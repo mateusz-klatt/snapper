@@ -34,8 +34,8 @@ Order Management:
     - KrakenCancelOrderParamsSchema: Order cancellation request
     - KrakenCancelOrderResponseSchema: Order cancellation response
 
-All schemas use EXCHANGE_SCHEMA_CONFIG for parsing exchange responses
-(allows extra fields) or STRICT_SCHEMA_CONFIG for outgoing requests
+All schemas inherit ExchangeResponse for parsing exchange responses
+(allows extra fields) or ExchangeRequest for outgoing requests
 (forbids extra fields to catch typos).
 """
 
@@ -44,11 +44,10 @@ from collections.abc import Sequence
 from typing import Any
 from typing import Literal
 
-from pydantic import BaseModel
 from pydantic import Field
 
-from snapper.infrastructure.exchanges.schemas.base import EXCHANGE_SCHEMA_CONFIG
-from snapper.infrastructure.exchanges.schemas.base import STRICT_SCHEMA_CONFIG
+from snapper.infrastructure.exchanges.schemas.base import ExchangeRequest
+from snapper.infrastructure.exchanges.schemas.base import ExchangeResponse
 
 
 def _empty_pair_list() -> list[KrakenInstrumentPairSchema]:
@@ -69,10 +68,9 @@ def _empty_asset_list() -> list[KrakenInstrumentAssetSchema]:
     return []
 
 
-class KrakenInstrumentSubscribeParamsSchema(BaseModel):
+class KrakenInstrumentSubscribeParamsSchema(ExchangeRequest):
     """Parameters for subscribing to instrument WebSocket channel."""
 
-    model_config = STRICT_SCHEMA_CONFIG
     channel: Literal["instrument"] = Field(default="instrument", frozen=True)
     snapshot: bool = True
     include_tokenized_assets: bool = True
@@ -86,10 +84,9 @@ class KrakenInstrumentSubscribeParamsSchema(BaseModel):
         return self.model_dump(by_alias=True, exclude_none=True)
 
 
-class KrakenInstrumentSubscriptionAckSchema(BaseModel):
+class KrakenInstrumentSubscriptionAckSchema(ExchangeResponse):
     """Subscription acknowledgement for instrument channel."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     channel: Literal["instrument"]
     event: Literal["subscribe", "unsubscribe"]
     status: Literal["ok", "error"]
@@ -97,29 +94,26 @@ class KrakenInstrumentSubscriptionAckSchema(BaseModel):
     request_id: int | None = Field(default=None, alias="reqid")
 
 
-class KrakenInstrumentAssetSchema(BaseModel):
+class KrakenInstrumentAssetSchema(ExchangeResponse):
     """Kraken asset/currency metadata."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     asset: str | None = None
     status: str | None = None
     altname: str | None = None
     decimals: int | None = None
 
 
-class KrakenInstrumentFeeScheduleSchema(BaseModel):
+class KrakenInstrumentFeeScheduleSchema(ExchangeResponse):
     """Kraken trading fee schedule entry."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     type: str
     percent: float | None = None
     symbol: str | None = None
 
 
-class KrakenInstrumentPairSchema(BaseModel):
+class KrakenInstrumentPairSchema(ExchangeResponse):
     """Kraken trading pair specification and constraints."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     symbol: str
     status: str | None = None
     wsname: str | None = None
@@ -155,10 +149,9 @@ class KrakenInstrumentPairSchema(BaseModel):
         return self.model_dump(by_alias=True, exclude_none=True)
 
 
-class KrakenInstrumentSnapshotSchema(BaseModel):
+class KrakenInstrumentSnapshotSchema(ExchangeResponse):
     """Snapshot of all available instruments and assets."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     pairs: list[KrakenInstrumentPairSchema] = Field(default_factory=_empty_pair_list)
     assets: list[KrakenInstrumentAssetSchema] = Field(default_factory=_empty_asset_list)
 
@@ -171,10 +164,9 @@ class KrakenInstrumentSnapshotSchema(BaseModel):
         return tuple(self.pairs)
 
 
-class KrakenInstrumentEventEnvelope(BaseModel):
+class KrakenInstrumentEventEnvelope(ExchangeResponse):
     """WebSocket message envelope for instrument updates."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     channel: Literal["instrument"]
     type: str
     data: (
@@ -205,10 +197,9 @@ class KrakenInstrumentEventEnvelope(BaseModel):
         return [pair.as_summary() for pair in self.iter_pairs()]
 
 
-class KrakenTickerSubscribeParamsSchema(BaseModel):
+class KrakenTickerSubscribeParamsSchema(ExchangeRequest):
     """Parameters for subscribing to ticker WebSocket channel."""
 
-    model_config = STRICT_SCHEMA_CONFIG
     channel: Literal["ticker"] = Field(default="ticker", frozen=True)
     symbol: Sequence[str]
     snapshot: bool = True
@@ -222,10 +213,9 @@ class KrakenTickerSubscribeParamsSchema(BaseModel):
         return self.model_dump(by_alias=True, exclude_none=True)
 
 
-class KrakenTickerSubscriptionAckSchema(BaseModel):
+class KrakenTickerSubscriptionAckSchema(ExchangeResponse):
     """Subscription acknowledgement for ticker channel."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     channel: Literal["ticker"]
     event: Literal["subscribe", "unsubscribe"]
     status: Literal["ok", "error"]
@@ -233,10 +223,9 @@ class KrakenTickerSubscriptionAckSchema(BaseModel):
     request_id: int | None = Field(default=None, alias="reqid")
 
 
-class KrakenTickerSchema(BaseModel):
+class KrakenTickerSchema(ExchangeResponse):
     """Real-time ticker data with bid/ask/last prices."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     symbol: str
     bid: float | None = None
     bid_qty: float | None = None
@@ -251,10 +240,9 @@ class KrakenTickerSchema(BaseModel):
     change_pct: float | None = None
 
 
-class KrakenTickerEventEnvelope(BaseModel):
+class KrakenTickerEventEnvelope(ExchangeResponse):
     """WebSocket message envelope for ticker updates."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     channel: Literal["ticker"]
     type: str | None = None
     symbol: str
@@ -262,10 +250,9 @@ class KrakenTickerEventEnvelope(BaseModel):
     time: float | None = None
 
 
-class KrakenOhlcSubscribeParamsSchema(BaseModel):
+class KrakenOhlcSubscribeParamsSchema(ExchangeRequest):
     """Parameters for subscribing to OHLC WebSocket channel."""
 
-    model_config = STRICT_SCHEMA_CONFIG
     channel: Literal["ohlc"] = Field(default="ohlc", frozen=True)
     symbol: Sequence[str]
     interval: int
@@ -281,10 +268,9 @@ class KrakenOhlcSubscribeParamsSchema(BaseModel):
         return self.model_dump(by_alias=True, exclude_none=True)
 
 
-class KrakenOhlcSubscriptionResultSchema(BaseModel):
+class KrakenOhlcSubscriptionResultSchema(ExchangeResponse):
     """Result details from OHLC subscription acknowledgement."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     channel: Literal["ohlc"]
     symbol: str
     interval: int | None = None
@@ -292,10 +278,9 @@ class KrakenOhlcSubscriptionResultSchema(BaseModel):
     warnings: list[str] | None = None
 
 
-class KrakenOhlcSubscriptionAckSchema(BaseModel):
+class KrakenOhlcSubscriptionAckSchema(ExchangeResponse):
     """Subscription acknowledgement for OHLC channel."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     method: Literal["subscribe"]
     result: KrakenOhlcSubscriptionResultSchema
     success: bool
@@ -305,10 +290,9 @@ class KrakenOhlcSubscriptionAckSchema(BaseModel):
     request_id: int | None = Field(default=None, alias="reqid")
 
 
-class KrakenCandleSchema(BaseModel):
+class KrakenCandleSchema(ExchangeResponse):
     """OHLCV candle data from Kraken."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     symbol: str | None = None
     open: float
     high: float
@@ -330,10 +314,9 @@ class KrakenCandleSchema(BaseModel):
         return self.model_dump(exclude_none=True)
 
 
-class KrakenOhlcEventEnvelope(BaseModel):
+class KrakenOhlcEventEnvelope(ExchangeResponse):
     """WebSocket message envelope for OHLC candle updates."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     channel: Literal["ohlc"]
     type: Literal["snapshot", "update"] | None = None
     data: list[KrakenCandleSchema]
@@ -359,10 +342,9 @@ class KrakenOhlcEventEnvelope(BaseModel):
         return None
 
 
-class KrakenTradeSubscribeParamsSchema(BaseModel):
+class KrakenTradeSubscribeParamsSchema(ExchangeRequest):
     """Parameters for subscribing to trade WebSocket channel."""
 
-    model_config = STRICT_SCHEMA_CONFIG
     channel: Literal["trade"] = Field(default="trade", frozen=True)
     symbol: Sequence[str]
     snapshot: bool = False
@@ -377,10 +359,9 @@ class KrakenTradeSubscribeParamsSchema(BaseModel):
         return self.model_dump(by_alias=True, exclude_none=True)
 
 
-class KrakenTradeSubscriptionAckSchema(BaseModel):
+class KrakenTradeSubscriptionAckSchema(ExchangeResponse):
     """Subscription acknowledgement for trade channel."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     method: Literal["subscribe"]
     result: dict[str, Any]
     success: bool
@@ -391,10 +372,9 @@ class KrakenTradeSubscriptionAckSchema(BaseModel):
     warnings: list[str] | None = None
 
 
-class KrakenTradeSchema(BaseModel):
+class KrakenTradeSchema(ExchangeResponse):
     """Individual trade data from Kraken."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     symbol: str
     side: str
     qty: float
@@ -412,10 +392,9 @@ class KrakenTradeSchema(BaseModel):
         return self.model_dump(exclude_none=True)
 
 
-class KrakenTradeEventEnvelope(BaseModel):
+class KrakenTradeEventEnvelope(ExchangeResponse):
     """WebSocket message envelope for trade updates."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     channel: Literal["trade"]
     type: Literal["snapshot", "update"] | None = None
     data: list[KrakenTradeSchema]
@@ -440,10 +419,9 @@ class KrakenTradeEventEnvelope(BaseModel):
         return [event.as_dict() for event in self.data]
 
 
-class KrakenExecutionSubscribeParamsSchema(BaseModel):
+class KrakenExecutionSubscribeParamsSchema(ExchangeRequest):
     """Parameters for subscribing to executions WebSocket channel."""
 
-    model_config = STRICT_SCHEMA_CONFIG
     channel: Literal["executions"] = Field(default="executions", frozen=True)
     token: str | None = None
     snap_trades: bool | None = None
@@ -465,10 +443,9 @@ class KrakenExecutionSubscribeParamsSchema(BaseModel):
         return self.model_dump(by_alias=True, exclude_none=True)
 
 
-class KrakenExecutionSubscriptionResultSchema(BaseModel):
+class KrakenExecutionSubscriptionResultSchema(ExchangeResponse):
     """Result details from executions subscription acknowledgement."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     channel: Literal["executions"]
     snap_trades: bool | None = None
     snap_orders: bool | None = None
@@ -476,10 +453,9 @@ class KrakenExecutionSubscriptionResultSchema(BaseModel):
     snapshot: bool | None = None
 
 
-class KrakenExecutionSubscriptionAckSchema(BaseModel):
+class KrakenExecutionSubscriptionAckSchema(ExchangeResponse):
     """Subscription acknowledgement for executions channel."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     method: Literal["subscribe"]
     result: KrakenExecutionSubscriptionResultSchema
     success: bool
@@ -490,10 +466,9 @@ class KrakenExecutionSubscriptionAckSchema(BaseModel):
     request_id: int | None = Field(default=None, alias="reqid")
 
 
-class KrakenExecutionFeeSchema(BaseModel):
+class KrakenExecutionFeeSchema(ExchangeResponse):
     """Execution fee details."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     asset: str | None = None
     qty: float | None = None
 
@@ -506,10 +481,9 @@ class KrakenExecutionFeeSchema(BaseModel):
         return self.model_dump(exclude_none=True)
 
 
-class KrakenExecutionSchema(BaseModel):
+class KrakenExecutionSchema(ExchangeResponse):
     """Order execution report data."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     order_id: str | None = None
     order_userref: int | None = None
     symbol: str | None = None
@@ -559,10 +533,9 @@ class KrakenExecutionSchema(BaseModel):
         return self.model_dump(exclude_none=True)
 
 
-class KrakenExecutionEventEnvelope(BaseModel):
+class KrakenExecutionEventEnvelope(ExchangeResponse):
     """WebSocket message envelope for execution updates."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     channel: Literal["executions"]
     type: Literal["snapshot", "update"] | None = None
     data: list[KrakenExecutionSchema]
@@ -588,10 +561,9 @@ class KrakenExecutionEventEnvelope(BaseModel):
         return [report.as_dict() for report in self.data]
 
 
-class KrakenAddOrderParamsSchema(BaseModel):
+class KrakenAddOrderParamsSchema(ExchangeRequest):
     """Parameters for adding a new order via WebSocket."""
 
-    model_config = STRICT_SCHEMA_CONFIG
     order_type: str
     side: str
     symbol: str
@@ -610,20 +582,18 @@ class KrakenAddOrderParamsSchema(BaseModel):
     token: str | None = None
 
 
-class KrakenAddOrderResultSchema(BaseModel):
+class KrakenAddOrderResultSchema(ExchangeResponse):
     """Result from successful order creation."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     order_id: str
     order_userref: int | None = None
     cl_ord_id: str | None = None
     warning: list[str] | None = None
 
 
-class KrakenAddOrderResponseSchema(BaseModel):
+class KrakenAddOrderResponseSchema(ExchangeResponse):
     """Response from add_order WebSocket request."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     method: Literal["add_order"]
     result: KrakenAddOrderResultSchema | None = None
     success: bool
@@ -633,28 +603,25 @@ class KrakenAddOrderResponseSchema(BaseModel):
     request_id: int | None = Field(default=None, alias="reqid")
 
 
-class KrakenCancelOrderParamsSchema(BaseModel):
+class KrakenCancelOrderParamsSchema(ExchangeRequest):
     """Parameters for cancelling an order via WebSocket."""
 
-    model_config = STRICT_SCHEMA_CONFIG
     order_id: list[str] | None = None
     cl_ord_id: list[str] | None = None
     token: str | None = None
 
 
-class KrakenCancelOrderResultSchema(BaseModel):
+class KrakenCancelOrderResultSchema(ExchangeResponse):
     """Result from successful order cancellation."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     order_id: str | None = None
     cl_ord_id: str | None = None
     warning: list[str] | None = None
 
 
-class KrakenCancelOrderResponseSchema(BaseModel):
+class KrakenCancelOrderResponseSchema(ExchangeResponse):
     """Response from cancel_order WebSocket request."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     method: Literal["cancel_order"]
     result: KrakenCancelOrderResultSchema | None = None
     success: bool

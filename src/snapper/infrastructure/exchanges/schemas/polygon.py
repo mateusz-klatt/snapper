@@ -20,10 +20,9 @@ used by different Polygon API versions.
 
 from typing import Any
 
-from pydantic import BaseModel
 from pydantic import Field
 
-from snapper.infrastructure.exchanges.schemas.base import EXCHANGE_SCHEMA_CONFIG
+from snapper.infrastructure.exchanges.schemas.base import ExchangeResponse
 
 _OPEN_DESC = "Opening price"
 _HIGH_DESC = "High price"
@@ -34,10 +33,9 @@ _VWAP_DESC = "Volume weighted average price"
 _TIMESTAMP_DESC = "Unix timestamp in milliseconds"
 
 
-class PolygonAgg(BaseModel):
+class PolygonAgg(ExchangeResponse):
     """OHLCV aggregate bar from Polygon.io API."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     open: float | None = Field(default=None, description=_OPEN_DESC)
     high: float | None = Field(default=None, description=_HIGH_DESC)
     low: float | None = Field(default=None, description=_LOW_DESC)
@@ -71,10 +69,9 @@ class PolygonAgg(BaseModel):
         )
 
 
-class PolygonGroupedAgg(BaseModel):
+class PolygonGroupedAgg(ExchangeResponse):
     """Daily grouped aggregate for all tickers from Polygon.io."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     ticker: str = Field(description="Ticker symbol (e.g., X:BTCUSD)")
     open: float | None = Field(default=None, description=_OPEN_DESC)
     high: float | None = Field(default=None, description=_HIGH_DESC)
@@ -108,10 +105,9 @@ class PolygonGroupedAgg(BaseModel):
         )
 
 
-class PolygonPreviousClose(BaseModel):
+class PolygonPreviousClose(ExchangeResponse):
     """Previous trading day close data from Polygon.io."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     ticker: str = Field(description="Ticker symbol")
     open: float | None = Field(default=None, description=_OPEN_DESC)
     high: float | None = Field(default=None, description=_HIGH_DESC)
@@ -144,10 +140,9 @@ class PolygonPreviousClose(BaseModel):
         )
 
 
-class PolygonTicker(BaseModel):
+class PolygonTicker(ExchangeResponse):
     """Ticker metadata and status information from Polygon.io."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     ticker: str = Field(description="Ticker symbol (e.g., X:BTCUSD)")
     name: str | None = Field(default=None, description="Full name of the asset")
     market: str | None = Field(default=None, description="Market type (crypto, fx, stocks)")

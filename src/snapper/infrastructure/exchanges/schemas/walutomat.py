@@ -19,17 +19,15 @@ methods for converting API responses to typed objects.
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel
 from pydantic import Field
 from pydantic import field_validator
 
-from snapper.infrastructure.exchanges.schemas.base import EXCHANGE_SCHEMA_CONFIG
+from snapper.infrastructure.exchanges.schemas.base import ExchangeResponse
 
 
-class WalutomatBestOffer(BaseModel):
+class WalutomatBestOffer(ExchangeResponse):
     """Current best bid/ask prices from Walutomat."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     bid_now: float | None = Field(default=None, description="Current best bid price")
     ask_now: float | None = Field(default=None, description="Current best ask price")
     forex_now: float = Field(description="Mid-market forex rate")
@@ -41,10 +39,9 @@ class WalutomatBestOffer(BaseModel):
     forex_trend: str | None = Field(default=None, description="Forex rate trend")
 
 
-class WalutomatLastExchange(BaseModel):
+class WalutomatLastExchange(ExchangeResponse):
     """Recent exchange transaction record from Walutomat."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     ts: datetime = Field(description="Timestamp of the exchange")
     price: float = Field(description="Exchange price")
     volume: float = Field(description="Volume exchanged")
@@ -65,10 +62,9 @@ class WalutomatLastExchange(BaseModel):
         return datetime.fromisoformat(v.replace("Z", "+00:00"))
 
 
-class WalutomatDayExchange(BaseModel):
+class WalutomatDayExchange(ExchangeResponse):
     """Daily exchange volume summary from Walutomat."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     day: datetime = Field(description="Day as datetime")
     volume: float = Field(description="Total volume for the day")
 
@@ -88,10 +84,9 @@ class WalutomatDayExchange(BaseModel):
         return datetime.fromisoformat(v.replace("Z", "+00:00"))
 
 
-class WalutomatMarketPair(BaseModel):
+class WalutomatMarketPair(ExchangeResponse):
     """Complete market pair data with offers and exchange history."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     pair: str = Field(description="Currency pair in Walutomat format (EUR_PLN)")
     best_offers: WalutomatBestOffer = Field(
         alias="bestOffers", description="Current best bid/ask offers"
@@ -108,10 +103,9 @@ class WalutomatMarketPair(BaseModel):
     )
 
 
-class WalutomatMarketResponse(BaseModel):
+class WalutomatMarketResponse(ExchangeResponse):
     """API response containing all Walutomat market pairs."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     pairs: list[WalutomatMarketPair] = Field(
         default_factory=list, description="List of all market pairs"
     )

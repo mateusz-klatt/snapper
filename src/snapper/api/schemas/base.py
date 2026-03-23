@@ -8,6 +8,7 @@ provenance fields and strict type validation.
 Schema hierarchy::
 
     BaseModel
+    ├── PartialBody           → lenient partial parsing (extra="ignore", strict=True)
     └── StrictBody            → strict structural schemas / request bodies (no provenance)
         └── StrictDataSchema  → ALL event payload items (provenance required)
             ├── PayloadRequest[T]     → REST mutation request (payload: T)
@@ -30,6 +31,13 @@ STRICT_BODY_CONFIG = ConfigDict(
     populate_by_name=True,
 )
 
+PARTIAL_BODY_CONFIG = ConfigDict(
+    extra="ignore",
+    strict=True,
+    validate_default=True,
+    populate_by_name=True,
+)
+
 
 class StrictBody(BaseModel):
     """Strict base for structural schemas and request bodies without provenance.
@@ -43,6 +51,18 @@ class StrictBody(BaseModel):
     """
 
     model_config = STRICT_BODY_CONFIG
+
+
+class PartialBody(BaseModel):
+    """Lenient base for schemas that parse a subset of fields from external data.
+
+    Uses extra="ignore" so unknown fields are silently discarded rather than
+    rejected. Intended for partial parsing of JWT payloads (WsTokenPayload)
+    and best-effort provenance extraction (GapEnvelope) where the full shape
+    is not controlled by Snapper.
+    """
+
+    model_config = PARTIAL_BODY_CONFIG
 
 
 class StrictDataSchema[TypeT: str](StrictBody):
@@ -153,7 +173,9 @@ class MessageResponse(PayloadResponse[Literal["message"], str]):
 
 
 __all__ = [
+    "PARTIAL_BODY_CONFIG",
     "STRICT_BODY_CONFIG",
+    "PartialBody",
     "StrictBody",
     "StrictDataSchema",
     "PayloadRequest",

@@ -7,13 +7,12 @@ for secure WebSocket connection establishment.
 from dataclasses import dataclass
 from datetime import datetime
 
-from pydantic import BaseModel
-from pydantic import ConfigDict
+from snapper.api.schemas.base import PartialBody
 
 __all__ = ["WsTokenPayload", "WsTokenResult"]
 
 
-class WsTokenPayload(BaseModel):
+class WsTokenPayload(PartialBody):
     """WebSocket token JWT payload schema.
 
     Contains claims for a single-use WebSocket connection token.
@@ -28,13 +27,6 @@ class WsTokenPayload(BaseModel):
         exp: Expiration timestamp (Unix epoch).
         jti: Unique token identifier for replay prevention.
     """
-
-    model_config = ConfigDict(
-        extra="ignore",
-        strict=True,
-        validate_default=True,
-        populate_by_name=True,
-    )
 
     purpose: str
     sub: str

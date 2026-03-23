@@ -1,37 +1,59 @@
-"""Base configuration objects for exchange schemas.
+"""Base classes for exchange schemas.
 
-This module provides common Pydantic model configuration objects used
-across all exchange-specific schema modules to ensure consistent
-validation behavior.
+This module provides base Pydantic model classes for all exchange-specific
+schema modules, ensuring consistent validation behavior across exchange
+integrations.
+
+Schema hierarchy for exchange boundary::
+
+    BaseModel
+    ├── ExchangeRequest   → outgoing requests to exchange APIs (extra="forbid")
+    └── ExchangeResponse  → parsing exchange API responses (extra="allow")
+
+Both inherit BaseModel directly (not StrictBody) because exchange schemas
+are an external boundary layer, separate from Snapper's internal schema
+hierarchy. The configs are equivalent in strictness but semantically distinct.
 """
 
+from pydantic import BaseModel
 from pydantic import ConfigDict
 
-EXCHANGE_SCHEMA_CONFIG = ConfigDict(
+EXCHANGE_RESPONSE_CONFIG = ConfigDict(
     populate_by_name=True,
     extra="allow",
     strict=True,
 )
-"""Pydantic config for parsing exchange API responses.
 
-This configuration allows extra fields (since exchange APIs may add new
-fields over time) while maintaining strict type validation. Field aliases
-are enabled for mapping snake_case to exchange-specific formats.
-"""
-
-STRICT_SCHEMA_CONFIG = ConfigDict(
+EXCHANGE_REQUEST_CONFIG = ConfigDict(
     populate_by_name=True,
     extra="forbid",
     strict=True,
 )
-"""Pydantic config for outgoing requests to exchange APIs.
 
-This configuration forbids extra fields to catch typos in request
-parameters. Used for subscription and order request schemas where
-unknown fields would be ignored by the exchange.
-"""
+
+class ExchangeResponse(BaseModel):
+    """Base for parsing exchange API responses.
+
+    Uses extra="allow" so new fields added by exchange APIs do not break
+    parsing. Strict type validation is still enforced on known fields.
+    """
+
+    model_config = EXCHANGE_RESPONSE_CONFIG
+
+
+class ExchangeRequest(BaseModel):
+    """Base for outgoing requests to exchange APIs.
+
+    Uses extra="forbid" to catch typos in request parameters — unknown
+    fields would be silently ignored by the exchange, hiding bugs.
+    """
+
+    model_config = EXCHANGE_REQUEST_CONFIG
+
 
 __all__ = [
-    "EXCHANGE_SCHEMA_CONFIG",
-    "STRICT_SCHEMA_CONFIG",
+    "EXCHANGE_REQUEST_CONFIG",
+    "EXCHANGE_RESPONSE_CONFIG",
+    "ExchangeRequest",
+    "ExchangeResponse",
 ]

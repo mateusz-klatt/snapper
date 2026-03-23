@@ -7,7 +7,6 @@ from datetime import UTC
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel
 from pydantic import Field
 from pydantic import field_validator
 
@@ -17,20 +16,18 @@ from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
-from snapper.infrastructure.exchanges.schemas.base import EXCHANGE_SCHEMA_CONFIG
+from snapper.infrastructure.exchanges.schemas.base import ExchangeResponse
 
 
-class ZondaMarketInfo(BaseModel):
+class ZondaMarketInfo(ExchangeResponse):
     """Market information from Zonda exchange."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     code: str = ""
 
 
-class ZondaTickerData(BaseModel):
+class ZondaTickerData(ExchangeResponse):
     """Ticker data from Zonda exchange WebSocket."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     market: ZondaMarketInfo = Field(default_factory=ZondaMarketInfo)
     highest_bid: str = Field(default="0", alias="highestBid")
     lowest_ask: str = Field(default="0", alias="lowestAsk")
@@ -66,10 +63,9 @@ class ZondaTickerData(BaseModel):
         return float(self.rate) if self.rate else 0.0
 
 
-class ZondaTickerMessage(BaseModel):
+class ZondaTickerMessage(ExchangeResponse):
     """WebSocket message containing ticker data from Zonda."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     action: str = ""
     topic: str = ""
     message: ZondaTickerData = Field(default_factory=ZondaTickerData)
@@ -87,10 +83,9 @@ class ZondaTickerMessage(BaseModel):
         return self.message.market.code.upper()
 
 
-class ZondaStatsData(BaseModel):
+class ZondaStatsData(ExchangeResponse):
     """24-hour statistics data from Zonda exchange."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     m: str = ""
     h: float = 0.0
     l: float = 0.0
@@ -158,20 +153,18 @@ class ZondaStatsData(BaseModel):
         return self.r24h
 
 
-class ZondaStatsMessage(BaseModel):
+class ZondaStatsMessage(ExchangeResponse):
     """WebSocket message containing statistics data from Zonda."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     action: str = ""
     topic: str = ""
     message: list[ZondaStatsData] = Field(default_factory=list)
     seq_no: int = Field(default=0, alias="seqNo")
 
 
-class ZondaTransactionData(BaseModel):
+class ZondaTransactionData(ExchangeResponse):
     """Single transaction data from Zonda exchange."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     id: str = ""
     t: str = "0"
     a: str = "0"
@@ -252,17 +245,15 @@ class ZondaTransactionData(BaseModel):
         )
 
 
-class ZondaTransactionsPayload(BaseModel):
+class ZondaTransactionsPayload(ExchangeResponse):
     """Payload containing a list of transactions from Zonda."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     transactions: list[ZondaTransactionData] = Field(default_factory=list)
 
 
-class ZondaTransactionsMessage(BaseModel):
+class ZondaTransactionsMessage(ExchangeResponse):
     """WebSocket message containing transactions from Zonda."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     action: str = ""
     topic: str = ""
     message: ZondaTransactionsPayload = Field(default_factory=ZondaTransactionsPayload)
@@ -280,10 +271,9 @@ class ZondaTransactionsMessage(BaseModel):
         return ""
 
 
-class ZondaExecutionData(BaseModel):
+class ZondaExecutionData(ExchangeResponse):
     """Single execution data from Zonda exchange."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     id: str = ""
     market: str = ""
     time: str = "0"
@@ -359,17 +349,15 @@ class ZondaExecutionData(BaseModel):
         )
 
 
-class ZondaExecutionsPayload(BaseModel):
+class ZondaExecutionsPayload(ExchangeResponse):
     """Payload containing execution history from Zonda."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     history: list[ZondaExecutionData] = Field(default_factory=list)
 
 
-class ZondaExecutionsMessage(BaseModel):
+class ZondaExecutionsMessage(ExchangeResponse):
     """WebSocket message containing executions from Zonda."""
 
-    model_config = EXCHANGE_SCHEMA_CONFIG
     action: str = ""
     topic: str = ""
     message: ZondaExecutionsPayload = Field(default_factory=ZondaExecutionsPayload)

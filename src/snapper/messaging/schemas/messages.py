@@ -11,9 +11,7 @@ Functions:
 import json
 from typing import Any
 
-from pydantic import BaseModel
-from pydantic import ConfigDict
-
+from snapper.api.schemas.base import PartialBody
 from snapper.api.schemas.base import StrictDataSchema
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import ExecutionData
@@ -35,7 +33,7 @@ MarketDataMessage = TickData | CandleData | TradeData
 """Union type for all market data message types."""
 
 
-class GapEnvelope(BaseModel):
+class GapEnvelope(PartialBody):
     """Minimal typed envelope for gap detection on the bridge receive path.
 
     Extracts only the provenance fields needed for gap detection from any
@@ -47,8 +45,6 @@ class GapEnvelope(BaseModel):
         sequence_id: Per-table monotonic counter (zero when absent).
         type: Payload item type discriminator (empty string when absent).
     """
-
-    model_config = ConfigDict(extra="ignore")
 
     session_id: str = ""
     sequence_id: int = 0
