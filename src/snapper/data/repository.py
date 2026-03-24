@@ -1067,6 +1067,7 @@ class SQLAlchemyRepository(Repository):
                     Trade.instrument_public_id == inst.public_id,
                     Trade.timestamp >= start,
                     Trade.timestamp <= end,
+                    Trade.timestamp <= now,
                     Trade.known_to > now,
                 )
                 .order_by(Trade.timestamp.asc())
