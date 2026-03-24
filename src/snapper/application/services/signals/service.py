@@ -20,7 +20,6 @@ from snapper.data.models import Signal
 from snapper.data.models import Symbol
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
-from snapper.data.repository import where_active_now
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.strategies.models import StrategySignal
@@ -39,6 +38,7 @@ class SignalReadService:
         signal: StrategySignal,
         exchange: str,
         tracker: SequenceTracker,
+        as_of: datetime | None = None,
     ) -> str | None:
         """Look up or lazily create the instrument row for a signal.
 
@@ -46,13 +46,15 @@ class SignalReadService:
             signal: Signal carrying the instrument symbol.
             exchange: Exchange name to look up / create for.
             tracker: SequenceTracker for provenance on upsert.
+            as_of: Point-in-time for temporal resolution. Defaults to now.
 
         Returns:
             The instrument_public_id string, or ``None`` when the symbol
             cannot be resolved.
         """
+        t = as_of or datetime.now(UTC)
         async with self.repo.session() as session:
-            s_ts, s_kt = where_active_now(Symbol)
+            s_ts, s_kt = where_active(Symbol, t)
             sym_query = await session.execute(
                 select(Symbol).where(
                     Symbol.native_symbol == signal.instrument,
@@ -64,7 +66,7 @@ class SignalReadService:
             if sym is None:
                 logger.error(f"No active Symbol row for {signal.instrument}")
                 return None
-            i_ts, i_kt = where_active_now(Instrument)
+            i_ts, i_kt = where_active(Instrument, t)
             inst_query = await session.execute(
                 select(Instrument).where(
                     Instrument.symbol_public_id == sym.public_id,
@@ -76,7 +78,7 @@ class SignalReadService:
             inst = inst_query.scalars().first()
         if inst:
             return str(inst.public_id)
-        symbol_pid = await resolve_symbol_public_id(self.repo, signal.instrument)
+        symbol_pid = await resolve_symbol_public_id(self.repo, signal.instrument, as_of=t)
         if symbol_pid is None:
             logger.error(f"No active Symbol row for {signal.instrument}")
             return None
@@ -85,6 +87,7 @@ class SignalReadService:
             exchange=exchange,
             session_id=tracker.session_id,
             sequence_id=tracker.next_sequence("instruments"),
+            timestamp=t,
         )
         return public_id
 
@@ -121,10 +124,10 @@ class SignalReadService:
             Signal event UUID or empty string on error.
         """
         try:
-            inst_public_id = await self._resolve_instrument(signal, exchange, tracker)
+            now = timestamp or signal.timestamp or datetime.now(UTC)
+            inst_public_id = await self._resolve_instrument(signal, exchange, tracker, as_of=now)
             if inst_public_id is None:
                 return ""
-            now = datetime.now(UTC)
             async with self.repo.session() as session:
                 init_kwargs: dict[str, Any] = {
                     "instrument_public_id": inst_public_id,

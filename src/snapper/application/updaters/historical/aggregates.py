@@ -560,8 +560,9 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         assert self._loader is not None
         assert self._db_async is not None
         timeframe = _timeframe_label(self._multiplier, self._timespan)
-        instrument_public_id = await self._ensure_instrument(context)
         start_date, end_date, max_ts = self._compute_date_range()
+        backfill_time = datetime.combine(start_date, datetime.min.time(), tzinfo=UTC)
+        instrument_public_id = await self._ensure_instrument(context, as_of=backfill_time)
         logger.info(
             f"Starting backfill for {context.polygon_symbol}",
             symbol=context.polygon_symbol,
@@ -732,7 +733,9 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         )
         return None
 
-    async def _ensure_instrument(self, context: _SymbolContext) -> str:
+    async def _ensure_instrument(
+        self, context: _SymbolContext, as_of: datetime | None = None
+    ) -> str:
         """Ensure instrument exists in database, return its public_id.
 
         Uses cache to avoid repeated database lookups.  Resolves the
@@ -741,6 +744,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
 
         Args:
             context: Symbol context.
+            as_of: Point-in-time for symbol/instrument resolution.
 
         Returns:
             The instrument_public_id string.
@@ -748,7 +752,9 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         assert self._db_async is not None
         if context.native_symbol in self._instrument_cache:
             return self._instrument_cache[context.native_symbol]
-        symbol_pid = await resolve_symbol_public_id(self._db_async, context.native_symbol)
+        symbol_pid = await resolve_symbol_public_id(
+            self._db_async, context.native_symbol, as_of=as_of
+        )
         if symbol_pid is None:
             raise ValueError(f"No active Symbol row for {context.native_symbol}")
         _id, instrument_public_id = await self._db_async.ensure_instrument(
@@ -756,6 +762,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             exchange="polygon",
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence("instruments"),
+            timestamp=as_of,
         )
         self._instrument_cache[context.native_symbol] = instrument_public_id
         return instrument_public_id
@@ -784,7 +791,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             {
                 "instrument_public_id": instrument_public_id,
                 "open_at": candle.timestamp,
-                "timestamp": datetime.now(UTC),
+                "timestamp": candle.timestamp,
                 "timeframe": timeframe,
                 "open": float(candle.open),
                 "high": float(candle.high),

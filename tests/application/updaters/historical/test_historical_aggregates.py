@@ -2288,7 +2288,7 @@ def test_build_candle_rows_converts_values_decimal() -> None:
     assert row["vwap"] is None
     assert row["trades"] == 10
     assert isinstance(row["timestamp"], datetime)
-    assert row["timestamp"] != row["open_at"]
+    assert row["timestamp"] == row["open_at"]
 
 
 def test_timeframe_label_variants_extended() -> None:
