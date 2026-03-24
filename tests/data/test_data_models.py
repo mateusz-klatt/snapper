@@ -33,17 +33,13 @@ class TestInstrumentModel:
         Then: All fields match provided values.
         """
         instrument = Instrument(
-            symbol="BTC-USD",
+            symbol_public_id="00000000-0000-7000-8000-000000000001",
             exchange="kraken",
-            base="BTC",
-            quote="USD",
             session_id="test-session",
             sequence_id=1,
         )
-        assert instrument.symbol == "BTC-USD"
+        assert instrument.symbol_public_id == "00000000-0000-7000-8000-000000000001"
         assert instrument.exchange == "kraken"
-        assert instrument.base == "BTC"
-        assert instrument.quote == "USD"
 
     def test_instrument_string_representation(self) -> None:
         """Test Instrument has string representation.
@@ -53,10 +49,8 @@ class TestInstrumentModel:
         Then: Returns string representation.
         """
         instrument = Instrument(
-            symbol="ETH-USD",
+            symbol_public_id="00000000-0000-7000-8000-000000000002",
             exchange="kraken",
-            base="ETH",
-            quote="USD",
             session_id="test-session",
             sequence_id=1,
         )
@@ -71,7 +65,9 @@ class TestInstrumentModel:
         Then: Attribute is None (INSERT default supplies empty string).
         """
         instrument = Instrument(
-            symbol="BTC-USD", base="BTC", quote="USD", session_id="test-session", sequence_id=1
+            symbol_public_id="00000000-0000-7000-8000-000000000003",
+            session_id="test-session",
+            sequence_id=1,
         )
         assert instrument.exchange is None
 

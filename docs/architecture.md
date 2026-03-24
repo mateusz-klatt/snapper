@@ -66,7 +66,7 @@ Persistence layer with SQLAlchemy:
 
 - **ORM Models** (`models.py`):
 
-    - `Instrument` — Financial instruments
+    - `Instrument` — Financial instruments (natural key: symbol_public_id + exchange)
     - `Candle` — OHLCV candles
     - `Trade` — Transactions
     - `Order` — Order history
@@ -292,7 +292,7 @@ instruments         -- Financial instruments (logical key: symbol_public_id + ex
 candles             -- OHLCV data
 ticks               -- Real-time price snapshots
 trades              -- Transaction history
-market_snapshots    -- Denormalized market data snapshots
+market_snapshots    -- Real-time market data (SCD2 per instrument, one active row each)
 
 -- Trading (joined to instruments via instrument_public_id)
 orders              -- Order history

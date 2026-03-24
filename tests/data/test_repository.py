@@ -417,6 +417,171 @@ async def test_upsert_trades_savepoint_preserves_earlier_inserts(
     assert session.commit_called is True
 
 
+@pytest.mark.asyncio
+async def test_upsert_market_snapshots_empty_returns_zero() -> None:
+    """Return 0 when called with empty list.
+
+    Given: Empty rows list,
+    When: upsert_market_snapshots is called,
+    Then: Returns 0 without opening session.
+    """
+    session = _DummyAsyncSession()
+    repo = _make_repo(lambda: _session_factory(session), dialect="custom")
+    result = await repo.upsert_market_snapshots([])
+    assert result == 0
+    assert session.commit_called is False
+
+
+@pytest.mark.asyncio
+async def test_upsert_market_snapshots_inserts_new_row() -> None:
+    """Insert new market snapshot when no existing active row.
+
+    Given: Session returning no existing row,
+    When: upsert_market_snapshots is called,
+    Then: New row is added and count is 1.
+    """
+    added_objects: list[Any] = []
+
+    async def _execute(stmt: Any) -> Any:
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+
+    session = _DummyAsyncSession()
+    session.execute = _execute
+    session.add = lambda obj: added_objects.append(obj)
+    repo = _make_repo(lambda: _session_factory(session), dialect="custom")
+    ts = datetime(2024, 6, 1, tzinfo=UTC)
+    rows = [
+        {
+            "instrument_public_id": "inst-abc",
+            "bid": 100.0,
+            "ask": 101.0,
+            "timestamp": ts,
+            "session_id": "s1",
+            "sequence_id": 1,
+        },
+    ]
+    result = await repo.upsert_market_snapshots(rows)
+    assert result == 1
+    assert session.commit_called is True
+    assert len(added_objects) == 1
+    assert added_objects[0].instrument_public_id == "inst-abc"
+
+
+@pytest.mark.asyncio
+async def test_upsert_market_snapshots_closes_and_replaces() -> None:
+    """Close existing active snapshot and insert new version.
+
+    Given: Session returning an existing active row,
+    When: upsert_market_snapshots is called,
+    Then: Existing row is closed (UPDATE executed), public_id is preserved, new row added.
+    """
+    existing = SimpleNamespace(id=42, public_id="existing-uuid")
+    call_count = 0
+    added_objects: list[Any] = []
+
+    async def _execute(stmt: Any) -> Any:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: existing))
+        return SimpleNamespace(rowcount=1)
+
+    session = _DummyAsyncSession()
+    session.execute = _execute
+    session.add = lambda obj: added_objects.append(obj)
+    repo = _make_repo(lambda: _session_factory(session), dialect="custom")
+    ts = datetime(2024, 6, 1, tzinfo=UTC)
+    rows = [
+        {
+            "instrument_public_id": "inst-abc",
+            "bid": 100.0,
+            "ask": 101.0,
+            "timestamp": ts,
+            "session_id": "s1",
+            "sequence_id": 1,
+        },
+    ]
+    result = await repo.upsert_market_snapshots(rows)
+    assert result == 1
+    assert rows[0]["public_id"] == "existing-uuid"
+    assert session.commit_called is True
+    assert len(added_objects) == 1
+
+
+@pytest.mark.asyncio
+async def test_upsert_market_snapshots_generates_defaults() -> None:
+    """Generate public_id, known_to, and timestamp when missing.
+
+    Given: Row dict without public_id, known_to, or timestamp,
+    When: upsert_market_snapshots is called,
+    Then: Defaults are generated before insert.
+    """
+    added_objects: list[Any] = []
+
+    async def _execute(stmt: Any) -> Any:
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+
+    session = _DummyAsyncSession()
+    session.execute = _execute
+    session.add = lambda obj: added_objects.append(obj)
+    repo = _make_repo(lambda: _session_factory(session), dialect="custom")
+    rows: list[dict[str, Any]] = [
+        {
+            "instrument_public_id": "inst-xyz",
+            "bid": 50.0,
+            "ask": 51.0,
+            "session_id": "s1",
+            "sequence_id": 1,
+        },
+    ]
+    before = datetime.now(UTC)
+    result = await repo.upsert_market_snapshots(rows)
+    after = datetime.now(UTC)
+    assert result == 1
+    assert "public_id" in rows[0]
+    assert len(rows[0]["public_id"]) > 0
+    assert rows[0]["known_to"] == KNOWN_TO_MAX
+    assert before <= rows[0]["timestamp"] <= after
+
+
+@pytest.mark.asyncio
+async def test_upsert_market_snapshots_preserves_supplied_keys() -> None:
+    """Preserve caller-supplied public_id, known_to, and timestamp.
+
+    Given: Row dict with all optional keys pre-populated,
+    When: upsert_market_snapshots is called,
+    Then: Supplied values are not overwritten by defaults.
+    """
+    added_objects: list[Any] = []
+
+    async def _execute(stmt: Any) -> Any:
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+
+    session = _DummyAsyncSession()
+    session.execute = _execute
+    session.add = lambda obj: added_objects.append(obj)
+    repo = _make_repo(lambda: _session_factory(session), dialect="custom")
+    ts = datetime(2024, 6, 1, tzinfo=UTC)
+    custom_known_to = datetime(2099, 1, 1, tzinfo=UTC)
+    rows: list[dict[str, Any]] = [
+        {
+            "instrument_public_id": "inst-xyz",
+            "bid": 50.0,
+            "ask": 51.0,
+            "session_id": "s1",
+            "sequence_id": 1,
+            "public_id": "custom-pid",
+            "known_to": custom_known_to,
+            "timestamp": ts,
+        },
+    ]
+    result = await repo.upsert_market_snapshots(rows)
+    assert result == 1
+    assert rows[0]["public_id"] == "custom-pid"
+    assert rows[0]["known_to"] == custom_known_to
+    assert rows[0]["timestamp"] == ts
+
+
 def test_get_repository_caches_instances(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test get_repository caches instances.
 
@@ -636,10 +801,10 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
     )
     assert isinstance(execution_id, int)
     assert execution_id > 0
+    snapshot_inst_pid = instrument_public_id
     async with repo.session() as session:
         stored_snapshot = MarketSnapshot(
-            exchange="kraken",
-            symbol="BTC-USD",
+            instrument_public_id=snapshot_inst_pid,
             bid=10.4,
             bid_volume=1.0,
             ask=10.6,
@@ -659,8 +824,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         session.add(stored_snapshot)
         await session.commit()
     snapshots = await repo.get_market_snapshots(
-        "kraken",
-        ["BTC-USD"],
+        [snapshot_inst_pid],
         base_ts - timedelta(seconds=1),
         base_ts + timedelta(seconds=1),
     )
@@ -672,8 +836,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         else result_snapshot["ts"].replace(tzinfo=UTC)
     )
     assert normalized_ts == base_ts
-    assert result_snapshot["symbol"] == "BTC-USD"
-    assert result_snapshot["exchange"] == "kraken"
+    assert result_snapshot["instrument_public_id"] == snapshot_inst_pid
     assert result_snapshot["bid"] == pytest.approx(10.4)
     assert result_snapshot["bid_volume"] == pytest.approx(1.0)
     assert result_snapshot["ask"] == pytest.approx(10.6)
@@ -895,7 +1058,7 @@ class DummyRepository(Repository):
         return []
 
     async def get_market_snapshots(
-        self, exchange: str, symbols: list[str], start: datetime, end: datetime
+        self, instrument_public_ids: list[str], start: datetime, end: datetime
     ) -> list[dict[str, Any]]:
         """Get market snapshots - returns empty list."""
         return []
@@ -1504,21 +1667,47 @@ class TestSQLAlchemyRepositoryDialects:
             mock_session.add.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_get_candles_symbol_not_found(
+        self, mock_postgres_repo: SQLAlchemyRepository
+    ) -> None:
+        """Verify get_candles returns empty list when Symbol row is missing.
+
+        Given: No active Symbol row for the requested native_symbol,
+        When: get_candles is called,
+        Then: Returns empty list without querying Instrument.
+        """
+        mock_session = AsyncMock()
+        mock_sym_result = Mock()
+        mock_sym_result.scalar_one_or_none.return_value = None
+        mock_session.execute.return_value = mock_sym_result
+        with patch.object(mock_postgres_repo, "session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__.return_value = mock_session
+            mock_session_ctx.return_value.__aexit__.return_value = None
+            start = datetime(2024, 1, 1, tzinfo=UTC)
+            end = datetime(2024, 1, 1, 1, 0, tzinfo=UTC)
+            result = await mock_postgres_repo.get_candles(
+                "NONEXISTENT", "1m", start, end, exchange="kraken"
+            )
+            assert result == []
+
+    @pytest.mark.asyncio
     async def test_get_candles_instrument_not_found(
         self, mock_postgres_repo: SQLAlchemyRepository
     ) -> None:
         """Verify get_candles returns empty list for unknown instrument.
 
-        Given: Non-existent instrument,
+        Given: Symbol exists but no matching Instrument,
         When: get_candles is called,
         Then: Returns empty list.
         """
         mock_session = AsyncMock()
-        mock_result = Mock()
-        mock_scalars = Mock()
-        mock_scalars.first.return_value = None
-        mock_result.scalars.return_value = mock_scalars
-        mock_session.execute.return_value = mock_result
+        mock_sym_result = Mock()
+        mock_sym_result.scalar_one_or_none.return_value = "sym-pub-1"
+        mock_inst_result = Mock()
+        mock_inst_scalars = Mock()
+        mock_inst_scalars.first.return_value = None
+        mock_inst_result.scalars.return_value = mock_inst_scalars
+        mock_session.execute.side_effect = [mock_sym_result, mock_inst_result]
         with patch.object(mock_postgres_repo, "session") as mock_session_ctx:
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
             mock_session_ctx.return_value.__aexit__.return_value = None
@@ -1538,6 +1727,8 @@ class TestSQLAlchemyRepositoryDialects:
         Then: Returns list of candle dicts.
         """
         mock_session = AsyncMock()
+        mock_sym_result = Mock()
+        mock_sym_result.scalar_one_or_none.return_value = "sym-pub-1"
         mock_inst_result = Mock()
         mock_instrument = Mock()
         mock_instrument.id = 1
@@ -1556,7 +1747,7 @@ class TestSQLAlchemyRepositoryDialects:
         mock_row.vwap = None
         mock_row.trades = 10
         mock_candles_result.all.return_value = [mock_row]
-        mock_session.execute.side_effect = [mock_inst_result, mock_candles_result]
+        mock_session.execute.side_effect = [mock_sym_result, mock_inst_result, mock_candles_result]
         with patch.object(mock_postgres_repo, "session") as mock_session_ctx:
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
             mock_session_ctx.return_value.__aexit__.return_value = None
@@ -1644,10 +1835,10 @@ async def test_get_trades_returns_empty_when_instrument_missing(
     """Verify get_trades returns empty list when instrument is not found."""
     with patch("snapper.data.repository.create_async_engine"):
         repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
-    mock_execute_result = SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+    mock_sym_result = SimpleNamespace(scalar_one_or_none=lambda: None)
 
     async def _execute(*_: object, **__: object) -> SimpleNamespace:
-        return mock_execute_result
+        return mock_sym_result
 
     mock_session = AsyncMock()
     mock_session.execute.side_effect = _execute
@@ -1676,10 +1867,16 @@ async def test_get_trades_with_exchange_filter(
     """Verify get_trades filters by exchange when provided."""
     with patch("snapper.data.repository.create_async_engine"):
         repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
-    mock_execute_result = SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+    mock_sym_result = SimpleNamespace(scalar_one_or_none=lambda: "sym-pub-1")
+    mock_inst_result = SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+    call_count = 0
 
     async def _execute(*_: object, **__: object) -> SimpleNamespace:
-        return mock_execute_result
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return mock_sym_result
+        return mock_inst_result
 
     mock_session = AsyncMock()
     mock_session.execute.side_effect = _execute
@@ -1798,8 +1995,7 @@ class _MinimalRepository(Repository):
 
     async def get_market_snapshots(
         self,
-        exchange: str,
-        symbols: list[str],
+        instrument_public_ids: list[str],
         start: datetime,
         end: datetime,
     ) -> list[dict[str, Any]]:

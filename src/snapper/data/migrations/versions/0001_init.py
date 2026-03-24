@@ -257,10 +257,7 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
         sa.Column("symbol_public_id", sa.String(36), nullable=False),
-        sa.Column("symbol", sa.String(32), nullable=False),
         sa.Column("exchange", sa.String(20), nullable=False),
-        sa.Column("base", sa.String(16), nullable=False),
-        sa.Column("quote", sa.String(16), nullable=False),
         sa.Column("session_id", sa.String(36), nullable=False),
         sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
@@ -287,7 +284,6 @@ def upgrade() -> None:
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
     op.create_index("ix_instruments_symbol_public_id", "instruments", ["symbol_public_id"])
-    op.create_index("ix_instruments_symbol", "instruments", ["symbol"])
     op.create_index("ix_instruments_exchange", "instruments", ["exchange"])
     op.create_table(
         "candles",
@@ -716,8 +712,7 @@ def upgrade() -> None:
         "market_snapshots",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
-        sa.Column("exchange", sa.String(20), server_default="kraken", nullable=False),
-        sa.Column("symbol", sa.String(20), nullable=False),
+        sa.Column("instrument_public_id", sa.String(36), nullable=False),
         sa.Column("bid", sa.Float(), nullable=True),
         sa.Column("bid_volume", sa.Float(), nullable=True),
         sa.Column("ask", sa.Float(), nullable=True),
@@ -746,13 +741,23 @@ def upgrade() -> None:
         sqlite_where=text(_KNOWN_TO_ACTIVE),
         postgresql_where=text(_KNOWN_TO_ACTIVE),
     )
-    op.create_index("ix_market_snapshots_symbol", "market_snapshots", ["symbol"])
-    op.create_index("ix_market_snapshots_timestamp", "market_snapshots", ["timestamp"])
-    op.create_index("ix_market_snapshots_symbol_ts", "market_snapshots", ["symbol", "timestamp"])
     op.create_index(
-        "ix_market_snapshots_exchange_symbol_ts",
+        "uq_market_snapshot_instrument",
         "market_snapshots",
-        ["exchange", "symbol", "timestamp"],
+        ["instrument_public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE),
+    )
+    op.create_index(
+        "ix_market_snapshots_instrument_public_id",
+        "market_snapshots",
+        ["instrument_public_id"],
+    )
+    op.create_index(
+        "ix_market_snapshots_instrument_ts",
+        "market_snapshots",
+        ["instrument_public_id", "timestamp"],
     )
     op.create_table(
         "control",

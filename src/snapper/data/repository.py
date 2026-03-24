@@ -69,6 +69,7 @@ from snapper.data.models import Execution
 from snapper.data.models import Instrument
 from snapper.data.models import MarketSnapshot
 from snapper.data.models import Order
+from snapper.data.models import Symbol
 from snapper.data.models import Tick
 from snapper.data.models import Trade
 
@@ -254,11 +255,11 @@ class Repository(ABC):
 
     @abstractmethod
     async def upsert_instrument(self, **kwargs: Any) -> tuple[int, str]:
-        """Insert or update instrument by (symbol_public_id, exchange).
+        """Find or create instrument by (symbol_public_id, exchange).
 
-        Temporal SCD2: compares payload (symbol, base, quote) against the
-        active version. Returns existing (id, public_id) when identical,
-        close+inserts when changed, or inserts fresh when not found.
+        Instrument natural key is immutable, so no SCD2 versioning is
+        needed.  Returns (id, public_id) of active row, creating one
+        if none exists.
         """
         ...
 
@@ -368,9 +369,19 @@ class Repository(ABC):
 
     @abstractmethod
     async def get_market_snapshots(
-        self, exchange: AllExchange, symbols: list[str], start: datetime, end: datetime
+        self, instrument_public_ids: list[str], start: datetime, end: datetime
     ) -> list[dict[str, Any]]:
-        """Retrieve market snapshots for symbols in time range."""
+        """Retrieve active market snapshots for instruments in time range."""
+        ...
+
+    @abstractmethod
+    async def upsert_market_snapshots(self, rows: list[dict[str, Any]]) -> int:
+        """SCD2 close+insert for market snapshots.
+
+        Each row must contain instrument_public_id plus market data fields.
+        Closes the active snapshot for the same instrument and inserts a
+        new version, preserving public_id across updates.
+        """
         ...
 
 
@@ -492,12 +503,11 @@ class SQLAlchemyRepository(Repository):
             }
 
     async def upsert_instrument(self, **kwargs: Any) -> tuple[int, str]:
-        """Insert or update instrument by (symbol_public_id, exchange).
+        """Find or create instrument by (symbol_public_id, exchange).
 
-        Temporal SCD2: looks up active version, compares payload
-        (symbol, base, quote). If identical returns existing (id, public_id).
-        If different, closes old version and inserts new one with
-        same public_id. If not found, inserts fresh.
+        Instrument natural key is immutable (symbol_public_id + exchange),
+        so no SCD2 versioning is needed.  Returns (id, public_id) of the
+        active row, creating a new one if none exists.
         """
         filtered = _filter_instrument_kwargs(kwargs)
         symbol_public_id = filtered["symbol_public_id"]
@@ -515,48 +525,29 @@ class SQLAlchemyRepository(Repository):
                 )
             )
             inst = q.scalar_one_or_none()
-            if inst is None:
-                new_inst = Instrument(**filtered)
-                s.add(new_inst)
-                try:
-                    await s.commit()
-                except IntegrityError as exc:
-                    await s.rollback()
-                    retry_ts, retry_kt = where_active(Instrument)
-                    q2 = await s.execute(
-                        select(Instrument).where(
-                            Instrument.symbol_public_id == symbol_public_id,
-                            Instrument.exchange == exchange,
-                            retry_ts,
-                            retry_kt,
-                        )
-                    )
-                    inst = q2.scalar_one_or_none()
-                    if inst is None:
-                        raise exc
-                    return (int(inst.id), str(inst.public_id))
-                await s.refresh(new_inst)
-                return (int(new_inst.id), str(new_inst.public_id))
-            payload_same = (
-                inst.symbol == filtered.get("symbol")
-                and inst.base == filtered.get("base")
-                and inst.quote == filtered.get("quote")
-            )
-            if payload_same:
+            if inst is not None:
                 return (int(inst.id), str(inst.public_id))
-            new_row = await close_and_insert(
-                s,
-                Instrument,
-                [
-                    Instrument.symbol_public_id == symbol_public_id,
-                    Instrument.exchange == exchange,
-                ],
-                filtered,
-                bus_time,
-            )
-            await s.commit()
-            await s.refresh(new_row)
-            return (int(new_row.id), str(new_row.public_id))
+            new_inst = Instrument(**filtered)
+            s.add(new_inst)
+            try:
+                await s.commit()
+            except IntegrityError as exc:
+                await s.rollback()
+                retry_ts, retry_kt = where_active(Instrument)
+                q2 = await s.execute(
+                    select(Instrument).where(
+                        Instrument.symbol_public_id == symbol_public_id,
+                        Instrument.exchange == exchange,
+                        retry_ts,
+                        retry_kt,
+                    )
+                )
+                inst = q2.scalar_one_or_none()
+                if inst is None:
+                    raise exc
+                return (int(inst.id), str(inst.public_id))
+            await s.refresh(new_inst)
+            return (int(new_inst.id), str(new_inst.public_id))
 
     async def _upsert_batch(
         self, model: type[Base], rows: list[dict[str, Any]], index_elements: list[str]
@@ -810,10 +801,21 @@ class SQLAlchemyRepository(Repository):
         """Retrieve active candles for instrument within time range."""
         now = datetime.now(UTC)
         async with self.session() as s:
+            s_ts, s_kt = where_active(Symbol, now)
+            sym_q = await s.execute(
+                select(Symbol.public_id).where(
+                    Symbol.native_symbol == instrument,
+                    s_ts,
+                    s_kt,
+                )
+            )
+            symbol_pid = sym_q.scalar_one_or_none()
+            if symbol_pid is None:
+                return []
             i_ts, i_kt = where_active(Instrument, now)
             q_inst = await s.execute(
                 select(Instrument).where(
-                    Instrument.symbol == instrument,
+                    Instrument.symbol_public_id == symbol_pid,
                     Instrument.exchange == exchange,
                     i_ts,
                     i_kt,
@@ -866,10 +868,21 @@ class SQLAlchemyRepository(Repository):
         """Retrieve trades for instrument within time range."""
         now = datetime.now(UTC)
         async with self.session() as s:
+            s_ts, s_kt = where_active(Symbol, now)
+            sym_q = await s.execute(
+                select(Symbol.public_id).where(
+                    Symbol.native_symbol == instrument,
+                    s_ts,
+                    s_kt,
+                )
+            )
+            symbol_pid = sym_q.scalar_one_or_none()
+            if symbol_pid is None:
+                return []
             i_ts, i_kt = where_active(Instrument, now)
             q_inst = await s.execute(
                 select(Instrument).where(
-                    Instrument.symbol == instrument,
+                    Instrument.symbol_public_id == symbol_pid,
                     Instrument.exchange == exchange,
                     i_ts,
                     i_kt,
@@ -907,16 +920,15 @@ class SQLAlchemyRepository(Repository):
             ]
 
     async def get_market_snapshots(
-        self, exchange: AllExchange, symbols: list[str], start: datetime, end: datetime
+        self, instrument_public_ids: list[str], start: datetime, end: datetime
     ) -> list[dict[str, Any]]:
-        """Retrieve market snapshots for exchange and symbols in time range."""
+        """Retrieve active market snapshots for instruments in time range."""
         now = datetime.now(UTC)
         async with self.session() as s:
             q = await s.execute(
                 select(
                     MarketSnapshot.timestamp,
-                    MarketSnapshot.symbol,
-                    MarketSnapshot.exchange,
+                    MarketSnapshot.instrument_public_id,
                     MarketSnapshot.bid,
                     MarketSnapshot.bid_volume,
                     MarketSnapshot.ask,
@@ -928,8 +940,7 @@ class SQLAlchemyRepository(Repository):
                     MarketSnapshot.high_24h,
                 )
                 .where(
-                    MarketSnapshot.exchange == exchange,
-                    MarketSnapshot.symbol.in_(symbols),
+                    MarketSnapshot.instrument_public_id.in_(instrument_public_ids),
                     MarketSnapshot.timestamp >= start,
                     MarketSnapshot.timestamp <= end,
                     MarketSnapshot.known_to > now,
@@ -940,8 +951,7 @@ class SQLAlchemyRepository(Repository):
             return [
                 {
                     "ts": r.timestamp,
-                    "symbol": r.symbol,
-                    "exchange": r.exchange,
+                    "instrument_public_id": r.instrument_public_id,
                     "bid": r.bid,
                     "bid_volume": r.bid_volume,
                     "ask": r.ask,
@@ -954,6 +964,52 @@ class SQLAlchemyRepository(Repository):
                 }
                 for r in rows
             ]
+
+    async def upsert_market_snapshots(self, rows: list[dict[str, Any]]) -> int:
+        """SCD2 close+insert for market snapshots.
+
+        One active row per instrument_public_id.  Closes the existing
+        active snapshot and inserts a new version with the same public_id.
+        """
+        if not rows:
+            return 0
+        for r in rows:
+            if "public_id" not in r:
+                r["public_id"] = str(uuid7())
+            if "known_to" not in r:
+                r["known_to"] = KNOWN_TO_MAX
+            if "timestamp" not in r:
+                r["timestamp"] = datetime.now(UTC)
+        async with self.session() as s:
+            count = 0
+            for r in rows:
+                bus_time = r["timestamp"]
+                existing = (
+                    (
+                        await s.execute(
+                            select(MarketSnapshot)
+                            .where(
+                                MarketSnapshot.instrument_public_id == r["instrument_public_id"],
+                                MarketSnapshot.timestamp <= bus_time,
+                                MarketSnapshot.known_to > bus_time,
+                            )
+                            .with_for_update()
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                if existing:
+                    await s.execute(
+                        update(MarketSnapshot)
+                        .where(MarketSnapshot.id == existing.id)
+                        .values(known_to=bus_time)
+                    )
+                    r["public_id"] = existing.public_id
+                s.add(MarketSnapshot(**r))
+                count += 1
+            await s.commit()
+        return count
 
 
 _repository_cache: dict[str, Repository] = {}

@@ -397,12 +397,12 @@ class TestCreateApiRouter:
 
     @patch("snapper.server.app.get_settings")
     @patch("snapper.server.app.get_repository")
-    def test_get_candles_instrument_not_found_returns_empty_payload(
+    def test_get_candles_symbol_not_found_returns_empty_payload(
         self, mock_get_repo: MagicMock, mock_get_settings: MagicMock
     ) -> None:
-        """Test candles endpoint returns empty payload for unknown instrument.
+        """Test candles endpoint returns empty payload when Symbol is missing.
 
-        Given: An instrument that does not exist in the database,
+        Given: No active Symbol row for the requested instrument,
         When: GET /api/candles is called,
         Then: Response status is 200 with empty payload list.
         """
@@ -416,10 +416,51 @@ class TestCreateApiRouter:
         mock_session_context.__aexit__ = AsyncMock(return_value=None)
         mock_repo.session.return_value = mock_session_context
         mock_get_repo.return_value = mock_repo
-        mock_inst_result = MagicMock()
-        mock_inst_result.scalars.return_value.first.return_value = None
+        mock_sym_result = MagicMock()
+        mock_sym_result.scalar_one_or_none.return_value = None
 
         async def mock_execute(query: Any) -> Any:
+            return mock_sym_result
+
+        mock_session.execute = mock_execute
+        response = self.client.get("/api/candles?instrument=NOSYMBOL&exchange=kraken&timeframe=1h")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["payload"] == []
+        assert data["count"] == 0
+
+    @patch("snapper.server.app.get_settings")
+    @patch("snapper.server.app.get_repository")
+    def test_get_candles_instrument_not_found_returns_empty_payload(
+        self, mock_get_repo: MagicMock, mock_get_settings: MagicMock
+    ) -> None:
+        """Test candles endpoint returns empty payload for unknown instrument.
+
+        Given: Symbol exists but no matching Instrument in the database,
+        When: GET /api/candles is called,
+        Then: Response status is 200 with empty payload list.
+        """
+        mock_settings = MagicMock()
+        mock_settings.db_url = TEST_DB_URL
+        mock_get_settings.return_value = mock_settings
+        mock_repo = MagicMock()
+        mock_session = MagicMock()
+        mock_session_context = AsyncMock()
+        mock_session_context.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_context.__aexit__ = AsyncMock(return_value=None)
+        mock_repo.session.return_value = mock_session_context
+        mock_get_repo.return_value = mock_repo
+        mock_sym_result = MagicMock()
+        mock_sym_result.scalar_one_or_none.return_value = "sym-pub-1"
+        mock_inst_result = MagicMock()
+        mock_inst_result.scalars.return_value.first.return_value = None
+        call_count = 0
+
+        async def mock_execute(query: Any) -> Any:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return mock_sym_result
             return mock_inst_result
 
         mock_session.execute = mock_execute
@@ -1268,14 +1309,23 @@ class TestAppCoverageImprovement:
                 os.unlink(tmp_path)
 
 
+class MockSymbol:
+    """Mock symbol for testing endpoint responses."""
+
+    def __init__(self, native_symbol: str = "BTC-USD") -> None:
+        """Initialize the instance."""
+        self.native_symbol = native_symbol
+        self.public_id = "test-symbol-public-id"
+
+
 class MockInstrument:
     """Mock instrument for testing endpoint responses."""
 
-    def __init__(self, inst_id: int = 1, symbol: str = "BTC-USD", exchange: str = "kraken") -> None:
+    def __init__(self, inst_id: int = 1, exchange: str = "kraken") -> None:
         """Initialize the instance."""
         self.id = inst_id
         self.public_id = "test-instrument-public-id"
-        self.symbol = symbol
+        self.symbol_public_id = "test-symbol-public-id"
         self.exchange = exchange
 
 
@@ -1445,7 +1495,8 @@ class TestOrdersSuccessPath:
         """
         order = MockOrder()
         instrument = MockInstrument()
-        repo = MockRepository(session_result=[(order, instrument)])
+        symbol = MockSymbol()
+        repo = MockRepository(session_result=[(order, instrument, symbol)])
         client = create_app_with_overrides(repo)
         response = client.get("/api/orders")
         assert response.status_code == 200
@@ -1471,8 +1522,9 @@ class TestOrdersSuccessPath:
         Then: Response contains only matching orders.
         """
         order = MockOrder()
-        instrument = MockInstrument(symbol="ETH-USD")
-        repo = MockRepository(session_result=[(order, instrument)])
+        instrument = MockInstrument()
+        symbol = MockSymbol(native_symbol="ETH-USD")
+        repo = MockRepository(session_result=[(order, instrument, symbol)])
         client = create_app_with_overrides(repo)
         response = client.get("/api/orders?symbol=ETH-USD")
         assert response.status_code == 200
@@ -1508,7 +1560,8 @@ class TestSignalsSuccessPath:
         """
         signal = MockSignal()
         instrument = MockInstrument()
-        repo = MockRepository(session_result=[(signal, instrument)])
+        symbol = MockSymbol()
+        repo = MockRepository(session_result=[(signal, instrument, symbol)])
         client = create_app_with_overrides(repo)
         response = client.get("/api/signals")
         assert response.status_code == 200
@@ -1535,7 +1588,8 @@ class TestSignalsSuccessPath:
         """
         signal = MockSignal()
         instrument = MockInstrument()
-        repo = MockRepository(session_result=[(signal, instrument)])
+        symbol = MockSymbol()
+        repo = MockRepository(session_result=[(signal, instrument, symbol)])
         client = create_app_with_overrides(repo)
         response = client.get("/api/signals?instrument=BTC-USD&strategy=rsi_strategy")
         assert response.status_code == 200
@@ -1571,7 +1625,8 @@ class TestExecutionsSuccessPath:
         execution = MockExecution()
         order = MockOrder()
         instrument = MockInstrument()
-        repo = MockRepository(session_result=[(execution, order, instrument)])
+        symbol = MockSymbol()
+        repo = MockRepository(session_result=[(execution, order, instrument, symbol)])
         client = create_app_with_overrides(repo)
         response = client.get("/api/executions")
         assert response.status_code == 200
@@ -1621,7 +1676,8 @@ class TestPositionsSuccessPath:
         """
         position = MockPosition()
         instrument = MockInstrument()
-        repo = MockRepository(session_result=[(position, instrument)])
+        symbol = MockSymbol()
+        repo = MockRepository(session_result=[(position, instrument, symbol)])
         client = create_app_with_overrides(repo)
         response = client.get("/api/positions")
         assert response.status_code == 200
@@ -1780,7 +1836,8 @@ class TestSignalsExchangeFilter:
         """
         signal = MockSignal()
         instrument = MockInstrument()
-        repo = MockRepository(session_result=[(signal, instrument)])
+        symbol = MockSymbol()
+        repo = MockRepository(session_result=[(signal, instrument, symbol)])
         client = create_app_with_overrides(repo)
         response = client.get("/api/signals?exchange=kraken")
         assert response.status_code == 200
@@ -1802,7 +1859,8 @@ class TestOrdersExchangeFilter:
         """
         order = MockOrder()
         instrument = MockInstrument()
-        repo = MockRepository(session_result=[(order, instrument)])
+        symbol = MockSymbol()
+        repo = MockRepository(session_result=[(order, instrument, symbol)])
         client = create_app_with_overrides(repo)
         response = client.get("/api/orders?exchange=kraken")
         assert response.status_code == 200

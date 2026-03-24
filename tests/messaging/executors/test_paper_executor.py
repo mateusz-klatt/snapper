@@ -44,12 +44,12 @@ def _make_repo_mock() -> MagicMock:
 
 
 async def fake_get_market_snapshots(
-    exchange: str, symbols: list[str], start_dt: datetime, end_dt: datetime
+    instrument_public_ids: list[str], start_dt: datetime, end_dt: datetime
 ) -> list[dict]:
     """Return fake market snapshot data for testing."""
     return [
         {
-            "symbol": "BTC-USD",
+            "instrument_public_id": "inst-btc-usd",
             "bid": 50000.0,
             "ask": 50100.0,
             "last": 50050.0,
@@ -59,9 +59,14 @@ async def fake_get_market_snapshots(
             "vwap": 50000.0,
             "low": 49000.0,
             "high": 51000.0,
-            "timestamp": datetime.now(tz=UTC),
+            "ts": datetime.now(tz=UTC),
         }
     ]
+
+
+async def fake_resolve_instrument_public_ids(symbols: list[str], exchange: str) -> list[str]:
+    """Return fake instrument_public_ids for testing."""
+    return [f"inst-{s.lower()}" for s in symbols]
 
 
 async def fake_get_candles(
@@ -467,6 +472,7 @@ class TestPaperMarketDataMethods:
         """
         mock_repo = SimpleNamespace(get_market_snapshots=fake_get_market_snapshots)
         client = PaperExchangeClient(repository=mock_repo, source_exchange="kraken")
+        client._resolve_instrument_public_ids = fake_resolve_instrument_public_ids
         client.set_tracker(SequenceTracker())
         await client.connect()
         ticker = await client.get_ticker("BTC-USD")
@@ -541,10 +547,10 @@ class TestPaperMarketDataMethods:
             end_time=end_ts,
             source_exchange="kraken",
         )
+        client._resolve_instrument_public_ids = fake_resolve_instrument_public_ids
         client.set_tracker(SequenceTracker())
         await client.connect()
         async for ticker in client.subscribe_ticker(["BTC-USD"]):
-            assert ticker.symbol == "BTC-USD"
             assert ticker.bid == pytest.approx(50000.0)
             break
         await client.disconnect()

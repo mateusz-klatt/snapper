@@ -348,9 +348,6 @@ class TraderCoordinator(RegisterableProcess):
             instrument: Symbol string (e.g., "BTC-USD" or "BTC/USD").
             exchange: Exchange name (lowercase).
         """
-        parts = instrument.split("-") if "-" in instrument else instrument.split("/")
-        base = parts[0] if len(parts) > 0 else instrument
-        quote = parts[1] if len(parts) > 1 else "USD"
         symbol_pid = await resolve_symbol_public_id(self.repository, instrument)
         if symbol_pid is None:
             logger.warning(
@@ -359,12 +356,7 @@ class TraderCoordinator(RegisterableProcess):
             return
         await self.repository.upsert_instrument(
             symbol_public_id=symbol_pid,
-            symbol=instrument,
             exchange=exchange,
-            base=base,
-            quote=quote,
-            tick_size=0.01,
-            lot_size=0.0001,
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence("instruments"),
         )

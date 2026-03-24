@@ -476,7 +476,13 @@ def _apply_signal_filters(
         Filtered query.
     """
     if instrument:
-        query = query.where(Instrument.symbol == instrument)
+        s_ts, s_kt = where_active(Symbol)
+        sym_subq = (
+            select(Symbol.public_id)
+            .where(Symbol.native_symbol == instrument, s_ts, s_kt)
+            .scalar_subquery()
+        )
+        query = query.where(Instrument.symbol_public_id == sym_subq)
     if strategy:
         query = query.where(Signal.strategy_name == strategy)
     if exchange:
@@ -527,9 +533,24 @@ def _create_candles_signals_router() -> APIRouter:
         processing_date = as_of or datetime.now(UTC)
         try:
             async with repo.session() as session:
+                s_ts, s_kt = where_active(Symbol, processing_date)
+                sym_q = await session.execute(
+                    select(Symbol.public_id).where(Symbol.native_symbol == instrument, s_ts, s_kt)
+                )
+                symbol_pid = sym_q.scalar_one_or_none()
+                tracker: SequenceTracker = request.app.state.rest_tracker
+                if symbol_pid is None:
+                    return CandleListResponse(
+                        payload=[],
+                        count=0,
+                        session_id=tracker.session_id,
+                        sequence_id=tracker.next_sequence(_REST_DATA_STREAM),
+                        public_id=str(uuid7()),
+                        timestamp=dt.datetime.now(dt.UTC),
+                    )
                 inst_query = await session.execute(
                     select(Instrument).where(
-                        Instrument.symbol == instrument,
+                        Instrument.symbol_public_id == symbol_pid,
                         Instrument.exchange == exchange,
                         Instrument.timestamp <= processing_date,
                         Instrument.known_to > processing_date,
@@ -537,7 +558,6 @@ def _create_candles_signals_router() -> APIRouter:
                 )
                 inst = inst_query.scalars().first()
                 if not inst:
-                    tracker: SequenceTracker = request.app.state.rest_tracker
                     return CandleListResponse(
                         payload=[],
                         count=0,
@@ -631,12 +651,22 @@ def _create_candles_signals_router() -> APIRouter:
         try:
             async with repo.session() as session:
                 since = processing_date - timedelta(hours=hours)
-                query = select(Signal, Instrument).join(
-                    Instrument,
-                    and_(
-                        Signal.instrument_public_id == Instrument.public_id,
-                        *where_active(Instrument, processing_date),
-                    ),
+                query = (
+                    select(Signal, Instrument, Symbol)
+                    .join(
+                        Instrument,
+                        and_(
+                            Signal.instrument_public_id == Instrument.public_id,
+                            *where_active(Instrument, processing_date),
+                        ),
+                    )
+                    .join(
+                        Symbol,
+                        and_(
+                            Instrument.symbol_public_id == Symbol.public_id,
+                            *where_active(Symbol, processing_date),
+                        ),
+                    )
                 )
                 query = query.where(Signal.fired_at >= since)
                 query = query.where(
@@ -652,7 +682,7 @@ def _create_candles_signals_router() -> APIRouter:
                         timestamp=signal.timestamp,
                         session_id=signal.session_id,
                         sequence_id=signal.sequence_id,
-                        instrument=inst.symbol,
+                        instrument=sym.native_symbol,
                         exchange=inst.exchange,
                         side=signal.side,
                         strength=signal.strength,
@@ -661,7 +691,7 @@ def _create_candles_signals_router() -> APIRouter:
                         price=signal.price,
                         fired_at=signal.fired_at,
                     )
-                    for signal, inst in signals_with_instruments
+                    for signal, inst, sym in signals_with_instruments
                 ]
                 tracker: SequenceTracker = request.app.state.rest_tracker
                 sid = tracker.session_id
@@ -814,7 +844,13 @@ def _apply_order_filters(
         Filtered query.
     """
     if symbol:
-        query = query.where(Instrument.symbol == symbol)
+        s_ts, s_kt = where_active(Symbol)
+        sym_subq = (
+            select(Symbol.public_id)
+            .where(Symbol.native_symbol == symbol, s_ts, s_kt)
+            .scalar_subquery()
+        )
+        query = query.where(Instrument.symbol_public_id == sym_subq)
     if exchange:
         query = query.where(Instrument.exchange == exchange)
     return query
@@ -859,12 +895,22 @@ def _create_orders_executions_router() -> APIRouter:
         processing_date = as_of or datetime.now(UTC)
         try:
             async with repo.session() as session:
-                query = select(Order, Instrument).join(
-                    Instrument,
-                    and_(
-                        Order.instrument_public_id == Instrument.public_id,
-                        *where_active(Instrument, processing_date),
-                    ),
+                query = (
+                    select(Order, Instrument, Symbol)
+                    .join(
+                        Instrument,
+                        and_(
+                            Order.instrument_public_id == Instrument.public_id,
+                            *where_active(Instrument, processing_date),
+                        ),
+                    )
+                    .join(
+                        Symbol,
+                        and_(
+                            Instrument.symbol_public_id == Symbol.public_id,
+                            *where_active(Symbol, processing_date),
+                        ),
+                    )
                 )
                 query = query.where(
                     Order.timestamp <= processing_date, Order.known_to > processing_date
@@ -879,7 +925,7 @@ def _create_orders_executions_router() -> APIRouter:
                         timestamp=order.timestamp,
                         session_id=order.session_id,
                         sequence_id=order.sequence_id,
-                        instrument=inst.symbol,
+                        instrument=sym.native_symbol,
                         exchange=inst.exchange,
                         client_order_id=order.client_order_id or "",
                         exchange_order_id=order.exchange_order_id,
@@ -895,7 +941,7 @@ def _create_orders_executions_router() -> APIRouter:
                         time_in_force=order.time_in_force,
                         error=order.error,
                     )
-                    for order, inst in orders_with_instruments
+                    for order, inst, sym in orders_with_instruments
                 ]
                 tracker: SequenceTracker = request.app.state.rest_tracker
                 sid = tracker.session_id
@@ -940,7 +986,7 @@ def _create_orders_executions_router() -> APIRouter:
         try:
             async with repo.session() as session:
                 query = (
-                    select(Execution, Order, Instrument)
+                    select(Execution, Order, Instrument, Symbol)
                     .join(
                         Order,
                         and_(
@@ -954,6 +1000,13 @@ def _create_orders_executions_router() -> APIRouter:
                         and_(
                             Order.instrument_public_id == Instrument.public_id,
                             *where_active(Instrument, processing_date),
+                        ),
+                    )
+                    .join(
+                        Symbol,
+                        and_(
+                            Instrument.symbol_public_id == Symbol.public_id,
+                            *where_active(Symbol, processing_date),
                         ),
                     )
                     .where(Execution.timestamp <= processing_date)
@@ -972,8 +1025,8 @@ def _create_orders_executions_router() -> APIRouter:
                         trade_id=execution.trade_id,
                         exchange_order_id=order.exchange_order_id,
                         client_order_id=order.client_order_id or "",
-                        instrument=instrument.symbol,
-                        exchange=instrument.exchange,
+                        instrument=sym.native_symbol,
+                        exchange=inst.exchange,
                         side=execution.side,
                         size=execution.size,
                         price=execution.price,
@@ -982,7 +1035,7 @@ def _create_orders_executions_router() -> APIRouter:
                         status=execution.status,
                         executed_at=execution.executed_at or execution.timestamp,
                     )
-                    for execution, order, instrument in rows
+                    for execution, order, inst, sym in rows
                 ]
                 tracker: SequenceTracker = request.app.state.rest_tracker
                 sid = tracker.session_id
@@ -1024,12 +1077,22 @@ def _create_orders_executions_router() -> APIRouter:
         processing_date = as_of or datetime.now(UTC)
         try:
             async with repo.session() as session:
-                query = select(Position, Instrument).join(
-                    Instrument,
-                    and_(
-                        Position.instrument_public_id == Instrument.public_id,
-                        *where_active(Instrument, processing_date),
-                    ),
+                query = (
+                    select(Position, Instrument, Symbol)
+                    .join(
+                        Instrument,
+                        and_(
+                            Position.instrument_public_id == Instrument.public_id,
+                            *where_active(Instrument, processing_date),
+                        ),
+                    )
+                    .join(
+                        Symbol,
+                        and_(
+                            Instrument.symbol_public_id == Symbol.public_id,
+                            *where_active(Symbol, processing_date),
+                        ),
+                    )
                 )
                 query = query.where(
                     Position.timestamp <= processing_date,
@@ -1043,14 +1106,14 @@ def _create_orders_executions_router() -> APIRouter:
                         timestamp=position.timestamp,
                         session_id=position.session_id,
                         sequence_id=position.sequence_id,
-                        instrument=inst.symbol,
+                        instrument=sym.native_symbol,
                         exchange=inst.exchange,
                         quantity=position.quantity,
                         average_price=position.average_price,
                         unrealized_pnl=position.unrealized_pnl,
                         realized_pnl=position.realized_pnl,
                     )
-                    for position, inst in positions_with_instruments
+                    for position, inst, sym in positions_with_instruments
                 ]
                 tracker: SequenceTracker = request.app.state.rest_tracker
                 sid = tracker.session_id

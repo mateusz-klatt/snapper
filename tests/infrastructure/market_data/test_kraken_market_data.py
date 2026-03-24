@@ -164,7 +164,7 @@ async def test_collect_ticker_snapshots_timeout() -> None:
 
     Given a slow ticker stream that never reaches the 2000 target,
     When _collect_ticker_snapshots times out,
-    Then it returns the snapshots collected so far and disconnects.
+    Then it returns the raw batch collected so far and disconnects.
     """
     mock_exchange = MagicMock(spec=KrakenExchangeClient)
     mock_exchange.disconnect_websocket = AsyncMock()
@@ -191,26 +191,26 @@ async def test_collect_ticker_snapshots_timeout() -> None:
     mock_repo = MagicMock(spec=DatabaseRepository)
     service = KrakenSnapshotUpdaterService(mock_exchange, mock_repo)
     service._COLLECTION_TIMEOUT_SECONDS = 0.1
-    snapshots, count = await service._collect_ticker_snapshots()
+    raw_batch, count = await service._collect_ticker_snapshots()
     assert count == 1
-    assert len(snapshots) == 1
-    assert snapshots[0].symbol == "BTC-USD"
+    assert len(raw_batch) == 1
+    assert raw_batch[0][0] == "BTC-USD"
     mock_exchange.disconnect_websocket.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_collect_ticker_snapshots_stamps_provenance() -> None:
-    """Snapshot collection stamps session_id and sequence_id on each snapshot.
+async def test_collect_ticker_snapshots_returns_symbol_ticker_pairs() -> None:
+    """Snapshot collection returns (symbol, ticker) pairs for provenance.
 
     Given a ticker stream yielding two distinct symbols,
     When _collect_ticker_snapshots completes,
-    Then each snapshot has a non-empty session_id and monotonically increasing sequence_id.
+    Then each entry is a (symbol, TickerUpdate) tuple.
     """
     mock_exchange = MagicMock(spec=KrakenExchangeClient)
     mock_exchange.disconnect_websocket = AsyncMock()
 
     async def _two_tickers(symbols: list[str]) -> AsyncIterator[TickerUpdate]:
-        """Yield two tickers for provenance verification."""
+        """Yield two tickers for verification."""
         for sym in ("BTC-USD", "ETH-USD"):
             yield TickerUpdate(
                 symbol=sym,
@@ -230,11 +230,174 @@ async def test_collect_ticker_snapshots_stamps_provenance() -> None:
     mock_exchange.subscribe_ticks = _two_tickers
     mock_repo = MagicMock(spec=DatabaseRepository)
     service = KrakenSnapshotUpdaterService(mock_exchange, mock_repo)
-    snapshots, count = await service._collect_ticker_snapshots()
+    raw_batch, count = await service._collect_ticker_snapshots()
     assert count == 2
-    assert len(snapshots) == 2
-    session_ids = {s.session_id for s in snapshots}
-    assert len(session_ids) == 1
-    assert "" not in session_ids
-    sequence_ids = sorted(s.sequence_id for s in snapshots)
-    assert sequence_ids == [1, 2]
+    assert len(raw_batch) == 2
+    symbols_collected = [entry[0] for entry in raw_batch]
+    assert symbols_collected == ["BTC-USD", "ETH-USD"]
+
+
+@pytest.mark.asyncio
+async def test_build_kraken_snapshot_sets_instrument_public_id() -> None:
+    """_build_kraken_snapshot populates instrument_public_id.
+
+    Given a TickerUpdate and a known instrument_public_id,
+    When _build_kraken_snapshot is called,
+    Then the snapshot has the correct instrument_public_id and provenance.
+    """
+    ticker = TickerUpdate(
+        symbol="BTC-USD",
+        bid=50000.0,
+        bid_qty=1.0,
+        ask=50010.0,
+        ask_qty=1.5,
+        last=50005.0,
+        volume=100.0,
+        vwap=50002.0,
+        low=49900.0,
+        high=50100.0,
+        change=100.0,
+        change_pct=0.2,
+    )
+    snapshot = KrakenSnapshotUpdaterService._build_kraken_snapshot(
+        ticker,
+        instrument_public_id="inst-abc-123",
+        session_id="sess-1",
+        sequence_id=42,
+    )
+    assert snapshot.instrument_public_id == "inst-abc-123"
+    assert snapshot.session_id == "sess-1"
+    assert snapshot.sequence_id == 42
+    assert snapshot.bid == pytest.approx(50000.0)
+    assert snapshot.ask == pytest.approx(50010.0)
+
+
+@pytest.mark.asyncio
+async def test_deduplicate_and_persist_calls_scd2() -> None:
+    """_deduplicate_and_persist resolves instruments and uses SCD2 persistence.
+
+    Given a raw batch with two entries for same symbol (dedup) and one other,
+    When _deduplicate_and_persist is called with mocked resolution and persistence,
+    Then the correct number of snapshots are built and persisted.
+    """
+    mock_exchange = MagicMock(spec=KrakenExchangeClient)
+    mock_repo = MagicMock(spec=DatabaseRepository)
+    service = KrakenSnapshotUpdaterService(mock_exchange, mock_repo)
+
+    ticker1 = TickerUpdate(
+        symbol="BTC-USD",
+        bid=50000.0,
+        bid_qty=1.0,
+        ask=50010.0,
+        ask_qty=1.5,
+        last=50005.0,
+        volume=100.0,
+        vwap=50002.0,
+        low=49900.0,
+        high=50100.0,
+        change=100.0,
+        change_pct=0.2,
+    )
+    ticker2 = TickerUpdate(
+        symbol="BTC-USD",
+        bid=50001.0,
+        bid_qty=1.0,
+        ask=50011.0,
+        ask_qty=1.5,
+        last=50006.0,
+        volume=101.0,
+        vwap=50003.0,
+        low=49901.0,
+        high=50101.0,
+        change=101.0,
+        change_pct=0.21,
+    )
+    ticker3 = TickerUpdate(
+        symbol="ETH-USD",
+        bid=3000.0,
+        bid_qty=2.0,
+        ask=3001.0,
+        ask_qty=2.5,
+        last=3000.5,
+        volume=200.0,
+        vwap=3000.2,
+        low=2990.0,
+        high=3010.0,
+        change=10.0,
+        change_pct=0.3,
+    )
+    raw_batch = [("BTC-USD", ticker1), ("BTC-USD", ticker2), ("ETH-USD", ticker3)]
+
+    with (
+        patch.object(
+            service,
+            "_resolve_batch_instrument_ids",
+            return_value={"BTC-USD": "inst-btc", "ETH-USD": "inst-eth"},
+        ),
+        patch.object(service, "_persist_snapshots_scd2", return_value=2) as mock_persist,
+    ):
+        service._deduplicate_and_persist(raw_batch)
+
+    mock_persist.assert_called_once()
+    persisted = mock_persist.call_args[0][0]
+    assert len(persisted) == 2
+    inst_ids = {s.instrument_public_id for s in persisted}
+    assert inst_ids == {"inst-btc", "inst-eth"}
+
+
+@pytest.mark.asyncio
+async def test_deduplicate_and_persist_skips_unresolved() -> None:
+    """_deduplicate_and_persist skips symbols with no instrument resolution.
+
+    Given a raw batch with two symbols where only one resolves,
+    When _deduplicate_and_persist is called,
+    Then only the resolved symbol is persisted and skipped count is logged.
+    """
+    mock_exchange = MagicMock(spec=KrakenExchangeClient)
+    mock_repo = MagicMock(spec=DatabaseRepository)
+    service = KrakenSnapshotUpdaterService(mock_exchange, mock_repo)
+
+    ticker1 = TickerUpdate(
+        symbol="BTC-USD",
+        bid=50000.0,
+        bid_qty=1.0,
+        ask=50010.0,
+        ask_qty=1.5,
+        last=50005.0,
+        volume=100.0,
+        vwap=50002.0,
+        low=49900.0,
+        high=50100.0,
+        change=100.0,
+        change_pct=0.2,
+    )
+    ticker2 = TickerUpdate(
+        symbol="NOPE-USD",
+        bid=1.0,
+        bid_qty=1.0,
+        ask=2.0,
+        ask_qty=1.0,
+        last=1.5,
+        volume=10.0,
+        vwap=1.5,
+        low=1.0,
+        high=2.0,
+        change=0.1,
+        change_pct=10.0,
+    )
+    raw_batch = [("BTC-USD", ticker1), ("NOPE-USD", ticker2)]
+
+    with (
+        patch.object(
+            service,
+            "_resolve_batch_instrument_ids",
+            return_value={"BTC-USD": "inst-btc"},
+        ),
+        patch.object(service, "_persist_snapshots_scd2", return_value=1) as mock_persist,
+    ):
+        service._deduplicate_and_persist(raw_batch)
+
+    mock_persist.assert_called_once()
+    persisted = mock_persist.call_args[0][0]
+    assert len(persisted) == 1
+    assert persisted[0].instrument_public_id == "inst-btc"

@@ -5,6 +5,7 @@ from datetime import UTC
 from datetime import datetime
 from typing import Any
 from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -14,12 +15,28 @@ from snapper.infrastructure.market_data.base import MarketSnapshotUpdaterService
 from snapper.infrastructure.market_data.kraken import KrakenSnapshotUpdaterService
 
 
+def _make_instrument_map(symbols: list[str]) -> dict[str, str]:
+    """Build a deterministic symbol->instrument_public_id mapping for tests."""
+    return {s: f"inst-{s.lower()}" for s in symbols}
+
+
+def _capture_and_count(
+    target: list[list[MarketSnapshot]],
+) -> Any:
+    """Return a callable that captures snapshots and returns their count."""
+
+    def _handler(snaps: list[MarketSnapshot]) -> int:
+        target.append(list(snaps))
+        return len(snaps)
+
+    return _handler
+
+
 class TestMarketSnapshotServiceCoverage:
     """Tests for MarketSnapshotUpdaterService base functionality."""
 
     @pytest.fixture
     def mock_repository(self) -> MagicMock:
-        """Create mock repository for testing."""
         """Create mock repository for testing."""
         return MagicMock()
 
@@ -65,10 +82,9 @@ class TestMarketSnapshotServiceCoverage:
 
         Given: service with mocked repository and valid ticker,
         When: calling update_market_snapshots,
-        Then: snapshot saved with correct symbol, prices, and spread.
+        Then: snapshot saved with correct instrument_public_id, prices, and spread.
         """
-        mock_session = MagicMock()
-        mock_repository.session_factory.return_value.__enter__.return_value = mock_session
+        persisted: list[list[MarketSnapshot]] = []
 
         async def mock_subscribe_ticks(
             symbols: list[str], *, req_id: int | None = None
@@ -76,15 +92,25 @@ class TestMarketSnapshotServiceCoverage:
             yield sample_ticker_data
 
         service.exchange_client.subscribe_ticks = mock_subscribe_ticks
-        count = await service.update_market_snapshots()
+        with (
+            patch.object(
+                service,
+                "_resolve_batch_instrument_ids",
+                return_value={"BTC-USD": "inst-btc-usd"},
+            ),
+            patch.object(
+                service,
+                "_persist_snapshots_scd2",
+                side_effect=_capture_and_count(persisted),
+            ),
+        ):
+            count = await service.update_market_snapshots()
         assert count == 1
-        mock_session.bulk_save_objects.assert_called_once()
-        mock_session.commit.assert_called_once()
-        saved_snapshots = mock_session.bulk_save_objects.call_args[0][0]
-        assert len(saved_snapshots) == 1
-        snapshot = saved_snapshots[0]
+        assert len(persisted) == 1
+        assert len(persisted[0]) == 1
+        snapshot = persisted[0][0]
         assert isinstance(snapshot, MarketSnapshot)
-        assert snapshot.symbol == "BTC-USD"
+        assert snapshot.instrument_public_id == "inst-btc-usd"
         assert snapshot.bid == pytest.approx(50000.0)
         assert snapshot.ask == pytest.approx(50100.0)
         assert snapshot.spread == pytest.approx(100.0)
@@ -100,10 +126,8 @@ class TestMarketSnapshotServiceCoverage:
 
         Given: service with ticker having empty symbol,
         When: calling update_market_snapshots,
-        Then: count is 0 and no bulk_save_objects call.
+        Then: count is 0 and no persist call.
         """
-        mock_session = MagicMock()
-        mock_repository.session_factory.return_value.__enter__.return_value = mock_session
         ticker_data = TickerUpdate(
             symbol="",
             bid=100.0,
@@ -127,7 +151,6 @@ class TestMarketSnapshotServiceCoverage:
         service.exchange_client.subscribe_ticks = mock_subscribe_ticks
         count = await service.update_market_snapshots()
         assert count == 0
-        mock_session.bulk_save_objects.assert_not_called()
 
     async def test_update_market_snapshots_skips_empty_native_symbol(
         self,
@@ -138,10 +161,8 @@ class TestMarketSnapshotServiceCoverage:
 
         Given: service with ticker returning empty native symbol,
         When: calling update_market_snapshots,
-        Then: count is 0 and no bulk_save_objects call.
+        Then: count is 0 and no persist call.
         """
-        mock_session = MagicMock()
-        mock_repository.session_factory.return_value.__enter__.return_value = mock_session
         ticker_data = TickerUpdate(
             symbol="",
             bid=100.0,
@@ -165,7 +186,6 @@ class TestMarketSnapshotServiceCoverage:
         service.exchange_client.subscribe_ticks = mock_subscribe_ticks
         count = await service.update_market_snapshots()
         assert count == 0
-        mock_session.bulk_save_objects.assert_not_called()
 
     async def test_update_market_snapshots_deduplicates_symbols(
         self,
@@ -178,8 +198,7 @@ class TestMarketSnapshotServiceCoverage:
         When: calling update_market_snapshots,
         Then: only last ticker saved (1 snapshot, latest bid).
         """
-        mock_session = MagicMock()
-        mock_repository.session_factory.return_value.__enter__.return_value = mock_session
+        persisted: list[list[MarketSnapshot]] = []
         tickers = [
             TickerUpdate(
                 symbol="BTC-USD",
@@ -205,11 +224,22 @@ class TestMarketSnapshotServiceCoverage:
                 yield ticker
 
         service.exchange_client.subscribe_ticks = mock_subscribe_ticks
-        count = await service.update_market_snapshots()
+        with (
+            patch.object(
+                service,
+                "_resolve_batch_instrument_ids",
+                return_value={"BTC-USD": "inst-btc-usd"},
+            ),
+            patch.object(
+                service,
+                "_persist_snapshots_scd2",
+                side_effect=_capture_and_count(persisted),
+            ),
+        ):
+            count = await service.update_market_snapshots()
         assert count == 3
-        saved_snapshots = mock_session.bulk_save_objects.call_args[0][0]
-        assert len(saved_snapshots) == 1
-        assert saved_snapshots[0].bid == pytest.approx(50200.0)
+        assert len(persisted[0]) == 1
+        assert persisted[0][0].bid == pytest.approx(50200.0)
 
     async def test_update_market_snapshots_stops_at_2000_snapshots(
         self,
@@ -222,8 +252,6 @@ class TestMarketSnapshotServiceCoverage:
         When: calling update_market_snapshots,
         Then: returns exactly 2000 (hard limit).
         """
-        mock_session = MagicMock()
-        mock_repository.session_factory.return_value.__enter__.return_value = mock_session
 
         async def infinite_tickers(
             symbols: list[str], *, req_id: int | None = None
@@ -247,7 +275,19 @@ class TestMarketSnapshotServiceCoverage:
                 i += 1
 
         service.exchange_client.subscribe_ticks = infinite_tickers
-        result_count = await service.update_market_snapshots()
+        with (
+            patch.object(
+                service,
+                "_resolve_batch_instrument_ids",
+                side_effect=lambda ns, ex: _make_instrument_map(list(ns)),
+            ),
+            patch.object(
+                service,
+                "_persist_snapshots_scd2",
+                side_effect=lambda snaps: len(snaps),
+            ),
+        ):
+            result_count = await service.update_market_snapshots()
         assert result_count == 2000
 
     async def test_update_market_snapshots_calculates_spread_correctly(
@@ -261,8 +301,7 @@ class TestMarketSnapshotServiceCoverage:
         When: calling update_market_snapshots,
         Then: spread=10 and spread_pct=(10/mid)*100.
         """
-        mock_session = MagicMock()
-        mock_repository.session_factory.return_value.__enter__.return_value = mock_session
+        persisted: list[list[MarketSnapshot]] = []
         ticker_data = TickerUpdate(
             symbol="ETH-USD",
             bid=3000.0,
@@ -284,12 +323,24 @@ class TestMarketSnapshotServiceCoverage:
             yield ticker_data
 
         service.exchange_client.subscribe_ticks = mock_subscribe_ticks
-        await service.update_market_snapshots()
-        saved_snapshots = mock_session.bulk_save_objects.call_args[0][0]
-        snapshot = saved_snapshots[0]
+        with (
+            patch.object(
+                service,
+                "_resolve_batch_instrument_ids",
+                return_value={"ETH-USD": "inst-eth-usd"},
+            ),
+            patch.object(
+                service,
+                "_persist_snapshots_scd2",
+                side_effect=_capture_and_count(persisted),
+            ),
+        ):
+            await service.update_market_snapshots()
+        snapshot = persisted[0][0]
         assert snapshot.spread == pytest.approx(10.0)
         mid = (3000.0 + 3010.0) / 2
         expected_spread_pct = (10.0 / mid) * 100
+        assert snapshot.spread_pct is not None
         assert abs(snapshot.spread_pct - expected_spread_pct) < 0.001
 
     async def test_update_market_snapshots_handles_zero_mid_price(
@@ -303,8 +354,7 @@ class TestMarketSnapshotServiceCoverage:
         When: calling update_market_snapshots,
         Then: spread_pct is 0.0 (no division by zero).
         """
-        mock_session = MagicMock()
-        mock_repository.session_factory.return_value.__enter__.return_value = mock_session
+        persisted: list[list[MarketSnapshot]] = []
         ticker_data = TickerUpdate(
             symbol="NULL-USD",
             bid=0.0,
@@ -326,9 +376,20 @@ class TestMarketSnapshotServiceCoverage:
             yield ticker_data
 
         service.exchange_client.subscribe_ticks = mock_subscribe_ticks
-        await service.update_market_snapshots()
-        saved_snapshots = mock_session.bulk_save_objects.call_args[0][0]
-        snapshot = saved_snapshots[0]
+        with (
+            patch.object(
+                service,
+                "_resolve_batch_instrument_ids",
+                return_value={"NULL-USD": "inst-null-usd"},
+            ),
+            patch.object(
+                service,
+                "_persist_snapshots_scd2",
+                side_effect=_capture_and_count(persisted),
+            ),
+        ):
+            await service.update_market_snapshots()
+        snapshot = persisted[0][0]
         assert snapshot.spread_pct == pytest.approx(0.0)
 
     async def test_update_market_snapshots_handles_exception(
@@ -364,8 +425,7 @@ class TestMarketSnapshotServiceCoverage:
         When: calling update_market_snapshots,
         Then: snapshot timestamp is UTC and within before/after bounds.
         """
-        mock_session = MagicMock()
-        mock_repository.session_factory.return_value.__enter__.return_value = mock_session
+        persisted: list[list[MarketSnapshot]] = []
 
         async def mock_subscribe_ticks(
             symbols: list[str], *, req_id: int | None = None
@@ -374,10 +434,21 @@ class TestMarketSnapshotServiceCoverage:
 
         service.exchange_client.subscribe_ticks = mock_subscribe_ticks
         before = datetime.now(UTC)
-        await service.update_market_snapshots()
+        with (
+            patch.object(
+                service,
+                "_resolve_batch_instrument_ids",
+                return_value={"BTC-USD": "inst-btc-usd"},
+            ),
+            patch.object(
+                service,
+                "_persist_snapshots_scd2",
+                side_effect=_capture_and_count(persisted),
+            ),
+        ):
+            await service.update_market_snapshots()
         after = datetime.now(UTC)
-        saved_snapshots = mock_session.bulk_save_objects.call_args[0][0]
-        snapshot = saved_snapshots[0]
+        snapshot = persisted[0][0]
         assert before <= snapshot.timestamp <= after
         assert snapshot.timestamp.tzinfo == UTC
 
@@ -420,3 +491,239 @@ async def test_start_invokes_update_and_logs(monkeypatch: pytest.MonkeyPatch) ->
     assert updater.calls == [{}]
     assert any("Starting StubMarketUpdater" in msg for msg in messages)
     assert any("StubMarketUpdater completed - updated 3 snapshots" in msg for msg in messages)
+
+
+class _FakeScalarResult:
+    """Fake scalar result for mocking session.execute().scalars()."""
+
+    def __init__(self, value: Any) -> None:
+        self._value = value
+
+    def first(self) -> Any:
+        """Return configured value."""
+        return self._value
+
+
+class _FakeExecResult:
+    """Fake execute result wrapping scalars."""
+
+    def __init__(self, value: Any) -> None:
+        self._value = value
+
+    def scalars(self) -> _FakeScalarResult:
+        """Return FakeScalarResult with configured value."""
+        return _FakeScalarResult(self._value)
+
+
+class _FakeSession:
+    """Fake sync session for base method tests."""
+
+    def __init__(self, responses: list[Any]) -> None:
+        """Initialize with sequential responses for execute() calls."""
+        self._responses = list(responses)
+        self._call_idx = 0
+        self.added: list[Any] = []
+        self.committed = False
+
+    def execute(self, stmt: Any) -> _FakeExecResult:
+        """Return next configured response."""
+        idx = self._call_idx
+        self._call_idx += 1
+        if idx < len(self._responses):
+            return _FakeExecResult(self._responses[idx])
+        return _FakeExecResult(None)
+
+    def add(self, obj: Any) -> None:
+        """Track added objects."""
+        self.added.append(obj)
+
+    def commit(self) -> None:
+        """Mark as committed."""
+        self.committed = True
+
+    def __enter__(self) -> _FakeSession:
+        """Enter the context manager."""
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
+        """Exit the context manager."""
+        return None
+
+
+def _make_updater_with_session(session: _FakeSession) -> StubMarketUpdater:
+    """Create a StubMarketUpdater whose repository.session_factory returns session."""
+    updater = StubMarketUpdater()
+    updater.repository = MagicMock()
+    updater.repository.session_factory.return_value = session
+    return updater
+
+
+def test_resolve_instrument_public_id_found() -> None:
+    """Resolve instrument_public_id via 2-hop lookup.
+
+    Given: Session returning symbol_public_id then instrument_public_id,
+    When: _resolve_instrument_public_id is called,
+    Then: Returns the instrument_public_id.
+    """
+    session = _FakeSession(["sym-pub-1", "inst-pub-1"])
+    updater = _make_updater_with_session(session)
+    result = updater._resolve_instrument_public_id("BTC-USD", "kraken")
+    assert result == "inst-pub-1"
+
+
+def test_resolve_instrument_public_id_symbol_not_found() -> None:
+    """Return None when symbol lookup fails.
+
+    Given: Session returning None for symbol lookup,
+    When: _resolve_instrument_public_id is called,
+    Then: Returns None without querying instrument table.
+    """
+    session = _FakeSession([None])
+    updater = _make_updater_with_session(session)
+    result = updater._resolve_instrument_public_id("UNKNOWN", "kraken")
+    assert result is None
+
+
+def test_resolve_instrument_public_id_instrument_not_found() -> None:
+    """Return None when instrument lookup fails.
+
+    Given: Session returning symbol_public_id but None for instrument,
+    When: _resolve_instrument_public_id is called,
+    Then: Returns None.
+    """
+    session = _FakeSession(["sym-pub-1", None])
+    updater = _make_updater_with_session(session)
+    result = updater._resolve_instrument_public_id("BTC-USD", "kraken")
+    assert result is None
+
+
+def test_resolve_batch_instrument_ids_mixed() -> None:
+    """Resolve batch with mix of found and missing symbols.
+
+    Given: Two symbols, one resolvable and one not,
+    When: _resolve_batch_instrument_ids is called,
+    Then: Only the resolvable symbol appears in the result.
+    """
+    session = _FakeSession(["sym-btc", "inst-btc", None])
+    updater = _make_updater_with_session(session)
+    result = updater._resolve_batch_instrument_ids({"BTC-USD", "NOPE"}, "kraken")
+    assert len(result) == 1
+    found_values = set(result.values())
+    assert "inst-btc" in found_values
+
+
+def test_resolve_batch_instrument_ids_instrument_missing() -> None:
+    """Log warning when instrument not found for resolved symbol.
+
+    Given: Symbol resolves but instrument does not,
+    When: _resolve_batch_instrument_ids is called,
+    Then: Returns empty dict.
+    """
+    session = _FakeSession(["sym-pub-1", None])
+    updater = _make_updater_with_session(session)
+    result = updater._resolve_batch_instrument_ids({"BTC-USD"}, "kraken")
+    assert result == {}
+
+
+def test_persist_snapshots_scd2_empty_list() -> None:
+    """Return 0 for empty snapshot list.
+
+    Given: Empty snapshot list,
+    When: _persist_snapshots_scd2 is called,
+    Then: Returns 0 without opening session.
+    """
+    updater = StubMarketUpdater()
+    result = updater._persist_snapshots_scd2([])
+    assert result == 0
+
+
+def test_persist_snapshots_scd2_calls_close_and_insert() -> None:
+    """Persist snapshots via close_and_insert_sync.
+
+    Given: List of two snapshots,
+    When: _persist_snapshots_scd2 is called,
+    Then: close_and_insert_sync called once per snapshot and session committed.
+    """
+    session = _FakeSession([])
+    updater = _make_updater_with_session(session)
+    now = datetime.now(UTC)
+    snap1 = MarketSnapshot(
+        instrument_public_id="inst-1",
+        bid=100.0,
+        bid_volume=1.0,
+        ask=101.0,
+        ask_volume=1.5,
+        last_price=100.5,
+        volume_24h=5000.0,
+        vwap_24h=100.3,
+        low_24h=99.0,
+        high_24h=102.0,
+        change_24h=1.0,
+        spread=1.0,
+        spread_pct=1.0,
+        timestamp=now,
+        session_id="s1",
+        sequence_id=1,
+    )
+    snap2 = MarketSnapshot(
+        instrument_public_id="inst-2",
+        bid=200.0,
+        bid_volume=2.0,
+        ask=201.0,
+        ask_volume=2.5,
+        last_price=200.5,
+        volume_24h=3000.0,
+        vwap_24h=200.3,
+        low_24h=199.0,
+        high_24h=202.0,
+        change_24h=0.5,
+        spread=1.0,
+        spread_pct=0.5,
+        timestamp=now,
+        session_id="s1",
+        sequence_id=2,
+    )
+    with patch("snapper.infrastructure.market_data.base.close_and_insert_sync") as mock_ci:
+        result = updater._persist_snapshots_scd2([snap1, snap2])
+    assert result == 2
+    assert mock_ci.call_count == 2
+    assert session.committed is True
+    first_call = mock_ci.call_args_list[0]
+    assert first_call.kwargs["session"] is session
+    assert first_call.kwargs["model"] is MarketSnapshot
+    assert first_call.kwargs["bus_time"] == now
+
+
+def test_persist_snapshots_scd2_uses_fallback_timestamp() -> None:
+    """Use current UTC time when snapshot has no timestamp.
+
+    Given: Snapshot with timestamp=None,
+    When: _persist_snapshots_scd2 is called,
+    Then: close_and_insert_sync receives a valid UTC bus_time.
+    """
+    session = _FakeSession([])
+    updater = _make_updater_with_session(session)
+    snap = MarketSnapshot(
+        instrument_public_id="inst-1",
+        bid=100.0,
+        bid_volume=1.0,
+        ask=101.0,
+        ask_volume=1.5,
+        last_price=100.5,
+        volume_24h=5000.0,
+        vwap_24h=100.3,
+        low_24h=99.0,
+        high_24h=102.0,
+        change_24h=1.0,
+        spread=1.0,
+        spread_pct=1.0,
+        timestamp=None,
+        session_id="s1",
+        sequence_id=1,
+    )
+    before = datetime.now(UTC)
+    with patch("snapper.infrastructure.market_data.base.close_and_insert_sync") as mock_ci:
+        updater._persist_snapshots_scd2([snap])
+    after = datetime.now(UTC)
+    bus_time = mock_ci.call_args.kwargs["bus_time"]
+    assert before <= bus_time <= after

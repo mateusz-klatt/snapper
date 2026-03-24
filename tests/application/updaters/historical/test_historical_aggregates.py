@@ -269,8 +269,7 @@ async def test_ensure_instrument_caches_result(service: PolygonAggregatesBackfil
     assert result == repeated_result == async_repo.return_value[1]
     assert len(async_repo.calls) == 1
     call = async_repo.calls[0]
-    assert call["symbol"] == "ETH-USD"
-    assert call["quote"] == "USD"
+    assert call["exchange"] == "polygon"
     assert call["session_id"] != ""
     assert call["sequence_id"] >= 1
 
@@ -2185,7 +2184,7 @@ async def test_ensure_instrument_caches_id(
     second = await service_private._ensure_instrument(context)
     assert first == second == "inst-pub-42"
     assert len(calls) == 1
-    assert calls[0]["quote"] == "BTC"
+    assert calls[0]["exchange"] == "polygon"
 
 
 def test_build_candle_rows_converts_values_decimal() -> None:
@@ -2317,7 +2316,7 @@ async def test_process_symbol_persists_fetched_rows(
     )
     await service_private._process_symbol(context)
     assert len(repo.instrument_calls) == 1
-    assert repo.instrument_calls[0]["symbol"] == "BTC-USD"
+    assert repo.instrument_calls[0]["exchange"] == "polygon"
     assert repo.candle_batches and repo.candle_batches[0][0]["timeframe"] == "1m"
     assert loader_stub.fetch_calls, "fetch_aggregates should have been invoked"
 

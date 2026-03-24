@@ -363,19 +363,13 @@ class ExchangeClientBase(ABC):
         if self.repository is None or self._tracker is None:
             return None
         try:
-            parts = request.symbol.split("-") if "-" in request.symbol else [request.symbol]
-            base = parts[0]
-            quote = parts[1] if len(parts) > 1 else "USD"
             symbol_pid = await resolve_symbol_public_id(self.repository, request.symbol)
             if symbol_pid is None:
                 logger.error(f"No active Symbol row for {request.symbol}, cannot log order")
                 return None
             _id, instrument_public_id = await self.repository.upsert_instrument(
                 symbol_public_id=symbol_pid,
-                symbol=request.symbol,
                 exchange=self.exchange_name,
-                base=base,
-                quote=quote,
                 session_id=self._tracker.session_id,
                 sequence_id=self._tracker.next_sequence("instruments"),
             )

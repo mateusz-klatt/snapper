@@ -128,8 +128,8 @@ class Instrument(TemporalMixin, Base):
     """SQLAlchemy model for tradeable financial instruments.
 
     Logical identity key is (symbol_public_id, exchange) -- stable across
-    symbol renames.  ``symbol``, ``base``, ``quote`` are snapshot /
-    denormalization attributes carried forward on each SCD2 version.
+    symbol renames.  Symbol name, base, and quote are derived from the
+    Symbol table via symbol_public_id temporal join.
     """
 
     __tablename__ = "instruments"
@@ -153,10 +153,7 @@ class Instrument(TemporalMixin, Base):
         Index("ix_instruments_exchange", "exchange"),
     )
     symbol_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
-    symbol: Mapped[str] = mapped_column(String(32), index=True)
     exchange: Mapped[str] = mapped_column(String(20))
-    base: Mapped[str] = mapped_column(String(16))
-    quote: Mapped[str] = mapped_column(String(16))
 
 
 class Candle(TemporalMixin, Base):
@@ -678,12 +675,23 @@ class InstrumentSpec(TemporalMixin, Base):
 
 
 class MarketSnapshot(TemporalMixin, Base):
-    """SQLAlchemy model for real-time market data snapshots."""
+    """SQLAlchemy model for real-time market data snapshots.
+
+    One active row per instrument (SCD2 close+insert on each update).
+    Symbol and exchange are derived via instrument_public_id temporal
+    join to Instrument and Symbol tables.
+    """
 
     __tablename__ = "market_snapshots"
     __table_args__ = (
-        Index("ix_market_snapshots_symbol_ts", "symbol", "timestamp"),
-        Index("ix_market_snapshots_exchange_symbol_ts", "exchange", "symbol", "timestamp"),
+        Index(
+            "uq_market_snapshot_instrument",
+            "instrument_public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE,
+            postgresql_where=_KNOWN_TO_ACTIVE,
+        ),
+        Index("ix_market_snapshots_instrument_ts", "instrument_public_id", "timestamp"),
         Index(
             "ix_market_snapshots_public_id",
             "public_id",
@@ -692,14 +700,7 @@ class MarketSnapshot(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE,
         ),
     )
-    exchange: Mapped[str] = mapped_column(
-        String(20),
-        server_default="kraken",
-        comment="Exchange name (kraken, zonda, walutomat)",
-    )
-    symbol: Mapped[str] = mapped_column(
-        String(20), index=True, comment="Trading pair symbol (e.g., BTC-USD)"
-    )
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     bid: Mapped[float | None] = mapped_column(Float, comment="Best bid price")
     bid_volume: Mapped[float | None] = mapped_column(Float, comment="Volume at best bid")
     ask: Mapped[float | None] = mapped_column(Float, comment="Best ask price")

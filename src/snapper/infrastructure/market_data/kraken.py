@@ -6,13 +6,10 @@ all available tickers and persists snapshots to the database.
 
 Features:
     - WebSocket-based real-time ticker subscription
-    - Automatic deduplication (keeps latest snapshot per symbol)
-    - Batch persistence for efficiency
+    - Automatic deduplication (keeps latest snapshot per instrument)
+    - Instrument resolution via Symbol/Instrument 2-hop lookup
+    - SCD2 close+insert persistence
     - Configurable snapshot collection limit
-
-Example:
-    >>> from snapper.infrastructure.market_data.kraken import run_snapshot_update
-    >>> run_snapshot_update()  # Collects and saves market snapshots
 """
 
 import asyncio
@@ -29,6 +26,8 @@ from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchan
 from snapper.infrastructure.market_data.base import MarketSnapshotUpdaterService
 from snapper.utils.logging import set_log_context
 
+EXCHANGE_NAME = "kraken"
+
 
 class KrakenSnapshotUpdaterService(MarketSnapshotUpdaterService):
     """Market snapshot updater for Kraken exchange.
@@ -37,8 +36,9 @@ class KrakenSnapshotUpdaterService(MarketSnapshotUpdaterService):
     collects market snapshots including bid/ask prices, volumes, spread,
     and 24h statistics.
 
-    The service collects up to 2000 ticker updates, deduplicates by symbol
-    (keeping the latest), and bulk-saves to the database.
+    The service collects up to 2000 ticker updates, deduplicates by
+    instrument_public_id (keeping the latest), and persists via SCD2
+    close+insert.
 
     Attributes:
         exchange_client: Kraken exchange client for WebSocket access.
@@ -60,6 +60,7 @@ class KrakenSnapshotUpdaterService(MarketSnapshotUpdaterService):
     @staticmethod
     def _build_kraken_snapshot(
         ticker_data: TickerUpdate,
+        instrument_public_id: str,
         session_id: str,
         sequence_id: int,
     ) -> MarketSnapshot:
@@ -67,6 +68,7 @@ class KrakenSnapshotUpdaterService(MarketSnapshotUpdaterService):
 
         Args:
             ticker_data: Parsed ticker update from exchange.
+            instrument_public_id: Resolved instrument public identifier.
             session_id: Session identifier for provenance stamping.
             sequence_id: Sequence number for provenance stamping.
 
@@ -79,8 +81,7 @@ class KrakenSnapshotUpdaterService(MarketSnapshotUpdaterService):
         mid = (bid + ask) / 2
         spread_pct = (ask - bid) / mid * 100 if mid > 0 else 0.0
         return MarketSnapshot(
-            exchange="kraken",
-            symbol=ticker_data.symbol,
+            instrument_public_id=instrument_public_id,
             bid=bid,
             bid_volume=ticker_data.bid_qty,
             ask=ask,
@@ -100,7 +101,9 @@ class KrakenSnapshotUpdaterService(MarketSnapshotUpdaterService):
 
     _COLLECTION_TIMEOUT_SECONDS = 120.0
 
-    async def _collect_ticker_snapshots(self) -> tuple[list[MarketSnapshot], int]:
+    async def _collect_ticker_snapshots(
+        self,
+    ) -> tuple[list[tuple[str, TickerUpdate]], int]:
         """Collect ticker snapshots from Kraken WebSocket feed.
 
         Subscribes to all tickers and collects up to 2000 updates.
@@ -108,22 +111,16 @@ class KrakenSnapshotUpdaterService(MarketSnapshotUpdaterService):
         symbols prevent the counter from reaching the target.
 
         Returns:
-            Tuple of (collected snapshots list, total count).
+            Tuple of (collected (symbol, ticker) pairs, total count).
         """
-        snapshots_batch: list[MarketSnapshot] = []
+        raw_batch: list[tuple[str, TickerUpdate]] = []
         count = 0
         try:
             async with asyncio.timeout(self._COLLECTION_TIMEOUT_SECONDS):
                 async for ticker_data in self.exchange_client.subscribe_ticks(["*"]):
                     if not ticker_data.symbol:
                         continue
-                    snapshots_batch.append(
-                        self._build_kraken_snapshot(
-                            ticker_data,
-                            session_id=self._tracker.session_id,
-                            sequence_id=self._tracker.next_sequence("snapshots"),
-                        )
-                    )
+                    raw_batch.append((ticker_data.symbol, ticker_data))
                     count += 1
                     if count % 100 == 0:
                         logger.debug(f"Collected {count} market snapshots...")
@@ -137,31 +134,51 @@ class KrakenSnapshotUpdaterService(MarketSnapshotUpdaterService):
             )
         finally:
             await self.exchange_client.disconnect_websocket()
-        return snapshots_batch, count
+        return raw_batch, count
 
-    def _deduplicate_and_persist(self, snapshots_batch: list[MarketSnapshot]) -> None:
-        """Deduplicate snapshots by symbol and persist to database.
+    def _deduplicate_and_persist(self, raw_batch: list[tuple[str, TickerUpdate]]) -> None:
+        """Resolve instruments, deduplicate by instrument_public_id, and persist.
 
         Args:
-            snapshots_batch: List of collected snapshots (may contain duplicates).
+            raw_batch: List of (native_symbol, ticker_data) pairs.
         """
-        unique_snapshots: dict[str, MarketSnapshot] = {}
-        for snapshot in snapshots_batch:
-            unique_snapshots[snapshot.symbol] = snapshot
-        final_snapshots = list(unique_snapshots.values())
+        unique_by_symbol: dict[str, TickerUpdate] = dict(raw_batch)
+
+        native_symbols = set(unique_by_symbol.keys())
+        symbol_to_inst = self._resolve_batch_instrument_ids(native_symbols, EXCHANGE_NAME)
+
+        snapshots: list[MarketSnapshot] = []
+        skipped = 0
+        for symbol, ticker in unique_by_symbol.items():
+            inst_pid = symbol_to_inst.get(symbol)
+            if inst_pid is None:
+                skipped += 1
+                continue
+            snapshots.append(
+                self._build_kraken_snapshot(
+                    ticker,
+                    instrument_public_id=inst_pid,
+                    session_id=self._tracker.session_id,
+                    sequence_id=self._tracker.next_sequence("snapshots"),
+                )
+            )
+
+        if skipped > 0:
+            logger.warning(f"Skipped {skipped} symbols with no instrument resolution")
+
         logger.info(
-            f"Collected {len(snapshots_batch)} snapshots, {len(final_snapshots)} unique symbols"
+            f"Collected {len(raw_batch)} snapshots, "
+            f"{len(unique_by_symbol)} unique symbols, "
+            f"{len(snapshots)} resolved instruments"
         )
-        with self.repository.session_factory() as session:
-            session.bulk_save_objects(final_snapshots)
-            session.commit()
-        logger.info(f"Successfully saved {len(final_snapshots)} market snapshots to database")
+        count = self._persist_snapshots_scd2(snapshots)
+        logger.info(f"Successfully saved {count} market snapshots to database")
 
     async def update_market_snapshots(self, **kwargs: object) -> int:
         """Fetch and persist market snapshots from Kraken.
 
         Subscribes to all Kraken tickers via WebSocket, collects up to 2000
-        updates, deduplicates by symbol, and saves to database.
+        updates, resolves instruments, deduplicates, and saves via SCD2.
 
         Args:
             **kwargs: Unused, present for interface compatibility.
@@ -174,9 +191,9 @@ class KrakenSnapshotUpdaterService(MarketSnapshotUpdaterService):
         """
         logger.info("Starting market snapshots update from WebSocket ticker ['*']...")
         try:
-            snapshots_batch, count = await self._collect_ticker_snapshots()
-            if snapshots_batch:
-                self._deduplicate_and_persist(snapshots_batch)
+            raw_batch, count = await self._collect_ticker_snapshots()
+            if raw_batch:
+                self._deduplicate_and_persist(raw_batch)
             return count
         except Exception as e:
             logger.error(f"Error updating market snapshots: {e}")

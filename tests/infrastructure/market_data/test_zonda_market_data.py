@@ -159,7 +159,7 @@ async def test_collect_snapshots_loop_creates_entries(monkeypatch: pytest.Monkey
     await service._collect_snapshots_loop(["BTC-PLN", "OTHER"], snapshots)
     assert "BTC-PLN" in snapshots
     snapshot = snapshots["BTC-PLN"]
-    assert snapshot.exchange == "zonda"
+    assert snapshot.instrument_public_id == "BTC-PLN"
     assert math.isclose(snapshot.spread or 0.0, 1.0, rel_tol=1e-9)
     assert math.isclose(snapshot.spread_pct or 0.0, (1.0 / 100.5) * 100, rel_tol=1e-9)
 
@@ -168,11 +168,11 @@ async def test_collect_snapshots_loop_creates_entries(monkeypatch: pytest.Monkey
 async def test_collect_snapshots_with_timeout_returns_partial_results(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Return empty list on timeout.
+    """Return empty dict on timeout.
 
     Given: Service with mocked timeout behavior,
     When: _collect_snapshots_with_timeout times out,
-    Then: Returns empty list.
+    Then: Returns empty dict.
     """
     service = ZondaSnapshotUpdaterService(
         cast(ZondaExchangeClient, StubZondaClient([])),
@@ -200,18 +200,18 @@ async def test_collect_snapshots_with_timeout_returns_partial_results(
         _ImmediateTimeout,
     )
     result = await service._collect_snapshots_with_timeout(timeout_seconds=1)
-    assert result == []
+    assert result == {}
 
 
 @pytest.mark.asyncio()
 async def test_update_market_snapshots_persists_results(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Persist collected snapshots to database.
+    """Persist collected snapshots to database via SCD2.
 
-    Given: Service with mocked collection returning snapshot,
+    Given: Service with mocked collection and resolution,
     When: update_market_snapshots is called,
-    Then: Snapshot is saved and committed.
+    Then: Snapshots are resolved and persisted via SCD2.
     """
     repository = DummyRepository()
     service = ZondaSnapshotUpdaterService(
@@ -219,8 +219,7 @@ async def test_update_market_snapshots_persists_results(
         cast(DatabaseRepository, repository),
     )
     snapshot = MarketSnapshot(
-        exchange="zonda",
-        symbol="BTC-PLN",
+        instrument_public_id="BTC-PLN",
         bid=100.0,
         bid_volume=5.0,
         ask=101.0,
@@ -238,14 +237,23 @@ async def test_update_market_snapshots_persists_results(
         sequence_id=1,
     )
 
-    async def fake_collect(_timeout: int) -> list[MarketSnapshot]:
-        return [snapshot]
+    async def fake_collect(_timeout: int) -> dict[str, MarketSnapshot]:
+        return {"BTC-PLN": snapshot}
 
     monkeypatch.setattr(service, "_collect_snapshots_with_timeout", fake_collect)
+    monkeypatch.setattr(
+        service,
+        "_resolve_batch_instrument_ids",
+        lambda ns, ex: {"BTC-PLN": "inst-btc-123"},
+    )
+    monkeypatch.setattr(
+        service,
+        "_persist_snapshots_scd2",
+        lambda snaps: len(snaps),
+    )
     result = await service.update_market_snapshots(timeout_seconds=5)
     assert result == 1
-    assert repository.session.saved == [snapshot]
-    assert repository.session.committed is True
+    assert snapshot.instrument_public_id == "inst-btc-123"
 
 
 @pytest.mark.asyncio()
@@ -263,7 +271,7 @@ async def test_update_market_snapshots_propagates_errors(
         cast(DatabaseRepository, DummyRepository()),
     )
 
-    async def fake_collect(_timeout: int) -> list[MarketSnapshot]:
+    async def fake_collect(_timeout: int) -> dict[str, MarketSnapshot]:
         raise RuntimeError("failure")
 
     monkeypatch.setattr(service, "_collect_snapshots_with_timeout", fake_collect)
@@ -621,3 +629,80 @@ async def test_collect_snapshots_loop_stamps_provenance(
     assert "" not in session_ids
     sequence_ids = sorted(s.sequence_id for s in snapshots.values())
     assert sequence_ids == [1, 2]
+
+
+@pytest.mark.asyncio()
+async def test_update_market_snapshots_skips_unresolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skip symbols with no instrument resolution.
+
+    Given: Service with collection returning two symbols but only one resolvable,
+    When: update_market_snapshots is called,
+    Then: Only the resolved snapshot is persisted.
+    """
+    service = ZondaSnapshotUpdaterService(
+        cast(ZondaExchangeClient, StubZondaClient([])),
+        cast(DatabaseRepository, DummyRepository()),
+    )
+    snap1 = MarketSnapshot(
+        instrument_public_id="BTC-PLN",
+        bid=100.0,
+        bid_volume=5.0,
+        ask=101.0,
+        ask_volume=4.0,
+        last_price=100.5,
+        volume_24h=1200.0,
+        vwap_24h=100.7,
+        low_24h=98.0,
+        high_24h=105.0,
+        change_24h=0.02,
+        spread=1.0,
+        spread_pct=1.0,
+        timestamp=datetime.now(UTC),
+        session_id="s",
+        sequence_id=1,
+    )
+    snap2 = MarketSnapshot(
+        instrument_public_id="NOPE-PLN",
+        bid=50.0,
+        bid_volume=2.0,
+        ask=51.0,
+        ask_volume=3.0,
+        last_price=50.5,
+        volume_24h=600.0,
+        vwap_24h=50.3,
+        low_24h=49.0,
+        high_24h=52.0,
+        change_24h=0.01,
+        spread=1.0,
+        spread_pct=2.0,
+        timestamp=datetime.now(UTC),
+        session_id="s",
+        sequence_id=2,
+    )
+
+    async def fake_collect(_timeout: int) -> dict[str, MarketSnapshot]:
+        return {"BTC-PLN": snap1, "NOPE-PLN": snap2}
+
+    monkeypatch.setattr(service, "_collect_snapshots_with_timeout", fake_collect)
+    monkeypatch.setattr(
+        service,
+        "_resolve_batch_instrument_ids",
+        lambda ns, ex: {"BTC-PLN": "inst-btc"},
+    )
+    persisted: list[list[MarketSnapshot]] = []
+
+    def _capture(snaps: list[MarketSnapshot]) -> int:
+        persisted.append(list(snaps))
+        return len(snaps)
+
+    monkeypatch.setattr(
+        service,
+        "_persist_snapshots_scd2",
+        _capture,
+    )
+    result = await service.update_market_snapshots(timeout_seconds=5)
+    assert result == 1
+    assert len(persisted[0]) == 1
+    assert persisted[0][0].instrument_public_id == "inst-btc"

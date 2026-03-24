@@ -86,7 +86,7 @@ async def test_collect_snapshots_loop_stops_after_all(monkeypatch: pytest.Monkey
 
     Given: Client yielding ticker for requested symbol,
     When: _collect_snapshots_loop is called,
-    Then: Snapshot with correct exchange is stored.
+    Then: Snapshot with correct instrument_public_id placeholder is stored.
     """
     ticker = DummyTicker(
         symbol="EUR-PLN",
@@ -108,7 +108,7 @@ async def test_collect_snapshots_loop_stops_after_all(monkeypatch: pytest.Monkey
     await svc._collect_snapshots_loop(["EUR-PLN"], snapshots)
     assert "EUR-PLN" in snapshots
     snap = snapshots["EUR-PLN"]
-    assert snap.exchange == "walutomat"
+    assert snap.instrument_public_id == "EUR-PLN"
 
 
 @pytest.mark.asyncio
@@ -133,21 +133,64 @@ async def test_update_market_snapshots_handles_timeout(monkeypatch: pytest.Monke
 
 @pytest.mark.asyncio
 async def test_update_market_snapshots_saves(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Persist snapshots to repository.
+    """Persist snapshots to repository via SCD2.
 
     Given: Service with mocked collection returning snapshots,
     When: update_market_snapshots is called,
-    Then: Snapshots are saved and committed.
+    Then: Snapshots are resolved and persisted via SCD2.
     """
     client = DummyClient([])
     repo: Any = DummyRepo()
     svc = WalutomatSnapshotUpdaterService(client, repo)
-    snapshots = [SimpleNamespace(), SimpleNamespace()]
-    monkeypatch.setattr(svc, "_collect_snapshots_with_timeout", AsyncMock(return_value=snapshots))
+    snap1 = MarketSnapshot(
+        instrument_public_id="EUR-PLN",
+        bid=4.0,
+        bid_volume=10.0,
+        ask=4.1,
+        ask_volume=12.0,
+        last_price=4.05,
+        volume_24h=100.0,
+        vwap_24h=4.0,
+        low_24h=3.9,
+        high_24h=4.2,
+        change_24h=0.01,
+        spread=0.1,
+        spread_pct=2.4,
+        timestamp=datetime.now(UTC),
+        session_id="s",
+        sequence_id=1,
+    )
+    snap2 = MarketSnapshot(
+        instrument_public_id="USD-PLN",
+        bid=4.2,
+        bid_volume=8.0,
+        ask=4.3,
+        ask_volume=9.0,
+        last_price=4.25,
+        volume_24h=200.0,
+        vwap_24h=4.2,
+        low_24h=4.1,
+        high_24h=4.4,
+        change_24h=0.02,
+        spread=0.1,
+        spread_pct=2.3,
+        timestamp=datetime.now(UTC),
+        session_id="s",
+        sequence_id=2,
+    )
+
+    async def fake_collect(_timeout: int) -> dict[str, MarketSnapshot]:
+        return {"EUR-PLN": snap1, "USD-PLN": snap2}
+
+    monkeypatch.setattr(svc, "_collect_snapshots_with_timeout", fake_collect)
+    monkeypatch.setattr(
+        svc,
+        "_resolve_batch_instrument_ids",
+        lambda ns, ex: {"EUR-PLN": "inst-eur", "USD-PLN": "inst-usd"},
+    )
+    monkeypatch.setattr(svc, "_persist_snapshots_scd2", lambda snaps: len(snaps))
     count = await svc.update_market_snapshots(timeout_seconds=1)
     assert count == 2
-    assert len(repo.saved) == 2
-    assert repo.committed
 
 
 class BadTicker(SimpleNamespace):
@@ -184,7 +227,7 @@ async def test_collect_snapshots_loop_recovers_from_error(monkeypatch: pytest.Mo
     svc = WalutomatSnapshotUpdaterService(client, repo)
     snapshots: dict[str, Any] = {}
     await svc._collect_snapshots_loop(["EUR-PLN"], snapshots)
-    assert snapshots["EUR-PLN"].symbol == "EUR-PLN"
+    assert snapshots["EUR-PLN"].instrument_public_id == "EUR-PLN"
 
 
 @pytest.mark.asyncio
@@ -333,8 +376,7 @@ async def test_collect_snapshots_loop_creates_market_snapshots() -> None:
     await service._collect_snapshots_loop(["EUR-PLN"], snapshots)
     assert "EUR-PLN" in snapshots
     snapshot = snapshots["EUR-PLN"]
-    assert snapshot.exchange == "walutomat"
-    assert snapshot.symbol == "EUR-PLN"
+    assert snapshot.instrument_public_id == "EUR-PLN"
     assert math.isclose(snapshot.spread or 0.0, 0.2, rel_tol=1e-9)
     assert math.isclose(snapshot.spread_pct or 0.0, (0.2 / 4.4) * 100, rel_tol=1e-9)
 
@@ -343,11 +385,11 @@ async def test_collect_snapshots_loop_creates_market_snapshots() -> None:
 async def test_collect_snapshots_with_timeout_handles_asyncio_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Return empty list on asyncio timeout.
+    """Return empty dict on asyncio timeout.
 
     Given: Mocked wait_for raising TimeoutError,
     When: _collect_snapshots_with_timeout is called,
-    Then: Returns empty list.
+    Then: Returns empty dict.
     """
     client = StubWalutomatClient(["EUR-PLN"], [])
     service = WalutomatSnapshotUpdaterService(
@@ -373,18 +415,18 @@ async def test_collect_snapshots_with_timeout_handles_asyncio_timeout(
     monkeypatch.setattr(service, "load_all_symbols", fake_load_all_symbols)
     monkeypatch.setattr(asyncio, "timeout", _ImmediateTimeout)
     snapshots = await service._collect_snapshots_with_timeout(timeout_seconds=1)
-    assert snapshots == []
+    assert snapshots == {}
 
 
 @pytest.mark.asyncio()
-async def test_update_market_snapshots_persists_bulk_insert(
+async def test_update_market_snapshots_persists_via_scd2(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Bulk save and commit snapshots.
+    """Resolve instruments and persist via SCD2 close+insert.
 
     Given: Service with mocked collection returning snapshot,
     When: update_market_snapshots is called,
-    Then: Snapshot is saved and session committed.
+    Then: Snapshot is resolved and persisted via SCD2.
     """
     client = StubWalutomatClient(["EUR-PLN"], [])
     repository = DummyRepository()
@@ -393,8 +435,7 @@ async def test_update_market_snapshots_persists_bulk_insert(
         cast(DatabaseRepository, repository),
     )
     snapshot = MarketSnapshot(
-        exchange="walutomat",
-        symbol="EUR-PLN",
+        instrument_public_id="EUR-PLN",
         bid=4.3,
         bid_volume=None,
         ask=4.5,
@@ -412,18 +453,30 @@ async def test_update_market_snapshots_persists_bulk_insert(
         sequence_id=1,
     )
 
-    async def fake_collect(_timeout: int) -> list[MarketSnapshot]:
-        return [snapshot]
+    async def fake_collect(_timeout: int) -> dict[str, MarketSnapshot]:
+        return {"EUR-PLN": snapshot}
+
+    monkeypatch.setattr(service, "_collect_snapshots_with_timeout", fake_collect)
+    monkeypatch.setattr(
+        service,
+        "_resolve_batch_instrument_ids",
+        lambda ns, ex: {"EUR-PLN": "inst-eur-456"},
+    )
+    persisted: list[list[MarketSnapshot]] = []
+
+    def _capture(snaps: list[MarketSnapshot]) -> int:
+        persisted.append(list(snaps))
+        return len(snaps)
 
     monkeypatch.setattr(
         service,
-        "_collect_snapshots_with_timeout",
-        fake_collect,
+        "_persist_snapshots_scd2",
+        _capture,
     )
     result = await service.update_market_snapshots(timeout_seconds=9)
     assert result == 1
-    assert repository.session.saved == [snapshot]
-    assert repository.session.committed is True
+    assert len(persisted[0]) == 1
+    assert persisted[0][0].instrument_public_id == "inst-eur-456"
 
 
 @pytest.mark.asyncio()
@@ -442,7 +495,7 @@ async def test_update_market_snapshots_propagates_exceptions(
         cast(DatabaseRepository, DummyRepository()),
     )
 
-    async def fake_collect(_timeout: int) -> list[MarketSnapshot]:
+    async def fake_collect(_timeout: int) -> dict[str, MarketSnapshot]:
         raise RuntimeError("database failure")
 
     monkeypatch.setattr(service, "_collect_snapshots_with_timeout", fake_collect)
@@ -527,11 +580,11 @@ class _TimeoutUpdater(WalutomatSnapshotUpdaterService):
 
 @pytest.mark.asyncio()
 async def test_collect_snapshots_handles_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Return empty list on timeout.
+    """Return empty dict on timeout.
 
     Given: Mocked wait_for raising TimeoutError,
     When: _collect_snapshots_with_timeout is called,
-    Then: Returns empty list.
+    Then: Returns empty dict.
     """
     updater = _TimeoutUpdater()
 
@@ -552,7 +605,7 @@ async def test_collect_snapshots_handles_timeout(monkeypatch: pytest.MonkeyPatch
         _ImmediateTimeout,
     )
     snapshots = await updater._collect_snapshots_with_timeout(timeout_seconds=1)
-    assert snapshots == []
+    assert snapshots == {}
 
 
 class _FaultyTicker:
@@ -738,3 +791,81 @@ async def test_collect_snapshots_loop_stamps_provenance() -> None:
     assert "" not in session_ids
     sequence_ids = sorted(s.sequence_id for s in snapshots.values())
     assert sequence_ids == [1, 2]
+
+
+@pytest.mark.asyncio()
+async def test_update_market_snapshots_skips_unresolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skip symbols with no instrument resolution.
+
+    Given: Service with collection returning two symbols but only one resolvable,
+    When: update_market_snapshots is called,
+    Then: Only the resolved snapshot is persisted.
+    """
+    client = StubWalutomatClient(["EUR-PLN", "GBP-PLN"], [])
+    service = WalutomatSnapshotUpdaterService(
+        cast(WalutomatExchangeClient, client),
+        cast(DatabaseRepository, DummyRepository()),
+    )
+    snap1 = MarketSnapshot(
+        instrument_public_id="EUR-PLN",
+        bid=4.3,
+        bid_volume=1.0,
+        ask=4.5,
+        ask_volume=1.0,
+        last_price=4.4,
+        volume_24h=1000.0,
+        vwap_24h=4.4,
+        low_24h=4.2,
+        high_24h=4.6,
+        change_24h=0.1,
+        spread=0.2,
+        spread_pct=4.5,
+        timestamp=datetime.now(UTC),
+        session_id="s",
+        sequence_id=1,
+    )
+    snap2 = MarketSnapshot(
+        instrument_public_id="GBP-PLN",
+        bid=5.0,
+        bid_volume=1.0,
+        ask=5.1,
+        ask_volume=1.0,
+        last_price=5.05,
+        volume_24h=500.0,
+        vwap_24h=5.0,
+        low_24h=4.9,
+        high_24h=5.2,
+        change_24h=0.05,
+        spread=0.1,
+        spread_pct=2.0,
+        timestamp=datetime.now(UTC),
+        session_id="s",
+        sequence_id=2,
+    )
+
+    async def fake_collect(_timeout: int) -> dict[str, MarketSnapshot]:
+        return {"EUR-PLN": snap1, "GBP-PLN": snap2}
+
+    monkeypatch.setattr(service, "_collect_snapshots_with_timeout", fake_collect)
+    monkeypatch.setattr(
+        service,
+        "_resolve_batch_instrument_ids",
+        lambda ns, ex: {"EUR-PLN": "inst-eur"},
+    )
+    persisted: list[list[MarketSnapshot]] = []
+
+    def _capture(snaps: list[MarketSnapshot]) -> int:
+        persisted.append(list(snaps))
+        return len(snaps)
+
+    monkeypatch.setattr(
+        service,
+        "_persist_snapshots_scd2",
+        _capture,
+    )
+    result = await service.update_market_snapshots(timeout_seconds=5)
+    assert result == 1
+    assert len(persisted[0]) == 1
+    assert persisted[0][0].instrument_public_id == "inst-eur"

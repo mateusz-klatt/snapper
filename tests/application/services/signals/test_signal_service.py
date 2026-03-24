@@ -90,12 +90,7 @@ class TestSignalService:
         """
         await test_repository.upsert_instrument(
             symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
-            symbol="BTCUSD",
             exchange="testexchange",
-            base="BTC",
-            quote="USD",
-            tick_size=0.01,
-            lot_size=0.001,
             session_id="test-session",
             sequence_id=1,
         )
@@ -136,12 +131,7 @@ class TestSignalService:
         """
         await test_repository.upsert_instrument(
             symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
-            symbol="BTCUSD",
             exchange="testexchange",
-            base="BTC",
-            quote="USD",
-            tick_size=0.01,
-            lot_size=0.001,
             session_id="test-session",
             sequence_id=1,
         )
@@ -176,12 +166,7 @@ class TestSignalService:
         """
         await test_repository.upsert_instrument(
             symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
-            symbol="BTCUSD",
             exchange="testexchange",
-            base="BTC",
-            quote="USD",
-            tick_size=0.01,
-            lot_size=0.001,
             session_id="test-session",
             sequence_id=1,
         )
@@ -223,12 +208,7 @@ class TestSignalService:
         """
         await test_repository.upsert_instrument(
             symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
-            symbol="BTCUSD",
             exchange="testexchange",
-            base="BTC",
-            quote="USD",
-            tick_size=0.01,
-            lot_size=0.001,
             session_id="test-session",
             sequence_id=1,
         )
@@ -264,12 +244,7 @@ class TestSignalService:
         """
         await test_repository.upsert_instrument(
             symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
-            symbol="BTCUSD",
             exchange="testexchange",
-            base="BTC",
-            quote="USD",
-            tick_size=0.01,
-            lot_size=0.001,
             session_id="test-session",
             sequence_id=1,
         )
@@ -319,23 +294,13 @@ class TestSignalService:
         """
         await test_repository.upsert_instrument(
             symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
-            symbol="BTCUSD",
             exchange="testexchange",
-            base="BTC",
-            quote="USD",
-            tick_size=0.01,
-            lot_size=0.001,
             session_id="test-session",
             sequence_id=1,
         )
         await test_repository.upsert_instrument(
             symbol_public_id=ETHUSD_SYMBOL_PUBLIC_ID,
-            symbol="ETHUSD",
             exchange="testexchange",
-            base="ETH",
-            quote="USD",
-            tick_size=0.01,
-            lot_size=0.001,
             session_id="test-session",
             sequence_id=1,
         )
@@ -388,23 +353,13 @@ class TestSignalService:
         """
         await test_repository.upsert_instrument(
             symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
-            symbol="BTCUSD",
             exchange="exchange_a",
-            base="BTC",
-            quote="USD",
-            tick_size=0.01,
-            lot_size=0.001,
             session_id="test-session",
             sequence_id=1,
         )
         await test_repository.upsert_instrument(
             symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
-            symbol="BTCUSD",
             exchange="exchange_b",
-            base="BTC",
-            quote="USD",
-            tick_size=0.01,
-            lot_size=0.001,
             session_id="test-session",
             sequence_id=1,
         )
@@ -509,6 +464,34 @@ class TestSignalServiceCoverage:
             price=50000.0,
         )
 
+    async def test_resolve_instrument_returns_none_when_no_symbol(
+        self, signal_service: SignalReadService
+    ) -> None:
+        """Verify _resolve_instrument returns None when Symbol row is missing.
+
+        Given: No Symbol row matching the signal instrument,
+        When: store_signal is called,
+        Then: Returns empty string because _resolve_instrument finds no Symbol.
+        """
+        unknown_signal = StrategySignal(
+            instrument="NOSYMBOL",
+            side="buy",
+            strength=0.5,
+            reason="Unknown symbol test",
+            price=100.0,
+        )
+        tracker = SequenceTracker()
+        signal_id = await signal_service.store_signal(
+            signal=unknown_signal,
+            exchange="testexchange",
+            strategy_name="test_strategy",
+            price=100.0,
+            session_id="",
+            sequence_id=0,
+            tracker=tracker,
+        )
+        assert signal_id == ""
+
     async def test_store_signal_creates_new_instrument(
         self, signal_service: SignalReadService, sample_signal: StrategySignal
     ) -> None:
@@ -516,7 +499,7 @@ class TestSignalServiceCoverage:
 
         Given: No existing instrument for BTC-USD,
         When: store_signal called,
-        Then: Instrument created with correct symbol, base, quote.
+        Then: Instrument created with correct symbol_public_id and exchange.
         """
         signal_id = await signal_service.store_signal(
             signal=sample_signal,
@@ -530,13 +513,15 @@ class TestSignalServiceCoverage:
         assert len(signal_id) == 36
         async with signal_service.repo.session() as session:
             inst_query = await session.execute(
-                select(Instrument).where(Instrument.symbol == "BTC-USD")
+                select(Instrument).where(
+                    Instrument.symbol_public_id == BTC_USD_SYMBOL_PUBLIC_ID,
+                    Instrument.exchange == "testexchange",
+                )
             )
             inst = inst_query.scalar_one_or_none()
             assert inst is not None
-            assert inst.symbol == "BTC-USD"
-            assert inst.base == "BTC"
-            assert inst.quote == "USD"
+            assert inst.symbol_public_id == BTC_USD_SYMBOL_PUBLIC_ID
+            assert inst.exchange == "testexchange"
 
     async def test_store_signal_error_handling(
         self, signal_service: SignalReadService, sample_signal: StrategySignal
@@ -684,12 +669,7 @@ class TestSignalServiceCoverage:
         """
         await test_repository.upsert_instrument(
             symbol_public_id=BTC_USD_SYMBOL_PUBLIC_ID,
-            symbol="BTC-USD",
             exchange="testexchange",
-            base="BTC",
-            quote="USD",
-            tick_size=0.01,
-            lot_size=0.001,
             session_id="test-session",
             sequence_id=1,
         )
@@ -728,12 +708,14 @@ class TestSignalServiceCoverage:
 
         Given: No existing instrument for GOLD,
         When: store_signal called with instrument='GOLD' (no dash),
-        Then: Instrument created with base='GOLD' and quote='USD'.
+        Then: Instrument created with correct symbol_public_id and exchange.
         """
+        gold_symbol_public_id = "00000000-0000-7000-8000-000000000099"
         tracker = SequenceTracker()
         async with test_repository.session() as s:
             s.add(
                 Symbol(
+                    public_id=gold_symbol_public_id,
                     native_symbol="GOLD",
                     base="GOLD",
                     quote="USD",
@@ -764,13 +746,15 @@ class TestSignalServiceCoverage:
         assert len(signal_id) == 36
         async with signal_service.repo.session() as session:
             inst_query = await session.execute(
-                select(Instrument).where(Instrument.symbol == "GOLD")
+                select(Instrument).where(
+                    Instrument.symbol_public_id == gold_symbol_public_id,
+                    Instrument.exchange == "testexchange",
+                )
             )
             inst = inst_query.scalar_one_or_none()
             assert inst is not None
-            assert inst.symbol == "GOLD"
-            assert inst.base == "GOLD"
-            assert inst.quote == "USD"
+            assert inst.symbol_public_id == gold_symbol_public_id
+            assert inst.exchange == "testexchange"
 
     async def test_get_recent_signals_complex_query_error(
         self, signal_service: SignalReadService, test_repository: SQLAlchemyRepository
@@ -783,12 +767,7 @@ class TestSignalServiceCoverage:
         """
         await test_repository.upsert_instrument(
             symbol_public_id=BTC_USD_SYMBOL_PUBLIC_ID,
-            symbol="BTC-USD",
             exchange="testexchange",
-            base="BTC",
-            quote="USD",
-            tick_size=0.01,
-            lot_size=0.001,
             session_id="test-session",
             sequence_id=1,
         )
@@ -832,7 +811,7 @@ class TestSignalServiceCoverage:
         async with signal_service.repo.session() as session:
             inst_query = await session.execute(
                 select(Instrument).where(
-                    Instrument.symbol == "BTC-USD",
+                    Instrument.symbol_public_id == BTC_USD_SYMBOL_PUBLIC_ID,
                     Instrument.exchange == "testexchange",
                 )
             )

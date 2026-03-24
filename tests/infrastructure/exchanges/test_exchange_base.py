@@ -288,10 +288,7 @@ async def test_log_order_to_db_logs_successfully(mock_resolve: AsyncMock) -> Non
     mock_resolve.assert_awaited_once_with(mock_repo, "BTC-USD")
     call_kwargs = mock_repo.upsert_instrument.call_args.kwargs
     assert call_kwargs["symbol_public_id"] == "fake-spid"
-    assert call_kwargs["symbol"] == "BTC-USD"
     assert call_kwargs["exchange"] == "dummy"
-    assert call_kwargs["base"] == "BTC"
-    assert call_kwargs["quote"] == "USD"
     assert call_kwargs["session_id"] == tracker.session_id
     assert call_kwargs["sequence_id"] >= 1
     mock_repo.insert_order.assert_awaited_once()
@@ -390,10 +387,7 @@ async def test_log_order_to_db_parses_symbol_without_delimiter(_mock_resolve: As
     _mock_resolve.assert_awaited_once_with(mock_repo, "BTCUSD")
     call_kwargs = mock_repo.upsert_instrument.call_args.kwargs
     assert call_kwargs["symbol_public_id"] == "fake-spid"
-    assert call_kwargs["symbol"] == "BTCUSD"
     assert call_kwargs["exchange"] == "dummy"
-    assert call_kwargs["base"] == "BTCUSD"
-    assert call_kwargs["quote"] == "USD"
     assert call_kwargs["session_id"] == tracker.session_id
     assert call_kwargs["sequence_id"] >= 1
 

@@ -270,14 +270,6 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         cached = self._instrument_cache.get(native_symbol)
         if cached is not None:
             return cached
-        try:
-            base_currency, quote_currency = native_symbol.split("-", 1)
-        except ValueError:
-            logger.warning(
-                f"MarketDataPublisherService: "
-                f"Unable to split symbol {native_symbol} for instrument"
-            )
-            return None
         assert self.repository is not None, "Repository not initialized"
         symbol_pid = await resolve_symbol_public_id(self.repository, native_symbol)
         if symbol_pid is None:
@@ -285,12 +277,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             return None
         _id, instrument_public_id = await self.repository.upsert_instrument(
             symbol_public_id=symbol_pid,
-            symbol=native_symbol,
             exchange=self._get_exchange_name(),
-            base=base_currency,
-            quote=quote_currency,
-            tick_size=0.0,
-            lot_size=0.0,
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence("instruments"),
         )

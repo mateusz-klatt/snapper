@@ -8,13 +8,8 @@ Features:
     - REST API-based ticker polling
     - Configurable collection timeout (default: 12 seconds)
     - Automatic symbol discovery from exchange API
-    - Batch persistence for efficiency
-
-Example:
-    >>> from snapper.infrastructure.market_data.walutomat import (
-    ...     run_walutomat_snapshot_update,
-    ... )
-    >>> run_walutomat_snapshot_update()  # Collects and saves Walutomat snapshots
+    - Instrument resolution via Symbol/Instrument 2-hop lookup
+    - SCD2 close+insert persistence
 """
 
 import asyncio
@@ -31,13 +26,16 @@ from snapper.infrastructure.exchanges.implementations.walutomat import Walutomat
 from snapper.infrastructure.market_data.base import MarketSnapshotUpdaterService
 from snapper.utils.logging import set_log_context
 
+EXCHANGE_NAME = "walutomat"
+
 
 class WalutomatSnapshotUpdaterService(MarketSnapshotUpdaterService):
     """Market snapshot updater for Walutomat exchange.
 
     Collects forex market data from Walutomat using REST API polling.
     Unlike WebSocket-based updaters, this polls the ticker endpoint
-    sequentially for each supported currency pair.
+    sequentially for each supported currency pair. Instrument resolution
+    is performed after collection, mapping native symbols to instrument_public_id.
 
     Attributes:
         exchange_client: Walutomat exchange client for API access.
@@ -72,8 +70,8 @@ class WalutomatSnapshotUpdaterService(MarketSnapshotUpdaterService):
     async def update_market_snapshots(self, **kwargs: object) -> int:
         """Fetch and persist market snapshots from Walutomat.
 
-        Polls Walutomat API for ticker data and collects snapshots
-        until timeout or all symbols are collected.
+        Polls Walutomat API for ticker data, resolves instrument_public_id,
+        and persists via SCD2 close+insert.
 
         Args:
             **kwargs: Optional parameters.
@@ -92,27 +90,41 @@ class WalutomatSnapshotUpdaterService(MarketSnapshotUpdaterService):
             f"(timeout: {timeout_seconds}s)..."
         )
         try:
-            snapshots = await self._collect_snapshots_with_timeout(timeout_seconds)
-            if snapshots:
-                count = len(snapshots)
-                logger.info(f"Collected {count} Walutomat market snapshots")
-                with self.repository.session_factory() as session:
-                    session.bulk_save_objects(snapshots)
-                    session.commit()
+            raw_snapshots = await self._collect_snapshots_with_timeout(timeout_seconds)
+            if raw_snapshots:
+                native_symbols = set(raw_snapshots.keys())
+                symbol_to_inst = self._resolve_batch_instrument_ids(native_symbols, EXCHANGE_NAME)
+                snapshots: list[MarketSnapshot] = []
+                skipped = 0
+                for symbol, snap in raw_snapshots.items():
+                    inst_pid = symbol_to_inst.get(symbol)
+                    if inst_pid is None:
+                        skipped += 1
+                        continue
+                    snap.instrument_public_id = inst_pid
+                    snapshots.append(snap)
+                if skipped > 0:
+                    logger.warning(f"Skipped {skipped} symbols with no instrument resolution")
+                count = self._persist_snapshots_scd2(snapshots)
                 logger.info(f"Successfully saved {count} Walutomat market snapshots to database")
         except Exception as e:
             logger.error(f"Error updating Walutomat market snapshots: {e}")
             raise
         return count
 
-    async def _collect_snapshots_with_timeout(self, timeout_seconds: int) -> list[MarketSnapshot]:
+    async def _collect_snapshots_with_timeout(
+        self, timeout_seconds: int
+    ) -> dict[str, MarketSnapshot]:
         """Collect snapshots with a timeout limit.
+
+        Snapshots are keyed by native_symbol. The instrument_public_id
+        field is set to a placeholder and must be resolved after collection.
 
         Args:
             timeout_seconds: Maximum time to spend collecting snapshots.
 
         Returns:
-            List of collected MarketSnapshot objects.
+            Dict mapping native_symbol to MarketSnapshot (unresolved).
         """
         snapshots: dict[str, MarketSnapshot] = {}
         all_symbols = await self.load_all_symbols()
@@ -125,15 +137,16 @@ class WalutomatSnapshotUpdaterService(MarketSnapshotUpdaterService):
                 f"Polling collection timed out after {timeout_seconds}s - "
                 f"collected {len(snapshots)}/{len(all_symbols)} symbols"
             )
-        return list(snapshots.values())
+        return snapshots
 
     async def _collect_snapshots_loop(
         self, all_symbols: list[str], snapshots: dict[str, MarketSnapshot]
     ) -> None:
         """Main collection loop for Walutomat ticker data.
 
-        Processes incoming ticker messages and builds snapshot dictionary.
-        Continues until all symbols are collected or caller cancels.
+        Processes incoming ticker messages and builds snapshot dictionary
+        keyed by native symbol. The instrument_public_id is set to the
+        native_symbol as a placeholder and resolved later in batch.
 
         Args:
             all_symbols: List of symbols to collect.
@@ -156,8 +169,7 @@ class WalutomatSnapshotUpdaterService(MarketSnapshotUpdaterService):
                 mid = (bid + ask) / 2 if (bid > 0 and ask > 0) else 0.0
                 spread_pct = (spread / mid * 100) if mid > 0 else 0.0
                 snapshot = MarketSnapshot(
-                    exchange="walutomat",
-                    symbol=native_symbol,
+                    instrument_public_id=native_symbol,
                     bid=bid,
                     bid_volume=bid_volume,
                     ask=ask,

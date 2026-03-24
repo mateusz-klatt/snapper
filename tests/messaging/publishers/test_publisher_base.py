@@ -450,12 +450,7 @@ async def test_save_to_db_handles_non_candle_and_missing_repo(
     resolve_mock.assert_awaited_once_with(repo, "BTC-USD")
     call_kwargs = repo.upsert_instrument.call_args.kwargs
     assert call_kwargs["symbol_public_id"] == "fake-spid"
-    assert call_kwargs["symbol"] == "BTC-USD"
     assert call_kwargs["exchange"] == "kraken"
-    assert call_kwargs["base"] == "BTC"
-    assert call_kwargs["quote"] == "USD"
-    assert call_kwargs["tick_size"] == 0.0
-    assert call_kwargs["lot_size"] == 0.0
     assert call_kwargs["session_id"] != ""
     assert call_kwargs["sequence_id"] >= 1
     repo.upsert_candles.assert_awaited_once()
@@ -974,6 +969,36 @@ async def test_save_to_db_invalid_symbol_logs_warning() -> None:
         open_at=datetime.now(UTC),
     )
     await pub._save_to_db("INVALID", candle)
+
+
+@pytest.mark.asyncio
+async def test_save_to_db_returns_when_ensure_instrument_none() -> None:
+    """Verify _save_to_db returns early when _ensure_instrument yields None.
+
+    Given: A publisher whose _ensure_instrument resolves to None,
+    When: _save_to_db is called,
+    Then: No candle is persisted and the method returns without error.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.repository = SimpleNamespace(upsert_candles=AsyncMock())
+    candle = CandleData(
+        session_id="",
+        sequence_id=0,
+        public_id="test-public-id",
+        instrument="BTC-USD",
+        volume=1.0,
+        timeframe="1m",
+        open=1.0,
+        high=1.0,
+        low=1.0,
+        close=1.0,
+        timestamp=datetime.now(tz=UTC),
+        exchange="kraken",
+        open_at=datetime.now(UTC),
+    )
+    with patch.object(pub, "_ensure_instrument", new=AsyncMock(return_value=None)):
+        await pub._save_to_db("BTC-USD", candle)
+    pub.repository.upsert_candles.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1804,12 +1829,7 @@ class TestFeedPublisherCoverage:
         resolve_mock.assert_awaited_once_with(mock_repository, "BTC-USD")
         call_kwargs = mock_repository.upsert_instrument.call_args.kwargs
         assert call_kwargs["symbol_public_id"] == "fake-spid"
-        assert call_kwargs["symbol"] == "BTC-USD"
         assert call_kwargs["exchange"] == "kraken"
-        assert call_kwargs["base"] == "BTC"
-        assert call_kwargs["quote"] == "USD"
-        assert call_kwargs["tick_size"] == 0.0
-        assert call_kwargs["lot_size"] == 0.0
         assert call_kwargs["session_id"] != ""
         assert call_kwargs["sequence_id"] >= 1
         mock_repository.upsert_candles.assert_awaited_once()
@@ -1917,12 +1937,7 @@ async def test_save_to_db_caches_instrument(monkeypatch: pytest.MonkeyPatch) -> 
     assert len(repo.instrument_calls) == 1
     call = repo.instrument_calls[0]
     assert call["symbol_public_id"] == "fake-spid"
-    assert call["symbol"] == "EUR-USD"
     assert call["exchange"] == "kraken"
-    assert call["base"] == "EUR"
-    assert call["quote"] == "USD"
-    assert call["tick_size"] == 0.0
-    assert call["lot_size"] == 0.0
     assert call["session_id"] == publisher._tracker.session_id
     assert call["sequence_id"] == 1
     assert len(repo.candle_calls) == 1
@@ -2395,10 +2410,17 @@ async def test_candle_loop_skips_publish_when_ensure_instrument_returns_none() -
 
 
 @pytest.mark.asyncio
-async def test_ensure_instrument_returns_none_for_unsplittable_symbol() -> None:
-    """Verify _ensure_instrument returns None when symbol has no dash.
+@patch(
+    "snapper.messaging.publishers.base.resolve_symbol_public_id",
+    new_callable=AsyncMock,
+    return_value=None,
+)
+async def test_ensure_instrument_returns_none_for_unsplittable_symbol(
+    _mock_resolve: AsyncMock,
+) -> None:
+    """Verify _ensure_instrument returns None when symbol cannot be resolved.
 
-    Given: A publisher with a symbol that cannot be split on '-',
+    Given: A publisher with a symbol that has no active Symbol row,
     When: _ensure_instrument is called,
     Then: None is returned.
     """
@@ -2430,12 +2452,7 @@ async def test_ensure_instrument_resolves_and_caches(
     resolve_mock.assert_awaited_once_with(pub.repository, "BTC-USD")
     call_kwargs = mock_upsert.call_args.kwargs
     assert call_kwargs["symbol_public_id"] == "fake-spid"
-    assert call_kwargs["symbol"] == "BTC-USD"
     assert call_kwargs["exchange"] == "kraken"
-    assert call_kwargs["base"] == "BTC"
-    assert call_kwargs["quote"] == "USD"
-    assert call_kwargs["tick_size"] == 0.0
-    assert call_kwargs["lot_size"] == 0.0
     assert call_kwargs["session_id"] != ""
     assert call_kwargs["sequence_id"] >= 1
 

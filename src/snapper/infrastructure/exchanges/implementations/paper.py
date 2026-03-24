@@ -37,9 +37,13 @@ from datetime import timedelta
 from typing import Any
 
 from loguru import logger
+from sqlalchemy import select
 
 from snapper.core.types import MarketDataExchange
+from snapper.data.models import Instrument
+from snapper.data.models import Symbol
 from snapper.data.repository import Repository
+from snapper.data.repository import where_active
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
@@ -393,6 +397,50 @@ class PaperExchangeClient(ExchangeClientBase):
                 logger.error(f"Error in paper execution subscription: {e}")
                 break
 
+    async def _resolve_instrument_public_ids(self, symbols: list[str], exchange: str) -> list[str]:
+        """Resolve native symbols to instrument_public_ids via repository.
+
+        Performs 2-hop lookup: Symbol(native_symbol) -> Symbol.public_id,
+        then Instrument(symbol_public_id, exchange) -> Instrument.public_id.
+
+        Args:
+            symbols: List of native symbol strings.
+            exchange: Exchange name for instrument lookup.
+
+        Returns:
+            List of resolved instrument_public_id strings (may be shorter than input).
+        """
+        if not self.repository:
+            return []
+        result: list[str] = []
+        now = datetime.now(tz=UTC)
+        async with self.repository.session() as s:
+            for symbol in symbols:
+                s_ts, s_kt = where_active(Symbol, now)
+                sym_q = await s.execute(
+                    select(Symbol.public_id).where(
+                        Symbol.native_symbol == symbol,
+                        s_ts,
+                        s_kt,
+                    )
+                )
+                symbol_pid = sym_q.scalar_one_or_none()
+                if symbol_pid is None:
+                    continue
+                i_ts, i_kt = where_active(Instrument, now)
+                inst_q = await s.execute(
+                    select(Instrument.public_id).where(
+                        Instrument.symbol_public_id == symbol_pid,
+                        Instrument.exchange == exchange,
+                        i_ts,
+                        i_kt,
+                    )
+                )
+                inst_pid = inst_q.scalar_one_or_none()
+                if inst_pid is not None:
+                    result.append(inst_pid)
+        return result
+
     async def get_ticker(self, symbol: str) -> TickerSnapshot:
         """Get ticker data from repository for backtesting.
 
@@ -412,18 +460,19 @@ class PaperExchangeClient(ExchangeClientBase):
             raise ValueError(_SOURCE_EXCHANGE_REQUIRED_MSG)
         end_dt = datetime.now(tz=UTC)
         start_dt = end_dt.replace(hour=0, minute=0, second=0, microsecond=0)
-        snapshots = await self.repository.get_market_snapshots(
-            self.source_exchange, [symbol], start_dt, end_dt
-        )
+        inst_pids = await self._resolve_instrument_public_ids([symbol], self.source_exchange)
+        if not inst_pids:
+            raise ValueError(f"No ticker data found for {symbol}")
+        snapshots = await self.repository.get_market_snapshots(inst_pids, start_dt, end_dt)
         if not snapshots:
             raise ValueError(f"No ticker data found for {symbol}")
         latest = snapshots[-1]
         return TickerSnapshot(
-            symbol=latest["symbol"],
+            symbol=symbol,
             bid=latest["bid"],
             ask=latest["ask"],
             last=latest["last"],
-            timestamp=latest["timestamp"].timestamp(),
+            timestamp=latest["ts"].timestamp(),
         )
 
     async def get_ohlcv(
@@ -520,12 +569,13 @@ class PaperExchangeClient(ExchangeClientBase):
         logger.info(
             f"Replaying ticker for {symbols} from {start_dt} to {end_dt} from {exchange_name}"
         )
-        snapshots = await self.repository.get_market_snapshots(
-            exchange_name, symbols, start_dt, end_dt
-        )
+        inst_pids = await self._resolve_instrument_public_ids(symbols, exchange_name)
+        if not inst_pids:
+            return
+        snapshots = await self.repository.get_market_snapshots(inst_pids, start_dt, end_dt)
         for snap in snapshots:
             ticker = TickerUpdate(
-                symbol=snap["symbol"],
+                symbol=snap.get("symbol", ""),
                 bid=snap["bid"],
                 bid_qty=snap["bid_volume"],
                 ask=snap["ask"],

@@ -751,15 +751,9 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         symbol_pid = await resolve_symbol_public_id(self._db_async, context.native_symbol)
         if symbol_pid is None:
             raise ValueError(f"No active Symbol row for {context.native_symbol}")
-        quote_value = context.quote_currency or context.base_currency
         _id, instrument_public_id = await self._db_async.upsert_instrument(
             symbol_public_id=symbol_pid,
-            symbol=context.native_symbol,
             exchange="polygon",
-            base=context.base_currency,
-            quote=quote_value,
-            tick_size=0.0,
-            lot_size=0.0,
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence("instruments"),
         )

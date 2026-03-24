@@ -25,6 +25,24 @@ from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.implementations.paper import PaperExchangeClient
 
 
+async def _fake_resolve(symbols: list[str], exchange: str) -> list[str]:
+    """Return deterministic instrument_public_ids for testing."""
+    return [f"inst-{s.lower().replace('/', '-')}" for s in symbols]
+
+
+class _AsyncCtx:
+    """Minimal async context manager wrapping a value."""
+
+    def __init__(self, value: Any) -> None:
+        self._value = value
+
+    async def __aenter__(self) -> Any:
+        return self._value
+
+    async def __aexit__(self, *args: object) -> None:
+        pass
+
+
 class DummyRepo(SimpleNamespace):
     """Stub repository for paper exchange tests."""
 
@@ -653,11 +671,11 @@ class _ReplayRepo:
         now = datetime.now(tz=UTC)
         self.snapshots = [
             {
-                "symbol": "BTC/USD",
+                "instrument_public_id": "inst-btc-usd",
                 "bid": 10.0,
                 "ask": 11.0,
                 "last": 10.5,
-                "timestamp": now,
+                "ts": now,
                 "bid_volume": 1.0,
                 "ask_volume": 2.0,
                 "volume": 3.0,
@@ -839,6 +857,7 @@ async def test_get_ticker_success_and_empty() -> None:
     """
     repo = _ReplayRepo()
     client = PaperExchangeClient(repository=cast(Repository, repo), source_exchange="kraken")
+    client._resolve_instrument_public_ids = _fake_resolve
     await client.connect()
     snapshot = await client.get_ticker("BTC/USD")
     assert snapshot.bid == pytest.approx(10.0)
@@ -860,6 +879,123 @@ async def test_get_ticker_no_source_exchange_raises() -> None:
     await client.connect()
     with pytest.raises(ValueError, match="source_exchange required"):
         await client.get_ticker("BTC/USD")
+
+
+@pytest.mark.asyncio
+async def test_get_ticker_no_instrument_resolution_raises() -> None:
+    """Verify get_ticker raises when instrument resolution returns empty.
+
+    Given: A connected client with repository but resolution returns empty,
+    When: get_ticker() is called,
+    Then: ValueError is raised.
+    """
+
+    async def _empty_resolve(symbols: list[str], exchange: str) -> list[str]:
+        return []
+
+    repo = _ReplayRepo()
+    client = PaperExchangeClient(repository=cast(Repository, repo), source_exchange="kraken")
+    client._resolve_instrument_public_ids = _empty_resolve
+    await client.connect()
+    with pytest.raises(ValueError, match="No ticker data"):
+        await client.get_ticker("UNKNOWN/USD")
+
+
+@pytest.mark.asyncio
+async def test_resolve_instrument_public_ids_no_repo() -> None:
+    """Verify _resolve_instrument_public_ids returns empty when no repository.
+
+    Given: A paper client with repository=None,
+    When: _resolve_instrument_public_ids is called,
+    Then: Returns empty list.
+    """
+    client = PaperExchangeClient(repository=None)
+    result = await client._resolve_instrument_public_ids(["BTC/USD"], "kraken")
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_instrument_public_ids_full_path() -> None:
+    """Verify _resolve_instrument_public_ids resolves via 2-hop lookup.
+
+    Given: A mock repository whose session returns symbol_pid then inst_pid,
+    When: _resolve_instrument_public_ids is called with two symbols (one resolvable),
+    Then: Only the resolvable symbol's instrument_public_id is returned.
+    """
+    call_count = 0
+
+    async def _mock_execute(stmt: Any) -> Any:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return SimpleNamespace(scalar_one_or_none=lambda: "sym-pub-1")
+        if call_count == 2:
+            return SimpleNamespace(scalar_one_or_none=lambda: "inst-pub-1")
+        return SimpleNamespace(scalar_one_or_none=lambda: None)
+
+    mock_session = AsyncMock()
+    mock_session.execute = _mock_execute
+
+    class _MockRepo:
+        def session(self) -> Any:
+            return _AsyncCtx(mock_session)
+
+    client = PaperExchangeClient(repository=cast(Repository, _MockRepo()))
+    result = await client._resolve_instrument_public_ids(["BTC/USD", "NOPE"], "kraken")
+    assert result == ["inst-pub-1"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_instrument_public_ids_symbol_not_found() -> None:
+    """Verify _resolve_instrument_public_ids skips symbols with no Symbol row.
+
+    Given: A mock repository whose session returns None for symbol lookup,
+    When: _resolve_instrument_public_ids is called,
+    Then: Returns empty list.
+    """
+
+    async def _mock_execute(stmt: Any) -> Any:
+        return SimpleNamespace(scalar_one_or_none=lambda: None)
+
+    mock_session = AsyncMock()
+    mock_session.execute = _mock_execute
+
+    class _MockRepo:
+        def session(self) -> Any:
+            return _AsyncCtx(mock_session)
+
+    client = PaperExchangeClient(repository=cast(Repository, _MockRepo()))
+    result = await client._resolve_instrument_public_ids(["NOPE"], "kraken")
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_instrument_public_ids_instrument_not_found() -> None:
+    """Verify _resolve_instrument_public_ids skips when instrument not found.
+
+    Given: A mock repository returning symbol_pid but None for instrument,
+    When: _resolve_instrument_public_ids is called,
+    Then: Returns empty list.
+    """
+    call_count = 0
+
+    async def _mock_execute(stmt: Any) -> Any:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return SimpleNamespace(scalar_one_or_none=lambda: "sym-pub-1")
+        return SimpleNamespace(scalar_one_or_none=lambda: None)
+
+    mock_session = AsyncMock()
+    mock_session.execute = _mock_execute
+
+    class _MockRepo:
+        def session(self) -> Any:
+            return _AsyncCtx(mock_session)
+
+    client = PaperExchangeClient(repository=cast(Repository, _MockRepo()))
+    result = await client._resolve_instrument_public_ids(["BTC/USD"], "kraken")
+    assert result == []
 
 
 @pytest.mark.asyncio
@@ -910,6 +1046,7 @@ async def test_subscribe_ticker_replays_snapshots() -> None:
     client = PaperExchangeClient(
         repository=cast(Repository, _ReplayRepo()), source_exchange="kraken"
     )
+    client._resolve_instrument_public_ids = _fake_resolve
     client._running = True
     client.start_time = 0
     client.end_time = 1
@@ -917,7 +1054,8 @@ async def test_subscribe_ticker_replays_snapshots() -> None:
     async for tick in client.subscribe_ticker(["BTC/USD"]):
         updates.append(tick)
         break
-    assert updates and updates[0].symbol == "BTC/USD"
+    assert len(updates) == 1
+    assert updates[0].bid == pytest.approx(10.0)
 
 
 @pytest.mark.asyncio
@@ -1038,11 +1176,36 @@ async def test_subscribe_ticker_empty_snapshots() -> None:
     repo = _ReplayRepo()
     repo.snapshots = []
     client = PaperExchangeClient(repository=cast(Repository, repo), source_exchange="kraken")
+    client._resolve_instrument_public_ids = _fake_resolve
     client._running = True
     client.start_time = 0
     client.end_time = 1
     ticks: list[Any] = []
     async for tick in client.subscribe_ticker(["BTC/USD"]):
+        ticks.append(tick)
+    assert ticks == []
+
+
+@pytest.mark.asyncio
+async def test_subscribe_ticker_no_instrument_resolution() -> None:
+    """Verify subscribe_ticker returns empty when instrument resolution fails.
+
+    Given: A running client where _resolve_instrument_public_ids returns empty,
+    When: subscribe_ticker() is iterated,
+    Then: No tickers are yielded.
+    """
+
+    async def _empty_resolve(symbols: list[str], exchange: str) -> list[str]:
+        return []
+
+    repo = _ReplayRepo()
+    client = PaperExchangeClient(repository=cast(Repository, repo), source_exchange="kraken")
+    client._resolve_instrument_public_ids = _empty_resolve
+    client._running = True
+    client.start_time = 0
+    client.end_time = 1
+    ticks: list[Any] = []
+    async for tick in client.subscribe_ticker(["UNKNOWN"]):
         ticks.append(tick)
     assert ticks == []
 
@@ -1134,6 +1297,7 @@ async def test_subscribe_ticks_alias_replays_snapshots() -> None:
     client = PaperExchangeClient(
         repository=cast(Repository, _ReplayRepo()), source_exchange="kraken"
     )
+    client._resolve_instrument_public_ids = _fake_resolve
     client._running = True
     client.start_time = 0
     client.end_time = 1

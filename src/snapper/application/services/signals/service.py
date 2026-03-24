@@ -17,6 +17,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from snapper.config.settings import get_settings
 from snapper.data.models import Instrument
 from snapper.data.models import Signal
+from snapper.data.models import Symbol
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
@@ -50,10 +51,22 @@ class SignalReadService:
             cannot be resolved.
         """
         async with self.repo.session() as session:
+            s_ts, s_kt = where_active(Symbol)
+            sym_query = await session.execute(
+                select(Symbol).where(
+                    Symbol.native_symbol == signal.instrument,
+                    s_ts,
+                    s_kt,
+                )
+            )
+            sym = sym_query.scalars().first()
+            if sym is None:
+                logger.error(f"No active Symbol row for {signal.instrument}")
+                return None
             i_ts, i_kt = where_active(Instrument)
             inst_query = await session.execute(
                 select(Instrument).where(
-                    Instrument.symbol == signal.instrument,
+                    Instrument.symbol_public_id == sym.public_id,
                     Instrument.exchange == exchange,
                     i_ts,
                     i_kt,
@@ -62,21 +75,13 @@ class SignalReadService:
             inst = inst_query.scalars().first()
         if inst:
             return str(inst.public_id)
-        parts = signal.instrument.split("-") if "-" in signal.instrument else [signal.instrument]
-        base = parts[0]
-        quote = parts[1] if len(parts) > 1 else "USD"
         symbol_pid = await resolve_symbol_public_id(self.repo, signal.instrument)
         if symbol_pid is None:
             logger.error(f"No active Symbol row for {signal.instrument}")
             return None
         _id, public_id = await self.repo.upsert_instrument(
             symbol_public_id=symbol_pid,
-            symbol=signal.instrument,
             exchange=exchange,
-            base=base,
-            quote=quote,
-            tick_size=0.01,
-            lot_size=0.0001,
             session_id=tracker.session_id,
             sequence_id=tracker.next_sequence("instruments"),
         )
@@ -166,17 +171,33 @@ class SignalReadService:
             async with self.repo.session() as session:
                 now = datetime.now(UTC)
                 since = now - timedelta(hours=hours)
-                query = select(Signal, Instrument).join(
-                    Instrument,
-                    and_(
-                        Signal.instrument_public_id == Instrument.public_id,
-                        *where_active(Instrument),
-                    ),
+                query = (
+                    select(Signal, Instrument, Symbol)
+                    .join(
+                        Instrument,
+                        and_(
+                            Signal.instrument_public_id == Instrument.public_id,
+                            *where_active(Instrument),
+                        ),
+                    )
+                    .join(
+                        Symbol,
+                        and_(
+                            Instrument.symbol_public_id == Symbol.public_id,
+                            *where_active(Symbol),
+                        ),
+                    )
                 )
                 query = query.where(Signal.fired_at >= since)
                 query = query.where(Signal.timestamp <= now, Signal.known_to > now)
                 if instrument:
-                    query = query.where(Instrument.symbol == instrument)
+                    s_ts, s_kt = where_active(Symbol)
+                    symbol_subq = (
+                        select(Symbol.public_id)
+                        .where(Symbol.native_symbol == instrument, s_ts, s_kt)
+                        .scalar_subquery()
+                    )
+                    query = query.where(Instrument.symbol_public_id == symbol_subq)
                 if strategy:
                     query = query.where(Signal.strategy_name == strategy)
                 if exchange:
@@ -187,7 +208,7 @@ class SignalReadService:
                 return [
                     {
                         "public_id": signal.public_id,
-                        "instrument": inst.symbol,
+                        "instrument": symbol.native_symbol,
                         "exchange": inst.exchange,
                         "timestamp": signal.timestamp,
                         "fired_at": signal.fired_at,
@@ -197,7 +218,7 @@ class SignalReadService:
                         "strategy_name": signal.strategy_name,
                         "price": signal.price,
                     }
-                    for signal, inst in signals_with_instruments
+                    for signal, inst, symbol in signals_with_instruments
                 ]
         except SQLAlchemyError as e:
             logger.error(f"Error retrieving signals: {e}")

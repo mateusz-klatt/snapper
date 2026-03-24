@@ -8,11 +8,8 @@ Features:
     - WebSocket-based ticker subscription with snapshot mode
     - Configurable collection timeout
     - Automatic symbol mapping from Zonda format to native format
-    - Batch persistence for efficiency
-
-Example:
-    >>> from snapper.infrastructure.market_data.zonda import run_zonda_snapshot_update
-    >>> run_zonda_snapshot_update()  # Collects and saves Zonda market snapshots
+    - Instrument resolution via Symbol/Instrument 2-hop lookup
+    - SCD2 close+insert persistence
 """
 
 import asyncio
@@ -32,6 +29,8 @@ from snapper.infrastructure.symbols.functions import get_available_zonda_symbols
 from snapper.infrastructure.symbols.functions import zonda_ws_to_native
 from snapper.utils.logging import set_log_context
 
+EXCHANGE_NAME = "zonda"
+
 
 class ZondaSnapshotUpdaterService(MarketSnapshotUpdaterService):
     """Market snapshot updater for Zonda exchange.
@@ -41,7 +40,8 @@ class ZondaSnapshotUpdaterService(MarketSnapshotUpdaterService):
     and 24h statistics.
 
     The service uses a timeout-based collection approach, gathering as many
-    symbols as possible within the configured time limit.
+    symbols as possible within the configured time limit. Instrument resolution
+    is performed after collection, mapping native symbols to instrument_public_id.
 
     Attributes:
         exchange_client: Zonda exchange client for WebSocket access.
@@ -78,8 +78,8 @@ class ZondaSnapshotUpdaterService(MarketSnapshotUpdaterService):
     async def update_market_snapshots(self, **kwargs: object) -> int:
         """Fetch and persist market snapshots from Zonda.
 
-        Subscribes to Zonda WebSocket ticker feed and collects snapshots
-        until timeout or all symbols are collected.
+        Subscribes to Zonda WebSocket ticker feed, collects snapshots,
+        resolves instrument_public_id, and persists via SCD2 close+insert.
 
         Args:
             **kwargs: Optional parameters.
@@ -97,27 +97,41 @@ class ZondaSnapshotUpdaterService(MarketSnapshotUpdaterService):
             f"Starting Zonda market snapshots update via WebSocket (timeout: {timeout_seconds}s)..."
         )
         try:
-            snapshots = await self._collect_snapshots_with_timeout(timeout_seconds)
-            if snapshots:
-                count = len(snapshots)
-                logger.info(f"Collected {count} Zonda market snapshots")
-                with self.repository.session_factory() as session:
-                    session.bulk_save_objects(snapshots)
-                    session.commit()
+            raw_snapshots = await self._collect_snapshots_with_timeout(timeout_seconds)
+            if raw_snapshots:
+                native_symbols = set(raw_snapshots.keys())
+                symbol_to_inst = self._resolve_batch_instrument_ids(native_symbols, EXCHANGE_NAME)
+                snapshots: list[MarketSnapshot] = []
+                skipped = 0
+                for symbol, snap in raw_snapshots.items():
+                    inst_pid = symbol_to_inst.get(symbol)
+                    if inst_pid is None:
+                        skipped += 1
+                        continue
+                    snap.instrument_public_id = inst_pid
+                    snapshots.append(snap)
+                if skipped > 0:
+                    logger.warning(f"Skipped {skipped} symbols with no instrument resolution")
+                count = self._persist_snapshots_scd2(snapshots)
                 logger.info(f"Successfully saved {count} Zonda market snapshots to database")
         except Exception as e:
             logger.error(f"Error updating Zonda market snapshots: {e}")
             raise
         return count
 
-    async def _collect_snapshots_with_timeout(self, timeout_seconds: int) -> list[MarketSnapshot]:
+    async def _collect_snapshots_with_timeout(
+        self, timeout_seconds: int
+    ) -> dict[str, MarketSnapshot]:
         """Collect snapshots with a timeout limit.
+
+        Snapshots are keyed by native_symbol. The instrument_public_id
+        field is set to a placeholder and must be resolved after collection.
 
         Args:
             timeout_seconds: Maximum time to spend collecting snapshots.
 
         Returns:
-            List of collected MarketSnapshot objects.
+            Dict mapping native_symbol to MarketSnapshot (unresolved).
         """
         snapshots: dict[str, MarketSnapshot] = {}
         all_symbols = await self.load_all_symbols()
@@ -130,7 +144,7 @@ class ZondaSnapshotUpdaterService(MarketSnapshotUpdaterService):
                 f"WebSocket collection timed out after {timeout_seconds}s - "
                 f"collected {len(snapshots)}/{len(all_symbols)} symbols"
             )
-        return list(snapshots.values())
+        return snapshots
 
     def _resolve_native_symbol(self, zonda_symbol: str) -> str | None:
         """Resolve a Zonda symbol to its native format.
@@ -156,8 +170,11 @@ class ZondaSnapshotUpdaterService(MarketSnapshotUpdaterService):
     ) -> MarketSnapshot:
         """Build a MarketSnapshot from Zonda ticker data.
 
+        The instrument_public_id is set to a placeholder value that must
+        be resolved after collection via _resolve_batch_instrument_ids.
+
         Args:
-            native_symbol: Native symbol string.
+            native_symbol: Native symbol string (used as temporary key).
             ticker_data: Parsed ticker update from exchange.
             session_id: Session identifier for provenance stamping.
             sequence_id: Sequence number for provenance stamping.
@@ -172,8 +189,7 @@ class ZondaSnapshotUpdaterService(MarketSnapshotUpdaterService):
         mid = (bid + ask) / 2 if has_valid_prices else 0.0
         spread_pct = (spread / mid * 100) if mid > 0 else 0.0
         return MarketSnapshot(
-            exchange="zonda",
-            symbol=native_symbol,
+            instrument_public_id=native_symbol,
             bid=bid,
             bid_volume=ticker_data.bid_qty,
             ask=ask,
@@ -196,8 +212,9 @@ class ZondaSnapshotUpdaterService(MarketSnapshotUpdaterService):
     ) -> None:
         """Main collection loop for Zonda ticker data.
 
-        Processes incoming ticker messages and builds snapshot dictionary.
-        Continues until all symbols are collected or caller cancels.
+        Processes incoming ticker messages and builds snapshot dictionary
+        keyed by native symbol. The instrument_public_id is set to the
+        native_symbol as a placeholder and resolved later in batch.
 
         Args:
             all_symbols: List of symbols to collect.

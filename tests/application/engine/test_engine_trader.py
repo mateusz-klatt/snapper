@@ -624,24 +624,14 @@ class _RepositoryStub:
         self,
         *,
         symbol_public_id: str,
-        symbol: str,
         exchange: str,
-        base: str,
-        quote: str,
-        tick_size: float,
-        lot_size: float,
         session_id: str = "",
         sequence_id: int = 0,
     ) -> tuple[int, str]:
         self.calls.append(
             {
                 "symbol_public_id": symbol_public_id,
-                "symbol": symbol,
                 "exchange": exchange,
-                "base": base,
-                "quote": quote,
-                "tick_size": tick_size,
-                "lot_size": lot_size,
                 "session_id": session_id,
                 "sequence_id": sequence_id,
             }
@@ -904,14 +894,14 @@ async def test_ensure_instrument_handles_delimiters(monkeypatch: pytest.MonkeyPa
     await coord_any._ensure_instrument("BTC-USD", exchange="kraken")
     await coord_any._ensure_instrument("ETH/EUR", exchange="binance")
     repository_stub = cast(_RepositoryStub, coord.repository)
-    symbols = {call["symbol"]: call for call in repository_stub.calls}
-    assert symbols["BTC-USD"]["base"] == "BTC"
-    assert symbols["BTC-USD"]["exchange"] == "kraken"
-    assert symbols["ETH/EUR"]["quote"] == "EUR"
-    assert symbols["ETH/EUR"]["exchange"] == "binance"
-    assert symbols["BTC-USD"]["session_id"] != ""
-    assert symbols["BTC-USD"]["sequence_id"] >= 1
-    assert symbols["ETH/EUR"]["sequence_id"] >= 2
+    assert len(repository_stub.calls) == 2
+    assert repository_stub.calls[0]["symbol_public_id"] == "stub-spid"
+    assert repository_stub.calls[0]["exchange"] == "kraken"
+    assert repository_stub.calls[1]["symbol_public_id"] == "stub-spid"
+    assert repository_stub.calls[1]["exchange"] == "binance"
+    assert repository_stub.calls[0]["session_id"] != ""
+    assert repository_stub.calls[0]["sequence_id"] >= 1
+    assert repository_stub.calls[1]["sequence_id"] >= 2
 
 
 @pytest.mark.asyncio
@@ -1078,7 +1068,7 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
     engine_key = "BTC-USD@kraken-live"
     assert engine_key in coord.engines
     engine = cast(_EngineStub, coord.engines[engine_key])
-    assert repository.calls[0]["symbol"] == "BTC-USD"
+    assert repository.calls[0]["symbol_public_id"] == "stub-spid"
     assert engine.execute_calls[0]["desired_units"] == pytest.approx(0.5)
     signal_sell = SignalData(
         session_id="",
