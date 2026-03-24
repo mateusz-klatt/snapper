@@ -736,9 +736,9 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         try:
             with self.repository.get_session() as session:
                 processed_symbol_public_ids: set[str] = set()
+                now = datetime.now(UTC)
                 for symbol_data in symbols:
                     native_symbol = symbol_data["native_symbol"]
-                    now = datetime.now(UTC)
                     asset_type: AssetType = (
                         "equity"
                         if symbol_data.get("asset_class") == "tokenized_asset"
@@ -767,7 +767,6 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                         )
                     created_count += c
                     updated_count += u
-                now = datetime.now(UTC)
                 deactivated = self._reconcile_capabilities(
                     session,
                     "kraken",

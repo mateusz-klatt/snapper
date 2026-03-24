@@ -268,5 +268,5 @@ async def remove_setting(
         session_id=tracker.session_id,
         sequence_id=tracker.next_sequence(_REST_STREAM),
         public_id=str(uuid7()),
-        timestamp=datetime.now(UTC),
+        timestamp=now,
     )

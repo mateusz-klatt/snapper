@@ -160,10 +160,11 @@ class ProcessSpawnerService:
         Returns:
             ProcessInstanceInfo with all fields populated.
         """
+        now = datetime.now(UTC)
         info = ProcessInstanceInfo(
             name=name,
             pid=process.pid,
-            started_at=datetime.now(UTC),
+            started_at=now,
             config={
                 "class_path": class_path,
                 "method": method,
@@ -172,7 +173,7 @@ class ProcessSpawnerService:
             },
             process=process,
             spawner=self,
-            last_heartbeat=datetime.now(UTC),
+            last_heartbeat=now,
         )
         if exit_code is not None:
             info.exit_code = exit_code

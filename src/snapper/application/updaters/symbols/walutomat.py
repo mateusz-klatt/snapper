@@ -75,9 +75,9 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
         updated_count = 0
         with self.repository.get_session() as session:
             processed_symbol_public_ids: set[str] = set()
+            now = datetime.now(UTC)
             for instrument in symbols:
                 native_symbol = instrument["native_symbol"]
-                now = datetime.now(UTC)
                 sid = self._tracker.session_id
                 symbol_public_id = self._upsert_symbol(
                     session,
@@ -130,7 +130,6 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
                     session_id=sid,
                     sequence_id=self._tracker.next_sequence("capabilities"),
                 )
-            now = datetime.now(UTC)
             deactivated = self._reconcile_capabilities(
                 session,
                 "walutomat",

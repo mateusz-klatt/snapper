@@ -217,11 +217,11 @@ class SettingsService:
         description: str | None,
         is_encrypted: bool,
         updated_by: str | None,
+        now: datetime,
     ) -> None:
         """Close active setting and insert new version (SCD Type 2)."""
         repository = get_repository(self.db_url)
         async with repository.session() as session:
-            now = datetime.now(UTC)
             await close_and_insert(
                 session=session,
                 model=Setting,
@@ -266,6 +266,7 @@ class SettingsService:
             encrypted_value, is_encrypted = force_encrypt_if_cleartext(key, str_value)
         else:
             encrypted_value, is_encrypted = encrypt_if_sensitive(key, str_value)
+        now = datetime.now(UTC)
         await self._close_and_insert_setting(
             key=key,
             value=encrypted_value,
@@ -273,16 +274,23 @@ class SettingsService:
             description=description,
             is_encrypted=is_encrypted,
             updated_by=updated_by,
+            now=now,
         )
         self._cache[key] = value
-        await self._broadcast_change(key, encrypted_value, category, updated_by)
+        await self._broadcast_change(key, encrypted_value, category, updated_by, now=now)
         logger.info(
             f"Setting {key} updated to: {encrypted_value}"
             + (" (encrypted)" if is_encrypted else "")
         )
 
     async def _broadcast_change(
-        self, key: str, value: str, category: str, updated_by: str | None = None
+        self,
+        key: str,
+        value: str,
+        category: str,
+        updated_by: str | None = None,
+        *,
+        now: datetime,
     ) -> None:
         """Broadcast setting change via ZMQ.
 
@@ -291,6 +299,7 @@ class SettingsService:
             value: New value (encrypted if applicable).
             category: Setting category.
             updated_by: Optional user identifier.
+            now: Shared timestamp for the entire operation.
         """
         if not self._msg_publisher:
             logger.warning("ZMQ publisher not available, skipping broadcast")
@@ -298,7 +307,7 @@ class SettingsService:
         topic = system_topic("settings")
         envelope = SettingChangedData(
             public_id=str(uuid7()),
-            timestamp=datetime.now(UTC),
+            timestamp=now,
             session_id=self._msg_publisher.tracker.session_id,
             sequence_id=self._msg_publisher.tracker.next_sequence(topic),
             key=key,

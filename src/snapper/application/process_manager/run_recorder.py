@@ -60,6 +60,7 @@ class ProcessRunRecorder:
         """
         repository = get_repository(self.settings.db_url)
         public_id = str(uuid7())
+        now = datetime.now(UTC)
         async with repository.session() as session:
             run = ProcessRun(
                 public_id=public_id,
@@ -69,8 +70,8 @@ class ProcessRunRecorder:
                 status=ProcessRunStatusEnum.RUNNING.value,
                 parameters=parameters,
                 tags=list(config.tags),
-                started_at=datetime.now(UTC),
-                timestamp=datetime.now(UTC),
+                started_at=now,
+                timestamp=now,
                 session_id=self._tracker.session_id,
                 sequence_id=self._tracker.next_sequence("process_runs"),
             )
@@ -121,7 +122,7 @@ class ProcessRunRecorder:
                 error=error[:1024] if error is not None else process_run.error,
                 tags=process_run.tags,
                 started_at=process_run.started_at,
-                completed_at=datetime.now(UTC),
+                completed_at=now,
                 timestamp=now,
                 known_to=KNOWN_TO_MAX,
                 session_id=process_run.session_id,

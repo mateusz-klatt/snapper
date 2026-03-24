@@ -123,11 +123,12 @@ class SignalReadService:
             inst_public_id = await self._resolve_instrument(signal, exchange, tracker)
             if inst_public_id is None:
                 return ""
+            now = datetime.now(UTC)
             async with self.repo.session() as session:
                 init_kwargs: dict[str, Any] = {
                     "instrument_public_id": inst_public_id,
-                    "timestamp": timestamp or datetime.now(UTC),
-                    "fired_at": signal.timestamp or datetime.now(UTC),
+                    "timestamp": timestamp or now,
+                    "fired_at": signal.timestamp or now,
                     "side": signal.side,
                     "strength": signal.strength,
                     "reason": signal.reason,

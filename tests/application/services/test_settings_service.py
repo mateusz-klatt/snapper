@@ -333,7 +333,9 @@ class TestSettingsService:
         )
         publisher = self._StubMsgPublisher()
         cast(Any, service)._msg_publisher = publisher
-        await cast(Any, service)._broadcast_change("api_key", "secure", "auth", updated_by="tester")
+        await cast(Any, service)._broadcast_change(
+            "api_key", "secure", "auth", updated_by="tester", now=datetime.now(UTC)
+        )
         assert publisher.published
         msg = publisher.published[0]
         assert msg.type == "setting_changed"
@@ -360,7 +362,9 @@ class TestSettingsService:
         tracker = SequenceTracker()
         msg_pub = MessagePublisher(cast(Any, mock_vp), tracker)
         cast(Any, service)._msg_publisher = msg_pub
-        await cast(Any, service)._broadcast_change("api_key", "s3cr3t", "auth")
+        await cast(Any, service)._broadcast_change(
+            "api_key", "s3cr3t", "auth", now=datetime.now(UTC)
+        )
         mock_vp.send_multipart.assert_called_once()
         call_args = mock_vp.send_multipart.call_args
         topic = call_args.args[0]
@@ -387,7 +391,9 @@ class TestSettingsService:
             db_url="sqlite+aiosqlite:///:memory:",
             zmq_broker_xpub="tcp://127.0.0.1:7501",
         )
-        await cast(Any, service)._broadcast_change("unused", "value", "system")
+        await cast(Any, service)._broadcast_change(
+            "unused", "value", "system", now=datetime.now(UTC)
+        )
 
     @pytest.mark.asyncio
     async def test_broadcast_change_handles_send_error(self) -> None:
@@ -407,7 +413,9 @@ class TestSettingsService:
         publisher.session_id = publisher.tracker.session_id
         cast(Any, service)._msg_publisher = publisher
         with patch("snapper.application.services.settings.logger.error") as log_error:
-            await cast(Any, service)._broadcast_change("api_key", "secure", "auth")
+            await cast(Any, service)._broadcast_change(
+                "api_key", "secure", "auth", now=datetime.now(UTC)
+            )
         log_error.assert_called_once()
 
     @pytest.mark.asyncio
@@ -908,7 +916,9 @@ async def test_broadcast_change_when_publisher_is_none() -> None:
         zmq_broker_xpub="tcp://127.0.0.1:7501",
     )
     service._msg_publisher = None
-    await service._broadcast_change("test_key", "test_value", "system", "user1")
+    await service._broadcast_change(
+        "test_key", "test_value", "system", "user1", now=datetime.now(UTC)
+    )
 
 
 @pytest.mark.asyncio
@@ -928,7 +938,9 @@ async def test_broadcast_change_when_send_multipart_raises() -> None:
     mock_publisher.tracker = SequenceTracker()
     mock_publisher.session_id = mock_publisher.tracker.session_id
     service._msg_publisher = mock_publisher
-    await service._broadcast_change("test_key", "test_value", "system", "user1")
+    await service._broadcast_change(
+        "test_key", "test_value", "system", "user1", now=datetime.now(UTC)
+    )
     assert mock_publisher.send.called
 
 
