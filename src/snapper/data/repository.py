@@ -99,29 +99,6 @@ def where_active(model: type[Any], at: datetime | None = None) -> tuple[Any, Any
     return model.timestamp <= t, model.known_to > t
 
 
-_INSTRUMENT_COLUMNS = frozenset(c.key for c in Instrument.__table__.columns if c.key != "id")
-
-
-def _filter_instrument_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Strip kwargs not in the Instrument model columns.
-
-    Callers may pass tick_size / lot_size which were moved to
-    InstrumentSpec; silently drop them so Instrument(**kwargs) works.
-    Supplies a default ``timestamp`` of now(UTC) when not provided,
-    since the TemporalMixin makes timestamp NOT NULL.
-
-    Args:
-        kwargs: Raw keyword arguments from callers.
-
-    Returns:
-        Filtered dict containing only valid Instrument column keys.
-    """
-    filtered = {k: v for k, v in kwargs.items() if k in _INSTRUMENT_COLUMNS}
-    if "timestamp" not in filtered:
-        filtered["timestamp"] = datetime.now(UTC)
-    return filtered
-
-
 async def close_and_insert(
     session: AsyncSession,
     model: type[Any],
@@ -254,12 +231,20 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    async def upsert_instrument(self, **kwargs: Any) -> tuple[int, str]:
-        """Find or create instrument by (symbol_public_id, exchange).
+    async def ensure_instrument(
+        self,
+        symbol_public_id: str,
+        exchange: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime | None = None,
+    ) -> tuple[int, str]:
+        """Idempotent resolve-or-create for instrument identity.
 
-        Instrument natural key is immutable, so no SCD2 versioning is
-        needed.  Returns (id, public_id) of active row, creating one
-        if none exists.
+        Looks up the active Instrument by business key
+        (symbol_public_id, exchange).  Returns (id, public_id) of the
+        existing row, or inserts a new one if none exists.
+        Never closes an existing version.
         """
         ...
 
@@ -502,18 +487,22 @@ class SQLAlchemyRepository(Repository):
                 for row in q.all()
             }
 
-    async def upsert_instrument(self, **kwargs: Any) -> tuple[int, str]:
-        """Find or create instrument by (symbol_public_id, exchange).
+    async def ensure_instrument(
+        self,
+        symbol_public_id: str,
+        exchange: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime | None = None,
+    ) -> tuple[int, str]:
+        """Idempotent resolve-or-create for instrument identity.
 
-        Instrument natural key is immutable (symbol_public_id + exchange),
-        so no SCD2 versioning is needed.  Returns (id, public_id) of the
-        active row, creating a new one if none exists.
+        Looks up the active Instrument by business key
+        (symbol_public_id, exchange) as of *timestamp*.  Returns
+        (id, public_id) of the existing row, or inserts a new one
+        if none exists.  Never closes an existing version.
         """
-        filtered = _filter_instrument_kwargs(kwargs)
-        symbol_public_id = filtered["symbol_public_id"]
-        exchange = filtered["exchange"]
-        bus_time = filtered.get("timestamp") or datetime.now(UTC)
-        filtered["timestamp"] = bus_time
+        bus_time = timestamp or datetime.now(UTC)
         async with self.session() as s:
             ts_filter, kt_filter = where_active(Instrument, bus_time)
             q = await s.execute(
@@ -527,7 +516,13 @@ class SQLAlchemyRepository(Repository):
             inst = q.scalar_one_or_none()
             if inst is not None:
                 return (int(inst.id), str(inst.public_id))
-            new_inst = Instrument(**filtered)
+            new_inst = Instrument(
+                symbol_public_id=symbol_public_id,
+                exchange=exchange,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=bus_time,
+            )
             s.add(new_inst)
             try:
                 await s.commit()

@@ -666,20 +666,17 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         await s.commit()
     spid = await resolve_symbol_public_id(repo, "BTC-USD")
     assert spid is not None
-    instrument_payload = {
-        "symbol_public_id": spid,
-        "symbol": "BTC-USD",
-        "base": "BTC",
-        "quote": "USD",
-        "exchange": "kraken",
-        "tick_size": 0.01,
-        "lot_size": 0.001,
-    }
-    instrument_id, instrument_public_id = await repo.upsert_instrument(
-        **instrument_payload, session_id="test-session", sequence_id=1
+    instrument_id, instrument_public_id = await repo.ensure_instrument(
+        symbol_public_id=spid,
+        exchange="kraken",
+        session_id="test-session",
+        sequence_id=1,
     )
-    duplicate_id, _ = await repo.upsert_instrument(
-        **instrument_payload, session_id="test-session", sequence_id=1
+    duplicate_id, _ = await repo.ensure_instrument(
+        symbol_public_id=spid,
+        exchange="kraken",
+        session_id="test-session",
+        sequence_id=1,
     )
     assert duplicate_id == instrument_id
     base_ts = datetime.now(UTC) - timedelta(minutes=10)
@@ -965,8 +962,8 @@ class DummyRepository(Repository):
         """Return dummy dialect name."""
         return "dummy"
 
-    async def upsert_instrument(self, **kwargs: Any) -> tuple[int, str]:
-        """Upsert instrument - no-op returning (0, stub-public-id)."""
+    async def ensure_instrument(self, **kwargs: Any) -> tuple[int, str]:
+        """Ensure instrument - no-op returning (0, stub-public-id)."""
         return (0, "stub-public-id")
 
     async def get_latest_candle_ids(self) -> dict[tuple[str, str], tuple[datetime, str]]:
@@ -1554,13 +1551,13 @@ class TestSQLAlchemyRepositoryDialects:
         assert result_ticks == 0
 
     @pytest.mark.asyncio
-    async def test_upsert_instrument_with_integrity_error(
+    async def test_ensure_instrument_with_integrity_error(
         self, mock_postgres_repo: SQLAlchemyRepository
     ) -> None:
-        """Verify upsert_instrument handles duplicate key gracefully.
+        """Verify ensure_instrument handles duplicate key gracefully.
 
         Given: No active instrument found, insert hits IntegrityError (race),
-        When: upsert_instrument is called,
+        When: ensure_instrument is called,
         Then: Retries lookup and returns existing instrument ID.
         """
         mock_session = AsyncMock()
@@ -1579,14 +1576,9 @@ class TestSQLAlchemyRepositoryDialects:
         with patch.object(mock_postgres_repo, "session") as mock_session_ctx:
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
             mock_session_ctx.return_value.__aexit__.return_value = None
-            result = await mock_postgres_repo.upsert_instrument(
+            result = await mock_postgres_repo.ensure_instrument(
                 symbol_public_id="fake-spid",
-                symbol="BTC-USD",
-                base="BTC",
-                quote="USD",
                 exchange="kraken",
-                tick_size=0.01,
-                lot_size=0.001,
                 session_id="test-session",
                 sequence_id=1,
             )
@@ -1594,13 +1586,13 @@ class TestSQLAlchemyRepositoryDialects:
             mock_session.rollback.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_upsert_instrument_integrity_error_reraise(
+    async def test_ensure_instrument_integrity_error_reraise(
         self, mock_postgres_repo: SQLAlchemyRepository
     ) -> None:
-        """Verify upsert_instrument re-raises when retry also finds nothing.
+        """Verify ensure_instrument re-raises when retry also finds nothing.
 
         Given: Instrument not found before or after IntegrityError,
-        When: upsert_instrument is called,
+        When: ensure_instrument is called,
         Then: IntegrityError is re-raised.
         """
         mock_session = AsyncMock()
@@ -1616,27 +1608,22 @@ class TestSQLAlchemyRepositoryDialects:
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
             mock_session_ctx.return_value.__aexit__.return_value = None
             with pytest.raises(IntegrityError):
-                await mock_postgres_repo.upsert_instrument(
+                await mock_postgres_repo.ensure_instrument(
                     symbol_public_id="fake-spid",
-                    symbol="BTC-USD",
-                    base="BTC",
-                    quote="USD",
                     exchange="kraken",
-                    tick_size=0.01,
-                    lot_size=0.001,
                     session_id="test-session",
                     sequence_id=1,
                 )
             mock_session.rollback.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_upsert_instrument_existing(
+    async def test_ensure_instrument_existing(
         self, mock_postgres_repo: SQLAlchemyRepository
     ) -> None:
-        """Verify upsert_instrument returns existing ID when payload matches.
+        """Verify ensure_instrument returns existing ID when payload matches.
 
         Given: Active instrument with identical payload exists,
-        When: upsert_instrument is called,
+        When: ensure_instrument is called,
         Then: Returns existing ID, skips add.
         """
         mock_session = AsyncMock()
@@ -1652,14 +1639,9 @@ class TestSQLAlchemyRepositoryDialects:
         with patch.object(mock_postgres_repo, "session") as mock_session_ctx:
             mock_session_ctx.return_value.__aenter__.return_value = mock_session
             mock_session_ctx.return_value.__aexit__.return_value = None
-            result = await mock_postgres_repo.upsert_instrument(
+            result = await mock_postgres_repo.ensure_instrument(
                 symbol_public_id="fake-spid",
-                symbol="ETH-USD",
-                base="ETH",
-                quote="USD",
                 exchange="kraken",
-                tick_size=0.01,
-                lot_size=0.001,
                 session_id="test-session",
                 sequence_id=1,
             )
@@ -1922,7 +1904,7 @@ class _MinimalRepository(Repository):
     async def upsert_ticks(self, rows: list[dict[str, Any]]) -> int:
         return 0
 
-    async def upsert_instrument(self, **kwargs: Any) -> tuple[int, str]:
+    async def ensure_instrument(self, **kwargs: Any) -> tuple[int, str]:
         return (0, "stub-public-id")
 
     async def insert_order(

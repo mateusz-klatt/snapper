@@ -86,7 +86,7 @@ async def _create_repo_with_instrument(
         await s.commit()
     spid = symbol.public_id
     assert spid is not None
-    inst_id, inst_public_id = await repo.upsert_instrument(
+    inst_id, inst_public_id = await repo.ensure_instrument(
         symbol_public_id=spid,
         exchange="kraken",
         timestamp=seed_time,
@@ -1508,7 +1508,7 @@ class TestInstrumentBitemporal:
         repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         spid = await resolve_symbol_public_id(repo, "BTC-USD")
         assert spid is not None
-        inst_id2, _ = await repo.upsert_instrument(
+        inst_id2, _ = await repo.ensure_instrument(
             symbol_public_id=spid,
             exchange="kraken",
             session_id="test-session",
@@ -1526,7 +1526,7 @@ class TestInstrumentBitemporal:
         spid = await resolve_symbol_public_id(repo, "BTC-USD")
         assert spid is not None
 
-        _, pub2 = await repo.upsert_instrument(
+        _, pub2 = await repo.ensure_instrument(
             symbol_public_id=spid,
             exchange="kraken",
             session_id="test-session",
@@ -1548,7 +1548,7 @@ class TestInstrumentBitemporal:
             original_pid = orig.public_id
 
         for _ in range(3):
-            await repo.upsert_instrument(
+            await repo.ensure_instrument(
                 symbol_public_id=spid,
                 exchange="kraken",
                 session_id="test-session",
@@ -1581,7 +1581,7 @@ class TestInstrumentBitemporal:
         spid = await resolve_symbol_public_id(repo, "BTC-USD")
         assert spid is not None
 
-        await repo.upsert_instrument(
+        await repo.ensure_instrument(
             symbol_public_id=spid,
             exchange="binance",
             session_id="test-session",
@@ -1875,13 +1875,13 @@ class TestInstrumentJoinSemantics:
 
     @pytest.mark.asyncio
     async def test_idempotent_upsert_no_duplicate_rows(self, tmp_path: Path) -> None:
-        """Repeated upsert_instrument with same key does not create duplicates."""
+        """Repeated ensure_instrument with same key does not create duplicates."""
         repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         spid = await resolve_symbol_public_id(repo, "BTC-USD")
         assert spid is not None
 
         for _ in range(5):
-            returned_id, _ = await repo.upsert_instrument(
+            returned_id, _ = await repo.ensure_instrument(
                 symbol_public_id=spid,
                 exchange="kraken",
                 session_id="test-session",

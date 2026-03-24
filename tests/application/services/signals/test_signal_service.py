@@ -88,7 +88,7 @@ class TestSignalService:
         When: store_signal called with signal,
         Then: StrategySignal stored with correct attributes.
         """
-        await test_repository.upsert_instrument(
+        await test_repository.ensure_instrument(
             symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
             exchange="testexchange",
             session_id="test-session",
@@ -129,7 +129,7 @@ class TestSignalService:
         When: store_signal called with price=None,
         Then: StrategySignal stored with price=None.
         """
-        await test_repository.upsert_instrument(
+        await test_repository.ensure_instrument(
             symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
             exchange="testexchange",
             session_id="test-session",
@@ -164,7 +164,7 @@ class TestSignalService:
         When: store_signal called with public_id and timestamp,
         Then: DB row carries the exact same public_id and timestamp as the published envelope.
         """
-        await test_repository.upsert_instrument(
+        await test_repository.ensure_instrument(
             symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
             exchange="testexchange",
             session_id="test-session",
@@ -206,7 +206,7 @@ class TestSignalService:
         When: get_recent_signals called with limit=2,
         Then: Two most recent signals returned.
         """
-        await test_repository.upsert_instrument(
+        await test_repository.ensure_instrument(
             symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
             exchange="testexchange",
             session_id="test-session",
@@ -242,7 +242,7 @@ class TestSignalService:
         When: get_recent_signals called with strategy='strategy_b',
         Then: Only strategy_b signals returned.
         """
-        await test_repository.upsert_instrument(
+        await test_repository.ensure_instrument(
             symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
             exchange="testexchange",
             session_id="test-session",
@@ -292,13 +292,13 @@ class TestSignalService:
         When: get_recent_signals called with instrument='BTCUSD',
         Then: Only BTCUSD signals returned.
         """
-        await test_repository.upsert_instrument(
+        await test_repository.ensure_instrument(
             symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
             exchange="testexchange",
             session_id="test-session",
             sequence_id=1,
         )
-        await test_repository.upsert_instrument(
+        await test_repository.ensure_instrument(
             symbol_public_id=ETHUSD_SYMBOL_PUBLIC_ID,
             exchange="testexchange",
             session_id="test-session",
@@ -351,13 +351,13 @@ class TestSignalService:
         When: get_recent_signals called with exchange='exchange_b',
         Then: Only exchange_b signals returned.
         """
-        await test_repository.upsert_instrument(
+        await test_repository.ensure_instrument(
             symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
             exchange="exchange_a",
             session_id="test-session",
             sequence_id=1,
         )
-        await test_repository.upsert_instrument(
+        await test_repository.ensure_instrument(
             symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
             exchange="exchange_b",
             session_id="test-session",
@@ -582,19 +582,19 @@ class TestSignalServiceCoverage:
             mock_logger.error.assert_called_once()
             assert "No active Symbol row" in str(mock_logger.error.call_args)
 
-    async def test_store_signal_upsert_instrument_error(
+    async def test_store_signal_ensure_instrument_error(
         self, signal_service: SignalReadService, sample_signal: StrategySignal
     ) -> None:
         """Verify store_signal returns -1 and logs error on upsert failure.
 
-        Given: Repository upsert_instrument that raises Exception,
+        Given: Repository ensure_instrument that raises Exception,
         When: store_signal called,
         Then: Returns -1 and logger.error called with message.
         """
         with (
             patch.object(
                 signal_service.repo,
-                "upsert_instrument",
+                "ensure_instrument",
                 side_effect=SQLAlchemyError("Upsert error"),
             ),
             patch("snapper.application.services.signals.service.logger") as mock_logger,
@@ -667,7 +667,7 @@ class TestSignalServiceCoverage:
         When: store_signal called,
         Then: Returns -1 and logger.error called with message.
         """
-        await test_repository.upsert_instrument(
+        await test_repository.ensure_instrument(
             symbol_public_id=BTC_USD_SYMBOL_PUBLIC_ID,
             exchange="testexchange",
             session_id="test-session",
@@ -765,7 +765,7 @@ class TestSignalServiceCoverage:
         When: get_recent_signals called with filters,
         Then: Empty list returned and logger.error called with message.
         """
-        await test_repository.upsert_instrument(
+        await test_repository.ensure_instrument(
             symbol_public_id=BTC_USD_SYMBOL_PUBLIC_ID,
             exchange="testexchange",
             session_id="test-session",

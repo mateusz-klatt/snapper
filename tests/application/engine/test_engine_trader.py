@@ -620,7 +620,7 @@ class _RepositoryStub:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    async def upsert_instrument(
+    async def ensure_instrument(
         self,
         *,
         symbol_public_id: str,
@@ -2166,7 +2166,7 @@ async def test_on_signal_converts_iso_timestamp(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(
         trader_module,
         "get_repository",
-        lambda _url: SimpleNamespace(upsert_instrument=AsyncMock(return_value=(1, "inst-pub-1"))),
+        lambda _url: SimpleNamespace(ensure_instrument=AsyncMock(return_value=(1, "inst-pub-1"))),
     )
     monkeypatch.setattr(
         trader_module,

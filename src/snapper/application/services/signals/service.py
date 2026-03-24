@@ -79,7 +79,7 @@ class SignalReadService:
         if symbol_pid is None:
             logger.error(f"No active Symbol row for {signal.instrument}")
             return None
-        _id, public_id = await self.repo.upsert_instrument(
+        _id, public_id = await self.repo.ensure_instrument(
             symbol_public_id=symbol_pid,
             exchange=exchange,
             session_id=tracker.session_id,

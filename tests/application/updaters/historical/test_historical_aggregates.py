@@ -102,7 +102,7 @@ class _StubAsyncRepo:
         self.calls: list[dict[str, Any]] = []
         self.return_value: tuple[int, str] = (42, "stub-instrument-pub-id")
 
-    async def upsert_instrument(self, **kwargs: Any) -> tuple[int, str]:
+    async def ensure_instrument(self, **kwargs: Any) -> tuple[int, str]:
         self.calls.append(dict(kwargs))
         return self.return_value
 
@@ -251,7 +251,7 @@ def test_resolve_symbol_context_missing(service: PolygonAggregatesBackfillServic
 async def test_ensure_instrument_caches_result(service: PolygonAggregatesBackfillService) -> None:
     """Verify _ensure_instrument caches instrument ID.
 
-    Given: Async repository with upsert_instrument,
+    Given: Async repository with ensure_instrument,
     When: _ensure_instrument called twice for same symbol,
     Then: Repository called only once, same ID returned.
     """
@@ -434,7 +434,7 @@ async def test_process_symbol_with_empty_candles(monkeypatch: pytest.MonkeyPatch
     loader.fetch_aggregates = AsyncMock(return_value=[])
     svc._loader = loader
     repo: Any = SimpleNamespace()
-    repo.upsert_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
+    repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
     repo.upsert_candles = AsyncMock(return_value=0)
     svc._db_async = repo
     svc._instrument_cache = {}
@@ -445,7 +445,7 @@ async def test_process_symbol_with_empty_candles(monkeypatch: pytest.MonkeyPatch
         quote_currency="USD",
     )
     await svc._process_symbol(context)
-    repo.upsert_instrument.assert_awaited_once()
+    repo.ensure_instrument.assert_awaited_once()
     loader.fetch_aggregates.assert_awaited()
 
 
@@ -553,7 +553,7 @@ async def test_process_symbol_skips_small_chunk_when_all_csv_exist(
     """
     svc = PolygonAggregatesBackfillService(symbols=[], days_back=2, resume=True, save_csv=True)
     svc._db_async = cast(
-        Any, SimpleNamespace(upsert_instrument=AsyncMock(return_value=(1, "inst-pub-1")))
+        Any, SimpleNamespace(ensure_instrument=AsyncMock(return_value=(1, "inst-pub-1")))
     )
 
     class Loader:
@@ -599,7 +599,7 @@ async def test_process_symbol_optimizes_large_chunk(monkeypatch: pytest.MonkeyPa
     svc._db_async = cast(
         Any,
         SimpleNamespace(
-            upsert_instrument=AsyncMock(return_value=(1, "inst-pub-1")),
+            ensure_instrument=AsyncMock(return_value=(1, "inst-pub-1")),
             upsert_candles=AsyncMock(return_value=1),
         ),
     )
@@ -643,7 +643,7 @@ async def test_process_symbol_optimizes_large_chunk(monkeypatch: pytest.MonkeyPa
     await svc._process_symbol(context)
     db_async = cast(Any, svc._db_async)
     loader = cast(Any, svc._loader)
-    db_async.upsert_instrument.assert_awaited_once()
+    db_async.ensure_instrument.assert_awaited_once()
     db_async.upsert_candles.assert_awaited()
     assert loader.fetch_calls == 1
 
@@ -666,7 +666,7 @@ async def test_process_symbol_hour_timespan_fetches(monkeypatch: pytest.MonkeyPa
     svc._db_async = cast(
         Any,
         SimpleNamespace(
-            upsert_instrument=AsyncMock(return_value=(7, "inst-pub-7")),
+            ensure_instrument=AsyncMock(return_value=(7, "inst-pub-7")),
             upsert_candles=AsyncMock(return_value=1),
         ),
     )
@@ -704,7 +704,7 @@ async def test_process_symbol_hour_timespan_fetches(monkeypatch: pytest.MonkeyPa
     await svc._process_symbol(context)
     repo = cast(Any, svc._db_async)
     loader = cast(Any, svc._loader)
-    repo.upsert_instrument.assert_awaited_once()
+    repo.ensure_instrument.assert_awaited_once()
     repo.upsert_candles.assert_awaited_once()
     assert loader.fetch_calls == 1
 
@@ -725,7 +725,7 @@ async def test_process_symbol_day_timespan_skips_when_csv_exist(tmp_path: Any) -
         timespan="day",
     )
     svc._db_async = cast(
-        Any, SimpleNamespace(upsert_instrument=AsyncMock(return_value=(11, "inst-pub-11")))
+        Any, SimpleNamespace(ensure_instrument=AsyncMock(return_value=(11, "inst-pub-11")))
     )
     existing_file = tmp_path / "exists.csv"
     existing_file.touch()
@@ -751,7 +751,7 @@ async def test_process_symbol_day_timespan_skips_when_csv_exist(tmp_path: Any) -
     await svc._process_symbol(context)
     repo = cast(Any, svc._db_async)
     loader = cast(Any, svc._loader)
-    repo.upsert_instrument.assert_awaited_once()
+    repo.ensure_instrument.assert_awaited_once()
     assert loader.fetch_calls == 0
 
 
@@ -767,7 +767,7 @@ async def test_process_symbol_large_chunk_all_csv_exist_skips_fetch(
     """
     svc = PolygonAggregatesBackfillService(symbols=[], days_back=40, resume=True, save_csv=True)
     svc._db_async = cast(
-        Any, SimpleNamespace(upsert_instrument=AsyncMock(return_value=(3, "inst-pub-3")))
+        Any, SimpleNamespace(ensure_instrument=AsyncMock(return_value=(3, "inst-pub-3")))
     )
 
     class FrozenDatetime(datetime):
@@ -800,7 +800,7 @@ async def test_process_symbol_large_chunk_all_csv_exist_skips_fetch(
     await svc._process_symbol(context)
     repo = cast(Any, svc._db_async)
     loader = cast(Any, svc._loader)
-    repo.upsert_instrument.assert_awaited_once()
+    repo.ensure_instrument.assert_awaited_once()
     assert loader.fetch_calls == 0
 
 
@@ -1080,8 +1080,8 @@ class _StubBackfillAsyncRepo:
         self.calls: list[dict[str, Any]] = []
         self.upsert_candles_called = 0
 
-    async def upsert_instrument(self, **kwargs: Any) -> tuple[int, str]:
-        self.calls.append({"upsert_instrument": kwargs})
+    async def ensure_instrument(self, **kwargs: Any) -> tuple[int, str]:
+        self.calls.append({"ensure_instrument": kwargs})
         return (1, "stub-backfill-inst-pub-id")
 
     async def upsert_candles(self, rows: list[dict[str, object]]) -> int:
@@ -1596,7 +1596,7 @@ class _DummyRepo:
 class _DummyAsyncRepo:
     """Test dummy for async repository."""
 
-    async def upsert_instrument(self, **kwargs: Any) -> tuple[int, str]:
+    async def ensure_instrument(self, **kwargs: Any) -> tuple[int, str]:
         return (1, "dummy-inst-pub-id")
 
     async def upsert_candles(self, rows: list[dict[str, object]]) -> int:
@@ -1944,7 +1944,7 @@ class _RepoStub:
         self.instrument_calls: list[dict[str, Any]] = []
         self.candle_batches: list[list[dict[str, object]]] = []
 
-    async def upsert_instrument(self, **kwargs: Any) -> tuple[int, str]:
+    async def ensure_instrument(self, **kwargs: Any) -> tuple[int, str]:
         self.instrument_calls.append(kwargs)
         return (77, "inst-pub-77")
 
@@ -2167,13 +2167,13 @@ async def test_ensure_instrument_caches_id(
     """
     calls: list[dict[str, Any]] = []
 
-    async def upsert_instrument(**kwargs: Any) -> tuple[int, str]:
+    async def ensure_instrument(**kwargs: Any) -> tuple[int, str]:
         calls.append(kwargs)
         return (42, "inst-pub-42")
 
     service, _ = service_and_mapper
     service_private = cast(Any, service)
-    service._db_async = cast(Repository, SimpleNamespace(upsert_instrument=upsert_instrument))
+    service._db_async = cast(Repository, SimpleNamespace(ensure_instrument=ensure_instrument))
     context = SimpleNamespace(
         native_symbol="BTC-USD",
         polygon_symbol="X:BTCUSD",

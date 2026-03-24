@@ -354,7 +354,7 @@ class TraderCoordinator(RegisterableProcess):
                 f"ZMQTrader: No active Symbol row for {instrument}, skipping instrument upsert"
             )
             return
-        await self.repository.upsert_instrument(
+        await self.repository.ensure_instrument(
             symbol_public_id=symbol_pid,
             exchange=exchange,
             session_id=self._tracker.session_id,

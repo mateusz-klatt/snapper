@@ -24,11 +24,11 @@ def _make_repo_mock() -> MagicMock:
     """Create a mock repository with async database logging methods.
 
     Returns:
-        MagicMock with upsert_instrument, insert_order, update_order,
+        MagicMock with ensure_instrument, insert_order, update_order,
         and insert_execution configured as AsyncMock.
     """
     repo = MagicMock()
-    repo.upsert_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
+    repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
     repo.insert_order = AsyncMock(return_value=(1, "order-uuid-0001"))
     repo.update_order = AsyncMock()
     repo.insert_execution = AsyncMock()

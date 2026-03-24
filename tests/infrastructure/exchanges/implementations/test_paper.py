@@ -46,7 +46,7 @@ class _AsyncCtx:
 class DummyRepo(SimpleNamespace):
     """Stub repository for paper exchange tests."""
 
-    async def upsert_instrument(self, **kwargs: Any) -> tuple[int, str]:
+    async def ensure_instrument(self, **kwargs: Any) -> tuple[int, str]:
         """Insert or update instrument record."""
         return (1, "inst-pub-1")
 

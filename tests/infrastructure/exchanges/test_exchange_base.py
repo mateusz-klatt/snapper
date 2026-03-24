@@ -257,7 +257,7 @@ async def test_log_order_to_db_logs_successfully(mock_resolve: AsyncMock) -> Non
     Then: Order is inserted and ID returned.
     """
     mock_repo = MagicMock(spec=Repository)
-    mock_repo.upsert_instrument = AsyncMock(return_value=(42, "inst-pub-42"))
+    mock_repo.ensure_instrument = AsyncMock(return_value=(42, "inst-pub-42"))
     mock_repo.insert_order = AsyncMock(return_value=(99, "order-uuid-123"))
     client = DummyExchangeClient(repository=mock_repo)
     tracker = SequenceTracker()
@@ -286,7 +286,7 @@ async def test_log_order_to_db_logs_successfully(mock_resolve: AsyncMock) -> Non
     result = await client._log_order_to_db(request, order)
     assert result == (99, "order-uuid-123")
     mock_resolve.assert_awaited_once_with(mock_repo, "BTC-USD")
-    call_kwargs = mock_repo.upsert_instrument.call_args.kwargs
+    call_kwargs = mock_repo.ensure_instrument.call_args.kwargs
     assert call_kwargs["symbol_public_id"] == "fake-spid"
     assert call_kwargs["exchange"] == "dummy"
     assert call_kwargs["session_id"] == tracker.session_id
@@ -310,7 +310,7 @@ async def test_log_order_to_db_returns_none_when_symbol_not_resolved(
     Then: No instrument or order write is attempted.
     """
     mock_repo = MagicMock(spec=Repository)
-    mock_repo.upsert_instrument = AsyncMock(return_value=(42, "inst-pub-42"))
+    mock_repo.ensure_instrument = AsyncMock(return_value=(42, "inst-pub-42"))
     mock_repo.insert_order = AsyncMock(return_value=(99, "order-uuid-123"))
     client = DummyExchangeClient(repository=mock_repo)
     client.set_tracker(SequenceTracker())
@@ -338,7 +338,7 @@ async def test_log_order_to_db_returns_none_when_symbol_not_resolved(
     result = await client._log_order_to_db(request, order)
     assert result is None
     mock_resolve.assert_awaited_once_with(mock_repo, "BTC-USD")
-    mock_repo.upsert_instrument.assert_not_awaited()
+    mock_repo.ensure_instrument.assert_not_awaited()
     mock_repo.insert_order.assert_not_awaited()
 
 
@@ -356,7 +356,7 @@ async def test_log_order_to_db_parses_symbol_without_delimiter(_mock_resolve: As
     Then: base equals the full symbol and quote defaults to USD.
     """
     mock_repo = MagicMock(spec=Repository)
-    mock_repo.upsert_instrument = AsyncMock(return_value=(42, "inst-pub-42"))
+    mock_repo.ensure_instrument = AsyncMock(return_value=(42, "inst-pub-42"))
     mock_repo.insert_order = AsyncMock(return_value=(99, "order-uuid-123"))
     client = DummyExchangeClient(repository=mock_repo)
     tracker = SequenceTracker()
@@ -385,7 +385,7 @@ async def test_log_order_to_db_parses_symbol_without_delimiter(_mock_resolve: As
     result = await client._log_order_to_db(request, order)
     assert result == (99, "order-uuid-123")
     _mock_resolve.assert_awaited_once_with(mock_repo, "BTCUSD")
-    call_kwargs = mock_repo.upsert_instrument.call_args.kwargs
+    call_kwargs = mock_repo.ensure_instrument.call_args.kwargs
     assert call_kwargs["symbol_public_id"] == "fake-spid"
     assert call_kwargs["exchange"] == "dummy"
     assert call_kwargs["session_id"] == tracker.session_id
@@ -406,7 +406,7 @@ async def test_log_order_to_db_handles_exception(_mock_resolve: AsyncMock) -> No
     Then: Returns None without propagating error.
     """
     mock_repo = MagicMock(spec=Repository)
-    mock_repo.upsert_instrument = AsyncMock(side_effect=SQLAlchemyError("Database error"))
+    mock_repo.ensure_instrument = AsyncMock(side_effect=SQLAlchemyError("Database error"))
     client = DummyExchangeClient(repository=mock_repo)
     client.set_tracker(SequenceTracker())
     request = ExchangeOrderRequest(
@@ -684,10 +684,10 @@ async def test_log_order_to_db_passes_provenance_when_tracker_set(
 
     Given: Client with mock repository and an injected SequenceTracker,
     When: _log_order_to_db is called,
-    Then: upsert_instrument receives non-empty session_id and sequence_id >= 1.
+    Then: ensure_instrument receives non-empty session_id and sequence_id >= 1.
     """
     mock_repo = MagicMock(spec=Repository)
-    mock_repo.upsert_instrument = AsyncMock(return_value=(42, "inst-pub-42"))
+    mock_repo.ensure_instrument = AsyncMock(return_value=(42, "inst-pub-42"))
     mock_repo.insert_order = AsyncMock(return_value=(99, "order-uuid-99"))
     client = DummyExchangeClient(repository=mock_repo)
     tracker = SequenceTracker()
@@ -715,6 +715,6 @@ async def test_log_order_to_db_passes_provenance_when_tracker_set(
     )
     result = await client._log_order_to_db(request, order)
     assert result == (99, "order-uuid-99")
-    call_kwargs = mock_repo.upsert_instrument.call_args.kwargs
+    call_kwargs = mock_repo.ensure_instrument.call_args.kwargs
     assert call_kwargs["session_id"] == tracker.session_id
     assert call_kwargs["sequence_id"] >= 1

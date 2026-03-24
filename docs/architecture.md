@@ -66,7 +66,10 @@ Persistence layer with SQLAlchemy:
 
 - **ORM Models** (`models.py`):
 
-    - `Instrument` — Financial instruments (natural key: symbol_public_id + exchange)
+    - `Instrument` — Financial instruments (natural key: symbol_public_id + exchange).
+        `Instrument.public_id` is the stable identity used by fact tables (orders,
+        executions, positions, signals, candles). The versioned business attributes
+        `symbol_public_id` and `exchange` are resolved via `ensure_instrument()`
     - `Candle` — OHLCV candles
     - `Trade` — Transactions
     - `Order` — Order history

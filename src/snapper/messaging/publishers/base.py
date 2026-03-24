@@ -275,7 +275,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         if symbol_pid is None:
             logger.warning(f"MarketDataPublisherService: No active Symbol row for {native_symbol}")
             return None
-        _id, instrument_public_id = await self.repository.upsert_instrument(
+        _id, instrument_public_id = await self.repository.ensure_instrument(
             symbol_public_id=symbol_pid,
             exchange=self._get_exchange_name(),
             session_id=self._tracker.session_id,
