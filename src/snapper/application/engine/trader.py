@@ -14,6 +14,8 @@ The coordinator:
 import asyncio
 import contextlib
 import time
+from datetime import UTC
+from datetime import datetime
 from typing import Any
 from typing import cast
 from typing import get_args
@@ -348,7 +350,8 @@ class TraderCoordinator(RegisterableProcess):
             instrument: Symbol string (e.g., "BTC-USD" or "BTC/USD").
             exchange: Exchange name (lowercase).
         """
-        symbol_pid = await resolve_symbol_public_id(self.repository, instrument)
+        now = datetime.now(UTC)
+        symbol_pid = await resolve_symbol_public_id(self.repository, instrument, as_of=now)
         if symbol_pid is None:
             logger.warning(
                 f"ZMQTrader: No active Symbol row for {instrument}, skipping instrument upsert"
@@ -359,6 +362,7 @@ class TraderCoordinator(RegisterableProcess):
             exchange=exchange,
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence("instruments"),
+            timestamp=now,
         )
 
     def _setup_external_execution(self) -> None:

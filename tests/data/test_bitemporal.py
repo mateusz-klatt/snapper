@@ -299,6 +299,7 @@ class TestCandleBitemporal:
             start=open_at - timedelta(minutes=1),
             end=open_at + timedelta(minutes=1),
             exchange="kraken",
+            as_of=datetime.now(UTC),
         )
         assert len(candles) == 1
         assert candles[0]["close"] == pytest.approx(110.0)
@@ -336,7 +337,7 @@ class TestCandleBitemporal:
             assert active_row is not None
             expected_public_id = active_row.public_id
 
-        latest = await repo.get_latest_candle_ids()
+        latest = await repo.get_latest_candle_ids(as_of=datetime.now(UTC))
         key = (inst_public_id, "1m")
         assert key in latest
         returned_open_at, returned_public_id = latest[key]
@@ -1514,13 +1515,14 @@ class TestInstrumentBitemporal:
     async def test_upsert_same_key_is_idempotent(self, tmp_path: Path) -> None:
         """Re-upserting same (symbol_public_id, exchange) returns same id, no new row."""
         repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
-        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=datetime.now(UTC))
         assert spid is not None
         inst_id2, _ = await repo.ensure_instrument(
             symbol_public_id=spid,
             exchange="kraken",
             session_id="test-session",
             sequence_id=1,
+            timestamp=datetime.now(UTC),
         )
         assert inst_id2 == inst_id
         async with repo.session() as s:
@@ -1531,7 +1533,7 @@ class TestInstrumentBitemporal:
     async def test_upsert_same_key_returns_same_public_id(self, tmp_path: Path) -> None:
         """Repeated upsert of same natural key returns identical public_id."""
         repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
-        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=datetime.now(UTC))
         assert spid is not None
 
         _, pub2 = await repo.ensure_instrument(
@@ -1539,6 +1541,7 @@ class TestInstrumentBitemporal:
             exchange="kraken",
             session_id="test-session",
             sequence_id=1,
+            timestamp=datetime.now(UTC),
         )
         assert pub2 == inst_public_id
 
@@ -1546,7 +1549,7 @@ class TestInstrumentBitemporal:
     async def test_upsert_multiple_times_still_one_row(self, tmp_path: Path) -> None:
         """Multiple upserts for same key produce exactly one active row."""
         repo, _, _ = await _create_repo_with_instrument(tmp_path)
-        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=datetime.now(UTC))
         assert spid is not None
 
         async with repo.session() as s:
@@ -1561,6 +1564,7 @@ class TestInstrumentBitemporal:
                 exchange="kraken",
                 session_id="test-session",
                 sequence_id=1,
+                timestamp=datetime.now(UTC),
             )
 
         async with repo.session() as s:
@@ -1586,7 +1590,7 @@ class TestInstrumentBitemporal:
     async def test_different_exchange_creates_new_instrument(self, tmp_path: Path) -> None:
         """Different exchange for same symbol_public_id creates a separate row."""
         repo, _, _ = await _create_repo_with_instrument(tmp_path)
-        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=datetime.now(UTC))
         assert spid is not None
 
         await repo.ensure_instrument(
@@ -1594,6 +1598,7 @@ class TestInstrumentBitemporal:
             exchange="binance",
             session_id="test-session",
             sequence_id=1,
+            timestamp=datetime.now(UTC),
         )
 
         async with repo.session() as s:
@@ -1617,7 +1622,7 @@ class TestInstrumentBitemporal:
               returns the correct existing instrument.
         """
         repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
-        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=datetime.now(UTC))
         assert spid is not None
         historical_time = datetime(2024, 6, 1, tzinfo=UTC)
         result_id, result_pid = await repo.ensure_instrument(
@@ -1639,7 +1644,7 @@ class TestInstrumentBitemporal:
         Then: The candle is returned.
         """
         repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
-        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=datetime.now(UTC))
         assert spid is not None
         t1 = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
         await repo.upsert_candles([_candle_row(inst_public_id, t1, datetime.now(UTC))])
@@ -1650,6 +1655,7 @@ class TestInstrumentBitemporal:
             start=t1 - timedelta(hours=1),
             end=t1 + timedelta(hours=1),
             exchange="kraken",
+            as_of=datetime.now(UTC),
         )
         assert len(candles) == 1
 
@@ -1710,7 +1716,7 @@ class TestInstrumentBitemporal:
         The temporal join picks the active Instrument row.
         """
         repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
-        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=datetime.now(UTC))
         assert spid is not None
 
         async with repo.session() as s:
@@ -1763,7 +1769,7 @@ class TestReviseInstrument:
     async def test_revise_no_change_returns_same_id(self, tmp_path: Path) -> None:
         """Revising with identical payload is a no-op."""
         repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
-        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=datetime.now(UTC))
         assert spid is not None
         result_id = await repo.revise_instrument(
             instrument_public_id=inst_public_id,
@@ -1782,7 +1788,7 @@ class TestReviseInstrument:
     async def test_revise_changed_exchange_creates_new_version(self, tmp_path: Path) -> None:
         """Revising exchange creates a new version with same public_id."""
         repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
-        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=datetime.now(UTC))
         assert spid is not None
         rev_time = datetime(2024, 6, 1, tzinfo=UTC)
         new_id = await repo.revise_instrument(
@@ -1831,7 +1837,7 @@ class TestReviseInstrument:
     async def test_revise_conflict_with_existing_raises(self, tmp_path: Path) -> None:
         """Revising to a business key occupied by another instrument raises ValueError."""
         repo, _, inst_a_pid = await _create_repo_with_instrument(tmp_path)
-        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=datetime.now(UTC))
         assert spid is not None
         seed_time = datetime(2024, 1, 1, tzinfo=UTC)
         eth_sym = Symbol(
@@ -1869,7 +1875,7 @@ class TestReviseInstrument:
     async def test_revise_preserves_contiguous_intervals(self, tmp_path: Path) -> None:
         """Successive revisions produce contiguous temporal intervals."""
         repo, _, inst_pid = await _create_repo_with_instrument(tmp_path)
-        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=datetime.now(UTC))
         assert spid is not None
         t1 = datetime(2024, 3, 1, tzinfo=UTC)
         await repo.revise_instrument(
@@ -1909,7 +1915,7 @@ class TestReviseInstrument:
     async def test_revise_then_ensure_old_key_creates_new_instrument(self, tmp_path: Path) -> None:
         """After revising business key, ensure on old key creates a new instrument."""
         repo, _, inst_pid = await _create_repo_with_instrument(tmp_path)
-        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=datetime.now(UTC))
         assert spid is not None
         rev_time = datetime(2024, 6, 1, tzinfo=UTC)
         await repo.revise_instrument(
@@ -2198,7 +2204,7 @@ class TestInstrumentJoinSemantics:
     async def test_idempotent_upsert_no_duplicate_rows(self, tmp_path: Path) -> None:
         """Repeated ensure_instrument with same key does not create duplicates."""
         repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
-        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=datetime.now(UTC))
         assert spid is not None
 
         for _ in range(5):
@@ -2207,6 +2213,7 @@ class TestInstrumentJoinSemantics:
                 exchange="kraken",
                 session_id="test-session",
                 sequence_id=1,
+                timestamp=datetime.now(UTC),
             )
             assert returned_id == inst_id
 

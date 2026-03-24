@@ -143,7 +143,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self.settings = get_settings_with_service(settings_service)
         logger.info(f"{process_name}: AppSettings initialized with database access")
         self.repository = get_repository(self.settings.db_url)
-        self._candle_id_cache = await self.repository.get_latest_candle_ids()
+        self._candle_id_cache = await self.repository.get_latest_candle_ids(as_of=datetime.now(UTC))
         logger.info(
             f"{process_name}: Loaded candle ID cache with {len(self._candle_id_cache)} entries"
         )
@@ -271,7 +271,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         if cached is not None:
             return cached
         assert self.repository is not None, "Repository not initialized"
-        symbol_pid = await resolve_symbol_public_id(self.repository, native_symbol)
+        now = datetime.now(UTC)
+        symbol_pid = await resolve_symbol_public_id(self.repository, native_symbol, as_of=now)
         if symbol_pid is None:
             logger.warning(f"MarketDataPublisherService: No active Symbol row for {native_symbol}")
             return None
@@ -280,6 +281,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             exchange=self._get_exchange_name(),
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence("instruments"),
+            timestamp=now,
         )
         self._instrument_cache[native_symbol] = instrument_public_id
         return instrument_public_id

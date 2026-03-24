@@ -346,7 +346,7 @@ async def test_repository_create_and_upserts(tmp_path: Path) -> None:
             )
         )
         await s.commit()
-    spid = await resolve_symbol_public_id(repo, "BTC-USD")
+    spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=datetime.now(UTC))
     assert spid is not None
     _, inst_pub_id = await repo.ensure_instrument(
         symbol_public_id=spid,
@@ -437,13 +437,14 @@ async def test_upsert_trades_sqlite(tmp_path: Path) -> None:
             )
         )
         await s.commit()
-    spid = await resolve_symbol_public_id(repo, "ETH-USD")
+    spid = await resolve_symbol_public_id(repo, "ETH-USD", as_of=datetime.now(UTC))
     assert spid is not None
     _, inst_pub_id = await repo.ensure_instrument(
         symbol_public_id=spid,
         exchange="kraken",
         session_id="test-session",
         sequence_id=1,
+        timestamp=datetime.now(UTC),
     )
     rows = [
         {
@@ -498,13 +499,14 @@ async def test_upsert_ticks_sqlite(tmp_path: Path) -> None:
             )
         )
         await s.commit()
-    spid = await resolve_symbol_public_id(repo, "ETH-USD")
+    spid = await resolve_symbol_public_id(repo, "ETH-USD", as_of=datetime.now(UTC))
     assert spid is not None
     _, inst_pub_id = await repo.ensure_instrument(
         symbol_public_id=spid,
         exchange="kraken",
         session_id="test-session",
         sequence_id=1,
+        timestamp=datetime.now(UTC),
     )
     tick_rows = [
         {

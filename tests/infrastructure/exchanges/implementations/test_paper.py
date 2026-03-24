@@ -52,7 +52,7 @@ class DummyRepo(SimpleNamespace):
         exchange: str,
         session_id: str,
         sequence_id: int,
-        timestamp: datetime | None = None,
+        timestamp: datetime = datetime(2024, 1, 1, tzinfo=UTC),
     ) -> tuple[int, str]:
         """Insert or update instrument record."""
         return (1, "inst-pub-1")

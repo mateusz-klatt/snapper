@@ -93,6 +93,7 @@ class TestSignalService:
             exchange="testexchange",
             session_id="test-session",
             sequence_id=1,
+            timestamp=FIXED_TEST_TIME,
         )
         tracker = SequenceTracker()
         signal_id = await signal_service.store_signal(
@@ -134,6 +135,7 @@ class TestSignalService:
             exchange="testexchange",
             session_id="test-session",
             sequence_id=1,
+            timestamp=FIXED_TEST_TIME,
         )
         tracker = SequenceTracker()
         signal_id = await signal_service.store_signal(
@@ -169,6 +171,7 @@ class TestSignalService:
             exchange="testexchange",
             session_id="test-session",
             sequence_id=1,
+            timestamp=FIXED_TEST_TIME,
         )
         envelope_public_id = "envelope-public-id-abc"
         envelope_timestamp = datetime(2024, 6, 15, 12, 0, 0, tzinfo=UTC)
@@ -211,6 +214,7 @@ class TestSignalService:
             exchange="testexchange",
             session_id="test-session",
             sequence_id=1,
+            timestamp=FIXED_TEST_TIME,
         )
         tracker = SequenceTracker()
         signal_ids = []
@@ -247,6 +251,7 @@ class TestSignalService:
             exchange="testexchange",
             session_id="test-session",
             sequence_id=1,
+            timestamp=FIXED_TEST_TIME,
         )
         tracker = SequenceTracker()
         await signal_service.store_signal(
@@ -297,12 +302,14 @@ class TestSignalService:
             exchange="testexchange",
             session_id="test-session",
             sequence_id=1,
+            timestamp=FIXED_TEST_TIME,
         )
         await test_repository.ensure_instrument(
             symbol_public_id=ETHUSD_SYMBOL_PUBLIC_ID,
             exchange="testexchange",
             session_id="test-session",
             sequence_id=1,
+            timestamp=FIXED_TEST_TIME,
         )
         btc_signal = StrategySignal(
             instrument="BTCUSD",
@@ -356,12 +363,14 @@ class TestSignalService:
             exchange="exchange_a",
             session_id="test-session",
             sequence_id=1,
+            timestamp=FIXED_TEST_TIME,
         )
         await test_repository.ensure_instrument(
             symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
             exchange="exchange_b",
             session_id="test-session",
             sequence_id=1,
+            timestamp=FIXED_TEST_TIME,
         )
         btc_signal = StrategySignal(
             instrument="BTCUSD",
@@ -672,6 +681,7 @@ class TestSignalServiceCoverage:
             exchange="testexchange",
             session_id="test-session",
             sequence_id=1,
+            timestamp=FIXED_TEST_TIME,
         )
         mock_session = MagicMock()
         mock_execute_result = MagicMock()
@@ -770,6 +780,7 @@ class TestSignalServiceCoverage:
             exchange="testexchange",
             session_id="test-session",
             sequence_id=1,
+            timestamp=FIXED_TEST_TIME,
         )
         mock_session = AsyncMock()
         mock_result = MagicMock()

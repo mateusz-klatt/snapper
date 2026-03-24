@@ -463,7 +463,9 @@ class PaperExchangeClient(ExchangeClientBase):
         inst_pids = await self._resolve_instrument_public_ids([symbol], self.source_exchange)
         if not inst_pids:
             raise ValueError(f"No ticker data found for {symbol}")
-        snapshots = await self.repository.get_market_snapshots(inst_pids, start_dt, end_dt)
+        snapshots = await self.repository.get_market_snapshots(
+            inst_pids, start_dt, end_dt, as_of=datetime.now(UTC)
+        )
         if not snapshots:
             raise ValueError(f"No ticker data found for {symbol}")
         latest = snapshots[-1]
@@ -508,7 +510,12 @@ class PaperExchangeClient(ExchangeClientBase):
         else:
             start_dt = end_dt - timedelta(hours=24)
         candles = await self.repository.get_candles(
-            symbol, timeframe, start_dt, end_dt, exchange=self.source_exchange
+            symbol,
+            timeframe,
+            start_dt,
+            end_dt,
+            exchange=self.source_exchange,
+            as_of=datetime.now(UTC),
         )
         ohlcv_list = [
             OhlcvSnapshot(
@@ -572,7 +579,9 @@ class PaperExchangeClient(ExchangeClientBase):
         inst_pids = await self._resolve_instrument_public_ids(symbols, exchange_name)
         if not inst_pids:
             return
-        snapshots = await self.repository.get_market_snapshots(inst_pids, start_dt, end_dt)
+        snapshots = await self.repository.get_market_snapshots(
+            inst_pids, start_dt, end_dt, as_of=datetime.now(UTC)
+        )
         for snap in snapshots:
             ticker = TickerUpdate(
                 symbol=snap.get("symbol", ""),
@@ -648,7 +657,12 @@ class PaperExchangeClient(ExchangeClientBase):
         replay_candles: list[CandleUpdate] = []
         for symbol in symbols:
             candles = await self.repository.get_candles(
-                symbol, interval, start_dt, end_dt, exchange=exchange_name
+                symbol,
+                interval,
+                start_dt,
+                end_dt,
+                exchange=exchange_name,
+                as_of=datetime.now(UTC),
             )
             for candle_dict in candles:
                 replay_candles.append(
@@ -737,7 +751,11 @@ class PaperExchangeClient(ExchangeClientBase):
         replay_trades: list[TradeUpdate] = []
         for symbol in symbols:
             trades = await self.repository.get_trades(
-                symbol, start_dt, end_dt, exchange=exchange_name
+                symbol,
+                start_dt,
+                end_dt,
+                exchange=exchange_name,
+                as_of=datetime.now(UTC),
             )
             for trade_dict in trades:
                 replay_trades.append(

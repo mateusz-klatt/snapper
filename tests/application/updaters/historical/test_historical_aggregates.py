@@ -1,6 +1,5 @@
 """Unit tests for PolygonAggregatesBackfillService."""
 
-from collections.abc import Awaitable
 from collections.abc import Callable
 from datetime import UTC
 from datetime import date
@@ -278,9 +277,9 @@ async def test_ensure_instrument_caches_result(service: PolygonAggregatesBackfil
         base_currency="ETH",
         quote_currency="USD",
     )
-    ensure_instrument = cast(Callable[[Any], Awaitable[str]], cast(Any, service)._ensure_instrument)
-    result = await ensure_instrument(context)
-    repeated_result = await ensure_instrument(context)
+    ensure_instrument = cast(Any, service)._ensure_instrument
+    result = await ensure_instrument(context, as_of=datetime.now(UTC))
+    repeated_result = await ensure_instrument(context, as_of=datetime.now(UTC))
     assert result == repeated_result == async_repo.return_value[1]
     assert len(async_repo.calls) == 1
     call = async_repo.calls[0]
@@ -312,11 +311,9 @@ async def test_ensure_instrument_raises_when_symbol_not_resolved(
         base_currency="ETH",
         quote_currency="USD",
     )
-    ensure_instrument = cast(
-        Callable[[Any], Awaitable[tuple[int, str]]], cast(Any, service)._ensure_instrument
-    )
+    ensure_instrument = cast(Any, service)._ensure_instrument
     with pytest.raises(ValueError, match="No active Symbol row for ETH-USD"):
-        await ensure_instrument(context)
+        await ensure_instrument(context, as_of=datetime.now(UTC))
 
 
 def test_build_candle_rows(service: PolygonAggregatesBackfillService) -> None:
@@ -2248,8 +2245,8 @@ async def test_ensure_instrument_caches_id(
         base_currency="BTC",
         quote_currency=None,
     )
-    first = await service_private._ensure_instrument(context)
-    second = await service_private._ensure_instrument(context)
+    first = await service_private._ensure_instrument(context, as_of=datetime.now(UTC))
+    second = await service_private._ensure_instrument(context, as_of=datetime.now(UTC))
     assert first == second == "inst-pub-42"
     assert len(calls) == 1
     assert calls[0]["exchange"] == "polygon"

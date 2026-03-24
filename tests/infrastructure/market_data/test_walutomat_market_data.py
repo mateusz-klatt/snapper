@@ -186,7 +186,7 @@ async def test_update_market_snapshots_saves(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(
         svc,
         "_resolve_batch_instrument_ids",
-        lambda ns, ex: {"EUR-PLN": "inst-eur", "USD-PLN": "inst-usd"},
+        lambda ns, ex, as_of: {"EUR-PLN": "inst-eur", "USD-PLN": "inst-usd"},
     )
     monkeypatch.setattr(svc, "_persist_snapshots_scd2", lambda snaps: len(snaps))
     count = await svc.update_market_snapshots(timeout_seconds=1)
@@ -460,7 +460,7 @@ async def test_update_market_snapshots_persists_via_scd2(
     monkeypatch.setattr(
         service,
         "_resolve_batch_instrument_ids",
-        lambda ns, ex: {"EUR-PLN": "inst-eur-456"},
+        lambda ns, ex, as_of: {"EUR-PLN": "inst-eur-456"},
     )
     persisted: list[list[MarketSnapshot]] = []
 
@@ -852,7 +852,7 @@ async def test_update_market_snapshots_skips_unresolved(
     monkeypatch.setattr(
         service,
         "_resolve_batch_instrument_ids",
-        lambda ns, ex: {"EUR-PLN": "inst-eur"},
+        lambda ns, ex, as_of: {"EUR-PLN": "inst-eur"},
     )
     persisted: list[list[MarketSnapshot]] = []
 

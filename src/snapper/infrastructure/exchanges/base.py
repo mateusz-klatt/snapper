@@ -363,7 +363,10 @@ class ExchangeClientBase(ABC):
         if self.repository is None or self._tracker is None:
             return None
         try:
-            symbol_pid = await resolve_symbol_public_id(self.repository, request.symbol)
+            order_time = datetime.fromtimestamp(order.timestamp, tz=UTC)
+            symbol_pid = await resolve_symbol_public_id(
+                self.repository, request.symbol, as_of=order_time
+            )
             if symbol_pid is None:
                 logger.error(f"No active Symbol row for {request.symbol}, cannot log order")
                 return None
@@ -372,9 +375,9 @@ class ExchangeClientBase(ABC):
                 exchange=self.exchange_name,
                 session_id=self._tracker.session_id,
                 sequence_id=self._tracker.next_sequence("instruments"),
+                timestamp=order_time,
             )
             seq = self._tracker.next_sequence("orders")
-            order_time = datetime.fromtimestamp(order.timestamp, tz=UTC)
             return await self.repository.insert_order(
                 instrument_public_id=instrument_public_id,
                 client_order_id=order.client_order_id,

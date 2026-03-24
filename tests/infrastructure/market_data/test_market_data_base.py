@@ -279,7 +279,7 @@ class TestMarketSnapshotServiceCoverage:
             patch.object(
                 service,
                 "_resolve_batch_instrument_ids",
-                side_effect=lambda ns, ex: _make_instrument_map(list(ns)),
+                side_effect=lambda ns, ex, as_of: _make_instrument_map(list(ns)),
             ),
             patch.object(
                 service,
@@ -567,7 +567,7 @@ def test_resolve_instrument_public_id_found() -> None:
     """
     session = _FakeSession(["sym-pub-1", "inst-pub-1"])
     updater = _make_updater_with_session(session)
-    result = updater._resolve_instrument_public_id("BTC-USD", "kraken")
+    result = updater._resolve_instrument_public_id("BTC-USD", "kraken", datetime.now(UTC))
     assert result == "inst-pub-1"
 
 
@@ -580,7 +580,7 @@ def test_resolve_instrument_public_id_symbol_not_found() -> None:
     """
     session = _FakeSession([None])
     updater = _make_updater_with_session(session)
-    result = updater._resolve_instrument_public_id("UNKNOWN", "kraken")
+    result = updater._resolve_instrument_public_id("UNKNOWN", "kraken", datetime.now(UTC))
     assert result is None
 
 
@@ -593,7 +593,7 @@ def test_resolve_instrument_public_id_instrument_not_found() -> None:
     """
     session = _FakeSession(["sym-pub-1", None])
     updater = _make_updater_with_session(session)
-    result = updater._resolve_instrument_public_id("BTC-USD", "kraken")
+    result = updater._resolve_instrument_public_id("BTC-USD", "kraken", datetime.now(UTC))
     assert result is None
 
 
@@ -606,7 +606,9 @@ def test_resolve_batch_instrument_ids_mixed() -> None:
     """
     session = _FakeSession(["sym-btc", "inst-btc", None])
     updater = _make_updater_with_session(session)
-    result = updater._resolve_batch_instrument_ids({"BTC-USD", "NOPE"}, "kraken")
+    result = updater._resolve_batch_instrument_ids(
+        {"BTC-USD", "NOPE"}, "kraken", as_of=datetime.now(UTC)
+    )
     assert len(result) == 1
     found_values = set(result.values())
     assert "inst-btc" in found_values
@@ -621,7 +623,7 @@ def test_resolve_batch_instrument_ids_instrument_missing() -> None:
     """
     session = _FakeSession(["sym-pub-1", None])
     updater = _make_updater_with_session(session)
-    result = updater._resolve_batch_instrument_ids({"BTC-USD"}, "kraken")
+    result = updater._resolve_batch_instrument_ids({"BTC-USD"}, "kraken", as_of=datetime.now(UTC))
     assert result == {}
 
 
@@ -694,15 +696,16 @@ def test_persist_snapshots_scd2_calls_close_and_insert() -> None:
     assert first_call.kwargs["bus_time"] == now
 
 
-def test_persist_snapshots_scd2_uses_fallback_timestamp() -> None:
-    """Use current UTC time when snapshot has no timestamp.
+def test_persist_snapshots_scd2_passes_snapshot_timestamp_directly() -> None:
+    """Pass snap.timestamp directly as bus_time without fallback.
 
-    Given: Snapshot with timestamp=None,
+    Given: Snapshot with explicit timestamp,
     When: _persist_snapshots_scd2 is called,
-    Then: close_and_insert_sync receives a valid UTC bus_time.
+    Then: close_and_insert_sync receives the exact snapshot timestamp as bus_time.
     """
     session = _FakeSession([])
     updater = _make_updater_with_session(session)
+    now = datetime.now(UTC)
     snap = MarketSnapshot(
         instrument_public_id="inst-1",
         bid=100.0,
@@ -717,13 +720,11 @@ def test_persist_snapshots_scd2_uses_fallback_timestamp() -> None:
         change_24h=1.0,
         spread=1.0,
         spread_pct=1.0,
-        timestamp=None,
+        timestamp=now,
         session_id="s1",
         sequence_id=1,
     )
-    before = datetime.now(UTC)
     with patch("snapper.infrastructure.market_data.base.close_and_insert_sync") as mock_ci:
         updater._persist_snapshots_scd2([snap])
-    after = datetime.now(UTC)
     bus_time = mock_ci.call_args.kwargs["bus_time"]
-    assert before <= bus_time <= after
+    assert bus_time is now

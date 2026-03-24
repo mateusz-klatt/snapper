@@ -341,14 +341,14 @@ async def test_upsert_candles_preserves_caller_supplied_known_to(
 
 
 @pytest.mark.asyncio
-async def test_upsert_candles_generates_timestamp_when_missing(
+async def test_upsert_candles_requires_caller_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify upsert_candles generates timestamp when not provided.
+    """Verify upsert_candles uses caller-supplied timestamp.
 
-    Given: A row without a 'timestamp' key,
+    Given: A row with an explicit 'timestamp' key,
     When: upsert_candles is called,
-    Then: The row gets a generated UTC timestamp.
+    Then: The row keeps the caller-supplied timestamp.
     """
     added_objects: list[Any] = []
 
@@ -359,7 +359,7 @@ async def test_upsert_candles_generates_timestamp_when_missing(
     session.execute = _execute
     session.add = lambda obj: added_objects.append(obj)
     repo = _make_repo(lambda: _session_factory(session), dialect="custom")
-    before = datetime.now(UTC)
+    fixed_time = datetime(2024, 1, 1, tzinfo=UTC)
     rows = [
         {
             "instrument_public_id": "fake-inst-pid",
@@ -374,11 +374,11 @@ async def test_upsert_candles_generates_timestamp_when_missing(
             "trades": 10,
             "session_id": "test-session",
             "sequence_id": 1,
+            "timestamp": fixed_time,
         },
     ]
     await repo.upsert_candles(rows)
-    assert isinstance(rows[0]["timestamp"], datetime)
-    assert rows[0]["timestamp"] >= before
+    assert rows[0]["timestamp"] == fixed_time
 
 
 @pytest.mark.asyncio
@@ -512,11 +512,11 @@ async def test_upsert_market_snapshots_closes_and_replaces() -> None:
 
 @pytest.mark.asyncio
 async def test_upsert_market_snapshots_generates_defaults() -> None:
-    """Generate public_id, known_to, and timestamp when missing.
+    """Generate public_id and known_to when missing; timestamp is required.
 
-    Given: Row dict without public_id, known_to, or timestamp,
+    Given: Row dict without public_id or known_to but with timestamp,
     When: upsert_market_snapshots is called,
-    Then: Defaults are generated before insert.
+    Then: Defaults are generated for public_id and known_to.
     """
     added_objects: list[Any] = []
 
@@ -527,6 +527,7 @@ async def test_upsert_market_snapshots_generates_defaults() -> None:
     session.execute = _execute
     session.add = lambda obj: added_objects.append(obj)
     repo = _make_repo(lambda: _session_factory(session), dialect="custom")
+    fixed_time = datetime(2024, 1, 1, tzinfo=UTC)
     rows: list[dict[str, Any]] = [
         {
             "instrument_public_id": "inst-xyz",
@@ -534,16 +535,15 @@ async def test_upsert_market_snapshots_generates_defaults() -> None:
             "ask": 51.0,
             "session_id": "s1",
             "sequence_id": 1,
+            "timestamp": fixed_time,
         },
     ]
-    before = datetime.now(UTC)
     result = await repo.upsert_market_snapshots(rows)
-    after = datetime.now(UTC)
     assert result == 1
     assert "public_id" in rows[0]
     assert len(rows[0]["public_id"]) > 0
     assert rows[0]["known_to"] == KNOWN_TO_MAX
-    assert before <= rows[0]["timestamp"] <= after
+    assert rows[0]["timestamp"] == fixed_time
 
 
 @pytest.mark.asyncio
@@ -666,19 +666,21 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
             )
         )
         await s.commit()
-    spid = await resolve_symbol_public_id(repo, "BTC-USD")
+    spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=datetime.now(UTC))
     assert spid is not None
     instrument_id, instrument_public_id = await repo.ensure_instrument(
         symbol_public_id=spid,
         exchange="kraken",
         session_id="test-session",
         sequence_id=1,
+        timestamp=datetime.now(UTC),
     )
     duplicate_id, _ = await repo.ensure_instrument(
         symbol_public_id=spid,
         exchange="kraken",
         session_id="test-session",
         sequence_id=1,
+        timestamp=datetime.now(UTC),
     )
     assert duplicate_id == instrument_id
     base_ts = datetime.now(UTC) - timedelta(minutes=10)
@@ -746,6 +748,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         base_ts - timedelta(minutes=1),
         base_ts + timedelta(minutes=2),
         exchange="kraken",
+        as_of=datetime.now(UTC),
     )
     assert len(candle_results) == 2
     trade_results = await repo.get_trades(
@@ -753,6 +756,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         base_ts - timedelta(minutes=1),
         base_ts + timedelta(minutes=2),
         exchange="kraken",
+        as_of=datetime.now(UTC),
     )
     assert len(trade_results) == 2
     order_id, order_public_id = await repo.insert_order(
@@ -829,6 +833,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         [snapshot_inst_pid],
         base_ts - timedelta(seconds=1),
         base_ts + timedelta(seconds=1),
+        as_of=datetime.now(UTC),
     )
     assert len(snapshots) == 1
     result_snapshot = snapshots[0]
@@ -973,7 +978,7 @@ class DummyRepository(Repository):
         exchange: str,
         session_id: str,
         sequence_id: int,
-        timestamp: datetime | None = None,
+        timestamp: datetime,
     ) -> tuple[int, str]:
         """Ensure instrument - no-op returning (0, stub-public-id)."""
         return (0, "stub-public-id")
@@ -1002,7 +1007,7 @@ class DummyRepository(Repository):
         return 0
 
     async def get_latest_candle_ids(
-        self, as_of: datetime | None = None
+        self, as_of: datetime
     ) -> dict[tuple[str, str], tuple[datetime, str]]:
         """Load latest candle IDs - returns empty dict for dummy."""
         return {}
@@ -1079,7 +1084,7 @@ class DummyRepository(Repository):
         start: datetime,
         end: datetime,
         exchange: str,
-        as_of: datetime | None = None,
+        as_of: datetime,
     ) -> list[dict[str, Any]]:
         """Get candles - returns empty list."""
         return []
@@ -1090,7 +1095,7 @@ class DummyRepository(Repository):
         start: datetime,
         end: datetime,
         exchange: str,
-        as_of: datetime | None = None,
+        as_of: datetime,
     ) -> list[dict[str, Any]]:
         """Get trades - returns empty list."""
         return []
@@ -1100,7 +1105,7 @@ class DummyRepository(Repository):
         instrument_public_ids: list[str],
         start: datetime,
         end: datetime,
-        as_of: datetime | None = None,
+        as_of: datetime,
     ) -> list[dict[str, Any]]:
         """Get market snapshots - returns empty list."""
         return []
@@ -1626,6 +1631,7 @@ class TestSQLAlchemyRepositoryDialects:
                 exchange="kraken",
                 session_id="test-session",
                 sequence_id=1,
+                timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             )
             assert result == (123, "mock-public-id-123")
             mock_session.rollback.assert_called_once()
@@ -1700,6 +1706,7 @@ class TestSQLAlchemyRepositoryDialects:
                     exchange="kraken",
                     session_id="test-session",
                     sequence_id=1,
+                    timestamp=datetime(2024, 1, 1, tzinfo=UTC),
                 )
             mock_session.rollback.assert_called_once()
 
@@ -1731,6 +1738,7 @@ class TestSQLAlchemyRepositoryDialects:
                 exchange="kraken",
                 session_id="test-session",
                 sequence_id=1,
+                timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             )
             assert result == (456, "mock-public-id-456")
             mock_session.add.assert_not_called()
@@ -1755,7 +1763,7 @@ class TestSQLAlchemyRepositoryDialects:
             start = datetime(2024, 1, 1, tzinfo=UTC)
             end = datetime(2024, 1, 1, 1, 0, tzinfo=UTC)
             result = await mock_postgres_repo.get_candles(
-                "NONEXISTENT", "1m", start, end, exchange="kraken"
+                "NONEXISTENT", "1m", start, end, exchange="kraken", as_of=start
             )
             assert result == []
 
@@ -1783,7 +1791,7 @@ class TestSQLAlchemyRepositoryDialects:
             start = datetime(2024, 1, 1, tzinfo=UTC)
             end = datetime(2024, 1, 1, 1, 0, tzinfo=UTC)
             result = await mock_postgres_repo.get_candles(
-                "NONEXISTENT", "1m", start, end, exchange="kraken"
+                "NONEXISTENT", "1m", start, end, exchange="kraken", as_of=start
             )
             assert result == []
 
@@ -1823,7 +1831,7 @@ class TestSQLAlchemyRepositoryDialects:
             start = datetime(2024, 1, 1, tzinfo=UTC)
             end = datetime(2024, 1, 1, 1, 0, tzinfo=UTC)
             result = await mock_postgres_repo.get_candles(
-                "BTC-USD", "1m", start, end, exchange="kraken"
+                "BTC-USD", "1m", start, end, exchange="kraken", as_of=start
             )
             expected: list[dict[str, Any]] = [
                 {
@@ -1862,7 +1870,7 @@ class TestSQLAlchemyRepositoryDialects:
             start = datetime(2024, 1, 1, tzinfo=UTC)
             end = datetime(2024, 1, 1, 1, 0, tzinfo=UTC)
             result = await mock_postgres_repo.get_candles(
-                "BTC-USD", "1m", start, end, exchange="kraken"
+                "BTC-USD", "1m", start, end, exchange="kraken", as_of=start
             )
             assert result == []
 
@@ -1925,6 +1933,7 @@ async def test_get_trades_returns_empty_when_instrument_missing(
         datetime.now(UTC),
         datetime.now(UTC),
         exchange="kraken",
+        as_of=datetime.now(UTC),
     )
     assert result == []
 
@@ -1963,6 +1972,7 @@ async def test_get_trades_with_exchange_filter(
         datetime.now(UTC),
         datetime.now(UTC),
         exchange="kraken",
+        as_of=datetime.now(UTC),
     )
     assert result == []
 
@@ -1980,7 +1990,7 @@ class _MinimalRepository(Repository):
         return "sqlite"
 
     async def get_latest_candle_ids(
-        self, as_of: datetime | None = None
+        self, as_of: datetime
     ) -> dict[tuple[str, str], tuple[datetime, str]]:
         return {}
 
@@ -1999,7 +2009,7 @@ class _MinimalRepository(Repository):
         exchange: str,
         session_id: str,
         sequence_id: int,
-        timestamp: datetime | None = None,
+        timestamp: datetime,
     ) -> tuple[int, str]:
         return (0, "stub-public-id")
 
@@ -2072,7 +2082,7 @@ class _MinimalRepository(Repository):
         start: datetime,
         end: datetime,
         exchange: str,
-        as_of: datetime | None = None,
+        as_of: datetime,
     ) -> list[dict[str, Any]]:
         return []
 
@@ -2082,7 +2092,7 @@ class _MinimalRepository(Repository):
         start: datetime,
         end: datetime,
         exchange: str,
-        as_of: datetime | None = None,
+        as_of: datetime,
     ) -> list[dict[str, Any]]:
         return []
 
@@ -2091,7 +2101,7 @@ class _MinimalRepository(Repository):
         instrument_public_ids: list[str],
         start: datetime,
         end: datetime,
-        as_of: datetime | None = None,
+        as_of: datetime,
     ) -> list[dict[str, Any]]:
         return []
 

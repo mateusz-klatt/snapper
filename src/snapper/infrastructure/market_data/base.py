@@ -13,7 +13,6 @@ The updater services are responsible for:
 
 from abc import ABC
 from abc import abstractmethod
-from datetime import UTC
 from datetime import datetime
 from typing import Any
 
@@ -69,7 +68,7 @@ class MarketSnapshotUpdaterService(ABC):
         ...
 
     def _resolve_instrument_public_id(
-        self, native_symbol: str, exchange: str, as_of: datetime | None = None
+        self, native_symbol: str, exchange: str, as_of: datetime
     ) -> str | None:
         """Resolve native_symbol to instrument_public_id via 2-hop lookup.
 
@@ -79,12 +78,12 @@ class MarketSnapshotUpdaterService(ABC):
         Args:
             native_symbol: Native symbol string (e.g. 'BTC-USD').
             exchange: Exchange identifier (lowercase, e.g. 'kraken').
-            as_of: Point-in-time for temporal query. Defaults to now.
+            as_of: Point-in-time for temporal query.
 
         Returns:
             Instrument public_id string, or None if resolution fails.
         """
-        now = as_of or datetime.now(UTC)
+        now = as_of
         with self.repository.session_factory() as session:
             sym_row = (
                 session.execute(
@@ -114,19 +113,19 @@ class MarketSnapshotUpdaterService(ABC):
             return inst_row
 
     def _resolve_batch_instrument_ids(
-        self, native_symbols: set[str], exchange: str, as_of: datetime | None = None
+        self, native_symbols: set[str], exchange: str, as_of: datetime
     ) -> dict[str, str]:
         """Resolve a batch of native symbols to instrument_public_id.
 
         Args:
             native_symbols: Set of native symbol strings.
             exchange: Exchange identifier (lowercase).
-            as_of: Point-in-time for temporal query. Defaults to now.
+            as_of: Point-in-time for temporal query.
 
         Returns:
             Mapping of native_symbol -> instrument_public_id for successful lookups.
         """
-        now = as_of or datetime.now(UTC)
+        now = as_of
         result: dict[str, str] = {}
         with self.repository.session_factory() as session:
             for ns in native_symbols:
@@ -182,7 +181,7 @@ class MarketSnapshotUpdaterService(ABC):
         with self.repository.session_factory() as session:
             count = 0
             for snap in snapshots:
-                bus_time = snap.timestamp or datetime.now(UTC)
+                bus_time = snap.timestamp
                 new_values: dict[str, Any] = {
                     "instrument_public_id": snap.instrument_public_id,
                     "bid": snap.bid,

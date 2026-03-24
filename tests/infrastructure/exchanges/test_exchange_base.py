@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from unittest.mock import ANY
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -285,7 +286,7 @@ async def test_log_order_to_db_logs_successfully(mock_resolve: AsyncMock) -> Non
     )
     result = await client._log_order_to_db(request, order)
     assert result == (99, "order-uuid-123")
-    mock_resolve.assert_awaited_once_with(mock_repo, "BTC-USD")
+    mock_resolve.assert_awaited_once_with(mock_repo, "BTC-USD", as_of=ANY)
     call_kwargs = mock_repo.ensure_instrument.call_args.kwargs
     assert call_kwargs["symbol_public_id"] == "fake-spid"
     assert call_kwargs["exchange"] == "dummy"
@@ -337,7 +338,7 @@ async def test_log_order_to_db_returns_none_when_symbol_not_resolved(
     )
     result = await client._log_order_to_db(request, order)
     assert result is None
-    mock_resolve.assert_awaited_once_with(mock_repo, "BTC-USD")
+    mock_resolve.assert_awaited_once_with(mock_repo, "BTC-USD", as_of=ANY)
     mock_repo.ensure_instrument.assert_not_awaited()
     mock_repo.insert_order.assert_not_awaited()
 
@@ -384,7 +385,7 @@ async def test_log_order_to_db_parses_symbol_without_delimiter(_mock_resolve: As
     )
     result = await client._log_order_to_db(request, order)
     assert result == (99, "order-uuid-123")
-    _mock_resolve.assert_awaited_once_with(mock_repo, "BTCUSD")
+    _mock_resolve.assert_awaited_once_with(mock_repo, "BTCUSD", as_of=ANY)
     call_kwargs = mock_repo.ensure_instrument.call_args.kwargs
     assert call_kwargs["symbol_public_id"] == "fake-spid"
     assert call_kwargs["exchange"] == "dummy"

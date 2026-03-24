@@ -244,7 +244,7 @@ async def test_update_market_snapshots_persists_results(
     monkeypatch.setattr(
         service,
         "_resolve_batch_instrument_ids",
-        lambda ns, ex: {"BTC-PLN": "inst-btc-123"},
+        lambda ns, ex, as_of: {"BTC-PLN": "inst-btc-123"},
     )
     monkeypatch.setattr(
         service,
@@ -689,7 +689,7 @@ async def test_update_market_snapshots_skips_unresolved(
     monkeypatch.setattr(
         service,
         "_resolve_batch_instrument_ids",
-        lambda ns, ex: {"BTC-PLN": "inst-btc"},
+        lambda ns, ex, as_of: {"BTC-PLN": "inst-btc"},
     )
     persisted: list[list[MarketSnapshot]] = []
 

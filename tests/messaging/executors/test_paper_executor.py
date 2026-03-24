@@ -44,7 +44,10 @@ def _make_repo_mock() -> MagicMock:
 
 
 async def fake_get_market_snapshots(
-    instrument_public_ids: list[str], start_dt: datetime, end_dt: datetime
+    instrument_public_ids: list[str],
+    start_dt: datetime,
+    end_dt: datetime,
+    as_of: datetime | None = None,
 ) -> list[dict]:
     """Return fake market snapshot data for testing."""
     return [
@@ -70,7 +73,12 @@ async def fake_resolve_instrument_public_ids(symbols: list[str], exchange: str) 
 
 
 async def fake_get_candles(
-    symbol: str, interval: str, start_dt: datetime, end_dt: datetime, exchange: str
+    symbol: str,
+    interval: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    exchange: str,
+    as_of: datetime | None = None,
 ) -> list[dict]:
     """Return fake candle data for testing."""
     return [
@@ -88,7 +96,11 @@ async def fake_get_candles(
 
 
 async def fake_get_trades(
-    symbol: str, start_dt: datetime, end_dt: datetime, exchange: str
+    symbol: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    exchange: str,
+    as_of: datetime | None = None,
 ) -> list[dict]:
     """Return fake trade data for testing."""
     return [

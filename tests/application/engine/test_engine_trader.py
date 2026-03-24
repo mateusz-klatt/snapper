@@ -627,6 +627,7 @@ class _RepositoryStub:
         exchange: str,
         session_id: str = "",
         sequence_id: int = 0,
+        timestamp: datetime,
     ) -> tuple[int, str]:
         self.calls.append(
             {

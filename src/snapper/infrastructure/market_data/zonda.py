@@ -100,7 +100,10 @@ class ZondaSnapshotUpdaterService(MarketSnapshotUpdaterService):
             raw_snapshots = await self._collect_snapshots_with_timeout(timeout_seconds)
             if raw_snapshots:
                 native_symbols = set(raw_snapshots.keys())
-                symbol_to_inst = self._resolve_batch_instrument_ids(native_symbols, EXCHANGE_NAME)
+                now = datetime.now(UTC)
+                symbol_to_inst = self._resolve_batch_instrument_ids(
+                    native_symbols, EXCHANGE_NAME, as_of=now
+                )
                 snapshots: list[MarketSnapshot] = []
                 skipped = 0
                 for symbol, snap in raw_snapshots.items():

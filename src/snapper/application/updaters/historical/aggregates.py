@@ -733,9 +733,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         )
         return None
 
-    async def _ensure_instrument(
-        self, context: _SymbolContext, as_of: datetime | None = None
-    ) -> str:
+    async def _ensure_instrument(self, context: _SymbolContext, as_of: datetime) -> str:
         """Ensure instrument exists in database, return its public_id.
 
         Uses cache to avoid repeated database lookups.  Resolves the

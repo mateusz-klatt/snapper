@@ -145,7 +145,10 @@ class KrakenSnapshotUpdaterService(MarketSnapshotUpdaterService):
         unique_by_symbol: dict[str, TickerUpdate] = dict(raw_batch)
 
         native_symbols = set(unique_by_symbol.keys())
-        symbol_to_inst = self._resolve_batch_instrument_ids(native_symbols, EXCHANGE_NAME)
+        now = datetime.now(UTC)
+        symbol_to_inst = self._resolve_batch_instrument_ids(
+            native_symbols, EXCHANGE_NAME, as_of=now
+        )
 
         snapshots: list[MarketSnapshot] = []
         skipped = 0

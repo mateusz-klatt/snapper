@@ -7,6 +7,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 from typing import cast
+from unittest.mock import ANY
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import Mock
@@ -447,7 +448,7 @@ async def test_save_to_db_handles_non_candle_and_missing_repo(
         open_at=datetime.now(UTC),
     )
     await pub._save_to_db("BTC-USD", candle)
-    resolve_mock.assert_awaited_once_with(repo, "BTC-USD")
+    resolve_mock.assert_awaited_once_with(repo, "BTC-USD", as_of=ANY)
     call_kwargs = repo.ensure_instrument.call_args.kwargs
     assert call_kwargs["symbol_public_id"] == "fake-spid"
     assert call_kwargs["exchange"] == "kraken"
@@ -1826,7 +1827,7 @@ class TestFeedPublisherCoverage:
             open_at=datetime.now(UTC),
         )
         await publisher_any._save_to_db("BTC-USD", bar_message)
-        resolve_mock.assert_awaited_once_with(mock_repository, "BTC-USD")
+        resolve_mock.assert_awaited_once_with(mock_repository, "BTC-USD", as_of=ANY)
         call_kwargs = mock_repository.ensure_instrument.call_args.kwargs
         assert call_kwargs["symbol_public_id"] == "fake-spid"
         assert call_kwargs["exchange"] == "kraken"
@@ -1948,7 +1949,7 @@ async def test_save_to_db_caches_instrument(monkeypatch: pytest.MonkeyPatch) -> 
     publisher.repository = repo
     bar_message = _build_bar_message("EUR-USD")
     await publisher._save_to_db("EUR-USD", bar_message)
-    resolve_mock.assert_awaited_once_with(repo, "EUR-USD")
+    resolve_mock.assert_awaited_once_with(repo, "EUR-USD", as_of=ANY)
     assert len(repo.instrument_calls) == 1
     call = repo.instrument_calls[0]
     assert call["symbol_public_id"] == "fake-spid"
@@ -2464,7 +2465,7 @@ async def test_ensure_instrument_resolves_and_caches(
     second = await pub._ensure_instrument("BTC-USD")
     assert first == "inst-pub-42"
     assert second == "inst-pub-42"
-    resolve_mock.assert_awaited_once_with(pub.repository, "BTC-USD")
+    resolve_mock.assert_awaited_once_with(pub.repository, "BTC-USD", as_of=ANY)
     call_kwargs = mock_upsert.call_args.kwargs
     assert call_kwargs["symbol_public_id"] == "fake-spid"
     assert call_kwargs["exchange"] == "kraken"
@@ -2489,5 +2490,5 @@ async def test_ensure_instrument_returns_none_when_symbol_not_resolved(
     monkeypatch.setattr("snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock)
     result = await pub._ensure_instrument("BTC-USD")
     assert result is None
-    resolve_mock.assert_awaited_once_with(pub.repository, "BTC-USD")
+    resolve_mock.assert_awaited_once_with(pub.repository, "BTC-USD", as_of=ANY)
     mock_upsert.assert_not_awaited()

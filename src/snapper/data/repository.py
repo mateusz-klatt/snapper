@@ -274,7 +274,7 @@ class Repository(ABC):
         exchange: str,
         session_id: str,
         sequence_id: int,
-        timestamp: datetime | None = None,
+        timestamp: datetime,
     ) -> tuple[int, str]:
         """Idempotent resolve-or-create for instrument identity.
 
@@ -327,7 +327,7 @@ class Repository(ABC):
 
     @abstractmethod
     async def get_latest_candle_ids(
-        self, as_of: datetime | None = None
+        self, as_of: datetime
     ) -> dict[tuple[str, str], tuple[datetime, str]]:
         """Load the latest candle public_id per (instrument_public_id, timeframe).
 
@@ -425,7 +425,7 @@ class Repository(ABC):
         start: datetime,
         end: datetime,
         exchange: AllExchange,
-        as_of: datetime | None = None,
+        as_of: datetime,
     ) -> list[dict[str, Any]]:
         """Retrieve candles for instrument in time range."""
         ...
@@ -437,7 +437,7 @@ class Repository(ABC):
         start: datetime,
         end: datetime,
         exchange: AllExchange,
-        as_of: datetime | None = None,
+        as_of: datetime,
     ) -> list[dict[str, Any]]:
         """Retrieve trades for instrument in time range."""
         ...
@@ -448,7 +448,7 @@ class Repository(ABC):
         instrument_public_ids: list[str],
         start: datetime,
         end: datetime,
-        as_of: datetime | None = None,
+        as_of: datetime,
     ) -> list[dict[str, Any]]:
         """Retrieve active market snapshots for instruments in time range."""
         ...
@@ -546,10 +546,10 @@ class SQLAlchemyRepository(Repository):
                 raise
 
     async def get_latest_candle_ids(
-        self, as_of: datetime | None = None
+        self, as_of: datetime
     ) -> dict[tuple[str, str], tuple[datetime, str]]:
         """Load the latest candle public_id per (instrument_public_id, timeframe)."""
-        now = as_of or datetime.now(UTC)
+        now = as_of
         async with self.session() as s:
             latest = (
                 select(
@@ -589,7 +589,7 @@ class SQLAlchemyRepository(Repository):
         exchange: str,
         session_id: str,
         sequence_id: int,
-        timestamp: datetime | None = None,
+        timestamp: datetime,
     ) -> tuple[int, str]:
         """Idempotent resolve-or-create for instrument identity.
 
@@ -598,7 +598,7 @@ class SQLAlchemyRepository(Repository):
         (id, public_id) of the existing row, or inserts a new one
         if none exists.  Never closes an existing version.
         """
-        bus_time = timestamp or datetime.now(UTC)
+        bus_time = timestamp
         async with self.session() as s:
             ts_filter, kt_filter = where_active(Instrument, bus_time)
             q = await s.execute(
@@ -804,8 +804,6 @@ class SQLAlchemyRepository(Repository):
                 r["public_id"] = str(uuid7())
             if "known_to" not in r:
                 r["known_to"] = KNOWN_TO_MAX
-            if "timestamp" not in r:
-                r["timestamp"] = datetime.now(UTC)
         async with self.session() as s:
             count = 0
             for r in rows:
@@ -988,10 +986,10 @@ class SQLAlchemyRepository(Repository):
         start: datetime,
         end: datetime,
         exchange: AllExchange,
-        as_of: datetime | None = None,
+        as_of: datetime,
     ) -> list[dict[str, Any]]:
         """Retrieve active candles for instrument within time range."""
-        now = as_of or datetime.now(UTC)
+        now = as_of
         async with self.session() as s:
             s_ts, s_kt = where_active(Symbol, now)
             sym_q = await s.execute(
@@ -1060,10 +1058,10 @@ class SQLAlchemyRepository(Repository):
         start: datetime,
         end: datetime,
         exchange: AllExchange,
-        as_of: datetime | None = None,
+        as_of: datetime,
     ) -> list[dict[str, Any]]:
         """Retrieve trades for instrument within time range."""
-        now = as_of or datetime.now(UTC)
+        now = as_of
         async with self.session() as s:
             s_ts, s_kt = where_active(Symbol, now)
             sym_q = await s.execute(
@@ -1122,10 +1120,10 @@ class SQLAlchemyRepository(Repository):
         instrument_public_ids: list[str],
         start: datetime,
         end: datetime,
-        as_of: datetime | None = None,
+        as_of: datetime,
     ) -> list[dict[str, Any]]:
         """Retrieve active market snapshots for instruments in time range."""
-        now = as_of or datetime.now(UTC)
+        now = as_of
         async with self.session() as s:
             q = await s.execute(
                 select(
@@ -1181,8 +1179,6 @@ class SQLAlchemyRepository(Repository):
                 r["public_id"] = str(uuid7())
             if "known_to" not in r:
                 r["known_to"] = KNOWN_TO_MAX
-            if "timestamp" not in r:
-                r["timestamp"] = datetime.now(UTC)
         async with self.session() as s:
             count = 0
             for r in rows:
