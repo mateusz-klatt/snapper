@@ -659,6 +659,14 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             session_id=sid,
             sequence_id=self._tracker.next_sequence(_SEQ_KEY_CAPABILITIES),
         )
+        self._ensure_instrument_identity(
+            session,
+            symbol_public_id,
+            "kraken",
+            now,
+            session_id=sid,
+            sequence_id=self._tracker.next_sequence("instruments"),
+        )
         return created, updated
 
     def _persist_rest_symbol(
@@ -712,6 +720,14 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             now,
             session_id=sid,
             sequence_id=self._tracker.next_sequence(_SEQ_KEY_CAPABILITIES),
+        )
+        self._ensure_instrument_identity(
+            session,
+            symbol_public_id,
+            "kraken",
+            now,
+            session_id=sid,
+            sequence_id=self._tracker.next_sequence("instruments"),
         )
         return created, updated
 

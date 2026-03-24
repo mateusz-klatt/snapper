@@ -27,6 +27,7 @@ from snapper.config.settings import get_settings_with_service
 from snapper.core.types import AliasChannel
 from snapper.core.types import AssetType
 from snapper.core.types import UpsertResult
+from snapper.data.models import Instrument
 from snapper.data.models import Setting
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
@@ -359,6 +360,53 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             )
             return "updated"
         return "unchanged"
+
+    @staticmethod
+    def _ensure_instrument_identity(
+        session: Any,
+        symbol_public_id: str,
+        exchange: str,
+        now: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> str:
+        """Ensure an Instrument row exists for the given symbol+exchange pair.
+
+        Idempotent sync variant of Repository.ensure_instrument. Looks up
+        the active Instrument by business key; inserts a new row if none
+        exists. Never closes an existing version.
+
+        Args:
+            session: SQLAlchemy sync session.
+            symbol_public_id: Public ID of the owning Symbol.
+            exchange: Exchange name (lowercase).
+            now: Current UTC timestamp for temporal fields.
+            session_id: Producer session identifier.
+            sequence_id: Per-topic monotonic counter.
+
+        Returns:
+            The instrument public_id (stable across SCD2 versions).
+        """
+        existing = session.execute(
+            select(Instrument).where(
+                Instrument.symbol_public_id == symbol_public_id,
+                Instrument.exchange == exchange,
+                Instrument.timestamp <= now,
+                Instrument.known_to > now,
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            return str(existing.public_id)
+        inst = Instrument(
+            symbol_public_id=symbol_public_id,
+            exchange=exchange,
+            timestamp=now,
+            session_id=session_id,
+            sequence_id=sequence_id,
+        )
+        session.add(inst)
+        session.flush()
+        return str(inst.public_id)
 
     @staticmethod
     def _deactivate_stale_capabilities(

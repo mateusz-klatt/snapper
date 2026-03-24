@@ -130,6 +130,14 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
                     session_id=sid,
                     sequence_id=self._tracker.next_sequence("capabilities"),
                 )
+                self._ensure_instrument_identity(
+                    session,
+                    symbol_public_id,
+                    "walutomat",
+                    now,
+                    session_id=sid,
+                    sequence_id=self._tracker.next_sequence("instruments"),
+                )
             deactivated = self._reconcile_capabilities(
                 session,
                 "walutomat",

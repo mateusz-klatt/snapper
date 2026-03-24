@@ -307,7 +307,7 @@ class TestKrakenSymbolUpdater:
         mock_repo.get_session.return_value = mock_session
         with patch.object(updater, "repository", mock_repo):
             await updater._update_database(symbols)
-        assert mock_session.add.call_count == 5
+        assert mock_session.add.call_count == 6
         mock_session.commit.assert_called_once()
 
 

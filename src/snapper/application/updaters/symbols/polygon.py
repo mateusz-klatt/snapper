@@ -207,6 +207,14 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
             session_id=sid,
             sequence_id=self._tracker.next_sequence("capabilities"),
         )
+        self._ensure_instrument_identity(
+            session,
+            symbol_public_id,
+            "polygon",
+            now,
+            session_id=sid,
+            sequence_id=self._tracker.next_sequence("instruments"),
+        )
         if alias_result == "created":
             stats["inserted"] += 1
         elif alias_result == "updated":

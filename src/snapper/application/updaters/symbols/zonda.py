@@ -188,6 +188,14 @@ class ZondaSymbolUpdaterService(SymbolUpdaterService[ZondaExchangeClient]):
                         session_id=sid,
                         sequence_id=self._tracker.next_sequence("capabilities"),
                     )
+                    self._ensure_instrument_identity(
+                        session,
+                        symbol_public_id,
+                        "zonda",
+                        now,
+                        session_id=sid,
+                        sequence_id=self._tracker.next_sequence("instruments"),
+                    )
                 deactivated = self._reconcile_capabilities(
                     session,
                     "zonda",

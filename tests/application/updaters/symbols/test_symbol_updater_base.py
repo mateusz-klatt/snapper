@@ -8,6 +8,7 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -2038,3 +2039,21 @@ def test_real_updater_capability_change_closes_old_inserts_new(
     public_ids = {c.public_id for c in all_caps}
     assert len(public_ids) == 1
     _assert_contiguous_intervals(all_caps)
+
+
+def test_ensure_instrument_identity_returns_existing() -> None:
+    """Verify _ensure_instrument_identity returns existing instrument public_id.
+
+    Given: A mock session where scalar_one_or_none returns an existing instrument,
+    When: _ensure_instrument_identity is called,
+    Then: It returns the existing public_id without inserting.
+    """
+    existing = SimpleNamespace(public_id="existing-inst-pid")
+    session = MagicMock()
+    session.execute.return_value.scalar_one_or_none.return_value = existing
+    now = datetime.now(UTC)
+    result = SymbolUpdaterService._ensure_instrument_identity(
+        session, "sym-pid", "kraken", now, session_id="s", sequence_id=1
+    )
+    assert result == "existing-inst-pid"
+    session.add.assert_not_called()

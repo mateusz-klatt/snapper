@@ -495,7 +495,7 @@ async def test_update_database_creates_and_updates(monkeypatch: pytest.MonkeyPat
         }
     ]
     await svc._update_database(symbols)
-    assert fake_session.add.call_count == 4
+    assert fake_session.add.call_count == 5
 
 
 def test_get_default_kwargs_and_setting_key() -> None:
