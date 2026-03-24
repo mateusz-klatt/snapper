@@ -93,9 +93,9 @@ Persistence layer with SQLAlchemy:
     - `session_id` (str, required) — producer session identity
     - `sequence_id` (int, required) — per-table monotonic counter for gap detection
 
-    `StrictDataSchema` (Pydantic base) provides sentinel defaults for these
-    fields. Objects published via MessagePublisher, REST middleware, or WS
-    handlers get real values stamped before delivery.
+    `StrictDataSchema` (Pydantic base) requires these fields at construction.
+    Producers must obtain values from a `SequenceTracker` before creating
+    the event, ensuring every payload is complete and identifiable from birth.
 
     All ORM models use a dual-key identity pattern:
 

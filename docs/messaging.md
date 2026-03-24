@@ -121,8 +121,8 @@ Every Data class inherits from `StrictDataSchema` and carries:
 | `public_id` | string | UUID7 external identifier, stable across REST and WS |
 | `type` | string | Literal type discriminator |
 | `timestamp` | datetime | Message creation time |
-| `session_id` | string | UUID7 of the producer process session (empty for unstamped messages) |
-| `sequence_id` | int | Monotonic counter per destination table within the session (0 for unstamped messages) |
+| `session_id` | string | UUID7 of the producer process session (required at construction) |
+| `sequence_id` | int | Monotonic counter per topic within the session (required at construction) |
 
 `session_id` and `sequence_id` are stream-provenance fields stamped automatically by
 `MessagePublisher`. Counters are keyed by destination DB table (not ZMQ topic), so all
