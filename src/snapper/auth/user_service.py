@@ -22,6 +22,7 @@ from snapper.data.models import UserLoginEvent
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
+from snapper.data.repository import where_active_now
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 _USERS_TOPIC = "users"
@@ -114,7 +115,7 @@ class UserService:
         """
         async with self.repository.session() as session:
             stmt = select(User).where(
-                User.username == username, User.is_active, *where_active(User)
+                User.username == username, User.is_active, *where_active_now(User)
             )
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
@@ -144,7 +145,9 @@ class UserService:
             UserProfile if found and active, None otherwise.
         """
         async with self.repository.session() as session:
-            stmt = select(User).where(User.username == user_id, User.is_active, *where_active(User))
+            stmt = select(User).where(
+                User.username == user_id, User.is_active, *where_active_now(User)
+            )
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
             if not db_user:
@@ -162,7 +165,7 @@ class UserService:
         """
         async with self.repository.session() as session:
             stmt = select(User).where(
-                User.username == username, User.is_active, *where_active(User)
+                User.username == username, User.is_active, *where_active_now(User)
             )
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
@@ -180,7 +183,7 @@ class UserService:
             List of UserProfile instances.
         """
         async with self.repository.session() as session:
-            base = select(User).where(*where_active(User))
+            base = select(User).where(*where_active_now(User))
             stmt = base if include_inactive else base.where(User.is_active)
             result = await session.execute(stmt)
             db_users = result.scalars().all()
@@ -210,7 +213,7 @@ class UserService:
             ValueError: If username already exists.
         """
         async with self.repository.session() as session:
-            stmt = select(User).where(User.username == username, *where_active(User))
+            stmt = select(User).where(User.username == username, *where_active_now(User))
             result = await session.execute(stmt)
             existing_user = result.scalar_one_or_none()
             if existing_user:
@@ -258,7 +261,7 @@ class UserService:
         async with self.repository.session() as session:
             stmt = select(User).where(
                 User.username == user_id,
-                *where_active(User),
+                *where_active_now(User),
             )
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
@@ -298,7 +301,7 @@ class UserService:
         async with self.repository.session() as session:
             stmt = select(User).where(
                 User.username == user_id,
-                *where_active(User),
+                *where_active_now(User),
             )
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
@@ -339,7 +342,9 @@ class UserService:
             True if changed, False if user not found or wrong password.
         """
         async with self.repository.session() as session:
-            stmt = select(User).where(User.username == user_id, User.is_active, *where_active(User))
+            stmt = select(User).where(
+                User.username == user_id, User.is_active, *where_active_now(User)
+            )
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
             if not db_user:
@@ -380,7 +385,7 @@ class UserService:
         async with self.repository.session() as session:
             stmt = select(User).where(
                 User.username == user_id,
-                *where_active(User),
+                *where_active_now(User),
             )
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
@@ -419,7 +424,7 @@ class UserService:
         async with self.repository.session() as session:
             stmt = select(User).where(
                 User.username == username,
-                *where_active(User),
+                *where_active_now(User),
             )
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
@@ -459,12 +464,13 @@ class UserService:
         Returns:
             List of active login events ordered by logged_at descending.
         """
+        t = at or datetime.now(UTC)
         async with self.repository.session() as session:
             result = await session.execute(
                 select(UserLoginEvent)
                 .where(
                     UserLoginEvent.user_public_id == user_public_id,
-                    *where_active(UserLoginEvent, at),
+                    *where_active(UserLoginEvent, t),
                 )
                 .order_by(UserLoginEvent.logged_at.desc())
             )

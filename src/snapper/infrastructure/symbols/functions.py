@@ -26,6 +26,7 @@ Example:
     "BTC-USD"
 """
 
+from datetime import UTC
 from datetime import datetime
 
 from sqlalchemy import select
@@ -95,7 +96,8 @@ async def resolve_symbol_public_id(
         active row matches.
     """
     async with repo.session() as session:
-        ts_filter, kt_filter = where_active(Symbol, as_of)
+        t = as_of or datetime.now(UTC)
+        ts_filter, kt_filter = where_active(Symbol, t)
         result = await session.execute(
             select(Symbol.public_id).where(
                 Symbol.native_symbol == native_symbol,

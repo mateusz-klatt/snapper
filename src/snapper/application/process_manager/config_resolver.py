@@ -23,7 +23,7 @@ from snapper.config.settings import AppSettings
 from snapper.core.types import ProcessMode
 from snapper.data.models import Setting
 from snapper.data.repository import get_repository
-from snapper.data.repository import where_active
+from snapper.data.repository import where_active_now
 
 VALID_PROCESS_MODES: frozenset[str] = frozenset(("thread", "process"))
 """Valid process mode values matching the ProcessMode Literal."""
@@ -242,7 +242,7 @@ async def get_process_configs(settings: AppSettings) -> list[ProcessConfigModel]
     registry = get_registered_processes()
     async with repository.session() as session:
         result = await session.execute(
-            select(Setting).where(Setting.key.like("process_%"), *where_active(Setting))
+            select(Setting).where(Setting.key.like("process_%"), *where_active_now(Setting))
         )
         settings_rows = result.scalars().all()
         configs: list[ProcessConfigModel] = []

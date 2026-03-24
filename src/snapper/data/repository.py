@@ -86,21 +86,38 @@ __all__ = [
     "get_repository",
     "dispose_repositories",
     "where_active",
+    "where_active_now",
 ]
 
 
-def where_active(model: type[Any], at: datetime | None = None) -> tuple[Any, Any]:
-    """Return temporal filter clauses for active records.
+def where_active(model: type[Any], at: datetime) -> tuple[Any, Any]:
+    """Return temporal filter clauses for active records at a specific time.
 
     Args:
         model: SQLAlchemy model class with timestamp and known_to columns.
-        at: Point-in-time to query. Defaults to now.
+        at: Point-in-time to query. Required — use where_active_now() for
+            operations that genuinely mean 'current state'.
 
     Returns:
         Tuple of two filter clauses: (timestamp <= t, known_to > t).
     """
-    t = at or datetime.now(UTC)
-    return model.timestamp <= t, model.known_to > t
+    return model.timestamp <= at, model.known_to > at
+
+
+def where_active_now(model: type[Any]) -> tuple[Any, Any]:
+    """Return temporal filter clauses for currently active records.
+
+    Use sparingly — only for operations that genuinely mean 'current state'
+    and have no caller-provided time (e.g. auth login check, heartbeat).
+    Prefer where_active(model, at) with explicit time in domain code.
+
+    Args:
+        model: SQLAlchemy model class with timestamp and known_to columns.
+
+    Returns:
+        Tuple of two filter clauses: (timestamp <= now, known_to > now).
+    """
+    return where_active(model, datetime.now(UTC))
 
 
 async def close_and_insert(

@@ -20,7 +20,7 @@ from snapper.config.settings import AppSettings
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import ProcessRun
 from snapper.data.repository import get_repository
-from snapper.data.repository import where_active
+from snapper.data.repository import where_active_now
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 
@@ -101,7 +101,7 @@ class ProcessRunRecorder:
             result_row = await session.execute(
                 select(ProcessRun).where(
                     ProcessRun.public_id == public_id,
-                    *where_active(ProcessRun),
+                    *where_active_now(ProcessRun),
                 )
             )
             process_run = result_row.scalar_one_or_none()
@@ -148,7 +148,7 @@ class ProcessRunRecorder:
         """
         repository = get_repository(self.settings.db_url)
         async with repository.session() as session:
-            pr_ts, pr_kt = where_active(ProcessRun)
+            pr_ts, pr_kt = where_active_now(ProcessRun)
             stmt = (
                 select(ProcessRun)
                 .where(pr_ts, pr_kt)

@@ -20,6 +20,7 @@ from snapper.data.models import Signal
 from snapper.data.models import Symbol
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
+from snapper.data.repository import where_active_now
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.strategies.models import StrategySignal
@@ -51,7 +52,7 @@ class SignalReadService:
             cannot be resolved.
         """
         async with self.repo.session() as session:
-            s_ts, s_kt = where_active(Symbol)
+            s_ts, s_kt = where_active_now(Symbol)
             sym_query = await session.execute(
                 select(Symbol).where(
                     Symbol.native_symbol == signal.instrument,
@@ -63,7 +64,7 @@ class SignalReadService:
             if sym is None:
                 logger.error(f"No active Symbol row for {signal.instrument}")
                 return None
-            i_ts, i_kt = where_active(Instrument)
+            i_ts, i_kt = where_active_now(Instrument)
             inst_query = await session.execute(
                 select(Instrument).where(
                     Instrument.symbol_public_id == sym.public_id,

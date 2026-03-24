@@ -52,7 +52,7 @@ from snapper.data.models import Setting
 from snapper.data.repository import Repository
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
-from snapper.data.repository import where_active
+from snapper.data.repository import where_active_now
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 _SETTINGS_TOPIC = "settings"
@@ -866,7 +866,7 @@ class ProcessLauncherService:
         config_dict: dict[str, Any] = {}
         async with repository.session() as session:
             result = await session.execute(
-                select(Setting).where(Setting.key == config_key, *where_active(Setting))
+                select(Setting).where(Setting.key == config_key, *where_active_now(Setting))
             )
             setting = result.scalar_one_or_none()
             if not setting:
@@ -929,7 +929,7 @@ class ProcessLauncherService:
         config_key = f"process_{name}"
         async with repository.session() as session:
             result = await session.execute(
-                select(Setting).where(Setting.key == config_key, *where_active(Setting))
+                select(Setting).where(Setting.key == config_key, *where_active_now(Setting))
             )
             setting = result.scalar_one_or_none()
             if setting:

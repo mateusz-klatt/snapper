@@ -35,6 +35,7 @@ from snapper.data.repository import InstrumentSpecInput
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import where_active
+from snapper.data.repository import where_active_now
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 
 
@@ -1068,7 +1069,7 @@ class TestUserBitemporal:
         async with repo.session() as s:
             stmt = select(User).where(
                 User.username == "alice",
-                *where_active(User),
+                *where_active_now(User),
             )
             result = await s.execute(stmt)
             active_user = result.scalar_one_or_none()
@@ -1134,7 +1135,7 @@ class TestUserBitemporal:
             assert total == 3
 
         async with repo.session() as s:
-            active_stmt = select(User).where(*where_active(User))
+            active_stmt = select(User).where(*where_active_now(User))
             active_users = (await s.execute(active_stmt)).scalars().all()
 
         assert len(active_users) == 1
@@ -1257,7 +1258,7 @@ class TestUserBitemporal:
                     await s.execute(
                         select(UserLoginEvent).where(
                             UserLoginEvent.user_public_id == user.public_id,
-                            *where_active(UserLoginEvent),
+                            *where_active_now(UserLoginEvent),
                         )
                     )
                 )
@@ -1438,7 +1439,7 @@ class TestSettingsApiBitemporal:
                     await s.execute(
                         select(Setting).where(
                             Setting.key == "app.theme",
-                            *where_active(Setting),
+                            *where_active_now(Setting),
                         )
                     )
                 )
@@ -1496,7 +1497,7 @@ class TestSettingsApiBitemporal:
                     await s.execute(
                         select(Setting).where(
                             Setting.key == "cache.ttl",
-                            *where_active(Setting),
+                            *where_active_now(Setting),
                         )
                     )
                 )
@@ -1550,7 +1551,7 @@ class TestInstrumentBitemporal:
 
         async with repo.session() as s:
             orig = (
-                await s.execute(select(Instrument).where(*where_active(Instrument)))
+                await s.execute(select(Instrument).where(*where_active_now(Instrument)))
             ).scalar_one()
             original_pid = orig.public_id
 
@@ -1574,7 +1575,7 @@ class TestInstrumentBitemporal:
 
         async with repo.session() as s:
             active = (
-                (await s.execute(select(Instrument).where(*where_active(Instrument))))
+                (await s.execute(select(Instrument).where(*where_active_now(Instrument))))
                 .scalars()
                 .all()
             )
@@ -2422,6 +2423,6 @@ class TestInstrumentJoinSemantics:
             assert inst.exchange == "kraken"
 
             active_inst = (
-                await s.execute(select(Instrument).where(*where_active(Instrument)))
+                await s.execute(select(Instrument).where(*where_active_now(Instrument)))
             ).scalar_one()
             assert active_inst.exchange == "kraken"

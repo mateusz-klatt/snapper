@@ -68,7 +68,7 @@ from snapper.config.settings import BootstrapSettingsLoader
 from snapper.config.settings import get_settings
 from snapper.data.models import Setting
 from snapper.data.repository import close_and_insert
-from snapper.data.repository import where_active
+from snapper.data.repository import where_active_now
 from snapper.data.seed.loader import run_seed
 from snapper.infrastructure.market_data.kraken import run_snapshot_update
 from snapper.infrastructure.market_data.walutomat import run_walutomat_snapshot_update
@@ -837,7 +837,7 @@ async def _run_encryption_rotation(
         rotation_tracker = SequenceTracker()
         async with session_factory() as session:
             result = await session.execute(
-                sa.select(Setting).where(Setting.is_encrypted, *where_active(Setting))
+                sa.select(Setting).where(Setting.is_encrypted, *where_active_now(Setting))
             )
             encrypted_settings = result.scalars().all()
             typer.echo(f"Found {len(encrypted_settings)} encrypted settings to rotate")

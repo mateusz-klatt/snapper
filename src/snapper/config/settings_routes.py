@@ -52,7 +52,7 @@ from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.config.settings import get_settings
 from snapper.data.models import Setting
 from snapper.data.repository import get_repository
-from snapper.data.repository import where_active
+from snapper.data.repository import where_active_now
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.json_body import json_body
 from snapper.server.json_body import openapi_schema
@@ -86,7 +86,7 @@ async def get_all_settings(
     ts = datetime.now(UTC)
     pid = str(uuid7())
     async with repository.session() as session:
-        query = select(Setting).where(*where_active(Setting))
+        query = select(Setting).where(*where_active_now(Setting))
         if category:
             query = query.where(Setting.category == category)
         result = await session.execute(query)
@@ -134,7 +134,7 @@ async def get_setting_categories(
     repository = get_repository(settings.db_url)
     async with repository.session() as session:
         result = await session.execute(
-            select(Setting.category).where(*where_active(Setting)).distinct()
+            select(Setting.category).where(*where_active_now(Setting)).distinct()
         )
         categories = [row[0] for row in result.fetchall()]
         tracker: SequenceTracker = request.app.state.rest_tracker
@@ -198,7 +198,7 @@ async def set_setting(
     pid = str(uuid7())
     async with repository.session() as session:
         result = await session.execute(
-            select(Setting).where(Setting.key == key, *where_active(Setting))
+            select(Setting).where(Setting.key == key, *where_active_now(Setting))
         )
         setting = result.scalar_one_or_none()
         if not setting:
@@ -254,7 +254,7 @@ async def remove_setting(
     repository = get_repository(settings.db_url)
     async with repository.session() as session:
         result = await session.execute(
-            select(Setting).where(Setting.key == key, *where_active(Setting))
+            select(Setting).where(Setting.key == key, *where_active_now(Setting))
         )
         setting = result.scalar_one_or_none()
         if not setting:
