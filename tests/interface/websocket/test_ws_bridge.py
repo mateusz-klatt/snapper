@@ -39,6 +39,7 @@ def bridge() -> ZmqWebSocketBridgeService:
     """Provide ZmqWebSocketBridgeService with mock settings."""
     mock_settings = MagicMock()
     mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+    mock_settings.db_url = ""
     mock_cm = MagicMock()
     type(mock_cm).tracker = PropertyMock(return_value=SequenceTracker())
     with patch("snapper.interface.websocket.bridge.get_settings", return_value=mock_settings):
@@ -1733,6 +1734,7 @@ class TestZMQSubscriptionLoops:
         settings.zmq_heartbeat_url = "tcp://127.0.0.1:5558"
         settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
         settings.zmq_heartbeat_interval_ms = 1000
+        settings.db_url = ""
         return settings
 
     @pytest.fixture
@@ -1933,6 +1935,8 @@ def mock_settings() -> AppSettings:
     settings.zmq_trade_url = "tcp://localhost:5556"
     settings.zmq_strategy_url = "tcp://localhost:5557"
     settings.zmq_heartbeat_url = "tcp://localhost:5558"
+    settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+    settings.db_url = ""
     return settings
 
 
