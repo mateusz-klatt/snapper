@@ -718,6 +718,7 @@ export type Paths = {
          *         _auth: Authenticated user with READ_MARKET_DATA permission.
          *         _csrf: CSRF token validation.
          *         repo: Database repository.
+         *         as_of: Optional point-in-time query timestamp.
          *
          *     Returns:
          *         ExchangeListResponse wrapping the exchange name list.
@@ -748,6 +749,7 @@ export type Paths = {
          *         _auth: Authenticated user with READ_MARKET_DATA permission.
          *         _csrf: CSRF token validation.
          *         repo: Database repository.
+         *         as_of: Optional point-in-time query timestamp.
          *
          *     Returns:
          *         InstrumentListResponse wrapping the instrument symbol list.
@@ -4873,7 +4875,10 @@ export interface Operations {
     };
     get_exchanges_api_exchanges_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -4889,6 +4894,15 @@ export interface Operations {
                     "application/json": Components["schemas"]["ExchangeListResponse"];
                 };
             };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
             /** @description Internal server error */
             500: {
                 headers: {
@@ -4900,7 +4914,10 @@ export interface Operations {
     };
     get_exchange_instruments_api_exchanges__exchange__instruments_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
+            };
             header?: never;
             path: {
                 exchange: string;

@@ -344,7 +344,11 @@ Key concepts:
 - **Point-in-time queries** — REST endpoints accept an `as_of` query parameter
     to retrieve the state of data at a specific moment.
 - **Helpers**:
-    - `where_active(model, at)` — SQLAlchemy filter for temporal queries
+    - `where_active(model, at)` — SQLAlchemy filter for temporal queries.
+        `at: datetime` is required — no silent default-to-now
+    - `where_active_now(model)` — convenience for operations that genuinely
+        mean "current state" (auth login, heartbeat). Not a shortcut for
+        skipping `as_of` threading
     - `close_and_insert()` / `close_and_insert_sync()` — Repository helpers
         that atomically close the current row and insert a new version
 
