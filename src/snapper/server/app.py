@@ -463,6 +463,7 @@ def _apply_signal_filters(
     instrument: str | None,
     strategy: str | None,
     exchange: OrderExchange | None,
+    at: datetime,
 ) -> Select[Any]:
     """Apply optional instrument/strategy/exchange filters to a signal query.
 
@@ -471,12 +472,13 @@ def _apply_signal_filters(
         instrument: Filter by instrument symbol.
         strategy: Filter by strategy name.
         exchange: Filter by exchange.
+        at: Point-in-time for temporal filtering.
 
     Returns:
         Filtered query.
     """
     if instrument:
-        s_ts, s_kt = where_active(Symbol)
+        s_ts, s_kt = where_active(Symbol, at)
         sym_subq = (
             select(Symbol.public_id)
             .where(Symbol.native_symbol == instrument, s_ts, s_kt)
@@ -672,7 +674,9 @@ def _create_candles_signals_router() -> APIRouter:
                 query = query.where(
                     Signal.timestamp <= processing_date, Signal.known_to > processing_date
                 )
-                query = _apply_signal_filters(query, instrument, strategy, exchange)
+                query = _apply_signal_filters(
+                    query, instrument, strategy, exchange, processing_date
+                )
                 query = query.order_by(desc(Signal.fired_at)).limit(limit)
                 result = await session.execute(query)
                 signals_with_instruments = result.all()
@@ -727,6 +731,7 @@ def _create_exchange_router() -> APIRouter:
         _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         repo: Annotated[Repository, Depends(get_repository_dependency)],
+        as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
     ) -> ExchangeListResponse:
         """Return distinct exchange names from symbol_aliases.
 
@@ -735,13 +740,14 @@ def _create_exchange_router() -> APIRouter:
             _auth: Authenticated user with READ_MARKET_DATA permission.
             _csrf: CSRF token validation.
             repo: Database repository.
+            as_of: Optional point-in-time query timestamp.
 
         Returns:
             ExchangeListResponse wrapping the exchange name list.
         """
         try:
             async with repo.session() as session:
-                now = datetime.now(UTC)
+                now = as_of or datetime.now(UTC)
                 result = await session.execute(
                     select(distinct(SymbolAlias.exchange))
                     .where(
@@ -778,6 +784,7 @@ def _create_exchange_router() -> APIRouter:
         _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         repo: Annotated[Repository, Depends(get_repository_dependency)],
+        as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
     ) -> InstrumentListResponse:
         """Return distinct native symbols available on a given exchange.
 
@@ -787,13 +794,14 @@ def _create_exchange_router() -> APIRouter:
             _auth: Authenticated user with READ_MARKET_DATA permission.
             _csrf: CSRF token validation.
             repo: Database repository.
+            as_of: Optional point-in-time query timestamp.
 
         Returns:
             InstrumentListResponse wrapping the instrument symbol list.
         """
         try:
             async with repo.session() as session:
-                now = datetime.now(UTC)
+                now = as_of or datetime.now(UTC)
                 result = await session.execute(
                     select(distinct(Symbol.native_symbol))
                     .select_from(SymbolAlias)
@@ -832,6 +840,7 @@ def _apply_order_filters(
     query: Select[Any],
     symbol: str | None,
     exchange: OrderExchange | None,
+    at: datetime,
 ) -> Select[Any]:
     """Apply optional symbol/exchange filters to an orders query.
 
@@ -839,12 +848,13 @@ def _apply_order_filters(
         query: Base orders query.
         symbol: Filter by instrument symbol.
         exchange: Filter by exchange.
+        at: Point-in-time for temporal filtering.
 
     Returns:
         Filtered query.
     """
     if symbol:
-        s_ts, s_kt = where_active(Symbol)
+        s_ts, s_kt = where_active(Symbol, at)
         sym_subq = (
             select(Symbol.public_id)
             .where(Symbol.native_symbol == symbol, s_ts, s_kt)
@@ -915,7 +925,7 @@ def _create_orders_executions_router() -> APIRouter:
                 query = query.where(
                     Order.timestamp <= processing_date, Order.known_to > processing_date
                 )
-                query = _apply_order_filters(query, symbol, exchange)
+                query = _apply_order_filters(query, symbol, exchange, processing_date)
                 query = query.order_by(desc(Order.created_at)).offset(offset).limit(limit)
                 result = await session.execute(query)
                 orders_with_instruments = result.all()

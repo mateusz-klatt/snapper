@@ -68,7 +68,9 @@ class MarketSnapshotUpdaterService(ABC):
         """
         ...
 
-    def _resolve_instrument_public_id(self, native_symbol: str, exchange: str) -> str | None:
+    def _resolve_instrument_public_id(
+        self, native_symbol: str, exchange: str, as_of: datetime | None = None
+    ) -> str | None:
         """Resolve native_symbol to instrument_public_id via 2-hop lookup.
 
         Performs Symbol(native_symbol) -> Symbol.public_id, then
@@ -77,12 +79,13 @@ class MarketSnapshotUpdaterService(ABC):
         Args:
             native_symbol: Native symbol string (e.g. 'BTC-USD').
             exchange: Exchange identifier (lowercase, e.g. 'kraken').
+            as_of: Point-in-time for temporal query. Defaults to now.
 
         Returns:
             Instrument public_id string, or None if resolution fails.
         """
+        now = as_of or datetime.now(UTC)
         with self.repository.session_factory() as session:
-            now = datetime.now(UTC)
             sym_row = (
                 session.execute(
                     select(Symbol.public_id).where(
@@ -111,20 +114,21 @@ class MarketSnapshotUpdaterService(ABC):
             return inst_row
 
     def _resolve_batch_instrument_ids(
-        self, native_symbols: set[str], exchange: str
+        self, native_symbols: set[str], exchange: str, as_of: datetime | None = None
     ) -> dict[str, str]:
         """Resolve a batch of native symbols to instrument_public_id.
 
         Args:
             native_symbols: Set of native symbol strings.
             exchange: Exchange identifier (lowercase).
+            as_of: Point-in-time for temporal query. Defaults to now.
 
         Returns:
             Mapping of native_symbol -> instrument_public_id for successful lookups.
         """
+        now = as_of or datetime.now(UTC)
         result: dict[str, str] = {}
         with self.repository.session_factory() as session:
-            now = datetime.now(UTC)
             for ns in native_symbols:
                 sym_pid = (
                     session.execute(
