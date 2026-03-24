@@ -766,6 +766,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         status="new",
         session_id="",
         sequence_id=0,
+        timestamp=base_ts,
     )
     order_v2 = await repo.update_order(
         order_id=order_id,
@@ -773,6 +774,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         updated_at=base_ts + timedelta(minutes=1),
         session_id="",
         sequence_id=0,
+        timestamp=base_ts + timedelta(minutes=1),
         filled_size=0.5,
         average_price=10.55,
     )
@@ -782,6 +784,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
         updated_at=base_ts + timedelta(minutes=2),
         session_id="",
         sequence_id=0,
+        timestamp=base_ts + timedelta(minutes=2),
         exchange_order_id="ex-1",
         error=None,
     )
@@ -1028,6 +1031,7 @@ class DummyRepository(Repository):
         status: str,
         session_id: str,
         sequence_id: int,
+        timestamp: datetime,
         time_in_force: str | None = None,
     ) -> tuple[int, str]:
         """Insert order - no-op returning (0, stub-public-id)."""
@@ -1040,6 +1044,7 @@ class DummyRepository(Repository):
         updated_at: datetime,
         session_id: str,
         sequence_id: int,
+        timestamp: datetime,
         exchange_order_id: str | None = None,
         error: str | None = None,
         filled_size: float | None = None,
@@ -2021,6 +2026,7 @@ class _MinimalRepository(Repository):
         status: str,
         session_id: str,
         sequence_id: int,
+        timestamp: datetime,
         time_in_force: str | None = None,
     ) -> tuple[int, str]:
         return (0, "stub-public-id")
@@ -2032,6 +2038,7 @@ class _MinimalRepository(Repository):
         updated_at: datetime,
         session_id: str,
         sequence_id: int,
+        timestamp: datetime,
         exchange_order_id: str | None = None,
         error: str | None = None,
         filled_size: float | None = None,

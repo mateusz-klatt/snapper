@@ -355,6 +355,7 @@ class Repository(ABC):
         status: str,
         session_id: str,
         sequence_id: int,
+        timestamp: datetime,
         time_in_force: str | None = None,
     ) -> tuple[int, str]:
         """Insert new order record, returning (id, public_id) tuple."""
@@ -368,6 +369,7 @@ class Repository(ABC):
         updated_at: datetime,
         session_id: str,
         sequence_id: int,
+        timestamp: datetime,
         exchange_order_id: str | None = None,
         error: str | None = None,
         filled_size: float | None = None,
@@ -849,6 +851,7 @@ class SQLAlchemyRepository(Repository):
         status: str,
         session_id: str,
         sequence_id: int,
+        timestamp: datetime,
         time_in_force: str | None = None,
     ) -> tuple[int, str]:
         """Insert new order record and return (id, public_id) tuple."""
@@ -859,7 +862,7 @@ class SQLAlchemyRepository(Repository):
                 exchange_order_id=exchange_order_id,
                 created_at=created_at,
                 updated_at=None,
-                timestamp=datetime.now(UTC),
+                timestamp=timestamp,
                 side=side,
                 order_type=order_type,
                 price=price,
@@ -884,6 +887,7 @@ class SQLAlchemyRepository(Repository):
         updated_at: datetime,
         session_id: str,
         sequence_id: int,
+        timestamp: datetime,
         exchange_order_id: str | None = None,
         error: str | None = None,
         filled_size: float | None = None,
@@ -891,13 +895,12 @@ class SQLAlchemyRepository(Repository):
     ) -> int:
         """Close old order version and insert new one (SCD Type 2)."""
         async with self.session() as s:
-            now = datetime.now(UTC)
             old_order = (
                 (await s.execute(select(Order).where(Order.id == order_id).with_for_update()))
                 .scalars()
                 .one()
             )
-            await s.execute(update(Order).where(Order.id == order_id).values(known_to=now))
+            await s.execute(update(Order).where(Order.id == order_id).values(known_to=timestamp))
             new_order = Order(
                 public_id=old_order.public_id,
                 instrument_public_id=old_order.instrument_public_id,
@@ -905,7 +908,7 @@ class SQLAlchemyRepository(Repository):
                 exchange_order_id=exchange_order_id or old_order.exchange_order_id,
                 created_at=old_order.created_at,
                 updated_at=updated_at,
-                timestamp=now,
+                timestamp=timestamp,
                 side=old_order.side,
                 order_type=old_order.order_type,
                 price=old_order.price,

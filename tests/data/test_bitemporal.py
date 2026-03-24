@@ -406,6 +406,7 @@ class TestOrderBitemporal:
             status="new",
             session_id="",
             sequence_id=0,
+            timestamp=base_ts,
         )
 
         order_v2 = await repo.update_order(
@@ -414,6 +415,7 @@ class TestOrderBitemporal:
             updated_at=base_ts + timedelta(seconds=10),
             session_id="",
             sequence_id=0,
+            timestamp=base_ts + timedelta(seconds=10),
             filled_size=0.5,
             average_price=50050.0,
         )
@@ -424,6 +426,7 @@ class TestOrderBitemporal:
             updated_at=base_ts + timedelta(seconds=20),
             session_id="",
             sequence_id=0,
+            timestamp=base_ts + timedelta(seconds=20),
             exchange_order_id="ex-001",
             filled_size=1.0,
             average_price=50025.0,
@@ -544,6 +547,7 @@ class TestExecutionDedup:
             status="new",
             session_id="",
             sequence_id=0,
+            timestamp=base_ts,
         )
 
         await repo.update_order(
@@ -552,6 +556,7 @@ class TestExecutionDedup:
             updated_at=base_ts + timedelta(seconds=5),
             session_id="",
             sequence_id=0,
+            timestamp=base_ts + timedelta(seconds=5),
             exchange_order_id="ex-dedup",
         )
 
@@ -2044,11 +2049,12 @@ class TestInstrumentJoinSemantics:
         """Order joins Instrument via instrument_public_id temporal join."""
         repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
 
+        now = datetime.now(UTC)
         order_id, order_pid = await repo.insert_order(
             instrument_public_id=inst_public_id,
             client_order_id="cli-join",
             exchange_order_id=None,
-            created_at=datetime.now(UTC),
+            created_at=now,
             side="buy",
             order_type="limit",
             price=50000.0,
@@ -2056,6 +2062,7 @@ class TestInstrumentJoinSemantics:
             status="new",
             session_id="",
             sequence_id=0,
+            timestamp=now,
         )
 
         async with repo.session() as s:
@@ -2084,12 +2091,13 @@ class TestInstrumentJoinSemantics:
     async def test_executions_join_instrument(self, tmp_path: Path) -> None:
         """Execution joins Instrument via order temporal join chain."""
         repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
+        now = datetime.now(UTC)
 
         order_id, order_pid = await repo.insert_order(
             instrument_public_id=inst_public_id,
             client_order_id="cli-exec-join",
             exchange_order_id="ex-exec-join",
-            created_at=datetime.now(UTC),
+            created_at=now,
             side="buy",
             order_type="limit",
             price=50000.0,
@@ -2097,6 +2105,7 @@ class TestInstrumentJoinSemantics:
             status="filled",
             session_id="",
             sequence_id=0,
+            timestamp=now,
         )
 
         exec_id = await repo.insert_execution(
@@ -2286,6 +2295,7 @@ class TestInstrumentJoinSemantics:
             status="new",
             session_id="",
             sequence_id=0,
+            timestamp=now,
         )
 
         async with repo.session() as s:
@@ -2378,11 +2388,12 @@ class TestInstrumentJoinSemantics:
         """
         repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
 
+        now = datetime.now(UTC)
         await repo.insert_order(
             instrument_public_id=inst_public_id,
             client_order_id="cli-snapshot",
             exchange_order_id=None,
-            created_at=datetime.now(UTC),
+            created_at=now,
             side="buy",
             order_type="limit",
             price=50000.0,
@@ -2390,6 +2401,7 @@ class TestInstrumentJoinSemantics:
             status="new",
             session_id="",
             sequence_id=0,
+            timestamp=now,
         )
 
         async with repo.session() as s:

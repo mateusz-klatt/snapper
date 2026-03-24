@@ -374,11 +374,12 @@ class ExchangeClientBase(ABC):
                 sequence_id=self._tracker.next_sequence("instruments"),
             )
             seq = self._tracker.next_sequence("orders")
+            order_time = datetime.fromtimestamp(order.timestamp, tz=UTC)
             return await self.repository.insert_order(
                 instrument_public_id=instrument_public_id,
                 client_order_id=order.client_order_id,
                 exchange_order_id=order.id,
-                created_at=datetime.fromtimestamp(order.timestamp, tz=UTC),
+                created_at=order_time,
                 side=order.side.value,
                 order_type=order.type.value,
                 price=order.price,
@@ -387,6 +388,7 @@ class ExchangeClientBase(ABC):
                 time_in_force=None,
                 session_id=self._tracker.session_id,
                 sequence_id=seq,
+                timestamp=order_time,
             )
         except SQLAlchemyError as e:
             logger.error(f"Failed to log order to database: {e}")
@@ -418,15 +420,17 @@ class ExchangeClientBase(ABC):
         if self.repository is None or self._tracker is None:
             return None
         try:
+            now = datetime.now(tz=UTC)
             seq = self._tracker.next_sequence("orders")
             return await self.repository.update_order(
                 order_id=db_order_id,
                 status=status.value,
-                updated_at=datetime.now(tz=UTC),
+                updated_at=now,
                 exchange_order_id=exchange_order_id,
                 error=error,
                 session_id=self._tracker.session_id,
                 sequence_id=seq,
+                timestamp=now,
             )
         except SQLAlchemyError as e:
             logger.error(f"Failed to log order update to database: {e}")
