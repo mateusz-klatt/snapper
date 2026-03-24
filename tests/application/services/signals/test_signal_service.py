@@ -17,9 +17,13 @@ from snapper.data.models import Instrument
 from snapper.data.models import Signal
 from snapper.data.models import Symbol
 from snapper.data.repository import SQLAlchemyRepository
-from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.strategies.base import StrategySignal
+
+FIXED_TEST_TIME = datetime(2024, 1, 1, tzinfo=UTC)
+BTCUSD_SYMBOL_PUBLIC_ID = "00000000-0000-7000-8000-000000000001"
+ETHUSD_SYMBOL_PUBLIC_ID = "00000000-0000-7000-8000-000000000002"
+BTC_USD_SYMBOL_PUBLIC_ID = "00000000-0000-7000-8000-000000000003"
 
 
 class TestSignalService:
@@ -34,15 +38,19 @@ class TestSignalService:
         await repo.create_all()
         tracker = SequenceTracker()
         async with repo.session() as s:
-            for sym, base, quote in [("BTCUSD", "BTC", "USD"), ("ETHUSD", "ETH", "USD")]:
+            for public_id, sym, base, quote in [
+                (BTCUSD_SYMBOL_PUBLIC_ID, "BTCUSD", "BTC", "USD"),
+                (ETHUSD_SYMBOL_PUBLIC_ID, "ETHUSD", "ETH", "USD"),
+            ]:
                 s.add(
                     Symbol(
+                        public_id=public_id,
                         native_symbol=sym,
                         base=base,
                         quote=quote,
                         asset_type="crypto",
-                        created_at=datetime.now(UTC),
-                        timestamp=datetime.now(UTC),
+                        created_at=FIXED_TEST_TIME,
+                        timestamp=FIXED_TEST_TIME,
                         session_id=tracker.session_id,
                         sequence_id=tracker.next_sequence("symbols"),
                     )
@@ -80,10 +88,8 @@ class TestSignalService:
         When: store_signal called with signal,
         Then: StrategySignal stored with correct attributes.
         """
-        spid = await resolve_symbol_public_id(test_repository, "BTCUSD")
-        assert spid is not None
         await test_repository.upsert_instrument(
-            symbol_public_id=spid,
+            symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
             symbol="BTCUSD",
             exchange="testexchange",
             base="BTC",
@@ -128,10 +134,8 @@ class TestSignalService:
         When: store_signal called with price=None,
         Then: StrategySignal stored with price=None.
         """
-        spid = await resolve_symbol_public_id(test_repository, "BTCUSD")
-        assert spid is not None
         await test_repository.upsert_instrument(
-            symbol_public_id=spid,
+            symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
             symbol="BTCUSD",
             exchange="testexchange",
             base="BTC",
@@ -170,10 +174,8 @@ class TestSignalService:
         When: store_signal called with public_id and timestamp,
         Then: DB row carries the exact same public_id and timestamp as the published envelope.
         """
-        spid = await resolve_symbol_public_id(test_repository, "BTCUSD")
-        assert spid is not None
         await test_repository.upsert_instrument(
-            symbol_public_id=spid,
+            symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
             symbol="BTCUSD",
             exchange="testexchange",
             base="BTC",
@@ -219,10 +221,8 @@ class TestSignalService:
         When: get_recent_signals called with limit=2,
         Then: Two most recent signals returned.
         """
-        spid = await resolve_symbol_public_id(test_repository, "BTCUSD")
-        assert spid is not None
         await test_repository.upsert_instrument(
-            symbol_public_id=spid,
+            symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
             symbol="BTCUSD",
             exchange="testexchange",
             base="BTC",
@@ -262,10 +262,8 @@ class TestSignalService:
         When: get_recent_signals called with strategy='strategy_b',
         Then: Only strategy_b signals returned.
         """
-        spid = await resolve_symbol_public_id(test_repository, "BTCUSD")
-        assert spid is not None
         await test_repository.upsert_instrument(
-            symbol_public_id=spid,
+            symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
             symbol="BTCUSD",
             exchange="testexchange",
             base="BTC",
@@ -319,10 +317,8 @@ class TestSignalService:
         When: get_recent_signals called with instrument='BTCUSD',
         Then: Only BTCUSD signals returned.
         """
-        spid = await resolve_symbol_public_id(test_repository, "BTCUSD")
-        assert spid is not None
         await test_repository.upsert_instrument(
-            symbol_public_id=spid,
+            symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
             symbol="BTCUSD",
             exchange="testexchange",
             base="BTC",
@@ -332,10 +328,8 @@ class TestSignalService:
             session_id="test-session",
             sequence_id=1,
         )
-        spid_eth = await resolve_symbol_public_id(test_repository, "ETHUSD")
-        assert spid_eth is not None
         await test_repository.upsert_instrument(
-            symbol_public_id=spid_eth,
+            symbol_public_id=ETHUSD_SYMBOL_PUBLIC_ID,
             symbol="ETHUSD",
             exchange="testexchange",
             base="ETH",
@@ -392,10 +386,8 @@ class TestSignalService:
         When: get_recent_signals called with exchange='exchange_b',
         Then: Only exchange_b signals returned.
         """
-        spid = await resolve_symbol_public_id(test_repository, "BTCUSD")
-        assert spid is not None
         await test_repository.upsert_instrument(
-            symbol_public_id=spid,
+            symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
             symbol="BTCUSD",
             exchange="exchange_a",
             base="BTC",
@@ -406,7 +398,7 @@ class TestSignalService:
             sequence_id=1,
         )
         await test_repository.upsert_instrument(
-            symbol_public_id=spid,
+            symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
             symbol="BTCUSD",
             exchange="exchange_b",
             base="BTC",
@@ -485,12 +477,13 @@ class TestSignalServiceCoverage:
         async with repo.session() as s:
             s.add(
                 Symbol(
+                    public_id=BTC_USD_SYMBOL_PUBLIC_ID,
                     native_symbol="BTC-USD",
                     base="BTC",
                     quote="USD",
                     asset_type="crypto",
-                    created_at=datetime.now(UTC),
-                    timestamp=datetime.now(UTC),
+                    created_at=FIXED_TEST_TIME,
+                    timestamp=FIXED_TEST_TIME,
                     session_id=tracker.session_id,
                     sequence_id=tracker.next_sequence("symbols"),
                 )
@@ -689,10 +682,8 @@ class TestSignalServiceCoverage:
         When: store_signal called,
         Then: Returns -1 and logger.error called with message.
         """
-        spid = await resolve_symbol_public_id(test_repository, "BTC-USD")
-        assert spid is not None
         await test_repository.upsert_instrument(
-            symbol_public_id=spid,
+            symbol_public_id=BTC_USD_SYMBOL_PUBLIC_ID,
             symbol="BTC-USD",
             exchange="testexchange",
             base="BTC",
@@ -747,8 +738,8 @@ class TestSignalServiceCoverage:
                     base="GOLD",
                     quote="USD",
                     asset_type="crypto",
-                    created_at=datetime.now(UTC),
-                    timestamp=datetime.now(UTC),
+                    created_at=FIXED_TEST_TIME,
+                    timestamp=FIXED_TEST_TIME,
                     session_id=tracker.session_id,
                     sequence_id=tracker.next_sequence("symbols"),
                 )
@@ -790,10 +781,8 @@ class TestSignalServiceCoverage:
         When: get_recent_signals called with filters,
         Then: Empty list returned and logger.error called with message.
         """
-        spid = await resolve_symbol_public_id(test_repository, "BTC-USD")
-        assert spid is not None
         await test_repository.upsert_instrument(
-            symbol_public_id=spid,
+            symbol_public_id=BTC_USD_SYMBOL_PUBLIC_ID,
             symbol="BTC-USD",
             exchange="testexchange",
             base="BTC",
