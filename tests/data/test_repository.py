@@ -978,6 +978,17 @@ class DummyRepository(Repository):
         """Revise instrument - no-op returning 0."""
         return 0
 
+    async def revise_instrument_spec(
+        self,
+        instrument_public_id: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+        **kwargs: Any,
+    ) -> int:
+        """Revise instrument spec - no-op returning 0."""
+        return 0
+
     async def get_latest_candle_ids(self) -> dict[tuple[str, str], tuple[datetime, str]]:
         """Load latest candle IDs - returns empty dict for dummy."""
         return {}

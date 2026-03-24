@@ -23,6 +23,7 @@ from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Candle
 from snapper.data.models import Execution
 from snapper.data.models import Instrument
+from snapper.data.models import InstrumentSpec
 from snapper.data.models import Order
 from snapper.data.models import Position
 from snapper.data.models import Setting
@@ -1892,6 +1893,118 @@ class TestReviseInstrument:
             timestamp=datetime(2024, 7, 1, tzinfo=UTC),
         )
         assert new_pid != inst_pid
+
+
+class TestReviseInstrumentSpec:
+    """SCD2 close+insert for instrument trading specifications."""
+
+    @pytest.mark.asyncio
+    async def test_insert_new_spec(self, tmp_path: Path) -> None:
+        """First revise_instrument_spec creates a new row."""
+        repo, _, inst_pid = await _create_repo_with_instrument(tmp_path)
+        spec_id = await repo.revise_instrument_spec(
+            instrument_public_id=inst_pid,
+            session_id="spec-session",
+            sequence_id=1,
+            timestamp=datetime(2024, 6, 1, tzinfo=UTC),
+            tick_size=0.01,
+            lot_size=0.001,
+        )
+        async with repo.session() as s:
+            spec = (await s.execute(select(InstrumentSpec))).scalars().first()
+            assert spec is not None
+            assert spec.id == spec_id
+            assert spec.instrument_public_id == inst_pid
+            assert spec.tick_size == 0.01
+            assert spec.lot_size == 0.001
+
+    @pytest.mark.asyncio
+    async def test_revise_no_change_returns_same_id(self, tmp_path: Path) -> None:
+        """Revising with identical payload is a no-op."""
+        repo, _, inst_pid = await _create_repo_with_instrument(tmp_path)
+        t1 = datetime(2024, 6, 1, tzinfo=UTC)
+        spec_id1 = await repo.revise_instrument_spec(
+            instrument_public_id=inst_pid,
+            session_id="spec-session",
+            sequence_id=1,
+            timestamp=t1,
+            tick_size=0.01,
+            lot_size=0.001,
+        )
+        t2 = datetime(2024, 7, 1, tzinfo=UTC)
+        spec_id2 = await repo.revise_instrument_spec(
+            instrument_public_id=inst_pid,
+            session_id="spec-session",
+            sequence_id=2,
+            timestamp=t2,
+            tick_size=0.01,
+            lot_size=0.001,
+        )
+        assert spec_id2 == spec_id1
+        async with repo.session() as s:
+            all_rows = (await s.execute(select(InstrumentSpec))).scalars().all()
+            assert len(all_rows) == 1
+
+    @pytest.mark.asyncio
+    async def test_revise_changed_creates_new_version(self, tmp_path: Path) -> None:
+        """Revising with different payload creates a new version."""
+        repo, _, inst_pid = await _create_repo_with_instrument(tmp_path)
+        t1 = datetime(2024, 6, 1, tzinfo=UTC)
+        spec_id1 = await repo.revise_instrument_spec(
+            instrument_public_id=inst_pid,
+            session_id="spec-session",
+            sequence_id=1,
+            timestamp=t1,
+            tick_size=0.01,
+            lot_size=0.001,
+        )
+        t2 = datetime(2024, 7, 1, tzinfo=UTC)
+        spec_id2 = await repo.revise_instrument_spec(
+            instrument_public_id=inst_pid,
+            session_id="spec-session",
+            sequence_id=2,
+            timestamp=t2,
+            tick_size=0.05,
+            lot_size=0.001,
+        )
+        assert spec_id2 != spec_id1
+        async with repo.session() as s:
+            all_rows = (
+                (await s.execute(select(InstrumentSpec).order_by(InstrumentSpec.timestamp.asc())))
+                .scalars()
+                .all()
+            )
+            assert len(all_rows) == 2
+            assert all_rows[0].known_to == all_rows[1].timestamp
+
+    @pytest.mark.asyncio
+    async def test_revise_preserves_contiguous_intervals(self, tmp_path: Path) -> None:
+        """Successive revisions produce contiguous temporal intervals."""
+        repo, _, inst_pid = await _create_repo_with_instrument(tmp_path)
+        for i, (ts, tick) in enumerate(
+            [
+                (datetime(2024, 3, 1, tzinfo=UTC), 0.01),
+                (datetime(2024, 6, 1, tzinfo=UTC), 0.05),
+                (datetime(2024, 9, 1, tzinfo=UTC), 0.10),
+            ],
+            start=1,
+        ):
+            await repo.revise_instrument_spec(
+                instrument_public_id=inst_pid,
+                session_id="spec-session",
+                sequence_id=i,
+                timestamp=ts,
+                tick_size=tick,
+            )
+        async with repo.session() as s:
+            rows = (
+                (await s.execute(select(InstrumentSpec).order_by(InstrumentSpec.timestamp.asc())))
+                .scalars()
+                .all()
+            )
+            assert len(rows) == 3
+            for j in range(len(rows) - 1):
+                assert rows[j].known_to == rows[j + 1].timestamp
 
 
 class TestInstrumentJoinSemantics:

@@ -67,6 +67,7 @@ from snapper.data.models import Base
 from snapper.data.models import Candle
 from snapper.data.models import Execution
 from snapper.data.models import Instrument
+from snapper.data.models import InstrumentSpec
 from snapper.data.models import MarketSnapshot
 from snapper.data.models import Order
 from snapper.data.models import Symbol
@@ -269,6 +270,31 @@ class Repository(ABC):
         Raises ValueError when no active version exists for the given
         instrument_public_id, or when the target business key is
         already occupied by a different instrument.
+        """
+        ...
+
+    @abstractmethod
+    async def revise_instrument_spec(
+        self,
+        instrument_public_id: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+        tick_size: float | None = None,
+        lot_size: float | None = None,
+        min_order_size: float | None = None,
+        max_order_size: float | None = None,
+        cost_decimals: int | None = None,
+        qty_decimals: int | None = None,
+        margin_initial: float | None = None,
+        position_limit_long: int | None = None,
+        position_limit_short: int | None = None,
+        status: str | None = None,
+    ) -> int:
+        """SCD2 close+insert for instrument trading specifications.
+
+        Insert if absent, no-op if payload identical, close+insert if
+        changed.  Returns id of the active or newly inserted row.
         """
         ...
 
@@ -620,6 +646,67 @@ class SQLAlchemyRepository(Repository):
                     "session_id": session_id,
                     "sequence_id": sequence_id,
                 },
+                timestamp,
+            )
+            await s.commit()
+            await s.refresh(new_row)
+            return int(new_row.id)
+
+    async def revise_instrument_spec(
+        self,
+        instrument_public_id: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+        tick_size: float | None = None,
+        lot_size: float | None = None,
+        min_order_size: float | None = None,
+        max_order_size: float | None = None,
+        cost_decimals: int | None = None,
+        qty_decimals: int | None = None,
+        margin_initial: float | None = None,
+        position_limit_long: int | None = None,
+        position_limit_short: int | None = None,
+        status: str | None = None,
+    ) -> int:
+        """SCD2 close+insert for instrument trading specifications."""
+        payload = {
+            "tick_size": tick_size,
+            "lot_size": lot_size,
+            "min_order_size": min_order_size,
+            "max_order_size": max_order_size,
+            "cost_decimals": cost_decimals,
+            "qty_decimals": qty_decimals,
+            "margin_initial": margin_initial,
+            "position_limit_long": position_limit_long,
+            "position_limit_short": position_limit_short,
+            "status": status,
+        }
+        async with self.session() as s:
+            ts_filter, kt_filter = where_active(InstrumentSpec, timestamp)
+            q = await s.execute(
+                select(InstrumentSpec).where(
+                    InstrumentSpec.instrument_public_id == instrument_public_id,
+                    ts_filter,
+                    kt_filter,
+                )
+            )
+            spec = q.scalar_one_or_none()
+            if spec is not None:
+                same = all(getattr(spec, k) == v for k, v in payload.items())
+                if same:
+                    return int(spec.id)
+            new_values = {
+                "instrument_public_id": instrument_public_id,
+                "session_id": session_id,
+                "sequence_id": sequence_id,
+                **payload,
+            }
+            new_row = await close_and_insert(
+                s,
+                InstrumentSpec,
+                [InstrumentSpec.instrument_public_id == instrument_public_id],
+                new_values,
                 timestamp,
             )
             await s.commit()
