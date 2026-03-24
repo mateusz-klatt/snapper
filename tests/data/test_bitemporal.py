@@ -1720,6 +1720,180 @@ class TestInstrumentBitemporal:
             assert inst.exchange == "kraken"
 
 
+class TestReviseInstrument:
+    """SCD2 close+insert for instrument business attribute corrections."""
+
+    @pytest.mark.asyncio
+    async def test_revise_no_change_returns_same_id(self, tmp_path: Path) -> None:
+        """Revising with identical payload is a no-op."""
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
+        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        assert spid is not None
+        result_id = await repo.revise_instrument(
+            instrument_public_id=inst_public_id,
+            symbol_public_id=spid,
+            exchange="kraken",
+            session_id="rev-session",
+            sequence_id=1,
+            timestamp=datetime(2024, 6, 1, tzinfo=UTC),
+        )
+        assert result_id == inst_id
+        async with repo.session() as s:
+            all_rows = (await s.execute(select(Instrument))).scalars().all()
+            assert len(all_rows) == 1
+
+    @pytest.mark.asyncio
+    async def test_revise_changed_exchange_creates_new_version(self, tmp_path: Path) -> None:
+        """Revising exchange creates a new version with same public_id."""
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
+        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        assert spid is not None
+        rev_time = datetime(2024, 6, 1, tzinfo=UTC)
+        new_id = await repo.revise_instrument(
+            instrument_public_id=inst_public_id,
+            symbol_public_id=spid,
+            exchange="binance",
+            session_id="rev-session",
+            sequence_id=1,
+            timestamp=rev_time,
+        )
+        assert new_id != inst_id
+        async with repo.session() as s:
+            all_rows = (await s.execute(select(Instrument))).scalars().all()
+            assert len(all_rows) == 2
+            active_ts, active_kt = where_active(Instrument, rev_time)
+            active = (
+                (
+                    await s.execute(
+                        select(Instrument).where(
+                            Instrument.public_id == inst_public_id, active_ts, active_kt
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            assert active is not None
+            assert active.exchange == "binance"
+            assert active.id == new_id
+
+    @pytest.mark.asyncio
+    async def test_revise_nonexistent_raises(self, tmp_path: Path) -> None:
+        """Revising a non-existent instrument raises ValueError."""
+        repo, _, _ = await _create_repo_with_instrument(tmp_path)
+        with pytest.raises(ValueError, match="No active Instrument"):
+            await repo.revise_instrument(
+                instrument_public_id="nonexistent-pid",
+                symbol_public_id="some-spid",
+                exchange="kraken",
+                session_id="rev-session",
+                sequence_id=1,
+                timestamp=datetime(2024, 6, 1, tzinfo=UTC),
+            )
+
+    @pytest.mark.asyncio
+    async def test_revise_conflict_with_existing_raises(self, tmp_path: Path) -> None:
+        """Revising to a business key occupied by another instrument raises ValueError."""
+        repo, _, inst_a_pid = await _create_repo_with_instrument(tmp_path)
+        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        assert spid is not None
+        seed_time = datetime(2024, 1, 1, tzinfo=UTC)
+        eth_sym = Symbol(
+            native_symbol="ETH-USD",
+            base="ETH",
+            quote="USD",
+            asset_type="crypto",
+            created_at=seed_time,
+            timestamp=seed_time,
+            session_id="test-session",
+            sequence_id=2,
+        )
+        async with repo.session() as s:
+            s.add(eth_sym)
+            await s.commit()
+        eth_spid = eth_sym.public_id
+        await repo.ensure_instrument(
+            symbol_public_id=eth_spid,
+            exchange="kraken",
+            session_id="test-session",
+            sequence_id=2,
+            timestamp=seed_time,
+        )
+        with pytest.raises(ValueError, match="already occupied"):
+            await repo.revise_instrument(
+                instrument_public_id=inst_a_pid,
+                symbol_public_id=eth_spid,
+                exchange="kraken",
+                session_id="rev-session",
+                sequence_id=1,
+                timestamp=datetime(2024, 6, 1, tzinfo=UTC),
+            )
+
+    @pytest.mark.asyncio
+    async def test_revise_preserves_contiguous_intervals(self, tmp_path: Path) -> None:
+        """Successive revisions produce contiguous temporal intervals."""
+        repo, _, inst_pid = await _create_repo_with_instrument(tmp_path)
+        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        assert spid is not None
+        t1 = datetime(2024, 3, 1, tzinfo=UTC)
+        await repo.revise_instrument(
+            instrument_public_id=inst_pid,
+            symbol_public_id=spid,
+            exchange="binance",
+            session_id="rev-session",
+            sequence_id=1,
+            timestamp=t1,
+        )
+        t2 = datetime(2024, 6, 1, tzinfo=UTC)
+        await repo.revise_instrument(
+            instrument_public_id=inst_pid,
+            symbol_public_id=spid,
+            exchange="coinbase",
+            session_id="rev-session",
+            sequence_id=2,
+            timestamp=t2,
+        )
+        async with repo.session() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(Instrument)
+                        .where(Instrument.public_id == inst_pid)
+                        .order_by(Instrument.timestamp.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(rows) == 3
+            for i in range(len(rows) - 1):
+                assert rows[i].known_to == rows[i + 1].timestamp
+
+    @pytest.mark.asyncio
+    async def test_revise_then_ensure_old_key_creates_new_instrument(self, tmp_path: Path) -> None:
+        """After revising business key, ensure on old key creates a new instrument."""
+        repo, _, inst_pid = await _create_repo_with_instrument(tmp_path)
+        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        assert spid is not None
+        rev_time = datetime(2024, 6, 1, tzinfo=UTC)
+        await repo.revise_instrument(
+            instrument_public_id=inst_pid,
+            symbol_public_id=spid,
+            exchange="binance",
+            session_id="rev-session",
+            sequence_id=1,
+            timestamp=rev_time,
+        )
+        new_id, new_pid = await repo.ensure_instrument(
+            symbol_public_id=spid,
+            exchange="kraken",
+            session_id="new-session",
+            sequence_id=1,
+            timestamp=datetime(2024, 7, 1, tzinfo=UTC),
+        )
+        assert new_pid != inst_pid
+
+
 class TestInstrumentJoinSemantics:
     """Contract tests: fact records join Instrument by public_id.
 

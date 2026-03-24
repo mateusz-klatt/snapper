@@ -966,6 +966,18 @@ class DummyRepository(Repository):
         """Ensure instrument - no-op returning (0, stub-public-id)."""
         return (0, "stub-public-id")
 
+    async def revise_instrument(
+        self,
+        instrument_public_id: str,
+        symbol_public_id: str,
+        exchange: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+    ) -> int:
+        """Revise instrument - no-op returning 0."""
+        return 0
+
     async def get_latest_candle_ids(self) -> dict[tuple[str, str], tuple[datetime, str]]:
         """Load latest candle IDs - returns empty dict for dummy."""
         return {}
@@ -1906,6 +1918,17 @@ class _MinimalRepository(Repository):
 
     async def ensure_instrument(self, **kwargs: Any) -> tuple[int, str]:
         return (0, "stub-public-id")
+
+    async def revise_instrument(
+        self,
+        instrument_public_id: str,
+        symbol_public_id: str,
+        exchange: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+    ) -> int:
+        return 0
 
     async def insert_order(
         self,

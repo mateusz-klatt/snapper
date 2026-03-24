@@ -249,6 +249,30 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def revise_instrument(
+        self,
+        instrument_public_id: str,
+        symbol_public_id: str,
+        exchange: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+    ) -> int:
+        """SCD2 close+insert for instrument business attributes.
+
+        Looks up the active Instrument by public_id as of *timestamp*.
+        Compares payload (symbol_public_id, exchange) against the active
+        version.  Returns existing id when identical (no-op).  When
+        different, closes the old version and inserts a new one with
+        the same public_id.
+
+        Raises ValueError when no active version exists for the given
+        instrument_public_id, or when the target business key is
+        already occupied by a different instrument.
+        """
+        ...
+
+    @abstractmethod
     async def get_latest_candle_ids(self) -> dict[tuple[str, str], tuple[datetime, str]]:
         """Load the latest candle public_id per (instrument_public_id, timeframe).
 
@@ -543,6 +567,64 @@ class SQLAlchemyRepository(Repository):
                 return (int(inst.id), str(inst.public_id))
             await s.refresh(new_inst)
             return (int(new_inst.id), str(new_inst.public_id))
+
+    async def revise_instrument(
+        self,
+        instrument_public_id: str,
+        symbol_public_id: str,
+        exchange: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+    ) -> int:
+        """SCD2 close+insert for instrument business attributes.
+
+        Raises ValueError when no active version exists or when the
+        target business key is already occupied by another instrument.
+        """
+        async with self.session() as s:
+            ts_filter, kt_filter = where_active(Instrument, timestamp)
+            q = await s.execute(
+                select(Instrument).where(
+                    Instrument.public_id == instrument_public_id,
+                    ts_filter,
+                    kt_filter,
+                )
+            )
+            inst = q.scalar_one_or_none()
+            if inst is None:
+                raise ValueError(f"No active Instrument with public_id={instrument_public_id}")
+            if inst.symbol_public_id == symbol_public_id and inst.exchange == exchange:
+                return int(inst.id)
+            conflict_q = await s.execute(
+                select(Instrument).where(
+                    Instrument.symbol_public_id == symbol_public_id,
+                    Instrument.exchange == exchange,
+                    ts_filter,
+                    kt_filter,
+                )
+            )
+            conflict = conflict_q.scalar_one_or_none()
+            if conflict is not None and conflict.public_id != instrument_public_id:
+                raise ValueError(
+                    f"Business key ({symbol_public_id}, {exchange}) "
+                    f"already occupied by instrument {conflict.public_id}"
+                )
+            new_row = await close_and_insert(
+                s,
+                Instrument,
+                [Instrument.public_id == instrument_public_id],
+                {
+                    "symbol_public_id": symbol_public_id,
+                    "exchange": exchange,
+                    "session_id": session_id,
+                    "sequence_id": sequence_id,
+                },
+                timestamp,
+            )
+            await s.commit()
+            await s.refresh(new_row)
+            return int(new_row.id)
 
     async def _upsert_batch(
         self, model: type[Base], rows: list[dict[str, Any]], index_elements: list[str]
