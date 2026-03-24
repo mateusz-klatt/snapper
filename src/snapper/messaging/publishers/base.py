@@ -335,9 +335,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     instrument_public_id, timeframe, candle.interval_begin
                 )
                 topic = self._build_data_topic(native_symbol, "candles", timeframe=timeframe)
+                received_at = datetime.now(UTC)
                 candle_msg = CandleData(
                     public_id=public_id,
-                    timestamp=datetime.now(UTC),
+                    timestamp=received_at,
                     session_id=self._tracker.session_id,
                     sequence_id=self._tracker.next_sequence(topic),
                     exchange=exchange,
@@ -353,7 +354,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     trades=candle.trades,
                 )
                 published = await self._publish_message(topic, candle_msg)
-                self._last_data_timestamps[native_symbol] = datetime.now(UTC).timestamp() * 1000
+                self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
                 await self._save_to_db(
                     native_symbol, cast(CandleData, published) if published else candle_msg
                 )
@@ -376,9 +377,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     break
                 native_symbol = message.symbol
                 topic = self._build_data_topic(native_symbol, "ticks")
+                received_at = datetime.now(UTC)
                 tick_msg = TickData(
                     public_id=str(uuid7()),
-                    timestamp=datetime.now(UTC),
+                    timestamp=received_at,
                     session_id=self._tracker.session_id,
                     sequence_id=self._tracker.next_sequence(topic),
                     exchange=exchange,
@@ -389,7 +391,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     last=message.last,
                 )
                 await self._publish_message(topic, tick_msg)
-                self._last_data_timestamps[native_symbol] = datetime.now(UTC).timestamp() * 1000
+                self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
         except Exception as e:
             logger.error(f"Tick loop error for {symbols}: {e}")
 
@@ -409,9 +411,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     break
                 native_symbol = trade.symbol
                 topic = self._build_data_topic(native_symbol, "trades")
+                received_at = datetime.now(UTC)
                 trade_msg = TradeData(
                     public_id=str(uuid7()),
-                    timestamp=datetime.now(UTC),
+                    timestamp=received_at,
                     session_id=self._tracker.session_id,
                     sequence_id=self._tracker.next_sequence(topic),
                     exchange=exchange,
@@ -422,7 +425,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     side=trade.side if trade.side in ["buy", "sell"] else None,
                 )
                 await self._publish_message(topic, trade_msg)
-                self._last_data_timestamps[native_symbol] = datetime.now(UTC).timestamp() * 1000
+                self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
         except Exception as e:
             logger.error(f"Trade loop error for {symbols}: {e}")
 

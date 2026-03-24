@@ -505,9 +505,10 @@ class BaseStrategy(ABC):
         if not self.msg_publisher:
             await self._setup_publisher()
         tracker = self.msg_publisher.tracker if self.msg_publisher else self._tracker
+        now = signal.timestamp or datetime.now(UTC)
         signal_envelope = SignalData(
             public_id=str(uuid7()),
-            timestamp=datetime.now(UTC),
+            timestamp=now,
             session_id=tracker.session_id,
             sequence_id=tracker.next_sequence(topic),
             instrument=signal.instrument,
@@ -517,7 +518,7 @@ class BaseStrategy(ABC):
             price=signal.price,
             exchange=self.exchange,
             strategy_name=self.name,
-            fired_at=signal.timestamp or datetime.now(UTC),
+            fired_at=now,
         )
 
         if self.msg_publisher is not None:
