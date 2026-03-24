@@ -486,11 +486,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if not self.msg_publisher or not self.running:
             return
         exchange_name = self._get_exchange_name()
+        now = datetime.now(UTC)
         try:
             topic = order_event_topic(exchange_name, cancel.instrument, event)
             order_event = OrderEventData(
                 public_id=str(uuid7()),
-                timestamp=datetime.now(UTC),
+                timestamp=now,
                 session_id=self._tracker.session_id,
                 sequence_id=self._tracker.next_sequence(topic),
                 exchange_order_id=cancel.exchange_order_id,
@@ -521,11 +522,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if not self.msg_publisher or not self.running:
             return
         exchange_name = self._get_exchange_name()
+        now = datetime.now(UTC)
         try:
             topic = order_event_topic(exchange_name, replace.instrument, event)
             order_event = OrderEventData(
                 public_id=str(uuid7()),
-                timestamp=datetime.now(UTC),
+                timestamp=now,
                 session_id=self._tracker.session_id,
                 sequence_id=self._tracker.next_sequence(topic),
                 exchange_order_id=replace.exchange_order_id,
@@ -742,10 +744,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         status = to_fill_status(execution)
         total_fee = execution.fee_usd_equiv or 0.0
+        now = datetime.now(UTC)
         topic = order_event_topic(exchange_name, original_order.instrument, "executed")
         return topic, ExecutionData(
             public_id=str(uuid7()),
-            timestamp=datetime.now(UTC),
+            timestamp=now,
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence(topic),
             trade_id=execution.exec_id,
@@ -759,7 +762,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             fee=total_fee,
             fee_asset="USD" if total_fee > 0 else "",
             status=status,
-            executed_at=datetime.now(UTC),
+            executed_at=execution.timestamp,
         )
 
     async def _process_execution(self, execution: ExecutionUpdate) -> None:
@@ -818,11 +821,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if not self.msg_publisher or not self.running:
             return
         exchange_name = self._get_exchange_name()
+        now = datetime.now(UTC)
         try:
             topic = order_event_topic(exchange_name, order.instrument, status)
             order_status = OrderData(
                 public_id=str(uuid7()),
-                timestamp=datetime.now(UTC),
+                timestamp=now,
                 session_id=self._tracker.session_id,
                 sequence_id=self._tracker.next_sequence(topic),
                 exchange_order_id=exchange_order_id,
@@ -835,7 +839,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 size=order.quantity,
                 filled_size=0.0 if status == "rejected" else order.quantity,
                 price=order.price,
-                created_at=datetime.now(UTC),
+                created_at=order.timestamp,
             )
             await self.msg_publisher.send(topic, order_status)
             logger.info(

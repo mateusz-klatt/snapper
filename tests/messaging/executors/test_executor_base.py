@@ -748,6 +748,7 @@ async def test_process_execution_default_filled_and_removes_pending(
         cum_qty=None,
         average_price=None,
         fee_usd_equiv=None,
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
     )
     await ex._process_execution(execution)
     assert order.client_order_id not in ex.pending_orders
