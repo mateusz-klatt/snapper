@@ -33,6 +33,7 @@ from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import MarketSnapshot
 from snapper.data.models import Symbol
 from snapper.data.repository import DatabaseRepository
+from snapper.data.repository import InstrumentSpecInput
 from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import dispose_repositories
@@ -991,16 +992,7 @@ class DummyRepository(Repository):
         session_id: str,
         sequence_id: int,
         timestamp: datetime,
-        tick_size: float | None = None,
-        lot_size: float | None = None,
-        min_order_size: float | None = None,
-        max_order_size: float | None = None,
-        cost_decimals: int | None = None,
-        qty_decimals: int | None = None,
-        margin_initial: float | None = None,
-        position_limit_long: int | None = None,
-        position_limit_short: int | None = None,
-        status: str | None = None,
+        spec: InstrumentSpecInput,
     ) -> int:
         """Revise instrument spec - no-op returning 0."""
         return 0

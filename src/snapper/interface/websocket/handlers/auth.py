@@ -21,6 +21,7 @@ from snapper.api.auth.services.ws_token_service import WsTokenService
 from snapper.api.auth.services.ws_token_service import compute_sid_hash
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.websocket_auth import WebSocketAuthManager
+from snapper.interface.websocket.models import SERVER_CONTROL_SEQ
 from snapper.interface.websocket.schemas import WSAuthenticateRequest
 from snapper.interface.websocket.schemas import WSAuthExpiredResponse
 from snapper.interface.websocket.schemas import WSAuthFailedResponse
@@ -113,7 +114,7 @@ def create_deadline_tasks(
             reauth_msg = WSReauthRequiredResponse(
                 deadline=expiration,
                 session_id=tracker.session_id,
-                sequence_id=tracker.next_sequence("server.control"),
+                sequence_id=tracker.next_sequence(SERVER_CONTROL_SEQ),
                 public_id=str(uuid7()),
                 timestamp=datetime.now(UTC),
             )
@@ -130,7 +131,7 @@ def create_deadline_tasks(
                 await asyncio.sleep(delay)
             expired_msg = WSAuthExpiredResponse(
                 session_id=tracker.session_id,
-                sequence_id=tracker.next_sequence("server.control"),
+                sequence_id=tracker.next_sequence(SERVER_CONTROL_SEQ),
                 public_id=str(uuid7()),
                 timestamp=datetime.now(UTC),
             )
@@ -173,7 +174,7 @@ async def authenticate_websocket(
         auth_failed = WSAuthFailedResponse(
             reason="missing_cookie",
             session_id=tracker.session_id,
-            sequence_id=tracker.next_sequence("server.control"),
+            sequence_id=tracker.next_sequence(SERVER_CONTROL_SEQ),
             public_id=str(uuid7()),
             timestamp=datetime.now(UTC),
         )
@@ -185,7 +186,7 @@ async def authenticate_websocket(
     auth_required = WSAuthRequiredResponse(
         timeout=AUTH_TIMEOUT_SECONDS,
         session_id=tracker.session_id,
-        sequence_id=tracker.next_sequence("server.control"),
+        sequence_id=tracker.next_sequence(SERVER_CONTROL_SEQ),
         public_id=str(uuid7()),
         timestamp=datetime.now(UTC),
     )
@@ -197,7 +198,7 @@ async def authenticate_websocket(
         auth_failed = WSAuthFailedResponse(
             reason="timeout",
             session_id=tracker.session_id,
-            sequence_id=tracker.next_sequence("server.control"),
+            sequence_id=tracker.next_sequence(SERVER_CONTROL_SEQ),
             public_id=str(uuid7()),
             timestamp=datetime.now(UTC),
         )
@@ -210,7 +211,7 @@ async def authenticate_websocket(
         auth_failed = WSAuthFailedResponse(
             reason="invalid_json",
             session_id=tracker.session_id,
-            sequence_id=tracker.next_sequence("server.control"),
+            sequence_id=tracker.next_sequence(SERVER_CONTROL_SEQ),
             public_id=str(uuid7()),
             timestamp=datetime.now(UTC),
         )
@@ -227,7 +228,7 @@ async def authenticate_websocket(
     except WsTokenAlreadyUsedError:
         auth_failed = WSAuthFailedResponse(
             session_id=tracker.session_id,
-            sequence_id=tracker.next_sequence("server.control"),
+            sequence_id=tracker.next_sequence(SERVER_CONTROL_SEQ),
             public_id=str(uuid7()),
             timestamp=datetime.now(UTC),
         )
@@ -237,7 +238,7 @@ async def authenticate_websocket(
     except WsTokenError:
         auth_failed = WSAuthFailedResponse(
             session_id=tracker.session_id,
-            sequence_id=tracker.next_sequence("server.control"),
+            sequence_id=tracker.next_sequence(SERVER_CONTROL_SEQ),
             public_id=str(uuid7()),
             timestamp=datetime.now(UTC),
         )
@@ -292,7 +293,7 @@ async def handle_reauth(
     if state is None:
         auth_failed = WSAuthFailedResponse(
             session_id=tracker.session_id,
-            sequence_id=tracker.next_sequence("server.control"),
+            sequence_id=tracker.next_sequence(SERVER_CONTROL_SEQ),
             public_id=str(uuid7()),
             timestamp=datetime.now(UTC),
         )
@@ -309,7 +310,7 @@ async def handle_reauth(
     except WsTokenAlreadyUsedError:
         auth_failed = WSAuthFailedResponse(
             session_id=tracker.session_id,
-            sequence_id=tracker.next_sequence("server.control"),
+            sequence_id=tracker.next_sequence(SERVER_CONTROL_SEQ),
             public_id=str(uuid7()),
             timestamp=datetime.now(UTC),
         )
@@ -319,7 +320,7 @@ async def handle_reauth(
     except WsTokenError:
         auth_failed = WSAuthFailedResponse(
             session_id=tracker.session_id,
-            sequence_id=tracker.next_sequence("server.control"),
+            sequence_id=tracker.next_sequence(SERVER_CONTROL_SEQ),
             public_id=str(uuid7()),
             timestamp=datetime.now(UTC),
         )
@@ -337,7 +338,7 @@ async def handle_reauth(
     reauth_ok = WSReauthOkResponse(
         exp=datetime.fromtimestamp(new_payload.exp, UTC),
         session_id=tracker.session_id,
-        sequence_id=tracker.next_sequence("server.control"),
+        sequence_id=tracker.next_sequence(SERVER_CONTROL_SEQ),
         public_id=str(uuid7()),
         timestamp=datetime.now(UTC),
     )

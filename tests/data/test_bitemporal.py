@@ -31,6 +31,7 @@ from snapper.data.models import Signal
 from snapper.data.models import Symbol
 from snapper.data.models import User
 from snapper.data.models import UserLoginEvent
+from snapper.data.repository import InstrumentSpecInput
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import where_active
@@ -1935,8 +1936,7 @@ class TestReviseInstrumentSpec:
             session_id="spec-session",
             sequence_id=1,
             timestamp=datetime(2024, 6, 1, tzinfo=UTC),
-            tick_size=0.01,
-            lot_size=0.001,
+            spec=InstrumentSpecInput(tick_size=0.01, lot_size=0.001),
         )
         async with repo.session() as s:
             spec = (await s.execute(select(InstrumentSpec))).scalars().first()
@@ -1956,8 +1956,7 @@ class TestReviseInstrumentSpec:
             session_id="spec-session",
             sequence_id=1,
             timestamp=t1,
-            tick_size=0.01,
-            lot_size=0.001,
+            spec=InstrumentSpecInput(tick_size=0.01, lot_size=0.001),
         )
         t2 = datetime(2024, 7, 1, tzinfo=UTC)
         spec_id2 = await repo.revise_instrument_spec(
@@ -1965,8 +1964,7 @@ class TestReviseInstrumentSpec:
             session_id="spec-session",
             sequence_id=2,
             timestamp=t2,
-            tick_size=0.01,
-            lot_size=0.001,
+            spec=InstrumentSpecInput(tick_size=0.01, lot_size=0.001),
         )
         assert spec_id2 == spec_id1
         async with repo.session() as s:
@@ -1983,8 +1981,7 @@ class TestReviseInstrumentSpec:
             session_id="spec-session",
             sequence_id=1,
             timestamp=t1,
-            tick_size=0.01,
-            lot_size=0.001,
+            spec=InstrumentSpecInput(tick_size=0.01, lot_size=0.001),
         )
         t2 = datetime(2024, 7, 1, tzinfo=UTC)
         spec_id2 = await repo.revise_instrument_spec(
@@ -1992,8 +1989,7 @@ class TestReviseInstrumentSpec:
             session_id="spec-session",
             sequence_id=2,
             timestamp=t2,
-            tick_size=0.05,
-            lot_size=0.001,
+            spec=InstrumentSpecInput(tick_size=0.05, lot_size=0.001),
         )
         assert spec_id2 != spec_id1
         async with repo.session() as s:
@@ -2022,7 +2018,7 @@ class TestReviseInstrumentSpec:
                 session_id="spec-session",
                 sequence_id=i,
                 timestamp=ts,
-                tick_size=tick,
+                spec=InstrumentSpecInput(tick_size=tick),
             )
         async with repo.session() as s:
             rows = (

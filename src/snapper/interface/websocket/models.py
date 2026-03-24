@@ -13,6 +13,7 @@ from snapper.core.types import SubscriptionAction
 
 __all__ = [
     "ConnectionStats",
+    "SERVER_CONTROL_SEQ",
     "SubscriptionRequestModel",
     "SubscriptionStatsSnapshot",
     "SubscriptionTopicDetail",
@@ -23,6 +24,9 @@ __all__ = [
     "UITopicModel",
     "WsStatsSnapshot",
 ]
+
+
+SERVER_CONTROL_SEQ: str = "server.control"
 
 
 @dataclass

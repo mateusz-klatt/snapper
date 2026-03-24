@@ -65,7 +65,7 @@ const SignalCard: React.FC<{ signal: Signal }> = ({ signal }) => {
             </span>
           )}
         </div>
-        <div className='text-xs text-muted-500'>{formatTime(signal.firedAt as Date)}</div>
+        <div className='text-xs text-muted-500'>{formatTime(signal.firedAt)}</div>
       </div>
       <div className='grid grid-cols-3 gap-4 text-sm mb-3'>
         <div>
@@ -130,9 +130,9 @@ export const Signals: React.FC = () => {
       s.side,
       String(s.strength),
       s.strategyName ?? '',
-      s.price != null ? String(s.price) : '',
+      s.price == null ? '' : String(s.price),
       s.reason,
-      (s.firedAt as Date).toISOString(),
+      s.firedAt.toISOString(),
     ])
 
     exportToCSV('signals.csv', headers, rows)

@@ -13,6 +13,7 @@ from fastapi import WebSocket
 
 from snapper.auth.domain.roles import UserRole
 from snapper.config.app import AppSettings
+from snapper.interface.websocket.models import SERVER_CONTROL_SEQ
 from snapper.interface.websocket.schemas import WSAuthFailedResponse
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.topics.builders import parse_market_topic
@@ -93,7 +94,7 @@ async def validate_origin(
         auth_failed = WSAuthFailedResponse(
             reason="origin_forbidden",
             session_id=tracker.session_id,
-            sequence_id=tracker.next_sequence("server.control"),
+            sequence_id=tracker.next_sequence(SERVER_CONTROL_SEQ),
             public_id=str(uuid7()),
             timestamp=datetime.now(UTC),
         )

@@ -33,6 +33,8 @@ from abc import abstractmethod
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager
 from contextlib import asynccontextmanager
+from dataclasses import asdict
+from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from inspect import isawaitable
@@ -78,6 +80,7 @@ __all__ = [
     "Repository",
     "SQLAlchemyRepository",
     "DatabaseRepository",
+    "InstrumentSpecInput",
     "close_and_insert",
     "close_and_insert_sync",
     "get_repository",
@@ -200,6 +203,22 @@ def close_and_insert_sync(
     return new_row
 
 
+@dataclass(frozen=True)
+class InstrumentSpecInput:
+    """Typed payload for instrument trading specification revisions."""
+
+    tick_size: float | None = None
+    lot_size: float | None = None
+    min_order_size: float | None = None
+    max_order_size: float | None = None
+    cost_decimals: int | None = None
+    qty_decimals: int | None = None
+    margin_initial: float | None = None
+    position_limit_long: int | None = None
+    position_limit_short: int | None = None
+    status: str | None = None
+
+
 class Repository(ABC):
     """Abstract base class defining the repository interface.
 
@@ -280,16 +299,7 @@ class Repository(ABC):
         session_id: str,
         sequence_id: int,
         timestamp: datetime,
-        tick_size: float | None = None,
-        lot_size: float | None = None,
-        min_order_size: float | None = None,
-        max_order_size: float | None = None,
-        cost_decimals: int | None = None,
-        qty_decimals: int | None = None,
-        margin_initial: float | None = None,
-        position_limit_long: int | None = None,
-        position_limit_short: int | None = None,
-        status: str | None = None,
+        spec: InstrumentSpecInput,
     ) -> int:
         """SCD2 close+insert for instrument trading specifications.
 
@@ -658,30 +668,10 @@ class SQLAlchemyRepository(Repository):
         session_id: str,
         sequence_id: int,
         timestamp: datetime,
-        tick_size: float | None = None,
-        lot_size: float | None = None,
-        min_order_size: float | None = None,
-        max_order_size: float | None = None,
-        cost_decimals: int | None = None,
-        qty_decimals: int | None = None,
-        margin_initial: float | None = None,
-        position_limit_long: int | None = None,
-        position_limit_short: int | None = None,
-        status: str | None = None,
+        spec: InstrumentSpecInput,
     ) -> int:
         """SCD2 close+insert for instrument trading specifications."""
-        payload = {
-            "tick_size": tick_size,
-            "lot_size": lot_size,
-            "min_order_size": min_order_size,
-            "max_order_size": max_order_size,
-            "cost_decimals": cost_decimals,
-            "qty_decimals": qty_decimals,
-            "margin_initial": margin_initial,
-            "position_limit_long": position_limit_long,
-            "position_limit_short": position_limit_short,
-            "status": status,
-        }
+        payload = asdict(spec)
         async with self.session() as s:
             ts_filter, kt_filter = where_active(InstrumentSpec, timestamp)
             q = await s.execute(
@@ -691,11 +681,11 @@ class SQLAlchemyRepository(Repository):
                     kt_filter,
                 )
             )
-            spec = q.scalar_one_or_none()
-            if spec is not None:
-                same = all(getattr(spec, k) == v for k, v in payload.items())
+            existing_spec = q.scalar_one_or_none()
+            if existing_spec is not None:
+                same = all(getattr(existing_spec, k) == v for k, v in payload.items())
                 if same:
-                    return int(spec.id)
+                    return int(existing_spec.id)
             new_values = {
                 "instrument_public_id": instrument_public_id,
                 "session_id": session_id,

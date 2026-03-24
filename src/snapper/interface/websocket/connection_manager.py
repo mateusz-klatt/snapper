@@ -13,6 +13,7 @@ from fastapi import WebSocket
 from pydantic import BaseModel
 
 from snapper.interface.websocket.bridge import ZmqWebSocketBridgeService
+from snapper.interface.websocket.models import SERVER_CONTROL_SEQ
 from snapper.interface.websocket.models import ConnectionStats
 from snapper.interface.websocket.models import WsStatsSnapshot
 from snapper.interface.websocket.schemas import WSErrorResponse
@@ -236,7 +237,7 @@ class WebSocketConnectionManager:
         error = WSErrorResponse(
             message=error_message,
             session_id=self._tracker.session_id,
-            sequence_id=self._tracker.next_sequence("server.control"),
+            sequence_id=self._tracker.next_sequence(SERVER_CONTROL_SEQ),
             public_id=str(uuid7()),
             timestamp=datetime.now(UTC),
         )

@@ -15,6 +15,7 @@ from snapper.interface.websocket.connection_manager import WebSocketConnectionMa
 from snapper.interface.websocket.helpers import filter_topics
 from snapper.interface.websocket.helpers import get_allowed_topics_for_role
 from snapper.interface.websocket.helpers import role_allowed_categories
+from snapper.interface.websocket.models import SERVER_CONTROL_SEQ
 from snapper.interface.websocket.schemas import WSErrorResponse
 from snapper.interface.websocket.schemas import WSSubscribeRequest
 from snapper.interface.websocket.schemas import WSSubscriptionsListResponse
@@ -61,7 +62,7 @@ async def handle_subscribe(
         error_msg = WSErrorResponse(
             message=f"Invalid topic format: {', '.join(error_details)}",
             session_id=manager.tracker.session_id,
-            sequence_id=manager.tracker.next_sequence("server.control"),
+            sequence_id=manager.tracker.next_sequence(SERVER_CONTROL_SEQ),
             public_id=str(uuid7()),
             timestamp=datetime.now(UTC),
         )
@@ -79,7 +80,7 @@ async def handle_subscribe(
             denied_topics=denied,
             active_subscriptions=list(manager.get_client_subscriptions(websocket)),
             session_id=manager.tracker.session_id,
-            sequence_id=manager.tracker.next_sequence("server.control"),
+            sequence_id=manager.tracker.next_sequence(SERVER_CONTROL_SEQ),
             public_id=str(uuid7()),
             timestamp=datetime.now(UTC),
         )
@@ -93,7 +94,7 @@ async def handle_subscribe(
             denied_topics=denied,
             active_subscriptions=list(manager.get_client_subscriptions(websocket)),
             session_id=manager.tracker.session_id,
-            sequence_id=manager.tracker.next_sequence("server.control"),
+            sequence_id=manager.tracker.next_sequence(SERVER_CONTROL_SEQ),
             public_id=str(uuid7()),
             timestamp=datetime.now(UTC),
         )
@@ -106,7 +107,7 @@ async def handle_subscribe(
         error_msg = WSErrorResponse(
             message="ZMQ bridge is not available",
             session_id=manager.tracker.session_id,
-            sequence_id=manager.tracker.next_sequence("server.control"),
+            sequence_id=manager.tracker.next_sequence(SERVER_CONTROL_SEQ),
             public_id=str(uuid7()),
             timestamp=datetime.now(UTC),
         )
@@ -121,7 +122,7 @@ async def handle_subscribe(
         active_subscriptions=list(manager.get_client_subscriptions(websocket)),
         message=f"Access denied to topics: {denied}" if denied else None,
         session_id=manager.tracker.session_id,
-        sequence_id=manager.tracker.next_sequence("server.control"),
+        sequence_id=manager.tracker.next_sequence(SERVER_CONTROL_SEQ),
         public_id=str(uuid7()),
         timestamp=datetime.now(UTC),
     )
@@ -158,7 +159,7 @@ async def handle_unsubscribe(
             denied_topics=denied,
             active_subscriptions=list(current_subscriptions),
             session_id=manager.tracker.session_id,
-            sequence_id=manager.tracker.next_sequence("server.control"),
+            sequence_id=manager.tracker.next_sequence(SERVER_CONTROL_SEQ),
             public_id=str(uuid7()),
             timestamp=datetime.now(UTC),
         )
@@ -169,7 +170,7 @@ async def handle_unsubscribe(
         error_msg = WSErrorResponse(
             message="ZMQ bridge is not available",
             session_id=manager.tracker.session_id,
-            sequence_id=manager.tracker.next_sequence("server.control"),
+            sequence_id=manager.tracker.next_sequence(SERVER_CONTROL_SEQ),
             public_id=str(uuid7()),
             timestamp=datetime.now(UTC),
         )
@@ -186,7 +187,7 @@ async def handle_unsubscribe(
         active_subscriptions=list(manager.get_client_subscriptions(websocket)),
         message=f"Not subscribed to topics: {denied}" if denied else None,
         session_id=manager.tracker.session_id,
-        sequence_id=manager.tracker.next_sequence("server.control"),
+        sequence_id=manager.tracker.next_sequence(SERVER_CONTROL_SEQ),
         public_id=str(uuid7()),
         timestamp=datetime.now(UTC),
     )
@@ -211,7 +212,7 @@ async def handle_get_subscriptions(
         available_topics=allowed_topics,
         total_available=len(allowed_topics),
         session_id=manager.tracker.session_id,
-        sequence_id=manager.tracker.next_sequence("server.control"),
+        sequence_id=manager.tracker.next_sequence(SERVER_CONTROL_SEQ),
         public_id=str(uuid7()),
         timestamp=datetime.now(UTC),
     )

@@ -19,10 +19,14 @@ function stamp<T extends Record<string, unknown>>(type: string, data: T): Proven
   return { type, ...BASE_PROVENANCE, ...data }
 }
 
+const DEFAULT_USER_OVERRIDES: Partial<Components['schemas']['UserProfile']> & {
+  username: string
+} = { username: 'test' }
+
 export function makeUserProfile(
-  overrides: Partial<Components['schemas']['UserProfile']> & { username: string } = {
-    username: 'test',
-  }
+  overrides: Partial<Components['schemas']['UserProfile']> & {
+    username: string
+  } = DEFAULT_USER_OVERRIDES
 ): Components['schemas']['UserProfile'] {
   return stamp('user_profile', {
     role: 'viewer' as const,

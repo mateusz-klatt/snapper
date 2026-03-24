@@ -40,6 +40,7 @@ from snapper.interface.websocket.handlers.subscribe import handle_get_subscripti
 from snapper.interface.websocket.handlers.subscribe import handle_subscribe
 from snapper.interface.websocket.handlers.subscribe import handle_unsubscribe
 from snapper.interface.websocket.helpers import get_allowed_topics_for_role
+from snapper.interface.websocket.models import SERVER_CONTROL_SEQ
 from snapper.interface.websocket.schemas import WSAuthCompleteResponse
 from snapper.interface.websocket.schemas import WSAuthOkResponse
 from snapper.interface.websocket.schemas import WSErrorResponse
@@ -133,7 +134,7 @@ async def _record_ws_control(
             client_session_id=client_sid,
             client_public_id=client_pid,
             session_id=tracker.session_id,
-            sequence_id=tracker.next_sequence("server.control"),
+            sequence_id=tracker.next_sequence(SERVER_CONTROL_SEQ),
             timestamp=now,
         )
         async with repo.session() as session:
@@ -208,7 +209,7 @@ async def send_auth_complete(
     auth_ok = WSAuthOkResponse(
         exp=datetime.fromtimestamp(ws_payload.exp, UTC),
         session_id=manager.tracker.session_id,
-        sequence_id=manager.tracker.next_sequence("server.control"),
+        sequence_id=manager.tracker.next_sequence(SERVER_CONTROL_SEQ),
         public_id=str(uuid7()),
         timestamp=datetime.now(UTC),
     )
@@ -221,7 +222,7 @@ async def send_auth_complete(
         session_expires_at=session_expires_at_dt,
         ws_token_exp=datetime.fromtimestamp(ws_payload.exp, UTC),
         session_id=manager.tracker.session_id,
-        sequence_id=manager.tracker.next_sequence("server.control"),
+        sequence_id=manager.tracker.next_sequence(SERVER_CONTROL_SEQ),
         public_id=str(uuid7()),
         timestamp=datetime.now(UTC),
     )
@@ -247,7 +248,7 @@ def _try_parse_message(
         return WSErrorResponse(
             message=f"Invalid message format: {e.error_count()} errors",
             session_id=manager.tracker.session_id,
-            sequence_id=manager.tracker.next_sequence("server.control"),
+            sequence_id=manager.tracker.next_sequence(SERVER_CONTROL_SEQ),
             public_id=str(uuid7()),
             timestamp=datetime.now(UTC),
         )
@@ -367,7 +368,7 @@ async def dispatch_messages(
         error_msg = WSErrorResponse(
             message="Internal server error",
             session_id=manager.tracker.session_id,
-            sequence_id=manager.tracker.next_sequence("server.control"),
+            sequence_id=manager.tracker.next_sequence(SERVER_CONTROL_SEQ),
             public_id=str(uuid7()),
             timestamp=datetime.now(UTC),
         )

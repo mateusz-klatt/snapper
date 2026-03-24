@@ -23,6 +23,7 @@ from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.data.models import Control
 from snapper.data.repository import get_repository
+from snapper.interface.websocket.models import SERVER_CONTROL_SEQ
 from snapper.interface.websocket.models import ConnectionStats
 from snapper.interface.websocket.models import SubscriptionStatsSnapshot
 from snapper.interface.websocket.models import SubscriptionTopicDetail
@@ -132,7 +133,7 @@ class ZmqWebSocketBridgeService:
                 client_session_id=None,
                 client_public_id=None,
                 session_id=tracker.session_id,
-                sequence_id=tracker.next_sequence("server.control"),
+                sequence_id=tracker.next_sequence(SERVER_CONTROL_SEQ),
                 timestamp=now,
             )
             async with repo.session() as session:
@@ -653,7 +654,7 @@ class ZmqWebSocketBridgeService:
                 error_response = WSErrorResponse(
                     message=f"Invalid topic: {error_msg}",
                     session_id=tracker.session_id,
-                    sequence_id=tracker.next_sequence("server.control"),
+                    sequence_id=tracker.next_sequence(SERVER_CONTROL_SEQ),
                     public_id=str(uuid7()),
                     timestamp=datetime.now(UTC),
                 )

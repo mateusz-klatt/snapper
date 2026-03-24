@@ -117,7 +117,7 @@ export function MarketData() {
 
     for (const candle of sortedCandles) {
       const unixTime = Math.floor(new Date(candle.open_at).getTime() / 1000)
-      const previous = deduped[deduped.length - 1]
+      const previous = deduped.at(-1)
 
       if (previous?.time === unixTime) {
         deduped[deduped.length - 1] = {
@@ -143,8 +143,8 @@ export function MarketData() {
 
   const stats = useMemo(() => {
     if (!chartData.length) return null
-    const latest = chartData[chartData.length - 1]
-    const previous = chartData.length > 1 ? chartData[chartData.length - 2] : null
+    const latest = chartData.at(-1) as FormattedCandle
+    const previous = chartData.length > 1 ? (chartData.at(-2) as FormattedCandle) : null
     const change = previous ? latest.close - previous.close : 0
     const changePercent = previous ? (change / previous.close) * 100 : 0
     const prices = chartData.map(c => c.close)
