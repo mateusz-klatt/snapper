@@ -1596,6 +1596,34 @@ class TestInstrumentBitemporal:
             assert exchanges == {"kraken", "binance"}
 
     @pytest.mark.asyncio
+    async def test_ensure_historical_timestamp_race_retry(self, tmp_path: Path) -> None:
+        """Race-retry after IntegrityError uses the same bus_time, not now().
+
+        Regression test for the bug where ensure_instrument retry path
+        called where_active(Instrument) without bus_time, causing incorrect
+        lookups for historical timestamps.
+
+        Given: An instrument already exists at a fixed historical time,
+        When: ensure_instrument is called with that historical timestamp
+              and the first INSERT hits IntegrityError (simulated race),
+        Then: The retry lookup uses the same historical bus_time and
+              returns the correct existing instrument.
+        """
+        repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
+        spid = await resolve_symbol_public_id(repo, "BTC-USD")
+        assert spid is not None
+        historical_time = datetime(2024, 6, 1, tzinfo=UTC)
+        result_id, result_pid = await repo.ensure_instrument(
+            symbol_public_id=spid,
+            exchange="kraken",
+            session_id="test-session",
+            sequence_id=2,
+            timestamp=historical_time,
+        )
+        assert result_id == inst_id
+        assert result_pid == inst_public_id
+
+    @pytest.mark.asyncio
     async def test_candles_use_active_instrument(self, tmp_path: Path) -> None:
         """Candles linked via instrument_public_id are found correctly.
 

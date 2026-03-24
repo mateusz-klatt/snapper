@@ -1625,6 +1625,48 @@ class TestSQLAlchemyRepositoryDialects:
             mock_session.rollback.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_ensure_instrument_race_retry_uses_bus_time(
+        self, mock_postgres_repo: SQLAlchemyRepository
+    ) -> None:
+        """Regression: retry after IntegrityError uses caller's bus_time.
+
+        Given: Historical timestamp passed to ensure_instrument,
+        When: First INSERT hits IntegrityError (race),
+        Then: Retry lookup calls where_active with the same bus_time,
+              not datetime.now(UTC).
+        """
+        historical_time = datetime(2024, 1, 15, tzinfo=UTC)
+        mock_session = AsyncMock()
+        mock_result = Mock()
+        mock_result.scalar_one_or_none.return_value = None
+        mock_instrument = Mock()
+        mock_instrument.id = 42
+        mock_instrument.public_id = "hist-pid"
+        mock_result2 = Mock()
+        mock_result2.scalar_one_or_none.return_value = mock_instrument
+        mock_session.execute.side_effect = [mock_result, mock_result2]
+        mock_session.add = Mock()
+        mock_session.commit.side_effect = [
+            IntegrityError("dup", "params", Exception()),
+            None,
+        ]
+        with patch.object(mock_postgres_repo, "session") as mock_ctx:
+            mock_ctx.return_value.__aenter__.return_value = mock_session
+            mock_ctx.return_value.__aexit__.return_value = None
+            result = await mock_postgres_repo.ensure_instrument(
+                symbol_public_id="fake-spid",
+                exchange="kraken",
+                session_id="s",
+                sequence_id=1,
+                timestamp=historical_time,
+            )
+            assert result == (42, "hist-pid")
+            retry_stmt = mock_session.execute.call_args_list[1].args[0]
+            compiled = retry_stmt.compile(compile_kwargs={"literal_binds": True})
+            compiled_sql = str(compiled)
+            assert "2024-01-15" in compiled_sql
+
+    @pytest.mark.asyncio
     async def test_ensure_instrument_integrity_error_reraise(
         self, mock_postgres_repo: SQLAlchemyRepository
     ) -> None:
