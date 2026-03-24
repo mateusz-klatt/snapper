@@ -103,6 +103,7 @@ class TestSignalService:
             price=50000.0,
             session_id="",
             sequence_id=0,
+            timestamp=FIXED_TEST_TIME,
             tracker=tracker,
         )
         assert signal_id is not None
@@ -145,6 +146,7 @@ class TestSignalService:
             price=None,
             session_id="",
             sequence_id=0,
+            timestamp=FIXED_TEST_TIME,
             tracker=tracker,
         )
         assert signal_id is not None
@@ -226,10 +228,11 @@ class TestSignalService:
                 price=50000.0 + i * 100,
                 session_id="",
                 sequence_id=0,
+                timestamp=FIXED_TEST_TIME,
                 tracker=tracker,
             )
             signal_ids.append(signal_id)
-        recent_signals = await signal_service.get_recent_signals(limit=2)
+        recent_signals = await signal_service.get_recent_signals(as_of=FIXED_TEST_TIME, limit=2)
         assert len(recent_signals) == 2
         assert isinstance(recent_signals[0]["public_id"], str)
         assert recent_signals[0]["public_id"] > recent_signals[1]["public_id"]
@@ -259,6 +262,7 @@ class TestSignalService:
             "testexchange",
             session_id="",
             sequence_id=0,
+            timestamp=FIXED_TEST_TIME,
             tracker=tracker,
             strategy_name="strategy_a",
             price=50000.0,
@@ -268,6 +272,7 @@ class TestSignalService:
             "testexchange",
             session_id="",
             sequence_id=0,
+            timestamp=FIXED_TEST_TIME,
             tracker=tracker,
             strategy_name="strategy_b",
             price=51000.0,
@@ -277,12 +282,13 @@ class TestSignalService:
             "testexchange",
             session_id="",
             sequence_id=0,
+            timestamp=FIXED_TEST_TIME,
             tracker=tracker,
             strategy_name="strategy_a",
             price=52000.0,
         )
         strategy_b_signals = await signal_service.get_recent_signals(
-            strategy="strategy_b", limit=10
+            as_of=FIXED_TEST_TIME, strategy="strategy_b", limit=10
         )
         assert len(strategy_b_signals) == 1
         assert isinstance(strategy_b_signals[0]["public_id"], str)
@@ -331,6 +337,7 @@ class TestSignalService:
             "testexchange",
             session_id="",
             sequence_id=0,
+            timestamp=FIXED_TEST_TIME,
             tracker=tracker,
             strategy_name="strategy_a",
             price=50000.0,
@@ -340,11 +347,14 @@ class TestSignalService:
             "testexchange",
             session_id="",
             sequence_id=0,
+            timestamp=FIXED_TEST_TIME,
             tracker=tracker,
             strategy_name="strategy_a",
             price=3000.0,
         )
-        btc_signals = await signal_service.get_recent_signals(instrument="BTCUSD", limit=10)
+        btc_signals = await signal_service.get_recent_signals(
+            as_of=FIXED_TEST_TIME, instrument="BTCUSD", limit=10
+        )
         assert len(btc_signals) == 1
         assert isinstance(btc_signals[0]["public_id"], str)
         assert btc_signals[0]["instrument"] == "BTCUSD"
@@ -385,6 +395,7 @@ class TestSignalService:
             "exchange_a",
             session_id="",
             sequence_id=0,
+            timestamp=FIXED_TEST_TIME,
             tracker=tracker,
             strategy_name="strategy_a",
             price=50000.0,
@@ -394,12 +405,13 @@ class TestSignalService:
             "exchange_b",
             session_id="",
             sequence_id=0,
+            timestamp=FIXED_TEST_TIME,
             tracker=tracker,
             strategy_name="strategy_a",
             price=51000.0,
         )
         exchange_b_signals = await signal_service.get_recent_signals(
-            exchange="exchange_b", limit=10
+            as_of=FIXED_TEST_TIME, exchange="exchange_b", limit=10
         )
         assert len(exchange_b_signals) == 1
         assert isinstance(exchange_b_signals[0]["public_id"], str)
@@ -412,7 +424,7 @@ class TestSignalService:
         When: get_recent_signals called,
         Then: Empty list returned.
         """
-        signals = await signal_service.get_recent_signals()
+        signals = await signal_service.get_recent_signals(as_of=datetime.now(UTC))
         assert signals == []
 
     async def test_signal_service_initialization(self) -> None:
@@ -497,6 +509,7 @@ class TestSignalServiceCoverage:
             price=100.0,
             session_id="",
             sequence_id=0,
+            timestamp=FIXED_TEST_TIME,
             tracker=tracker,
         )
         assert signal_id == ""
@@ -517,6 +530,7 @@ class TestSignalServiceCoverage:
             price=50000.0,
             session_id="",
             sequence_id=0,
+            timestamp=FIXED_TEST_TIME,
             tracker=SequenceTracker(),
         )
         assert len(signal_id) == 36
@@ -555,6 +569,7 @@ class TestSignalServiceCoverage:
                 price=50000.0,
                 session_id="",
                 sequence_id=0,
+                timestamp=FIXED_TEST_TIME,
                 tracker=tracker,
             )
             assert signal_id == ""
@@ -585,6 +600,7 @@ class TestSignalServiceCoverage:
                 price=50000.0,
                 session_id="",
                 sequence_id=0,
+                timestamp=FIXED_TEST_TIME,
                 tracker=tracker,
             )
             assert signal_id == ""
@@ -615,6 +631,7 @@ class TestSignalServiceCoverage:
                 price=50000.0,
                 session_id="",
                 sequence_id=0,
+                timestamp=FIXED_TEST_TIME,
                 tracker=SequenceTracker(),
             )
             assert signal_id == ""
@@ -637,7 +654,11 @@ class TestSignalServiceCoverage:
             patch("snapper.application.services.signals.service.logger") as mock_logger,
         ):
             signals = await signal_service.get_recent_signals(
-                instrument="BTC-USD", strategy="test_strategy", hours=24, limit=100
+                as_of=datetime.now(UTC),
+                instrument="BTC-USD",
+                strategy="test_strategy",
+                hours=24,
+                limit=100,
             )
             assert signals == []
             mock_logger.error.assert_called_once()
@@ -659,7 +680,7 @@ class TestSignalServiceCoverage:
             patch("snapper.application.services.signals.service.logger") as mock_logger,
         ):
             mock_session_manager.return_value.__aenter__.return_value = mock_session
-            signals = await signal_service.get_recent_signals()
+            signals = await signal_service.get_recent_signals(as_of=datetime.now(UTC))
             assert signals == []
             mock_logger.error.assert_called_once()
             assert "Error retrieving signals" in str(mock_logger.error.call_args)
@@ -705,6 +726,7 @@ class TestSignalServiceCoverage:
                 price=50000.0,
                 session_id="",
                 sequence_id=0,
+                timestamp=FIXED_TEST_TIME,
                 tracker=tracker,
             )
             assert signal_id == ""
@@ -751,6 +773,7 @@ class TestSignalServiceCoverage:
             price=2000.0,
             session_id="",
             sequence_id=0,
+            timestamp=FIXED_TEST_TIME,
             tracker=SequenceTracker(),
         )
         assert len(signal_id) == 36
@@ -792,7 +815,9 @@ class TestSignalServiceCoverage:
         ):
             mock_session_manager.return_value.__aenter__.return_value = mock_session
             signals = await signal_service.get_recent_signals(
-                instrument="BTC-USD", strategy="test_strategy"
+                as_of=datetime.now(UTC),
+                instrument="BTC-USD",
+                strategy="test_strategy",
             )
             assert signals == []
             mock_logger.error.assert_called_once()
@@ -816,6 +841,7 @@ class TestSignalServiceCoverage:
             price=50000.0,
             session_id=tracker.session_id,
             sequence_id=tracker.next_sequence("signals"),
+            timestamp=FIXED_TEST_TIME,
             tracker=tracker,
         )
         assert len(signal_id) == 36
