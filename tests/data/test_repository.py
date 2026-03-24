@@ -962,7 +962,14 @@ class DummyRepository(Repository):
         """Return dummy dialect name."""
         return "dummy"
 
-    async def ensure_instrument(self, **kwargs: Any) -> tuple[int, str]:
+    async def ensure_instrument(
+        self,
+        symbol_public_id: str,
+        exchange: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime | None = None,
+    ) -> tuple[int, str]:
         """Ensure instrument - no-op returning (0, stub-public-id)."""
         return (0, "stub-public-id")
 
@@ -984,7 +991,16 @@ class DummyRepository(Repository):
         session_id: str,
         sequence_id: int,
         timestamp: datetime,
-        **kwargs: Any,
+        tick_size: float | None = None,
+        lot_size: float | None = None,
+        min_order_size: float | None = None,
+        max_order_size: float | None = None,
+        cost_decimals: int | None = None,
+        qty_decimals: int | None = None,
+        margin_initial: float | None = None,
+        position_limit_long: int | None = None,
+        position_limit_short: int | None = None,
+        status: str | None = None,
     ) -> int:
         """Revise instrument spec - no-op returning 0."""
         return 0
@@ -1927,7 +1943,14 @@ class _MinimalRepository(Repository):
     async def upsert_ticks(self, rows: list[dict[str, Any]]) -> int:
         return 0
 
-    async def ensure_instrument(self, **kwargs: Any) -> tuple[int, str]:
+    async def ensure_instrument(
+        self,
+        symbol_public_id: str,
+        exchange: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime | None = None,
+    ) -> tuple[int, str]:
         return (0, "stub-public-id")
 
     async def revise_instrument(

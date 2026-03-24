@@ -102,8 +102,23 @@ class _StubAsyncRepo:
         self.calls: list[dict[str, Any]] = []
         self.return_value: tuple[int, str] = (42, "stub-instrument-pub-id")
 
-    async def ensure_instrument(self, **kwargs: Any) -> tuple[int, str]:
-        self.calls.append(dict(kwargs))
+    async def ensure_instrument(
+        self,
+        symbol_public_id: str,
+        exchange: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime | None = None,
+    ) -> tuple[int, str]:
+        self.calls.append(
+            {
+                "symbol_public_id": symbol_public_id,
+                "exchange": exchange,
+                "session_id": session_id,
+                "sequence_id": sequence_id,
+                "timestamp": timestamp,
+            }
+        )
         return self.return_value
 
     async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
@@ -1080,8 +1095,25 @@ class _StubBackfillAsyncRepo:
         self.calls: list[dict[str, Any]] = []
         self.upsert_candles_called = 0
 
-    async def ensure_instrument(self, **kwargs: Any) -> tuple[int, str]:
-        self.calls.append({"ensure_instrument": kwargs})
+    async def ensure_instrument(
+        self,
+        symbol_public_id: str,
+        exchange: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime | None = None,
+    ) -> tuple[int, str]:
+        self.calls.append(
+            {
+                "ensure_instrument": {
+                    "symbol_public_id": symbol_public_id,
+                    "exchange": exchange,
+                    "session_id": session_id,
+                    "sequence_id": sequence_id,
+                    "timestamp": timestamp,
+                }
+            }
+        )
         return (1, "stub-backfill-inst-pub-id")
 
     async def upsert_candles(self, rows: list[dict[str, object]]) -> int:
@@ -1596,7 +1628,14 @@ class _DummyRepo:
 class _DummyAsyncRepo:
     """Test dummy for async repository."""
 
-    async def ensure_instrument(self, **kwargs: Any) -> tuple[int, str]:
+    async def ensure_instrument(
+        self,
+        symbol_public_id: str,
+        exchange: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime | None = None,
+    ) -> tuple[int, str]:
         return (1, "dummy-inst-pub-id")
 
     async def upsert_candles(self, rows: list[dict[str, object]]) -> int:
@@ -1944,8 +1983,23 @@ class _RepoStub:
         self.instrument_calls: list[dict[str, Any]] = []
         self.candle_batches: list[list[dict[str, object]]] = []
 
-    async def ensure_instrument(self, **kwargs: Any) -> tuple[int, str]:
-        self.instrument_calls.append(kwargs)
+    async def ensure_instrument(
+        self,
+        symbol_public_id: str,
+        exchange: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime | None = None,
+    ) -> tuple[int, str]:
+        self.instrument_calls.append(
+            {
+                "symbol_public_id": symbol_public_id,
+                "exchange": exchange,
+                "session_id": session_id,
+                "sequence_id": sequence_id,
+                "timestamp": timestamp,
+            }
+        )
         return (77, "inst-pub-77")
 
     async def upsert_candles(self, rows: list[dict[str, object]]) -> int:
@@ -2167,8 +2221,22 @@ async def test_ensure_instrument_caches_id(
     """
     calls: list[dict[str, Any]] = []
 
-    async def ensure_instrument(**kwargs: Any) -> tuple[int, str]:
-        calls.append(kwargs)
+    async def ensure_instrument(
+        symbol_public_id: str,
+        exchange: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime | None = None,
+    ) -> tuple[int, str]:
+        calls.append(
+            {
+                "symbol_public_id": symbol_public_id,
+                "exchange": exchange,
+                "session_id": session_id,
+                "sequence_id": sequence_id,
+                "timestamp": timestamp,
+            }
+        )
         return (42, "inst-pub-42")
 
     service, _ = service_and_mapper

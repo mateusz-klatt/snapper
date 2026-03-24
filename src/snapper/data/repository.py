@@ -578,7 +578,7 @@ class SQLAlchemyRepository(Repository):
                 await s.commit()
             except IntegrityError as exc:
                 await s.rollback()
-                retry_ts, retry_kt = where_active(Instrument)
+                retry_ts, retry_kt = where_active(Instrument, bus_time)
                 q2 = await s.execute(
                     select(Instrument).where(
                         Instrument.symbol_public_id == symbol_public_id,

@@ -1878,9 +1878,24 @@ class DummyRepository:
         self.candle_calls: list[list[dict[str, Any]]] = []
         self._next_id = 100
 
-    async def ensure_instrument(self, **kwargs: Any) -> tuple[int, str]:
+    async def ensure_instrument(
+        self,
+        symbol_public_id: str,
+        exchange: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime | None = None,
+    ) -> tuple[int, str]:
         """Upsert instrument to repository."""
-        self.instrument_calls.append(kwargs)
+        self.instrument_calls.append(
+            {
+                "symbol_public_id": symbol_public_id,
+                "exchange": exchange,
+                "session_id": session_id,
+                "sequence_id": sequence_id,
+                "timestamp": timestamp,
+            }
+        )
         current_id = self._next_id
         self._next_id += 1
         return (current_id, f"inst-pub-{current_id}")
