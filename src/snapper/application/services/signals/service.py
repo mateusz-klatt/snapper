@@ -154,6 +154,7 @@ class SignalReadService:
         exchange: str | None = None,
         hours: int = 24,
         limit: int = 100,
+        as_of: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """Retrieve recent trading signals from the database.
 
@@ -163,13 +164,14 @@ class SignalReadService:
             exchange: Filter by exchange name.
             hours: Look back period in hours.
             limit: Maximum number of signals to return.
+            as_of: Point-in-time for temporal query. Defaults to now.
 
         Returns:
             List of signal dicts with instrument, timestamp, side, etc.
         """
         try:
             async with self.repo.session() as session:
-                now = datetime.now(UTC)
+                now = as_of or datetime.now(UTC)
                 since = now - timedelta(hours=hours)
                 query = (
                     select(Signal, Instrument, Symbol)
@@ -177,21 +179,21 @@ class SignalReadService:
                         Instrument,
                         and_(
                             Signal.instrument_public_id == Instrument.public_id,
-                            *where_active(Instrument),
+                            *where_active(Instrument, now),
                         ),
                     )
                     .join(
                         Symbol,
                         and_(
                             Instrument.symbol_public_id == Symbol.public_id,
-                            *where_active(Symbol),
+                            *where_active(Symbol, now),
                         ),
                     )
                 )
                 query = query.where(Signal.fired_at >= since)
                 query = query.where(Signal.timestamp <= now, Signal.known_to > now)
                 if instrument:
-                    s_ts, s_kt = where_active(Symbol)
+                    s_ts, s_kt = where_active(Symbol, now)
                     symbol_subq = (
                         select(Symbol.public_id)
                         .where(Symbol.native_symbol == instrument, s_ts, s_kt)

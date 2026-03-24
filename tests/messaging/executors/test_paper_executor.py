@@ -660,6 +660,7 @@ class TestPaperMarketDataMethods:
                 start_dt: datetime,
                 end_dt: datetime,
                 exchange: str,
+                as_of: datetime | None = None,
             ) -> list[dict]:
                 _ = interval
                 _ = start_dt
@@ -724,7 +725,12 @@ class TestPaperMarketDataMethods:
 
         class MultiSymbolRepo:
             async def get_trades(
-                self, symbol: str, start_dt: datetime, end_dt: datetime, exchange: str
+                self,
+                symbol: str,
+                start_dt: datetime,
+                end_dt: datetime,
+                exchange: str,
+                as_of: datetime | None = None,
             ) -> list[dict]:
                 _ = start_dt
                 _ = end_dt

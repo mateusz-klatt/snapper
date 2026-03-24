@@ -309,12 +309,17 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    async def get_latest_candle_ids(self) -> dict[tuple[str, str], tuple[datetime, str]]:
+    async def get_latest_candle_ids(
+        self, as_of: datetime | None = None
+    ) -> dict[tuple[str, str], tuple[datetime, str]]:
         """Load the latest candle public_id per (instrument_public_id, timeframe).
 
         Used by the publisher to populate the in-memory candle ID cache on
         startup so that live upserts reuse existing public_ids for the
         current open_at window.
+
+        Args:
+            as_of: Point-in-time for temporal query. Defaults to now.
 
         Returns:
             Mapping of (instrument_public_id, timeframe) to (open_at, public_id).
@@ -401,20 +406,30 @@ class Repository(ABC):
         start: datetime,
         end: datetime,
         exchange: AllExchange,
+        as_of: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """Retrieve candles for instrument in time range."""
         ...
 
     @abstractmethod
     async def get_trades(
-        self, instrument: str, start: datetime, end: datetime, exchange: AllExchange
+        self,
+        instrument: str,
+        start: datetime,
+        end: datetime,
+        exchange: AllExchange,
+        as_of: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """Retrieve trades for instrument in time range."""
         ...
 
     @abstractmethod
     async def get_market_snapshots(
-        self, instrument_public_ids: list[str], start: datetime, end: datetime
+        self,
+        instrument_public_ids: list[str],
+        start: datetime,
+        end: datetime,
+        as_of: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """Retrieve active market snapshots for instruments in time range."""
         ...
@@ -511,10 +526,12 @@ class SQLAlchemyRepository(Repository):
                 await s.rollback()
                 raise
 
-    async def get_latest_candle_ids(self) -> dict[tuple[str, str], tuple[datetime, str]]:
+    async def get_latest_candle_ids(
+        self, as_of: datetime | None = None
+    ) -> dict[tuple[str, str], tuple[datetime, str]]:
         """Load the latest candle public_id per (instrument_public_id, timeframe)."""
+        now = as_of or datetime.now(UTC)
         async with self.session() as s:
-            now = datetime.now(UTC)
             latest = (
                 select(
                     Candle.instrument_public_id,
@@ -951,9 +968,10 @@ class SQLAlchemyRepository(Repository):
         start: datetime,
         end: datetime,
         exchange: AllExchange,
+        as_of: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """Retrieve active candles for instrument within time range."""
-        now = datetime.now(UTC)
+        now = as_of or datetime.now(UTC)
         async with self.session() as s:
             s_ts, s_kt = where_active(Symbol, now)
             sym_q = await s.execute(
@@ -1017,10 +1035,15 @@ class SQLAlchemyRepository(Repository):
             ]
 
     async def get_trades(
-        self, instrument: str, start: datetime, end: datetime, exchange: AllExchange
+        self,
+        instrument: str,
+        start: datetime,
+        end: datetime,
+        exchange: AllExchange,
+        as_of: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """Retrieve trades for instrument within time range."""
-        now = datetime.now(UTC)
+        now = as_of or datetime.now(UTC)
         async with self.session() as s:
             s_ts, s_kt = where_active(Symbol, now)
             sym_q = await s.execute(
@@ -1075,10 +1098,14 @@ class SQLAlchemyRepository(Repository):
             ]
 
     async def get_market_snapshots(
-        self, instrument_public_ids: list[str], start: datetime, end: datetime
+        self,
+        instrument_public_ids: list[str],
+        start: datetime,
+        end: datetime,
+        as_of: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """Retrieve active market snapshots for instruments in time range."""
-        now = datetime.now(UTC)
+        now = as_of or datetime.now(UTC)
         async with self.session() as s:
             q = await s.execute(
                 select(
@@ -1098,6 +1125,7 @@ class SQLAlchemyRepository(Repository):
                     MarketSnapshot.instrument_public_id.in_(instrument_public_ids),
                     MarketSnapshot.timestamp >= start,
                     MarketSnapshot.timestamp <= end,
+                    MarketSnapshot.timestamp <= now,
                     MarketSnapshot.known_to > now,
                 )
                 .order_by(MarketSnapshot.timestamp.asc())

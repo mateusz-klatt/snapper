@@ -997,7 +997,9 @@ class DummyRepository(Repository):
         """Revise instrument spec - no-op returning 0."""
         return 0
 
-    async def get_latest_candle_ids(self) -> dict[tuple[str, str], tuple[datetime, str]]:
+    async def get_latest_candle_ids(
+        self, as_of: datetime | None = None
+    ) -> dict[tuple[str, str], tuple[datetime, str]]:
         """Load latest candle IDs - returns empty dict for dummy."""
         return {}
 
@@ -1071,6 +1073,7 @@ class DummyRepository(Repository):
         start: datetime,
         end: datetime,
         exchange: str,
+        as_of: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """Get candles - returns empty list."""
         return []
@@ -1081,12 +1084,17 @@ class DummyRepository(Repository):
         start: datetime,
         end: datetime,
         exchange: str,
+        as_of: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """Get trades - returns empty list."""
         return []
 
     async def get_market_snapshots(
-        self, instrument_public_ids: list[str], start: datetime, end: datetime
+        self,
+        instrument_public_ids: list[str],
+        start: datetime,
+        end: datetime,
+        as_of: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """Get market snapshots - returns empty list."""
         return []
@@ -1965,7 +1973,9 @@ class _MinimalRepository(Repository):
     def dialect_name(self) -> str:
         return "sqlite"
 
-    async def get_latest_candle_ids(self) -> dict[tuple[str, str], tuple[datetime, str]]:
+    async def get_latest_candle_ids(
+        self, as_of: datetime | None = None
+    ) -> dict[tuple[str, str], tuple[datetime, str]]:
         return {}
 
     async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
@@ -2054,6 +2064,7 @@ class _MinimalRepository(Repository):
         start: datetime,
         end: datetime,
         exchange: str,
+        as_of: datetime | None = None,
     ) -> list[dict[str, Any]]:
         return []
 
@@ -2063,6 +2074,7 @@ class _MinimalRepository(Repository):
         start: datetime,
         end: datetime,
         exchange: str,
+        as_of: datetime | None = None,
     ) -> list[dict[str, Any]]:
         return []
 
@@ -2071,6 +2083,7 @@ class _MinimalRepository(Repository):
         instrument_public_ids: list[str],
         start: datetime,
         end: datetime,
+        as_of: datetime | None = None,
     ) -> list[dict[str, Any]]:
         return []
 
