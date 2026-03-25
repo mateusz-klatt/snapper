@@ -315,8 +315,9 @@ export type Paths = {
          *
          *     Args:
          *         request: FastAPI request (provides REST tracker for provenance).
-         *         category: Optional category name to filter settings.
          *         user: Authenticated user with CONFIGURE_SYSTEM permission.
+         *         category: Optional category name to filter settings.
+         *         as_of: Optional point-in-time query timestamp.
          *
          *     Returns:
          *         SettingListResponse wrapping all settings matching the filter criteria.
@@ -344,6 +345,7 @@ export type Paths = {
          *     Args:
          *         request: FastAPI request (provides REST tracker for provenance).
          *         user: Authenticated user with CONFIGURE_SYSTEM permission.
+         *         as_of: Optional point-in-time query timestamp.
          *
          *     Returns:
          *         Response containing sorted list of category names.
@@ -649,6 +651,7 @@ export type Paths = {
          *         request: FastAPI request (provides REST tracker for provenance).
          *         _auth: Authenticated user with READ_MARKET_DATA permission.
          *         _csrf: CSRF token validation.
+         *         repo: Database repository.
          *         instrument: Instrument symbol to query.
          *         exchange: Exchange name to query.
          *         timeframe: Candle timeframe (e.g. '1m', '1h').
@@ -4392,6 +4395,7 @@ export interface Operations {
         parameters: {
             query?: {
                 category?: string | null;
+                as_of?: string | null;
             };
             header?: never;
             path?: never;
@@ -4421,7 +4425,9 @@ export interface Operations {
     };
     get_setting_categories_api_settings_categories_get: {
         parameters: {
-            query?: never;
+            query?: {
+                as_of?: string | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -4435,6 +4441,15 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["SettingCategoriesResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };
