@@ -44,6 +44,7 @@ from snapper.data.models import Instrument
 from snapper.data.models import Symbol
 from snapper.data.repository import Repository
 from snapper.data.repository import where_active
+from snapper.data.repository_types import MarketSnapshotRow
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
@@ -583,21 +584,32 @@ class PaperExchangeClient(ExchangeClientBase):
             inst_pids, start_dt, end_dt, as_of=datetime.now(UTC)
         )
         for snap in snapshots:
-            ticker = TickerUpdate(
-                symbol=str(snap.get("symbol", "")),
-                bid=snap["bid"] or 0.0,
-                bid_qty=snap["bid_volume"] or 0.0,
-                ask=snap["ask"] or 0.0,
-                ask_qty=snap["ask_volume"] or 0.0,
-                last=snap["last"] or 0.0,
-                volume=snap["volume"] or 0.0,
-                vwap=snap["vwap"] or 0.0,
-                low=snap["low"] or 0.0,
-                high=snap["high"] or 0.0,
-                change=0.0,
-                change_pct=0.0,
-            )
-            yield ticker
+            yield self._snapshot_to_ticker(snap)
+
+    @staticmethod
+    def _snapshot_to_ticker(snap: MarketSnapshotRow) -> TickerUpdate:
+        """Convert a market snapshot row to a TickerUpdate.
+
+        Args:
+            snap: Market snapshot row from the repository.
+
+        Returns:
+            TickerUpdate with zero-defaults for missing values.
+        """
+        return TickerUpdate(
+            symbol=str(snap.get("symbol", "")),
+            bid=snap["bid"] or 0.0,
+            bid_qty=snap["bid_volume"] or 0.0,
+            ask=snap["ask"] or 0.0,
+            ask_qty=snap["ask_volume"] or 0.0,
+            last=snap["last"] or 0.0,
+            volume=snap["volume"] or 0.0,
+            vwap=snap["vwap"] or 0.0,
+            low=snap["low"] or 0.0,
+            high=snap["high"] or 0.0,
+            change=0.0,
+            change_pct=0.0,
+        )
 
     def subscribe_candles(
         self,

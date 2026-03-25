@@ -1293,11 +1293,12 @@ def _resolve_primitive_type(
         if additional and isinstance(additional, dict):
             val_type = json_type_to_ts_entity(additional, field_name, True, all_schemas, _visited)
             return f"Record<string, {val_type}>"
-        return "Record<string, unknown>"
+        return _TS_RECORD_UNKNOWN
     return "unknown"
 
 
 _RECURSIVE_JSON_TYPES = frozenset({"JsonValue", "JsonObject", "JsonArray", "JsonPrimitive"})
+_TS_RECORD_UNKNOWN = "Record<string, unknown>"
 _ZOD_JSON_RECORD = "z.record(z.string(), z.any())"
 
 
@@ -1326,7 +1327,7 @@ def json_type_to_ts_entity(
     if "$ref" in prop and all_schemas:
         ref_name = prop["$ref"].split("/")[-1]
         if ref_name in _RECURSIVE_JSON_TYPES:
-            return "Record<string, unknown>" if ref_name == "JsonObject" else "unknown"
+            return _TS_RECORD_UNKNOWN if ref_name == "JsonObject" else "unknown"
         if ref_name in _visited:
             return "unknown"
         _visited.add(ref_name)
@@ -1876,8 +1877,8 @@ def postprocess_openapi_typescript_file(file_path: Path) -> None:
     updated = updated.replace("operations[", "Operations[")
 
     _json_type_replacements = {
-        'Components["schemas"]["JsonValue"]': "Record<string, unknown>",
-        'Components["schemas"]["JsonObject"]': "Record<string, unknown>",
+        'Components["schemas"]["JsonValue"]': _TS_RECORD_UNKNOWN,
+        'Components["schemas"]["JsonObject"]': _TS_RECORD_UNKNOWN,
         'Components["schemas"]["JsonPrimitive"]': "string | number | boolean | null",
         'Components["schemas"]["JsonArray"]': "unknown[]",
     }
