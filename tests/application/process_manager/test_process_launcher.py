@@ -122,6 +122,7 @@ class TestImportClass:
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=(),
+                parameters_model=None,
                 parameters_schema=None,
                 enabled=True,
                 mode="thread",
@@ -153,6 +154,7 @@ class TestImportClass:
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=(),
+                parameters_model=None,
                 parameters_schema=None,
                 enabled=True,
                 mode="thread",
@@ -1460,6 +1462,7 @@ async def test_start_process_by_name_reports_start_error(
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=(),
+                parameters_model=None,
                 parameters_schema=None,
                 enabled=True,
                 mode="thread",
@@ -1550,6 +1553,7 @@ async def test_start_process_by_name_updates_config_and_persists_overrides(
                 lifecycle=ProcessLifecycleEnum.ONE_SHOT,
                 role=ProcessRoleEnum.CORE,
                 tags=("a", "b"),
+                parameters_model=None,
                 parameters_schema=None,
                 enabled=True,
                 mode="thread",
@@ -1942,6 +1946,7 @@ def test_import_class_errors(monkeypatch: pytest.MonkeyPatch) -> None:
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=(),
+                parameters_model=None,
                 parameters_schema=None,
                 enabled=True,
                 mode="thread",
@@ -2284,6 +2289,7 @@ async def test_get_process_configs_uses_metadata_parameters_schema(
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=(),
+                parameters_model=None,
                 parameters_schema={"field": "value"},
                 enabled=True,
                 mode="thread",
@@ -2328,6 +2334,7 @@ async def test_get_process_configs_preserves_existing_parameters_schema(
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=(),
+                parameters_model=None,
                 parameters_schema={"other": False},
                 enabled=True,
                 mode="thread",
@@ -2751,6 +2758,7 @@ async def test_start_process_by_name_drops_metadata_tags_when_schema_missing(
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=("meta",),
+                parameters_model=None,
                 parameters_schema=None,
                 enabled=True,
                 mode="thread",
@@ -2872,7 +2880,7 @@ class _RegistryClass:
     """Test class for registry operations."""
 
     @classmethod
-    def get_default_kwargs(cls, _settings: Any) -> dict[str, Any]:
+    def get_default_parameters(cls, _settings: Any) -> dict[str, Any]:
         return {"default": True}
 
 
@@ -2897,6 +2905,7 @@ async def test_sync_registry_creates_missing_configs(monkeypatch: pytest.MonkeyP
         lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
         role=ProcessRoleEnum.CORE,
         tags=("x",),
+        parameters_model=None,
         parameters_schema={"schema": True},
         enabled=True,
         mode="thread",
@@ -2920,7 +2929,7 @@ class _RegistryClassFailingKwargs:
     """Test class that fails when getting default kwargs."""
 
     @classmethod
-    def get_default_kwargs(cls, _settings: Any) -> dict[str, Any]:
+    def get_default_parameters(cls, _settings: Any) -> dict[str, Any]:
         raise RuntimeError("nope")
 
 
@@ -2928,9 +2937,9 @@ class _RegistryClassFailingKwargs:
 async def test_sync_registry_creates_missing_configs_even_when_kwargs_fail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify sync creates config even when get_default_kwargs fails.
+    """Verify sync creates config even when get_default_parameters fails.
 
-    Given: A registered process whose get_default_kwargs raises exception,
+    Given: A registered process whose get_default_parameters raises exception,
     When: sync_registry_to_database is called,
     Then: Config is created with empty kwargs instead of failing.
     """
@@ -2947,6 +2956,7 @@ async def test_sync_registry_creates_missing_configs_even_when_kwargs_fail(
         lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
         role=ProcessRoleEnum.CORE,
         tags=(),
+        parameters_model=None,
         parameters_schema=None,
         enabled=True,
         mode="thread",
@@ -2965,7 +2975,7 @@ async def test_sync_registry_creates_missing_configs_even_when_kwargs_fail(
 
 
 class _RegistryNoKwargs:
-    """Test class without get_default_kwargs method."""
+    """Test class without get_default_parameters method."""
 
     pass
 
@@ -3009,6 +3019,7 @@ async def test_sync_registry_skips_update_when_no_changes(monkeypatch: pytest.Mo
         lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
         role=ProcessRoleEnum.CORE,
         tags=(),
+        parameters_model=None,
         parameters_schema=None,
         enabled=True,
         mode="thread",
@@ -3026,7 +3037,7 @@ class _RegistryClassNoKwargs:
     """Test class with default kwargs returning filled value."""
 
     @classmethod
-    def get_default_kwargs(cls, _settings: Any) -> dict[str, Any]:
+    def get_default_parameters(cls, _settings: Any) -> dict[str, Any]:
         return {"filled": True}
 
 
@@ -3069,6 +3080,7 @@ async def test_sync_registry_updates_existing_config(monkeypatch: pytest.MonkeyP
         lifecycle=ProcessLifecycleEnum.ONE_SHOT,
         role=ProcessRoleEnum.CORE,
         tags=("a",),
+        parameters_model=None,
         parameters_schema={"shape": "x"},
         enabled=True,
         mode="thread",
@@ -3128,6 +3140,7 @@ async def test_sync_registry_adds_tags_and_schema_when_missing(
         lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
         role=ProcessRoleEnum.CORE,
         tags=("sync",),
+        parameters_model=None,
         parameters_schema={"p": 1},
         enabled=True,
         mode="thread",
@@ -3148,7 +3161,7 @@ class _RegistryClassKwargsFailingUpdate:
     """Test class that raises during kwargs retrieval."""
 
     @classmethod
-    def get_default_kwargs(cls, _settings: Any) -> dict[str, Any]:
+    def get_default_parameters(cls, _settings: Any) -> dict[str, Any]:
         raise RuntimeError("nope")
 
 
@@ -3172,9 +3185,9 @@ class _TwoPhaseRepository:
 async def test_sync_registry_update_handles_default_kwargs_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify sync handles get_default_kwargs failure during update.
+    """Verify sync handles get_default_parameters failure during update.
 
-    Given: An existing config where registry class get_default_kwargs raises,
+    Given: An existing config where registry class get_default_parameters raises,
     When: sync_registry_to_database is called,
     Then: Update uses empty kwargs and does not commit invalid state.
     """
@@ -3209,6 +3222,7 @@ async def test_sync_registry_update_handles_default_kwargs_failure(
         lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
         role=ProcessRoleEnum.CORE,
         tags=(),
+        parameters_model=None,
         parameters_schema=None,
         enabled=True,
         mode="thread",
@@ -3265,6 +3279,7 @@ async def test_sync_registry_update_handles_missing_record_on_second_fetch(
         lifecycle=ProcessLifecycleEnum.ONE_SHOT,
         role=ProcessRoleEnum.CORE,
         tags=("t",),
+        parameters_model=None,
         parameters_schema=None,
         enabled=True,
         mode="thread",
@@ -3302,6 +3317,7 @@ async def test_sync_registry_handles_invalid_json(monkeypatch: pytest.MonkeyPatc
         lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
         role=ProcessRoleEnum.CORE,
         tags=(),
+        parameters_model=None,
         parameters_schema=None,
         enabled=True,
         mode="thread",
@@ -3362,6 +3378,7 @@ async def test_sync_registry_skips_tag_update_when_already_present(
         lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
         role=ProcessRoleEnum.CORE,
         tags=("keep",),
+        parameters_model=None,
         parameters_schema=None,
         enabled=True,
         mode="thread",
@@ -3418,6 +3435,7 @@ async def test_sync_registry_adds_missing_tags_from_metadata(
         lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
         role=ProcessRoleEnum.CORE,
         tags=("new",),
+        parameters_model=None,
         parameters_schema=None,
         enabled=True,
         mode="thread",
@@ -3887,6 +3905,7 @@ async def test_start_process_by_name_persists_overrides_and_clears_tags_when_sch
             lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
             role=ProcessRoleEnum.CORE,
             tags=("legacy",),
+            parameters_model=None,
             parameters_schema=None,
             enabled=True,
             mode="thread",
@@ -3954,6 +3973,7 @@ async def test_sync_registry_to_database_adds_missing_tags(
             lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
             role=ProcessRoleEnum.CORE,
             tags=("alpha", "beta"),
+            parameters_model=None,
             parameters_schema={"type": "object"},
             enabled=True,
             mode="thread",
@@ -4028,6 +4048,7 @@ class TestProcessFactoryConfigLoading:
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=("test", "coverage"),
+                parameters_model=None,
                 parameters_schema={"type": "object"},
                 enabled=True,
                 mode="thread",
@@ -4501,11 +4522,11 @@ class TestProcessFactoryRegistrySync:
 
     @pytest.fixture
     def mock_process_class(self) -> type:
-        """Provide mock process class with get_default_kwargs method."""
+        """Provide mock process class with get_default_parameters method."""
 
         class MockProcess:
             @staticmethod
-            def get_default_kwargs(settings: Any) -> dict[str, Any]:
+            def get_default_parameters(settings: Any) -> dict[str, Any]:
                 return {"param1": "value1", "param2": 42}
 
         return MockProcess
@@ -4535,6 +4556,7 @@ class TestProcessFactoryRegistrySync:
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=("test", "new"),
+                parameters_model=None,
                 parameters_schema={"type": "object"},
                 enabled=True,
                 mode="thread",
@@ -4598,6 +4620,7 @@ class TestProcessFactoryRegistrySync:
                 lifecycle=ProcessLifecycleEnum.ONE_SHOT,
                 role=ProcessRoleEnum.BACKTEST,
                 tags=("updated",),
+                parameters_model=None,
                 parameters_schema=None,
                 enabled=True,
                 mode="thread",
@@ -4658,6 +4681,7 @@ class TestProcessFactoryRegistrySync:
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=(),
+                parameters_model=None,
                 parameters_schema=None,
                 enabled=True,
                 mode="thread",
@@ -4711,6 +4735,7 @@ class TestProcessFactoryRegistrySync:
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=(),
+                parameters_model=None,
                 parameters_schema=None,
                 enabled=True,
                 mode="thread",

@@ -13,15 +13,15 @@ from snapper.application.process_manager.models import RegisterableProcess
 class TestRegisterableProcess:
     """Test suite for RegisterableProcess abstract base class."""
 
-    def test_get_default_kwargs_returns_empty_dict(self) -> None:
-        """Verify get_default_kwargs returns empty dict as base implementation.
+    def test_get_default_parameters_returns_empty_dict(self) -> None:
+        """Verify get_default_parameters returns empty dict as base implementation.
 
         Given: A RegisterableProcess class,
-        When: get_default_kwargs is called with any settings object,
+        When: get_default_parameters is called with any settings object,
         Then: An empty dictionary is returned as the default behavior.
         """
         mock_settings = MagicMock()
-        result = RegisterableProcess.get_default_kwargs(mock_settings)
+        result = RegisterableProcess.get_default_parameters(mock_settings)
         assert result == {}
 
     @pytest.mark.asyncio

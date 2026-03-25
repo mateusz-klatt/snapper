@@ -1317,7 +1317,7 @@ class TestProcessRoutesTagsFallback:
         mock_factory = MagicMock()
         mock_factory.create_process_config = AsyncMock()
         strategy_class = MagicMock()
-        strategy_class.get_default_kwargs.return_value = {"name": "test"}
+        strategy_class.get_default_parameters.return_value = {"name": "test"}
         registry_data: dict[str, ProcessRegistryEntry] = {
             "test_process": ProcessRegistryEntry(
                 class_ref=strategy_class,
@@ -1328,6 +1328,7 @@ class TestProcessRoutesTagsFallback:
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=(),
+                parameters_model=None,
                 parameters_schema={"type": "object"},
                 enabled=False,
                 mode="thread",
@@ -1373,7 +1374,7 @@ class TestProcessRoutesTagsFallback:
         mock_factory = MagicMock()
         mock_factory.create_process_config = AsyncMock()
         strategy_class = MagicMock()
-        strategy_class.get_default_kwargs.return_value = {"name": "test"}
+        strategy_class.get_default_parameters.return_value = {"name": "test"}
         registry_data: dict[str, ProcessRegistryEntry] = {
             "test_process": ProcessRegistryEntry(
                 class_ref=strategy_class,
@@ -1384,6 +1385,7 @@ class TestProcessRoutesTagsFallback:
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=(),
+                parameters_model=None,
                 parameters_schema={"type": "object"},
                 enabled=False,
                 mode="thread",

@@ -69,14 +69,14 @@ class ZmqWebSocketBridgeService:
     """
 
     @staticmethod
-    def get_default_kwargs(settings: AppSettings) -> dict[str, Any]:
-        """Get default initialization arguments from settings.
+    def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
+        """Get default parameters from settings.
 
         Args:
             settings: Application settings instance.
 
         Returns:
-            Dictionary with default keyword arguments.
+            Dictionary with default parameters.
         """
         return {
             "connection_manager": None,

@@ -3791,15 +3791,15 @@ class TestTopicValidationPhase4:
 class TestExecutorBasePhase4:
     """Test suite for executor base class edge cases."""
 
-    def test_get_default_kwargs_returns_empty_dict(self) -> None:
-        """Verify get_default_kwargs returns empty dict.
+    def test_get_default_parameters_returns_empty_dict(self) -> None:
+        """Verify get_default_parameters returns empty dict.
 
         Given: ExchangeExecutorService,
-        When: get_default_kwargs called,
+        When: get_default_parameters called,
         Then: Empty dict returned.
         """
         mock_settings = MagicMock()
-        result = ExchangeExecutorService.get_default_kwargs(mock_settings)
+        result = ExchangeExecutorService.get_default_parameters(mock_settings)
         assert result == {}
 
     @pytest.mark.asyncio

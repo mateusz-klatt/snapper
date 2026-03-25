@@ -11,6 +11,7 @@ from loguru import logger
 
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
+from snapper.application.process_manager.process_parameters import SymbolUpdaterParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.config.settings import AppSettings
@@ -26,6 +27,7 @@ from snapper.infrastructure.symbols.mapper import make_native_symbol
     lifecycle=ProcessLifecycleEnum.ONE_SHOT,
     role=ProcessRoleEnum.TASK,
     tags=("maintenance", "symbols", "zonda"),
+    parameters_model=SymbolUpdaterParameters,
     enabled=True,
     mode="thread",
 )
@@ -33,8 +35,8 @@ class ZondaSymbolUpdaterService(SymbolUpdaterService[ZondaExchangeClient]):
     """Service for updating Zonda symbol mappings from CCXT."""
 
     @staticmethod
-    def get_default_kwargs(settings: AppSettings) -> dict[str, Any]:
-        """Return default kwargs for the Zonda updater service.
+    def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
+        """Return default parameters for the Zonda updater service.
 
         Args:
             settings: Application settings instance.

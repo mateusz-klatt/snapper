@@ -111,15 +111,15 @@ class TestWalutomatPublisher:
         assert client.__class__.__name__ == "WalutomatExchangeClient"
 
     @patch("snapper.config.settings.get_settings")
-    def test_get_default_kwargs(self, mock_get_settings: MagicMock) -> None:
+    def test_get_default_parameters(self, mock_get_settings: MagicMock) -> None:
         """Verify default kwargs extracts walutomat symbols from settings.
 
         Given settings with instruments.walutomat containing symbols,
-        When get_default_kwargs is called,
+        When get_default_parameters is called,
         Then returns dict with those symbols.
         """
         mock_settings = MagicMock()
         mock_settings.instruments = {"walutomat": ["EUR-PLN", "USD-PLN"]}
         mock_get_settings.return_value = mock_settings
-        kwargs = WalutomatMarketDataPublisher.get_default_kwargs(mock_settings)
+        kwargs = WalutomatMarketDataPublisher.get_default_parameters(mock_settings)
         assert kwargs == {"symbols": ["EUR-PLN", "USD-PLN"]}

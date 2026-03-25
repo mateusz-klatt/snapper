@@ -30,6 +30,7 @@ from typing import Any
 from loguru import logger
 
 from snapper.application.process_manager.enums import ProcessRoleEnum
+from snapper.application.process_manager.process_parameters import PublisherSymbolsParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
 from snapper.core.types import MarketDataExchange
@@ -44,6 +45,7 @@ from snapper.messaging.publishers.base import MarketDataPublisherService
     priority=21,
     role=ProcessRoleEnum.CORE,
     tags=("market-data", "publisher", "zonda"),
+    parameters_model=PublisherSymbolsParameters,
     enabled=True,
     mode="thread",
 )
@@ -70,8 +72,8 @@ class ZondaMarketDataPublisher(MarketDataPublisherService[ZondaExchangeClient]):
     """
 
     @staticmethod
-    def get_default_kwargs(settings: AppSettings) -> dict[str, Any]:
-        """Get default kwargs from settings.
+    def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
+        """Get default parameters from settings.
 
         Args:
             settings: Application settings with instruments config.

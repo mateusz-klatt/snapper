@@ -91,6 +91,7 @@ class TestListAvailableProcesses:
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=(),
+                parameters_model=None,
                 parameters_schema=None,
                 enabled=False,
                 mode="thread",
@@ -104,6 +105,7 @@ class TestListAvailableProcesses:
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=(),
+                parameters_model=None,
                 parameters_schema=None,
                 enabled=False,
                 mode="thread",
@@ -317,12 +319,14 @@ class TestGetProcessSchema:
     async def test_get_process_schema_with_defaults(self, mock_get_registry: MagicMock) -> None:
         """Test schema returns default kwargs from class method.
 
-        Given: A process class with get_default_kwargs method,
+        Given: A process class with get_default_parameters method,
         When: get_process_schema is called,
         Then: Schema includes default kwargs and configuration.
         """
         mock_class = MagicMock()
-        mock_class.get_default_kwargs = MagicMock(return_value={"endpoint": "tcp://0.0.0.0:5555"})
+        mock_class.get_default_parameters = MagicMock(
+            return_value={"endpoint": "tcp://0.0.0.0:5555"}
+        )
         mock_get_registry.return_value = {
             "zmq_broker": ProcessRegistryEntry(
                 class_ref=mock_class,
@@ -333,6 +337,7 @@ class TestGetProcessSchema:
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=(),
+                parameters_model=None,
                 parameters_schema=None,
                 enabled=True,
                 mode="thread",
@@ -353,14 +358,14 @@ class TestGetProcessSchema:
     @pytest.mark.asyncio
     @patch("snapper.server.process_routes.get_registered_processes")
     async def test_get_process_schema_without_defaults(self, mock_get_registry: MagicMock) -> None:
-        """Test schema falls back when get_default_kwargs missing.
+        """Test schema falls back when get_default_parameters missing.
 
-        Given: A process class without get_default_kwargs method,
+        Given: A process class without get_default_parameters method,
         When: get_process_schema is called,
         Then: Schema returns empty kwargs defaults.
         """
         mock_class = MagicMock()
-        del mock_class.get_default_kwargs
+        del mock_class.get_default_parameters
         mock_get_registry.return_value = {
             "custom_process": ProcessRegistryEntry(
                 class_ref=mock_class,
@@ -371,6 +376,7 @@ class TestGetProcessSchema:
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=(),
+                parameters_model=None,
                 parameters_schema=None,
                 enabled=False,
                 mode="thread",
@@ -390,27 +396,28 @@ class TestGetProcessSchema:
 
     @pytest.mark.asyncio
     @patch("snapper.server.process_routes.get_registered_processes")
-    async def test_get_process_schema_get_default_kwargs_raises(
+    async def test_get_process_schema_get_default_parameters_raises(
         self, mock_get_registry: MagicMock
     ) -> None:
-        """Test schema handles get_default_kwargs exceptions.
+        """Test schema handles get_default_parameters exceptions.
 
-        Given: A process class where get_default_kwargs raises an error,
+        Given: A process class where get_default_parameters raises an error,
         When: get_process_schema is called,
         Then: Schema returns empty kwargs without propagating error.
         """
         mock_class = MagicMock()
-        mock_class.get_default_kwargs = MagicMock(side_effect=Exception("DB error"))
+        mock_class.get_default_parameters = MagicMock(side_effect=Exception("DB error"))
         mock_get_registry.return_value = {
             "failing_process": ProcessRegistryEntry(
                 class_ref=mock_class,
                 class_path="failing.Process",
                 method="run",
-                description="Process with failing get_default_kwargs",
+                description="Process with failing get_default_parameters",
                 priority=50,
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=(),
+                parameters_model=None,
                 parameters_schema=None,
                 enabled=True,
                 mode="process",
@@ -635,7 +642,7 @@ class TestCreateProcessConfiguration:
         }
         mock_factory.create_process_config = AsyncMock()
         strategy_class = MagicMock()
-        strategy_class.get_default_kwargs.return_value = {
+        strategy_class.get_default_parameters.return_value = {
             "name": "default_strategy",
             "inputs": ["BTC-USD:1h"],
             "output": "signals.default_strategy",
@@ -650,6 +657,7 @@ class TestCreateProcessConfiguration:
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.STRATEGY,
                 tags=("strategy",),
+                parameters_model=None,
                 parameters_schema={"type": "object"},
                 enabled=False,
                 mode="thread",
@@ -770,6 +778,7 @@ class TestCreateProcessConfiguration:
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.STRATEGY,
                 tags=(),
+                parameters_model=None,
                 parameters_schema=None,
                 enabled=False,
                 mode="thread",
@@ -827,6 +836,7 @@ class TestProcessRoutesEdgeCases:
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=(),
+                parameters_model=None,
                 parameters_schema=None,
                 enabled=False,
                 mode="thread",
@@ -838,12 +848,12 @@ class TestProcessRoutesEdgeCases:
 
     @pytest.mark.asyncio
     @patch("snapper.server.process_routes.get_registered_processes")
-    async def test_create_process_get_default_kwargs_exception(
+    async def test_create_process_get_default_parameters_exception(
         self, mock_get_registry: MagicMock
     ) -> None:
-        """Verify graceful handling of get_default_kwargs exception.
+        """Verify graceful handling of get_default_parameters exception.
 
-        Given: A process class where get_default_kwargs raises exception,
+        Given: A process class where get_default_parameters raises exception,
         When: create_process_configuration is called,
         Then: Configuration is created with provided kwargs only.
         """
@@ -853,7 +863,7 @@ class TestProcessRoutesEdgeCases:
 
         class FailingKwargsClass:
             @staticmethod
-            def get_default_kwargs(settings: MagicMock) -> dict[str, object]:
+            def get_default_parameters(settings: MagicMock) -> dict[str, object]:
                 raise RuntimeError("Failed to load defaults")
 
         mock_get_registry.return_value = {
@@ -861,11 +871,12 @@ class TestProcessRoutesEdgeCases:
                 class_ref=FailingKwargsClass,
                 class_path="snapper.test.FailingKwargsClass",
                 method="run",
-                description="Test with failing get_default_kwargs",
+                description="Test with failing get_default_parameters",
                 priority=50,
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=(),
+                parameters_model=None,
                 parameters_schema=None,
                 enabled=False,
                 mode="thread",
@@ -899,10 +910,12 @@ class TestProcessRoutesEdgeCases:
 
     @pytest.mark.asyncio
     @patch("snapper.server.process_routes.get_registered_processes")
-    async def test_create_process_no_get_default_kwargs(self, mock_get_registry: MagicMock) -> None:
-        """Verify creation succeeds without get_default_kwargs method.
+    async def test_create_process_no_get_default_parameters(
+        self, mock_get_registry: MagicMock
+    ) -> None:
+        """Verify creation succeeds without get_default_parameters method.
 
-        Given: A process class without get_default_kwargs method,
+        Given: A process class without get_default_parameters method,
         When: create_process_configuration is called,
         Then: Configuration is created with provided kwargs.
         """
@@ -915,11 +928,12 @@ class TestProcessRoutesEdgeCases:
                 class_ref=mock_class,
                 class_path="snapper.test.NoKwargsClass",
                 method="run",
-                description="Test without get_default_kwargs",
+                description="Test without get_default_parameters",
                 priority=50,
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=(),
+                parameters_model=None,
                 parameters_schema=None,
                 enabled=False,
                 mode="thread",
@@ -964,7 +978,7 @@ class TestProcessRoutesEdgeCases:
         mock_factory.get_templates = AsyncMock(return_value=["test_template"])
         mock_factory.create_process_config = AsyncMock(return_value=MagicMock())
         mock_class = MagicMock()
-        mock_class.get_default_kwargs = MagicMock(return_value={})
+        mock_class.get_default_parameters = MagicMock(return_value={})
         mock_get_registry.return_value = {
             "test_template": ProcessRegistryEntry(
                 class_ref=mock_class,
@@ -975,6 +989,7 @@ class TestProcessRoutesEdgeCases:
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=(),
+                parameters_model=None,
                 parameters_schema=None,
                 enabled=False,
                 mode="thread",

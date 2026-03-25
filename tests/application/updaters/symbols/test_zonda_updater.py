@@ -498,15 +498,15 @@ async def test_update_database_creates_and_updates(monkeypatch: pytest.MonkeyPat
     assert fake_session.add.call_count == 5
 
 
-def test_get_default_kwargs_and_setting_key() -> None:
-    """Verify get_default_kwargs and _get_setting_key return expected values.
+def test_get_default_parameters_and_setting_key() -> None:
+    """Verify get_default_parameters and _get_setting_key return expected values.
 
     Given: ZondaSymbolUpdaterService instance,
-    When: get_default_kwargs and _get_setting_key called,
+    When: get_default_parameters and _get_setting_key called,
     Then: Expected threshold hours and setting key returned.
     """
     svc = ZondaSymbolUpdaterService(update_threshold_hours=1, force=False)
-    defaults = svc.get_default_kwargs(object())
+    defaults = svc.get_default_parameters(object())
     assert defaults["update_threshold_hours"] == 24
     assert svc._get_setting_key() == "zonda_symbols_last_update"
 

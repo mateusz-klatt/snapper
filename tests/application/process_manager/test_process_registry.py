@@ -67,7 +67,7 @@ async def test_strategy_process_creation() -> None:
     assert metadata.role == "strategy"
     assert "strategy" in metadata.tags
     mock_settings = MagicMock()
-    kwargs = strategy_process_cls.get_default_kwargs(mock_settings)
+    kwargs = strategy_process_cls.get_default_parameters(mock_settings)
     assert kwargs["name"] == "macd_test"
     assert kwargs["inputs"] == ["market.kraken.BTC-USD.candles.1m"]
     assert kwargs["outputs"] == ["macd_test"]

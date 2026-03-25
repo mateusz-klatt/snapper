@@ -262,32 +262,32 @@ class TestPaperMarketDataPublisher:
         assert pub.start_time == 1000.0
         assert pub.end_time == 2000.0
 
-    def test_get_default_kwargs_with_settings(self) -> None:
+    def test_get_default_parameters_with_settings(self) -> None:
         """Verify default kwargs from settings with paper_instruments.
 
         Given settings with paper_instruments,
-        When get_default_kwargs is called,
+        When get_default_parameters is called,
         Then returns dict with paper_instruments from settings.
         """
         mock_settings = MagicMock()
         mock_settings.paper_instruments = {"kraken": ["BTC-USD", "ETH-USD"]}
-        kwargs = PaperMarketDataPublisher.get_default_kwargs(mock_settings)
+        kwargs = PaperMarketDataPublisher.get_default_parameters(mock_settings)
         assert kwargs == {
             "paper_instruments": {"kraken": ["BTC-USD", "ETH-USD"]},
             "start_time": None,
             "end_time": None,
         }
 
-    def test_get_default_kwargs_empty_settings_returns_idle(self) -> None:
+    def test_get_default_parameters_empty_settings_returns_idle(self) -> None:
         """Verify default kwargs returns idle config when no paper_instruments.
 
         Given settings with empty paper_instruments,
-        When get_default_kwargs is called,
+        When get_default_parameters is called,
         Then returns dict with empty paper_instruments (idle mode).
         """
         mock_settings = MagicMock()
         mock_settings.paper_instruments = {}
-        kwargs = PaperMarketDataPublisher.get_default_kwargs(mock_settings)
+        kwargs = PaperMarketDataPublisher.get_default_parameters(mock_settings)
         assert kwargs == {
             "paper_instruments": {},
             "start_time": None,

@@ -810,15 +810,15 @@ class TestPaperMarketDataMethods:
 class TestPaperOrderExecutor:
     """Tests for PaperOrderExecutor service."""
 
-    def test_get_default_kwargs_returns_empty_dict(self) -> None:
-        """Test get_default_kwargs returns empty dict.
+    def test_get_default_parameters_returns_empty_dict(self) -> None:
+        """Test get_default_parameters returns empty dict.
 
         Given: AppSettings instance,
-        When: get_default_kwargs is called,
+        When: get_default_parameters is called,
         Then: Empty dictionary is returned.
         """
         settings = MagicMock(spec=AppSettings)
-        assert PaperOrderExecutor.get_default_kwargs(settings) == {}
+        assert PaperOrderExecutor.get_default_parameters(settings) == {}
 
     @patch("snapper.messaging.executors.paper.PaperExchangeClient")
     @patch("snapper.messaging.executors.paper.get_repository")

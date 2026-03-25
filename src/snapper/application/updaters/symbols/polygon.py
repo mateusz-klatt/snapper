@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
+from snapper.application.process_manager.process_parameters import PolygonSymbolUpdaterParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.config.settings import AppSettings
@@ -28,6 +29,7 @@ from snapper.infrastructure.exchanges.implementations.polygon import PolygonExch
     lifecycle=ProcessLifecycleEnum.ONE_SHOT,
     role=ProcessRoleEnum.TASK,
     tags=("maintenance", "symbols", "polygon"),
+    parameters_model=PolygonSymbolUpdaterParameters,
     enabled=True,
     mode="thread",
 )
@@ -37,8 +39,8 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
     BATCH_COMMIT_SIZE: int = 1000
 
     @staticmethod
-    def get_default_kwargs(settings: AppSettings) -> dict[str, Any]:
-        """Return default kwargs for the Polygon updater service.
+    def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
+        """Return default parameters for the Polygon updater service.
 
         Args:
             settings: Application settings instance.

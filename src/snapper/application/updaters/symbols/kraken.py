@@ -15,6 +15,7 @@ from loguru import logger
 
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
+from snapper.application.process_manager.process_parameters import SymbolUpdaterParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.config.settings import AppSettings
@@ -34,6 +35,7 @@ _SEQ_KEY_CAPABILITIES = "capabilities"
     lifecycle=ProcessLifecycleEnum.ONE_SHOT,
     role=ProcessRoleEnum.TASK,
     tags=("maintenance", "symbols", "kraken"),
+    parameters_model=SymbolUpdaterParameters,
     enabled=True,
     mode="thread",
 )
@@ -51,14 +53,14 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
     VERIFICATION_TIMEOUT_SECONDS = 30.0
 
     @staticmethod
-    def get_default_kwargs(settings: AppSettings) -> dict[str, Any]:
-        """Get default constructor kwargs.
+    def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
+        """Get default parameters.
 
         Args:
             settings: Application settings.
 
         Returns:
-            Default kwargs with threshold and force settings.
+            Default parameters with threshold and force settings.
         """
         return {
             "update_threshold_hours": 6,

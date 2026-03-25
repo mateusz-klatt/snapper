@@ -497,15 +497,15 @@ def test_build_candle_rows_converts_values() -> None:
     assert rows[0]["vwap"] is None
 
 
-def test_get_default_kwargs_uses_settings() -> None:
-    """Verify get_default_kwargs extracts values from settings.
+def test_get_default_parameters_uses_settings() -> None:
+    """Verify get_default_parameters extracts values from settings.
 
     Given: Settings with backfill_days=5 and instruments,
-    When: get_default_kwargs called,
+    When: get_default_parameters called,
     Then: Returned dict contains correct values.
     """
     settings = DummySettings(backfill_days=5, instruments={"polygon": ["X:BTCUSD"]})
-    kwargs = PolygonAggregatesBackfillService.get_default_kwargs(settings)
+    kwargs = PolygonAggregatesBackfillService.get_default_parameters(settings)
     assert kwargs["symbols"] == ["X:BTCUSD"]
     assert kwargs["days_back"] == 5
 

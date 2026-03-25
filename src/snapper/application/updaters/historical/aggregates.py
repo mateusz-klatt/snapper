@@ -25,6 +25,7 @@ from sqlalchemy import select
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import RegisterableProcess
+from snapper.application.process_manager.process_parameters import AggregatesBackfillParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.application.services.settings import get_settings_service
 from snapper.config.settings import AppSettings
@@ -96,6 +97,7 @@ def _timeframe_label(multiplier: int, timespan: str) -> str:
     lifecycle=ProcessLifecycleEnum.ONE_SHOT,
     role=ProcessRoleEnum.TASK,
     tags=("polygon", "backfill", "historical"),
+    parameters_model=AggregatesBackfillParameters,
     enabled=False,
     mode="thread",
 )
@@ -122,14 +124,14 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
     BATCH_COMMIT_SIZE: int = 500
 
     @staticmethod
-    def get_default_kwargs(settings: AppSettings) -> dict[str, Any]:
-        """Get default constructor kwargs from settings.
+    def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
+        """Get default parameters from settings.
 
         Args:
             settings: Application settings.
 
         Returns:
-            Default kwargs including symbols, timeframe, days_back.
+            Default parameters including symbols, timeframe, days_back.
         """
         return {
             "symbols": settings.instruments.get("polygon", []),

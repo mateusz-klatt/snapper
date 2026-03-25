@@ -77,14 +77,14 @@ def test_get_exchange_name_returns_literal(
     assert get_exchange_name() == "walutomat"
 
 
-def test_get_default_kwargs_returns_empty_dict(
+def test_get_default_parameters_returns_empty_dict(
     mocked_settings: SimpleNamespace,
 ) -> None:
     """Verify default kwargs is empty (credentials from settings).
 
     Given the WalutomatOrderExecutor class,
-    When get_default_kwargs is called with any settings,
+    When get_default_parameters is called with any settings,
     Then it returns an empty dict (executor uses settings directly).
     """
-    defaults = WalutomatOrderExecutor.get_default_kwargs(cast(AppSettings, SimpleNamespace()))
+    defaults = WalutomatOrderExecutor.get_default_parameters(cast(AppSettings, SimpleNamespace()))
     assert defaults == {}

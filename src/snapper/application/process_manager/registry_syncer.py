@@ -142,12 +142,12 @@ class ProcessRegistrySyncer:
             return False
         cls = entry.class_ref
         try:
-            default_kwargs = cls.get_default_kwargs(self.settings)
+            default_kwargs = cls.get_default_parameters(self.settings)
         except Exception as e:
-            logger.debug(f"Process '{name}' get_default_kwargs failed: {e}")
+            logger.debug(f"Process '{name}' get_default_parameters failed: {e}")
             default_kwargs = {}
         if not default_kwargs:
-            logger.debug(f"Process '{name}' has empty default kwargs")
+            logger.debug(f"Process '{name}' has empty default parameters")
             return False
         config_dict["kwargs"] = default_kwargs
         return True
@@ -228,9 +228,9 @@ class ProcessRegistrySyncer:
         cls: type[RegisterableProcess] = entry.class_ref
         defaults = self._get_defaults_from_entry(entry)
         try:
-            defaults["kwargs"] = cls.get_default_kwargs(self.settings)
+            defaults["kwargs"] = cls.get_default_parameters(self.settings)
         except Exception as e:
-            logger.warning(f"Failed to get default kwargs for '{name}': {e}, using empty dict")
+            logger.warning(f"Failed to get default parameters for '{name}': {e}, using empty dict")
             defaults["kwargs"] = {}
         await self._create_process_config_in_db(
             name=name,

@@ -130,15 +130,15 @@ class TestZmqMessageLogger:
         ctx.term()
 
     @pytest.mark.asyncio
-    async def test_get_default_kwargs(self) -> None:
-        """Test get_default_kwargs factory method.
+    async def test_get_default_parameters(self) -> None:
+        """Test get_default_parameters factory method.
 
         Given: Mock settings object,
-        When: Calling get_default_kwargs,
+        When: Calling get_default_parameters,
         Then: Returns dict with expected logger config keys.
         """
         mock_settings = MagicMock()
-        kwargs = ZmqMessageLogger.get_default_kwargs(mock_settings)
+        kwargs = ZmqMessageLogger.get_default_parameters(mock_settings)
         assert "log_to_file" in kwargs
         assert "log_payload" in kwargs
         assert "max_payload_length" in kwargs

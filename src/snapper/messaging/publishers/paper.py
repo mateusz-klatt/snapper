@@ -21,6 +21,7 @@ from loguru import logger
 
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import RegisterableProcess
+from snapper.application.process_manager.process_parameters import PaperPublisherParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
 from snapper.core.types import AllExchange
@@ -116,6 +117,7 @@ class PerSourcePaperPublisher(MarketDataPublisherService[PaperExchangeClient]):
     priority=30,
     role=ProcessRoleEnum.CORE,
     tags=("market-data", "publisher", "paper"),
+    parameters_model=PaperPublisherParameters,
     enabled=True,
     mode="thread",
 )
@@ -149,8 +151,8 @@ class PaperMarketDataPublisher(RegisterableProcess):
         self._publishers: list[PerSourcePaperPublisher] = []
 
     @staticmethod
-    def get_default_kwargs(settings: AppSettings) -> dict[str, Any]:
-        """Return default keyword arguments from application settings.
+    def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
+        """Return default parameters from application settings.
 
         Args:
             settings: Application settings instance.

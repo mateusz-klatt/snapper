@@ -72,38 +72,38 @@ class TestKrakenMarketDataPublisher:
         publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         assert publisher._get_max_symbols_per_connection() == 20
 
-    def test_get_default_kwargs_from_settings(self) -> None:
+    def test_get_default_parameters_from_settings(self) -> None:
         """Verify default kwargs extracts kraken symbols from settings.
 
         Given settings with instruments.kraken containing symbols,
-        When get_default_kwargs is called,
+        When get_default_parameters is called,
         Then returns dict with those symbols.
         """
         mock_settings = MagicMock(spec=AppSettings)
         mock_settings.instruments = {"kraken": ["BTC-USD", "ETH-USD"], "zonda": ["BTC-PLN"]}
-        kwargs = KrakenMarketDataPublisher.get_default_kwargs(mock_settings)
+        kwargs = KrakenMarketDataPublisher.get_default_parameters(mock_settings)
         assert kwargs == {"symbols": ["BTC-USD", "ETH-USD"]}
 
-    def test_get_default_kwargs_with_empty_kraken_list(self) -> None:
+    def test_get_default_parameters_with_empty_kraken_list(self) -> None:
         """Verify default kwargs handles empty kraken instrument list.
 
         Given settings with instruments.kraken as empty list,
-        When get_default_kwargs is called,
+        When get_default_parameters is called,
         Then returns dict with empty symbols list.
         """
         mock_settings = MagicMock(spec=AppSettings)
         mock_settings.instruments = {"kraken": [], "zonda": ["BTC-PLN"]}
-        kwargs = KrakenMarketDataPublisher.get_default_kwargs(mock_settings)
+        kwargs = KrakenMarketDataPublisher.get_default_parameters(mock_settings)
         assert kwargs == {"symbols": []}
 
-    def test_get_default_kwargs_with_missing_kraken_key(self) -> None:
+    def test_get_default_parameters_with_missing_kraken_key(self) -> None:
         """Verify default kwargs handles missing kraken key in instruments.
 
         Given settings without 'kraken' key in instruments dict,
-        When get_default_kwargs is called,
+        When get_default_parameters is called,
         Then returns dict with empty symbols list.
         """
         mock_settings = MagicMock(spec=AppSettings)
         mock_settings.instruments = {"zonda": ["BTC-PLN"]}
-        kwargs = KrakenMarketDataPublisher.get_default_kwargs(mock_settings)
+        kwargs = KrakenMarketDataPublisher.get_default_parameters(mock_settings)
         assert kwargs == {"symbols": []}

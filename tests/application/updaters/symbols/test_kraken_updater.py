@@ -974,18 +974,18 @@ class TestWebSocketDisconnectError:
 
 
 class TestKrakenGetDefaultKwargs:
-    """Test cases for get_default_kwargs class method."""
+    """Test cases for get_default_parameters class method."""
 
-    def test_get_default_kwargs_returns_expected_values(self) -> None:
-        """Verify get_default_kwargs returns correct defaults.
+    def test_get_default_parameters_returns_expected_values(self) -> None:
+        """Verify get_default_parameters returns correct defaults.
 
         Given: Valid app settings,
-        When: get_default_kwargs called,
+        When: get_default_parameters called,
         Then: Expected update threshold and force values returned.
         """
         bootstrap = BootstrapSettingsLoader()
         settings = AppSettings(bootstrap, None)
-        kwargs = KrakenSymbolUpdaterService.get_default_kwargs(settings)
+        kwargs = KrakenSymbolUpdaterService.get_default_parameters(settings)
         assert kwargs["update_threshold_hours"] == 6
         assert kwargs["force"] is False
 

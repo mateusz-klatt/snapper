@@ -28,6 +28,7 @@ from snapper.application.engine.config import EngineConfigModel
 from snapper.application.engine.service import TradingEngineService
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import RegisterableProcess
+from snapper.application.process_manager.process_parameters import TraderParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
@@ -66,6 +67,7 @@ _bootstrap_settings = get_bootstrap_settings()
     priority=40,
     role=ProcessRoleEnum.CORE,
     tags=("trading", "signals", "risk"),
+    parameters_model=TraderParameters,
     enabled=True,
     mode="thread",
 )
@@ -118,14 +120,14 @@ class TraderCoordinator(RegisterableProcess):
         self._current_topic: str = ""
 
     @staticmethod
-    def get_default_kwargs(settings: AppSettings) -> dict[str, Any]:
-        """Get default constructor kwargs from settings.
+    def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
+        """Get default parameters from settings.
 
         Args:
             settings: Application settings instance.
 
         Returns:
-            Dict with default kwargs for TraderCoordinator.
+            Dict with default parameters for TraderCoordinator.
         """
         return {
             "signal_topics": ["signals."],

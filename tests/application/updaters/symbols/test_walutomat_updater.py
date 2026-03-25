@@ -306,15 +306,15 @@ async def test_update_database_skips_when_mapping_unchanged(
     assert rest_alias.timestamp.replace(tzinfo=None) == original_timestamp.replace(tzinfo=None)
 
 
-def test_get_default_kwargs_uses_weekly_threshold() -> None:
-    """Verify get_default_kwargs returns weekly (168h) threshold.
+def test_get_default_parameters_uses_weekly_threshold() -> None:
+    """Verify get_default_parameters returns weekly (168h) threshold.
 
     Given: AppSettings instance,
-    When: get_default_kwargs called,
+    When: get_default_parameters called,
     Then: 168-hour threshold and force=False returned.
     """
     settings = AppSettings(BootstrapSettingsLoader())
-    defaults = WalutomatSymbolUpdaterService.get_default_kwargs(settings)
+    defaults = WalutomatSymbolUpdaterService.get_default_parameters(settings)
     assert defaults == {"update_threshold_hours": 168, "force": False}
 
 

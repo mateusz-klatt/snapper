@@ -311,7 +311,7 @@ async def create_process_configuration(
         raise HTTPException(status_code=404, detail=f"Template '{payload.template}' not found")
     cls: type[RegisterableProcess] = entry.class_ref
     try:
-        base_kwargs = cls.get_default_kwargs(settings)
+        base_kwargs = cls.get_default_parameters(settings)
     except Exception:
         base_kwargs = {}
     if payload.kwargs:
@@ -385,7 +385,7 @@ async def get_process_schema(
     entry = registry[name]
     cls: type[RegisterableProcess] = entry.class_ref
     try:
-        default_kwargs = cls.get_default_kwargs(settings)
+        default_kwargs = cls.get_default_parameters(settings)
     except Exception:
         default_kwargs = {}
     sid, seq, pid, ts = _mint_provenance(request)

@@ -8,6 +8,7 @@ from typing import Any
 from loguru import logger
 
 from snapper.application.process_manager.enums import ProcessRoleEnum
+from snapper.application.process_manager.process_parameters import PublisherSymbolsParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
 from snapper.core.types import MarketDataExchange
@@ -22,6 +23,7 @@ from snapper.messaging.publishers.base import MarketDataPublisherService
     priority=22,
     role=ProcessRoleEnum.CORE,
     tags=("market-data", "publisher", "walutomat"),
+    parameters_model=PublisherSymbolsParameters,
     enabled=True,
     mode="thread",
 )
@@ -29,8 +31,8 @@ class WalutomatMarketDataPublisher(MarketDataPublisherService[WalutomatExchangeC
     """Market data publisher for Walutomat exchange."""
 
     @staticmethod
-    def get_default_kwargs(settings: AppSettings) -> dict[str, Any]:
-        """Return default keyword arguments for publisher initialization.
+    def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
+        """Return default parameters for publisher initialization.
 
         Args:
             settings: Application settings instance.

@@ -11,6 +11,7 @@ from loguru import logger
 
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
+from snapper.application.process_manager.process_parameters import SymbolUpdaterParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.config.settings import AppSettings
@@ -25,6 +26,7 @@ from snapper.infrastructure.exchanges.implementations.walutomat import Walutomat
     lifecycle=ProcessLifecycleEnum.ONE_SHOT,
     role=ProcessRoleEnum.TASK,
     tags=("maintenance", "symbols", "walutomat"),
+    parameters_model=SymbolUpdaterParameters,
     enabled=True,
     mode="thread",
 )
@@ -32,8 +34,8 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
     """Service for updating Walutomat symbol mappings from REST API."""
 
     @staticmethod
-    def get_default_kwargs(settings: AppSettings) -> dict[str, Any]:
-        """Return default kwargs for the Walutomat updater service.
+    def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
+        """Return default parameters for the Walutomat updater service.
 
         Args:
             settings: Application settings instance.

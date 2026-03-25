@@ -752,14 +752,14 @@ class _EngineStub:
         )
 
 
-def test_get_default_kwargs_returns_default_signal_topic() -> None:
-    """Verify get_default_kwargs returns default signal topic.
+def test_get_default_parameters_returns_default_signal_topic() -> None:
+    """Verify get_default_parameters returns default signal topic.
 
     Given empty AppSettings,
-    When get_default_kwargs is called,
+    When get_default_parameters is called,
     Then default signal topics list with 'signals.' is returned.
     """
-    defaults = TraderCoordinator.get_default_kwargs(cast(AppSettings, SimpleNamespace()))
+    defaults = TraderCoordinator.get_default_parameters(cast(AppSettings, SimpleNamespace()))
     assert defaults == {"signal_topics": ["signals."]}
 
 

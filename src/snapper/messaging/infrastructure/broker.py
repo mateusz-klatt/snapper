@@ -60,6 +60,7 @@ from loguru import logger
 
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import RegisterableProcess
+from snapper.application.process_manager.process_parameters import BrokerParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
@@ -89,6 +90,7 @@ class BrokerStatus:
     priority=10,
     role=ProcessRoleEnum.CORE,
     tags=("zmq", "broker", "infrastructure"),
+    parameters_model=BrokerParameters,
     enabled=True,
     mode="thread",
 )
@@ -125,8 +127,8 @@ class ZmqBrokerProcess(RegisterableProcess):
     """
 
     @staticmethod
-    def get_default_kwargs(settings: AppSettings) -> dict[str, Any]:
-        """Get default keyword arguments from application settings.
+    def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
+        """Get default parameters from application settings.
 
         Args:
             settings: Application settings containing ZMQ endpoint configuration.

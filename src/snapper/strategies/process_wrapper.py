@@ -11,6 +11,7 @@ from loguru import logger
 
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import RegisterableProcess
+from snapper.application.process_manager.process_parameters import StrategyProcessParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
 from snapper.core.types import OrderExchange
@@ -45,12 +46,13 @@ def create_strategy_process(
         priority=50,
         role=ProcessRoleEnum.STRATEGY,
         tags=("strategy", strategy_class.lower()),
+        parameters_model=StrategyProcessParameters,
         enabled=False,
         mode="thread",
     )
     class StrategyProcess(RegisterableProcess):
         @staticmethod
-        def get_default_kwargs(settings: AppSettings) -> dict[str, Any]:
+        def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
             return default_config
 
         def __init__(

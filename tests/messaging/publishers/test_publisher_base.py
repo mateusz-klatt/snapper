@@ -1476,11 +1476,11 @@ class TestFeedPublisherCoverage:
         await publisher.stop()
 
     @patch("snapper.config.settings.get_settings")
-    def test_get_default_kwargs(self, mock_get_settings: MagicMock) -> None:
-        """Verify get_default_kwargs extracts symbols from settings.
+    def test_get_default_parameters(self, mock_get_settings: MagicMock) -> None:
+        """Verify get_default_parameters extracts symbols from settings.
 
         Given: Settings with instruments.kraken symbols,
-        When: get_default_kwargs is called,
+        When: get_default_parameters is called,
         Then: Returns dict with symbols list.
         """
         mock_settings = MagicMock()
@@ -1490,7 +1490,7 @@ class TestFeedPublisherCoverage:
             "walutomat": [],
             "polygon": [],
         }
-        kwargs = KrakenMarketDataPublisher.get_default_kwargs(mock_settings)
+        kwargs = KrakenMarketDataPublisher.get_default_parameters(mock_settings)
         assert kwargs["symbols"] == ["BTC-USD", "EUR-USD"]
 
     @pytest.mark.asyncio

@@ -199,15 +199,15 @@ class TestZMQBrokerAdditionalCoverage:
     """Additional coverage tests for ZMQ broker."""
 
     @pytest.mark.timeout(15)
-    async def test_get_default_kwargs_from_settings(self) -> None:
-        """Test get_default_kwargs returns settings values.
+    async def test_get_default_parameters_from_settings(self) -> None:
+        """Test get_default_parameters returns settings values.
 
         Given: Application settings,
-        When: get_default_kwargs is called,
+        When: get_default_parameters is called,
         Then: Returns xsub and xpub endpoints from settings.
         """
         settings = get_settings()
-        kwargs = ZmqBrokerProcess.get_default_kwargs(settings)
+        kwargs = ZmqBrokerProcess.get_default_parameters(settings)
         assert "xsub_endpoint" in kwargs
         assert "xpub_endpoint" in kwargs
         assert kwargs["xsub_endpoint"] == settings.zmq_broker_xsub

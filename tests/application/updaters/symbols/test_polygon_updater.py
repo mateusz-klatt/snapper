@@ -1001,15 +1001,15 @@ def test_match_polygon_to_native(
     assert updater.match_symbol_public(ticker, symbol_data) == expected
 
 
-def test_get_default_kwargs() -> None:
+def test_get_default_parameters() -> None:
     """Verify default kwargs returns expected configuration.
 
     Given: Mock AppSettings object,
-    When: get_default_kwargs called,
+    When: get_default_parameters called,
     Then: Weekly threshold and insert_new=False returned.
     """
     mock_settings = MagicMock(spec=AppSettings)
-    kwargs = PolygonSymbolUpdaterService.get_default_kwargs(mock_settings)
+    kwargs = PolygonSymbolUpdaterService.get_default_parameters(mock_settings)
     assert kwargs["update_threshold_hours"] == 168
     assert kwargs["force"] is False
     assert kwargs["insert_new"] is False

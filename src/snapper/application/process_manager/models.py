@@ -44,16 +44,18 @@ class RegisterableProcess(ABC):
     """
 
     @staticmethod
-    def get_default_kwargs(settings: AppSettings) -> dict[str, Any]:
-        """Get default constructor kwargs from application settings.
+    def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
+        """Get default constructor parameters from application settings.
 
         Override in subclasses to provide settings-based defaults.
+        Returns a dict (or Pydantic model instance that supports
+        model_dump) with default parameters for the process constructor.
 
         Args:
             settings: Application settings instance.
 
         Returns:
-            Dict with default kwargs for the process constructor.
+            Dict with default parameters for the process constructor.
         """
         return {}
 
@@ -241,7 +243,8 @@ class ProcessRegistryEntry:
         lifecycle: Process lifecycle type enum.
         role: Process role category enum.
         tags: Categorization tags tuple.
-        parameters_schema: Optional JSON schema for constructor params.
+        parameters_model: Optional Pydantic model type for parameter validation.
+        parameters_schema: Derived JSON Schema from parameters_model (API metadata).
         enabled: Default enabled state.
         mode: Default execution mode.
     """
@@ -254,6 +257,7 @@ class ProcessRegistryEntry:
     lifecycle: ProcessLifecycleEnum
     role: ProcessRoleEnum
     tags: tuple[str, ...]
+    parameters_model: type[Any] | None
     parameters_schema: JsonObject | None
     enabled: bool
     mode: ProcessMode

@@ -95,15 +95,15 @@ def service_fixture(
     return service_instance, loader
 
 
-def test_get_default_kwargs_reflects_expected_defaults() -> None:
-    """Verify get_default_kwargs returns expected default values.
+def test_get_default_parameters_reflects_expected_defaults() -> None:
+    """Verify get_default_parameters returns expected default values.
 
     Given: Dummy settings object,
-    When: get_default_kwargs called,
+    When: get_default_parameters called,
     Then: Dictionary with correct default values returned.
     """
     dummy_settings = cast(AppSettings, SimpleNamespace())
-    defaults = PolygonGroupedDailyBackfillService.get_default_kwargs(dummy_settings)
+    defaults = PolygonGroupedDailyBackfillService.get_default_parameters(dummy_settings)
     assert defaults == {
         "market_type": "crypto",
         "days": 3,

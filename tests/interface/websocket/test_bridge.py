@@ -40,14 +40,14 @@ class DummyWebSocket:
 
 
 @pytest.mark.asyncio
-async def test_get_default_kwargs_returns_placeholder() -> None:
+async def test_get_default_parameters_returns_placeholder() -> None:
     """Get default kwargs returns connection_manager placeholder.
 
     Given: The ZmqWebSocketBridgeService class,
-    When: Calling get_default_kwargs,
+    When: Calling get_default_parameters,
     Then: Returns dict with connection_manager key set to None.
     """
-    default = ZmqWebSocketBridgeService.get_default_kwargs(settings=AsyncMock())
+    default = ZmqWebSocketBridgeService.get_default_parameters(settings=AsyncMock())
     assert "connection_manager" in default
     assert default["connection_manager"] is None
 

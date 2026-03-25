@@ -70,14 +70,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     """Base service for executing orders on exchanges via ZMQ messaging."""
 
     @staticmethod
-    def get_default_kwargs(settings: AppSettings) -> dict[str, Any]:
-        """Return default kwargs for the executor service.
+    def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
+        """Return default parameters for the executor service.
 
         Args:
             settings: Application settings instance.
 
         Returns:
-            Dictionary of default keyword arguments for this executor.
+            Dictionary of default parameters for this executor.
         """
         return {}
 

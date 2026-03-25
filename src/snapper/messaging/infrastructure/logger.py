@@ -59,6 +59,7 @@ from loguru import logger
 
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import RegisterableProcess
+from snapper.application.process_manager.process_parameters import LoggerParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_bootstrap_settings
@@ -93,6 +94,7 @@ class LoggerStatistics:
     priority=15,
     role=ProcessRoleEnum.CORE,
     tags=("zmq", "logging", "audit", "debugging"),
+    parameters_model=LoggerParameters,
     enabled=False,
     mode="thread",
 )
@@ -162,8 +164,8 @@ class ZmqMessageLogger(RegisterableProcess):
         self.broker_xpub = bootstrap.zmq_broker_xpub
 
     @staticmethod
-    def get_default_kwargs(settings: AppSettings) -> dict[str, Any]:
-        """Get default keyword arguments from application settings.
+    def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
+        """Get default parameters from application settings.
 
         Args:
             settings: Application settings (not used, defaults are hardcoded).

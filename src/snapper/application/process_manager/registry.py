@@ -7,6 +7,7 @@ and can be discovered and launched by the ProcessLauncherService.
 
 from collections.abc import Callable
 from collections.abc import Iterable
+from typing import Any
 
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
@@ -24,6 +25,21 @@ __all__ = [
 _PROCESS_REGISTRY: dict[str, ProcessRegistryEntry] = {}
 
 
+def _derive_parameters_schema(parameters_model: type[Any] | None) -> JsonObject | None:
+    """Derive JSON Schema from a Pydantic parameters model.
+
+    Args:
+        parameters_model: Pydantic model type, or None.
+
+    Returns:
+        JSON Schema dict, or None if no model provided.
+    """
+    if parameters_model is None:
+        return None
+    schema: JsonObject = parameters_model.model_json_schema()
+    return schema
+
+
 def register_process[T: type[RegisterableProcess]](
     name: str,
     method: str = "start",
@@ -32,7 +48,7 @@ def register_process[T: type[RegisterableProcess]](
     lifecycle: ProcessLifecycleEnum | str = ProcessLifecycleEnum.LONG_RUNNING,
     role: ProcessRoleEnum | str = ProcessRoleEnum.CORE,
     tags: Iterable[str] | None = None,
-    parameters_schema: JsonObject | None = None,
+    parameters_model: type[Any] | None = None,
     enabled: bool = False,
     mode: ProcessMode = "thread",
 ) -> Callable[[T], T]:
@@ -49,7 +65,8 @@ def register_process[T: type[RegisterableProcess]](
         lifecycle: LONG_RUNNING or ONE_SHOT.
         role: Process role (CORE, TASK, STRATEGY, BACKTEST).
         tags: Iterable of string tags for filtering.
-        parameters_schema: Optional JSON schema for constructor parameters.
+        parameters_model: Optional Pydantic model for parameter validation.
+            When provided, parameters_schema is derived automatically.
         enabled: Default enabled state. Defaults to False.
         mode: Execution mode ("thread" or "process"). Defaults to "thread".
 
@@ -90,7 +107,8 @@ def register_process[T: type[RegisterableProcess]](
             lifecycle=lifecycle_value,
             role=role_value,
             tags=tags_value,
-            parameters_schema=parameters_schema,
+            parameters_model=parameters_model,
+            parameters_schema=_derive_parameters_schema(parameters_model),
             enabled=enabled,
             mode=mode,
         )

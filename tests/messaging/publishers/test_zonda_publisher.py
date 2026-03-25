@@ -102,17 +102,17 @@ class TestZondaPublisher:
         assert client.__class__.__name__ == "ZondaExchangeClient"
 
     @patch("snapper.config.settings.get_settings")
-    def test_get_default_kwargs(self, mock_get_settings: MagicMock) -> None:
+    def test_get_default_parameters(self, mock_get_settings: MagicMock) -> None:
         """Verify default kwargs extracts zonda symbols from settings.
 
         Given settings with instruments.zonda containing symbols,
-        When get_default_kwargs is called,
+        When get_default_parameters is called,
         Then returns dict with those symbols.
         """
         mock_settings = MagicMock()
         mock_settings.instruments = {"zonda": ["BTC-PLN", "ETH-PLN"]}
         mock_get_settings.return_value = mock_settings
-        kwargs = ZondaMarketDataPublisher.get_default_kwargs(mock_settings)
+        kwargs = ZondaMarketDataPublisher.get_default_parameters(mock_settings)
         assert kwargs == {"symbols": ["BTC-PLN", "ETH-PLN"]}
 
     @patch("snapper.messaging.publishers.zonda.logger")

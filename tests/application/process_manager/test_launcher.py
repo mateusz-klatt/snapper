@@ -66,6 +66,7 @@ async def test_import_class_prefers_registry(monkeypatch: pytest.MonkeyPatch) ->
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=(),
+                parameters_model=None,
                 parameters_schema=None,
                 enabled=False,
                 mode="thread",
@@ -266,6 +267,7 @@ class TestStartProcessByNameNoSetting:
                 lifecycle=ProcessLifecycleEnum.ONE_SHOT,
                 role=ProcessRoleEnum.CORE,
                 tags=(),
+                parameters_model=None,
                 parameters_schema=None,
                 enabled=False,
                 mode="thread",
@@ -306,7 +308,7 @@ class TestSyncRegistryTagsNotIterable:
             "kwargs": {"key": "value"},
         }
         mock_class = MagicMock()
-        mock_class.get_default_kwargs.return_value = {}
+        mock_class.get_default_parameters.return_value = {}
         registry = {
             "test_proc": ProcessRegistryEntry(
                 class_ref=mock_class,
@@ -317,6 +319,7 @@ class TestSyncRegistryTagsNotIterable:
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=("not_a_list",),
+                parameters_model=None,
                 parameters_schema=None,
                 enabled=False,
                 mode="thread",
@@ -435,6 +438,7 @@ class TestImportClass:
                     lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                     role=ProcessRoleEnum.CORE,
                     tags=(),
+                    parameters_model=None,
                     parameters_schema=None,
                     enabled=False,
                     mode="thread",
@@ -465,6 +469,7 @@ class TestImportClass:
                     lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                     role=ProcessRoleEnum.CORE,
                     tags=(),
+                    parameters_model=None,
                     parameters_schema=None,
                     enabled=False,
                     mode="thread",
@@ -1043,6 +1048,7 @@ class TestGetProcessConfigs:
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=("meta_tag",),
+                parameters_model=None,
                 parameters_schema={"type": "object"},
                 enabled=False,
                 mode="thread",
@@ -1616,6 +1622,7 @@ class TestSyncRegistryToDatabase:
                     lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                     role=ProcessRoleEnum.CORE,
                     tags=(),
+                    parameters_model=None,
                     parameters_schema=None,
                     enabled=False,
                     mode="thread",
@@ -1778,6 +1785,7 @@ class TestGetDefaultsFromMetadata:
             lifecycle=ProcessLifecycleEnum.ONE_SHOT,
             role=ProcessRoleEnum.TASK,
             tags=("tag1", "tag2"),
+            parameters_model=None,
             parameters_schema={"type": "object"},
             enabled=True,
             mode="process",
@@ -1806,6 +1814,7 @@ class TestGetDefaultsFromMetadata:
             lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
             role=ProcessRoleEnum.CORE,
             tags=(),
+            parameters_model=None,
             parameters_schema=None,
             enabled=False,
             mode="thread",

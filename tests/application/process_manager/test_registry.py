@@ -1,5 +1,6 @@
 """Tests for process registration and discovery system."""
 
+from snapper.api.schemas.base import StrictBody
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import ProcessRegistryEntry
@@ -7,6 +8,12 @@ from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import discover_processes
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.application.process_manager.registry import register_process
+
+
+class _CustomParams(StrictBody):
+    """Test parameter model for custom registration tests."""
+
+    param1: str = "value1"
 
 
 class TestRegisterProcess:
@@ -54,7 +61,7 @@ class TestRegisterProcess:
             lifecycle=ProcessLifecycleEnum.ONE_SHOT,
             role=ProcessRoleEnum.TASK,
             tags=["tag1", "tag2"],
-            parameters_schema={"param1": "value1"},
+            parameters_model=_CustomParams,
             enabled=True,
             mode="process",
         )
@@ -77,7 +84,14 @@ class TestRegisterProcess:
         assert metadata.lifecycle == ProcessLifecycleEnum.ONE_SHOT
         assert metadata.role == ProcessRoleEnum.TASK
         assert metadata.tags == ("tag1", "tag2")
-        assert metadata.parameters_schema == {"param1": "value1"}
+        assert metadata.parameters_model is _CustomParams
+        schema = metadata.parameters_schema
+        assert isinstance(schema, dict)
+        props = schema["properties"]
+        assert isinstance(props, dict)
+        p1 = props["param1"]
+        assert isinstance(p1, dict)
+        assert p1["default"] == "value1"
         assert metadata.enabled is True
         assert metadata.mode == "process"
 
