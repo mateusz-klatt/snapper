@@ -12,6 +12,11 @@ the complete quality gate using the consolidated Makefile targets before creatin
 - NO unit test functions without proper typing allowed
 - Apply mypy-compliant typing standards to ALL Python code
 - When generating/refactoring/modifying unit tests, be STRICT about types
+- NO `Any` in new code — use concrete types, TypedDicts, `JsonObject`, or Pydantic models
+    - `Any` is allowed ONLY at system boundaries: external SDK/WS raw payloads (first parse layer), SQLAlchemy expression internals, OpenAPI/JSON schema manipulation, generic wrappers (`_with_retry`)
+    - For genuinely arbitrary JSON data, use `JsonObject` (`dict[str, JsonValue]`) from `snapper.core.json_types`
+    - For internal data transfer (repo rows, batch upserts), use TypedDicts from `snapper.data.repository_types`
+    - Process parameters use Pydantic models from `snapper.application.process_manager.process_parameters`
 
 **Python Import Rules (MANDATORY):**
 
