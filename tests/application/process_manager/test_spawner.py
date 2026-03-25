@@ -117,7 +117,6 @@ class TestBuildProcessCommand:
             name="worker",
             class_path="my.module.MyClass",
             method="run",
-            args=["arg1"],
             kwargs={"key": "value"},
         )
         assert sys.executable in cmd
@@ -152,7 +151,6 @@ class TestSpawnerImmediateExitWithoutCapture:
                 name="worker",
                 class_path="snapper.application.process_manager.models.ProcessInstanceInfo",
                 method="run",
-                args=[],
                 kwargs={},
             )
         assert "see console output" in str(exc.value).lower()
@@ -182,7 +180,6 @@ class TestSpawnerClassPathValidation:
                 name="worker",
                 class_path="NoDotsHere",
                 method="run",
-                args=[],
                 kwargs={},
             )
         assert "invalid class" in str(exc.value).lower()
@@ -208,7 +205,6 @@ class TestSpawnerClassPathValidation:
                 name="worker",
                 class_path="snapper.application.process_manager.models.NonExistentClass",
                 method="run",
-                args=[],
                 kwargs={},
             )
         assert "invalid class" in str(exc.value).lower()
@@ -443,7 +439,6 @@ class TestCaptureOutputPaths:
                 name="worker",
                 class_path="snapper.application.process_manager.models.ProcessInstanceInfo",
                 method="run",
-                args=[],
                 kwargs={},
             )
         error_msg = str(exc.value)
@@ -812,7 +807,6 @@ def test_spawn_success_registers_process(monkeypatch: MonkeyPatch) -> None:
         name="worker",
         class_path="snapper.application.process_manager.models.ProcessInstanceInfo",
         method="run",
-        args=["foo"],
         kwargs={"bar": 1},
     )
     assert info.process.pid == dummy.pid
@@ -841,7 +835,6 @@ def test_spawn_duplicate_name_raises(monkeypatch: MonkeyPatch) -> None:
         name="worker",
         class_path="snapper.application.process_manager.models.ProcessInstanceInfo",
         method="run",
-        args=[],
         kwargs={},
     )
     with pytest.raises(RuntimeError):
@@ -849,7 +842,6 @@ def test_spawn_duplicate_name_raises(monkeypatch: MonkeyPatch) -> None:
             name="worker",
             class_path="snapper.application.process_manager.models.ProcessInstanceInfo",
             method="run",
-            args=[],
             kwargs={},
         )
 
@@ -875,7 +867,6 @@ def test_spawn_invalid_class_path(monkeypatch: MonkeyPatch) -> None:
             name="worker",
             class_path="snapper.invalid.MissingClass",
             method="run",
-            args=[],
             kwargs={},
         )
 
@@ -907,7 +898,6 @@ def test_spawn_restores_sys_path_on_failure(monkeypatch: MonkeyPatch) -> None:
             name="bad",
             class_path="snapper.missing.Class",
             method="run",
-            args=[],
             kwargs={},
         )
     assert cwd in faulty
@@ -934,7 +924,6 @@ def test_spawn_immediate_exit_success(monkeypatch: MonkeyPatch) -> None:
         name="worker",
         class_path="snapper.application.process_manager.models.ProcessInstanceInfo",
         method="run",
-        args=[],
         kwargs={},
     )
     assert info.exit_code == 0
@@ -966,7 +955,6 @@ def test_spawn_immediate_exit_failure(monkeypatch: MonkeyPatch) -> None:
             name="worker",
             class_path="snapper.application.process_manager.models.ProcessInstanceInfo",
             method="run",
-            args=[],
             kwargs={},
         )
     assert "failed to start" in str(exc.value).lower()
@@ -1006,7 +994,6 @@ def test_terminate_process_gracefully(monkeypatch: MonkeyPatch) -> None:
         name="worker",
         class_path="snapper.application.process_manager.models.ProcessInstanceInfo",
         method="run",
-        args=[],
         kwargs={},
     )
     assert service.terminate("worker", timeout=1.0) is True
@@ -1057,7 +1044,6 @@ def test_terminate_process_force_kill(monkeypatch: MonkeyPatch) -> None:
         name="worker",
         class_path="snapper.application.process_manager.models.ProcessInstanceInfo",
         method="run",
-        args=[],
         kwargs={},
     )
     result = service.terminate("worker", timeout=0.5)

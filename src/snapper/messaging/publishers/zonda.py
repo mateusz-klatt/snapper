@@ -46,7 +46,6 @@ from snapper.messaging.publishers.base import MarketDataPublisherService
     tags=("market-data", "publisher", "zonda"),
     enabled=True,
     mode="thread",
-    args=[],
 )
 class ZondaMarketDataPublisher(MarketDataPublisherService[ZondaExchangeClient]):
     """Zonda exchange market data publisher.

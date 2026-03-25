@@ -11,7 +11,6 @@ export interface StrategyLaunchData {
   autostart: boolean
   startImmediately: boolean
   note?: string
-  args: unknown[]
   kwargs: Record<string, unknown>
 }
 interface StrategyLaunchModalProps {
@@ -48,7 +47,6 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
   const processSchema = useProcessSchema(selectedTemplate, {
     enabled: open && selectedTemplate.length > 0,
   })
-  const defaultArgs: unknown[] = processSchema.data?.payload.default_args ?? []
   const defaultKwargs = useMemo(() => {
     const raw = processSchema.data?.payload.default_kwargs ?? {}
 
@@ -130,7 +128,6 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
         autostart,
         startImmediately,
         note: note.trim() || undefined,
-        args: defaultArgs,
         kwargs,
       })
     } catch (error) {

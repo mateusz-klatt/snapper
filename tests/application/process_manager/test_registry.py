@@ -37,7 +37,6 @@ class TestRegisterProcess:
         assert metadata.role == ProcessRoleEnum.CORE
         assert metadata.enabled is False
         assert metadata.mode == "thread"
-        assert metadata.args == []
 
     def test_register_with_custom_parameters(self) -> None:
         """Verify process registration with all custom parameters.
@@ -58,7 +57,6 @@ class TestRegisterProcess:
             parameters_schema={"param1": "value1"},
             enabled=True,
             mode="process",
-            args=["arg1", "arg2"],
         )
         class CustomProcess(RegisterableProcess):
             async def start(self) -> None:
@@ -82,7 +80,6 @@ class TestRegisterProcess:
         assert metadata.parameters_schema == {"param1": "value1"}
         assert metadata.enabled is True
         assert metadata.mode == "process"
-        assert metadata.args == ["arg1", "arg2"]
 
     def test_register_with_string_enums(self) -> None:
         """Verify registration accepts string enum values.
@@ -126,25 +123,6 @@ class TestRegisterProcess:
         assert metadata is not None
         assert isinstance(metadata, ProcessRegistryEntry)
         assert metadata.tags == ()
-
-    def test_register_with_none_args(self) -> None:
-        """Verify registration handles None args gracefully.
-
-        Given: Registration with args=None,
-        When: Metadata is retrieved,
-        Then: Args defaults to empty list.
-        """
-
-        @register_process(name="test_no_args", args=None)
-        class NoArgsProcess(RegisterableProcess):
-            async def start(self) -> None:
-                """No-op start for NoArgsProcess test stub."""
-                pass
-
-        metadata = get_registered_processes().get("test_no_args")
-        assert metadata is not None
-        assert isinstance(metadata, ProcessRegistryEntry)
-        assert metadata.args == []
 
     def test_class_path_generation(self) -> None:
         """Verify automatic class path generation from module and class.
@@ -229,7 +207,6 @@ class TestGetRegisteredProcesses:
         assert hasattr(metadata, "parameters_schema")
         assert hasattr(metadata, "enabled")
         assert hasattr(metadata, "mode")
-        assert hasattr(metadata, "args")
 
 
 class TestDiscoverProcesses:

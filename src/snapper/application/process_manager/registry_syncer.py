@@ -65,7 +65,6 @@ class ProcessRegistrySyncer:
         return {
             "enabled": entry.enabled,
             "mode": entry.mode,
-            "args": entry.args,
             "kwargs": {},
             "lifecycle": entry.lifecycle,
             "role": entry.role,
@@ -90,7 +89,6 @@ class ProcessRegistrySyncer:
             "mode": defaults["mode"],
             "class": class_path,
             "method": method,
-            "args": defaults["args"],
             "kwargs": defaults["kwargs"],
             "lifecycle": (
                 defaults["lifecycle"].value
@@ -317,7 +315,6 @@ class ProcessRegistrySyncer:
         method: str,
         enabled: bool,
         mode: ProcessMode,
-        args: list[Any],
         kwargs: dict[str, Any],
         lifecycle: ProcessLifecycleEnum,
         role: ProcessRoleEnum,
@@ -333,7 +330,6 @@ class ProcessRegistrySyncer:
             method: Entry method name.
             enabled: Whether process is enabled for autostart.
             mode: Execution mode (thread/process).
-            args: Positional arguments.
             kwargs: Keyword arguments.
             lifecycle: Process lifecycle type.
             role: Process role category.
@@ -351,7 +347,6 @@ class ProcessRegistrySyncer:
             "mode": mode,
             "class": class_path,
             "method": method,
-            "args": args,
             "kwargs": kwargs,
             "lifecycle": lifecycle.value,
             "role": role.value,

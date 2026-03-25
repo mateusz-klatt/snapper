@@ -19,7 +19,6 @@ from snapper.messaging.executors.base import ExchangeExecutorService
     tags=("execution", "orders", "zonda"),
     enabled=True,
     mode="thread",
-    args=[],
 )
 class ZondaOrderExecutor(ExchangeExecutorService[ZondaExchangeClient]):
     """Order executor for Zonda exchange.

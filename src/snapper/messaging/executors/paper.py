@@ -42,7 +42,6 @@ from snapper.messaging.executors.base import ExchangeExecutorService
     tags=("execution", "orders", "paper", "simulation"),
     enabled=True,
     mode="thread",
-    args=[],
 )
 class PaperOrderExecutor(ExchangeExecutorService[PaperExchangeClient]):
     """Paper trading order execution service.

@@ -48,7 +48,6 @@ def _build_process_command(
     name: str,
     class_path: str,
     method: str,
-    args: list[Any],
     kwargs: dict[str, Any],
 ) -> list[str]:
     """Build command line for subprocess execution.
@@ -59,7 +58,6 @@ def _build_process_command(
         name: Process name identifier.
         class_path: Fully qualified class path.
         method: Method name to execute.
-        args: Positional arguments for constructor.
         kwargs: Keyword arguments for constructor.
 
     Returns:
@@ -69,7 +67,6 @@ def _build_process_command(
         "name": name,
         "class_path": class_path,
         "method": method,
-        "args": args,
         "kwargs": kwargs,
     }
     config_json = json.dumps(config)
@@ -142,7 +139,6 @@ class ProcessSpawnerService:
         name: str,
         class_path: str,
         method: str,
-        args: list[Any],
         kwargs: dict[str, Any],
         process: subprocess.Popen[bytes],
         exit_code: int | None = None,
@@ -153,7 +149,6 @@ class ProcessSpawnerService:
             name: Process name.
             class_path: Fully qualified class path.
             method: Entry method name.
-            args: Positional arguments.
             kwargs: Keyword arguments.
             process: Subprocess handle.
             exit_code: Optional exit code if process already exited.
@@ -169,7 +164,6 @@ class ProcessSpawnerService:
             config={
                 "class_path": class_path,
                 "method": method,
-                "args": args,
                 "kwargs": kwargs,
             },
             process=process,
@@ -232,7 +226,6 @@ class ProcessSpawnerService:
         name: str,
         class_path: str,
         method: str,
-        args: list[Any],
         kwargs: dict[str, Any],
         process: subprocess.Popen[bytes],
         exit_code: int | None = None,
@@ -243,7 +236,6 @@ class ProcessSpawnerService:
             name: Process name.
             class_path: Fully qualified class path.
             method: Entry method name.
-            args: Positional arguments.
             kwargs: Keyword arguments.
             process: Subprocess handle.
             exit_code: Optional exit code if process already exited.
@@ -252,7 +244,7 @@ class ProcessSpawnerService:
             Registered ProcessInstanceInfo.
         """
         info = self._build_process_info(
-            name, class_path, method, args, kwargs, process, exit_code=exit_code
+            name, class_path, method, kwargs, process, exit_code=exit_code
         )
         self.processes[name] = info
         return info
@@ -262,7 +254,6 @@ class ProcessSpawnerService:
         name: str,
         class_path: str,
         method: str,
-        args: list[Any],
         kwargs: dict[str, Any],
     ) -> ProcessInstanceInfo:
         """Spawn a new subprocess.
@@ -274,7 +265,6 @@ class ProcessSpawnerService:
             name: Unique process identifier.
             class_path: Fully qualified class path to instantiate.
             method: Method to call on the instantiated class.
-            args: Positional arguments for constructor.
             kwargs: Keyword arguments for constructor.
 
         Returns:
@@ -287,18 +277,18 @@ class ProcessSpawnerService:
             raise RuntimeError(f"Process '{name}' already exists")
         logger.info(f"Spawning process '{name}' (class: {class_path}, method: {method})")
         self._validate_class_path(name, class_path)
-        cmd = _build_process_command(name, class_path, method, args, kwargs)
+        cmd = _build_process_command(name, class_path, method, kwargs)
         process = self._launch_subprocess(cmd)
         time.sleep(0.1)
         status = process.poll()
         if status is None:
-            info = self._register_spawned_process(name, class_path, method, args, kwargs, process)
+            info = self._register_spawned_process(name, class_path, method, kwargs, process)
             logger.info(f"Process '{name}' spawned with PID {info.pid}")
             return info
         if status == 0:
             logger.info("Process '{}' exited immediately after start", name)
             return self._register_spawned_process(
-                name, class_path, method, args, kwargs, process, exit_code=status
+                name, class_path, method, kwargs, process, exit_code=status
             )
         detail_suffix = self._build_early_exit_detail(process, status)
         raise RuntimeError(f"Process '{name}' failed to start (exit code: {status}){detail_suffix}")

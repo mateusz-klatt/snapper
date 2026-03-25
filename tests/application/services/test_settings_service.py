@@ -1331,7 +1331,6 @@ class TestProcessRoutesTagsFallback:
                 parameters_schema={"type": "object"},
                 enabled=False,
                 mode="thread",
-                args=[],
             )
         }
         with patch(
@@ -1348,7 +1347,6 @@ class TestProcessRoutesTagsFallback:
                     template="test_process",
                     enabled=True,
                     mode="thread",
-                    args=[],
                     kwargs={},
                 ),
             )
@@ -1389,7 +1387,6 @@ class TestProcessRoutesTagsFallback:
                 parameters_schema={"type": "object"},
                 enabled=False,
                 mode="thread",
-                args=[],
             )
         }
         with patch(
@@ -1406,7 +1403,6 @@ class TestProcessRoutesTagsFallback:
                     template="test_process",
                     enabled=True,
                     mode="thread",
-                    args=[],
                     kwargs={},
                 ),
             )

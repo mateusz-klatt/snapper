@@ -133,8 +133,7 @@ class TestProcessIsolation:
             name="crash_exception",
             class_path="tests.application.process_manager.test_process_spawner.CrashingProcess",
             method="start",
-            args=["exception"],
-            kwargs={},
+            kwargs={"crash_type": "exception"},
         )
         assert info.pid > 0
         parent_pid = os.getpid()
@@ -164,8 +163,7 @@ class TestProcessIsolation:
             name="crash_exit",
             class_path="tests.application.process_manager.test_process_spawner.CrashingProcess",
             method="start",
-            args=["exit"],
-            kwargs={},
+            kwargs={"crash_type": "exit"},
         )
         assert info.pid > 0
         parent_pid = os.getpid()
@@ -194,8 +192,7 @@ class TestProcessIsolation:
             name="crash_signal",
             class_path="tests.application.process_manager.test_process_spawner.CrashingProcess",
             method="start",
-            args=["sigterm"],
-            kwargs={},
+            kwargs={"crash_type": "sigterm"},
         )
         assert info.pid > 0
         parent_pid = os.getpid()
@@ -225,7 +222,6 @@ class TestProcessIsolation:
             name="hanging_process",
             class_path="tests.application.process_manager.test_process_spawner.InfiniteProcess",
             method="start",
-            args=[],
             kwargs={},
         )
         assert info.pid > 0
@@ -259,8 +255,7 @@ class TestProcessIsolation:
                 name=f"crash_{i}",
                 class_path="tests.application.process_manager.test_process_spawner.CrashingProcess",
                 method="start",
-                args=["exception"],
-                kwargs={},
+                kwargs={"crash_type": "exception"},
             )
             assert info.pid > 0
         max_wait = 10.0
@@ -317,8 +312,7 @@ class TestProcessSpawner:
             name="test_process",
             class_path="tests.application.process_manager.test_process_spawner.DummyProcess",
             method="start",
-            args=[0.5],
-            kwargs={},
+            kwargs={"duration": 0.5},
         )
         assert process_info.pid is not None
         assert process_info.pid > 0
@@ -340,8 +334,7 @@ class TestProcessSpawner:
             name="status_test",
             class_path="tests.application.process_manager.test_process_spawner.DummyProcess",
             method="start",
-            args=[1.0],
-            kwargs={},
+            kwargs={"duration": 1.0},
         )
         status = spawner.get_status("status_test")
         assert status.running is True
@@ -362,8 +355,7 @@ class TestProcessSpawner:
             name="graceful_test",
             class_path="tests.application.process_manager.test_process_spawner.DummyProcess",
             method="start",
-            args=[5.0],
-            kwargs={},
+            kwargs={"duration": 5.0},
         )
         pid = process_info.pid
         assert pid is not None
@@ -387,8 +379,7 @@ class TestProcessSpawner:
             name="forced_kill_test",
             class_path="tests.application.process_manager.test_process_spawner.DummyProcess",
             method="start",
-            args=[10.0],
-            kwargs={},
+            kwargs={"duration": 10.0},
         )
         start = time.time()
         success = spawner.terminate("forced_kill_test", timeout=0.1)
@@ -434,7 +425,6 @@ class TestProcessSpawner:
                 name="failing_spawn",
                 class_path="nonexistent.module.Class",
                 method="start",
-                args=[],
                 kwargs={},
             )
 
@@ -451,8 +441,7 @@ class TestProcessSpawner:
                 name=f"multi_test_{i}",
                 class_path="tests.application.process_manager.test_process_spawner.DummyProcess",
                 method="start",
-                args=[1.0],
-                kwargs={},
+                kwargs={"duration": 1.0},
             )
         for i in range(3):
             status = spawner.get_status(f"multi_test_{i}")
@@ -476,8 +465,7 @@ class TestProcessSpawner:
                 name=f"zombie_test_{i}",
                 class_path="tests.application.process_manager.test_process_spawner.DummyProcess",
                 method="start",
-                args=[0.1],
-                kwargs={},
+                kwargs={"duration": 0.1},
             )
             spawner.terminate(f"zombie_test_{i}")
         for i in range(5):
@@ -496,8 +484,7 @@ class TestProcessSpawner:
             name="exitcode_test",
             class_path="tests.application.process_manager.test_process_spawner.DummyProcess",
             method="start",
-            args=[0.2],
-            kwargs={},
+            kwargs={"duration": 0.2},
         )
         status = _wait_until_not_running(spawner, "exitcode_test", timeout=5.0)
         assert status.running is False
@@ -529,8 +516,7 @@ class TestProcessSpawner:
                 name=name,
                 class_path="tests.application.process_manager.test_process_spawner.DummyProcess",
                 method="start",
-                args=[2.0],
-                kwargs={},
+                kwargs={"duration": 2.0},
             )
         pids: set[int] = set()
         for name in names:
@@ -553,8 +539,7 @@ class TestProcessSpawner:
             name="uptime_test",
             class_path="tests.application.process_manager.test_process_spawner.DummyProcess",
             method="start",
-            args=[1.0],
-            kwargs={},
+            kwargs={"duration": 1.0},
         )
         time.sleep(0.3)
         status = spawner.get_status("uptime_test")

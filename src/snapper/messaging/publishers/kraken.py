@@ -48,7 +48,6 @@ from snapper.messaging.publishers.base import MarketDataPublisherService
     tags=("market-data", "publisher", "kraken"),
     enabled=True,
     mode="thread",
-    args=[],
 )
 class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]):
     """Kraken exchange market data publisher.

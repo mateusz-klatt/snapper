@@ -42,7 +42,6 @@ from snapper.messaging.executors.base import ExchangeExecutorService
     tags=("execution", "orders", "kraken"),
     enabled=True,
     mode="thread",
-    args=[],
 )
 class KrakenOrderExecutor(ExchangeExecutorService[KrakenExchangeClient]):
     """Kraken exchange order execution service.

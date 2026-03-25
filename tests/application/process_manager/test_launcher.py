@@ -69,7 +69,6 @@ async def test_import_class_prefers_registry(monkeypatch: pytest.MonkeyPatch) ->
                 parameters_schema=None,
                 enabled=False,
                 mode="thread",
-                args=[],
             )
         },
     )
@@ -109,7 +108,6 @@ async def test_start_process_handles_run_record_failure(monkeypatch: pytest.Monk
         mode="thread",
         class_path="dummy.path.DummyProcess",
         method="start",
-        args=[],
         kwargs={},
         note=None,
         lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
@@ -151,7 +149,6 @@ async def test_start_process_rejects_invalid_mode(monkeypatch: pytest.MonkeyPatc
         mode="worker",
         class_path="dummy.path.AsyncDummyProcess",
         method="start",
-        args=[],
         kwargs={},
         note=None,
         lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
@@ -234,7 +231,6 @@ class TestStartProcessByNameNoSetting:
             "method": "start",
             "enabled": True,
             "mode": "thread",
-            "args": [],
             "kwargs": {},
             "lifecycle": "one_shot",
             "role": "core",
@@ -273,7 +269,6 @@ class TestStartProcessByNameNoSetting:
                 parameters_schema=None,
                 enabled=False,
                 mode="thread",
-                args=[],
             )
         }
         monkeypatch.setattr(
@@ -325,7 +320,6 @@ class TestSyncRegistryTagsNotIterable:
                 parameters_schema=None,
                 enabled=False,
                 mode="thread",
-                args=[],
             )
         }
         monkeypatch.setattr(
@@ -444,7 +438,6 @@ class TestImportClass:
                     parameters_schema=None,
                     enabled=False,
                     mode="thread",
-                    args=[],
                 )
             }
             result = launcher.import_class("some.module.MockProcessClass", "test_process")
@@ -475,7 +468,6 @@ class TestImportClass:
                     parameters_schema=None,
                     enabled=False,
                     mode="thread",
-                    args=[],
                 )
             }
             with pytest.raises(TypeError, match="is not a class"):
@@ -549,7 +541,6 @@ class TestStartProcess:
             mode="process",
             class_path="some.module.TestClass",
             method="run",
-            args=[],
             kwargs={},
             lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
             role=ProcessRoleEnum.CORE,
@@ -569,7 +560,6 @@ class TestStartProcess:
                 name="test_subprocess",
                 class_path="some.module.TestClass",
                 method="run",
-                args=[],
                 kwargs={},
             )
             assert launcher.started_processes["test_subprocess"] is mock_process_info
@@ -595,7 +585,6 @@ class TestStartProcess:
             mode="thread",
             class_path="test.AsyncProcess",
             method="start",
-            args=[],
             kwargs={},
             lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
             role=ProcessRoleEnum.CORE,
@@ -638,7 +627,6 @@ class TestStartProcess:
             mode="thread",
             class_path="test.SyncProcess",
             method="start",
-            args=[],
             kwargs={},
             lifecycle=ProcessLifecycleEnum.ONE_SHOT,
             role=ProcessRoleEnum.CORE,
@@ -671,7 +659,6 @@ class TestStartProcess:
             mode="thread",
             class_path="test.FailingProcess",
             method="start",
-            args=[],
             kwargs={},
             lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
             role=ProcessRoleEnum.CORE,
@@ -713,7 +700,6 @@ class TestStartProcess:
             mode="thread",
             class_path="test.OneShotProcess",
             method="run",
-            args=[],
             kwargs={},
             lifecycle=ProcessLifecycleEnum.ONE_SHOT,
             role=ProcessRoleEnum.CORE,
@@ -754,7 +740,6 @@ class TestStartProcess:
             mode="thread",
             class_path="test.SimpleProcess",
             method="start",
-            args=[],
             kwargs={},
             lifecycle=ProcessLifecycleEnum.ONE_SHOT,
             role=ProcessRoleEnum.CORE,
@@ -886,7 +871,6 @@ class TestGetProcessConfigs:
                 "mode": "thread",
                 "class": "test.TestClass",
                 "method": "start",
-                "args": [],
                 "kwargs": {},
                 "lifecycle": "long-running",
                 "role": "core",
@@ -1062,7 +1046,6 @@ class TestGetProcessConfigs:
                 parameters_schema={"type": "object"},
                 enabled=False,
                 mode="thread",
-                args=[],
             )
         }
         with patch(
@@ -1103,7 +1086,6 @@ class TestProcessRunRecords:
             mode="thread",
             class_path="test.TestClass",
             method="start",
-            args=[],
             kwargs={},
             lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
             role=ProcessRoleEnum.CORE,
@@ -1637,7 +1619,6 @@ class TestSyncRegistryToDatabase:
                     parameters_schema=None,
                     enabled=False,
                     mode="thread",
-                    args=[],
                 )
             }
             mock_repo = MagicMock()
@@ -1681,7 +1662,6 @@ class TestCreateProcessConfig:
                 method="start",
                 enabled=True,
                 mode="thread",
-                args=[],
                 kwargs={},
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
@@ -1801,12 +1781,10 @@ class TestGetDefaultsFromMetadata:
             parameters_schema={"type": "object"},
             enabled=True,
             mode="process",
-            args=[1, 2, 3],
         )
         defaults = launcher._registry_syncer._get_defaults_from_entry(entry)
         assert defaults["enabled"] is True
         assert defaults["mode"] == "process"
-        assert defaults["args"] == [1, 2, 3]
         assert defaults["lifecycle"] == ProcessLifecycleEnum.ONE_SHOT
         assert defaults["role"] == ProcessRoleEnum.TASK
         assert defaults["tags"] == ["tag1", "tag2"]
@@ -1831,12 +1809,10 @@ class TestGetDefaultsFromMetadata:
             parameters_schema=None,
             enabled=False,
             mode="thread",
-            args=[],
         )
         defaults = launcher._registry_syncer._get_defaults_from_entry(entry)
         assert defaults["enabled"] is False
         assert defaults["mode"] == "thread"
-        assert defaults["args"] == []
         assert defaults["kwargs"] == {}
         assert defaults["lifecycle"] == ProcessLifecycleEnum.LONG_RUNNING
         assert defaults["role"] == ProcessRoleEnum.CORE

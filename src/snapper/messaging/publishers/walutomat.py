@@ -24,7 +24,6 @@ from snapper.messaging.publishers.base import MarketDataPublisherService
     tags=("market-data", "publisher", "walutomat"),
     enabled=True,
     mode="thread",
-    args=[],
 )
 class WalutomatMarketDataPublisher(MarketDataPublisherService[WalutomatExchangeClient]):
     """Market data publisher for Walutomat exchange."""

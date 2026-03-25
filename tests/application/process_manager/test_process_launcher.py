@@ -32,6 +32,7 @@ from snapper.application.process_manager.spawner import ProcessSpawnerService
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.config.settings import get_settings
+from snapper.core.json_types import JsonObject
 from snapper.data.models import ProcessRun
 from snapper.data.models import Setting
 
@@ -52,7 +53,6 @@ class TestProcessConfig:
             mode="thread",
             class_path="snapper.ipc.zmq_broker.ZmqBrokerThread",
             method="run",
-            args=[],
             kwargs={"endpoint": "tcp://0.0.0.0:5555"},
             note="Test broker",
         )
@@ -61,7 +61,6 @@ class TestProcessConfig:
         assert config.mode == "thread"
         assert config.class_path == "snapper.ipc.zmq_broker.ZmqBrokerThread"
         assert config.method == "run"
-        assert config.args == []
         assert config.kwargs == {"endpoint": "tcp://0.0.0.0:5555"}
         assert config.note == "Test broker"
 
@@ -78,7 +77,6 @@ class TestProcessConfig:
             mode="process",
             class_path="test.Class",
             method="start",
-            args=["arg1"],
             kwargs={"key": "value"},
         )
         assert config.note is None
@@ -127,7 +125,6 @@ class TestImportClass:
                 parameters_schema=None,
                 enabled=True,
                 mode="thread",
-                args=[],
             )
         }
         settings = MagicMock()
@@ -159,7 +156,6 @@ class TestImportClass:
                 parameters_schema=None,
                 enabled=True,
                 mode="thread",
-                args=[],
             )
         }
         settings = MagicMock()
@@ -261,7 +257,6 @@ class TestStartProcess:
             mode="thread",
             class_path="test.Class",
             method="run",
-            args=[],
             kwargs={},
         )
         await factory.start_process(config)
@@ -296,7 +291,6 @@ class TestStartProcess:
             mode="thread",
             class_path="test.Class",
             method="run",
-            args=[],
             kwargs={},
         )
         await factory.start_process(config)
@@ -309,7 +303,7 @@ class TestStartProcess:
         """Verify start_process handles async method in thread mode.
 
         Given: A process with async run method and mode='thread',
-        When: start_process is called with args and kwargs,
+        When: start_process is called with kwargs,
         Then: Process is started as asyncio task and tracked correctly.
         """
 
@@ -329,12 +323,11 @@ class TestStartProcess:
             mode="thread",
             class_path="test.AsyncClass",
             method="run",
-            args=["arg1"],
             kwargs={"key": "value"},
         )
         await factory.start_process(config)
         mock_import.assert_called_once_with("test.AsyncClass", "async_process")
-        mock_class.assert_called_once_with("arg1", key="value")
+        mock_class.assert_called_once_with(key="value")
         assert "async_process" in factory.started_processes
         assert "async_process" in factory.process_tasks
         task = factory.process_tasks["async_process"]
@@ -358,8 +351,7 @@ class TestStartProcess:
             mode="process",
             class_path="tests.application.process_manager.test_process_spawner.DummyProcess",
             method="start",
-            args=[0.5],
-            kwargs={},
+            kwargs={"duration": 0.5},
         )
         await factory.start_process(config)
         assert "process_mode" in factory.started_processes
@@ -389,7 +381,6 @@ class TestStartProcess:
             mode="thread",
             class_path="test.SyncClass",
             method="run",
-            args=[],
             kwargs={"config": "value"},
         )
         with patch("asyncio.get_event_loop") as mock_loop:
@@ -424,7 +415,6 @@ class TestStartProcess:
             mode="thread",
             class_path="test.NotedClass",
             method="run",
-            args=[],
             kwargs={"key": "value"},
             note="This is a test note",
         )
@@ -453,7 +443,6 @@ class TestStartProcess:
             mode="thread",
             class_path="test.ErrorClass",
             method="run",
-            args=[],
             kwargs={"key": "value"},
         )
         with pytest.raises(ImportError, match="Failed to import"):
@@ -484,7 +473,6 @@ class TestStartAllProcesses:
             mode="thread",
             class_path="test.Class1",
             method="run",
-            args=[],
             kwargs={"key": "value"},
         )
         config2 = ProcessConfigModel(
@@ -493,7 +481,6 @@ class TestStartAllProcesses:
             mode="thread",
             class_path="test.Class2",
             method="run",
-            args=[],
             kwargs={"key": "value"},
         )
         config3 = ProcessConfigModel(
@@ -502,7 +489,6 @@ class TestStartAllProcesses:
             mode="thread",
             class_path="test.Class3",
             method="run",
-            args=[],
             kwargs={"key": "value"},
         )
         mock_get_configs.return_value = [config1, config2, config3]
@@ -550,7 +536,6 @@ class TestStartAllProcesses:
             mode="thread",
             class_path="test.GoodClass",
             method="run",
-            args=[],
             kwargs={},
         )
         config2 = ProcessConfigModel(
@@ -559,7 +544,6 @@ class TestStartAllProcesses:
             mode="thread",
             class_path="test.BadClass",
             method="run",
-            args=[],
             kwargs={},
         )
         config3 = ProcessConfigModel(
@@ -568,7 +552,6 @@ class TestStartAllProcesses:
             mode="thread",
             class_path="test.AnotherGoodClass",
             method="run",
-            args=[],
             kwargs={},
         )
         mock_get_configs.return_value = [config1, config2, config3]
@@ -734,7 +717,6 @@ class TestStartProcessByName:
                 "class": "snapper.ipc.zmq_broker.ZmqBrokerThread",
                 "method": "run",
                 "mode": "thread",
-                "args": [],
                 "kwargs": {"endpoint": "tcp://0.0.0.0:5555"},
                 "enabled": False,
             }
@@ -777,7 +759,6 @@ class TestStartProcessByName:
                 "class": "snapper.services.symbol_updater.SymbolUpdaterService",
                 "method": "start",
                 "mode": "thread",
-                "args": [],
                 "kwargs": {"update_threshold_hours": 6},
                 "enabled": False,
                 "lifecycle": "one_shot",
@@ -813,7 +794,7 @@ class TestStartProcessByName:
         """Verify config overrides are applied and persisted.
 
         Given: Process config in database with default values.
-        When: start_process_by_name called with mode, args, kwargs, autostart.
+        When: start_process_by_name called with mode, kwargs, autostart.
         Then: Overrides applied to config, persisted, and process started.
         """
         mock_setting = MagicMock()
@@ -822,7 +803,6 @@ class TestStartProcessByName:
                 "class": "test.Class",
                 "method": "run",
                 "mode": "thread",
-                "args": [],
                 "kwargs": {"default": "value"},
             }
         )
@@ -841,14 +821,12 @@ class TestStartProcessByName:
         result = await factory.start_process_by_name(
             "test_process",
             mode="process",
-            args=["new_arg"],
             kwargs={"override": "value"},
             autostart=True,
         )
         assert result.status == "success"
         call_args = mock_start.call_args[0][0]
         assert call_args.mode == "process"
-        assert call_args.args == ["new_arg"]
         assert call_args.kwargs == {"override": "value"}
         mock_session.commit.assert_awaited_once()
         mock_session.add.assert_called_once()
@@ -874,7 +852,6 @@ class TestStartProcessByName:
             {
                 "class": "test.Class",
                 "method": "run",
-                "args": [],
                 "kwargs": {"key": "value"},
             }
         )
@@ -1286,7 +1263,6 @@ async def test_start_process_process_mode_filters_kwargs() -> None:
         mode="process",
         class_path="tests.application.process_manager.test_process_launcher.SyncProcess",
         method="start",
-        args=[],
         kwargs={"keep": "value"},
     )
     await factory.start_process(config)
@@ -1294,7 +1270,6 @@ async def test_start_process_process_mode_filters_kwargs() -> None:
         name="os_process",
         class_path="tests.application.process_manager.test_process_launcher.SyncProcess",
         method="start",
-        args=[],
         kwargs={"keep": "value"},
     )
     assert factory.started_processes["os_process"].pid == 1234
@@ -1320,8 +1295,7 @@ async def test_start_process_async_method_creates_task() -> None:
         mode="thread",
         class_path="tests.application.process_manager.test_process_launcher.AsyncProcess",
         method="start",
-        args=[tracker],
-        kwargs={},
+        kwargs=cast(JsonObject, {"tracker": tracker}),
     )
     await factory.start_process(config)
     assert tracker == ["async"]
@@ -1356,8 +1330,7 @@ async def test_start_process_sync_method_uses_executor(
         mode="thread",
         class_path="tests.application.process_manager.test_process_launcher.SyncProcess",
         method="start",
-        args=[tracker],
-        kwargs={},
+        kwargs=cast(JsonObject, {"tracker": tracker}),
     )
 
     class DummyLoop:
@@ -1395,8 +1368,7 @@ async def test_start_process_async_failure_cleans_up() -> None:
         mode="thread",
         class_path="tests.application.process_manager.test_process_launcher.FailingAsyncProcess",
         method="start",
-        args=[tracker],
-        kwargs={},
+        kwargs=cast(JsonObject, {"tracker": tracker}),
     )
     await factory.start_process(config)
     for _ in range(20):
@@ -1467,7 +1439,6 @@ async def test_start_process_by_name_reports_start_error(
         "enabled": True,
         "mode": "thread",
         "class": "tests.application.process_manager.test_process_launcher.SyncProcess",
-        "args": [],
         "kwargs": {},
     }
     setting = Setting(
@@ -1492,7 +1463,6 @@ async def test_start_process_by_name_reports_start_error(
                 parameters_schema=None,
                 enabled=True,
                 mode="thread",
-                args=[],
             )
         },
     )
@@ -1518,7 +1488,6 @@ async def test_start_process_by_name_one_shot_message(
         "enabled": True,
         "mode": "thread",
         "class": "tests.application.process_manager.test_process_launcher.SyncProcess",
-        "args": [],
         "kwargs": {},
         "lifecycle": ProcessLifecycleEnum.ONE_SHOT.value,
     }
@@ -1557,7 +1526,6 @@ async def test_start_process_by_name_updates_config_and_persists_overrides(
         "enabled": False,
         "mode": "thread",
         "class": "tests.application.process_manager.test_process_launcher.SyncProcess",
-        "args": [],
         "kwargs": {},
         "lifecycle": "invalid",
         "role": "invalid",
@@ -1585,14 +1553,12 @@ async def test_start_process_by_name_updates_config_and_persists_overrides(
                 parameters_schema=None,
                 enabled=True,
                 mode="thread",
-                args=[],
             )
         },
     )
     result = await factory.start_process_by_name(
         "worker",
         mode="process",
-        args=["arg1"],
         kwargs={"x": 1},
         autostart=True,
     )
@@ -1604,7 +1570,6 @@ async def test_start_process_by_name_updates_config_and_persists_overrides(
     persisted = json.loads(new_row.value)
     assert persisted["enabled"] is True
     assert persisted["mode"] == "process"
-    assert persisted["args"] == ["arg1"]
     assert persisted["kwargs"] == {"x": 1}
 
 
@@ -1625,7 +1590,6 @@ async def test_start_process_by_name_keeps_tags_when_present(
         "enabled": True,
         "mode": "thread",
         "class": "tests.application.process_manager.test_process_launcher.SyncProcess",
-        "args": [],
         "kwargs": {},
         "tags": ["keep"],
         "parameters_schema": {},
@@ -1689,7 +1653,7 @@ async def test_stop_process_by_name_async_stop(
     factory.started_processes["worker"] = proc
     setting = Setting(
         key="process_worker",
-        value=json.dumps({"class": "x", "enabled": True, "kwargs": {}, "args": []}),
+        value=json.dumps({"class": "x", "enabled": True, "kwargs": {}}),
         session_id="test-session",
         sequence_id=1,
     )
@@ -1755,7 +1719,7 @@ async def test_stop_process_by_name_when_instance_missing_disables_autostart(
     factory.started_processes["ghost"] = None
     setting = Setting(
         key="process_ghost",
-        value=json.dumps({"class": "x", "enabled": True, "kwargs": {}, "args": []}),
+        value=json.dumps({"class": "x", "enabled": True, "kwargs": {}}),
         session_id="test-session",
         sequence_id=1,
     )
@@ -1797,7 +1761,7 @@ async def test_stop_process_by_name_when_stop_handler_removes_instance(
     factory.started_processes["selfrem"] = proc
     setting = Setting(
         key="process_selfrem",
-        value=json.dumps({"class": "x", "enabled": True, "kwargs": {}, "args": []}),
+        value=json.dumps({"class": "x", "enabled": True, "kwargs": {}}),
         session_id="test-session",
         sequence_id=1,
     )
@@ -1981,7 +1945,6 @@ def test_import_class_errors(monkeypatch: pytest.MonkeyPatch) -> None:
                 parameters_schema=None,
                 enabled=True,
                 mode="thread",
-                args=[],
             )
         },
     )
@@ -2168,7 +2131,6 @@ async def test_start_all_processes_continues_on_errors(
         mode="thread",
         class_path="tests.application.process_manager.test_process_launcher.SyncProcess",
         method="start",
-        args=[],
         kwargs={},
     )
     config_fail = ProcessConfigModel(
@@ -2177,7 +2139,6 @@ async def test_start_all_processes_continues_on_errors(
         mode="thread",
         class_path="tests.application.process_manager.test_process_launcher.SyncProcess",
         method="start",
-        args=[],
         kwargs={},
     )
     config_disabled = ProcessConfigModel(
@@ -2186,7 +2147,6 @@ async def test_start_all_processes_continues_on_errors(
         mode="thread",
         class_path="tests.application.process_manager.test_process_launcher.SyncProcess",
         method="start",
-        args=[],
         kwargs={},
     )
     monkeypatch.setattr(
@@ -2327,7 +2287,6 @@ async def test_get_process_configs_uses_metadata_parameters_schema(
                 parameters_schema={"field": "value"},
                 enabled=True,
                 mode="thread",
-                args=[],
             )
         },
     )
@@ -2372,7 +2331,6 @@ async def test_get_process_configs_preserves_existing_parameters_schema(
                 parameters_schema={"other": False},
                 enabled=True,
                 mode="thread",
-                args=[],
             )
         },
     )
@@ -2408,7 +2366,6 @@ async def test_start_process_process_mode_with_note(monkeypatch: pytest.MonkeyPa
         mode="process",
         class_path="module.Class",
         method="start",
-        args=[],
         kwargs={},
         note="remember",
     )
@@ -2434,8 +2391,7 @@ async def test_start_process_immediate_async_failure_raises() -> None:
         mode="thread",
         class_path="tests.application.process_manager.test_process_launcher.ImmediateFailAsyncProcess",
         method="start",
-        args=[tracker],
-        kwargs={},
+        kwargs=cast(JsonObject, {"tracker": tracker}),
     )
     with pytest.raises(RuntimeError, match="boom-immediate"):
         await factory.start_process(config)
@@ -2460,7 +2416,6 @@ async def test_start_process_rejects_invalid_mode() -> None:
         mode="sequential",
         class_path="tests.application.process_manager.test_process_launcher.SyncProcess",
         method="start",
-        args=[],
         kwargs={},
     )
     with pytest.raises(ValueError, match="Invalid mode 'sequential'"):
@@ -2654,7 +2609,6 @@ async def test_start_process_by_name_removes_empty_tags_and_updates_schema(
         "enabled": True,
         "mode": "thread",
         "class": "tests.application.process_manager.test_process_launcher.SyncProcess",
-        "args": [],
         "kwargs": {},
         "tags": [],
         "parameters_schema": {"p": 1},
@@ -2695,7 +2649,6 @@ async def test_start_process_by_name_skips_persisting_schema_when_absent(
         "enabled": True,
         "mode": "thread",
         "class": "tests.application.process_manager.test_process_launcher.SyncProcess",
-        "args": [],
         "kwargs": {},
     }
     setting = Setting(
@@ -2733,7 +2686,6 @@ async def test_start_process_by_name_removes_stale_tags_without_schema(
         "enabled": True,
         "mode": "thread",
         "class": "tests.application.process_manager.test_process_launcher.SyncProcess",
-        "args": [],
         "kwargs": {},
         "tags": ["stale"],
     }
@@ -2775,7 +2727,6 @@ async def test_start_process_by_name_drops_metadata_tags_when_schema_missing(
         "enabled": True,
         "mode": "thread",
         "class": "tests.application.process_manager.test_process_launcher.SyncProcess",
-        "args": [],
         "kwargs": {},
     }
     setting = Setting(
@@ -2803,7 +2754,6 @@ async def test_start_process_by_name_drops_metadata_tags_when_schema_missing(
                 parameters_schema=None,
                 enabled=True,
                 mode="thread",
-                args=[],
             )
         },
     )
@@ -2842,7 +2792,7 @@ async def test_stop_process_by_name_cancels_task_and_terminates(
     factory.started_processes["native"] = proc_info
     setting = Setting(
         key="process_native",
-        value=json.dumps({"class": "x", "enabled": True, "args": [], "kwargs": {}}),
+        value=json.dumps({"class": "x", "enabled": True, "kwargs": {}}),
         session_id="test-session",
         sequence_id=1,
     )
@@ -2950,7 +2900,6 @@ async def test_sync_registry_creates_missing_configs(monkeypatch: pytest.MonkeyP
         parameters_schema={"schema": True},
         enabled=True,
         mode="thread",
-        args=[],
     )
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_registered_processes",
@@ -3001,7 +2950,6 @@ async def test_sync_registry_creates_missing_configs_even_when_kwargs_fail(
         parameters_schema=None,
         enabled=True,
         mode="thread",
-        args=[],
     )
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_registered_processes",
@@ -3040,7 +2988,6 @@ async def test_sync_registry_skips_update_when_no_changes(monkeypatch: pytest.Mo
                 "mode": "thread",
                 "class": "module.Class",
                 "method": "start",
-                "args": [],
                 "kwargs": {},
                 "lifecycle": ProcessLifecycleEnum.LONG_RUNNING.value,
                 "role": ProcessRoleEnum.CORE.value,
@@ -3065,7 +3012,6 @@ async def test_sync_registry_skips_update_when_no_changes(monkeypatch: pytest.Mo
         parameters_schema=None,
         enabled=True,
         mode="thread",
-        args=[],
     )
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_registered_processes",
@@ -3102,7 +3048,6 @@ async def test_sync_registry_updates_existing_config(monkeypatch: pytest.MonkeyP
                 "mode": "thread",
                 "class": "module.Class",
                 "method": "start",
-                "args": [],
                 "kwargs": {},
                 "lifecycle": ProcessLifecycleEnum.LONG_RUNNING.value,
                 "role": ProcessRoleEnum.CORE.value,
@@ -3127,7 +3072,6 @@ async def test_sync_registry_updates_existing_config(monkeypatch: pytest.MonkeyP
         parameters_schema={"shape": "x"},
         enabled=True,
         mode="thread",
-        args=[],
     )
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_registered_processes",
@@ -3163,7 +3107,6 @@ async def test_sync_registry_adds_tags_and_schema_when_missing(
                 "mode": "thread",
                 "class": "module.Class",
                 "method": "start",
-                "args": [],
                 "kwargs": {},
                 "lifecycle": ProcessLifecycleEnum.LONG_RUNNING.value,
                 "role": ProcessRoleEnum.CORE.value,
@@ -3188,7 +3131,6 @@ async def test_sync_registry_adds_tags_and_schema_when_missing(
         parameters_schema={"p": 1},
         enabled=True,
         mode="thread",
-        args=[],
     )
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_registered_processes",
@@ -3246,7 +3188,6 @@ async def test_sync_registry_update_handles_default_kwargs_failure(
                 "mode": "thread",
                 "class": "module.Class",
                 "method": "start",
-                "args": [],
                 "kwargs": {},
                 "lifecycle": ProcessLifecycleEnum.LONG_RUNNING.value,
                 "role": ProcessRoleEnum.CORE.value,
@@ -3271,7 +3212,6 @@ async def test_sync_registry_update_handles_default_kwargs_failure(
         parameters_schema=None,
         enabled=True,
         mode="thread",
-        args=[],
     )
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_registered_processes",
@@ -3304,7 +3244,6 @@ async def test_sync_registry_update_handles_missing_record_on_second_fetch(
                 "mode": "thread",
                 "class": "module.Class",
                 "method": "start",
-                "args": [],
                 "kwargs": {},
                 "lifecycle": ProcessLifecycleEnum.ONE_SHOT.value,
                 "role": ProcessRoleEnum.CORE.value,
@@ -3329,7 +3268,6 @@ async def test_sync_registry_update_handles_missing_record_on_second_fetch(
         parameters_schema=None,
         enabled=True,
         mode="thread",
-        args=[],
     )
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_registered_processes",
@@ -3367,7 +3305,6 @@ async def test_sync_registry_handles_invalid_json(monkeypatch: pytest.MonkeyPatc
         parameters_schema=None,
         enabled=True,
         mode="thread",
-        args=[],
     )
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_registered_processes",
@@ -3403,7 +3340,6 @@ async def test_sync_registry_skips_tag_update_when_already_present(
                 "mode": "thread",
                 "class": "module.Class",
                 "method": "start",
-                "args": [],
                 "kwargs": {},
                 "tags": ["keep"],
                 "lifecycle": ProcessLifecycleEnum.LONG_RUNNING.value,
@@ -3429,7 +3365,6 @@ async def test_sync_registry_skips_tag_update_when_already_present(
         parameters_schema=None,
         enabled=True,
         mode="thread",
-        args=[],
     )
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_registered_processes",
@@ -3462,7 +3397,6 @@ async def test_sync_registry_adds_missing_tags_from_metadata(
                 "mode": "thread",
                 "class": "module.Class",
                 "method": "start",
-                "args": [],
                 "kwargs": {},
                 "lifecycle": ProcessLifecycleEnum.LONG_RUNNING.value,
                 "role": ProcessRoleEnum.CORE.value,
@@ -3487,7 +3421,6 @@ async def test_sync_registry_adds_missing_tags_from_metadata(
         parameters_schema=None,
         enabled=True,
         mode="thread",
-        args=[],
     )
     monkeypatch.setattr(
         "snapper.application.process_manager.registry_syncer.get_registered_processes",
@@ -3542,7 +3475,6 @@ async def test_create_process_config_in_db_includes_tags_and_schema(
         defaults={
             "enabled": True,
             "mode": "thread",
-            "args": [],
             "kwargs": {"k": 1},
             "lifecycle": ProcessLifecycleEnum.ONE_SHOT,
             "role": ProcessRoleEnum.CORE,
@@ -3599,7 +3531,6 @@ async def test_create_process_config_in_db_omits_absent_optional_fields(
         defaults={
             "enabled": True,
             "mode": "thread",
-            "args": [],
             "kwargs": {},
             "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
             "role": ProcessRoleEnum.CORE,
@@ -3632,7 +3563,6 @@ async def test_create_process_config_raises_if_exists(monkeypatch: pytest.Monkey
             method="start",
             enabled=True,
             mode="thread",
-            args=[],
             kwargs={},
             lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
             role=ProcessRoleEnum.CORE,
@@ -3658,7 +3588,6 @@ class TestProcessFactoryDatabasePersistence:
             mode="thread",
             class_path="test.module.TestClass",
             method="start",
-            args=[],
             kwargs={"param": "value"},
             note="Test process",
             lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
@@ -3686,7 +3615,7 @@ class TestProcessFactoryDatabasePersistence:
         mock_session.commit = AsyncMock()
         mock_repo.session.return_value.__aenter__.return_value = mock_session
         mock_get_repo.return_value = mock_repo
-        parameters: dict[str, Any] = {"mode": "thread", "args": [], "kwargs": {"param": "value"}}
+        parameters: dict[str, Any] = {"mode": "thread", "kwargs": {"param": "value"}}
         run_id = await factory._create_process_run_record(sample_config, parameters)
         assert isinstance(UUID(run_id), UUID)
         mock_session.add.assert_called_once()
@@ -3961,7 +3890,6 @@ async def test_start_process_by_name_persists_overrides_and_clears_tags_when_sch
             parameters_schema=None,
             enabled=True,
             mode="thread",
-            args=[],
         )
     }
     existing_config: dict[str, Any] = {
@@ -3969,7 +3897,6 @@ async def test_start_process_by_name_persists_overrides_and_clears_tags_when_sch
         "mode": "thread",
         "class": "test.module.TestClass",
         "method": "start",
-        "args": [],
         "kwargs": {},
         "tags": ["stale"],
     }
@@ -3994,7 +3921,6 @@ async def test_start_process_by_name_persists_overrides_and_clears_tags_when_sch
     assert "tags" not in persisted
     assert persisted["lifecycle"] == ProcessLifecycleEnum.LONG_RUNNING.value
     assert persisted["mode"] == "thread"
-    assert persisted["args"] == []
     assert persisted["kwargs"] == {}
     assert persisted["role"] == ProcessRoleEnum.CORE.value
     session.commit.assert_awaited_once()
@@ -4031,7 +3957,6 @@ async def test_sync_registry_to_database_adds_missing_tags(
             parameters_schema={"type": "object"},
             enabled=True,
             mode="thread",
-            args=[],
         )
     }
     existing_value: dict[str, Any] = {
@@ -4039,7 +3964,6 @@ async def test_sync_registry_to_database_adds_missing_tags(
         "mode": "thread",
         "class": "test.module.RegClass",
         "method": "start",
-        "args": [],
         "kwargs": {},
         "lifecycle": ProcessLifecycleEnum.LONG_RUNNING.value,
         "role": ProcessRoleEnum.CORE.value,
@@ -4107,7 +4031,6 @@ class TestProcessFactoryConfigLoading:
                 parameters_schema={"type": "object"},
                 enabled=True,
                 mode="thread",
-                args=[],
             )
         }
         mock_get_registry.return_value = mock_registry
@@ -4123,7 +4046,6 @@ class TestProcessFactoryConfigLoading:
             "mode": "thread",
             "class": "test.module.TestClass",
             "method": "start",
-            "args": [],
             "kwargs": {"param": "value"},
             "note": "Test process"
         }"""
@@ -4138,7 +4060,6 @@ class TestProcessFactoryConfigLoading:
         assert config.mode == "thread"
         assert config.class_path == "test.module.TestClass"
         assert config.method == "start"
-        assert config.args == []
         assert config.kwargs == {"param": "value"}
         assert config.note == "Test process"
         assert config.lifecycle == ProcessLifecycleEnum.LONG_RUNNING
@@ -4617,7 +4538,6 @@ class TestProcessFactoryRegistrySync:
                 parameters_schema={"type": "object"},
                 enabled=True,
                 mode="thread",
-                args=[],
             )
         }
         mock_get_registry.return_value = mock_registry
@@ -4681,7 +4601,6 @@ class TestProcessFactoryRegistrySync:
                 parameters_schema=None,
                 enabled=True,
                 mode="thread",
-                args=[],
             )
         }
         mock_get_registry.return_value = mock_registry
@@ -4742,7 +4661,6 @@ class TestProcessFactoryRegistrySync:
                 parameters_schema=None,
                 enabled=True,
                 mode="thread",
-                args=[],
             )
         }
         mock_get_registry.return_value = mock_registry
@@ -4796,7 +4714,6 @@ class TestProcessFactoryRegistrySync:
                 parameters_schema=None,
                 enabled=True,
                 mode="thread",
-                args=[],
             )
         }
         mock_get_registry.return_value = mock_registry

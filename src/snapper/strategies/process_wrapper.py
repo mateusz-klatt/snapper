@@ -47,7 +47,6 @@ def create_strategy_process(
         tags=("strategy", strategy_class.lower()),
         enabled=False,
         mode="thread",
-        args=[],
     )
     class StrategyProcess(RegisterableProcess):
         @staticmethod

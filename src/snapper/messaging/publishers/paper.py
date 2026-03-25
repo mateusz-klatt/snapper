@@ -118,7 +118,6 @@ class PerSourcePaperPublisher(MarketDataPublisherService[PaperExchangeClient]):
     tags=("market-data", "publisher", "paper"),
     enabled=True,
     mode="thread",
-    args=[],
 )
 class PaperMarketDataPublisher(RegisterableProcess):
     """Orchestrator that manages per-source paper publishers.

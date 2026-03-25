@@ -109,7 +109,6 @@ export const Strategies: React.FC = () => {
         template: data.template,
         enabled: data.autostart,
         mode: data.executionMode,
-        args: data.args,
         kwargs: data.kwargs,
         note: data.note,
       })

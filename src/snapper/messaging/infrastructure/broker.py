@@ -91,7 +91,6 @@ class BrokerStatus:
     tags=("zmq", "broker", "infrastructure"),
     enabled=True,
     mode="thread",
-    args=[],
 )
 class ZmqBrokerProcess(RegisterableProcess):
     """Async ZMQ XPUB/XSUB broker as a RegisterableProcess.

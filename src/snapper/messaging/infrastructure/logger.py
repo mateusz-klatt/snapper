@@ -95,7 +95,6 @@ class LoggerStatistics:
     tags=("zmq", "logging", "audit", "debugging"),
     enabled=False,
     mode="thread",
-    args=[],
 )
 class ZmqMessageLogger(RegisterableProcess):
     """ZMQ message logger that subscribes to all broker traffic.

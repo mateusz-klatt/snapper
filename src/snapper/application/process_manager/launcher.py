@@ -245,7 +245,6 @@ class ProcessLauncherService:
             name=config.name,
             class_path=config.class_path,
             method=config.method,
-            args=config.args,
             kwargs=config.kwargs,
         )
         logger.info(f"Process '{config.name}' started with PID {process_info.pid}")
@@ -258,7 +257,7 @@ class ProcessLauncherService:
             config: Process configuration.
         """
         process_class = self.import_class(config.class_path, config.name)
-        process_instance = process_class(*config.args, **config.kwargs)
+        process_instance = process_class(**config.kwargs)
         method = getattr(process_instance, config.method)
         if inspect.iscoroutinefunction(method):
             await self._start_as_async_task(config, method)
@@ -295,7 +294,6 @@ class ProcessLauncherService:
         """
         run_parameters: JsonObject = {
             "mode": config.mode,
-            "args": config.args,
             "kwargs": config.kwargs,
         }
         try:
@@ -708,7 +706,6 @@ class ProcessLauncherService:
         self,
         config_dict: dict[str, Any],
         mode: ProcessMode | None,
-        args: list[Any] | None,
         kwargs: dict[str, Any] | None,
         autostart: bool | None,
     ) -> bool:
@@ -720,7 +717,6 @@ class ProcessLauncherService:
         Args:
             config_dict: Mutable config dictionary.
             mode: Optional execution mode override.
-            args: Optional positional arguments override.
             kwargs: Optional keyword arguments override.
             autostart: Optional autostart override.
 
@@ -734,9 +730,6 @@ class ProcessLauncherService:
         if mode is not None:
             config_dict["mode"] = mode
         config_dict.setdefault("mode", "thread")
-        if args is not None:
-            config_dict["args"] = args
-        config_dict.setdefault("args", [])
         if kwargs is not None:
             config_dict["kwargs"] = kwargs
         config_dict.setdefault("kwargs", {})
@@ -783,7 +776,6 @@ class ProcessLauncherService:
             mode=resolve_mode(config_dict.get("mode", "thread"), name),
             class_path=config_dict["class"],
             method=config_dict.get("method", "start"),
-            args=config_dict.get("args", []),
             kwargs=config_dict.get("kwargs", {}),
             note=config_dict.get("note"),
             lifecycle=self._resolve_lifecycle(lifecycle_raw, name),
@@ -810,7 +802,6 @@ class ProcessLauncherService:
         persisted_config = dict(config_dict)
         persisted_config["lifecycle"] = config.lifecycle.value
         persisted_config["mode"] = config.mode
-        persisted_config["args"] = config.args
         persisted_config["kwargs"] = config.kwargs
         persisted_config["role"] = config.role.value
         if config.tags:
@@ -840,7 +831,6 @@ class ProcessLauncherService:
         self,
         name: str,
         mode: ProcessMode | None = None,
-        args: list[Any] | None = None,
         kwargs: dict[str, Any] | None = None,
         autostart: bool | None = None,
     ) -> ProcessStartResult:
@@ -849,7 +839,6 @@ class ProcessLauncherService:
         Args:
             name: Process name from registry.
             mode: Execution mode (thread/process).
-            args: Positional arguments for the process.
             kwargs: Keyword arguments for the process.
             autostart: Whether to enable autostart on boot.
 
@@ -877,7 +866,7 @@ class ProcessLauncherService:
                 )
             config_dict = json.loads(setting.value)
             autostart_enabled = self._apply_overrides_to_config_dict(
-                config_dict, mode, args, kwargs, autostart
+                config_dict, mode, kwargs, autostart
             )
             config = self._build_config_for_start_by_name(name, config_dict, autostart_enabled)
         try:
@@ -1049,7 +1038,6 @@ class ProcessLauncherService:
         method: str,
         enabled: bool,
         mode: ProcessMode,
-        args: list[Any],
         kwargs: dict[str, Any],
         lifecycle: ProcessLifecycleEnum,
         role: ProcessRoleEnum,
@@ -1065,7 +1053,6 @@ class ProcessLauncherService:
             method: Method to invoke on the class.
             enabled: Whether the process is enabled.
             mode: Execution mode (thread/process).
-            args: Positional arguments for the method.
             kwargs: Keyword arguments for the method.
             lifecycle: Process lifecycle type.
             role: Process role classification.
@@ -1079,7 +1066,6 @@ class ProcessLauncherService:
             method=method,
             enabled=enabled,
             mode=mode,
-            args=args,
             kwargs=kwargs,
             lifecycle=lifecycle,
             role=role,

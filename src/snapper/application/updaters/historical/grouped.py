@@ -40,7 +40,6 @@ _CACHE_ROOT = Path("data/polygon/cache")
     tags=("polygon", "grouped", "historical"),
     enabled=False,
     mode="thread",
-    args=[],
 )
 class PolygonGroupedDailyBackfillService(RegisterableProcess):
     """Service for downloading Polygon grouped daily data.

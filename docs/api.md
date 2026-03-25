@@ -685,7 +685,6 @@ List configured process instances with runtime state. Requires
             "mode": "thread",
             "class_path": "snapper.messaging.infrastructure.broker.ZmqBrokerProcess",
             "method": "start",
-            "args": [],
             "kwargs": {},
             "note": null,
             "lifecycle": "long_running",

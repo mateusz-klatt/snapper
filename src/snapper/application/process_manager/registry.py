@@ -7,7 +7,6 @@ and can be discovered and launched by the ProcessLauncherService.
 
 from collections.abc import Callable
 from collections.abc import Iterable
-from typing import Any
 
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
@@ -36,7 +35,6 @@ def register_process[T: type[RegisterableProcess]](
     parameters_schema: JsonObject | None = None,
     enabled: bool = False,
     mode: ProcessMode = "thread",
-    args: list[Any] | None = None,
 ) -> Callable[[T], T]:
     """Decorator to register a process class in the global registry.
 
@@ -54,7 +52,6 @@ def register_process[T: type[RegisterableProcess]](
         parameters_schema: Optional JSON schema for constructor parameters.
         enabled: Default enabled state. Defaults to False.
         mode: Execution mode ("thread" or "process"). Defaults to "thread".
-        args: Default positional arguments for constructor.
 
     Returns:
         Decorator function that registers and returns the class unchanged.
@@ -84,7 +81,6 @@ def register_process[T: type[RegisterableProcess]](
         )
         role_value = role if isinstance(role, ProcessRoleEnum) else ProcessRoleEnum(str(role))
         tags_value: tuple[str, ...] = tuple(str(tag) for tag in tags) if tags is not None else ()
-        args_value: list[Any] = args if args is not None else []
         _PROCESS_REGISTRY[name] = ProcessRegistryEntry(
             class_ref=cls,
             class_path=class_path,
@@ -97,7 +93,6 @@ def register_process[T: type[RegisterableProcess]](
             parameters_schema=parameters_schema,
             enabled=enabled,
             mode=mode,
-            args=args_value,
         )
         return cls
 

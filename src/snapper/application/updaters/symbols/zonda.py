@@ -28,7 +28,6 @@ from snapper.infrastructure.symbols.mapper import make_native_symbol
     tags=("maintenance", "symbols", "zonda"),
     enabled=True,
     mode="thread",
-    args=[],
 )
 class ZondaSymbolUpdaterService(SymbolUpdaterService[ZondaExchangeClient]):
     """Service for updating Zonda symbol mappings from CCXT."""

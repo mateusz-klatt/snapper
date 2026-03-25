@@ -2053,8 +2053,7 @@ def test_main_runs_sync_method_success() -> None:
         "name": "sync_test",
         "class_path": "tests.server.dummy_processes.SyncProcess",
         "method": "start",
-        "args": ["one"],
-        "kwargs": {},
+        "kwargs": {"identifier": "one"},
     }
     with _set_argv(["process_runner", "--config", json.dumps(config)]):
         process_runner.main()
@@ -2072,8 +2071,7 @@ def test_main_runs_async_method_success() -> None:
         "name": "async_test",
         "class_path": "tests.server.dummy_processes.AsyncProcess",
         "method": "start",
-        "args": ["two"],
-        "kwargs": {},
+        "kwargs": {"identifier": "two"},
     }
     with _set_argv(["process_runner", "--config", json.dumps(config)]):
         process_runner.main()
@@ -2091,8 +2089,7 @@ def test_main_runs_sync_returning_awaitable() -> None:
         "name": "awaitable_test",
         "class_path": "tests.server.dummy_processes.SyncReturnsAwaitableProcess",
         "method": "start",
-        "args": ["three"],
-        "kwargs": {},
+        "kwargs": {"identifier": "three"},
     }
     with _set_argv(["process_runner", "--config", json.dumps(config)]):
         process_runner.main()
@@ -2110,8 +2107,7 @@ def test_main_exits_on_process_exception() -> None:
         "name": "failing_test",
         "class_path": "tests.server.dummy_processes.FailingProcess",
         "method": "start",
-        "args": ["four"],
-        "kwargs": {},
+        "kwargs": {"identifier": "four"},
     }
     with _set_argv(["process_runner", "--config", json.dumps(config)]):
         result = process_runner.main()

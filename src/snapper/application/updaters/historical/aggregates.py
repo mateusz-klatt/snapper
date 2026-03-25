@@ -98,7 +98,6 @@ def _timeframe_label(multiplier: int, timespan: str) -> str:
     tags=("polygon", "backfill", "historical"),
     enabled=False,
     mode="thread",
-    args=[],
 )
 class PolygonAggregatesBackfillService(RegisterableProcess):
     """Service for backfilling Polygon aggregate (OHLCV) data.

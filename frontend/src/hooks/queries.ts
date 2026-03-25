@@ -254,16 +254,14 @@ export const useStartProcessByName = () => {
     mutationFn: ({
       name,
       mode,
-      args,
       kwargs,
       autostart,
     }: {
       name: string
       mode?: 'thread' | 'process'
-      args?: unknown[]
       kwargs?: Record<string, unknown>
       autostart?: boolean
-    }) => apiClient.startProcessByName(name, { mode, args, kwargs, autostart }),
+    }) => apiClient.startProcessByName(name, { mode, kwargs, autostart }),
     retry: 2,
     retryDelay: attemptIndex => Math.min(1000 * 2 ** attemptIndex, 30000),
     onSuccess: (_data, variables) => {

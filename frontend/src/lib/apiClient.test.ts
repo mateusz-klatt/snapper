@@ -1053,7 +1053,6 @@ describe('domain API methods', () => {
           method: 'run',
           default_enabled: true,
           default_mode: 'thread',
-          default_args: [],
           default_kwargs: {},
           lifecycle: 'long_running',
         },
@@ -1295,7 +1294,6 @@ describe('domain API methods', () => {
     })
     const result = await apiClient.startProcessByName('test-process', {
       mode: 'live' as 'thread',
-      args: [1, 2],
       kwargs: { param: 'value' },
       autostart: true,
     })

@@ -19,7 +19,6 @@ from snapper.messaging.executors.base import ExchangeExecutorService
     tags=("execution", "orders", "walutomat"),
     enabled=True,
     mode="thread",
-    args=[],
 )
 class WalutomatOrderExecutor(ExchangeExecutorService[WalutomatExchangeClient]):
     """Order executor for Walutomat exchange.

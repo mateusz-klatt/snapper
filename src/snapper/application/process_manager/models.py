@@ -155,7 +155,6 @@ class ProcessConfigModel:
         mode: Execution mode ("thread" or "process").
         class_path: Fully qualified class path (e.g., "snapper.app.MyProcess").
         method: Method to call on instantiated class.
-        args: Positional arguments for constructor.
         kwargs: Keyword arguments for constructor.
         note: Optional human-readable description.
         lifecycle: LONG_RUNNING or ONE_SHOT.
@@ -169,7 +168,6 @@ class ProcessConfigModel:
     mode: ProcessMode
     class_path: str
     method: str
-    args: list[Any]
     kwargs: JsonObject
     note: str | None = None
     lifecycle: ProcessLifecycleEnum = ProcessLifecycleEnum.LONG_RUNNING
@@ -246,7 +244,6 @@ class ProcessRegistryEntry:
         parameters_schema: Optional JSON schema for constructor params.
         enabled: Default enabled state.
         mode: Default execution mode.
-        args: Default positional arguments.
     """
 
     class_ref: type[RegisterableProcess]
@@ -260,7 +257,6 @@ class ProcessRegistryEntry:
     parameters_schema: JsonObject | None
     enabled: bool
     mode: ProcessMode
-    args: list[Any]
 
 
 @dataclass

@@ -30,7 +30,6 @@ from snapper.infrastructure.exchanges.implementations.polygon import PolygonExch
     tags=("maintenance", "symbols", "polygon"),
     enabled=True,
     mode="thread",
-    args=[],
 )
 class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
     """Service for updating Polygon symbol mappings from REST API."""

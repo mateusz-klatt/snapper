@@ -248,8 +248,6 @@ struct ConfiguredProcess: Codable, Sendable {
     let classPath: String
     /// Entry point method name
     let method: String
-    /// Constructor arguments
-    let args: [AnyCodable]?
     /// Constructor kwargs
     let kwargs: JsonObject?
     /// Optional note
@@ -279,7 +277,6 @@ struct ConfiguredProcess: Codable, Sendable {
         case mode
         case classPath = "class_path"
         case method
-        case args
         case kwargs
         case note
         case lifecycle
@@ -846,8 +843,6 @@ struct ProcessSchemaData: Codable, Sendable {
     let defaultEnabled: Bool
     /// Default execution mode
     let defaultMode: String
-    /// Default arguments
-    let defaultArgs: [AnyCodable]?
     /// Default kwargs
     let defaultKwargs: JsonObject?
     /// Process lifecycle type
@@ -865,7 +860,6 @@ struct ProcessSchemaData: Codable, Sendable {
         case method
         case defaultEnabled = "default_enabled"
         case defaultMode = "default_mode"
-        case defaultArgs = "default_args"
         case defaultKwargs = "default_kwargs"
         case lifecycle
     }
@@ -1897,8 +1891,6 @@ struct ProcessCreateBody: Codable, Sendable {
     let enabled: Bool?
     /// Execution mode override (thread/process)
     let mode: String?
-    /// Constructor positional arguments
-    let args: [AnyCodable]?
     /// Constructor keyword arguments
     let kwargs: JsonObject?
     /// Optional note stored alongside configuration
@@ -1926,8 +1918,6 @@ struct ProcessStartRequest: Codable, Sendable {
 struct ProcessStartBody: Codable, Sendable {
     /// Execution mode (thread/process) - for ProcessLauncherService, not constructor
     let mode: String?
-    /// Constructor positional arguments override
-    let args: [AnyCodable]?
     /// Constructor keyword arguments override
     let kwargs: JsonObject?
     /// Toggle autostart flag; None keeps stored value

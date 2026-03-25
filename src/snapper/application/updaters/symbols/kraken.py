@@ -36,7 +36,6 @@ _SEQ_KEY_CAPABILITIES = "capabilities"
     tags=("maintenance", "symbols", "kraken"),
     enabled=True,
     mode="thread",
-    args=[],
 )
 class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
     """Symbol updater for Kraken exchange.

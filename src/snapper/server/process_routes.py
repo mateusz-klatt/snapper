@@ -170,7 +170,6 @@ async def list_configured_processes(
             mode=config.mode,
             class_path=config.class_path,
             method=config.method,
-            args=config.args,
             kwargs=config.kwargs,
             note=config.note,
             lifecycle=config.lifecycle.value,
@@ -317,7 +316,6 @@ async def create_process_configuration(
         base_kwargs = {}
     if payload.kwargs:
         base_kwargs.update(payload.kwargs)
-    final_args = payload.args if payload.args is not None else list(entry.args)
     final_mode = payload.mode or resolve_mode(entry.mode, payload.name)
     final_enabled = entry.enabled if payload.enabled is None else payload.enabled
     try:
@@ -327,7 +325,6 @@ async def create_process_configuration(
             method=entry.method,
             enabled=bool(final_enabled),
             mode=final_mode,
-            args=final_args,
             kwargs=base_kwargs,
             lifecycle=entry.lifecycle,
             role=entry.role,
@@ -403,7 +400,6 @@ async def get_process_schema(
         method=entry.method,
         default_enabled=entry.enabled,
         default_mode=resolve_mode(entry.mode, name),
-        default_args=entry.args,
         default_kwargs=default_kwargs,
         lifecycle=entry.lifecycle.value,
     )
@@ -429,7 +425,6 @@ async def start_process(
     result = await factory.start_process_by_name(
         name=name,
         mode=payload.mode,
-        args=payload.args,
         kwargs=payload.kwargs,
         autostart=payload.autostart,
     )

@@ -64,7 +64,6 @@ async def test_strategy_process_creation() -> None:
     assert metadata is not None
     assert metadata.enabled is False
     assert metadata.mode == "thread"
-    assert metadata.args == []
     assert metadata.role == "strategy"
     assert "strategy" in metadata.tags
     mock_settings = MagicMock()

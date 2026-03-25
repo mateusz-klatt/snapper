@@ -94,7 +94,6 @@ class TestListAvailableProcesses:
                 parameters_schema=None,
                 enabled=False,
                 mode="thread",
-                args=[],
             ),
             "feed_publisher": ProcessRegistryEntry(
                 class_ref=mock_class,
@@ -108,7 +107,6 @@ class TestListAvailableProcesses:
                 parameters_schema=None,
                 enabled=False,
                 mode="thread",
-                args=[],
             ),
         }
         result = await list_available_processes(request=_make_rest_request(), _user=MagicMock())
@@ -154,7 +152,6 @@ class TestListConfiguredProcesses:
                     mode="thread",
                     class_path="snapper.ipc.zmq_broker.ZmqBrokerThread",
                     method="run",
-                    args=[],
                     kwargs={"endpoint": "tcp://0.0.0.0:5555"},
                     note="Test broker",
                     lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
@@ -174,7 +171,6 @@ class TestListConfiguredProcesses:
         assert process.mode == "thread"
         assert process.class_path == "snapper.ipc.zmq_broker.ZmqBrokerThread"
         assert process.method == "run"
-        assert process.args == []
         assert process.kwargs == {"endpoint": "tcp://0.0.0.0:5555"}
         assert process.note == "Test broker"
         assert process.lifecycle == "long_running"
@@ -232,7 +228,6 @@ class TestGetProcessSummary:
                     mode="process",
                     class_path="snapper.feeds.KrakenFeed",
                     method="run",
-                    args=[],
                     kwargs={},
                 ),
                 ProcessConfigModel(
@@ -241,7 +236,6 @@ class TestGetProcessSummary:
                     mode="process",
                     class_path="snapper.feeds.PolygonFeed",
                     method="run",
-                    args=[],
                     kwargs={},
                 ),
                 ProcessConfigModel(
@@ -250,7 +244,6 @@ class TestGetProcessSummary:
                     mode="process",
                     class_path="snapper.strategies.Momentum",
                     method="run",
-                    args=[],
                     kwargs={},
                     role=ProcessRoleEnum.STRATEGY,
                 ),
@@ -260,7 +253,6 @@ class TestGetProcessSummary:
                     mode="thread",
                     class_path="snapper.executors.Kraken",
                     method="run",
-                    args=[],
                     kwargs={},
                 ),
                 ProcessConfigModel(
@@ -269,7 +261,6 @@ class TestGetProcessSummary:
                     mode="thread",
                     class_path="snapper.ipc.zmq_broker.ZmqBrokerThread",
                     method="run",
-                    args=[],
                     kwargs={},
                 ),
             ]
@@ -303,7 +294,6 @@ class TestGetProcessSummary:
                     mode="process",
                     class_path="snapper.tasks.Backfill",
                     method="run",
-                    args=[],
                     kwargs={},
                     role=ProcessRoleEnum.TASK,
                 ),
@@ -346,7 +336,6 @@ class TestGetProcessSchema:
                 parameters_schema=None,
                 enabled=True,
                 mode="thread",
-                args=[],
             )
         }
         settings = MagicMock()
@@ -359,7 +348,6 @@ class TestGetProcessSchema:
         assert result.payload.method == "run"
         assert result.payload.default_enabled is True
         assert result.payload.default_mode == "thread"
-        assert result.payload.default_args == []
         assert result.payload.default_kwargs == {"endpoint": "tcp://0.0.0.0:5555"}
 
     @pytest.mark.asyncio
@@ -386,7 +374,6 @@ class TestGetProcessSchema:
                 parameters_schema=None,
                 enabled=False,
                 mode="thread",
-                args=[],
             )
         }
         settings = MagicMock()
@@ -399,7 +386,6 @@ class TestGetProcessSchema:
         assert result.payload.name == "custom_process"
         assert result.payload.default_enabled is False
         assert result.payload.default_mode == "thread"
-        assert result.payload.default_args == []
         assert result.payload.default_kwargs == {}
 
     @pytest.mark.asyncio
@@ -428,7 +414,6 @@ class TestGetProcessSchema:
                 parameters_schema=None,
                 enabled=True,
                 mode="process",
-                args=["arg1"],
             )
         }
         settings = MagicMock()
@@ -441,7 +426,6 @@ class TestGetProcessSchema:
         assert result.payload.default_kwargs == {}
         assert result.payload.default_enabled is True
         assert result.payload.default_mode == "process"
-        assert result.payload.default_args == ["arg1"]
 
     @pytest.mark.asyncio
     @patch("snapper.server.process_routes.get_registered_processes")
@@ -489,7 +473,6 @@ class TestStartProcess:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(
                 mode="process",
-                args=["arg1"],
                 kwargs={"endpoint": "tcp://0.0.0.0:6666"},
                 autostart=True,
             ),
@@ -508,7 +491,6 @@ class TestStartProcess:
         mock_factory.start_process_by_name.assert_awaited_once_with(
             name="zmq_broker",
             mode="process",
-            args=["arg1"],
             kwargs={"endpoint": "tcp://0.0.0.0:6666"},
             autostart=True,
         )
@@ -532,7 +514,6 @@ class TestStartProcess:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(
                 mode=None,
-                args=None,
                 kwargs=None,
                 autostart=None,
             ),
@@ -547,7 +528,7 @@ class TestStartProcess:
         )
         assert result.payload.status == "success"
         mock_factory.start_process_by_name.assert_awaited_once_with(
-            name="zmq_broker", mode=None, args=None, kwargs=None, autostart=None
+            name="zmq_broker", mode=None, kwargs=None, autostart=None
         )
 
 
@@ -595,13 +576,11 @@ class TestProcessStartRequest:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(
                 mode="process",
-                args=["arg1", 2],
                 kwargs={"key": "value"},
                 autostart=False,
             ),
         )
         assert request.payload.mode == "process"
-        assert request.payload.args == ["arg1", 2]
         assert request.payload.kwargs == {"key": "value"}
         assert request.payload.autostart is False
 
@@ -619,13 +598,11 @@ class TestProcessStartRequest:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(
                 mode=None,
-                args=None,
                 kwargs=None,
                 autostart=None,
             ),
         )
         assert request.payload.mode is None
-        assert request.payload.args is None
         assert request.payload.kwargs is None
         assert request.payload.autostart is None
 
@@ -646,7 +623,6 @@ class TestCreateProcessConfiguration:
         mock_factory.get_class_defaults.return_value = {
             "enabled": False,
             "mode": "thread",
-            "args": [],
             "kwargs": {
                 "name": "default_strategy",
                 "inputs": ["BTC-USD:1h"],
@@ -677,7 +653,6 @@ class TestCreateProcessConfiguration:
                 parameters_schema={"type": "object"},
                 enabled=False,
                 mode="thread",
-                args=[],
             )
         }
         request = ProcessCreateRequest(
@@ -690,7 +665,6 @@ class TestCreateProcessConfiguration:
                 template="strategy_macd_btc_1h",
                 enabled=True,
                 mode="process",
-                args=[],
                 kwargs={"name": "macd_custom"},
                 note="UI created",
             ),
@@ -710,7 +684,6 @@ class TestCreateProcessConfiguration:
             method="start",
             enabled=True,
             mode="process",
-            args=[],
             kwargs={
                 "name": "macd_custom",
                 "inputs": ["BTC-USD:1h"],
@@ -747,7 +720,6 @@ class TestCreateProcessConfiguration:
                 template="missing",
                 enabled=None,
                 mode=None,
-                args=None,
                 kwargs=None,
                 note=None,
             ),
@@ -781,7 +753,6 @@ class TestCreateProcessConfiguration:
         mock_factory.get_class_defaults.return_value = {
             "enabled": False,
             "mode": "thread",
-            "args": [],
             "kwargs": {},
             "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
             "role": ProcessRoleEnum.CORE,
@@ -802,7 +773,6 @@ class TestCreateProcessConfiguration:
                 parameters_schema=None,
                 enabled=False,
                 mode="thread",
-                args=[],
             )
         }
         request = ProcessCreateRequest(
@@ -815,7 +785,6 @@ class TestCreateProcessConfiguration:
                 template="strategy_macd_btc_1h",
                 enabled=None,
                 mode=None,
-                args=None,
                 kwargs=None,
                 note=None,
             ),
@@ -861,7 +830,6 @@ class TestProcessRoutesEdgeCases:
                 parameters_schema=None,
                 enabled=False,
                 mode="thread",
-                args=[],
             ),
         }
         result = await list_available_processes(request=_make_rest_request(), _user=MagicMock())
@@ -901,7 +869,6 @@ class TestProcessRoutesEdgeCases:
                 parameters_schema=None,
                 enabled=False,
                 mode="thread",
-                args=[],
             )
         }
         request = ProcessCreateRequest(
@@ -914,7 +881,6 @@ class TestProcessRoutesEdgeCases:
                 template="test_template",
                 enabled=True,
                 mode="thread",
-                args=None,
                 kwargs={"custom": "value"},
                 note=None,
             ),
@@ -957,7 +923,6 @@ class TestProcessRoutesEdgeCases:
                 parameters_schema=None,
                 enabled=False,
                 mode="thread",
-                args=[],
             )
         }
         request = ProcessCreateRequest(
@@ -970,7 +935,6 @@ class TestProcessRoutesEdgeCases:
                 template="test_template",
                 enabled=True,
                 mode="thread",
-                args=None,
                 kwargs={"custom": "value"},
                 note=None,
             ),
@@ -1014,7 +978,6 @@ class TestProcessRoutesEdgeCases:
                 parameters_schema=None,
                 enabled=False,
                 mode="thread",
-                args=[],
             )
         }
         request = ProcessCreateRequest(
@@ -1027,7 +990,6 @@ class TestProcessRoutesEdgeCases:
                 template="test_template",
                 enabled=True,
                 mode="thread",
-                args=None,
                 kwargs=None,
                 note=None,
             ),

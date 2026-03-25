@@ -14,7 +14,6 @@ Schema hierarchy follows these rules:
 - Request schemas stay as ``StrictDataSchema``.
 """
 
-from typing import Any
 from typing import Literal
 
 from pydantic import Field
@@ -88,7 +87,6 @@ class ProcessStartBody(StrictBody):
 
     Attributes:
         mode: Execution mode (thread/process) override.
-        args: Constructor positional arguments override.
         kwargs: Constructor keyword arguments override.
         autostart: Toggle autostart flag (None keeps stored value).
     """
@@ -97,11 +95,6 @@ class ProcessStartBody(StrictBody):
         None,
         description="Execution mode (thread/process) - for ProcessLauncherService, not constructor",
         examples=["thread", "process"],
-    )
-    args: list[Any] | None = Field(
-        None,
-        description="Constructor positional arguments override",
-        examples=[["arg1", 2, 3.0]],
     )
     kwargs: JsonObject | None = Field(
         None,
@@ -132,7 +125,6 @@ class ProcessCreateBody(StrictBody):
         template: Registered process identifier used as template.
         enabled: Whether process should autostart on boot.
         mode: Execution mode override (thread/process).
-        args: Constructor positional arguments.
         kwargs: Constructor keyword arguments.
         note: Optional note stored alongside configuration.
     """
@@ -155,10 +147,6 @@ class ProcessCreateBody(StrictBody):
     mode: ProcessMode | None = Field(
         None,
         description="Execution mode override (thread/process)",
-    )
-    args: list[Any] | None = Field(
-        None,
-        description="Constructor positional arguments",
     )
     kwargs: JsonObject | None = Field(
         None,
@@ -465,7 +453,6 @@ class ConfiguredProcess(StrictDataSchema[Literal["configured_process"]]):
         mode: Execution mode (thread/process).
         class_path: Full Python class path.
         method: Entry point method name.
-        args: Constructor arguments.
         kwargs: Constructor keyword arguments.
         note: Optional note.
         lifecycle: Process lifecycle type.
@@ -483,7 +470,6 @@ class ConfiguredProcess(StrictDataSchema[Literal["configured_process"]]):
     mode: ProcessMode = Field(description="Execution mode (thread/process)")
     class_path: str = Field(description=_CLASS_PATH_DESC)
     method: str = Field(description=_METHOD_DESC)
-    args: list[Any] = Field(default=[], description="Constructor arguments")
     kwargs: JsonObject = Field(default={}, description="Constructor kwargs")
     note: str | None = Field(None, description="Optional note")
     lifecycle: ProcessLifecycleType = Field(description=_LIFECYCLE_DESC)
@@ -607,7 +593,6 @@ class ProcessSchemaData(StrictDataSchema[Literal["process_schema"]]):
         method: Entry point method name.
         default_enabled: Default autostart setting.
         default_mode: Default execution mode.
-        default_args: Default arguments.
         default_kwargs: Default keyword arguments.
         lifecycle: Process lifecycle type.
     """
@@ -619,7 +604,6 @@ class ProcessSchemaData(StrictDataSchema[Literal["process_schema"]]):
     method: str = Field(description=_METHOD_DESC)
     default_enabled: bool = Field(description="Default autostart setting")
     default_mode: ProcessMode = Field(description="Default execution mode")
-    default_args: list[Any] = Field(default=[], description="Default arguments")
     default_kwargs: JsonObject = Field(default={}, description="Default kwargs")
     lifecycle: ProcessLifecycleType = Field(description=_LIFECYCLE_DESC)
 

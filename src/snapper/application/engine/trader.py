@@ -68,7 +68,6 @@ _bootstrap_settings = get_bootstrap_settings()
     tags=("trading", "signals", "risk"),
     enabled=True,
     mode="thread",
-    args=[],
 )
 class TraderCoordinator(RegisterableProcess):
     """Central trading coordinator - ONE instance per system.

@@ -27,7 +27,6 @@ from snapper.infrastructure.exchanges.implementations.walutomat import Walutomat
     tags=("maintenance", "symbols", "walutomat"),
     enabled=True,
     mode="thread",
-    args=[],
 )
 class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient]):
     """Service for updating Walutomat symbol mappings from REST API."""
