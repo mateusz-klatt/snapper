@@ -685,7 +685,7 @@ List configured process instances with runtime state. Requires
             "mode": "thread",
             "class_path": "snapper.messaging.infrastructure.broker.ZmqBrokerProcess",
             "method": "start",
-            "kwargs": {},
+            "parameters": {},
             "note": null,
             "lifecycle": "long_running",
             "role": "core",
@@ -732,7 +732,7 @@ X-CSRF-Token: <csrf_token>
     "template": "kraken_feed_publisher",
     "enabled": true,
     "mode": "thread",
-    "kwargs": { "symbols": ["BTC-USD"] },
+    "parameters": { "symbols": ["BTC-USD"] },
     "note": "Kraken BTC feed"
 }
 ```
@@ -764,8 +764,7 @@ Requires `manage:processes` permission.
     "method": "start",
     "default_enabled": true,
     "default_mode": "thread",
-    "default_args": [],
-    "default_kwargs": {},
+    "default_parameters": {},
     "lifecycle": "long_running"
 }
 ```
