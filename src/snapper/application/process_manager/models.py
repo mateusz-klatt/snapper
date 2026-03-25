@@ -23,6 +23,7 @@ from typing import Any
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.config.settings import AppSettings
+from snapper.core.json_types import JsonObject
 from snapper.core.types import ProcessLifecycleType
 from snapper.core.types import ProcessMode
 from snapper.core.types import ProcessRoleType
@@ -105,7 +106,7 @@ class ProcessInstanceInfo(RegisterableProcess):
     name: str
     pid: int
     started_at: datetime
-    config: dict[str, Any]
+    config: JsonObject
     process: subprocess.Popen[bytes]
     spawner: Any = None
     exit_code: int | None = None
@@ -169,12 +170,12 @@ class ProcessConfigModel:
     class_path: str
     method: str
     args: list[Any]
-    kwargs: dict[str, Any]
+    kwargs: JsonObject
     note: str | None = None
     lifecycle: ProcessLifecycleEnum = ProcessLifecycleEnum.LONG_RUNNING
     role: ProcessRoleEnum = ProcessRoleEnum.CORE
     tags: tuple[str, ...] = ()
-    parameters_schema: dict[str, Any] | None = None
+    parameters_schema: JsonObject | None = None
 
 
 @dataclass
@@ -256,7 +257,7 @@ class ProcessRegistryEntry:
     lifecycle: ProcessLifecycleEnum
     role: ProcessRoleEnum
     tags: tuple[str, ...]
-    parameters_schema: dict[str, Any] | None
+    parameters_schema: JsonObject | None
     enabled: bool
     mode: ProcessMode
     args: list[Any]

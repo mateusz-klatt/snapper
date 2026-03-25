@@ -1809,7 +1809,7 @@ class TestGetDefaultsFromMetadata:
         assert defaults["args"] == [1, 2, 3]
         assert defaults["lifecycle"] == ProcessLifecycleEnum.ONE_SHOT
         assert defaults["role"] == ProcessRoleEnum.TASK
-        assert defaults["tags"] == ("tag1", "tag2")
+        assert defaults["tags"] == ["tag1", "tag2"]
         assert defaults["parameters_schema"] == {"type": "object"}
 
     def test_get_defaults_from_metadata_empty(self, launcher: ProcessLauncherService) -> None:
@@ -1840,7 +1840,7 @@ class TestGetDefaultsFromMetadata:
         assert defaults["kwargs"] == {}
         assert defaults["lifecycle"] == ProcessLifecycleEnum.LONG_RUNNING
         assert defaults["role"] == ProcessRoleEnum.CORE
-        assert defaults["tags"] == ()
+        assert defaults["tags"] == []
         assert defaults["parameters_schema"] is None
 
 

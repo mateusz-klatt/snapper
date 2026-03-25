@@ -47,6 +47,7 @@ from snapper.application.process_manager.registry_syncer import ProcessRegistryS
 from snapper.application.process_manager.run_recorder import ProcessRunRecorder
 from snapper.application.process_manager.spawner import ProcessSpawnerService
 from snapper.config.settings import AppSettings
+from snapper.core.json_types import JsonObject
 from snapper.core.types import ProcessMode
 from snapper.data.models import Setting
 from snapper.data.repository import Repository
@@ -103,7 +104,7 @@ class ProcessLauncherService:
     async def _create_process_run_record(
         self,
         config: ProcessConfigModel,
-        parameters: dict[str, Any] | None,
+        parameters: JsonObject | None,
     ) -> str:
         """Delegate to run_recorder.create_run_record."""
         return await self._run_recorder.create_run_record(config, parameters)
@@ -113,7 +114,7 @@ class ProcessLauncherService:
         public_id: str,
         status: ProcessRunStatusEnum,
         *,
-        result: dict[str, Any] | None = None,
+        result: JsonObject | None = None,
         error: str | None = None,
     ) -> None:
         """Delegate to run_recorder.update_run_record."""
@@ -124,7 +125,7 @@ class ProcessLauncherService:
         name: str,
         status: ProcessRunStatusEnum,
         *,
-        result: dict[str, Any] | None = None,
+        result: JsonObject | None = None,
         error: str | None = None,
     ) -> None:
         """Finalize a process run by updating its record.
@@ -168,7 +169,7 @@ class ProcessLauncherService:
     def _resolve_parameters_schema(
         config_dict: dict[str, Any],
         entry: ProcessRegistryEntry | None,
-    ) -> dict[str, Any] | None:
+    ) -> JsonObject | None:
         """Delegate to config_resolver.resolve_parameters_schema."""
         return resolve_parameters_schema(config_dict, entry)
 
@@ -292,7 +293,7 @@ class ProcessLauncherService:
         Returns:
             The public_id string, or None if persistence failed.
         """
-        run_parameters: dict[str, Any] = {
+        run_parameters: JsonObject = {
             "mode": config.mode,
             "args": config.args,
             "kwargs": config.kwargs,
@@ -1002,7 +1003,7 @@ class ProcessLauncherService:
             Typed status with running state, role, lifecycle and details.
         """
         is_running = name in self.started_processes
-        details: dict[str, Any] | None = None
+        details: JsonObject | None = None
         instance = self.started_processes.get(name)
         if instance:
             try:
@@ -1053,7 +1054,7 @@ class ProcessLauncherService:
         lifecycle: ProcessLifecycleEnum,
         role: ProcessRoleEnum,
         tags: Iterable[str],
-        parameters_schema: dict[str, Any] | None = None,
+        parameters_schema: JsonObject | None = None,
         note: str | None = None,
     ) -> None:
         """Create a new process configuration in the database.

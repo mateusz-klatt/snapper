@@ -22,6 +22,7 @@ from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.config.settings import AppSettings
+from snapper.core.json_types import JsonObject
 from snapper.core.types import ProcessMode
 from snapper.data.models import Setting
 from snapper.data.repository import Repository
@@ -52,7 +53,7 @@ class ProcessRegistrySyncer:
         self.settings = settings
         self._tracker = SequenceTracker()
 
-    def _get_defaults_from_entry(self, entry: ProcessRegistryEntry) -> dict[str, Any]:
+    def _get_defaults_from_entry(self, entry: ProcessRegistryEntry) -> JsonObject:
         """Extract default configuration values from registry entry.
 
         Args:
@@ -68,7 +69,7 @@ class ProcessRegistrySyncer:
             "kwargs": {},
             "lifecycle": entry.lifecycle,
             "role": entry.role,
-            "tags": entry.tags,
+            "tags": list(entry.tags),
             "parameters_schema": entry.parameters_schema,
         }
 
@@ -321,7 +322,7 @@ class ProcessRegistrySyncer:
         lifecycle: ProcessLifecycleEnum,
         role: ProcessRoleEnum,
         tags: Iterable[str],
-        parameters_schema: dict[str, Any] | None = None,
+        parameters_schema: JsonObject | None = None,
         note: str | None = None,
     ) -> None:
         """Create a new process configuration in the database.

@@ -24,6 +24,7 @@ from snapper.api.schemas.base import PayloadRequest
 from snapper.api.schemas.base import PayloadResponse
 from snapper.api.schemas.base import StrictBody
 from snapper.api.schemas.base import StrictDataSchema
+from snapper.core.json_types import JsonObject
 from snapper.core.types import ProcessLifecycleType
 from snapper.core.types import ProcessMode
 from snapper.core.types import ProcessRoleType
@@ -102,7 +103,7 @@ class ProcessStartBody(StrictBody):
         description="Constructor positional arguments override",
         examples=[["arg1", 2, 3.0]],
     )
-    kwargs: dict[str, Any] | None = Field(
+    kwargs: JsonObject | None = Field(
         None,
         description="Constructor keyword arguments override",
         examples=[{"endpoint": "tcp://0.0.0.0:5555"}],
@@ -159,7 +160,7 @@ class ProcessCreateBody(StrictBody):
         None,
         description="Constructor positional arguments",
     )
-    kwargs: dict[str, Any] | None = Field(
+    kwargs: JsonObject | None = Field(
         None,
         description="Constructor keyword arguments",
     )
@@ -271,7 +272,7 @@ class StrategyStatusPayload(StrictBody):
 
     strategy_name: str = Field(description="Strategy name")
     status: str = Field(description="Current strategy status")
-    details: dict[str, Any] = Field(default={}, description="Full raw status")
+    details: JsonObject = Field(default={}, description="Full raw status")
     signals_generated: int | None = Field(None, description="Signals generated count")
     trades_executed: int | None = Field(None, description="Trades executed count")
     last_signal: str | None = Field(None, description="Last signal description")
@@ -433,7 +434,7 @@ class AvailableProcess(StrictDataSchema[Literal["available_process"]]):
     lifecycle: ProcessLifecycleType = Field(description=_LIFECYCLE_DESC)
     role: ProcessRoleType = Field(description=_ROLE_DESC)
     tags: list[str] = Field(default=[], description="Categorization tags")
-    parameters_schema: dict[str, Any] | None = Field(None, description="JSON Schema for parameters")
+    parameters_schema: JsonObject | None = Field(None, description="JSON Schema for parameters")
 
 
 class AvailableProcessesResponse(
@@ -483,12 +484,12 @@ class ConfiguredProcess(StrictDataSchema[Literal["configured_process"]]):
     class_path: str = Field(description=_CLASS_PATH_DESC)
     method: str = Field(description=_METHOD_DESC)
     args: list[Any] = Field(default=[], description="Constructor arguments")
-    kwargs: dict[str, Any] = Field(default={}, description="Constructor kwargs")
+    kwargs: JsonObject = Field(default={}, description="Constructor kwargs")
     note: str | None = Field(None, description="Optional note")
     lifecycle: ProcessLifecycleType = Field(description=_LIFECYCLE_DESC)
     role: ProcessRoleType = Field(description=_ROLE_DESC)
     tags: list[str] = Field(default=[], description="Categorization tags")
-    parameters_schema: dict[str, Any] | None = Field(None, description="JSON Schema for parameters")
+    parameters_schema: JsonObject | None = Field(None, description="JSON Schema for parameters")
     is_one_shot: bool = Field(description="Whether process is one-shot task")
     active_public_id: str | None = Field(None, description="Active public ID if running")
 
@@ -619,7 +620,7 @@ class ProcessSchemaData(StrictDataSchema[Literal["process_schema"]]):
     default_enabled: bool = Field(description="Default autostart setting")
     default_mode: ProcessMode = Field(description="Default execution mode")
     default_args: list[Any] = Field(default=[], description="Default arguments")
-    default_kwargs: dict[str, Any] = Field(default={}, description="Default kwargs")
+    default_kwargs: JsonObject = Field(default={}, description="Default kwargs")
     lifecycle: ProcessLifecycleType = Field(description=_LIFECYCLE_DESC)
 
 
@@ -660,8 +661,8 @@ class ProcessRun(StrictDataSchema[Literal["process_run"]]):
     status: ProcessRunStatusType = Field(description="Run status")
     role: ProcessRoleType = Field(description="Process role")
     lifecycle: ProcessLifecycleType = Field(description="Process lifecycle")
-    parameters: dict[str, Any] | None = Field(None, description="Run parameters")
-    result: dict[str, Any] | None = Field(None, description="Run result if completed")
+    parameters: JsonObject | None = Field(None, description="Run parameters")
+    result: JsonObject | None = Field(None, description="Run result if completed")
     error: str | None = Field(None, description="Error message if failed")
     tags: list[str] = Field(default=[], description="Process tags")
     started_at: str = Field(description="Start time in ISO format")
@@ -701,7 +702,7 @@ class ProcessRuntimeStatusData(StrictDataSchema[Literal["process_runtime_status"
     role: ProcessRoleType = Field(description=_ROLE_DESC)
     lifecycle: ProcessLifecycleType = Field(description=_LIFECYCLE_DESC)
     active_public_id: str | None = Field(None, description="Active public ID if running")
-    details: dict[str, Any] | None = Field(None, description="Additional process details")
+    details: JsonObject | None = Field(None, description="Additional process details")
 
 
 class ProcessRuntimeStatusResponse(

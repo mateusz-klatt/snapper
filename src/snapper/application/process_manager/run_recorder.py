@@ -17,6 +17,7 @@ from sqlalchemy import update
 from snapper.application.process_manager.enums import ProcessRunStatusEnum
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.config.settings import AppSettings
+from snapper.core.json_types import JsonObject
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import ProcessRun
 from snapper.data.repository import get_repository
@@ -47,7 +48,7 @@ class ProcessRunRecorder:
     async def create_run_record(
         self,
         config: ProcessConfigModel,
-        parameters: dict[str, Any] | None,
+        parameters: JsonObject | None,
     ) -> str:
         """Create a new process run record in database.
 
@@ -84,7 +85,7 @@ class ProcessRunRecorder:
         public_id: str,
         status: ProcessRunStatusEnum,
         *,
-        result: dict[str, Any] | None = None,
+        result: JsonObject | None = None,
         error: str | None = None,
     ) -> None:
         """Update an existing process run record.

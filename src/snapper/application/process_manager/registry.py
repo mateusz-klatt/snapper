@@ -13,6 +13,7 @@ from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.models import RegisterableProcess
+from snapper.core.json_types import JsonObject
 from snapper.core.types import ProcessMode
 from snapper.utils.autoload import import_all_under
 
@@ -32,7 +33,7 @@ def register_process[T: type[RegisterableProcess]](
     lifecycle: ProcessLifecycleEnum | str = ProcessLifecycleEnum.LONG_RUNNING,
     role: ProcessRoleEnum | str = ProcessRoleEnum.CORE,
     tags: Iterable[str] | None = None,
-    parameters_schema: dict[str, Any] | None = None,
+    parameters_schema: JsonObject | None = None,
     enabled: bool = False,
     mode: ProcessMode = "thread",
     args: list[Any] | None = None,

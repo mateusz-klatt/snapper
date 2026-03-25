@@ -10,6 +10,7 @@ from datetime import date
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
@@ -56,7 +57,7 @@ class PolygonGroupedDailyBackfillService(RegisterableProcess):
     """
 
     @staticmethod
-    def get_default_kwargs(settings: AppSettings) -> dict[str, object]:
+    def get_default_kwargs(settings: AppSettings) -> dict[str, Any]:
         """Get default constructor kwargs from settings.
 
         Args:

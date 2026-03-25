@@ -24,6 +24,7 @@ from loguru import logger
 
 from snapper.application.process_manager.models import ProcessInstanceInfo
 from snapper.application.process_manager.models import SpawnerStatusSnapshot
+from snapper.core.json_types import JsonObject
 
 IS_WINDOWS = sys.platform == "win32"
 CREATE_NEW_PROCESS_GROUP = 0x00000200 if IS_WINDOWS else 0
@@ -64,7 +65,7 @@ def _build_process_command(
     Returns:
         Command list for subprocess.Popen.
     """
-    config: dict[str, Any] = {
+    config: JsonObject = {
         "name": name,
         "class_path": class_path,
         "method": method,
