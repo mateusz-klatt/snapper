@@ -839,44 +839,6 @@ class TestStartProcessByName:
     @pytest.mark.asyncio
     @patch("snapper.application.process_manager.launcher.ProcessLauncherService.start_process")
     @patch("snapper.application.process_manager.launcher.get_repository")
-    async def test_start_process_by_name_migrates_legacy_kwargs(
-        self, mock_get_repo: MagicMock, mock_start: AsyncMock
-    ) -> None:
-        """Verify legacy kwargs key is migrated to parameters on start.
-
-        Given: Process config in database using legacy 'kwargs' key.
-        When: start_process_by_name called without parameter overrides.
-        Then: Legacy kwargs migrated to parameters and process starts.
-        """
-        mock_setting = MagicMock()
-        mock_setting.value = json.dumps(
-            {
-                "class": "test.Class",
-                "method": "run",
-                "mode": "thread",
-                "kwargs": {"legacy": "value"},
-            }
-        )
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = mock_setting
-        mock_session = MagicMock()
-        mock_session.execute = AsyncMock(return_value=mock_result)
-        mock_session.commit = AsyncMock()
-        mock_repo = MagicMock()
-        mock_repo.session.return_value.__aenter__.return_value = mock_session
-        mock_repo.session.return_value.__aexit__.return_value = AsyncMock()
-        mock_get_repo.return_value = mock_repo
-        settings = MagicMock()
-        settings.db_url = "sqlite:///:memory:"
-        factory = ProcessLauncherService(settings)
-        result = await factory.start_process_by_name("test_process")
-        assert result.status == "success"
-        call_args = mock_start.call_args[0][0]
-        assert call_args.parameters == {"legacy": "value"}
-
-    @pytest.mark.asyncio
-    @patch("snapper.application.process_manager.launcher.ProcessLauncherService.start_process")
-    @patch("snapper.application.process_manager.launcher.get_repository")
     async def test_start_process_by_name_start_fails(
         self, mock_get_repo: MagicMock, mock_start: AsyncMock
     ) -> None:

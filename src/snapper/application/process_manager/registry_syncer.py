@@ -136,7 +136,7 @@ class ProcessRegistrySyncer:
         Returns:
             True if config_dict was updated.
         """
-        parameters = config_dict.get("parameters", config_dict.get("kwargs", {}))
+        parameters = config_dict.get("parameters", {})
         if parameters:
             logger.debug(f"Process '{name}' already has database config with parameters")
             return False

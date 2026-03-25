@@ -248,8 +248,8 @@ struct ConfiguredProcess: Codable, Sendable {
     let classPath: String
     /// Entry point method name
     let method: String
-    /// Constructor kwargs
-    let kwargs: JsonObject?
+    /// Constructor parameters
+    let parameters: JsonObject?
     /// Optional note
     let note: String?
     /// Process lifecycle type
@@ -277,7 +277,7 @@ struct ConfiguredProcess: Codable, Sendable {
         case mode
         case classPath = "class_path"
         case method
-        case kwargs
+        case parameters
         case note
         case lifecycle
         case role
@@ -843,8 +843,8 @@ struct ProcessSchemaData: Codable, Sendable {
     let defaultEnabled: Bool
     /// Default execution mode
     let defaultMode: String
-    /// Default kwargs
-    let defaultKwargs: JsonObject?
+    /// Default parameters
+    let defaultParameters: JsonObject?
     /// Process lifecycle type
     let lifecycle: String
 
@@ -860,7 +860,7 @@ struct ProcessSchemaData: Codable, Sendable {
         case method
         case defaultEnabled = "default_enabled"
         case defaultMode = "default_mode"
-        case defaultKwargs = "default_kwargs"
+        case defaultParameters = "default_parameters"
         case lifecycle
     }
 }
@@ -1891,8 +1891,8 @@ struct ProcessCreateBody: Codable, Sendable {
     let enabled: Bool?
     /// Execution mode override (thread/process)
     let mode: String?
-    /// Constructor keyword arguments
-    let kwargs: JsonObject?
+    /// Constructor parameters
+    let parameters: JsonObject?
     /// Optional note stored alongside configuration
     let note: String?
 }
@@ -1918,8 +1918,8 @@ struct ProcessStartRequest: Codable, Sendable {
 struct ProcessStartBody: Codable, Sendable {
     /// Execution mode (thread/process) - for ProcessLauncherService, not constructor
     let mode: String?
-    /// Constructor keyword arguments override
-    let kwargs: JsonObject?
+    /// Constructor parameters override
+    let parameters: JsonObject?
     /// Toggle autostart flag; None keeps stored value
     let autostart: Bool?
 }

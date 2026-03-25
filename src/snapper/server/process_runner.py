@@ -95,7 +95,7 @@ def main() -> int:
     name = config.get("name", "unknown")
     class_path = config["class_path"]
     method = config["method"]
-    class_parameters = config.get("parameters", config.get("kwargs", {}))
+    class_parameters = config.get("parameters", {})
     set_log_context(f"proc:{name}")
     logger.info(f"Process '{name}' starting (PID: {os.getpid()})")
     try:

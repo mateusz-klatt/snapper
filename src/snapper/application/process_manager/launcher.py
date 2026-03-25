@@ -754,8 +754,7 @@ class ProcessLauncherService:
         config_dict.setdefault("mode", "thread")
         if parameters is not None:
             config_dict["parameters"] = parameters
-        if "parameters" not in config_dict:
-            config_dict["parameters"] = config_dict.pop("kwargs", {})
+        config_dict.setdefault("parameters", {})
         return autostart_enabled
 
     def _build_config_for_start_by_name(
@@ -799,7 +798,7 @@ class ProcessLauncherService:
             mode=resolve_mode(config_dict.get("mode", "thread"), name),
             class_path=config_dict["class"],
             method=config_dict.get("method", "start"),
-            parameters=config_dict.get("parameters", config_dict.get("kwargs", {})),
+            parameters=config_dict.get("parameters", {}),
             note=config_dict.get("note"),
             lifecycle=self._resolve_lifecycle(lifecycle_raw, name),
             role=self._resolve_role(role_raw, name),
@@ -826,7 +825,6 @@ class ProcessLauncherService:
         persisted_config["lifecycle"] = config.lifecycle.value
         persisted_config["mode"] = config.mode
         persisted_config["parameters"] = config.parameters
-        persisted_config.pop("kwargs", None)
         persisted_config["role"] = config.role.value
         if config.tags:
             persisted_config["tags"] = list(config.tags)

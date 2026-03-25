@@ -179,7 +179,7 @@ def build_process_config_from_dict(
         mode=resolve_mode(config_dict.get("mode", "thread"), process_name),
         class_path=config_dict["class"],
         method=config_dict.get("method", "start"),
-        parameters=config_dict.get("parameters", config_dict.get("kwargs", {})),
+        parameters=config_dict.get("parameters", {}),
         note=config_dict.get("note"),
         lifecycle=resolve_lifecycle(lifecycle_raw, process_name),
         role=resolve_role(role_raw, process_name),
