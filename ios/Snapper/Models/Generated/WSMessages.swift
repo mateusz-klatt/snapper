@@ -151,6 +151,9 @@ struct CandleData: Codable, Sendable {
     }
 }
 
+struct JsonObject: Codable, Sendable {
+}
+
 struct HeartbeatData: Codable, Sendable {
     let type: String
     let sequenceId: Int
@@ -161,7 +164,7 @@ struct HeartbeatData: Codable, Sendable {
     let sequence: Int
     let status: String
     let lagMs: Int
-    let meta: [String: AnyCodable]?
+    let meta: JsonObject?
 
     enum CodingKeys: String, CodingKey {
         case type

@@ -29,6 +29,7 @@ from snapper.core.types import MarketDataType
 from snapper.core.types import OrderExchange
 from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
+from snapper.data.repository_types import CandleUpsertRow
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
@@ -523,7 +524,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             close_price = candle_msg.close if candle_msg.close is not None else 0.0
             vwap_price = candle_msg.vwap if candle_msg.vwap is not None else candle_msg.close
             trades = candle_msg.trades if candle_msg.trades is not None else 0
-            candle_row: dict[str, Any] = {
+            candle_row: CandleUpsertRow = {
                 "public_id": candle_msg.public_id,
                 "instrument_public_id": instrument_public_id,
                 "open_at": candle_msg.open_at,

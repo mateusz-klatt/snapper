@@ -1249,6 +1249,18 @@ class TestJsonTypeToZod:
         result = json_type_to_zod(prop, True, {})
         assert result == "z.string()"
 
+    def test_recursive_json_object_ref_returns_record(self) -> None:
+        """Recursive $ref to JsonObject emits z.record(z.string(), z.any())."""
+        prop = {"$ref": "#/$defs/JsonObject"}
+        result = json_type_to_zod(prop, True, {})
+        assert result == "z.record(z.string(), z.any())"
+
+    def test_recursive_json_value_ref_returns_unknown(self) -> None:
+        """Recursive $ref to JsonValue emits z.unknown()."""
+        prop = {"$ref": "#/$defs/JsonValue"}
+        result = json_type_to_zod(prop, True, {})
+        assert result == "z.unknown()"
+
 
 class TestGenerateZodObjectSchema:
     """Tests for generate_zod_object_schema function."""
@@ -1304,6 +1316,16 @@ class TestGenerateZodSchemaDefinition:
         schema = {"type": "string"}
         result = generate_zod_schema_definition("Name", schema, {})
         assert "export const NameSchema = z.string()" in result
+
+    def test_recursive_json_object_emits_record_any(self) -> None:
+        """Recursive JsonObject schema emits z.record(z.string(), z.any())."""
+        result = generate_zod_schema_definition("JsonObject", {}, {})
+        assert result == "export const JsonObjectSchema = z.record(z.string(), z.any())"
+
+    def test_recursive_json_value_emits_unknown(self) -> None:
+        """Recursive JsonValue schema emits z.unknown()."""
+        result = generate_zod_schema_definition("JsonValue", {}, {})
+        assert result == "export const JsonValueSchema = z.unknown()"
 
 
 class TestTopologicalSortSchemas:
@@ -1551,6 +1573,27 @@ class TestJsonTypeToTsEntity:
         prop = {"type": "object", "additionalProperties": True}
         result = json_type_to_ts_entity(prop, "field", True)
         assert result == "Record<string, unknown>"
+
+    def test_recursive_json_object_ref_returns_record(self) -> None:
+        """Recursive $ref to JsonObject emits Record<string, unknown>."""
+        schemas = {"JsonObject": {"type": "object"}}
+        prop = {"$ref": "#/$defs/JsonObject"}
+        result = json_type_to_ts_entity(prop, "meta", True, schemas)
+        assert result == "Record<string, unknown>"
+
+    def test_recursive_json_value_ref_returns_unknown(self) -> None:
+        """Recursive $ref to JsonValue emits unknown."""
+        schemas = {"JsonValue": {"anyOf": [{"type": "string"}]}}
+        prop = {"$ref": "#/$defs/JsonValue"}
+        result = json_type_to_ts_entity(prop, "val", True, schemas)
+        assert result == "unknown"
+
+    def test_cyclic_ref_returns_unknown(self) -> None:
+        """Cyclic $ref (non-JSON type) detected via _visited returns unknown."""
+        schemas = {"Foo": {"$ref": "#/$defs/Foo"}}
+        prop = {"$ref": "#/$defs/Foo"}
+        result = json_type_to_ts_entity(prop, "x", True, schemas)
+        assert result == "unknown"
 
 
 class TestGenerateEntityInterface:

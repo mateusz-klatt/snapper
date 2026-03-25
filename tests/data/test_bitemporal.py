@@ -36,6 +36,7 @@ from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import where_active
 from snapper.data.repository import where_active_now
+from snapper.data.repository_types import CandleUpsertRow
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 
 
@@ -104,7 +105,7 @@ def _candle_row(
     open_at: datetime,
     timestamp: datetime,
     close: float = 1.5,
-) -> dict[str, Any]:
+) -> CandleUpsertRow:
     """Build a candle row dict with sensible defaults.
 
     Args:

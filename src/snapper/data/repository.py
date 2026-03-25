@@ -81,6 +81,18 @@ from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.models import Tick
 from snapper.data.models import Trade
+from snapper.data.repository_types import CandleRow
+from snapper.data.repository_types import CandleUpsertRow
+from snapper.data.repository_types import ExecutionRow
+from snapper.data.repository_types import MarketSnapshotRow
+from snapper.data.repository_types import MarketSnapshotUpsertRow
+from snapper.data.repository_types import OrderRow
+from snapper.data.repository_types import PositionRow
+from snapper.data.repository_types import SettingRow
+from snapper.data.repository_types import SignalRow
+from snapper.data.repository_types import TickUpsertRow
+from snapper.data.repository_types import TradeRow
+from snapper.data.repository_types import TradeUpsertRow
 
 __all__ = [
     "Repository",
@@ -350,17 +362,17 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
+    async def upsert_candles(self, rows: list[CandleUpsertRow]) -> int:
         """Insert or update candles. Return affected row count."""
         ...
 
     @abstractmethod
-    async def upsert_trades(self, rows: list[dict[str, Any]]) -> int:
+    async def upsert_trades(self, rows: list[TradeUpsertRow]) -> int:
         """Insert trades, skipping duplicates. Return inserted count."""
         ...
 
     @abstractmethod
-    async def upsert_ticks(self, rows: list[dict[str, Any]]) -> int:
+    async def upsert_ticks(self, rows: list[TickUpsertRow]) -> int:
         """Insert ticks. Return inserted count."""
         ...
 
@@ -434,7 +446,7 @@ class Repository(ABC):
         as_of: datetime,
         limit: int | None = None,
         order: str = "asc",
-    ) -> list[dict[str, Any]]:
+    ) -> list[CandleRow]:
         """Retrieve candles for instrument.
 
         Two modes:
@@ -451,7 +463,7 @@ class Repository(ABC):
         end: datetime,
         exchange: AllExchange,
         as_of: datetime,
-    ) -> list[dict[str, Any]]:
+    ) -> list[TradeRow]:
         """Retrieve trades for instrument in time range."""
         ...
 
@@ -462,12 +474,12 @@ class Repository(ABC):
         start: datetime,
         end: datetime,
         as_of: datetime,
-    ) -> list[dict[str, Any]]:
+    ) -> list[MarketSnapshotRow]:
         """Retrieve active market snapshots for instruments in time range."""
         ...
 
     @abstractmethod
-    async def upsert_market_snapshots(self, rows: list[dict[str, Any]]) -> int:
+    async def upsert_market_snapshots(self, rows: list[MarketSnapshotUpsertRow]) -> int:
         """SCD2 close+insert for market snapshots.
 
         Each row must contain instrument_public_id plus market data fields.
@@ -510,7 +522,7 @@ class Repository(ABC):
         instrument: str | None = None,
         strategy: str | None = None,
         exchange: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[SignalRow]:
         """Retrieve signals with optional filters.
 
         Args:
@@ -535,7 +547,7 @@ class Repository(ABC):
         as_of: datetime,
         symbol: str | None = None,
         exchange: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[OrderRow]:
         """Retrieve orders with optional filters and pagination.
 
         Args:
@@ -552,7 +564,7 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    async def get_executions(self, limit: int, as_of: datetime) -> list[dict[str, Any]]:
+    async def get_executions(self, limit: int, as_of: datetime) -> list[ExecutionRow]:
         """Retrieve executions with order/instrument/symbol info.
 
         Args:
@@ -566,7 +578,7 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    async def get_positions(self, as_of: datetime) -> list[dict[str, Any]]:
+    async def get_positions(self, as_of: datetime) -> list[PositionRow]:
         """Retrieve active positions with instrument/symbol info.
 
         Args:
@@ -578,9 +590,7 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    async def get_settings(
-        self, as_of: datetime, category: str | None = None
-    ) -> list[dict[str, Any]]:
+    async def get_settings(self, as_of: datetime, category: str | None = None) -> list[SettingRow]:
         """Retrieve active settings, optionally filtered by category.
 
         Args:
@@ -593,7 +603,7 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    async def get_setting_by_key(self, key: str, as_of: datetime) -> dict[str, Any] | None:
+    async def get_setting_by_key(self, key: str, as_of: datetime) -> SettingRow | None:
         """Retrieve a single setting by key.
 
         Args:
@@ -894,7 +904,7 @@ class SQLAlchemyRepository(Repository):
             return int(new_row.id)
 
     async def _upsert_batch(
-        self, model: type[Base], rows: list[dict[str, Any]], index_elements: list[str]
+        self, model: type[Base], rows: list[Any], index_elements: list[str]
     ) -> int:
         """Dialect-aware batch upsert with conflict-do-nothing.
 
@@ -940,7 +950,7 @@ class SQLAlchemyRepository(Repository):
                 await s.commit()
                 return inserted
 
-    async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
+    async def upsert_candles(self, rows: list[CandleUpsertRow]) -> int:
         """Close-old + insert-new (SCD Type 2) for candle rows.
 
         When a candle with the same (instrument_public_id, timeframe, open_at)
@@ -989,13 +999,13 @@ class SQLAlchemyRepository(Repository):
             await s.commit()
         return count
 
-    async def upsert_trades(self, rows: list[dict[str, Any]]) -> int:
+    async def upsert_trades(self, rows: list[TradeUpsertRow]) -> int:
         """Insert trades with dialect-specific conflict handling."""
         if not rows:
             return 0
         return await self._upsert_batch(Trade, rows, ["trade_id"])
 
-    async def upsert_ticks(self, rows: list[dict[str, Any]]) -> int:
+    async def upsert_ticks(self, rows: list[TickUpsertRow]) -> int:
         """Insert ticks as append-only (no dedup key)."""
         if not rows:
             return 0
@@ -1179,7 +1189,7 @@ class SQLAlchemyRepository(Repository):
         as_of: datetime,
         limit: int | None = None,
         order: str = "asc",
-    ) -> list[dict[str, Any]]:
+    ) -> list[CandleRow]:
         """Retrieve active candles for instrument.
 
         Supports two modes:
@@ -1243,7 +1253,7 @@ class SQLAlchemyRepository(Repository):
         end: datetime,
         exchange: AllExchange,
         as_of: datetime,
-    ) -> list[dict[str, Any]]:
+    ) -> list[TradeRow]:
         """Retrieve trades for instrument within time range."""
         async with self.session() as s:
             inst = await self._resolve_active_instrument(s, instrument, exchange, as_of)
@@ -1284,7 +1294,7 @@ class SQLAlchemyRepository(Repository):
         start: datetime,
         end: datetime,
         as_of: datetime,
-    ) -> list[dict[str, Any]]:
+    ) -> list[MarketSnapshotRow]:
         """Retrieve active market snapshots for instruments in time range."""
         now = as_of
         async with self.session() as s:
@@ -1329,7 +1339,7 @@ class SQLAlchemyRepository(Repository):
                 for r in rows
             ]
 
-    async def upsert_market_snapshots(self, rows: list[dict[str, Any]]) -> int:
+    async def upsert_market_snapshots(self, rows: list[MarketSnapshotUpsertRow]) -> int:
         """SCD2 close+insert for market snapshots.
 
         One active row per instrument_public_id.  Closes the existing
@@ -1407,7 +1417,7 @@ class SQLAlchemyRepository(Repository):
         instrument: str | None = None,
         strategy: str | None = None,
         exchange: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[SignalRow]:
         """Retrieve signals with optional filters."""
         async with self.session() as s:
             query = (
@@ -1470,7 +1480,7 @@ class SQLAlchemyRepository(Repository):
         as_of: datetime,
         symbol: str | None = None,
         exchange: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[OrderRow]:
         """Retrieve orders with optional filters and pagination."""
         async with self.session() as s:
             query = (
@@ -1528,7 +1538,7 @@ class SQLAlchemyRepository(Repository):
                 for order, inst, sym in result.all()
             ]
 
-    async def get_executions(self, limit: int, as_of: datetime) -> list[dict[str, Any]]:
+    async def get_executions(self, limit: int, as_of: datetime) -> list[ExecutionRow]:
         """Retrieve executions with order/instrument/symbol info."""
         async with self.session() as s:
             query = (
@@ -1581,7 +1591,7 @@ class SQLAlchemyRepository(Repository):
                 for exe, order, inst, sym in result.all()
             ]
 
-    async def get_positions(self, as_of: datetime) -> list[dict[str, Any]]:
+    async def get_positions(self, as_of: datetime) -> list[PositionRow]:
         """Retrieve active positions with instrument/symbol info."""
         async with self.session() as s:
             query = (
@@ -1619,9 +1629,7 @@ class SQLAlchemyRepository(Repository):
                 for pos, inst, sym in result.all()
             ]
 
-    async def get_settings(
-        self, as_of: datetime, category: str | None = None
-    ) -> list[dict[str, Any]]:
+    async def get_settings(self, as_of: datetime, category: str | None = None) -> list[SettingRow]:
         """Retrieve active settings, optionally filtered by category."""
         async with self.session() as s:
             query = select(Setting).where(*where_active(Setting, as_of))
@@ -1643,7 +1651,7 @@ class SQLAlchemyRepository(Repository):
                 for setting in result.scalars().all()
             ]
 
-    async def get_setting_by_key(self, key: str, as_of: datetime) -> dict[str, Any] | None:
+    async def get_setting_by_key(self, key: str, as_of: datetime) -> SettingRow | None:
         """Retrieve a single setting by key."""
         async with self.session() as s:
             result = await s.execute(
@@ -1652,7 +1660,7 @@ class SQLAlchemyRepository(Repository):
             setting = result.scalars().first()
             if setting is None:
                 return None
-            return {
+            row: SettingRow = {
                 "public_id": setting.public_id,
                 "timestamp": setting.timestamp,
                 "session_id": setting.session_id,
@@ -1663,6 +1671,7 @@ class SQLAlchemyRepository(Repository):
                 "description": setting.description,
                 "updated_by": setting.updated_by,
             }
+            return row
 
     async def get_setting_categories(self, as_of: datetime) -> list[str]:
         """Return distinct setting category names."""

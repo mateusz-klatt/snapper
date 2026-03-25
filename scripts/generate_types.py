@@ -965,12 +965,13 @@ def _zod_object_type(prop: dict[str, Any], definitions: dict[str, Any]) -> str:
     if "properties" in prop:
         return generate_zod_object_schema(prop, definitions)
     additional = prop.get("additionalProperties")
+    _zod_record_unknown = "z.record(z.string(), z.unknown())"
     if additional:
         if additional is True:
-            return "z.record(z.string(), z.unknown())"
+            return _zod_record_unknown
         value_type = json_type_to_zod(additional, True, definitions)
         return f"z.record(z.string(), {value_type})"
-    return "z.record(z.string(), z.unknown())"
+    return _zod_record_unknown
 
 
 def json_type_to_zod(prop: dict[str, Any], required: bool, definitions: dict[str, Any]) -> str:
@@ -986,6 +987,10 @@ def json_type_to_zod(prop: dict[str, Any], required: bool, definitions: dict[str
     """
     if "$ref" in prop:
         ref_name = prop["$ref"].split("/")[-1]
+        if ref_name in _RECURSIVE_JSON_TYPES:
+            if ref_name == "JsonObject":
+                return _ZOD_JSON_RECORD
+            return "z.unknown()"
         return f"{ref_name}Schema"
     if "anyOf" in prop:
         return _zod_anyof_type(prop, definitions)
@@ -1042,6 +1047,10 @@ def generate_zod_schema_definition(
     Returns:
         Zod schema definition as an export statement.
     """
+    if name in _RECURSIVE_JSON_TYPES:
+        if name == "JsonObject":
+            return f"export const {name}Schema = z.record(z.string(), z.any())"
+        return f"export const {name}Schema = z.unknown()"
     if schema.get("type") == "string" and "enum" in schema:
         enum_values = ", ".join(f"'{v}'" for v in schema["enum"])
         return f"export const {name}Schema = z.enum([{enum_values}])"
@@ -1217,6 +1226,7 @@ def _resolve_anyof_entity(
     types: list[dict[str, Any]],
     field_name: str,
     all_schemas: dict[str, Any] | None,
+    _visited: set[str] | None = None,
 ) -> str:
     """Resolve anyOf union to a TypeScript type string.
 
@@ -1224,6 +1234,7 @@ def _resolve_anyof_entity(
         types: List of type schemas from anyOf.
         field_name: Name of the field being converted.
         all_schemas: All schema definitions for reference resolution.
+        _visited: Tracks visited $ref names to detect cycles.
 
     Returns:
         TypeScript union type string.
@@ -1231,9 +1242,11 @@ def _resolve_anyof_entity(
     non_null = [t for t in types if t.get("type") != "null"]
     has_null = any(t.get("type") == "null" for t in types)
     if len(non_null) == 1:
-        base = json_type_to_ts_entity(non_null[0], field_name, True, all_schemas)
+        base = json_type_to_ts_entity(non_null[0], field_name, True, all_schemas, _visited)
     else:
-        parts = [json_type_to_ts_entity(t, field_name, True, all_schemas) for t in non_null]
+        parts = [
+            json_type_to_ts_entity(t, field_name, True, all_schemas, _visited) for t in non_null
+        ]
         base = " | ".join(parts)
     return f"{base} | null" if has_null else base
 
@@ -1251,6 +1264,7 @@ def _resolve_primitive_type(
     prop_type: str,
     field_name: str,
     all_schemas: dict[str, Any] | None,
+    _visited: set[str] | None = None,
 ) -> str:
     """Resolve a primitive JSON Schema type to TypeScript.
 
@@ -1259,6 +1273,7 @@ def _resolve_primitive_type(
         prop_type: The JSON Schema type string.
         field_name: Name of the field.
         all_schemas: All schema definitions for reference resolution.
+        _visited: Tracks visited $ref names to detect cycles.
 
     Returns:
         TypeScript type string.
@@ -1271,15 +1286,19 @@ def _resolve_primitive_type(
         return "string"
     if prop_type == "array":
         items = prop.get("items", {})
-        item_type = json_type_to_ts_entity(items, field_name, True, all_schemas)
+        item_type = json_type_to_ts_entity(items, field_name, True, all_schemas, _visited)
         return f"{item_type}[]"
     if prop_type == "object":
         additional = prop.get("additionalProperties")
         if additional and isinstance(additional, dict):
-            val_type = json_type_to_ts_entity(additional, field_name, True, all_schemas)
+            val_type = json_type_to_ts_entity(additional, field_name, True, all_schemas, _visited)
             return f"Record<string, {val_type}>"
         return "Record<string, unknown>"
     return "unknown"
+
+
+_RECURSIVE_JSON_TYPES = frozenset({"JsonValue", "JsonObject", "JsonArray", "JsonPrimitive"})
+_ZOD_JSON_RECORD = "z.record(z.string(), z.any())"
 
 
 def json_type_to_ts_entity(
@@ -1287,6 +1306,7 @@ def json_type_to_ts_entity(
     field_name: str,
     required: bool,
     all_schemas: dict[str, Any] | None = None,
+    _visited: set[str] | None = None,
 ) -> str:
     """Convert JSON Schema type to TypeScript type for entities.
 
@@ -1295,21 +1315,30 @@ def json_type_to_ts_entity(
         field_name: Name of the field being converted.
         required: Whether the field is required.
         all_schemas: All schema definitions for reference resolution.
+        _visited: Tracks visited $ref names to detect cycles.
 
     Returns:
         TypeScript type string representation.
     """
+    if _visited is None:
+        _visited = set()
+
     if "$ref" in prop and all_schemas:
         ref_name = prop["$ref"].split("/")[-1]
+        if ref_name in _RECURSIVE_JSON_TYPES:
+            return "Record<string, unknown>" if ref_name == "JsonObject" else "unknown"
+        if ref_name in _visited:
+            return "unknown"
+        _visited.add(ref_name)
         return json_type_to_ts_entity(
-            all_schemas.get(ref_name, {}), field_name, required, all_schemas
+            all_schemas.get(ref_name, {}), field_name, required, all_schemas, _visited
         )
 
     if "anyOf" in prop:
-        return _resolve_anyof_entity(prop["anyOf"], field_name, all_schemas)
+        return _resolve_anyof_entity(prop["anyOf"], field_name, all_schemas, _visited)
 
     if "allOf" in prop:
-        return json_type_to_ts_entity(prop["allOf"][0], field_name, required, all_schemas)
+        return json_type_to_ts_entity(prop["allOf"][0], field_name, required, all_schemas, _visited)
 
     prop_type: str = prop.get("type", "")
     if prop_type == "string" and prop.get("format") == "date-time":
@@ -1318,7 +1347,7 @@ def json_type_to_ts_entity(
     if field_name in ENTITY_UNION_ID_FIELDS:
         return "string | number"
 
-    return _resolve_primitive_type(prop, prop_type, field_name, all_schemas)
+    return _resolve_primitive_type(prop, prop_type, field_name, all_schemas, _visited)
 
 
 _ENTITY_UNION_THRESHOLD = 3

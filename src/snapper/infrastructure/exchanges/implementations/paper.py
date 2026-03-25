@@ -471,9 +471,9 @@ class PaperExchangeClient(ExchangeClientBase):
         latest = snapshots[-1]
         return TickerSnapshot(
             symbol=symbol,
-            bid=latest["bid"],
-            ask=latest["ask"],
-            last=latest["last"],
+            bid=latest["bid"] or 0.0,
+            ask=latest["ask"] or 0.0,
+            last=latest["last"] or 0.0,
             timestamp=latest["ts"].timestamp(),
         )
 
@@ -584,16 +584,16 @@ class PaperExchangeClient(ExchangeClientBase):
         )
         for snap in snapshots:
             ticker = TickerUpdate(
-                symbol=snap.get("symbol", ""),
-                bid=snap["bid"],
-                bid_qty=snap["bid_volume"],
-                ask=snap["ask"],
-                ask_qty=snap["ask_volume"],
-                last=snap["last"],
-                volume=snap["volume"],
-                vwap=snap["vwap"],
-                low=snap["low"],
-                high=snap["high"],
+                symbol=str(snap.get("symbol", "")),
+                bid=snap["bid"] or 0.0,
+                bid_qty=snap["bid_volume"] or 0.0,
+                ask=snap["ask"] or 0.0,
+                ask_qty=snap["ask_volume"] or 0.0,
+                last=snap["last"] or 0.0,
+                volume=snap["volume"] or 0.0,
+                vwap=snap["vwap"] or 0.0,
+                low=snap["low"] or 0.0,
+                high=snap["high"] or 0.0,
                 change=0.0,
                 change_pct=0.0,
             )
@@ -675,8 +675,8 @@ class PaperExchangeClient(ExchangeClientBase):
                         low=candle_dict["low"],
                         close=candle_dict["close"],
                         volume=candle_dict["volume"],
-                        vwap=candle_dict.get("vwap", 0.0),
-                        trades=candle_dict.get("trades", 0),
+                        vwap=candle_dict.get("vwap") or 0.0,
+                        trades=candle_dict.get("trades") or 0,
                     )
                 )
         replay_candles.sort(key=lambda candle: candle.interval_begin)
@@ -765,7 +765,7 @@ class PaperExchangeClient(ExchangeClientBase):
                         quantity=trade_dict["size"],
                         price=trade_dict["price"],
                         ord_type="unknown",
-                        trade_id=trade_dict.get("trade_id", 0),
+                        trade_id=int(trade_dict.get("trade_id") or 0),
                         timestamp=trade_dict["timestamp"],
                     )
                 )

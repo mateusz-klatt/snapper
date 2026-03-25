@@ -47,6 +47,7 @@ from datetime import datetime
 from datetime import timedelta
 from typing import Annotated
 from typing import Any
+from typing import cast
 from uuid import uuid7
 
 import zmq
@@ -576,7 +577,7 @@ def _create_candles_signals_router() -> APIRouter:
                 strategy=strategy,
                 exchange=exchange,
             )
-            items = [SignalData(**r) for r in rows]
+            items = [SignalData(**cast(dict[str, Any], r)) for r in rows]
             tracker: SequenceTracker = request.app.state.rest_tracker
             sid = tracker.session_id
             seq = tracker.next_sequence(_REST_DATA_STREAM)
@@ -738,7 +739,7 @@ def _create_orders_executions_router() -> APIRouter:
                 symbol=symbol,
                 exchange=exchange,
             )
-            items = [OrderData(**r) for r in rows]
+            items = [OrderData(**cast(dict[str, Any], r)) for r in rows]
             tracker: SequenceTracker = request.app.state.rest_tracker
             sid = tracker.session_id
             seq = tracker.next_sequence(_REST_DATA_STREAM)
@@ -781,7 +782,7 @@ def _create_orders_executions_router() -> APIRouter:
         processing_date = as_of or datetime.now(UTC)
         try:
             rows = await repo.get_executions(limit=limit, as_of=processing_date)
-            items = [ExecutionData(**r) for r in rows]
+            items = [ExecutionData(**cast(dict[str, Any], r)) for r in rows]
             tracker: SequenceTracker = request.app.state.rest_tracker
             sid = tracker.session_id
             seq = tracker.next_sequence(_REST_DATA_STREAM)
@@ -822,7 +823,7 @@ def _create_orders_executions_router() -> APIRouter:
         processing_date = as_of or datetime.now(UTC)
         try:
             rows = await repo.get_positions(as_of=processing_date)
-            items = [PositionData(**r) for r in rows]
+            items = [PositionData(**cast(dict[str, Any], r)) for r in rows]
             tracker: SequenceTracker = request.app.state.rest_tracker
             sid = tracker.session_id
             seq = tracker.next_sequence(_REST_DATA_STREAM)

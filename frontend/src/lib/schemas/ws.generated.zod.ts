@@ -58,20 +58,7 @@ export const ExecutionDataSchema = z
   })
   .strict()
 
-export const HeartbeatDataSchema = z
-  .object({
-    type: z.literal('heartbeat'),
-    sequence_id: z.number().int(),
-    public_id: z.string(),
-    timestamp: z.iso.datetime(),
-    session_id: z.string(),
-    component: z.string(),
-    sequence: z.number().int(),
-    status: z.enum(['healthy', 'warning', 'error']),
-    lag_ms: z.number().int(),
-    meta: z.record(z.string(), z.unknown()),
-  })
-  .strict()
+export const JsonPrimitiveSchema = z.unknown()
 
 export const OrderCancelDataSchema = z
   .object({
@@ -460,6 +447,8 @@ export const WSUnsubscribeRequestSchema = z
   })
   .strict()
 
+export const JsonValueSchema = z.unknown()
+
 export const WSAuthCompleteResponseSchema = z
   .object({
     type: z.literal('auth_complete'),
@@ -471,5 +460,22 @@ export const WSAuthCompleteResponseSchema = z
     user_role: UserRoleSchema,
     session_expires_at: z.iso.datetime().nullable(),
     ws_token_exp: z.iso.datetime(),
+  })
+  .strict()
+
+export const JsonObjectSchema = z.record(z.string(), z.any())
+
+export const HeartbeatDataSchema = z
+  .object({
+    type: z.literal('heartbeat'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    component: z.string(),
+    sequence: z.number().int(),
+    status: z.enum(['healthy', 'warning', 'error']),
+    lag_ms: z.number().int(),
+    meta: z.record(z.string(), z.any()),
   })
   .strict()

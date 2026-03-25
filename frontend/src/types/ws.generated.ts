@@ -54,6 +54,13 @@ export type Side = "buy" | "sell";
 export type Status = "filled" | "partial";
 export type Type2 = "heartbeat";
 export type Status1 = "healthy" | "warning" | "error";
+export type JsonValue =
+  | JsonPrimitive
+  | JsonValue[]
+  | {
+      [k: string]: JsonValue;
+    };
+export type JsonPrimitive = string | number | boolean | null;
 export type Type3 = "order_cancel";
 export type Exchange2 = "paper" | "kraken" | "zonda" | "walutomat";
 export type Type4 = "order";
@@ -362,10 +369,10 @@ export interface HeartbeatData {
   sequence: number;
   status: Status1;
   lag_ms: number;
-  meta?: Meta;
+  meta?: JsonObject;
 }
-export interface Meta {
-  [k: string]: unknown;
+export interface JsonObject {
+  [k: string]: JsonValue;
 }
 /**
  * Order cancel request from strategy to executor.

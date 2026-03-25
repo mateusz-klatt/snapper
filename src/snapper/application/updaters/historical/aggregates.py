@@ -34,6 +34,7 @@ from snapper.data.models import SymbolAlias
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
+from snapper.data.repository_types import CandleUpsertRow
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
 from snapper.infrastructure.historical.polygon.loader import AggregateCandle
 from snapper.infrastructure.historical.polygon.loader import PolygonHistoricalLoader
@@ -772,7 +773,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         timeframe: str,
         session_id: str,
         sequence_id_fn: Callable[[], int],
-    ) -> list[dict[str, object]]:
+    ) -> list[CandleUpsertRow]:
         """Build database row dicts from candle objects.
 
         Args:
