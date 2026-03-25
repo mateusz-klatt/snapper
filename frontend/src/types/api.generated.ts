@@ -1060,7 +1060,7 @@ export type Components = {
          *         mode: Execution mode (thread/process).
          *         class_path: Full Python class path.
          *         method: Entry point method name.
-         *         kwargs: Constructor keyword arguments.
+         *         parameters: Constructor parameters dict.
          *         note: Optional note.
          *         lifecycle: Process lifecycle type.
          *         role: Process role category.
@@ -1119,10 +1119,10 @@ export type Components = {
              */
             method: string;
             /**
-             * @description Constructor kwargs
+             * @description Constructor parameters
              * @default {}
              */
-            kwargs: Record<string, unknown>;
+            parameters: Record<string, unknown>;
             /**
              * Note
              * @description Optional note
@@ -2147,7 +2147,7 @@ export type Components = {
          *         method: Entry point method name.
          *         default_enabled: Default autostart setting.
          *         default_mode: Default execution mode.
-         *         default_kwargs: Default keyword arguments.
+         *         default_parameters: Default constructor parameters.
          *         lifecycle: Process lifecycle type.
          */
         ProcessSchemaData: {
@@ -2200,10 +2200,10 @@ export type Components = {
              */
             default_mode: "thread" | "process";
             /**
-             * @description Default kwargs
+             * @description Default parameters
              * @default {}
              */
-            default_kwargs: Record<string, unknown>;
+            default_parameters: Record<string, unknown>;
             /**
              * Lifecycle
              * @description Process lifecycle type
@@ -3954,7 +3954,7 @@ export type Components = {
          *         template: Registered process identifier used as template.
          *         enabled: Whether process should autostart on boot.
          *         mode: Execution mode override (thread/process).
-         *         kwargs: Constructor keyword arguments.
+         *         parameters: Constructor parameters dict.
          *         note: Optional note stored alongside configuration.
          */
         ProcessCreateBody: {
@@ -3978,8 +3978,8 @@ export type Components = {
              * @description Execution mode override (thread/process)
              */
             mode?: ("thread" | "process") | null;
-            /** @description Constructor keyword arguments */
-            kwargs?: Record<string, unknown> | null;
+            /** @description Constructor parameters */
+            parameters?: Record<string, unknown> | null;
             /**
              * Note
              * @description Optional note stored alongside configuration
@@ -4018,7 +4018,7 @@ export type Components = {
          *
          *     Attributes:
          *         mode: Execution mode (thread/process) override.
-         *         kwargs: Constructor keyword arguments override.
+         *         parameters: Constructor parameters override.
          *         autostart: Toggle autostart flag (None keeps stored value).
          */
         ProcessStartBody: {
@@ -4030,12 +4030,12 @@ export type Components = {
              */
             mode?: ("thread" | "process") | null;
             /**
-             * @description Constructor keyword arguments override
+             * @description Constructor parameters override
              * @example {
              *       "endpoint": "tcp://0.0.0.0:5555"
              *     }
              */
-            kwargs?: Record<string, unknown> | null;
+            parameters?: Record<string, unknown> | null;
             /**
              * Autostart
              * @description Toggle autostart flag; None keeps stored value

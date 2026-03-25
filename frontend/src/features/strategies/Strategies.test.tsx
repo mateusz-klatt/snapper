@@ -714,7 +714,7 @@ describe('Strategies', () => {
       data: {
         payload: {
           default_args: [],
-          default_kwargs: { name: 'macd_default' },
+          default_parameters: { name: 'macd_default' },
           default_mode: 'thread',
         },
       },
@@ -794,7 +794,7 @@ describe('Strategies', () => {
       data: {
         payload: {
           default_args: [],
-          default_kwargs: { name: 'macd_default' },
+          default_parameters: { name: 'macd_default' },
           default_mode: 'thread',
         },
       },
@@ -868,7 +868,7 @@ describe('Strategies', () => {
       data: {
         payload: {
           default_args: [],
-          default_kwargs: { name: 'macd_default' },
+          default_parameters: { name: 'macd_default' },
           default_mode: 'thread',
         },
       },
@@ -937,7 +937,7 @@ describe('Strategies', () => {
       data: {
         payload: {
           default_args: [],
-          default_kwargs: { name: 'macd_default' },
+          default_parameters: { name: 'macd_default' },
           default_mode: 'thread',
         },
       },

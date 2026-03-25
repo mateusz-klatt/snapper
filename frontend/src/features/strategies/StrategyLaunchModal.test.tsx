@@ -281,7 +281,7 @@ describe('StrategyLaunchModal', () => {
       data: {
         payload: {
           default_args: [],
-          default_kwargs: { name: 'test_strategy' },
+          default_parameters: { name: 'test_strategy' },
           default_mode: 'thread',
         },
       },
@@ -413,7 +413,7 @@ describe('StrategyLaunchModal', () => {
       expect(selects[0]).toHaveValue('strategy_rsi')
     })
   })
-  it('uses empty kwargs when default_kwargs is not an object', async () => {
+  it('uses empty parameters when default_parameters is not an object', async () => {
     const user = userEvent.setup()
 
     mockOnSubmit.mockResolvedValue(undefined)
@@ -423,7 +423,7 @@ describe('StrategyLaunchModal', () => {
       data: {
         payload: {
           default_args: [],
-          default_kwargs: 'invalid',
+          default_parameters: 'invalid',
           default_mode: 'thread',
         },
       },
@@ -447,7 +447,7 @@ describe('StrategyLaunchModal', () => {
     await waitFor(() => {
       expect(mockOnSubmit).toHaveBeenCalledWith(
         expect.objectContaining({
-          kwargs: expect.any(Object),
+          parameters: expect.any(Object),
         })
       )
     })
@@ -534,7 +534,7 @@ describe('StrategyLaunchModal', () => {
       data: {
         payload: {
           default_args: [],
-          default_kwargs: {},
+          default_parameters: {},
           default_mode: 'process',
         },
       },
@@ -566,7 +566,7 @@ describe('StrategyLaunchModal', () => {
       data: {
         payload: {
           default_args: [],
-          default_kwargs: { name: 'test', output: 'signals.original' },
+          default_parameters: { name: 'test', output: 'signals.original' },
           default_mode: 'thread',
         },
       },
@@ -590,7 +590,7 @@ describe('StrategyLaunchModal', () => {
     await waitFor(() => {
       expect(mockOnSubmit).toHaveBeenCalledWith(
         expect.objectContaining({
-          kwargs: expect.objectContaining({
+          parameters: expect.objectContaining({
             output: expect.stringMatching(/^signals\./),
           }),
         })
@@ -607,7 +607,7 @@ describe('StrategyLaunchModal', () => {
       data: {
         payload: {
           default_args: [],
-          default_kwargs: { name: 'test', output: 'signals' },
+          default_parameters: { name: 'test', output: 'signals' },
           default_mode: 'thread',
         },
       },
@@ -628,7 +628,7 @@ describe('StrategyLaunchModal', () => {
     await waitFor(() => {
       expect(mockOnSubmit).toHaveBeenCalledWith(
         expect.objectContaining({
-          kwargs: expect.objectContaining({
+          parameters: expect.objectContaining({
             output: 'test',
           }),
         })

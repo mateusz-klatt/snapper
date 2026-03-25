@@ -802,7 +802,7 @@ export const ConfiguredProcessSchema = z
     mode: z.enum(['thread', 'process']),
     class_path: z.string(),
     method: z.string(),
-    kwargs: z.record(z.string(), z.any()),
+    parameters: z.record(z.string(), z.any()),
     note: z.string().nullable().optional(),
     lifecycle: z.enum(['long_running', 'one_shot']),
     role: z.enum(['core', 'task', 'strategy', 'backtest']),
@@ -846,7 +846,7 @@ export const ProcessSchemaDataSchema = z
     method: z.string(),
     default_enabled: z.boolean(),
     default_mode: z.enum(['thread', 'process']),
-    default_kwargs: z.record(z.string(), z.any()),
+    default_parameters: z.record(z.string(), z.any()),
     lifecycle: z.enum(['long_running', 'one_shot']),
   })
   .strict()
@@ -872,7 +872,7 @@ export const ProcessCreateBodySchema = z
     template: z.string(),
     enabled: z.boolean().nullable().optional(),
     mode: z.enum(['thread', 'process']).nullable().optional(),
-    kwargs: z.record(z.string(), z.any()).nullable().optional(),
+    parameters: z.record(z.string(), z.any()).nullable().optional(),
     note: z.string().max(512).nullable().optional(),
   })
   .strict()
@@ -880,7 +880,7 @@ export const ProcessCreateBodySchema = z
 export const ProcessStartBodySchema = z
   .object({
     mode: z.enum(['thread', 'process']).nullable().optional(),
-    kwargs: z.record(z.string(), z.any()).nullable().optional(),
+    parameters: z.record(z.string(), z.any()).nullable().optional(),
     autostart: z.boolean().nullable().optional(),
   })
   .strict()

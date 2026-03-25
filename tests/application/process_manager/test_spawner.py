@@ -117,7 +117,7 @@ class TestBuildProcessCommand:
             name="worker",
             class_path="my.module.MyClass",
             method="run",
-            kwargs={"key": "value"},
+            parameters={"key": "value"},
         )
         assert sys.executable in cmd
         assert "-m" in cmd
@@ -151,7 +151,7 @@ class TestSpawnerImmediateExitWithoutCapture:
                 name="worker",
                 class_path="snapper.application.process_manager.models.ProcessInstanceInfo",
                 method="run",
-                kwargs={},
+                parameters={},
             )
         assert "see console output" in str(exc.value).lower()
 
@@ -180,7 +180,7 @@ class TestSpawnerClassPathValidation:
                 name="worker",
                 class_path="NoDotsHere",
                 method="run",
-                kwargs={},
+                parameters={},
             )
         assert "invalid class" in str(exc.value).lower()
 
@@ -205,7 +205,7 @@ class TestSpawnerClassPathValidation:
                 name="worker",
                 class_path="snapper.application.process_manager.models.NonExistentClass",
                 method="run",
-                kwargs={},
+                parameters={},
             )
         assert "invalid class" in str(exc.value).lower()
 
@@ -439,7 +439,7 @@ class TestCaptureOutputPaths:
                 name="worker",
                 class_path="snapper.application.process_manager.models.ProcessInstanceInfo",
                 method="run",
-                kwargs={},
+                parameters={},
             )
         error_msg = str(exc.value)
         assert "stdout message" in error_msg
@@ -807,7 +807,7 @@ def test_spawn_success_registers_process(monkeypatch: MonkeyPatch) -> None:
         name="worker",
         class_path="snapper.application.process_manager.models.ProcessInstanceInfo",
         method="run",
-        kwargs={"bar": 1},
+        parameters={"bar": 1},
     )
     assert info.process.pid == dummy.pid
     assert service.processes["worker"] is info
@@ -835,14 +835,14 @@ def test_spawn_duplicate_name_raises(monkeypatch: MonkeyPatch) -> None:
         name="worker",
         class_path="snapper.application.process_manager.models.ProcessInstanceInfo",
         method="run",
-        kwargs={},
+        parameters={},
     )
     with pytest.raises(RuntimeError):
         service.spawn(
             name="worker",
             class_path="snapper.application.process_manager.models.ProcessInstanceInfo",
             method="run",
-            kwargs={},
+            parameters={},
         )
 
 
@@ -867,7 +867,7 @@ def test_spawn_invalid_class_path(monkeypatch: MonkeyPatch) -> None:
             name="worker",
             class_path="snapper.invalid.MissingClass",
             method="run",
-            kwargs={},
+            parameters={},
         )
 
 
@@ -898,7 +898,7 @@ def test_spawn_restores_sys_path_on_failure(monkeypatch: MonkeyPatch) -> None:
             name="bad",
             class_path="snapper.missing.Class",
             method="run",
-            kwargs={},
+            parameters={},
         )
     assert cwd in faulty
 
@@ -924,7 +924,7 @@ def test_spawn_immediate_exit_success(monkeypatch: MonkeyPatch) -> None:
         name="worker",
         class_path="snapper.application.process_manager.models.ProcessInstanceInfo",
         method="run",
-        kwargs={},
+        parameters={},
     )
     assert info.exit_code == 0
 
@@ -955,7 +955,7 @@ def test_spawn_immediate_exit_failure(monkeypatch: MonkeyPatch) -> None:
             name="worker",
             class_path="snapper.application.process_manager.models.ProcessInstanceInfo",
             method="run",
-            kwargs={},
+            parameters={},
         )
     assert "failed to start" in str(exc.value).lower()
     assert "failure" in str(exc.value)
@@ -994,7 +994,7 @@ def test_terminate_process_gracefully(monkeypatch: MonkeyPatch) -> None:
         name="worker",
         class_path="snapper.application.process_manager.models.ProcessInstanceInfo",
         method="run",
-        kwargs={},
+        parameters={},
     )
     assert service.terminate("worker", timeout=1.0) is True
     assert dummy.returncode == 0
@@ -1044,7 +1044,7 @@ def test_terminate_process_force_kill(monkeypatch: MonkeyPatch) -> None:
         name="worker",
         class_path="snapper.application.process_manager.models.ProcessInstanceInfo",
         method="run",
-        kwargs={},
+        parameters={},
     )
     result = service.terminate("worker", timeout=0.5)
     assert result is True

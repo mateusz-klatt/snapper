@@ -50,7 +50,7 @@ class TestListStrategies:
                     mode="thread",
                     class_path="snapper.strategies.MACD",
                     method="run",
-                    kwargs={},
+                    parameters={},
                     role=ProcessRoleEnum.STRATEGY,
                 ),
                 ProcessConfigModel(
@@ -59,7 +59,7 @@ class TestListStrategies:
                     mode="thread",
                     class_path="snapper.ipc.zmq_broker.ZmqBrokerThread",
                     method="run",
-                    kwargs={},
+                    parameters={},
                     role=ProcessRoleEnum.CORE,
                 ),
                 ProcessConfigModel(
@@ -68,7 +68,7 @@ class TestListStrategies:
                     mode="thread",
                     class_path="snapper.executors.Kraken",
                     method="run",
-                    kwargs={},
+                    parameters={},
                     role=ProcessRoleEnum.CORE,
                 ),
             ]
@@ -103,7 +103,7 @@ class TestListStrategies:
                     mode="process",
                     class_path="snapper.strategies.Running",
                     method="run",
-                    kwargs={},
+                    parameters={},
                     role=ProcessRoleEnum.STRATEGY,
                 ),
                 ProcessConfigModel(
@@ -112,7 +112,7 @@ class TestListStrategies:
                     mode="thread",
                     class_path="snapper.strategies.Stopped",
                     method="run",
-                    kwargs={},
+                    parameters={},
                     role=ProcessRoleEnum.STRATEGY,
                 ),
             ]

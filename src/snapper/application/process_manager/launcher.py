@@ -235,17 +235,38 @@ class ProcessLauncherService:
         self.started_processes.pop(config_name, None)
         self.process_roles.pop(config_name, None)
 
+    def _validate_parameters(self, config: ProcessConfigModel) -> dict[str, Any]:
+        """Validate process parameters against the registered model.
+
+        If a parameters_model is registered for this process, validates
+        the parameters dict against it. Otherwise returns parameters as-is.
+
+        Args:
+            config: Process configuration with parameters to validate.
+
+        Returns:
+            Validated parameters dict ready for process_class instantiation.
+        """
+        registry = get_registered_processes()
+        entry = registry.get(config.name)
+        parameters_dict: dict[str, Any] = dict(config.parameters)
+        if entry and entry.parameters_model:
+            validated = entry.parameters_model.model_validate(parameters_dict)
+            parameters_dict = validated.model_dump()
+        return parameters_dict
+
     def _start_as_subprocess(self, config: ProcessConfigModel) -> None:
         """Spawn a native subprocess and register it.
 
         Args:
             config: Process configuration.
         """
+        validated_params = self._validate_parameters(config)
         process_info = self.spawner.spawn(
             name=config.name,
             class_path=config.class_path,
             method=config.method,
-            kwargs=config.kwargs,
+            parameters=validated_params,
         )
         logger.info(f"Process '{config.name}' started with PID {process_info.pid}")
         self.started_processes[config.name] = process_info
@@ -257,7 +278,8 @@ class ProcessLauncherService:
             config: Process configuration.
         """
         process_class = self.import_class(config.class_path, config.name)
-        process_instance = process_class(**config.kwargs)
+        validated_params = self._validate_parameters(config)
+        process_instance = process_class(**validated_params)
         method = getattr(process_instance, config.method)
         if inspect.iscoroutinefunction(method):
             await self._start_as_async_task(config, method)
@@ -294,7 +316,7 @@ class ProcessLauncherService:
         """
         run_parameters: JsonObject = {
             "mode": config.mode,
-            "kwargs": config.kwargs,
+            "parameters": config.parameters,
         }
         try:
             public_id = await self._create_process_run_record(config, run_parameters)
@@ -706,7 +728,7 @@ class ProcessLauncherService:
         self,
         config_dict: dict[str, Any],
         mode: ProcessMode | None,
-        kwargs: dict[str, Any] | None,
+        parameters: dict[str, Any] | None,
         autostart: bool | None,
     ) -> bool:
         """Apply runtime overrides to a config dictionary.
@@ -717,7 +739,7 @@ class ProcessLauncherService:
         Args:
             config_dict: Mutable config dictionary.
             mode: Optional execution mode override.
-            kwargs: Optional keyword arguments override.
+            parameters: Optional constructor parameters override.
             autostart: Optional autostart override.
 
         Returns:
@@ -730,9 +752,10 @@ class ProcessLauncherService:
         if mode is not None:
             config_dict["mode"] = mode
         config_dict.setdefault("mode", "thread")
-        if kwargs is not None:
-            config_dict["kwargs"] = kwargs
-        config_dict.setdefault("kwargs", {})
+        if parameters is not None:
+            config_dict["parameters"] = parameters
+        if "parameters" not in config_dict:
+            config_dict["parameters"] = config_dict.pop("kwargs", {})
         return autostart_enabled
 
     def _build_config_for_start_by_name(
@@ -776,7 +799,7 @@ class ProcessLauncherService:
             mode=resolve_mode(config_dict.get("mode", "thread"), name),
             class_path=config_dict["class"],
             method=config_dict.get("method", "start"),
-            kwargs=config_dict.get("kwargs", {}),
+            parameters=config_dict.get("parameters", config_dict.get("kwargs", {})),
             note=config_dict.get("note"),
             lifecycle=self._resolve_lifecycle(lifecycle_raw, name),
             role=self._resolve_role(role_raw, name),
@@ -802,7 +825,8 @@ class ProcessLauncherService:
         persisted_config = dict(config_dict)
         persisted_config["lifecycle"] = config.lifecycle.value
         persisted_config["mode"] = config.mode
-        persisted_config["kwargs"] = config.kwargs
+        persisted_config["parameters"] = config.parameters
+        persisted_config.pop("kwargs", None)
         persisted_config["role"] = config.role.value
         if config.tags:
             persisted_config["tags"] = list(config.tags)
@@ -831,7 +855,7 @@ class ProcessLauncherService:
         self,
         name: str,
         mode: ProcessMode | None = None,
-        kwargs: dict[str, Any] | None = None,
+        parameters: dict[str, Any] | None = None,
         autostart: bool | None = None,
     ) -> ProcessStartResult:
         """Start a process by its registered name.
@@ -839,7 +863,7 @@ class ProcessLauncherService:
         Args:
             name: Process name from registry.
             mode: Execution mode (thread/process).
-            kwargs: Keyword arguments for the process.
+            parameters: Constructor parameters for the process.
             autostart: Whether to enable autostart on boot.
 
         Returns:
@@ -866,7 +890,7 @@ class ProcessLauncherService:
                 )
             config_dict = json.loads(setting.value)
             autostart_enabled = self._apply_overrides_to_config_dict(
-                config_dict, mode, kwargs, autostart
+                config_dict, mode, parameters, autostart
             )
             config = self._build_config_for_start_by_name(name, config_dict, autostart_enabled)
         try:
@@ -1038,7 +1062,7 @@ class ProcessLauncherService:
         method: str,
         enabled: bool,
         mode: ProcessMode,
-        kwargs: dict[str, Any],
+        parameters: dict[str, Any],
         lifecycle: ProcessLifecycleEnum,
         role: ProcessRoleEnum,
         tags: Iterable[str],
@@ -1053,7 +1077,7 @@ class ProcessLauncherService:
             method: Method to invoke on the class.
             enabled: Whether the process is enabled.
             mode: Execution mode (thread/process).
-            kwargs: Keyword arguments for the method.
+            parameters: Constructor parameters dict.
             lifecycle: Process lifecycle type.
             role: Process role classification.
             tags: Process tags for categorization.
@@ -1066,7 +1090,7 @@ class ProcessLauncherService:
             method=method,
             enabled=enabled,
             mode=mode,
-            kwargs=kwargs,
+            parameters=parameters,
             lifecycle=lifecycle,
             role=role,
             tags=tags,

@@ -11,7 +11,7 @@ export interface StrategyLaunchData {
   autostart: boolean
   startImmediately: boolean
   note?: string
-  kwargs: Record<string, unknown>
+  parameters: Record<string, unknown>
 }
 interface StrategyLaunchModalProps {
   open: boolean
@@ -48,10 +48,10 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
     enabled: open && selectedTemplate.length > 0,
   })
   const defaultKwargs = useMemo(() => {
-    const raw = processSchema.data?.payload.default_kwargs ?? {}
+    const raw = processSchema.data?.payload.default_parameters ?? {}
 
     return typeof raw === 'object' && raw !== null ? { ...raw } : {}
-  }, [processSchema.data?.payload.default_kwargs])
+  }, [processSchema.data?.payload.default_parameters])
   const defaultStrategyName =
     typeof defaultKwargs.name === 'string' ? defaultKwargs.name : undefined
 
@@ -104,7 +104,7 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
   const handleSubmit = async (event: React.SubmitEvent<HTMLFormElement>) => {
     event.preventDefault()
     const template = selectedTemplate
-    const kwargs: Record<string, unknown> = {
+    const params: Record<string, unknown> = {
       ...defaultKwargs,
       name: sanitizeName(strategyName),
     }
@@ -116,7 +116,7 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
         ? baseOutput.slice(0, baseOutput.lastIndexOf('.') + 1)
         : ''
 
-      kwargs.output = `${prefix}${sanitizeName(strategyName)}`
+      params.output = `${prefix}${sanitizeName(strategyName)}`
     }
 
     try {
@@ -128,7 +128,7 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
         autostart,
         startImmediately,
         note: note.trim() || undefined,
-        kwargs,
+        parameters: params,
       })
     } catch (error) {
       console.error('Failed to submit strategy registration', error)

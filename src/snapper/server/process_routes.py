@@ -170,7 +170,7 @@ async def list_configured_processes(
             mode=config.mode,
             class_path=config.class_path,
             method=config.method,
-            kwargs=config.kwargs,
+            parameters=config.parameters,
             note=config.note,
             lifecycle=config.lifecycle.value,
             role=config.role.value,
@@ -311,11 +311,11 @@ async def create_process_configuration(
         raise HTTPException(status_code=404, detail=f"Template '{payload.template}' not found")
     cls: type[RegisterableProcess] = entry.class_ref
     try:
-        base_kwargs = cls.get_default_parameters(settings)
+        base_parameters = cls.get_default_parameters(settings)
     except Exception:
-        base_kwargs = {}
-    if payload.kwargs:
-        base_kwargs.update(payload.kwargs)
+        base_parameters = {}
+    if payload.parameters:
+        base_parameters.update(payload.parameters)
     final_mode = payload.mode or resolve_mode(entry.mode, payload.name)
     final_enabled = entry.enabled if payload.enabled is None else payload.enabled
     try:
@@ -325,7 +325,7 @@ async def create_process_configuration(
             method=entry.method,
             enabled=bool(final_enabled),
             mode=final_mode,
-            kwargs=base_kwargs,
+            parameters=base_parameters,
             lifecycle=entry.lifecycle,
             role=entry.role,
             tags=entry.tags,
@@ -385,9 +385,9 @@ async def get_process_schema(
     entry = registry[name]
     cls: type[RegisterableProcess] = entry.class_ref
     try:
-        default_kwargs = cls.get_default_parameters(settings)
+        default_parameters = cls.get_default_parameters(settings)
     except Exception:
-        default_kwargs = {}
+        default_parameters = {}
     sid, seq, pid, ts = _mint_provenance(request)
     data = ProcessSchemaData(
         session_id=sid,
@@ -400,7 +400,7 @@ async def get_process_schema(
         method=entry.method,
         default_enabled=entry.enabled,
         default_mode=resolve_mode(entry.mode, name),
-        default_kwargs=default_kwargs,
+        default_parameters=default_parameters,
         lifecycle=entry.lifecycle.value,
     )
     return ProcessSchemaResponse(
@@ -425,7 +425,7 @@ async def start_process(
     result = await factory.start_process_by_name(
         name=name,
         mode=payload.mode,
-        kwargs=payload.kwargs,
+        parameters=payload.parameters,
         autostart=payload.autostart,
     )
     sid, seq, pid, ts = _mint_provenance(http_request)

@@ -671,13 +671,13 @@ describe('queries', () => {
         await result.current.mutateAsync({
           name: 'collector',
           mode: 'thread',
-          kwargs: { key: 'value' },
+          parameters: { key: 'value' },
           autostart: true,
         })
       })
       expect(mockedApiClient.startProcessByName).toHaveBeenCalledWith('collector', {
         mode: 'thread',
-        kwargs: { key: 'value' },
+        parameters: { key: 'value' },
         autostart: true,
       })
     })

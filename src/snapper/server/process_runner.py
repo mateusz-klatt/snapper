@@ -18,7 +18,7 @@ Configuration JSON:
         "name": "process-name",
         "class_path": "snapper.strategies.rsi.RSIReversion",
         "method": "start",
-        "kwargs": {"symbols": ["BTC-USD"]}
+        "parameters": {"symbols": ["BTC-USD"]}
     }
 
 The subprocess runs independently with its own Python interpreter,
@@ -72,7 +72,7 @@ def main() -> int:
     """Main entry point for subprocess process runner.
 
     Parses command-line arguments, loads the specified class,
-    instantiates it with provided kwargs, and invokes
+    instantiates it with provided parameters, and invokes
     the target method (sync or async).
 
     Returns:
@@ -84,7 +84,7 @@ def main() -> int:
         "--config",
         type=str,
         required=True,
-        help="JSON config with class_path, method, kwargs",
+        help="JSON config with class_path, method, parameters",
     )
     args = parser.parse_args()
     try:
@@ -95,14 +95,14 @@ def main() -> int:
     name = config.get("name", "unknown")
     class_path = config["class_path"]
     method = config["method"]
-    class_kwargs = config.get("kwargs", {})
+    class_parameters = config.get("parameters", config.get("kwargs", {}))
     set_log_context(f"proc:{name}")
     logger.info(f"Process '{name}' starting (PID: {os.getpid()})")
     try:
         module_path, class_name = class_path.rsplit(".", 1)
         module = importlib.import_module(module_path)
         process_class = getattr(module, class_name)
-        instance = process_class(**class_kwargs)
+        instance = process_class(**class_parameters)
         target_method = getattr(instance, method)
         logger.info(f"Process '{name}' calling {class_path}.{method}()")
         if inspect.iscoroutinefunction(target_method):

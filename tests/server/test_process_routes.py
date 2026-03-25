@@ -154,7 +154,7 @@ class TestListConfiguredProcesses:
                     mode="thread",
                     class_path="snapper.ipc.zmq_broker.ZmqBrokerThread",
                     method="run",
-                    kwargs={"endpoint": "tcp://0.0.0.0:5555"},
+                    parameters={"endpoint": "tcp://0.0.0.0:5555"},
                     note="Test broker",
                     lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 )
@@ -173,7 +173,7 @@ class TestListConfiguredProcesses:
         assert process.mode == "thread"
         assert process.class_path == "snapper.ipc.zmq_broker.ZmqBrokerThread"
         assert process.method == "run"
-        assert process.kwargs == {"endpoint": "tcp://0.0.0.0:5555"}
+        assert process.parameters == {"endpoint": "tcp://0.0.0.0:5555"}
         assert process.note == "Test broker"
         assert process.lifecycle == "long_running"
         assert process.running is True
@@ -230,7 +230,7 @@ class TestGetProcessSummary:
                     mode="process",
                     class_path="snapper.feeds.KrakenFeed",
                     method="run",
-                    kwargs={},
+                    parameters={},
                 ),
                 ProcessConfigModel(
                     name="polygon_feed_publisher",
@@ -238,7 +238,7 @@ class TestGetProcessSummary:
                     mode="process",
                     class_path="snapper.feeds.PolygonFeed",
                     method="run",
-                    kwargs={},
+                    parameters={},
                 ),
                 ProcessConfigModel(
                     name="momentum_strategy",
@@ -246,7 +246,7 @@ class TestGetProcessSummary:
                     mode="process",
                     class_path="snapper.strategies.Momentum",
                     method="run",
-                    kwargs={},
+                    parameters={},
                     role=ProcessRoleEnum.STRATEGY,
                 ),
                 ProcessConfigModel(
@@ -255,7 +255,7 @@ class TestGetProcessSummary:
                     mode="thread",
                     class_path="snapper.executors.Kraken",
                     method="run",
-                    kwargs={},
+                    parameters={},
                 ),
                 ProcessConfigModel(
                     name="zmq_broker",
@@ -263,7 +263,7 @@ class TestGetProcessSummary:
                     mode="thread",
                     class_path="snapper.ipc.zmq_broker.ZmqBrokerThread",
                     method="run",
-                    kwargs={},
+                    parameters={},
                 ),
             ]
         )
@@ -296,7 +296,7 @@ class TestGetProcessSummary:
                     mode="process",
                     class_path="snapper.tasks.Backfill",
                     method="run",
-                    kwargs={},
+                    parameters={},
                     role=ProcessRoleEnum.TASK,
                 ),
             ]
@@ -317,11 +317,11 @@ class TestGetProcessSchema:
     @pytest.mark.asyncio
     @patch("snapper.server.process_routes.get_registered_processes")
     async def test_get_process_schema_with_defaults(self, mock_get_registry: MagicMock) -> None:
-        """Test schema returns default kwargs from class method.
+        """Test schema returns default parameters from class method.
 
         Given: A process class with get_default_parameters method,
         When: get_process_schema is called,
-        Then: Schema includes default kwargs and configuration.
+        Then: Schema includes default parameters and configuration.
         """
         mock_class = MagicMock()
         mock_class.get_default_parameters = MagicMock(
@@ -353,7 +353,7 @@ class TestGetProcessSchema:
         assert result.payload.method == "run"
         assert result.payload.default_enabled is True
         assert result.payload.default_mode == "thread"
-        assert result.payload.default_kwargs == {"endpoint": "tcp://0.0.0.0:5555"}
+        assert result.payload.default_parameters == {"endpoint": "tcp://0.0.0.0:5555"}
 
     @pytest.mark.asyncio
     @patch("snapper.server.process_routes.get_registered_processes")
@@ -362,7 +362,7 @@ class TestGetProcessSchema:
 
         Given: A process class without get_default_parameters method,
         When: get_process_schema is called,
-        Then: Schema returns empty kwargs defaults.
+        Then: Schema returns empty parameters defaults.
         """
         mock_class = MagicMock()
         del mock_class.get_default_parameters
@@ -392,7 +392,7 @@ class TestGetProcessSchema:
         assert result.payload.name == "custom_process"
         assert result.payload.default_enabled is False
         assert result.payload.default_mode == "thread"
-        assert result.payload.default_kwargs == {}
+        assert result.payload.default_parameters == {}
 
     @pytest.mark.asyncio
     @patch("snapper.server.process_routes.get_registered_processes")
@@ -403,7 +403,7 @@ class TestGetProcessSchema:
 
         Given: A process class where get_default_parameters raises an error,
         When: get_process_schema is called,
-        Then: Schema returns empty kwargs without propagating error.
+        Then: Schema returns empty parameters without propagating error.
         """
         mock_class = MagicMock()
         mock_class.get_default_parameters = MagicMock(side_effect=Exception("DB error"))
@@ -430,7 +430,7 @@ class TestGetProcessSchema:
             settings=settings,
             _user=MagicMock(),
         )
-        assert result.payload.default_kwargs == {}
+        assert result.payload.default_parameters == {}
         assert result.payload.default_enabled is True
         assert result.payload.default_mode == "process"
 
@@ -480,7 +480,7 @@ class TestStartProcess:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(
                 mode="process",
-                kwargs={"endpoint": "tcp://0.0.0.0:6666"},
+                parameters={"endpoint": "tcp://0.0.0.0:6666"},
                 autostart=True,
             ),
         )
@@ -498,7 +498,7 @@ class TestStartProcess:
         mock_factory.start_process_by_name.assert_awaited_once_with(
             name="zmq_broker",
             mode="process",
-            kwargs={"endpoint": "tcp://0.0.0.0:6666"},
+            parameters={"endpoint": "tcp://0.0.0.0:6666"},
             autostart=True,
         )
 
@@ -521,7 +521,7 @@ class TestStartProcess:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(
                 mode=None,
-                kwargs=None,
+                parameters=None,
                 autostart=None,
             ),
         )
@@ -535,7 +535,7 @@ class TestStartProcess:
         )
         assert result.payload.status == "success"
         mock_factory.start_process_by_name.assert_awaited_once_with(
-            name="zmq_broker", mode=None, kwargs=None, autostart=None
+            name="zmq_broker", mode=None, parameters=None, autostart=None
         )
 
 
@@ -583,12 +583,12 @@ class TestProcessStartRequest:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(
                 mode="process",
-                kwargs={"key": "value"},
+                parameters={"key": "value"},
                 autostart=False,
             ),
         )
         assert request.payload.mode == "process"
-        assert request.payload.kwargs == {"key": "value"}
+        assert request.payload.parameters == {"key": "value"}
         assert request.payload.autostart is False
 
     def test_process_start_request_defaults(self) -> None:
@@ -605,12 +605,12 @@ class TestProcessStartRequest:
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             payload=ProcessStartBody(
                 mode=None,
-                kwargs=None,
+                parameters=None,
                 autostart=None,
             ),
         )
         assert request.payload.mode is None
-        assert request.payload.kwargs is None
+        assert request.payload.parameters is None
         assert request.payload.autostart is None
 
 
@@ -630,7 +630,7 @@ class TestCreateProcessConfiguration:
         mock_factory.get_class_defaults.return_value = {
             "enabled": False,
             "mode": "thread",
-            "kwargs": {
+            "parameters": {
                 "name": "default_strategy",
                 "inputs": ["BTC-USD:1h"],
                 "output": "signals.default_strategy",
@@ -673,7 +673,7 @@ class TestCreateProcessConfiguration:
                 template="strategy_macd_btc_1h",
                 enabled=True,
                 mode="process",
-                kwargs={"name": "macd_custom"},
+                parameters={"name": "macd_custom"},
                 note="UI created",
             ),
         )
@@ -692,7 +692,7 @@ class TestCreateProcessConfiguration:
             method="start",
             enabled=True,
             mode="process",
-            kwargs={
+            parameters={
                 "name": "macd_custom",
                 "inputs": ["BTC-USD:1h"],
                 "output": "signals.default_strategy",
@@ -728,7 +728,7 @@ class TestCreateProcessConfiguration:
                 template="missing",
                 enabled=None,
                 mode=None,
-                kwargs=None,
+                parameters=None,
                 note=None,
             ),
         )
@@ -761,7 +761,7 @@ class TestCreateProcessConfiguration:
         mock_factory.get_class_defaults.return_value = {
             "enabled": False,
             "mode": "thread",
-            "kwargs": {},
+            "parameters": {},
             "lifecycle": ProcessLifecycleEnum.LONG_RUNNING,
             "role": ProcessRoleEnum.CORE,
             "tags": (),
@@ -794,7 +794,7 @@ class TestCreateProcessConfiguration:
                 template="strategy_macd_btc_1h",
                 enabled=None,
                 mode=None,
-                kwargs=None,
+                parameters=None,
                 note=None,
             ),
         )
@@ -855,7 +855,7 @@ class TestProcessRoutesEdgeCases:
 
         Given: A process class where get_default_parameters raises exception,
         When: create_process_configuration is called,
-        Then: Configuration is created with provided kwargs only.
+        Then: Configuration is created with provided parameters only.
         """
         mock_factory = MagicMock()
         mock_factory.get_templates = AsyncMock(return_value=["test_template"])
@@ -892,7 +892,7 @@ class TestProcessRoutesEdgeCases:
                 template="test_template",
                 enabled=True,
                 mode="thread",
-                kwargs={"custom": "value"},
+                parameters={"custom": "value"},
                 note=None,
             ),
         )
@@ -906,7 +906,7 @@ class TestProcessRoutesEdgeCases:
         )
         mock_factory.create_process_config.assert_called_once()
         call_args = mock_factory.create_process_config.call_args
-        assert call_args[1]["kwargs"] == {"custom": "value"}
+        assert call_args[1]["parameters"] == {"custom": "value"}
 
     @pytest.mark.asyncio
     @patch("snapper.server.process_routes.get_registered_processes")
@@ -917,7 +917,7 @@ class TestProcessRoutesEdgeCases:
 
         Given: A process class without get_default_parameters method,
         When: create_process_configuration is called,
-        Then: Configuration is created with provided kwargs.
+        Then: Configuration is created with provided parameters.
         """
         mock_factory = MagicMock()
         mock_factory.get_templates = AsyncMock(return_value=["test_template"])
@@ -949,7 +949,7 @@ class TestProcessRoutesEdgeCases:
                 template="test_template",
                 enabled=True,
                 mode="thread",
-                kwargs={"custom": "value"},
+                parameters={"custom": "value"},
                 note=None,
             ),
         )
@@ -963,7 +963,7 @@ class TestProcessRoutesEdgeCases:
         )
         mock_factory.create_process_config.assert_called_once()
         call_args = mock_factory.create_process_config.call_args
-        assert call_args[1]["kwargs"] == {"custom": "value"}
+        assert call_args[1]["parameters"] == {"custom": "value"}
 
     @pytest.mark.asyncio
     @patch("snapper.server.process_routes.get_registered_processes")
@@ -1005,7 +1005,7 @@ class TestProcessRoutesEdgeCases:
                 template="test_template",
                 enabled=True,
                 mode="thread",
-                kwargs=None,
+                parameters=None,
                 note=None,
             ),
         )

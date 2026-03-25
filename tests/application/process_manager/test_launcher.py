@@ -109,7 +109,7 @@ async def test_start_process_handles_run_record_failure(monkeypatch: pytest.Monk
         mode="thread",
         class_path="dummy.path.DummyProcess",
         method="start",
-        kwargs={},
+        parameters={},
         note=None,
         lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
         role=ProcessRoleEnum.CORE,
@@ -150,7 +150,7 @@ async def test_start_process_rejects_invalid_mode(monkeypatch: pytest.MonkeyPatc
         mode="worker",
         class_path="dummy.path.AsyncDummyProcess",
         method="start",
-        kwargs={},
+        parameters={},
         note=None,
         lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
         role=ProcessRoleEnum.CORE,
@@ -232,7 +232,7 @@ class TestStartProcessByNameNoSetting:
             "method": "start",
             "enabled": True,
             "mode": "thread",
-            "kwargs": {},
+            "parameters": {},
             "lifecycle": "one_shot",
             "role": "core",
         }
@@ -305,7 +305,7 @@ class TestSyncRegistryTagsNotIterable:
             "name": "test_proc",
             "lifecycle": "long_running",
             "role": "core",
-            "kwargs": {"key": "value"},
+            "parameters": {"key": "value"},
         }
         mock_class = MagicMock()
         mock_class.get_default_parameters.return_value = {}
@@ -546,7 +546,7 @@ class TestStartProcess:
             mode="process",
             class_path="some.module.TestClass",
             method="run",
-            kwargs={},
+            parameters={},
             lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
             role=ProcessRoleEnum.CORE,
         )
@@ -565,7 +565,7 @@ class TestStartProcess:
                 name="test_subprocess",
                 class_path="some.module.TestClass",
                 method="run",
-                kwargs={},
+                parameters={},
             )
             assert launcher.started_processes["test_subprocess"] is mock_process_info
 
@@ -590,7 +590,7 @@ class TestStartProcess:
             mode="thread",
             class_path="test.AsyncProcess",
             method="start",
-            kwargs={},
+            parameters={},
             lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
             role=ProcessRoleEnum.CORE,
         )
@@ -632,7 +632,7 @@ class TestStartProcess:
             mode="thread",
             class_path="test.SyncProcess",
             method="start",
-            kwargs={},
+            parameters={},
             lifecycle=ProcessLifecycleEnum.ONE_SHOT,
             role=ProcessRoleEnum.CORE,
         )
@@ -664,7 +664,7 @@ class TestStartProcess:
             mode="thread",
             class_path="test.FailingProcess",
             method="start",
-            kwargs={},
+            parameters={},
             lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
             role=ProcessRoleEnum.CORE,
         )
@@ -705,7 +705,7 @@ class TestStartProcess:
             mode="thread",
             class_path="test.OneShotProcess",
             method="run",
-            kwargs={},
+            parameters={},
             lifecycle=ProcessLifecycleEnum.ONE_SHOT,
             role=ProcessRoleEnum.CORE,
         )
@@ -745,7 +745,7 @@ class TestStartProcess:
             mode="thread",
             class_path="test.SimpleProcess",
             method="start",
-            kwargs={},
+            parameters={},
             lifecycle=ProcessLifecycleEnum.ONE_SHOT,
             role=ProcessRoleEnum.CORE,
         )
@@ -876,7 +876,7 @@ class TestGetProcessConfigs:
                 "mode": "thread",
                 "class": "test.TestClass",
                 "method": "start",
-                "kwargs": {},
+                "parameters": {},
                 "lifecycle": "long-running",
                 "role": "core",
             }
@@ -1092,7 +1092,7 @@ class TestProcessRunRecords:
             mode="thread",
             class_path="test.TestClass",
             method="start",
-            kwargs={},
+            parameters={},
             lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
             role=ProcessRoleEnum.CORE,
             tags=("tag1", "tag2"),
@@ -1669,7 +1669,7 @@ class TestCreateProcessConfig:
                 method="start",
                 enabled=True,
                 mode="thread",
-                kwargs={},
+                parameters={},
                 lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
                 role=ProcessRoleEnum.CORE,
                 tags=["tag1"],
@@ -1822,7 +1822,7 @@ class TestGetDefaultsFromMetadata:
         defaults = launcher._registry_syncer._get_defaults_from_entry(entry)
         assert defaults["enabled"] is False
         assert defaults["mode"] == "thread"
-        assert defaults["kwargs"] == {}
+        assert defaults["parameters"] == {}
         assert defaults["lifecycle"] == ProcessLifecycleEnum.LONG_RUNNING
         assert defaults["role"] == ProcessRoleEnum.CORE
         assert defaults["tags"] == []

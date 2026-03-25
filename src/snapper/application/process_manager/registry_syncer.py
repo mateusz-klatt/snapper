@@ -65,7 +65,7 @@ class ProcessRegistrySyncer:
         return {
             "enabled": entry.enabled,
             "mode": entry.mode,
-            "kwargs": {},
+            "parameters": {},
             "lifecycle": entry.lifecycle,
             "role": entry.role,
             "tags": list(entry.tags),
@@ -89,7 +89,7 @@ class ProcessRegistrySyncer:
             "mode": defaults["mode"],
             "class": class_path,
             "method": method,
-            "kwargs": defaults["kwargs"],
+            "parameters": defaults["parameters"],
             "lifecycle": (
                 defaults["lifecycle"].value
                 if isinstance(defaults["lifecycle"], ProcessLifecycleEnum)
@@ -120,13 +120,13 @@ class ProcessRegistrySyncer:
             await session.commit()
         logger.info(f"Created database config for process '{name}'")
 
-    def _sync_kwargs_from_entry(
+    def _sync_parameters_from_entry(
         self,
         name: str,
         config_dict: dict[str, Any],
         entry: ProcessRegistryEntry,
     ) -> bool:
-        """Sync kwargs from registry entry into config_dict if missing.
+        """Sync parameters from registry entry into config_dict if missing.
 
         Args:
             name: Process name for logging.
@@ -136,20 +136,20 @@ class ProcessRegistrySyncer:
         Returns:
             True if config_dict was updated.
         """
-        kwargs = config_dict.get("kwargs", {})
-        if kwargs:
-            logger.debug(f"Process '{name}' already has database config with kwargs")
+        parameters = config_dict.get("parameters", config_dict.get("kwargs", {}))
+        if parameters:
+            logger.debug(f"Process '{name}' already has database config with parameters")
             return False
         cls = entry.class_ref
         try:
-            default_kwargs = cls.get_default_parameters(self.settings)
+            default_parameters = cls.get_default_parameters(self.settings)
         except Exception as e:
             logger.debug(f"Process '{name}' get_default_parameters failed: {e}")
-            default_kwargs = {}
-        if not default_kwargs:
+            default_parameters = {}
+        if not default_parameters:
             logger.debug(f"Process '{name}' has empty default parameters")
             return False
-        config_dict["kwargs"] = default_kwargs
+        config_dict["parameters"] = default_parameters
         return True
 
     @staticmethod
@@ -209,7 +209,7 @@ class ProcessRegistrySyncer:
         Returns:
             True if any field was updated.
         """
-        updated = self._sync_kwargs_from_entry(name, config_dict, entry)
+        updated = self._sync_parameters_from_entry(name, config_dict, entry)
         updated = self._sync_enum_field(config_dict, "lifecycle", entry.lifecycle) or updated
         updated = self._sync_enum_field(config_dict, "role", entry.role) or updated
         updated = self._sync_tags_from_entry(config_dict, entry) or updated
@@ -228,10 +228,10 @@ class ProcessRegistrySyncer:
         cls: type[RegisterableProcess] = entry.class_ref
         defaults = self._get_defaults_from_entry(entry)
         try:
-            defaults["kwargs"] = cls.get_default_parameters(self.settings)
+            defaults["parameters"] = cls.get_default_parameters(self.settings)
         except Exception as e:
             logger.warning(f"Failed to get default parameters for '{name}': {e}, using empty dict")
-            defaults["kwargs"] = {}
+            defaults["parameters"] = {}
         await self._create_process_config_in_db(
             name=name,
             class_path=entry.class_path,
@@ -315,7 +315,7 @@ class ProcessRegistrySyncer:
         method: str,
         enabled: bool,
         mode: ProcessMode,
-        kwargs: dict[str, Any],
+        parameters: dict[str, Any],
         lifecycle: ProcessLifecycleEnum,
         role: ProcessRoleEnum,
         tags: Iterable[str],
@@ -330,7 +330,7 @@ class ProcessRegistrySyncer:
             method: Entry method name.
             enabled: Whether process is enabled for autostart.
             mode: Execution mode (thread/process).
-            kwargs: Keyword arguments.
+            parameters: Constructor parameters dict.
             lifecycle: Process lifecycle type.
             role: Process role category.
             tags: Process tags for grouping.
@@ -347,7 +347,7 @@ class ProcessRegistrySyncer:
             "mode": mode,
             "class": class_path,
             "method": method,
-            "kwargs": kwargs,
+            "parameters": parameters,
             "lifecycle": lifecycle.value,
             "role": role.value,
         }

@@ -1348,7 +1348,7 @@ class TestProcessRoutesTagsFallback:
                     template="test_process",
                     enabled=True,
                     mode="thread",
-                    kwargs={},
+                    parameters={},
                 ),
             )
             settings = MagicMock()
@@ -1405,7 +1405,7 @@ class TestProcessRoutesTagsFallback:
                     template="test_process",
                     enabled=True,
                     mode="thread",
-                    kwargs={},
+                    parameters={},
                 ),
             )
             settings = MagicMock()

@@ -36,7 +36,7 @@ class RegisterableProcess(ABC):
 
     All managed processes must inherit from this class and implement
     the start() method. The class provides hooks for:
-    - Default kwargs generation from settings
+    - Default parameters generation from settings
     - Status reporting
     - Graceful shutdown
 
@@ -157,7 +157,7 @@ class ProcessConfigModel:
         mode: Execution mode ("thread" or "process").
         class_path: Fully qualified class path (e.g., "snapper.app.MyProcess").
         method: Method to call on instantiated class.
-        kwargs: Keyword arguments for constructor.
+        parameters: Constructor parameters dict.
         note: Optional human-readable description.
         lifecycle: LONG_RUNNING or ONE_SHOT.
         role: Process role (CORE, TASK, STRATEGY, BACKTEST).
@@ -170,7 +170,7 @@ class ProcessConfigModel:
     mode: ProcessMode
     class_path: str
     method: str
-    kwargs: JsonObject
+    parameters: JsonObject
     note: str | None = None
     lifecycle: ProcessLifecycleEnum = ProcessLifecycleEnum.LONG_RUNNING
     role: ProcessRoleEnum = ProcessRoleEnum.CORE
