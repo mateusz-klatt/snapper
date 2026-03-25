@@ -955,14 +955,14 @@ class TestCandlePolicyBitemporal:
 
     @pytest.mark.asyncio
     async def test_upsert_candles_out_of_order_timestamp_rejected(self, tmp_path: Path) -> None:
-        """Out-of-order timestamp creates a second active record (known limitation).
+        """Out-of-order timestamp is rejected by the unique partial index.
 
         Given: A candle inserted at t2,
         When: A candle is upserted at t1 < t2 for the same business key,
         Then: The temporal filter (timestamp <= t1 AND known_to > t1) does not
-            find the active record (which has timestamp=t2 > t1), so a second
-            active record is created. This documents a known limitation:
-            out-of-order timestamps are not supported.
+            find the active record (which has timestamp=t2 > t1), so the repo
+            attempts a second insert which violates the partial unique index
+            on (instrument_public_id, timeframe, open_at) WHERE known_to = MAX.
         """
         repo, inst_id, inst_public_id = await _create_repo_with_instrument(tmp_path)
         open_at = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
@@ -970,29 +970,8 @@ class TestCandlePolicyBitemporal:
         t2 = datetime(2024, 6, 1, 12, 0, 20, tzinfo=UTC)
 
         await repo.upsert_candles([_candle_row(inst_public_id, open_at, t2, close=105.0)])
-        await repo.upsert_candles([_candle_row(inst_public_id, open_at, t1, close=100.0)])
-
-        async with repo.session() as s:
-            rows = (
-                (
-                    await s.execute(
-                        select(Candle).where(
-                            Candle.instrument_public_id == inst_public_id,
-                            Candle.timeframe == "1m",
-                            Candle.open_at == open_at,
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
-
-        assert len(rows) == 2
-        active_rows = [r for r in rows if r.known_to == KNOWN_TO_MAX]
-        assert len(active_rows) == 2
-
-        public_ids = {r.public_id for r in rows}
-        assert len(public_ids) == 2
+        with pytest.raises(IntegrityError):
+            await repo.upsert_candles([_candle_row(inst_public_id, open_at, t1, close=100.0)])
 
 
 async def _create_user(

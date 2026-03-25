@@ -1815,10 +1815,10 @@ class TestKrakenUpdateDatabaseBranches:
                     sequence_id=1,
                 )
             )
-
+            sym = session.query(Symbol).filter_by(native_symbol="BTC-USD").one()
             session.add(
                 SymbolAlias(
-                    symbol_public_id="BTC-USD",
+                    symbol_public_id=sym.public_id,
                     exchange="kraken",
                     channel="ws",
                     exchange_symbol="OLD/WS",
@@ -1830,7 +1830,7 @@ class TestKrakenUpdateDatabaseBranches:
             )
             session.add(
                 SymbolAlias(
-                    symbol_public_id="BTC-USD",
+                    symbol_public_id=sym.public_id,
                     exchange="kraken",
                     channel="rest",
                     exchange_symbol="XXBTZUSD",
@@ -1842,7 +1842,7 @@ class TestKrakenUpdateDatabaseBranches:
             )
             session.add(
                 SymbolAlias(
-                    symbol_public_id="BTC-USD",
+                    symbol_public_id=sym.public_id,
                     exchange="kraken",
                     channel="ccxt",
                     exchange_symbol="BTC/USD",
@@ -1913,10 +1913,10 @@ class TestKrakenUpdateDatabaseBranches:
                     sequence_id=1,
                 )
             )
-
+            sym = session.query(Symbol).filter_by(native_symbol="BTC-USD").one()
             session.add(
                 SymbolAlias(
-                    symbol_public_id="BTC-USD",
+                    symbol_public_id=sym.public_id,
                     exchange="kraken",
                     channel="ws",
                     exchange_symbol="BTC/USD",
@@ -1928,7 +1928,7 @@ class TestKrakenUpdateDatabaseBranches:
             )
             session.add(
                 SymbolAlias(
-                    symbol_public_id="BTC-USD",
+                    symbol_public_id=sym.public_id,
                     exchange="kraken",
                     channel="rest",
                     exchange_symbol="OLDREST",
@@ -1940,7 +1940,7 @@ class TestKrakenUpdateDatabaseBranches:
             )
             session.add(
                 SymbolAlias(
-                    symbol_public_id="BTC-USD",
+                    symbol_public_id=sym.public_id,
                     exchange="kraken",
                     channel="ccxt",
                     exchange_symbol="BTC/USD",
@@ -2011,10 +2011,10 @@ class TestKrakenUpdateDatabaseBranches:
                     sequence_id=1,
                 )
             )
-
+            sym = session.query(Symbol).filter_by(native_symbol="BTC-USD").one()
             session.add(
                 SymbolAlias(
-                    symbol_public_id="BTC-USD",
+                    symbol_public_id=sym.public_id,
                     exchange="kraken",
                     channel="ws",
                     exchange_symbol="BTC/USD",
@@ -2026,7 +2026,7 @@ class TestKrakenUpdateDatabaseBranches:
             )
             session.add(
                 SymbolAlias(
-                    symbol_public_id="BTC-USD",
+                    symbol_public_id=sym.public_id,
                     exchange="kraken",
                     channel="rest",
                     exchange_symbol="XXBTZUSD",
@@ -2038,7 +2038,7 @@ class TestKrakenUpdateDatabaseBranches:
             )
             session.add(
                 SymbolAlias(
-                    symbol_public_id="BTC-USD",
+                    symbol_public_id=sym.public_id,
                     exchange="kraken",
                     channel="ccxt",
                     exchange_symbol="OLD/CCXT",
@@ -2124,7 +2124,7 @@ class TestKrakenUpdateDatabaseBranches:
             )
             session.add(
                 SymbolAlias(
-                    symbol_public_id="BTC-USD",
+                    symbol_public_id=sym.public_id,
                     exchange="kraken",
                     channel="rest",
                     exchange_symbol="XXBTZUSD",
@@ -2136,7 +2136,7 @@ class TestKrakenUpdateDatabaseBranches:
             )
             session.add(
                 SymbolAlias(
-                    symbol_public_id="BTC-USD",
+                    symbol_public_id=sym.public_id,
                     exchange="kraken",
                     channel="ccxt",
                     exchange_symbol="BTC/USD",

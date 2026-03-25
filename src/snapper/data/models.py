@@ -103,7 +103,8 @@ __all__ = [
 
 
 _CK_EXCHANGE_LOWER = "exchange = LOWER(exchange)"
-_KNOWN_TO_ACTIVE = text("known_to = '9999-12-31T23:59:59+00:00'")
+_KNOWN_TO_ACTIVE_PG = text("known_to = '9999-12-31T23:59:59+00:00'")
+_KNOWN_TO_ACTIVE_SQLITE = text("known_to = '9999-12-31 23:59:59.000000'")
 
 
 class Base(DeclarativeBase):
@@ -141,15 +142,15 @@ class Instrument(TemporalMixin, Base):
             "symbol_public_id",
             "exchange",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
         Index(
             "ix_instruments_public_id",
             "public_id",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
         CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_instrument_exchange_lower"),
         Index("ix_instruments_exchange", "exchange"),
@@ -169,16 +170,16 @@ class Candle(TemporalMixin, Base):
             "timeframe",
             "open_at",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
         Index("ix_candle_instrument_open", "instrument_public_id", "open_at"),
         Index(
             "ix_candles_public_id",
             "public_id",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
@@ -203,8 +204,8 @@ class Tick(TemporalMixin, Base):
             "ix_ticks_public_id",
             "public_id",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
@@ -229,8 +230,8 @@ class Trade(TemporalMixin, Base):
             "ix_trades_public_id",
             "public_id",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
@@ -274,8 +275,8 @@ class Order(TemporalMixin, Base):
             "ix_orders_public_id",
             "public_id",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
@@ -317,8 +318,8 @@ class Execution(TemporalMixin, Base):
             "ix_executions_public_id",
             "public_id",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
     )
     order_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
@@ -342,15 +343,15 @@ class Position(TemporalMixin, Base):
             "uq_positions_instrument_public_id",
             "instrument_public_id",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
         Index(
             "ix_positions_public_id",
             "public_id",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
@@ -369,8 +370,8 @@ class Signal(TemporalMixin, Base):
             "ix_signals_public_id",
             "public_id",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
@@ -391,15 +392,15 @@ class User(TemporalMixin, Base):
             "ix_users_public_id",
             "public_id",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
         Index(
             "uq_users_username",
             "username",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
     )
     username: Mapped[str] = mapped_column(String(64))
@@ -424,8 +425,8 @@ class UserLoginEvent(TemporalMixin, Base):
             "ix_user_login_events_public_id",
             "public_id",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
     )
     user_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
@@ -441,15 +442,15 @@ class Setting(TemporalMixin, Base):
             "ix_settings_public_id",
             "public_id",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
         Index(
             "uq_settings_key",
             "key",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
     )
     key: Mapped[str] = mapped_column(String(64))
@@ -478,15 +479,15 @@ class Symbol(TemporalMixin, Base):
             "uq_symbols_active_native",
             "native_symbol",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
         Index(
             "ix_symbols_public_id",
             "public_id",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
         CheckConstraint(
             "asset_type IN ('crypto', 'forex', 'equity', 'index')",
@@ -528,8 +529,8 @@ class SymbolAlias(TemporalMixin, Base):
             "exchange",
             "channel",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
         Index(
             "uq_alias_exchange_channel_symbol",
@@ -537,15 +538,15 @@ class SymbolAlias(TemporalMixin, Base):
             "channel",
             "exchange_symbol",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
         Index(
             "ix_symbol_aliases_public_id",
             "public_id",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
     )
     symbol_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
@@ -580,8 +581,8 @@ class SymbolExchangeCapability(TemporalMixin, Base):
             "symbol_public_id",
             "exchange",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
         CheckConstraint(
             _CK_EXCHANGE_LOWER,
@@ -604,8 +605,8 @@ class SymbolExchangeCapability(TemporalMixin, Base):
             "ix_symbol_exchange_capabilities_public_id",
             "public_id",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
     )
     symbol_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
@@ -626,8 +627,8 @@ class ProcessRun(TemporalMixin, Base):
             "ix_process_runs_public_id",
             "public_id",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
     )
     process_name: Mapped[str] = mapped_column(String(64), index=True)
@@ -651,15 +652,15 @@ class InstrumentSpec(TemporalMixin, Base):
             "uq_instrument_spec_instrument",
             "instrument_public_id",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
         Index(
             "ix_instrument_specs_public_id",
             "public_id",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
@@ -695,16 +696,16 @@ class MarketSnapshot(TemporalMixin, Base):
             "uq_market_snapshot_instrument",
             "instrument_public_id",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
         Index("ix_market_snapshots_instrument_ts", "instrument_public_id", "timestamp"),
         Index(
             "ix_market_snapshots_public_id",
             "public_id",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
@@ -741,8 +742,8 @@ class Control(TemporalMixin, Base):
             "ix_control_public_id",
             "public_id",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
     )
     transport: Mapped[str] = mapped_column(String(10))
@@ -768,8 +769,8 @@ class Telemetry(TemporalMixin, Base):
             "ix_telemetry_public_id",
             "public_id",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE,
-            postgresql_where=_KNOWN_TO_ACTIVE,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
     )
     transport: Mapped[str] = mapped_column(String(10))

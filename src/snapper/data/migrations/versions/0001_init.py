@@ -16,7 +16,8 @@ from sqlalchemy import text
 
 _CK_EXCHANGE_LOWER = "exchange = LOWER(exchange)"
 _KNOWN_TO_MAX = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
-_KNOWN_TO_ACTIVE = "known_to = '9999-12-31T23:59:59+00:00'"
+_KNOWN_TO_ACTIVE_PG = "known_to = '9999-12-31T23:59:59+00:00'"
+_KNOWN_TO_ACTIVE_SQLITE = "known_to = '9999-12-31 23:59:59.000000'"
 _CK_SESSION_ID = "session_id != ''"
 _CK_SEQUENCE_ID = "sequence_id > 0"
 
@@ -134,16 +135,16 @@ def upgrade() -> None:
         "symbols",
         ["native_symbol"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index(
         "ix_symbols_public_id",
         "symbols",
         ["public_id"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_table(
         "symbol_aliases",
@@ -175,24 +176,24 @@ def upgrade() -> None:
         "symbol_aliases",
         ["public_id"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index(
         "uq_alias_spid_exchange_channel",
         "symbol_aliases",
         ["symbol_public_id", "exchange", "channel"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index(
         "uq_alias_exchange_channel_symbol",
         "symbol_aliases",
         ["exchange", "channel", "exchange_symbol"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index("ix_symbol_aliases_symbol_public_id", "symbol_aliases", ["symbol_public_id"])
     op.create_table(
@@ -223,16 +224,16 @@ def upgrade() -> None:
         "symbol_exchange_capabilities",
         ["public_id"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index(
         "uq_sec_symbol_exchange",
         "symbol_exchange_capabilities",
         ["symbol_public_id", "exchange"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index("ix_sec_exchange", "symbol_exchange_capabilities", ["exchange"])
     op.create_index(
@@ -272,16 +273,16 @@ def upgrade() -> None:
         "instruments",
         ["public_id"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index(
         "uq_instrument_spid_exchange",
         "instruments",
         ["symbol_public_id", "exchange"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index("ix_instruments_symbol_public_id", "instruments", ["symbol_public_id"])
     op.create_index("ix_instruments_exchange", "instruments", ["exchange"])
@@ -312,16 +313,16 @@ def upgrade() -> None:
         "candles",
         ["public_id"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index(
         "uq_candle_itf_open",
         "candles",
         ["instrument_public_id", "timeframe", "open_at"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index("ix_candles_instrument_public_id", "candles", ["instrument_public_id"])
     op.create_index("ix_candle_instrument_open", "candles", ["instrument_public_id", "open_at"])
@@ -349,8 +350,8 @@ def upgrade() -> None:
         "trades",
         ["public_id"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index("ix_trades_instrument_public_id", "trades", ["instrument_public_id"])
     op.create_index("ix_trades_timestamp", "trades", ["timestamp"])
@@ -377,8 +378,8 @@ def upgrade() -> None:
         "ticks",
         ["public_id"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index("ix_ticks_instrument_public_id", "ticks", ["instrument_public_id"])
     op.create_index("ix_tick_instrument_ts", "ticks", ["instrument_public_id", "timestamp"])
@@ -413,8 +414,8 @@ def upgrade() -> None:
         "orders",
         ["public_id"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index("ix_orders_instrument_public_id", "orders", ["instrument_public_id"])
     op.create_index("ix_orders_client_order_id", "orders", ["client_order_id"])
@@ -424,16 +425,16 @@ def upgrade() -> None:
         "orders",
         ["instrument_public_id", "client_order_id"],
         unique=True,
-        sqlite_where=text("client_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE),
-        postgresql_where=text("client_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE),
+        sqlite_where=text("client_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text("client_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE_PG),
     )
     op.create_index(
         "uq_orders_exchange_oid",
         "orders",
         ["instrument_public_id", "exchange_order_id"],
         unique=True,
-        sqlite_where=text("exchange_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE),
-        postgresql_where=text("exchange_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE),
+        sqlite_where=text("exchange_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text("exchange_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE_PG),
     )
     op.create_table(
         "executions",
@@ -462,8 +463,8 @@ def upgrade() -> None:
         "executions",
         ["public_id"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index("ix_executions_order_public_id", "executions", ["order_public_id"])
     op.create_index(
@@ -502,16 +503,16 @@ def upgrade() -> None:
         "positions",
         ["public_id"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index(
         "uq_positions_instrument_public_id",
         "positions",
         ["instrument_public_id"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index("ix_positions_instrument_public_id", "positions", ["instrument_public_id"])
     op.create_table(
@@ -538,8 +539,8 @@ def upgrade() -> None:
         "signals",
         ["public_id"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index("ix_signals_instrument_public_id", "signals", ["instrument_public_id"])
     op.create_index("ix_signals_fired_at", "signals", ["fired_at"])
@@ -566,16 +567,16 @@ def upgrade() -> None:
         "users",
         ["public_id"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index(
         "ix_users_username",
         "users",
         ["username"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_table(
         "user_login_events",
@@ -597,8 +598,8 @@ def upgrade() -> None:
         "user_login_events",
         ["public_id"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_table(
         "settings",
@@ -623,16 +624,16 @@ def upgrade() -> None:
         "settings",
         ["public_id"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index(
         "uq_settings_key",
         "settings",
         ["key"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_table(
         "process_runs",
@@ -661,8 +662,8 @@ def upgrade() -> None:
         "process_runs",
         ["public_id"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index("ix_process_runs_process_name", "process_runs", ["process_name"])
     op.create_index("ix_process_runs_status", "process_runs", ["status"])
@@ -695,16 +696,16 @@ def upgrade() -> None:
         "instrument_specs",
         ["public_id"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index(
         "uq_instrument_spec_instrument",
         "instrument_specs",
         ["instrument_public_id"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index(
         "ix_instrument_specs_instrument_public_id", "instrument_specs", ["instrument_public_id"]
@@ -739,16 +740,16 @@ def upgrade() -> None:
         "market_snapshots",
         ["public_id"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index(
         "uq_market_snapshot_instrument",
         "market_snapshots",
         ["instrument_public_id"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index(
         "ix_market_snapshots_instrument_public_id",
@@ -785,8 +786,8 @@ def upgrade() -> None:
         "control",
         ["public_id"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_table(
         "telemetry",
@@ -809,8 +810,8 @@ def upgrade() -> None:
         "telemetry",
         ["public_id"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE),
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     conn = op.get_bind()
     now = datetime.now(tz=UTC)
