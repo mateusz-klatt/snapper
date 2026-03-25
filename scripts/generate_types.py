@@ -1875,6 +1875,15 @@ def postprocess_openapi_typescript_file(file_path: Path) -> None:
     updated = updated.replace("components[", "Components[")
     updated = updated.replace("operations[", "Operations[")
 
+    _json_type_replacements = {
+        'Components["schemas"]["JsonValue"]': "Record<string, unknown>",
+        'Components["schemas"]["JsonObject"]': "Record<string, unknown>",
+        'Components["schemas"]["JsonPrimitive"]': "string | number | boolean | null",
+        'Components["schemas"]["JsonArray"]': "unknown[]",
+    }
+    for old, new in _json_type_replacements.items():
+        updated = updated.replace(old, new)
+
     if updated != content:
         file_path.write_text(updated, encoding="utf-8")
 
