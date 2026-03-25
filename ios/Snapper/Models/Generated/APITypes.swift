@@ -190,7 +190,7 @@ struct AvailableProcess: Codable, Sendable {
     /// Categorization tags
     let tags: [String]?
     /// JSON Schema for parameters
-    let parametersSchema: [String: AnyCodable]?
+    let parametersSchema: JsonObject?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -251,7 +251,7 @@ struct ConfiguredProcess: Codable, Sendable {
     /// Constructor arguments
     let args: [AnyCodable]?
     /// Constructor kwargs
-    let kwargs: [String: AnyCodable]?
+    let kwargs: JsonObject?
     /// Optional note
     let note: String?
     /// Process lifecycle type
@@ -261,7 +261,7 @@ struct ConfiguredProcess: Codable, Sendable {
     /// Categorization tags
     let tags: [String]?
     /// JSON Schema for parameters
-    let parametersSchema: [String: AnyCodable]?
+    let parametersSchema: JsonObject?
     /// Whether process is one-shot task
     let isOneShot: Bool
     /// Active public ID if running
@@ -527,6 +527,9 @@ struct InstrumentListResponse: Codable, Sendable {
     }
 }
 
+struct JsonObject: Codable, Sendable {
+}
+
 struct LoginData: Codable, Sendable {
     let type: String?
     let sequenceId: Int
@@ -773,9 +776,9 @@ struct ProcessRun: Codable, Sendable {
     /// Process lifecycle
     let lifecycle: String
     /// Run parameters
-    let parameters: [String: AnyCodable]?
+    let parameters: JsonObject?
     /// Run result if completed
-    let result: [String: AnyCodable]?
+    let result: JsonObject?
     /// Error message if failed
     let error: String?
     /// Process tags
@@ -846,7 +849,7 @@ struct ProcessSchemaData: Codable, Sendable {
     /// Default arguments
     let defaultArgs: [AnyCodable]?
     /// Default kwargs
-    let defaultKwargs: [String: AnyCodable]?
+    let defaultKwargs: JsonObject?
     /// Process lifecycle type
     let lifecycle: String
 
@@ -1285,7 +1288,7 @@ struct StrategyStatusPayload: Codable, Sendable {
     /// Current strategy status
     let status: String
     /// Full raw status
-    let details: [String: AnyCodable]?
+    let details: JsonObject?
     /// Signals generated count
     let signalsGenerated: Int?
     /// Trades executed count
@@ -1897,7 +1900,7 @@ struct ProcessCreateBody: Codable, Sendable {
     /// Constructor positional arguments
     let args: [AnyCodable]?
     /// Constructor keyword arguments
-    let kwargs: [String: AnyCodable]?
+    let kwargs: JsonObject?
     /// Optional note stored alongside configuration
     let note: String?
 }
@@ -1926,7 +1929,7 @@ struct ProcessStartBody: Codable, Sendable {
     /// Constructor positional arguments override
     let args: [AnyCodable]?
     /// Constructor keyword arguments override
-    let kwargs: [String: AnyCodable]?
+    let kwargs: JsonObject?
     /// Toggle autostart flag; None keeps stored value
     let autostart: Bool?
 }

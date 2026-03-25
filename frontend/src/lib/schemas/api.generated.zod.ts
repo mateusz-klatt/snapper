@@ -5,49 +5,6 @@
 
 import { z } from 'zod'
 
-export const AvailableProcessSchema = z
-  .object({
-    type: z.literal('available_process'),
-    sequence_id: z.number().int(),
-    public_id: z.string(),
-    timestamp: z.iso.datetime(),
-    session_id: z.string(),
-    name: z.string(),
-    class_path: z.string(),
-    method: z.string(),
-    description: z.string(),
-    lifecycle: z.enum(['long_running', 'one_shot']),
-    role: z.enum(['core', 'task', 'strategy', 'backtest']),
-    tags: z.array(z.string()),
-    parameters_schema: z.record(z.string(), z.unknown()).nullable().optional(),
-  })
-  .strict()
-
-export const ConfiguredProcessSchema = z
-  .object({
-    type: z.literal('configured_process'),
-    sequence_id: z.number().int(),
-    public_id: z.string(),
-    timestamp: z.iso.datetime(),
-    session_id: z.string(),
-    name: z.string(),
-    enabled: z.boolean(),
-    running: z.boolean(),
-    mode: z.enum(['thread', 'process']),
-    class_path: z.string(),
-    method: z.string(),
-    args: z.array(z.unknown()),
-    kwargs: z.record(z.string(), z.unknown()),
-    note: z.string().nullable().optional(),
-    lifecycle: z.enum(['long_running', 'one_shot']),
-    role: z.enum(['core', 'task', 'strategy', 'backtest']),
-    tags: z.array(z.string()),
-    parameters_schema: z.record(z.string(), z.unknown()).nullable().optional(),
-    is_one_shot: z.boolean(),
-    active_public_id: z.string().nullable().optional(),
-  })
-  .strict()
-
 export const ConnectionStatsSchema = z
   .object({
     active_connections: z.number().int(),
@@ -120,6 +77,8 @@ export const InstrumentListResponseSchema = z
   })
   .strict()
 
+export const JsonPrimitiveSchema = z.unknown()
+
 export const MessageResponseSchema = z
   .object({
     type: z.literal('message'),
@@ -184,45 +143,6 @@ export const ProcessCreatedInfoSchema = z
   .object({
     name: z.string(),
     template: z.string(),
-  })
-  .strict()
-
-export const ProcessRunSchema = z
-  .object({
-    type: z.literal('process_run'),
-    sequence_id: z.number().int(),
-    public_id: z.string(),
-    timestamp: z.iso.datetime(),
-    session_id: z.string(),
-    process_name: z.string(),
-    status: z.enum(['running', 'succeeded', 'failed', 'cancelled']),
-    role: z.enum(['core', 'task', 'strategy', 'backtest']),
-    lifecycle: z.enum(['long_running', 'one_shot']),
-    parameters: z.record(z.string(), z.unknown()).nullable().optional(),
-    result: z.record(z.string(), z.unknown()).nullable().optional(),
-    error: z.string().nullable().optional(),
-    tags: z.array(z.string()),
-    started_at: z.string(),
-    completed_at: z.string().nullable().optional(),
-  })
-  .strict()
-
-export const ProcessSchemaDataSchema = z
-  .object({
-    type: z.literal('process_schema'),
-    sequence_id: z.number().int(),
-    public_id: z.string(),
-    timestamp: z.iso.datetime(),
-    session_id: z.string(),
-    name: z.string(),
-    description: z.string(),
-    class_path: z.string(),
-    method: z.string(),
-    default_enabled: z.boolean(),
-    default_mode: z.enum(['thread', 'process']),
-    default_args: z.array(z.unknown()),
-    default_kwargs: z.record(z.string(), z.unknown()),
-    lifecycle: z.enum(['long_running', 'one_shot']),
   })
   .strict()
 
@@ -321,21 +241,6 @@ export const StrategyProcessSchema = z
     running: z.boolean(),
     enabled: z.boolean(),
     mode: z.enum(['thread', 'process']),
-  })
-  .strict()
-
-export const StrategyStatusPayloadSchema = z
-  .object({
-    strategy_name: z.string(),
-    status: z.string(),
-    details: z.record(z.string(), z.unknown()),
-    signals_generated: z.number().int().nullable().optional(),
-    trades_executed: z.number().int().nullable().optional(),
-    last_signal: z.string().nullable().optional(),
-    last_signal_time: z.string().nullable().optional(),
-    pnl: z.number().nullable().optional(),
-    pid: z.number().int().nullable().optional(),
-    uptime: z.string().nullable().optional(),
   })
   .strict()
 
@@ -444,51 +349,6 @@ export const SettingUpdateBodySchema = z
 
 export const RemoveSettingBodySchema = z.object({}).strict()
 
-export const ProcessCreateBodySchema = z
-  .object({
-    name: z.string().min(3).max(64),
-    template: z.string(),
-    enabled: z.boolean().nullable().optional(),
-    mode: z.enum(['thread', 'process']).nullable().optional(),
-    args: z.array(z.unknown()).nullable().optional(),
-    kwargs: z.record(z.string(), z.unknown()).nullable().optional(),
-    note: z.string().max(512).nullable().optional(),
-  })
-  .strict()
-
-export const ProcessStartBodySchema = z
-  .object({
-    mode: z.enum(['thread', 'process']).nullable().optional(),
-    args: z.array(z.unknown()).nullable().optional(),
-    kwargs: z.record(z.string(), z.unknown()).nullable().optional(),
-    autostart: z.boolean().nullable().optional(),
-  })
-  .strict()
-
-export const AvailableProcessesResponseSchema = z
-  .object({
-    type: z.literal('available_processes'),
-    sequence_id: z.number().int(),
-    public_id: z.string(),
-    timestamp: z.iso.datetime(),
-    session_id: z.string(),
-    payload: z.array(AvailableProcessSchema),
-    count: z.number().int(),
-  })
-  .strict()
-
-export const ConfiguredProcessesResponseSchema = z
-  .object({
-    type: z.literal('configured_processes'),
-    sequence_id: z.number().int(),
-    public_id: z.string(),
-    timestamp: z.iso.datetime(),
-    session_id: z.string(),
-    payload: z.array(ConfiguredProcessSchema),
-    count: z.number().int(),
-  })
-  .strict()
-
 export const ExecutionListResponseSchema = z
   .object({
     type: z.literal('execution_list'),
@@ -507,6 +367,8 @@ export const GapDetectionStatsSchema = z
     rest_clients: z.record(z.string(), GapStatsSchema),
   })
   .strict()
+
+export const JsonValueSchema = z.unknown()
 
 export const OrderListResponseSchema = z
   .object({
@@ -555,29 +417,6 @@ export const ProcessCreateDataSchema = z
     session_id: z.string(),
     status: z.literal('created'),
     process: ProcessCreatedInfoSchema,
-  })
-  .strict()
-
-export const ProcessRunsResponseSchema = z
-  .object({
-    type: z.literal('process_runs'),
-    sequence_id: z.number().int(),
-    public_id: z.string(),
-    timestamp: z.iso.datetime(),
-    session_id: z.string(),
-    payload: z.array(ProcessRunSchema),
-    count: z.number().int(),
-  })
-  .strict()
-
-export const ProcessSchemaResponseSchema = z
-  .object({
-    type: z.literal('process_schema_response'),
-    sequence_id: z.number().int(),
-    public_id: z.string(),
-    timestamp: z.iso.datetime(),
-    session_id: z.string(),
-    payload: ProcessSchemaDataSchema,
   })
   .strict()
 
@@ -647,19 +486,6 @@ export const StrategyListResponseSchema = z
     session_id: z.string(),
     payload: z.array(StrategyProcessSchema),
     count: z.number().int(),
-  })
-  .strict()
-
-export const SystemStatusDataSchema = z
-  .object({
-    type: z.literal('system_status'),
-    sequence_id: z.number().int(),
-    public_id: z.string(),
-    timestamp: z.iso.datetime(),
-    session_id: z.string(),
-    trader: ProcessStatusSchema,
-    backtests: z.record(z.string(), ProcessStatusSchema),
-    strategies: z.array(StrategyStatusPayloadSchema),
   })
   .strict()
 
@@ -800,28 +626,6 @@ export const RemoveSettingRequestSchema = z
   })
   .strict()
 
-export const ProcessCreateRequestSchema = z
-  .object({
-    type: z.literal('process_create_request').optional(),
-    sequence_id: z.number().int(),
-    public_id: z.string(),
-    timestamp: z.iso.datetime(),
-    session_id: z.string(),
-    payload: ProcessCreateBodySchema,
-  })
-  .strict()
-
-export const ProcessStartRequestSchema = z
-  .object({
-    type: z.literal('process_start_request').optional(),
-    sequence_id: z.number().int(),
-    public_id: z.string(),
-    timestamp: z.iso.datetime(),
-    session_id: z.string(),
-    payload: ProcessStartBodySchema,
-  })
-  .strict()
-
 export const HealthCheckDataSchema = z
   .object({
     type: z.literal('health_check'),
@@ -836,6 +640,8 @@ export const HealthCheckDataSchema = z
     gap_detection: GapDetectionStatsSchema,
   })
   .strict()
+
+export const JsonObjectSchema = z.record(z.string(), z.any())
 
 export const ProcessSummaryResponseSchema = z
   .object({
@@ -856,17 +662,6 @@ export const ProcessCreateResponseSchema = z
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     payload: ProcessCreateDataSchema,
-  })
-  .strict()
-
-export const SystemStatusResponseSchema = z
-  .object({
-    type: z.literal('system_status_response'),
-    sequence_id: z.number().int(),
-    public_id: z.string(),
-    timestamp: z.iso.datetime(),
-    session_id: z.string(),
-    payload: SystemStatusDataSchema,
   })
   .strict()
 
@@ -976,6 +771,124 @@ export const HealthCheckResponseSchema = z
   })
   .strict()
 
+export const AvailableProcessSchema = z
+  .object({
+    type: z.literal('available_process'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    name: z.string(),
+    class_path: z.string(),
+    method: z.string(),
+    description: z.string(),
+    lifecycle: z.enum(['long_running', 'one_shot']),
+    role: z.enum(['core', 'task', 'strategy', 'backtest']),
+    tags: z.array(z.string()),
+    parameters_schema: z.record(z.string(), z.any()).nullable().optional(),
+  })
+  .strict()
+
+export const ConfiguredProcessSchema = z
+  .object({
+    type: z.literal('configured_process'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    name: z.string(),
+    enabled: z.boolean(),
+    running: z.boolean(),
+    mode: z.enum(['thread', 'process']),
+    class_path: z.string(),
+    method: z.string(),
+    args: z.array(z.unknown()),
+    kwargs: z.record(z.string(), z.any()),
+    note: z.string().nullable().optional(),
+    lifecycle: z.enum(['long_running', 'one_shot']),
+    role: z.enum(['core', 'task', 'strategy', 'backtest']),
+    tags: z.array(z.string()),
+    parameters_schema: z.record(z.string(), z.any()).nullable().optional(),
+    is_one_shot: z.boolean(),
+    active_public_id: z.string().nullable().optional(),
+  })
+  .strict()
+
+export const ProcessRunSchema = z
+  .object({
+    type: z.literal('process_run'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    process_name: z.string(),
+    status: z.enum(['running', 'succeeded', 'failed', 'cancelled']),
+    role: z.enum(['core', 'task', 'strategy', 'backtest']),
+    lifecycle: z.enum(['long_running', 'one_shot']),
+    parameters: z.record(z.string(), z.any()).nullable().optional(),
+    result: z.record(z.string(), z.any()).nullable().optional(),
+    error: z.string().nullable().optional(),
+    tags: z.array(z.string()),
+    started_at: z.string(),
+    completed_at: z.string().nullable().optional(),
+  })
+  .strict()
+
+export const ProcessSchemaDataSchema = z
+  .object({
+    type: z.literal('process_schema'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    name: z.string(),
+    description: z.string(),
+    class_path: z.string(),
+    method: z.string(),
+    default_enabled: z.boolean(),
+    default_mode: z.enum(['thread', 'process']),
+    default_args: z.array(z.unknown()),
+    default_kwargs: z.record(z.string(), z.any()),
+    lifecycle: z.enum(['long_running', 'one_shot']),
+  })
+  .strict()
+
+export const StrategyStatusPayloadSchema = z
+  .object({
+    strategy_name: z.string(),
+    status: z.string(),
+    details: z.record(z.string(), z.any()),
+    signals_generated: z.number().int().nullable().optional(),
+    trades_executed: z.number().int().nullable().optional(),
+    last_signal: z.string().nullable().optional(),
+    last_signal_time: z.string().nullable().optional(),
+    pnl: z.number().nullable().optional(),
+    pid: z.number().int().nullable().optional(),
+    uptime: z.string().nullable().optional(),
+  })
+  .strict()
+
+export const ProcessCreateBodySchema = z
+  .object({
+    name: z.string().min(3).max(64),
+    template: z.string(),
+    enabled: z.boolean().nullable().optional(),
+    mode: z.enum(['thread', 'process']).nullable().optional(),
+    args: z.array(z.unknown()).nullable().optional(),
+    kwargs: z.record(z.string(), z.any()).nullable().optional(),
+    note: z.string().max(512).nullable().optional(),
+  })
+  .strict()
+
+export const ProcessStartBodySchema = z
+  .object({
+    mode: z.enum(['thread', 'process']).nullable().optional(),
+    args: z.array(z.unknown()).nullable().optional(),
+    kwargs: z.record(z.string(), z.any()).nullable().optional(),
+    autostart: z.boolean().nullable().optional(),
+  })
+  .strict()
+
 export const LoginResponseSchema = z
   .object({
     type: z.literal('login_response'),
@@ -998,22 +911,112 @@ export const RefreshResponseSchema = z
   })
   .strict()
 
+export const AvailableProcessesResponseSchema = z
+  .object({
+    type: z.literal('available_processes'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: z.array(AvailableProcessSchema),
+    count: z.number().int(),
+  })
+  .strict()
+
+export const ConfiguredProcessesResponseSchema = z
+  .object({
+    type: z.literal('configured_processes'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: z.array(ConfiguredProcessSchema),
+    count: z.number().int(),
+  })
+  .strict()
+
+export const ProcessRunsResponseSchema = z
+  .object({
+    type: z.literal('process_runs'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: z.array(ProcessRunSchema),
+    count: z.number().int(),
+  })
+  .strict()
+
+export const ProcessSchemaResponseSchema = z
+  .object({
+    type: z.literal('process_schema_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: ProcessSchemaDataSchema,
+  })
+  .strict()
+
+export const SystemStatusDataSchema = z
+  .object({
+    type: z.literal('system_status'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    trader: ProcessStatusSchema,
+    backtests: z.record(z.string(), ProcessStatusSchema),
+    strategies: z.array(StrategyStatusPayloadSchema),
+  })
+  .strict()
+
+export const ProcessCreateRequestSchema = z
+  .object({
+    type: z.literal('process_create_request').optional(),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: ProcessCreateBodySchema,
+  })
+  .strict()
+
+export const ProcessStartRequestSchema = z
+  .object({
+    type: z.literal('process_start_request').optional(),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: ProcessStartBodySchema,
+  })
+  .strict()
+
+export const SystemStatusResponseSchema = z
+  .object({
+    type: z.literal('system_status_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: SystemStatusDataSchema,
+  })
+  .strict()
+
 // Type exports
-export type AvailableProcess = z.infer<typeof AvailableProcessSchema>
-export type ConfiguredProcess = z.infer<typeof ConfiguredProcessSchema>
 export type ConnectionStats = z.infer<typeof ConnectionStatsSchema>
 export type ExchangeListResponse = z.infer<typeof ExchangeListResponseSchema>
 export type ExecutionData = z.infer<typeof ExecutionDataSchema>
 export type GapStats = z.infer<typeof GapStatsSchema>
 export type HealthTopics = z.infer<typeof HealthTopicsSchema>
 export type InstrumentListResponse = z.infer<typeof InstrumentListResponseSchema>
+export type JsonPrimitive = z.infer<typeof JsonPrimitiveSchema>
 export type MessageResponse = z.infer<typeof MessageResponseSchema>
 export type OrderData = z.infer<typeof OrderDataSchema>
 export type PositionData = z.infer<typeof PositionDataSchema>
 export type ProcessCategoryCount = z.infer<typeof ProcessCategoryCountSchema>
 export type ProcessCreatedInfo = z.infer<typeof ProcessCreatedInfoSchema>
-export type ProcessRun = z.infer<typeof ProcessRunSchema>
-export type ProcessSchemaData = z.infer<typeof ProcessSchemaDataSchema>
 export type ProcessStartData = z.infer<typeof ProcessStartDataSchema>
 export type ProcessStatus = z.infer<typeof ProcessStatusSchema>
 export type ProcessStopData = z.infer<typeof ProcessStopDataSchema>
@@ -1021,7 +1024,6 @@ export type SettingCategoriesResponse = z.infer<typeof SettingCategoriesResponse
 export type SettingRead = z.infer<typeof SettingReadSchema>
 export type SignalData = z.infer<typeof SignalDataSchema>
 export type StrategyProcess = z.infer<typeof StrategyProcessSchema>
-export type StrategyStatusPayload = z.infer<typeof StrategyStatusPayloadSchema>
 export type SubscriptionsStats = z.infer<typeof SubscriptionsStatsSchema>
 export type TopicMetricSnapshot = z.infer<typeof TopicMetricSnapshotSchema>
 export type UserRole = z.infer<typeof UserRoleSchema>
@@ -1037,25 +1039,19 @@ export type ChangePasswordBody = z.infer<typeof ChangePasswordBodySchema>
 export type AdminResetPasswordBody = z.infer<typeof AdminResetPasswordBodySchema>
 export type SettingUpdateBody = z.infer<typeof SettingUpdateBodySchema>
 export type RemoveSettingBody = z.infer<typeof RemoveSettingBodySchema>
-export type ProcessCreateBody = z.infer<typeof ProcessCreateBodySchema>
-export type ProcessStartBody = z.infer<typeof ProcessStartBodySchema>
-export type AvailableProcessesResponse = z.infer<typeof AvailableProcessesResponseSchema>
-export type ConfiguredProcessesResponse = z.infer<typeof ConfiguredProcessesResponseSchema>
 export type ExecutionListResponse = z.infer<typeof ExecutionListResponseSchema>
 export type GapDetectionStats = z.infer<typeof GapDetectionStatsSchema>
+export type JsonValue = z.infer<typeof JsonValueSchema>
 export type OrderListResponse = z.infer<typeof OrderListResponseSchema>
 export type PositionListResponse = z.infer<typeof PositionListResponseSchema>
 export type ProcessSummaryData = z.infer<typeof ProcessSummaryDataSchema>
 export type ProcessCreateData = z.infer<typeof ProcessCreateDataSchema>
-export type ProcessRunsResponse = z.infer<typeof ProcessRunsResponseSchema>
-export type ProcessSchemaResponse = z.infer<typeof ProcessSchemaResponseSchema>
 export type ProcessStartResponse = z.infer<typeof ProcessStartResponseSchema>
 export type ProcessStopResponse = z.infer<typeof ProcessStopResponseSchema>
 export type SettingListResponse = z.infer<typeof SettingListResponseSchema>
 export type SettingResponse = z.infer<typeof SettingResponseSchema>
 export type SignalListResponse = z.infer<typeof SignalListResponseSchema>
 export type StrategyListResponse = z.infer<typeof StrategyListResponseSchema>
-export type SystemStatusData = z.infer<typeof SystemStatusDataSchema>
 export type UserProfile = z.infer<typeof UserProfileSchema>
 export type CreateUserBody = z.infer<typeof CreateUserBodySchema>
 export type UpdateUserBody = z.infer<typeof UpdateUserBodySchema>
@@ -1068,12 +1064,10 @@ export type ChangePasswordRequest = z.infer<typeof ChangePasswordRequestSchema>
 export type AdminResetPasswordRequest = z.infer<typeof AdminResetPasswordRequestSchema>
 export type SettingUpdate = z.infer<typeof SettingUpdateSchema>
 export type RemoveSettingRequest = z.infer<typeof RemoveSettingRequestSchema>
-export type ProcessCreateRequest = z.infer<typeof ProcessCreateRequestSchema>
-export type ProcessStartRequest = z.infer<typeof ProcessStartRequestSchema>
 export type HealthCheckData = z.infer<typeof HealthCheckDataSchema>
+export type JsonObject = z.infer<typeof JsonObjectSchema>
 export type ProcessSummaryResponse = z.infer<typeof ProcessSummaryResponseSchema>
 export type ProcessCreateResponse = z.infer<typeof ProcessCreateResponseSchema>
-export type SystemStatusResponse = z.infer<typeof SystemStatusResponseSchema>
 export type LoginData = z.infer<typeof LoginDataSchema>
 export type RefreshData = z.infer<typeof RefreshDataSchema>
 export type UserListResponse = z.infer<typeof UserListResponseSchema>
@@ -1083,5 +1077,20 @@ export type UpdateUserRequest = z.infer<typeof UpdateUserRequestSchema>
 export type WsStatsResponse = z.infer<typeof WsStatsResponseSchema>
 export type ZmqHealthResponse = z.infer<typeof ZmqHealthResponseSchema>
 export type HealthCheckResponse = z.infer<typeof HealthCheckResponseSchema>
+export type AvailableProcess = z.infer<typeof AvailableProcessSchema>
+export type ConfiguredProcess = z.infer<typeof ConfiguredProcessSchema>
+export type ProcessRun = z.infer<typeof ProcessRunSchema>
+export type ProcessSchemaData = z.infer<typeof ProcessSchemaDataSchema>
+export type StrategyStatusPayload = z.infer<typeof StrategyStatusPayloadSchema>
+export type ProcessCreateBody = z.infer<typeof ProcessCreateBodySchema>
+export type ProcessStartBody = z.infer<typeof ProcessStartBodySchema>
 export type LoginResponse = z.infer<typeof LoginResponseSchema>
 export type RefreshResponse = z.infer<typeof RefreshResponseSchema>
+export type AvailableProcessesResponse = z.infer<typeof AvailableProcessesResponseSchema>
+export type ConfiguredProcessesResponse = z.infer<typeof ConfiguredProcessesResponseSchema>
+export type ProcessRunsResponse = z.infer<typeof ProcessRunsResponseSchema>
+export type ProcessSchemaResponse = z.infer<typeof ProcessSchemaResponseSchema>
+export type SystemStatusData = z.infer<typeof SystemStatusDataSchema>
+export type ProcessCreateRequest = z.infer<typeof ProcessCreateRequestSchema>
+export type ProcessStartRequest = z.infer<typeof ProcessStartRequestSchema>
+export type SystemStatusResponse = z.infer<typeof SystemStatusResponseSchema>

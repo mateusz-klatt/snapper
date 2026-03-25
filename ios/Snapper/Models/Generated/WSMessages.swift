@@ -151,9 +151,6 @@ struct CandleData: Codable, Sendable {
     }
 }
 
-struct JsonObject: Codable, Sendable {
-}
-
 struct HeartbeatData: Codable, Sendable {
     let type: String
     let sequenceId: Int

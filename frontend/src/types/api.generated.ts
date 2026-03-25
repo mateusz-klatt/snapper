@@ -1007,13 +1007,8 @@ export type Components = {
              * @default []
              */
             tags: string[];
-            /**
-             * Parameters Schema
-             * @description JSON Schema for parameters
-             */
-            parameters_schema?: {
-                [key: string]: unknown;
-            } | null;
+            /** @description JSON Schema for parameters */
+            parameters_schema?: Components["schemas"]["JsonObject"] | null;
         };
         /**
          * AvailableProcessesResponse
@@ -1131,13 +1126,10 @@ export type Components = {
              */
             args: unknown[];
             /**
-             * Kwargs
              * @description Constructor kwargs
              * @default {}
              */
-            kwargs: {
-                [key: string]: unknown;
-            };
+            kwargs: Components["schemas"]["JsonObject"];
             /**
              * Note
              * @description Optional note
@@ -1161,13 +1153,8 @@ export type Components = {
              * @default []
              */
             tags: string[];
-            /**
-             * Parameters Schema
-             * @description JSON Schema for parameters
-             */
-            parameters_schema?: {
-                [key: string]: unknown;
-            } | null;
+            /** @description JSON Schema for parameters */
+            parameters_schema?: Components["schemas"]["JsonObject"] | null;
             /**
              * Is One Shot
              * @description Whether process is one-shot task
@@ -1605,6 +1592,13 @@ export type Components = {
              * @description Number of items in payload
              */
             count: number;
+        };
+        JsonObject: {
+            [key: string]: Components["schemas"]["JsonValue"];
+        };
+        JsonPrimitive: string | number | boolean | null;
+        JsonValue: Components["schemas"]["JsonPrimitive"] | Components["schemas"]["JsonValue"][] | {
+            [key: string]: Components["schemas"]["JsonValue"];
         };
         /**
          * LoginData
@@ -2085,20 +2079,10 @@ export type Components = {
              * @enum {string}
              */
             lifecycle: "long_running" | "one_shot";
-            /**
-             * Parameters
-             * @description Run parameters
-             */
-            parameters?: {
-                [key: string]: unknown;
-            } | null;
-            /**
-             * Result
-             * @description Run result if completed
-             */
-            result?: {
-                [key: string]: unknown;
-            } | null;
+            /** @description Run parameters */
+            parameters?: Components["schemas"]["JsonObject"] | null;
+            /** @description Run result if completed */
+            result?: Components["schemas"]["JsonObject"] | null;
             /**
              * Error
              * @description Error message if failed
@@ -2230,13 +2214,10 @@ export type Components = {
              */
             default_args: unknown[];
             /**
-             * Default Kwargs
              * @description Default kwargs
              * @default {}
              */
-            default_kwargs: {
-                [key: string]: unknown;
-            };
+            default_kwargs: Components["schemas"]["JsonObject"];
             /**
              * Lifecycle
              * @description Process lifecycle type
@@ -2970,13 +2951,10 @@ export type Components = {
              */
             status: string;
             /**
-             * Details
              * @description Full raw status
              * @default {}
              */
-            details: {
-                [key: string]: unknown;
-            };
+            details: Components["schemas"]["JsonObject"];
             /**
              * Signals Generated
              * @description Signals generated count
@@ -4020,13 +3998,8 @@ export type Components = {
              * @description Constructor positional arguments
              */
             args?: unknown[] | null;
-            /**
-             * Kwargs
-             * @description Constructor keyword arguments
-             */
-            kwargs?: {
-                [key: string]: unknown;
-            } | null;
+            /** @description Constructor keyword arguments */
+            kwargs?: Components["schemas"]["JsonObject"] | null;
             /**
              * Note
              * @description Optional note stored alongside configuration
@@ -4088,15 +4061,12 @@ export type Components = {
              */
             args?: unknown[] | null;
             /**
-             * Kwargs
              * @description Constructor keyword arguments override
              * @example {
              *       "endpoint": "tcp://0.0.0.0:5555"
              *     }
              */
-            kwargs?: {
-                [key: string]: unknown;
-            } | null;
+            kwargs?: Components["schemas"]["JsonObject"] | null;
             /**
              * Autostart
              * @description Toggle autostart flag; None keeps stored value
