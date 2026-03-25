@@ -2804,3 +2804,205 @@ async def test_get_setting_categories_returns_sorted(tmp_path: Path) -> None:
         await s.commit()
     result = await r.get_setting_categories(as_of=now)
     assert result == ["auth", "ui"]
+
+
+@pytest.mark.asyncio
+async def test_upsert_ticks_appends_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify upsert_ticks inserts all rows as append-only.
+
+    Given: A repository session,
+    When: upsert_ticks is called with two rows,
+    Then: Both rows are added and count returned.
+    """
+    added_objects: list[Any] = []
+    session = _DummyAsyncSession()
+    session.add_all = lambda objs: added_objects.extend(objs)
+    repo = _make_repo(lambda: _session_factory(session))
+    ts = datetime(2024, 6, 1, tzinfo=UTC)
+    rows: list[dict[str, Any]] = [
+        {
+            "instrument_public_id": "inst-pub-1",
+            "timestamp": ts,
+            "bid": 100.0,
+            "ask": 101.0,
+            "last": 100.5,
+            "volume": 5.0,
+            "session_id": "s1",
+            "sequence_id": 1,
+            "public_id": "tick-pub-1",
+        },
+        {
+            "instrument_public_id": "inst-pub-1",
+            "timestamp": ts,
+            "bid": 100.5,
+            "ask": 101.5,
+            "last": 101.0,
+            "volume": 3.0,
+            "session_id": "s1",
+            "sequence_id": 2,
+        },
+    ]
+    result = await repo.upsert_ticks(rows)
+    assert result == 2
+    assert len(added_objects) == 2
+    assert session.commit_called is True
+    assert "public_id" in rows[1]
+
+
+@pytest.mark.asyncio
+async def test_upsert_ticks_returns_zero_for_empty() -> None:
+    """Verify upsert_ticks returns 0 for empty input."""
+    session = _DummyAsyncSession()
+    repo = _make_repo(lambda: _session_factory(session))
+    result = await repo.upsert_ticks([])
+    assert result == 0
+    assert session.commit_called is False
+
+
+@pytest.mark.asyncio
+async def test_get_ticks_returns_empty_when_instrument_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify get_ticks returns empty list when instrument is not found."""
+    with patch("snapper.data.repository.create_async_engine"):
+        repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+    mock_sym_result = SimpleNamespace(scalar_one_or_none=lambda: None)
+
+    async def _execute(*_: object, **__: object) -> SimpleNamespace:
+        return mock_sym_result
+
+    mock_session = AsyncMock()
+    mock_session.execute.side_effect = _execute
+
+    class _Ctx:
+        async def __aenter__(self) -> Any:
+            return mock_session
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+    monkeypatch.setattr(repo, "session", lambda: _Ctx())
+    result = await repo.get_ticks(
+        "MISSING",
+        datetime.now(UTC),
+        datetime.now(UTC),
+        exchange="kraken",
+        as_of=datetime.now(UTC),
+    )
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_get_ticks_returns_rows_when_instrument_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify get_ticks returns mapped rows when instrument exists."""
+    with patch("snapper.data.repository.create_async_engine"):
+        repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+    ts = datetime(2024, 6, 1, tzinfo=UTC)
+    mock_inst = SimpleNamespace(public_id="inst-pub-1")
+    mock_sym_result = SimpleNamespace(scalar_one_or_none=lambda: "sym-pub-1")
+    mock_inst_result = SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: mock_inst))
+    tick_row = SimpleNamespace(
+        timestamp=ts,
+        bid=100.0,
+        ask=101.0,
+        last=100.5,
+        volume=5.0,
+        public_id="tick-pub-1",
+        session_id="s1",
+        sequence_id=1,
+    )
+    mock_query_result = SimpleNamespace(all=lambda: [tick_row])
+    call_count = 0
+
+    async def _execute(*_: object, **__: object) -> SimpleNamespace:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return mock_sym_result
+        if call_count == 2:
+            return mock_inst_result
+        return mock_query_result
+
+    mock_session = AsyncMock()
+    mock_session.execute.side_effect = _execute
+
+    class _Ctx:
+        async def __aenter__(self) -> Any:
+            return mock_session
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+    monkeypatch.setattr(repo, "session", lambda: _Ctx())
+    result = await repo.get_ticks(
+        "BTC-USD",
+        ts - timedelta(hours=1),
+        ts + timedelta(hours=1),
+        exchange="kraken",
+        as_of=ts + timedelta(hours=1),
+    )
+    assert len(result) == 1
+    assert result[0]["bid"] == 100.0
+    assert result[0]["ask"] == 101.0
+    assert result[0]["last"] == 100.5
+    assert result[0]["volume"] == 5.0
+    assert result[0]["public_id"] == "tick-pub-1"
+
+
+@pytest.mark.asyncio
+async def test_get_trades_returns_executed_at(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify get_trades returns executed_at and maps it correctly."""
+    with patch("snapper.data.repository.create_async_engine"):
+        repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+    bus_time = datetime(2024, 6, 1, 0, 0, 1, tzinfo=UTC)
+    event_time = datetime(2024, 6, 1, 0, 0, 0, tzinfo=UTC)
+    mock_inst = SimpleNamespace(public_id="inst-pub-1")
+    mock_sym_result = SimpleNamespace(scalar_one_or_none=lambda: "sym-pub-1")
+    mock_inst_result = SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: mock_inst))
+    trade_row = SimpleNamespace(
+        timestamp=bus_time,
+        executed_at=event_time,
+        price=100.0,
+        size=1.5,
+        side="buy",
+        trade_id="exch-123",
+    )
+    mock_query_result = SimpleNamespace(all=lambda: [trade_row])
+    call_count = 0
+
+    async def _execute(*_: object, **__: object) -> SimpleNamespace:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return mock_sym_result
+        if call_count == 2:
+            return mock_inst_result
+        return mock_query_result
+
+    mock_session = AsyncMock()
+    mock_session.execute.side_effect = _execute
+
+    class _Ctx:
+        async def __aenter__(self) -> Any:
+            return mock_session
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+    monkeypatch.setattr(repo, "session", lambda: _Ctx())
+    result = await repo.get_trades(
+        "BTC-USD",
+        event_time - timedelta(seconds=1),
+        event_time + timedelta(seconds=1),
+        exchange="kraken",
+        as_of=bus_time + timedelta(hours=1),
+    )
+    assert len(result) == 1
+    assert result[0]["timestamp"] == bus_time
+    assert result[0]["executed_at"] == event_time
+    assert result[0]["trade_id"] == "exch-123"
+    assert result[0]["price"] == 100.0

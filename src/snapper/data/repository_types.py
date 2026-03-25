@@ -44,6 +44,7 @@ class TradeUpsertRow(TypedDict, total=False):
     size: float
     side: str
     trade_id: str
+    executed_at: datetime | None
     session_id: str
     sequence_id: int
     public_id: str
@@ -61,6 +62,19 @@ class TickUpsertRow(TypedDict, total=False):
     session_id: str
     sequence_id: int
     public_id: str
+
+
+class TickRow(TypedDict):
+    """Row dict returned by get_ticks."""
+
+    timestamp: datetime
+    bid: float | None
+    ask: float | None
+    last: float | None
+    volume: float
+    public_id: str
+    session_id: str
+    sequence_id: int
 
 
 class MarketSnapshotUpsertRow(TypedDict, total=False):
@@ -108,6 +122,7 @@ class TradeRow(TypedDict):
     """Row dict returned by get_trades."""
 
     timestamp: datetime
+    executed_at: datetime | None
     price: float
     size: float
     side: str

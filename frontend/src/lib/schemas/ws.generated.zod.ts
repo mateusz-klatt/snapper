@@ -262,6 +262,7 @@ export const TradeDataSchema = z
     price: z.number(),
     volume: z.number(),
     side: z.string().nullable(),
+    trade_id: z.string().nullable(),
   })
   .strict()
 

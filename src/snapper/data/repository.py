@@ -90,6 +90,7 @@ from snapper.data.repository_types import OrderRow
 from snapper.data.repository_types import PositionRow
 from snapper.data.repository_types import SettingRow
 from snapper.data.repository_types import SignalRow
+from snapper.data.repository_types import TickRow
 from snapper.data.repository_types import TickUpsertRow
 from snapper.data.repository_types import TradeRow
 from snapper.data.repository_types import TradeUpsertRow
@@ -453,6 +454,18 @@ class Repository(ABC):
         - Range: start and end both provided.
         - Latest-as-of: start and end are None, limit provided.
         """
+        ...
+
+    @abstractmethod
+    async def get_ticks(
+        self,
+        instrument: str,
+        start: datetime,
+        end: datetime,
+        exchange: AllExchange,
+        as_of: datetime,
+    ) -> list[TickRow]:
+        """Retrieve ticks for instrument in time range."""
         ...
 
     @abstractmethod
@@ -1246,6 +1259,54 @@ class SQLAlchemyRepository(Repository):
                 for r in rows
             ]
 
+    async def get_ticks(
+        self,
+        instrument: str,
+        start: datetime,
+        end: datetime,
+        exchange: AllExchange,
+        as_of: datetime,
+    ) -> list[TickRow]:
+        """Retrieve ticks for instrument within time range."""
+        async with self.session() as s:
+            inst = await self._resolve_active_instrument(s, instrument, exchange, as_of)
+            if inst is None:
+                return []
+            q = await s.execute(
+                select(
+                    Tick.timestamp,
+                    Tick.bid,
+                    Tick.ask,
+                    Tick.last,
+                    Tick.volume,
+                    Tick.public_id,
+                    Tick.session_id,
+                    Tick.sequence_id,
+                )
+                .where(
+                    Tick.instrument_public_id == inst.public_id,
+                    Tick.timestamp >= start,
+                    Tick.timestamp <= end,
+                    Tick.timestamp <= as_of,
+                    Tick.known_to > as_of,
+                )
+                .order_by(Tick.timestamp.asc())
+            )
+            rows = q.all()
+            return [
+                {
+                    "timestamp": r.timestamp,
+                    "bid": r.bid,
+                    "ask": r.ask,
+                    "last": r.last,
+                    "volume": r.volume,
+                    "public_id": r.public_id,
+                    "session_id": r.session_id,
+                    "sequence_id": r.sequence_id,
+                }
+                for r in rows
+            ]
+
     async def get_trades(
         self,
         instrument: str,
@@ -1254,14 +1315,21 @@ class SQLAlchemyRepository(Repository):
         exchange: AllExchange,
         as_of: datetime,
     ) -> list[TradeRow]:
-        """Retrieve trades for instrument within time range."""
+        """Retrieve trades for instrument within time range.
+
+        Uses coalesce(executed_at, timestamp) for range filtering and ordering
+        so that trades are selected by exchange event time when available,
+        falling back to bus-time for legacy rows without executed_at.
+        """
         async with self.session() as s:
             inst = await self._resolve_active_instrument(s, instrument, exchange, as_of)
             if inst is None:
                 return []
+            event_time = func.coalesce(Trade.executed_at, Trade.timestamp)
             q = await s.execute(
                 select(
                     Trade.timestamp,
+                    Trade.executed_at,
                     Trade.price,
                     Trade.size,
                     Trade.side,
@@ -1269,17 +1337,18 @@ class SQLAlchemyRepository(Repository):
                 )
                 .where(
                     Trade.instrument_public_id == inst.public_id,
-                    Trade.timestamp >= start,
-                    Trade.timestamp <= end,
+                    event_time >= start,
+                    event_time <= end,
                     Trade.timestamp <= as_of,
                     Trade.known_to > as_of,
                 )
-                .order_by(Trade.timestamp.asc())
+                .order_by(event_time.asc())
             )
             rows = q.all()
             return [
                 {
                     "timestamp": r.timestamp,
+                    "executed_at": r.executed_at,
                     "price": r.price,
                     "size": r.size,
                     "side": r.side,

@@ -778,7 +778,7 @@ class PaperExchangeClient(ExchangeClientBase):
                         price=trade_dict["price"],
                         ord_type="unknown",
                         trade_id=int(trade_dict.get("trade_id") or 0),
-                        timestamp=trade_dict["timestamp"],
+                        timestamp=trade_dict.get("executed_at") or trade_dict["timestamp"],
                     )
                 )
         replay_trades.sort(key=lambda trade: trade.timestamp)

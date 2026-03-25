@@ -411,6 +411,7 @@ struct TradeData: Codable, Sendable {
     let price: Double
     let volume: Double
     let side: String?
+    let tradeId: String?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -424,6 +425,7 @@ struct TradeData: Codable, Sendable {
         case price
         case volume
         case side
+        case tradeId = "trade_id"
     }
 }
 

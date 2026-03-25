@@ -334,6 +334,7 @@ def upgrade() -> None:
         sa.Column("price", sa.Float(), nullable=False),
         sa.Column("size", sa.Float(), nullable=False),
         sa.Column("side", sa.String(4), nullable=False),
+        sa.Column("executed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("session_id", sa.String(36), nullable=False),
         sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),

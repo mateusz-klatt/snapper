@@ -123,6 +123,7 @@ class TradeData(StrictDataSchema[Literal["trade"]]):
         price: Execution price of the trade.
         volume: Size of the trade.
         side: Trade direction ('buy'/'sell') if available.
+        trade_id: Exchange-provided trade identifier for deduplication.
     """
 
     type: Literal["trade"] = "trade"
@@ -132,6 +133,7 @@ class TradeData(StrictDataSchema[Literal["trade"]]):
     price: float
     volume: float
     side: str | None = None
+    trade_id: str | None = None
 
 
 class SignalData(StrictDataSchema[Literal["signal"]]):

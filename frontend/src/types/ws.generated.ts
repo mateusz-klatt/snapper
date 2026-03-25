@@ -113,6 +113,7 @@ export type Type15 = "trade";
 export type Exchange10 = "kraken" | "zonda" | "walutomat" | "polygon";
 export type ExecutedAt = string | null;
 export type Side4 = string | null;
+export type TradeId1 = string | null;
 /**
  * Message type discriminator
  */
@@ -713,6 +714,7 @@ export interface TickData {
  *     price: Execution price of the trade.
  *     volume: Size of the trade.
  *     side: Trade direction ('buy'/'sell') if available.
+ *     trade_id: Exchange-provided trade identifier for deduplication.
  */
 export interface TradeData {
   type: Type15;
@@ -726,6 +728,7 @@ export interface TradeData {
   price: number;
   volume: number;
   side?: Side4;
+  trade_id?: TradeId1;
 }
 /**
  * Authentication complete message with session info.

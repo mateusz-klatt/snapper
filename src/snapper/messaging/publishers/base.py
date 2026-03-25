@@ -30,6 +30,8 @@ from snapper.core.types import OrderExchange
 from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import CandleUpsertRow
+from snapper.data.repository_types import TickUpsertRow
+from snapper.data.repository_types import TradeUpsertRow
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
@@ -50,6 +52,7 @@ from snapper.messaging.topics.builders import market_topic
 from snapper.utils.logging import set_log_context
 
 _EXCHANGE_NOT_INIT_MSG = "Exchange client not initialized"
+_REPO_NOT_INIT_MSG = "Repository not initialized"
 
 
 class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC):
@@ -271,7 +274,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         cached = self._instrument_cache.get(native_symbol)
         if cached is not None:
             return cached
-        assert self.repository is not None, "Repository not initialized"
+        assert self.repository is not None, _REPO_NOT_INIT_MSG
         now = datetime.now(UTC)
         symbol_pid = await resolve_symbol_public_id(self.repository, native_symbol, as_of=now)
         if symbol_pid is None:
@@ -393,8 +396,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     ask=message.ask if not math.isclose(message.ask, 0.0) else None,
                     last=message.last,
                 )
-                await self._publish_message(topic, tick_msg)
+                published = await self._publish_message(topic, tick_msg)
                 self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
+                await self._save_tick_to_db(
+                    native_symbol, cast(TickData, published) if published else tick_msg
+                )
         except Exception as e:
             logger.error(f"Tick loop error for {symbols}: {e}")
 
@@ -426,9 +432,13 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     price=trade.price,
                     volume=trade.quantity,
                     side=trade.side if trade.side in ["buy", "sell"] else None,
+                    trade_id=str(trade.trade_id),
                 )
-                await self._publish_message(topic, trade_msg)
+                published = await self._publish_message(topic, trade_msg)
                 self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
+                await self._save_trade_to_db(
+                    native_symbol, cast(TradeData, published) if published else trade_msg
+                )
         except Exception as e:
             logger.error(f"Trade loop error for {symbols}: {e}")
 
@@ -540,10 +550,73 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 "session_id": candle_msg.session_id,
                 "sequence_id": candle_msg.sequence_id,
             }
-            assert self.repository is not None, "Repository not initialized"
+            assert self.repository is not None, _REPO_NOT_INIT_MSG
             await self.repository.upsert_candles([candle_row])
         except Exception as e:
             logger.error(f"Error saving candle to DB: {e}")
+
+    async def _save_tick_to_db(self, native_symbol: str, tick_msg: TickData) -> None:
+        """Persist tick data to the database.
+
+        Args:
+            native_symbol: Native exchange symbol identifier.
+            tick_msg: TickData containing bid/ask/last/volume to persist.
+        """
+        try:
+            instrument_public_id = await self._ensure_instrument(native_symbol)
+            if instrument_public_id is None:
+                return
+            tick_row: TickUpsertRow = {
+                "public_id": tick_msg.public_id,
+                "instrument_public_id": instrument_public_id,
+                "timestamp": tick_msg.timestamp,
+                "bid": tick_msg.bid,
+                "ask": tick_msg.ask,
+                "last": tick_msg.last,
+                "volume": tick_msg.volume,
+                "session_id": tick_msg.session_id,
+                "sequence_id": tick_msg.sequence_id,
+            }
+            assert self.repository is not None, _REPO_NOT_INIT_MSG
+            await self.repository.upsert_ticks([tick_row])
+        except Exception as e:
+            logger.error(f"Error saving tick to DB: {e}")
+
+    async def _save_trade_to_db(self, native_symbol: str, trade_msg: TradeData) -> None:
+        """Persist trade data to the database.
+
+        Skips persistence when trade_id is missing because the Trade model
+        uses trade_id as a unique dedup key and replay code casts it to int.
+
+        Args:
+            native_symbol: Native exchange symbol identifier.
+            trade_msg: TradeData containing price/volume/side to persist.
+        """
+        try:
+            if trade_msg.trade_id is None:
+                logger.debug(
+                    f"Skipping trade persistence for {native_symbol}: no exchange trade_id"
+                )
+                return
+            instrument_public_id = await self._ensure_instrument(native_symbol)
+            if instrument_public_id is None:
+                return
+            trade_row: TradeUpsertRow = {
+                "public_id": trade_msg.public_id,
+                "instrument_public_id": instrument_public_id,
+                "timestamp": trade_msg.timestamp,
+                "executed_at": trade_msg.executed_at,
+                "price": trade_msg.price,
+                "size": trade_msg.volume,
+                "side": trade_msg.side or "",
+                "trade_id": trade_msg.trade_id,
+                "session_id": trade_msg.session_id,
+                "sequence_id": trade_msg.sequence_id,
+            }
+            assert self.repository is not None, _REPO_NOT_INIT_MSG
+            await self.repository.upsert_trades([trade_row])
+        except Exception as e:
+            logger.error(f"Error saving trade to DB: {e}")
 
     async def _symbol_aliases_loop(self) -> None:
         """Listen for system messages and handle cache invalidation."""

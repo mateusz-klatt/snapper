@@ -295,6 +295,7 @@ export interface Trade {
   price: number
   volume: number
   side?: string | null
+  tradeId?: string | null
 }
 
 /**

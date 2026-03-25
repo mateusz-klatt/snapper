@@ -25,6 +25,7 @@ from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import SettingChangedData
 from snapper.messaging.schemas.data import TickData
+from snapper.messaging.schemas.data import TradeData
 
 TEST_DB_URL = "sqlite:///:memory:"
 
@@ -234,13 +235,14 @@ async def test_trade_loop_publishes_and_saves(monkeypatch: pytest.MonkeyPatch) -
 
     Given: A trade loop with incoming trades,
     When: Trade arrives,
-    Then: Message is published.
+    Then: Message is published and persisted.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
     pub.msg_publisher = AsyncMock()
-    pub.repository = SimpleNamespace()
+    pub.repository = SimpleNamespace(upsert_trades=AsyncMock())
     pub._exchange_client = SimpleNamespace()
+    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
 
     async def gen() -> AsyncIterator[Any]:
         yield SimpleNamespace(
@@ -248,6 +250,7 @@ async def test_trade_loop_publishes_and_saves(monkeypatch: pytest.MonkeyPatch) -
             price=100.0,
             quantity=1.0,
             side="buy",
+            trade_id=12345,
             timestamp=datetime.now(UTC),
         )
         pub.running = False
@@ -631,7 +634,9 @@ async def test_tick_loop_processes_message(monkeypatch: pytest.MonkeyPatch) -> N
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
     pub.msg_publisher = AsyncMock()
+    pub.repository = SimpleNamespace(upsert_ticks=AsyncMock())
     pub._exchange_client = SimpleNamespace()
+    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
 
     async def gen() -> AsyncIterator[Any]:
         yield SimpleNamespace(symbol="BTC-USD", last=10.0, volume=5.0, bid=1.0, ask=2.0)
@@ -916,7 +921,12 @@ async def test_trade_loop_breaks_when_not_running(monkeypatch: pytest.MonkeyPatc
 
     async def gen() -> AsyncIterator[Any]:
         yield SimpleNamespace(
-            symbol="BTC-USD", price=1.0, quantity=1.0, side="buy", timestamp=datetime.now(UTC)
+            symbol="BTC-USD",
+            price=1.0,
+            quantity=1.0,
+            side="buy",
+            trade_id=99,
+            timestamp=datetime.now(UTC),
         )
 
     pub._exchange_client.subscribe_trades = lambda symbols: gen()
@@ -1729,9 +1739,11 @@ class TestFeedPublisherCoverage:
             Any,
             SimpleNamespace(subscribe_ticks=tick_stream),
         )
+        publisher_any._save_tick_to_db = AsyncMock()
         await publisher_any._tick_loop(["BTC-USD"])
         publish_mock.assert_awaited_once()
         assert "BTC-USD" in publisher_any._last_data_timestamps
+        publisher_any._save_tick_to_db.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -1779,9 +1791,11 @@ class TestFeedPublisherCoverage:
             Any,
             SimpleNamespace(subscribe_trades=trade_stream),
         )
+        publisher_any._save_trade_to_db = AsyncMock()
         await publisher_any._trade_loop(["BTC-USD"])
         assert publish_mock.await_count == 2
         assert "BTC-USD" in publisher_any._last_data_timestamps
+        assert publisher_any._save_trade_to_db.await_count == 2
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -1879,6 +1893,8 @@ class DummyRepository:
         """Initialize the instance."""
         self.instrument_calls: list[dict[str, Any]] = []
         self.candle_calls: list[list[dict[str, Any]]] = []
+        self.tick_calls: list[list[dict[str, Any]]] = []
+        self.trade_calls: list[list[dict[str, Any]]] = []
         self._next_id = 100
 
     async def ensure_instrument(
@@ -1906,6 +1922,16 @@ class DummyRepository:
     async def upsert_candles(self, rows: list[dict[str, Any]]) -> int:
         """Upsert candles to repository."""
         self.candle_calls.append(rows)
+        return len(rows)
+
+    async def upsert_ticks(self, rows: list[dict[str, Any]]) -> int:
+        """Upsert ticks to repository."""
+        self.tick_calls.append(rows)
+        return len(rows)
+
+    async def upsert_trades(self, rows: list[dict[str, Any]]) -> int:
+        """Upsert trades to repository."""
+        self.trade_calls.append(rows)
         return len(rows)
 
 
@@ -2494,3 +2520,263 @@ async def test_ensure_instrument_returns_none_when_symbol_not_resolved(
     assert result is None
     resolve_mock.assert_awaited_once_with(pub.repository, "BTC-USD", as_of=ANY)
     mock_upsert.assert_not_awaited()
+
+
+def _build_tick_message(instrument: str) -> TickData:
+    """Build a TickData message for testing."""
+    return TickData(
+        session_id="test-session",
+        sequence_id=1,
+        public_id="tick-pub-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        instrument=instrument,
+        exchange="kraken",
+        volume=5.0,
+        bid=100.0,
+        ask=101.0,
+        last=100.5,
+    )
+
+
+def _build_trade_message(instrument: str) -> TradeData:
+    """Build a TradeData message for testing."""
+    return TradeData(
+        session_id="test-session",
+        sequence_id=2,
+        public_id="trade-pub-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        instrument=instrument,
+        exchange="kraken",
+        price=100.0,
+        volume=1.5,
+        side="buy",
+        trade_id="exch-trade-42",
+        executed_at=datetime(2023, 12, 31, 23, 59, 59, tzinfo=UTC),
+    )
+
+
+@pytest.mark.asyncio
+async def test_save_tick_to_db_inserts_tick(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify _save_tick_to_db persists tick and caches instrument.
+
+    Given: A publisher with a repository,
+    When: _save_tick_to_db is called with a tick message,
+    Then: The tick is upserted and instrument cached.
+    """
+    repo = DummyRepository()
+    resolve_mock = AsyncMock(return_value="fake-spid")
+    monkeypatch.setattr("snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock)
+    publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+    publisher.repository = repo
+    tick_msg = _build_tick_message("BTC-USD")
+    await publisher._save_tick_to_db("BTC-USD", tick_msg)
+    resolve_mock.assert_awaited_once_with(repo, "BTC-USD", as_of=ANY)
+    assert len(repo.tick_calls) == 1
+    row = repo.tick_calls[0][0]
+    assert row["instrument_public_id"] == "inst-pub-100"
+    assert row["bid"] == 100.0
+    assert row["ask"] == 101.0
+    assert row["last"] == 100.5
+    assert row["volume"] == 5.0
+    assert row["public_id"] == "tick-pub-id"
+    assert publisher._instrument_cache["BTC-USD"] == "inst-pub-100"
+    repo.instrument_calls.clear()
+    await publisher._save_tick_to_db("BTC-USD", tick_msg)
+    assert repo.instrument_calls == []
+    assert len(repo.tick_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_save_trade_to_db_inserts_trade(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify _save_trade_to_db persists trade and caches instrument.
+
+    Given: A publisher with a repository,
+    When: _save_trade_to_db is called with a trade message,
+    Then: The trade is upserted and instrument cached.
+    """
+    repo = DummyRepository()
+    resolve_mock = AsyncMock(return_value="fake-spid")
+    monkeypatch.setattr("snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock)
+    publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+    publisher.repository = repo
+    trade_msg = _build_trade_message("BTC-USD")
+    await publisher._save_trade_to_db("BTC-USD", trade_msg)
+    resolve_mock.assert_awaited_once_with(repo, "BTC-USD", as_of=ANY)
+    assert len(repo.trade_calls) == 1
+    row = repo.trade_calls[0][0]
+    assert row["instrument_public_id"] == "inst-pub-100"
+    assert row["price"] == 100.0
+    assert row["size"] == 1.5
+    assert row["side"] == "buy"
+    assert row["trade_id"] == "exch-trade-42"
+    assert row["timestamp"] == datetime(2024, 1, 1, tzinfo=UTC)
+    assert row["executed_at"] == datetime(2023, 12, 31, 23, 59, 59, tzinfo=UTC)
+    assert row["public_id"] == "trade-pub-id"
+    assert publisher._instrument_cache["BTC-USD"] == "inst-pub-100"
+    repo.instrument_calls.clear()
+    await publisher._save_trade_to_db("BTC-USD", trade_msg)
+    assert repo.instrument_calls == []
+    assert len(repo.trade_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_save_tick_to_db_returns_when_instrument_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify _save_tick_to_db skips persistence when instrument resolution fails.
+
+    Given: A publisher where symbol resolution returns None,
+    When: _save_tick_to_db is called,
+    Then: No tick is upserted.
+    """
+    resolve_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr("snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock)
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.repository = SimpleNamespace(
+        ensure_instrument=AsyncMock(return_value=(1, "inst-pub-1")),
+        upsert_ticks=AsyncMock(),
+    )
+    tick_msg = _build_tick_message("BTC-USD")
+    await pub._save_tick_to_db("BTC-USD", tick_msg)
+    pub.repository.upsert_ticks.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_save_trade_to_db_returns_when_instrument_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify _save_trade_to_db skips persistence when instrument resolution fails.
+
+    Given: A publisher where symbol resolution returns None,
+    When: _save_trade_to_db is called,
+    Then: No trade is upserted.
+    """
+    resolve_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr("snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock)
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.repository = SimpleNamespace(
+        ensure_instrument=AsyncMock(return_value=(1, "inst-pub-1")),
+        upsert_trades=AsyncMock(),
+    )
+    trade_msg = _build_trade_message("BTC-USD")
+    await pub._save_trade_to_db("BTC-USD", trade_msg)
+    pub.repository.upsert_trades.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_save_tick_to_db_logs_errors() -> None:
+    """Verify _save_tick_to_db logs errors without raising.
+
+    Given: A publisher with a failing repository,
+    When: DB save fails,
+    Then: Error is logged and no exception propagates.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.repository = SimpleNamespace(
+        ensure_instrument=AsyncMock(side_effect=RuntimeError("db fail")),
+        upsert_ticks=AsyncMock(),
+    )
+    tick_msg = _build_tick_message("BTC-USD")
+    await pub._save_tick_to_db("BTC-USD", tick_msg)
+
+
+@pytest.mark.asyncio
+async def test_save_trade_to_db_logs_errors() -> None:
+    """Verify _save_trade_to_db logs errors without raising.
+
+    Given: A publisher with a failing repository,
+    When: DB save fails,
+    Then: Error is logged and no exception propagates.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.repository = SimpleNamespace(
+        ensure_instrument=AsyncMock(side_effect=RuntimeError("db fail")),
+        upsert_trades=AsyncMock(),
+    )
+    trade_msg = _build_trade_message("BTC-USD")
+    await pub._save_trade_to_db("BTC-USD", trade_msg)
+
+
+@pytest.mark.asyncio
+async def test_save_trade_to_db_skips_when_no_trade_id() -> None:
+    """Verify _save_trade_to_db skips persistence when trade_id is None.
+
+    Given: A TradeData message without exchange trade_id,
+    When: _save_trade_to_db is called,
+    Then: No trade is upserted.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.repository = SimpleNamespace(
+        ensure_instrument=AsyncMock(return_value=(1, "inst-pub-1")),
+        upsert_trades=AsyncMock(),
+    )
+    trade_msg = TradeData(
+        session_id="test-session",
+        sequence_id=1,
+        public_id="trade-pub-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        instrument="BTC-USD",
+        exchange="kraken",
+        price=100.0,
+        volume=1.0,
+        side="buy",
+    )
+    await pub._save_trade_to_db("BTC-USD", trade_msg)
+    pub.repository.upsert_trades.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_tick_loop_publishes_and_saves(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify tick loop publishes to ZMQ and persists to DB.
+
+    Given: A running publisher with tick data,
+    When: Tick arrives,
+    Then: Message is published and saved to DB.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub.msg_publisher = AsyncMock()
+    pub.repository = SimpleNamespace(upsert_ticks=AsyncMock())
+    pub._exchange_client = SimpleNamespace()
+    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+
+    async def gen() -> AsyncIterator[Any]:
+        yield SimpleNamespace(symbol="BTC-USD", last=10.0, volume=5.0, bid=1.0, ask=2.0)
+        pub.running = False
+
+    pub._exchange_client.subscribe_ticks = lambda symbols: gen()
+    await pub._tick_loop(["BTC-USD"])
+    pub.msg_publisher.send.assert_awaited()
+    pub.repository.upsert_ticks.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_trade_loop_publishes_and_saves_to_db(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify trade loop publishes to ZMQ and persists to DB.
+
+    Given: A running publisher with trade data,
+    When: Trade arrives,
+    Then: Message is published and saved to DB.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub.msg_publisher = AsyncMock()
+    pub.repository = SimpleNamespace(upsert_trades=AsyncMock())
+    pub._exchange_client = SimpleNamespace()
+    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+
+    async def gen() -> AsyncIterator[Any]:
+        yield SimpleNamespace(
+            symbol="BTC-USD",
+            price=100.0,
+            quantity=1.0,
+            side="buy",
+            trade_id=12345,
+            timestamp=datetime.now(UTC),
+        )
+        pub.running = False
+
+    pub._exchange_client.subscribe_trades = lambda symbols: gen()
+    await pub._trade_loop(["BTC-USD"])
+    pub.msg_publisher.send.assert_awaited()
+    pub.repository.upsert_trades.assert_awaited_once()

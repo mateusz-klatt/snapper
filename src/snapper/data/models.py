@@ -215,7 +215,11 @@ class Tick(TemporalMixin, Base):
 
 
 class Trade(TemporalMixin, Base):
-    """SQLAlchemy model for individual market trades."""
+    """SQLAlchemy model for individual market trades.
+
+    timestamp (from TemporalMixin) is bus-time when the trade was received.
+    executed_at is domain-time when the trade actually occurred on the exchange.
+    """
 
     __tablename__ = "trades"
     __table_args__ = (
@@ -234,6 +238,7 @@ class Trade(TemporalMixin, Base):
     size: Mapped[float] = mapped_column(Float)
     side: Mapped[str] = mapped_column(String(4))
     trade_id: Mapped[str] = mapped_column(String(64))
+    executed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
 
 
 class Order(TemporalMixin, Base):
