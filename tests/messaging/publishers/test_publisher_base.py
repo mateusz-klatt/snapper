@@ -1093,6 +1093,81 @@ def test_get_max_symbols_per_connection_default() -> None:
     assert DummyPublisher(symbols=["BTC-USD"])._get_max_symbols_per_connection() == 0
 
 
+def test_supports_public_trades_default_true() -> None:
+    """Verify default supports_public_trades returns True.
+
+    Given a publisher instance,
+    When _supports_public_trades is called,
+    Then it returns True as the default value.
+    """
+    assert DummyPublisher(symbols=["BTC-USD"])._supports_public_trades() is True
+
+
+@pytest.mark.asyncio
+async def test_start_skips_trade_loop_when_unsupported(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify trade loop is not started when exchange has no trade feed.
+
+    Given: A publisher where _supports_public_trades returns False,
+    When: start() is called,
+    Then: _trade_loop is not invoked.
+    """
+    pub: Any = DummyPublisher(symbols=["EUR-PLN"])
+    pub._supports_public_trades = lambda: False
+    mock_repo = SimpleNamespace(get_latest_candle_ids=AsyncMock(return_value={}))
+    monkeypatch.setattr("snapper.messaging.publishers.base.get_repository", lambda _url: mock_repo)
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.get_settings_service",
+        AsyncMock(return_value=SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.get_settings_with_service",
+        lambda _svc: pub.settings,
+    )
+
+    class DummySock(SimpleNamespace):
+        def __init__(self) -> None:
+            super().__init__(
+                connect=lambda *_: None, close=lambda: None, setsockopt=lambda o, v: None
+            )
+
+    class DummyCtx:
+        def socket(self, *_args: Any) -> DummySock:
+            return DummySock()
+
+        def term(self) -> None:
+            return None
+
+    monkeypatch.setattr("snapper.messaging.publishers.base.zmq.asyncio.Context", lambda: DummyCtx())
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.ValidatedPublisher",
+        lambda sock: SimpleNamespace(
+            close=sock.close, send_multipart=AsyncMock(), setsockopt=sock.setsockopt
+        ),
+    )
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.ValidatedSubscriber",
+        lambda sock: SimpleNamespace(
+            subscribe=lambda *_: None,
+            recv_multipart=AsyncMock(),
+            close=sock.close,
+            setsockopt=sock.setsockopt,
+        ),
+    )
+    dummy_client = cast(Any, DummyClient())
+    dummy_client.connect = AsyncMock()
+    pub._create_exchange_client = lambda: dummy_client
+    pub.settings.timeframes = []
+    pub.settings.zmq_heartbeat_interval_ms = 0
+    pub._heartbeat_loop = AsyncMock()
+    pub._symbol_aliases_loop = AsyncMock()
+    pub._tick_loop = AsyncMock()
+    pub._trade_loop = AsyncMock()
+    pub._candle_loop = AsyncMock()
+    await pub.start()
+    pub._trade_loop.assert_not_awaited()
+    await pub.stop()
+
+
 @pytest.mark.asyncio
 async def test_candle_loop_breaks_when_stopped() -> None:
     """Verify candle loop exits when running flag is cleared.

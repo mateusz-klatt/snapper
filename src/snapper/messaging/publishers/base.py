@@ -188,7 +188,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             for timeframe in timeframes
         )
         tasks.append(asyncio.create_task(self._tick_loop(symbols_to_subscribe)))
-        tasks.append(asyncio.create_task(self._trade_loop(symbols_to_subscribe)))
+        if self._supports_public_trades():
+            tasks.append(asyncio.create_task(self._trade_loop(symbols_to_subscribe)))
+        else:
+            logger.info(f"{process_name}: Trade loop disabled (exchange has no public trade feed)")
         try:
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
@@ -213,6 +216,17 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             self.context.term()
         exchange_name = self._get_exchange_name()
         logger.info(f"{exchange_name}_feed_publisher: Stopped")
+
+    def _supports_public_trades(self) -> bool:
+        """Return whether this exchange provides a public trade feed.
+
+        Override to False for exchanges that do not expose trade tape
+        (e.g. Walutomat). When False, the trade loop is not started.
+
+        Returns:
+            True if the exchange supports public trade subscriptions.
+        """
+        return True
 
     def _get_max_symbols_per_connection(self) -> int:
         """Return maximum symbols per WebSocket connection (0 = unlimited).

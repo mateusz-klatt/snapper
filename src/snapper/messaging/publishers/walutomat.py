@@ -46,6 +46,9 @@ class WalutomatMarketDataPublisher(MarketDataPublisherService[WalutomatExchangeC
             "symbols": walutomat_symbols,
         }
 
+    def _supports_public_trades(self) -> bool:
+        return False
+
     def _create_exchange_client(self) -> WalutomatExchangeClient:
         return WalutomatExchangeClient()
 

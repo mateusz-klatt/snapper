@@ -95,6 +95,20 @@ class TestWalutomatPublisher:
         assert publisher._get_exchange_name() == "walutomat"
 
     @patch("snapper.config.settings.get_settings")
+    def test_supports_public_trades_false(self, mock_get_settings: MagicMock) -> None:
+        """Verify Walutomat reports no public trade feed.
+
+        Given a WalutomatMarketDataPublisher instance,
+        When _supports_public_trades is called,
+        Then it returns False.
+        """
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
+        mock_get_settings.return_value = mock_settings
+        publisher = WalutomatMarketDataPublisher(symbols=[])
+        assert publisher._supports_public_trades() is False
+
+    @patch("snapper.config.settings.get_settings")
     def test_create_exchange_client(self, mock_get_settings: MagicMock) -> None:
         """Verify factory creates WalutomatExchangeClient.
 
