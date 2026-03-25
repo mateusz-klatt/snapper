@@ -12,7 +12,7 @@ RUN pnpm build
 
 FROM python:3.14-slim AS py-build
 
-ENV PIP_NO_CACHE_DIR=1
+ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

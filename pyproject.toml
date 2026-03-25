@@ -84,6 +84,11 @@ types-markdown = "^3.10.2.20260211"
 [tool.poetry.scripts]
 snapper = "snapper.__main__:main"
 
+[[tool.poetry.source]]
+name = "aliyun"
+url = "https://mirrors.aliyun.com/pypi/simple"
+priority = "primary"
+
 [tool.ruff]
 target-version = "py314"
 line-length = 100
