@@ -44,7 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unixodbc \
     && rm -rf /var/lib/apt/lists/*
 
-ARG UID=8888
+ARG UID=888
 RUN adduser --disabled-password --gecos '' --no-create-home --uid "$UID" snapper
 
 COPY --from=py-build /wheels /wheels
