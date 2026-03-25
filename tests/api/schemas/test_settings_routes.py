@@ -24,11 +24,46 @@ from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 
 class MockRepository:
-    """Mock repository with session accessor."""
+    """Mock repository with session accessor and read methods."""
 
     def __init__(self) -> None:
         """Initialize the instance."""
         self.session = MagicMock()
+        self._settings: list[dict[str, object]] = []
+        self._categories: list[str] = []
+
+    def set_settings(self, settings: list[MagicMock]) -> None:
+        """Configure settings data for get_settings calls."""
+        self._settings = [
+            {
+                "public_id": s.public_id,
+                "timestamp": s.timestamp,
+                "session_id": s.session_id,
+                "sequence_id": s.sequence_id,
+                "key": s.key,
+                "value": s.value,
+                "category": s.category,
+                "description": s.description,
+                "updated_by": s.updated_by,
+            }
+            for s in settings
+        ]
+
+    def set_categories(self, categories: list[str]) -> None:
+        """Configure categories data for get_setting_categories calls."""
+        self._categories = categories
+
+    async def get_settings(
+        self, as_of: object, category: str | None = None
+    ) -> list[dict[str, object]]:
+        """Return configured settings, optionally filtered by category."""
+        if category:
+            return [s for s in self._settings if s["category"] == category]
+        return self._settings
+
+    async def get_setting_categories(self, as_of: object) -> list[str]:
+        """Return configured categories."""
+        return sorted(self._categories)
 
 
 class MockSession:
@@ -179,7 +214,6 @@ class TestSettingsRoutes:
         mock_settings = MagicMock()
         mock_settings.db_url = "sqlite:///:memory:"
         mock_repository = MockRepository()
-        mock_session = MockSession()
         mock_setting1 = self._make_mock_setting(
             key="key1",
             value="value1",
@@ -194,8 +228,7 @@ class TestSettingsRoutes:
             description="desc2",
             updated_by="user2",
         )
-        mock_session.execute.return_value = MockResult([mock_setting1, mock_setting2])
-        mock_repository.session.return_value = mock_session
+        mock_repository.set_settings([mock_setting1, mock_setting2])
         with (
             patch("snapper.config.settings_routes.get_settings", return_value=mock_settings),
             patch("snapper.config.settings_routes.get_repository", return_value=mock_repository),
@@ -219,7 +252,6 @@ class TestSettingsRoutes:
         mock_settings = MagicMock()
         mock_settings.db_url = "sqlite:///:memory:"
         mock_repository = MockRepository()
-        mock_session = MockSession()
         mock_setting = self._make_mock_setting(
             key="key1",
             value="value1",
@@ -227,8 +259,7 @@ class TestSettingsRoutes:
             description="desc1",
             updated_by="user1",
         )
-        mock_session.execute.return_value = MockResult([mock_setting])
-        mock_repository.session.return_value = mock_session
+        mock_repository.set_settings([mock_setting])
         with (
             patch("snapper.config.settings_routes.get_settings", return_value=mock_settings),
             patch("snapper.config.settings_routes.get_repository", return_value=mock_repository),
@@ -251,13 +282,7 @@ class TestSettingsRoutes:
         mock_settings = MagicMock()
         mock_settings.db_url = "sqlite:///:memory:"
         mock_repository = MockRepository()
-        mock_session = MockSession()
-        mock_setting1 = MagicMock()
-        mock_setting1.category = "auth"
-        mock_setting2 = MagicMock()
-        mock_setting2.category = "system"
-        mock_session.execute.return_value = MockResult([mock_setting1, mock_setting2])
-        mock_repository.session.return_value = mock_session
+        mock_repository.set_categories(["auth", "system"])
         with (
             patch("snapper.config.settings_routes.get_settings", return_value=mock_settings),
             patch("snapper.config.settings_routes.get_repository", return_value=mock_repository),

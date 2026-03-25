@@ -26,8 +26,6 @@ from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
-from snapper.data.models import Candle
-from snapper.data.models import Instrument
 from snapper.interface.websocket.models import ConnectionStats
 from snapper.interface.websocket.models import WsStatsSnapshot
 from snapper.server import process_runner
@@ -283,58 +281,33 @@ class TestCreateApiRouter:
         assert data["payload"]["status"] == "healthy"
         assert "timestamp" in data
 
-    @patch("snapper.server.app.get_settings")
-    @patch("snapper.server.app.get_repository")
-    def test_get_candles_success(
-        self, mock_get_repo: MagicMock, mock_get_settings: MagicMock
-    ) -> None:
+    def test_get_candles_success(self) -> None:
         """Test candles endpoint returns OHLCV data.
 
         Given: A valid instrument with candle data in repository,
         When: GET /api/candles is called with parameters,
         Then: Response contains candle data array with OHLCV values.
         """
-        mock_settings = MagicMock()
-        mock_settings.db_url = TEST_DB_URL
-        mock_get_settings.return_value = mock_settings
-        mock_repo = MagicMock()
-        mock_session = MagicMock()
-        mock_session_context = AsyncMock()
-        mock_session_context.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session_context.__aexit__ = AsyncMock(return_value=None)
-        mock_repo.session.return_value = mock_session_context
-        mock_get_repo.return_value = mock_repo
-        mock_instrument = MagicMock(spec=Instrument)
-        mock_instrument.id = 1
-        mock_instrument.symbol = "BTC-USD"
-        mock_inst_result = MagicMock()
-        mock_inst_result.scalars.return_value.first.return_value = mock_instrument
-        mock_candle = MagicMock(spec=Candle)
-        mock_candle.id = 1
-        mock_candle.public_id = "candle-uuid-1234"
-        mock_candle.timeframe = "1h"
-        mock_candle.open_at = datetime(2023, 1, 1, 12, 0)
-        mock_candle.timestamp = datetime(2023, 1, 1, 12, 0)
-        mock_candle.open = 50000.0
-        mock_candle.high = 51000.0
-        mock_candle.low = 49000.0
-        mock_candle.close = 50500.0
-        mock_candle.volume = 1000.0
-        mock_candle.vwap = 50250.0
-        mock_candle.trades = 10
-        mock_candle.session_id = ""
-        mock_candle.sequence_id = 0
-        mock_candles_result = MagicMock()
-        mock_candles_result.scalars.return_value.all.return_value = [mock_candle]
-
-        async def mock_execute(query: Any) -> Any:
-            if "Instrument" in str(query):
-                return mock_inst_result
-            else:
-                return mock_candles_result
-
-        mock_session.execute = mock_execute
-        response = self.client.get(
+        candle_rows = [
+            {
+                "public_id": "candle-uuid-1234",
+                "timestamp": datetime(2023, 1, 1, 12, 0, tzinfo=dt.UTC),
+                "session_id": "sess-1",
+                "sequence_id": 1,
+                "timeframe": "1h",
+                "open_at": datetime(2023, 1, 1, 12, 0, tzinfo=dt.UTC),
+                "open": 50000.0,
+                "high": 51000.0,
+                "low": 49000.0,
+                "close": 50500.0,
+                "volume": 1000.0,
+                "vwap": 50250.0,
+                "trades": 10,
+            }
+        ]
+        repo = MockRepository(session_result=candle_rows)
+        client = create_app_with_overrides(repo)
+        response = client.get(
             "/api/candles?instrument=BTC-USD&exchange=kraken&timeframe=1h&limit=10"
         )
         assert response.status_code == 200
@@ -350,43 +323,16 @@ class TestCreateApiRouter:
         assert items[0]["close"] == pytest.approx(50500.0)
         assert items[0]["timestamp"] is not None
 
-    @patch("snapper.server.app.get_settings")
-    @patch("snapper.server.app.get_repository")
-    def test_get_candles_no_data_returns_empty_array(
-        self, mock_get_repo: MagicMock, mock_get_settings: MagicMock
-    ) -> None:
+    def test_get_candles_no_data_returns_empty_array(self) -> None:
         """Test candles endpoint returns empty array when no data.
 
         Given: A valid instrument with no candle data,
         When: GET /api/candles is called,
         Then: Response contains an empty array.
         """
-        mock_settings = MagicMock()
-        mock_settings.db_url = TEST_DB_URL
-        mock_get_settings.return_value = mock_settings
-        mock_repo = MagicMock()
-        mock_get_repo.return_value = mock_repo
-        mock_session = MagicMock()
-        mock_session_context = AsyncMock()
-        mock_session_context.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session_context.__aexit__ = AsyncMock(return_value=None)
-        mock_repo.session.return_value = mock_session_context
-        mock_instrument = MagicMock(spec=Instrument)
-        mock_instrument.id = 1
-        mock_instrument.symbol = "BTC-USD"
-        mock_inst_result = MagicMock()
-        mock_inst_result.scalars.return_value.first.return_value = mock_instrument
-        mock_candles_result = MagicMock()
-        mock_candles_result.scalars.return_value.all.return_value = []
-
-        async def mock_execute(query: Any) -> Any:
-            if "Instrument" in str(query):
-                return mock_inst_result
-            else:
-                return mock_candles_result
-
-        mock_session.execute = mock_execute
-        response = self.client.get(
+        repo = MockRepository(session_result=[])
+        client = create_app_with_overrides(repo)
+        response = client.get(
             "/api/candles?instrument=BTC-USD&exchange=kraken&timeframe=1h&limit=10"
         )
         assert response.status_code == 200
@@ -395,76 +341,31 @@ class TestCreateApiRouter:
         assert data["count"] == 0
         assert data["payload"] == []
 
-    @patch("snapper.server.app.get_settings")
-    @patch("snapper.server.app.get_repository")
-    def test_get_candles_symbol_not_found_returns_empty_payload(
-        self, mock_get_repo: MagicMock, mock_get_settings: MagicMock
-    ) -> None:
+    def test_get_candles_symbol_not_found_returns_empty_payload(self) -> None:
         """Test candles endpoint returns empty payload when Symbol is missing.
 
         Given: No active Symbol row for the requested instrument,
         When: GET /api/candles is called,
         Then: Response status is 200 with empty payload list.
         """
-        mock_settings = MagicMock()
-        mock_settings.db_url = TEST_DB_URL
-        mock_get_settings.return_value = mock_settings
-        mock_repo = MagicMock()
-        mock_session = MagicMock()
-        mock_session_context = AsyncMock()
-        mock_session_context.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session_context.__aexit__ = AsyncMock(return_value=None)
-        mock_repo.session.return_value = mock_session_context
-        mock_get_repo.return_value = mock_repo
-        mock_sym_result = MagicMock()
-        mock_sym_result.scalar_one_or_none.return_value = None
-
-        async def mock_execute(query: Any) -> Any:
-            return mock_sym_result
-
-        mock_session.execute = mock_execute
-        response = self.client.get("/api/candles?instrument=NOSYMBOL&exchange=kraken&timeframe=1h")
+        repo = MockRepository(session_result=[])
+        client = create_app_with_overrides(repo)
+        response = client.get("/api/candles?instrument=NOSYMBOL&exchange=kraken&timeframe=1h")
         assert response.status_code == 200
         data = response.json()
         assert data["payload"] == []
         assert data["count"] == 0
 
-    @patch("snapper.server.app.get_settings")
-    @patch("snapper.server.app.get_repository")
-    def test_get_candles_instrument_not_found_returns_empty_payload(
-        self, mock_get_repo: MagicMock, mock_get_settings: MagicMock
-    ) -> None:
+    def test_get_candles_instrument_not_found_returns_empty_payload(self) -> None:
         """Test candles endpoint returns empty payload for unknown instrument.
 
         Given: Symbol exists but no matching Instrument in the database,
         When: GET /api/candles is called,
         Then: Response status is 200 with empty payload list.
         """
-        mock_settings = MagicMock()
-        mock_settings.db_url = TEST_DB_URL
-        mock_get_settings.return_value = mock_settings
-        mock_repo = MagicMock()
-        mock_session = MagicMock()
-        mock_session_context = AsyncMock()
-        mock_session_context.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session_context.__aexit__ = AsyncMock(return_value=None)
-        mock_repo.session.return_value = mock_session_context
-        mock_get_repo.return_value = mock_repo
-        mock_sym_result = MagicMock()
-        mock_sym_result.scalar_one_or_none.return_value = "sym-pub-1"
-        mock_inst_result = MagicMock()
-        mock_inst_result.scalars.return_value.first.return_value = None
-        call_count = 0
-
-        async def mock_execute(query: Any) -> Any:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return mock_sym_result
-            return mock_inst_result
-
-        mock_session.execute = mock_execute
-        response = self.client.get("/api/candles?instrument=INVALID&exchange=kraken&timeframe=1h")
+        repo = MockRepository(session_result=[])
+        client = create_app_with_overrides(repo)
+        response = client.get("/api/candles?instrument=INVALID&exchange=kraken&timeframe=1h")
         assert response.status_code == 200
         data = response.json()
         assert data["payload"] == []
@@ -667,16 +568,148 @@ class TestApiEndpointsEnhanced:
 
 
 class MockRepository:
-    """Mock repository for database session simulation."""
+    """Mock repository for testing REST endpoints.
+
+    Provides async read methods matching the Repository contract.
+    Accepts ORM-like mock tuples and converts them to dicts.
+    """
 
     def __init__(self, session_result: Any = None, error: Exception | None = None) -> None:
         """Initialize the instance."""
-        self._session_result = session_result
+        self._session_result = session_result or []
         self._error = error
 
     def session(self) -> MockSession:
         """Return mock session with configured result or error."""
         return MockSession(self._session_result, self._error)
+
+    def _raise_if_error(self) -> None:
+        """Raise stored error if configured."""
+        if self._error:
+            raise self._error
+
+    async def get_exchanges(self, as_of: Any) -> list[str]:
+        """Return mock exchange list."""
+        self._raise_if_error()
+        return list(self._session_result)
+
+    async def get_exchange_instruments(self, exchange: str, as_of: Any) -> list[str]:
+        """Return mock instrument list."""
+        self._raise_if_error()
+        return list(self._session_result)
+
+    async def get_signals(self, **kwargs: Any) -> list[dict[str, Any]]:
+        """Return mock signal dicts."""
+        self._raise_if_error()
+        return [
+            {
+                "public_id": sig.public_id,
+                "timestamp": sig.timestamp,
+                "session_id": sig.session_id,
+                "sequence_id": sig.sequence_id,
+                "instrument": sym.native_symbol,
+                "exchange": inst.exchange,
+                "side": sig.side,
+                "strength": sig.strength,
+                "reason": sig.reason,
+                "strategy_name": sig.strategy_name,
+                "price": sig.price,
+                "fired_at": sig.fired_at,
+            }
+            for sig, inst, sym in self._session_result
+        ]
+
+    async def get_orders(self, **kwargs: Any) -> list[dict[str, Any]]:
+        """Return mock order dicts."""
+        self._raise_if_error()
+        return [
+            {
+                "public_id": order.public_id,
+                "timestamp": order.timestamp,
+                "session_id": order.session_id,
+                "sequence_id": order.sequence_id,
+                "instrument": sym.native_symbol,
+                "exchange": inst.exchange,
+                "client_order_id": order.client_order_id or "",
+                "exchange_order_id": order.exchange_order_id,
+                "created_at": order.created_at,
+                "updated_at": order.updated_at,
+                "side": order.side,
+                "order_type": order.order_type,
+                "price": order.price,
+                "size": order.size,
+                "filled_size": order.filled_size,
+                "average_price": order.average_price,
+                "status": order.status,
+                "time_in_force": order.time_in_force,
+                "error": order.error,
+            }
+            for order, inst, sym in self._session_result
+        ]
+
+    async def get_executions(self, **kwargs: Any) -> list[dict[str, Any]]:
+        """Return mock execution dicts."""
+        self._raise_if_error()
+        return [
+            {
+                "public_id": exe.public_id,
+                "timestamp": exe.timestamp,
+                "session_id": exe.session_id,
+                "sequence_id": exe.sequence_id,
+                "trade_id": exe.trade_id,
+                "exchange_order_id": order.exchange_order_id,
+                "client_order_id": order.client_order_id or "",
+                "instrument": sym.native_symbol,
+                "exchange": inst.exchange,
+                "side": exe.side,
+                "size": exe.size,
+                "price": exe.price,
+                "fee": exe.fee,
+                "fee_asset": exe.fee_asset,
+                "status": exe.status,
+                "executed_at": exe.executed_at or exe.timestamp,
+            }
+            for exe, order, inst, sym in self._session_result
+        ]
+
+    async def get_positions(self, **kwargs: Any) -> list[dict[str, Any]]:
+        """Return mock position dicts."""
+        self._raise_if_error()
+        return [
+            {
+                "public_id": pos.public_id,
+                "timestamp": pos.timestamp,
+                "session_id": pos.session_id,
+                "sequence_id": pos.sequence_id,
+                "instrument": sym.native_symbol,
+                "exchange": inst.exchange,
+                "quantity": pos.quantity,
+                "average_price": pos.average_price,
+                "unrealized_pnl": pos.unrealized_pnl,
+                "realized_pnl": pos.realized_pnl,
+            }
+            for pos, inst, sym in self._session_result
+        ]
+
+    async def get_candles(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        """Return mock candle dicts."""
+        self._raise_if_error()
+        return list(self._session_result)
+
+    async def get_settings(self, **kwargs: Any) -> list[dict[str, Any]]:
+        """Return mock settings dicts."""
+        self._raise_if_error()
+        return list(self._session_result)
+
+    async def get_setting_by_key(self, key: str, as_of: Any) -> dict[str, Any] | None:
+        """Return mock setting dict or None."""
+        self._raise_if_error()
+        return self._session_result[0] if self._session_result else None
+
+    async def get_setting_categories(self, as_of: Any) -> list[str]:
+        """Return mock setting categories."""
+        self._raise_if_error()
+        return list(self._session_result)
 
 
 class MockSession:
@@ -1000,27 +1033,11 @@ class TestCandlesEndpointWithErrors:
         When: GET /candles is called,
         Then: Response is 500 with error detail.
         """
-        app = create_app()
-
-        def skip_csrf_validation() -> None:
-            return None
-
-        def skip_authentication() -> AuthPrincipal:
-            return AuthPrincipal(username="test_user", role=UserRole.ADMIN)
-
-        app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
-        app.dependency_overrides[require_authentication] = skip_authentication
-        client = _track_test_client(TestClient(app))
-        with patch("snapper.server.app.get_repository") as mock_get_repo:
-            mock_repo = MagicMock()
-            mock_session = AsyncMock()
-            mock_session.__aenter__ = AsyncMock(side_effect=Exception("Candle query failed"))
-            mock_session.__aexit__ = AsyncMock()
-            mock_repo.session.return_value = mock_session
-            mock_get_repo.return_value = mock_repo
-            response = client.get("/api/candles?instrument=BTC-USD&exchange=kraken&timeframe=1h")
-            assert response.status_code == 500
-            assert "Failed to fetch candle data" in response.json()["detail"]
+        repo = MockRepository(error=Exception("Candle query failed"))
+        client = create_app_with_overrides(repo)
+        response = client.get("/api/candles?instrument=BTC-USD&exchange=kraken&timeframe=1h")
+        assert response.status_code == 500
+        assert "Failed to fetch candle data" in response.json()["detail"]
 
 
 class TestZmqHealthCheckErrors:
@@ -1984,33 +2001,15 @@ class TestCandlesHttpExceptionReraise:
     def test_candles_reraises_http_exception(self) -> None:
         """Verify candles endpoint re-raises HTTPException.
 
-        Given: Repository session that raises HTTPException,
+        Given: Repository that raises HTTPException,
         When: GET /candles is called,
         Then: HTTPException is propagated with original status.
         """
-        app = create_app()
-
-        def skip_csrf_validation() -> None:
-            return None
-
-        def skip_authentication() -> AuthPrincipal:
-            return AuthPrincipal(username="test_user", role=UserRole.ADMIN)
-
-        app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
-        app.dependency_overrides[require_authentication] = skip_authentication
-        client = _track_test_client(TestClient(app))
-        with patch("snapper.server.app.get_repository") as mock_get_repo:
-            mock_repo = MagicMock()
-            mock_session = MagicMock()
-            mock_session.__aenter__ = AsyncMock(
-                side_effect=HTTPException(status_code=403, detail="Forbidden")
-            )
-            mock_session.__aexit__ = AsyncMock()
-            mock_repo.session.return_value = mock_session
-            mock_get_repo.return_value = mock_repo
-            response = client.get("/api/candles?instrument=BTC-USD&exchange=kraken&timeframe=1h")
-            assert response.status_code == 403
-            assert "Forbidden" in response.json()["detail"]
+        repo = MockRepository(error=HTTPException(status_code=403, detail="Forbidden"))
+        client = create_app_with_overrides(repo)
+        response = client.get("/api/candles?instrument=BTC-USD&exchange=kraken&timeframe=1h")
+        assert response.status_code == 403
+        assert "Forbidden" in response.json()["detail"]
 
 
 @pytest.fixture(autouse=True)

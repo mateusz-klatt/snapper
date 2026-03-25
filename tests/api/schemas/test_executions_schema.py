@@ -135,9 +135,11 @@ class TestDatabaseEndpoints:
         Then: Response is 500 with error detail.
         """
         mock_repository = AsyncMock(spec=Repository)
-        mock_repository.session.return_value.__aenter__.side_effect = Exception(
-            "Mock repository error"
-        )
+        db_error = Exception("Mock repository error")
+        mock_repository.get_orders.side_effect = db_error
+        mock_repository.get_signals.side_effect = db_error
+        mock_repository.get_executions.side_effect = db_error
+        mock_repository.get_positions.side_effect = db_error
         self.app.dependency_overrides[get_repository_dependency] = lambda: mock_repository
         endpoints = [
             "/api/orders",
@@ -158,10 +160,11 @@ class TestDatabaseEndpoints:
         Then: Response is 500 with specific error messages.
         """
         mock_repository = AsyncMock(spec=Repository)
-        mock_session = AsyncMock()
-        mock_repository.session.return_value.__aenter__.return_value = mock_session
-        mock_repository.session.return_value.__aexit__.return_value = None
-        mock_session.execute.side_effect = Exception("Database connection failed")
+        db_error = Exception("Database connection failed")
+        mock_repository.get_orders.side_effect = db_error
+        mock_repository.get_signals.side_effect = db_error
+        mock_repository.get_executions.side_effect = db_error
+        mock_repository.get_positions.side_effect = db_error
         self.app.dependency_overrides[get_repository_dependency] = lambda: mock_repository
         endpoint_messages = {
             "/api/orders": "Failed to fetch orders",

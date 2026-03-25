@@ -45,6 +45,8 @@ from uuid import uuid7
 from loguru import logger
 from sqlalchemy import and_
 from sqlalchemy import create_engine as create_sync_engine
+from sqlalchemy import desc
+from sqlalchemy import distinct
 from sqlalchemy import event
 from sqlalchemy import func
 from sqlalchemy import insert
@@ -72,7 +74,11 @@ from snapper.data.models import Instrument
 from snapper.data.models import InstrumentSpec
 from snapper.data.models import MarketSnapshot
 from snapper.data.models import Order
+from snapper.data.models import Position
+from snapper.data.models import Setting
+from snapper.data.models import Signal
 from snapper.data.models import Symbol
+from snapper.data.models import SymbolAlias
 from snapper.data.models import Tick
 from snapper.data.models import Trade
 
@@ -422,12 +428,19 @@ class Repository(ABC):
         self,
         instrument: str,
         timeframe: str,
-        start: datetime,
-        end: datetime,
+        start: datetime | None,
+        end: datetime | None,
         exchange: AllExchange,
         as_of: datetime,
+        limit: int | None = None,
+        order: str = "asc",
     ) -> list[dict[str, Any]]:
-        """Retrieve candles for instrument in time range."""
+        """Retrieve candles for instrument.
+
+        Two modes:
+        - Range: start and end both provided.
+        - Latest-as-of: start and end are None, limit provided.
+        """
         ...
 
     @abstractmethod
@@ -460,6 +473,147 @@ class Repository(ABC):
         Each row must contain instrument_public_id plus market data fields.
         Closes the active snapshot for the same instrument and inserts a
         new version, preserving public_id across updates.
+        """
+        ...
+
+    @abstractmethod
+    async def get_exchanges(self, as_of: datetime) -> list[str]:
+        """Return distinct exchange names from active symbol aliases.
+
+        Args:
+            as_of: Point-in-time for temporal query.
+
+        Returns:
+            Sorted list of exchange name strings.
+        """
+        ...
+
+    @abstractmethod
+    async def get_exchange_instruments(self, exchange: str, as_of: datetime) -> list[str]:
+        """Return distinct native symbols available on a given exchange.
+
+        Args:
+            exchange: Exchange name to query instruments for.
+            as_of: Point-in-time for temporal query.
+
+        Returns:
+            Sorted list of native symbol strings.
+        """
+        ...
+
+    @abstractmethod
+    async def get_signals(
+        self,
+        since: datetime,
+        limit: int,
+        as_of: datetime,
+        instrument: str | None = None,
+        strategy: str | None = None,
+        exchange: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve signals with optional filters.
+
+        Args:
+            since: Start of time window for fired_at.
+            limit: Maximum number of signals to return.
+            as_of: Point-in-time for temporal query.
+            instrument: Optional native symbol filter.
+            strategy: Optional strategy name filter.
+            exchange: Optional exchange filter.
+
+        Returns:
+            Signal dicts ordered by fired_at DESC, denormalized with
+            instrument and symbol info.
+        """
+        ...
+
+    @abstractmethod
+    async def get_orders(
+        self,
+        limit: int,
+        offset: int,
+        as_of: datetime,
+        symbol: str | None = None,
+        exchange: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve orders with optional filters and pagination.
+
+        Args:
+            limit: Maximum number of orders to return.
+            offset: Number of orders to skip.
+            as_of: Point-in-time for temporal query.
+            symbol: Optional native symbol filter.
+            exchange: Optional exchange filter.
+
+        Returns:
+            Order dicts ordered by created_at DESC, denormalized with
+            instrument and symbol info.
+        """
+        ...
+
+    @abstractmethod
+    async def get_executions(self, limit: int, as_of: datetime) -> list[dict[str, Any]]:
+        """Retrieve executions with order/instrument/symbol info.
+
+        Args:
+            limit: Maximum number of executions to return.
+            as_of: Point-in-time for temporal query.
+
+        Returns:
+            Execution dicts ordered by timestamp DESC, denormalized with
+            order, instrument and symbol info.
+        """
+        ...
+
+    @abstractmethod
+    async def get_positions(self, as_of: datetime) -> list[dict[str, Any]]:
+        """Retrieve active positions with instrument/symbol info.
+
+        Args:
+            as_of: Point-in-time for temporal query.
+
+        Returns:
+            Position dicts denormalized with instrument and symbol info.
+        """
+        ...
+
+    @abstractmethod
+    async def get_settings(
+        self, as_of: datetime, category: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Retrieve active settings, optionally filtered by category.
+
+        Args:
+            as_of: Point-in-time for temporal query.
+            category: Optional category filter.
+
+        Returns:
+            Setting dicts for active settings at as_of.
+        """
+        ...
+
+    @abstractmethod
+    async def get_setting_by_key(self, key: str, as_of: datetime) -> dict[str, Any] | None:
+        """Retrieve a single setting by key.
+
+        Args:
+            key: Setting key to look up.
+            as_of: Point-in-time for temporal query.
+
+        Returns:
+            Setting dict or None if not found.
+        """
+        ...
+
+    @abstractmethod
+    async def get_setting_categories(self, as_of: datetime) -> list[str]:
+        """Return distinct setting category names.
+
+        Args:
+            as_of: Point-in-time for temporal query.
+
+        Returns:
+            Sorted list of category name strings.
         """
         ...
 
@@ -979,64 +1133,90 @@ class SQLAlchemyRepository(Repository):
             await s.refresh(execution)
             return execution.id
 
+    async def _resolve_active_instrument(
+        self,
+        session: AsyncSession,
+        native_symbol: str,
+        exchange: str,
+        as_of: datetime,
+    ) -> Instrument | None:
+        """Resolve active Instrument from native symbol and exchange.
+
+        Args:
+            session: Active database session.
+            native_symbol: Canonical symbol string (e.g. 'BTC-USD').
+            exchange: Exchange name.
+            as_of: Point-in-time for temporal query.
+
+        Returns:
+            Active Instrument or None if symbol/instrument not found.
+        """
+        s_ts, s_kt = where_active(Symbol, as_of)
+        sym_q = await session.execute(
+            select(Symbol.public_id).where(Symbol.native_symbol == native_symbol, s_ts, s_kt)
+        )
+        symbol_pid = sym_q.scalar_one_or_none()
+        if symbol_pid is None:
+            return None
+        i_ts, i_kt = where_active(Instrument, as_of)
+        q_inst = await session.execute(
+            select(Instrument).where(
+                Instrument.symbol_public_id == symbol_pid,
+                Instrument.exchange == exchange,
+                i_ts,
+                i_kt,
+            )
+        )
+        return q_inst.scalars().first()
+
     async def get_candles(
         self,
         instrument: str,
         timeframe: str,
-        start: datetime,
-        end: datetime,
+        start: datetime | None,
+        end: datetime | None,
         exchange: AllExchange,
         as_of: datetime,
+        limit: int | None = None,
+        order: str = "asc",
     ) -> list[dict[str, Any]]:
-        """Retrieve active candles for instrument within time range."""
-        now = as_of
+        """Retrieve active candles for instrument.
+
+        Supports two modes:
+        - Range mode: start and end both provided.
+        - Latest-as-of mode: start/end are None, limit provided.
+        """
         async with self.session() as s:
-            s_ts, s_kt = where_active(Symbol, now)
-            sym_q = await s.execute(
-                select(Symbol.public_id).where(
-                    Symbol.native_symbol == instrument,
-                    s_ts,
-                    s_kt,
-                )
-            )
-            symbol_pid = sym_q.scalar_one_or_none()
-            if symbol_pid is None:
-                return []
-            i_ts, i_kt = where_active(Instrument, now)
-            q_inst = await s.execute(
-                select(Instrument).where(
-                    Instrument.symbol_public_id == symbol_pid,
-                    Instrument.exchange == exchange,
-                    i_ts,
-                    i_kt,
-                )
-            )
-            inst = q_inst.scalars().first()
+            inst = await self._resolve_active_instrument(s, instrument, exchange, as_of)
             if inst is None:
                 return []
-            q = await s.execute(
-                select(
-                    Candle.open_at,
-                    Candle.timeframe,
-                    Candle.open,
-                    Candle.high,
-                    Candle.low,
-                    Candle.close,
-                    Candle.volume,
-                    Candle.vwap,
-                    Candle.trades,
-                )
-                .where(
-                    Candle.instrument_public_id == inst.public_id,
-                    Candle.timeframe == timeframe,
-                    Candle.open_at >= start,
-                    Candle.open_at <= end,
-                    Candle.timestamp <= now,
-                    Candle.known_to > now,
-                )
-                .order_by(Candle.open_at.asc())
+            q = select(
+                Candle.open_at,
+                Candle.timeframe,
+                Candle.open,
+                Candle.high,
+                Candle.low,
+                Candle.close,
+                Candle.volume,
+                Candle.vwap,
+                Candle.trades,
+                Candle.public_id,
+                Candle.timestamp,
+                Candle.session_id,
+                Candle.sequence_id,
+            ).where(
+                Candle.instrument_public_id == inst.public_id,
+                Candle.timeframe == timeframe,
+                Candle.timestamp <= as_of,
+                Candle.known_to > as_of,
             )
-            rows = q.all()
+            if start is not None and end is not None:
+                q = q.where(Candle.open_at >= start, Candle.open_at <= end)
+            order_col = Candle.open_at.desc() if order == "desc" else Candle.open_at.asc()
+            q = q.order_by(order_col)
+            if limit is not None:
+                q = q.limit(limit)
+            rows = (await s.execute(q)).all()
             return [
                 {
                     "open_at": r.open_at,
@@ -1048,6 +1228,10 @@ class SQLAlchemyRepository(Repository):
                     "volume": r.volume,
                     "vwap": r.vwap,
                     "trades": r.trades,
+                    "public_id": r.public_id,
+                    "timestamp": r.timestamp,
+                    "session_id": r.session_id,
+                    "sequence_id": r.sequence_id,
                 }
                 for r in rows
             ]
@@ -1061,29 +1245,8 @@ class SQLAlchemyRepository(Repository):
         as_of: datetime,
     ) -> list[dict[str, Any]]:
         """Retrieve trades for instrument within time range."""
-        now = as_of
         async with self.session() as s:
-            s_ts, s_kt = where_active(Symbol, now)
-            sym_q = await s.execute(
-                select(Symbol.public_id).where(
-                    Symbol.native_symbol == instrument,
-                    s_ts,
-                    s_kt,
-                )
-            )
-            symbol_pid = sym_q.scalar_one_or_none()
-            if symbol_pid is None:
-                return []
-            i_ts, i_kt = where_active(Instrument, now)
-            q_inst = await s.execute(
-                select(Instrument).where(
-                    Instrument.symbol_public_id == symbol_pid,
-                    Instrument.exchange == exchange,
-                    i_ts,
-                    i_kt,
-                )
-            )
-            inst = q_inst.scalars().first()
+            inst = await self._resolve_active_instrument(s, instrument, exchange, as_of)
             if inst is None:
                 return []
             q = await s.execute(
@@ -1098,8 +1261,8 @@ class SQLAlchemyRepository(Repository):
                     Trade.instrument_public_id == inst.public_id,
                     Trade.timestamp >= start,
                     Trade.timestamp <= end,
-                    Trade.timestamp <= now,
-                    Trade.known_to > now,
+                    Trade.timestamp <= as_of,
+                    Trade.known_to > as_of,
                 )
                 .order_by(Trade.timestamp.asc())
             )
@@ -1209,6 +1372,305 @@ class SQLAlchemyRepository(Repository):
                 count += 1
             await s.commit()
         return count
+
+    async def get_exchanges(self, as_of: datetime) -> list[str]:
+        """Return distinct exchange names from active symbol aliases."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(distinct(SymbolAlias.exchange))
+                .where(*where_active(SymbolAlias, as_of))
+                .order_by(SymbolAlias.exchange)
+            )
+            return list(result.scalars().all())
+
+    async def get_exchange_instruments(self, exchange: str, as_of: datetime) -> list[str]:
+        """Return distinct native symbols available on a given exchange."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(distinct(Symbol.native_symbol))
+                .select_from(SymbolAlias)
+                .join(Symbol, Symbol.public_id == SymbolAlias.symbol_public_id)
+                .where(
+                    SymbolAlias.exchange == exchange,
+                    *where_active(SymbolAlias, as_of),
+                    *where_active(Symbol, as_of),
+                )
+                .order_by(Symbol.native_symbol)
+            )
+            return list(result.scalars().all())
+
+    async def get_signals(
+        self,
+        since: datetime,
+        limit: int,
+        as_of: datetime,
+        instrument: str | None = None,
+        strategy: str | None = None,
+        exchange: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve signals with optional filters."""
+        async with self.session() as s:
+            query = (
+                select(Signal, Instrument, Symbol)
+                .join(
+                    Instrument,
+                    and_(
+                        Signal.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument, as_of),
+                    ),
+                )
+                .join(
+                    Symbol,
+                    and_(
+                        Instrument.symbol_public_id == Symbol.public_id,
+                        *where_active(Symbol, as_of),
+                    ),
+                )
+                .where(
+                    Signal.fired_at >= since,
+                    *where_active(Signal, as_of),
+                )
+            )
+            if instrument:
+                s_ts, s_kt = where_active(Symbol, as_of)
+                sym_subq = (
+                    select(Symbol.public_id)
+                    .where(Symbol.native_symbol == instrument, s_ts, s_kt)
+                    .scalar_subquery()
+                )
+                query = query.where(Instrument.symbol_public_id == sym_subq)
+            if strategy:
+                query = query.where(Signal.strategy_name == strategy)
+            if exchange:
+                query = query.where(Instrument.exchange == exchange)
+            query = query.order_by(desc(Signal.fired_at)).limit(limit)
+            result = await s.execute(query)
+            return [
+                {
+                    "public_id": sig.public_id,
+                    "timestamp": sig.timestamp,
+                    "session_id": sig.session_id,
+                    "sequence_id": sig.sequence_id,
+                    "instrument": sym.native_symbol,
+                    "exchange": inst.exchange,
+                    "side": sig.side,
+                    "strength": sig.strength,
+                    "reason": sig.reason,
+                    "strategy_name": sig.strategy_name,
+                    "price": sig.price,
+                    "fired_at": sig.fired_at,
+                }
+                for sig, inst, sym in result.all()
+            ]
+
+    async def get_orders(
+        self,
+        limit: int,
+        offset: int,
+        as_of: datetime,
+        symbol: str | None = None,
+        exchange: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve orders with optional filters and pagination."""
+        async with self.session() as s:
+            query = (
+                select(Order, Instrument, Symbol)
+                .join(
+                    Instrument,
+                    and_(
+                        Order.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument, as_of),
+                    ),
+                )
+                .join(
+                    Symbol,
+                    and_(
+                        Instrument.symbol_public_id == Symbol.public_id,
+                        *where_active(Symbol, as_of),
+                    ),
+                )
+                .where(*where_active(Order, as_of))
+            )
+            if symbol:
+                s_ts, s_kt = where_active(Symbol, as_of)
+                sym_subq = (
+                    select(Symbol.public_id)
+                    .where(Symbol.native_symbol == symbol, s_ts, s_kt)
+                    .scalar_subquery()
+                )
+                query = query.where(Instrument.symbol_public_id == sym_subq)
+            if exchange:
+                query = query.where(Instrument.exchange == exchange)
+            query = query.order_by(desc(Order.created_at)).offset(offset).limit(limit)
+            result = await s.execute(query)
+            return [
+                {
+                    "public_id": order.public_id,
+                    "timestamp": order.timestamp,
+                    "session_id": order.session_id,
+                    "sequence_id": order.sequence_id,
+                    "instrument": sym.native_symbol,
+                    "exchange": inst.exchange,
+                    "client_order_id": order.client_order_id or "",
+                    "exchange_order_id": order.exchange_order_id,
+                    "created_at": order.created_at,
+                    "updated_at": order.updated_at,
+                    "side": order.side,
+                    "order_type": order.order_type,
+                    "price": order.price,
+                    "size": order.size,
+                    "filled_size": order.filled_size,
+                    "average_price": order.average_price,
+                    "status": order.status,
+                    "time_in_force": order.time_in_force,
+                    "error": order.error,
+                }
+                for order, inst, sym in result.all()
+            ]
+
+    async def get_executions(self, limit: int, as_of: datetime) -> list[dict[str, Any]]:
+        """Retrieve executions with order/instrument/symbol info."""
+        async with self.session() as s:
+            query = (
+                select(Execution, Order, Instrument, Symbol)
+                .join(
+                    Order,
+                    and_(
+                        Execution.order_public_id == Order.public_id,
+                        *where_active(Order, as_of),
+                    ),
+                )
+                .join(
+                    Instrument,
+                    and_(
+                        Order.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument, as_of),
+                    ),
+                )
+                .join(
+                    Symbol,
+                    and_(
+                        Instrument.symbol_public_id == Symbol.public_id,
+                        *where_active(Symbol, as_of),
+                    ),
+                )
+                .where(*where_active(Execution, as_of))
+                .order_by(desc(Execution.timestamp))
+                .limit(limit)
+            )
+            result = await s.execute(query)
+            return [
+                {
+                    "public_id": exe.public_id,
+                    "timestamp": exe.timestamp,
+                    "session_id": exe.session_id,
+                    "sequence_id": exe.sequence_id,
+                    "trade_id": exe.trade_id,
+                    "exchange_order_id": order.exchange_order_id,
+                    "client_order_id": order.client_order_id or "",
+                    "instrument": sym.native_symbol,
+                    "exchange": inst.exchange,
+                    "side": exe.side,
+                    "size": exe.size,
+                    "price": exe.price,
+                    "fee": exe.fee,
+                    "fee_asset": exe.fee_asset,
+                    "status": exe.status,
+                    "executed_at": exe.executed_at or exe.timestamp,
+                }
+                for exe, order, inst, sym in result.all()
+            ]
+
+    async def get_positions(self, as_of: datetime) -> list[dict[str, Any]]:
+        """Retrieve active positions with instrument/symbol info."""
+        async with self.session() as s:
+            query = (
+                select(Position, Instrument, Symbol)
+                .join(
+                    Instrument,
+                    and_(
+                        Position.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument, as_of),
+                    ),
+                )
+                .join(
+                    Symbol,
+                    and_(
+                        Instrument.symbol_public_id == Symbol.public_id,
+                        *where_active(Symbol, as_of),
+                    ),
+                )
+                .where(*where_active(Position, as_of))
+            )
+            result = await s.execute(query)
+            return [
+                {
+                    "public_id": pos.public_id,
+                    "timestamp": pos.timestamp,
+                    "session_id": pos.session_id,
+                    "sequence_id": pos.sequence_id,
+                    "instrument": sym.native_symbol,
+                    "exchange": inst.exchange,
+                    "quantity": pos.quantity,
+                    "average_price": pos.average_price,
+                    "unrealized_pnl": pos.unrealized_pnl,
+                    "realized_pnl": pos.realized_pnl,
+                }
+                for pos, inst, sym in result.all()
+            ]
+
+    async def get_settings(
+        self, as_of: datetime, category: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Retrieve active settings, optionally filtered by category."""
+        async with self.session() as s:
+            query = select(Setting).where(*where_active(Setting, as_of))
+            if category:
+                query = query.where(Setting.category == category)
+            result = await s.execute(query)
+            return [
+                {
+                    "public_id": setting.public_id,
+                    "timestamp": setting.timestamp,
+                    "session_id": setting.session_id,
+                    "sequence_id": setting.sequence_id,
+                    "key": setting.key,
+                    "value": setting.value,
+                    "category": setting.category,
+                    "description": setting.description,
+                    "updated_by": setting.updated_by,
+                }
+                for setting in result.scalars().all()
+            ]
+
+    async def get_setting_by_key(self, key: str, as_of: datetime) -> dict[str, Any] | None:
+        """Retrieve a single setting by key."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(Setting).where(Setting.key == key, *where_active(Setting, as_of))
+            )
+            setting = result.scalars().first()
+            if setting is None:
+                return None
+            return {
+                "public_id": setting.public_id,
+                "timestamp": setting.timestamp,
+                "session_id": setting.session_id,
+                "sequence_id": setting.sequence_id,
+                "key": setting.key,
+                "value": setting.value,
+                "category": setting.category,
+                "description": setting.description,
+                "updated_by": setting.updated_by,
+            }
+
+    async def get_setting_categories(self, as_of: datetime) -> list[str]:
+        """Return distinct setting category names."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(Setting.category).where(*where_active(Setting, as_of)).distinct()
+            )
+            return sorted(row[0] for row in result.fetchall())
 
 
 _repository_cache: dict[str, Repository] = {}

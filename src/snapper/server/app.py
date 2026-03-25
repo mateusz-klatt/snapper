@@ -62,11 +62,6 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-from sqlalchemy import Select
-from sqlalchemy import and_
-from sqlalchemy import desc
-from sqlalchemy import distinct
-from sqlalchemy import select
 
 from snapper.api.auth.services.ws_token_service import get_ws_token_service
 from snapper.api.schemas.data_responses import CandleListResponse
@@ -116,18 +111,9 @@ from snapper.core.types import HealthStatus
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import OrderExchange
 from snapper.core.types import SpawnerProcessStatus
-from snapper.data.models import Candle
-from snapper.data.models import Execution
-from snapper.data.models import Instrument
-from snapper.data.models import Order
-from snapper.data.models import Position
-from snapper.data.models import Signal
-from snapper.data.models import Symbol
-from snapper.data.models import SymbolAlias
 from snapper.data.repository import Repository
 from snapper.data.repository import dispose_repositories
 from snapper.data.repository import get_repository
-from snapper.data.repository import where_active
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
 from snapper.interface.websocket.helpers import build_allowed_origins
 from snapper.messaging.infrastructure.gap_detector import GapDetectorStats
@@ -458,40 +444,6 @@ def _collect_strategy_statuses(
     return strategies
 
 
-def _apply_signal_filters(
-    query: Select[Any],
-    instrument: str | None,
-    strategy: str | None,
-    exchange: OrderExchange | None,
-    at: datetime,
-) -> Select[Any]:
-    """Apply optional instrument/strategy/exchange filters to a signal query.
-
-    Args:
-        query: Base signal query.
-        instrument: Filter by instrument symbol.
-        strategy: Filter by strategy name.
-        exchange: Filter by exchange.
-        at: Point-in-time for temporal filtering.
-
-    Returns:
-        Filtered query.
-    """
-    if instrument:
-        s_ts, s_kt = where_active(Symbol, at)
-        sym_subq = (
-            select(Symbol.public_id)
-            .where(Symbol.native_symbol == instrument, s_ts, s_kt)
-            .scalar_subquery()
-        )
-        query = query.where(Instrument.symbol_public_id == sym_subq)
-    if strategy:
-        query = query.where(Signal.strategy_name == strategy)
-    if exchange:
-        query = query.where(Instrument.exchange == exchange)
-    return query
-
-
 def _create_candles_signals_router() -> APIRouter:
     """Create router for candles and signals endpoints.
 
@@ -509,6 +461,7 @@ def _create_candles_signals_router() -> APIRouter:
         request: Request,
         _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
         _csrf: Annotated[None, Depends(validate_csrf_token)],
+        repo: Annotated[Repository, Depends(get_repository_dependency)],
         instrument: Annotated[str, Query(description="Instrument symbol")],
         exchange: Annotated[MarketDataExchange, Query(description="Exchange name")],
         timeframe: Annotated[str, Query(description="Timeframe")],
@@ -521,6 +474,7 @@ def _create_candles_signals_router() -> APIRouter:
             request: FastAPI request (provides REST tracker for provenance).
             _auth: Authenticated user with READ_MARKET_DATA permission.
             _csrf: CSRF token validation.
+            repo: Database repository.
             instrument: Instrument symbol to query.
             exchange: Exchange name to query.
             timeframe: Candle timeframe (e.g. '1m', '1h').
@@ -530,89 +484,51 @@ def _create_candles_signals_router() -> APIRouter:
         Returns:
             CandleListResponse wrapping the candle data (empty payload if no instrument found).
         """
-        settings = get_settings()
-        repo = get_repository(settings.db_url)
         processing_date = as_of or datetime.now(UTC)
         try:
-            async with repo.session() as session:
-                s_ts, s_kt = where_active(Symbol, processing_date)
-                sym_q = await session.execute(
-                    select(Symbol.public_id).where(Symbol.native_symbol == instrument, s_ts, s_kt)
+            rows = await repo.get_candles(
+                instrument,
+                timeframe,
+                start=None,
+                end=None,
+                exchange=exchange,
+                as_of=processing_date,
+                limit=limit,
+                order="desc",
+            )
+            items = [
+                CandleData(
+                    public_id=r["public_id"],
+                    timestamp=r["timestamp"],
+                    session_id=r["session_id"],
+                    sequence_id=r["sequence_id"],
+                    instrument=instrument,
+                    exchange=exchange,
+                    timeframe=r["timeframe"],
+                    open_at=r["open_at"],
+                    open=r["open"],
+                    high=r["high"],
+                    low=r["low"],
+                    close=r["close"],
+                    volume=r["volume"],
+                    vwap=r["vwap"],
+                    trades=r["trades"],
                 )
-                symbol_pid = sym_q.scalar_one_or_none()
-                tracker: SequenceTracker = request.app.state.rest_tracker
-                if symbol_pid is None:
-                    return CandleListResponse(
-                        payload=[],
-                        count=0,
-                        session_id=tracker.session_id,
-                        sequence_id=tracker.next_sequence(_REST_DATA_STREAM),
-                        public_id=str(uuid7()),
-                        timestamp=dt.datetime.now(dt.UTC),
-                    )
-                inst_query = await session.execute(
-                    select(Instrument).where(
-                        Instrument.symbol_public_id == symbol_pid,
-                        Instrument.exchange == exchange,
-                        Instrument.timestamp <= processing_date,
-                        Instrument.known_to > processing_date,
-                    )
-                )
-                inst = inst_query.scalars().first()
-                if not inst:
-                    return CandleListResponse(
-                        payload=[],
-                        count=0,
-                        session_id=tracker.session_id,
-                        sequence_id=tracker.next_sequence(_REST_DATA_STREAM),
-                        public_id=str(uuid7()),
-                        timestamp=dt.datetime.now(dt.UTC),
-                    )
-                candles_query = await session.execute(
-                    select(Candle)
-                    .where(
-                        Candle.instrument_public_id == inst.public_id,
-                        Candle.timeframe == timeframe,
-                        Candle.timestamp <= processing_date,
-                        Candle.known_to > processing_date,
-                    )
-                    .order_by(desc(Candle.open_at))
-                    .limit(limit)
-                )
-                candles = candles_query.scalars().all()
-                items = [
-                    CandleData(
-                        public_id=candle.public_id,
-                        timestamp=candle.timestamp,
-                        session_id=candle.session_id,
-                        sequence_id=candle.sequence_id,
-                        instrument=instrument,
-                        exchange=exchange,
-                        timeframe=candle.timeframe,
-                        open_at=candle.open_at,
-                        open=candle.open,
-                        high=candle.high,
-                        low=candle.low,
-                        close=candle.close,
-                        volume=candle.volume,
-                        vwap=candle.vwap,
-                        trades=candle.trades,
-                    )
-                    for candle in reversed(candles)
-                ]
-                tracker = request.app.state.rest_tracker
-                sid = tracker.session_id
-                seq = tracker.next_sequence(_REST_DATA_STREAM)
-                ts = dt.datetime.now(dt.UTC)
-                pid = str(uuid7())
-                return CandleListResponse(
-                    session_id=sid,
-                    sequence_id=seq,
-                    public_id=pid,
-                    timestamp=ts,
-                    payload=items,
-                    count=len(items),
-                )
+                for r in reversed(rows)
+            ]
+            tracker: SequenceTracker = request.app.state.rest_tracker
+            sid = tracker.session_id
+            seq = tracker.next_sequence(_REST_DATA_STREAM)
+            ts = dt.datetime.now(dt.UTC)
+            pid = str(uuid7())
+            return CandleListResponse(
+                session_id=sid,
+                sequence_id=seq,
+                public_id=pid,
+                timestamp=ts,
+                payload=items,
+                count=len(items),
+            )
         except HTTPException:
             raise
         except Exception as exc:
@@ -651,65 +567,29 @@ def _create_candles_signals_router() -> APIRouter:
         """
         processing_date = as_of or datetime.now(UTC)
         try:
-            async with repo.session() as session:
-                since = processing_date - timedelta(hours=hours)
-                query = (
-                    select(Signal, Instrument, Symbol)
-                    .join(
-                        Instrument,
-                        and_(
-                            Signal.instrument_public_id == Instrument.public_id,
-                            *where_active(Instrument, processing_date),
-                        ),
-                    )
-                    .join(
-                        Symbol,
-                        and_(
-                            Instrument.symbol_public_id == Symbol.public_id,
-                            *where_active(Symbol, processing_date),
-                        ),
-                    )
-                )
-                query = query.where(Signal.fired_at >= since)
-                query = query.where(
-                    Signal.timestamp <= processing_date, Signal.known_to > processing_date
-                )
-                query = _apply_signal_filters(
-                    query, instrument, strategy, exchange, processing_date
-                )
-                query = query.order_by(desc(Signal.fired_at)).limit(limit)
-                result = await session.execute(query)
-                signals_with_instruments = result.all()
-                items = [
-                    SignalData(
-                        public_id=signal.public_id,
-                        timestamp=signal.timestamp,
-                        session_id=signal.session_id,
-                        sequence_id=signal.sequence_id,
-                        instrument=sym.native_symbol,
-                        exchange=inst.exchange,
-                        side=signal.side,
-                        strength=signal.strength,
-                        reason=signal.reason,
-                        strategy_name=signal.strategy_name,
-                        price=signal.price,
-                        fired_at=signal.fired_at,
-                    )
-                    for signal, inst, sym in signals_with_instruments
-                ]
-                tracker: SequenceTracker = request.app.state.rest_tracker
-                sid = tracker.session_id
-                seq = tracker.next_sequence(_REST_DATA_STREAM)
-                ts = dt.datetime.now(dt.UTC)
-                pid = str(uuid7())
-                return SignalListResponse(
-                    session_id=sid,
-                    sequence_id=seq,
-                    public_id=pid,
-                    timestamp=ts,
-                    payload=items,
-                    count=len(items),
-                )
+            since = processing_date - timedelta(hours=hours)
+            rows = await repo.get_signals(
+                since=since,
+                limit=limit,
+                as_of=processing_date,
+                instrument=instrument,
+                strategy=strategy,
+                exchange=exchange,
+            )
+            items = [SignalData(**r) for r in rows]
+            tracker: SequenceTracker = request.app.state.rest_tracker
+            sid = tracker.session_id
+            seq = tracker.next_sequence(_REST_DATA_STREAM)
+            ts = dt.datetime.now(dt.UTC)
+            pid = str(uuid7())
+            return SignalListResponse(
+                session_id=sid,
+                sequence_id=seq,
+                public_id=pid,
+                timestamp=ts,
+                payload=items,
+                count=len(items),
+            )
         except Exception as exc:
             logger.error(f"Failed to fetch signals: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch signals") from exc
@@ -746,30 +626,21 @@ def _create_exchange_router() -> APIRouter:
             ExchangeListResponse wrapping the exchange name list.
         """
         try:
-            async with repo.session() as session:
-                now = as_of or datetime.now(UTC)
-                result = await session.execute(
-                    select(distinct(SymbolAlias.exchange))
-                    .where(
-                        SymbolAlias.timestamp <= now,
-                        SymbolAlias.known_to > now,
-                    )
-                    .order_by(SymbolAlias.exchange)
-                )
-                items = list(result.scalars().all())
-                tracker: SequenceTracker = request.app.state.rest_tracker
-                sid = tracker.session_id
-                seq = tracker.next_sequence(_REST_DATA_STREAM)
-                ts = dt.datetime.now(dt.UTC)
-                pid = str(uuid7())
-                return ExchangeListResponse(
-                    session_id=sid,
-                    sequence_id=seq,
-                    public_id=pid,
-                    timestamp=ts,
-                    payload=items,
-                    count=len(items),
-                )
+            now = as_of or datetime.now(UTC)
+            items = await repo.get_exchanges(as_of=now)
+            tracker: SequenceTracker = request.app.state.rest_tracker
+            sid = tracker.session_id
+            seq = tracker.next_sequence(_REST_DATA_STREAM)
+            ts = dt.datetime.now(dt.UTC)
+            pid = str(uuid7())
+            return ExchangeListResponse(
+                session_id=sid,
+                sequence_id=seq,
+                public_id=pid,
+                timestamp=ts,
+                payload=items,
+                count=len(items),
+            )
         except Exception as exc:
             logger.error(f"Failed to fetch exchanges: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch exchanges") from exc
@@ -800,70 +671,26 @@ def _create_exchange_router() -> APIRouter:
             InstrumentListResponse wrapping the instrument symbol list.
         """
         try:
-            async with repo.session() as session:
-                now = as_of or datetime.now(UTC)
-                result = await session.execute(
-                    select(distinct(Symbol.native_symbol))
-                    .select_from(SymbolAlias)
-                    .join(Symbol, Symbol.public_id == SymbolAlias.symbol_public_id)
-                    .where(
-                        SymbolAlias.exchange == exchange,
-                        SymbolAlias.timestamp <= now,
-                        SymbolAlias.known_to > now,
-                        Symbol.timestamp <= now,
-                        Symbol.known_to > now,
-                    )
-                    .order_by(Symbol.native_symbol)
-                )
-                items = list(result.scalars().all())
-                tracker: SequenceTracker = request.app.state.rest_tracker
-                sid = tracker.session_id
-                seq = tracker.next_sequence(_REST_DATA_STREAM)
-                ts = dt.datetime.now(dt.UTC)
-                pid = str(uuid7())
-                return InstrumentListResponse(
-                    session_id=sid,
-                    sequence_id=seq,
-                    public_id=pid,
-                    timestamp=ts,
-                    payload=items,
-                    count=len(items),
-                )
+            now = as_of or datetime.now(UTC)
+            items = await repo.get_exchange_instruments(exchange=exchange, as_of=now)
+            tracker: SequenceTracker = request.app.state.rest_tracker
+            sid = tracker.session_id
+            seq = tracker.next_sequence(_REST_DATA_STREAM)
+            ts = dt.datetime.now(dt.UTC)
+            pid = str(uuid7())
+            return InstrumentListResponse(
+                session_id=sid,
+                sequence_id=seq,
+                public_id=pid,
+                timestamp=ts,
+                payload=items,
+                count=len(items),
+            )
         except Exception as exc:
             logger.error(f"Failed to fetch instruments for {exchange}: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch instruments") from exc
 
     return router
-
-
-def _apply_order_filters(
-    query: Select[Any],
-    symbol: str | None,
-    exchange: OrderExchange | None,
-    at: datetime,
-) -> Select[Any]:
-    """Apply optional symbol/exchange filters to an orders query.
-
-    Args:
-        query: Base orders query.
-        symbol: Filter by instrument symbol.
-        exchange: Filter by exchange.
-        at: Point-in-time for temporal filtering.
-
-    Returns:
-        Filtered query.
-    """
-    if symbol:
-        s_ts, s_kt = where_active(Symbol, at)
-        sym_subq = (
-            select(Symbol.public_id)
-            .where(Symbol.native_symbol == symbol, s_ts, s_kt)
-            .scalar_subquery()
-        )
-        query = query.where(Instrument.symbol_public_id == sym_subq)
-    if exchange:
-        query = query.where(Instrument.exchange == exchange)
-    return query
 
 
 def _create_orders_executions_router() -> APIRouter:
@@ -904,68 +731,27 @@ def _create_orders_executions_router() -> APIRouter:
         """
         processing_date = as_of or datetime.now(UTC)
         try:
-            async with repo.session() as session:
-                query = (
-                    select(Order, Instrument, Symbol)
-                    .join(
-                        Instrument,
-                        and_(
-                            Order.instrument_public_id == Instrument.public_id,
-                            *where_active(Instrument, processing_date),
-                        ),
-                    )
-                    .join(
-                        Symbol,
-                        and_(
-                            Instrument.symbol_public_id == Symbol.public_id,
-                            *where_active(Symbol, processing_date),
-                        ),
-                    )
-                )
-                query = query.where(
-                    Order.timestamp <= processing_date, Order.known_to > processing_date
-                )
-                query = _apply_order_filters(query, symbol, exchange, processing_date)
-                query = query.order_by(desc(Order.created_at)).offset(offset).limit(limit)
-                result = await session.execute(query)
-                orders_with_instruments = result.all()
-                items = [
-                    OrderData(
-                        public_id=order.public_id,
-                        timestamp=order.timestamp,
-                        session_id=order.session_id,
-                        sequence_id=order.sequence_id,
-                        instrument=sym.native_symbol,
-                        exchange=inst.exchange,
-                        client_order_id=order.client_order_id or "",
-                        exchange_order_id=order.exchange_order_id,
-                        created_at=order.created_at,
-                        updated_at=order.updated_at,
-                        side=order.side,
-                        order_type=order.order_type,
-                        price=order.price,
-                        size=order.size,
-                        filled_size=order.filled_size,
-                        average_price=order.average_price,
-                        status=order.status,
-                        time_in_force=order.time_in_force,
-                        error=order.error,
-                    )
-                    for order, inst, sym in orders_with_instruments
-                ]
-                tracker: SequenceTracker = request.app.state.rest_tracker
-                sid = tracker.session_id
-                seq = tracker.next_sequence(_REST_DATA_STREAM)
-                ts = dt.datetime.now(dt.UTC)
-                pid = str(uuid7())
-                return OrderListResponse(
-                    session_id=sid,
-                    sequence_id=seq,
-                    public_id=pid,
-                    timestamp=ts,
-                    payload=items,
-                    count=len(items),
-                )
+            rows = await repo.get_orders(
+                limit=limit,
+                offset=offset,
+                as_of=processing_date,
+                symbol=symbol,
+                exchange=exchange,
+            )
+            items = [OrderData(**r) for r in rows]
+            tracker: SequenceTracker = request.app.state.rest_tracker
+            sid = tracker.session_id
+            seq = tracker.next_sequence(_REST_DATA_STREAM)
+            ts = dt.datetime.now(dt.UTC)
+            pid = str(uuid7())
+            return OrderListResponse(
+                session_id=sid,
+                sequence_id=seq,
+                public_id=pid,
+                timestamp=ts,
+                payload=items,
+                count=len(items),
+            )
         except Exception as exc:
             logger.error(f"Failed to fetch orders: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch orders") from exc
@@ -994,72 +780,21 @@ def _create_orders_executions_router() -> APIRouter:
         """
         processing_date = as_of or datetime.now(UTC)
         try:
-            async with repo.session() as session:
-                query = (
-                    select(Execution, Order, Instrument, Symbol)
-                    .join(
-                        Order,
-                        and_(
-                            Execution.order_public_id == Order.public_id,
-                            Order.timestamp <= processing_date,
-                            Order.known_to > processing_date,
-                        ),
-                    )
-                    .join(
-                        Instrument,
-                        and_(
-                            Order.instrument_public_id == Instrument.public_id,
-                            *where_active(Instrument, processing_date),
-                        ),
-                    )
-                    .join(
-                        Symbol,
-                        and_(
-                            Instrument.symbol_public_id == Symbol.public_id,
-                            *where_active(Symbol, processing_date),
-                        ),
-                    )
-                    .where(Execution.timestamp <= processing_date)
-                    .where(Execution.known_to > processing_date)
-                    .order_by(desc(Execution.timestamp))
-                    .limit(limit)
-                )
-                result = await session.execute(query)
-                rows = result.all()
-                items = [
-                    ExecutionData(
-                        public_id=execution.public_id,
-                        timestamp=execution.timestamp,
-                        session_id=execution.session_id,
-                        sequence_id=execution.sequence_id,
-                        trade_id=execution.trade_id,
-                        exchange_order_id=order.exchange_order_id,
-                        client_order_id=order.client_order_id or "",
-                        instrument=sym.native_symbol,
-                        exchange=inst.exchange,
-                        side=execution.side,
-                        size=execution.size,
-                        price=execution.price,
-                        fee=execution.fee,
-                        fee_asset=execution.fee_asset,
-                        status=execution.status,
-                        executed_at=execution.executed_at or execution.timestamp,
-                    )
-                    for execution, order, inst, sym in rows
-                ]
-                tracker: SequenceTracker = request.app.state.rest_tracker
-                sid = tracker.session_id
-                seq = tracker.next_sequence(_REST_DATA_STREAM)
-                ts = dt.datetime.now(dt.UTC)
-                pid = str(uuid7())
-                return ExecutionListResponse(
-                    session_id=sid,
-                    sequence_id=seq,
-                    public_id=pid,
-                    timestamp=ts,
-                    payload=items,
-                    count=len(items),
-                )
+            rows = await repo.get_executions(limit=limit, as_of=processing_date)
+            items = [ExecutionData(**r) for r in rows]
+            tracker: SequenceTracker = request.app.state.rest_tracker
+            sid = tracker.session_id
+            seq = tracker.next_sequence(_REST_DATA_STREAM)
+            ts = dt.datetime.now(dt.UTC)
+            pid = str(uuid7())
+            return ExecutionListResponse(
+                session_id=sid,
+                sequence_id=seq,
+                public_id=pid,
+                timestamp=ts,
+                payload=items,
+                count=len(items),
+            )
         except Exception as exc:
             logger.error(f"Failed to fetch executions: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch executions") from exc
@@ -1086,58 +821,21 @@ def _create_orders_executions_router() -> APIRouter:
         """
         processing_date = as_of or datetime.now(UTC)
         try:
-            async with repo.session() as session:
-                query = (
-                    select(Position, Instrument, Symbol)
-                    .join(
-                        Instrument,
-                        and_(
-                            Position.instrument_public_id == Instrument.public_id,
-                            *where_active(Instrument, processing_date),
-                        ),
-                    )
-                    .join(
-                        Symbol,
-                        and_(
-                            Instrument.symbol_public_id == Symbol.public_id,
-                            *where_active(Symbol, processing_date),
-                        ),
-                    )
-                )
-                query = query.where(
-                    Position.timestamp <= processing_date,
-                    Position.known_to > processing_date,
-                )
-                result = await session.execute(query)
-                positions_with_instruments = result.all()
-                items = [
-                    PositionData(
-                        public_id=position.public_id,
-                        timestamp=position.timestamp,
-                        session_id=position.session_id,
-                        sequence_id=position.sequence_id,
-                        instrument=sym.native_symbol,
-                        exchange=inst.exchange,
-                        quantity=position.quantity,
-                        average_price=position.average_price,
-                        unrealized_pnl=position.unrealized_pnl,
-                        realized_pnl=position.realized_pnl,
-                    )
-                    for position, inst, sym in positions_with_instruments
-                ]
-                tracker: SequenceTracker = request.app.state.rest_tracker
-                sid = tracker.session_id
-                seq = tracker.next_sequence(_REST_DATA_STREAM)
-                ts = dt.datetime.now(dt.UTC)
-                pid = str(uuid7())
-                return PositionListResponse(
-                    session_id=sid,
-                    sequence_id=seq,
-                    public_id=pid,
-                    timestamp=ts,
-                    payload=items,
-                    count=len(items),
-                )
+            rows = await repo.get_positions(as_of=processing_date)
+            items = [PositionData(**r) for r in rows]
+            tracker: SequenceTracker = request.app.state.rest_tracker
+            sid = tracker.session_id
+            seq = tracker.next_sequence(_REST_DATA_STREAM)
+            ts = dt.datetime.now(dt.UTC)
+            pid = str(uuid7())
+            return PositionListResponse(
+                session_id=sid,
+                sequence_id=seq,
+                public_id=pid,
+                timestamp=ts,
+                payload=items,
+                count=len(items),
+            )
         except Exception as exc:
             logger.error(f"Failed to fetch positions: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch positions") from exc

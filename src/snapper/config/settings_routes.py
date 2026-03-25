@@ -67,89 +67,86 @@ async def get_all_settings(
     request: Request,
     user: Annotated[AuthPrincipal, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
     category: str | None = None,
+    as_of: datetime | None = None,
 ) -> SettingListResponse:
     """Retrieve all application settings, optionally filtered by category.
 
     Args:
         request: FastAPI request (provides REST tracker for provenance).
-        category: Optional category name to filter settings.
         user: Authenticated user with CONFIGURE_SYSTEM permission.
+        category: Optional category name to filter settings.
+        as_of: Optional point-in-time query timestamp.
 
     Returns:
         SettingListResponse wrapping all settings matching the filter criteria.
     """
     settings = get_settings()
     repository = get_repository(settings.db_url)
+    processing_date = as_of or datetime.now(UTC)
+    rows = await repository.get_settings(as_of=processing_date, category=category)
+    items = [
+        SettingRead(
+            public_id=r["public_id"],
+            timestamp=r["timestamp"],
+            session_id=r["session_id"],
+            sequence_id=r["sequence_id"],
+            key=r["key"],
+            value=r["value"],
+            category=r["category"],
+            description=r["description"],
+            updated_at=r["timestamp"],
+            updated_by=r["updated_by"],
+        )
+        for r in rows
+    ]
     tracker: SequenceTracker = request.app.state.rest_tracker
     sid = tracker.session_id
     seq = tracker.next_sequence(_REST_STREAM)
     ts = datetime.now(UTC)
     pid = str(uuid7())
-    async with repository.session() as session:
-        query = select(Setting).where(*where_active_now(Setting))
-        if category:
-            query = query.where(Setting.category == category)
-        result = await session.execute(query)
-        db_settings = result.scalars().all()
-        items = [
-            SettingRead(
-                public_id=setting.public_id,
-                timestamp=setting.timestamp,
-                session_id=setting.session_id,
-                sequence_id=setting.sequence_id,
-                key=setting.key,
-                value=setting.value,
-                category=setting.category,
-                description=setting.description,
-                updated_at=setting.timestamp,
-                updated_by=setting.updated_by,
-            )
-            for setting in db_settings
-        ]
-        return SettingListResponse(
-            session_id=sid,
-            sequence_id=seq,
-            public_id=pid,
-            timestamp=ts,
-            payload=items,
-            count=len(items),
-        )
+    return SettingListResponse(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=pid,
+        timestamp=ts,
+        payload=items,
+        count=len(items),
+    )
 
 
 @router.get("/categories")
 async def get_setting_categories(
     request: Request,
     user: Annotated[AuthPrincipal, Depends(require_permission(Permission.CONFIGURE_SYSTEM))],
+    as_of: datetime | None = None,
 ) -> SettingCategoriesResponse:
     """Retrieve all distinct setting category names.
 
     Args:
         request: FastAPI request (provides REST tracker for provenance).
         user: Authenticated user with CONFIGURE_SYSTEM permission.
+        as_of: Optional point-in-time query timestamp.
 
     Returns:
         Response containing sorted list of category names.
     """
     settings = get_settings()
     repository = get_repository(settings.db_url)
-    async with repository.session() as session:
-        result = await session.execute(
-            select(Setting.category).where(*where_active_now(Setting)).distinct()
-        )
-        categories = [row[0] for row in result.fetchall()]
-        tracker: SequenceTracker = request.app.state.rest_tracker
-        sid = tracker.session_id
-        seq = tracker.next_sequence(_REST_STREAM)
-        ts = datetime.now(UTC)
-        pid = str(uuid7())
-        return SettingCategoriesResponse(
-            session_id=sid,
-            sequence_id=seq,
-            public_id=pid,
-            timestamp=ts,
-            payload=sorted(categories),
-            count=len(categories),
-        )
+    processing_date = as_of or datetime.now(UTC)
+    categories = await repository.get_setting_categories(as_of=processing_date)
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    sid = tracker.session_id
+    seq = tracker.next_sequence(_REST_STREAM)
+    ts = datetime.now(UTC)
+    pid = str(uuid7())
+    return SettingCategoriesResponse(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=pid,
+        timestamp=ts,
+        payload=categories,
+        count=len(categories),
+    )
 
 
 @router.post(

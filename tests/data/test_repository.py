@@ -31,7 +31,11 @@ import snapper.data.repository as repository
 from snapper.data import repository as repo_module
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import MarketSnapshot
+from snapper.data.models import Position
+from snapper.data.models import Setting
+from snapper.data.models import Signal
 from snapper.data.models import Symbol
+from snapper.data.models import SymbolAlias
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import InstrumentSpecInput
 from snapper.data.repository import Repository
@@ -1081,10 +1085,12 @@ class DummyRepository(Repository):
         self,
         instrument: str,
         timeframe: str,
-        start: datetime,
-        end: datetime,
+        start: datetime | None,
+        end: datetime | None,
         exchange: str,
         as_of: datetime,
+        limit: int | None = None,
+        order: str = "asc",
     ) -> list[dict[str, Any]]:
         """Get candles - returns empty list."""
         return []
@@ -1108,6 +1114,63 @@ class DummyRepository(Repository):
         as_of: datetime,
     ) -> list[dict[str, Any]]:
         """Get market snapshots - returns empty list."""
+        return []
+
+    async def upsert_market_snapshots(self, rows: list[dict[str, Any]]) -> int:
+        """Upsert market snapshots - no-op returning 0."""
+        return 0
+
+    async def get_exchanges(self, as_of: datetime) -> list[str]:
+        """Get exchanges - returns empty list."""
+        return []
+
+    async def get_exchange_instruments(self, exchange: str, as_of: datetime) -> list[str]:
+        """Get exchange instruments - returns empty list."""
+        return []
+
+    async def get_signals(
+        self,
+        since: datetime,
+        limit: int,
+        as_of: datetime,
+        instrument: str | None = None,
+        strategy: str | None = None,
+        exchange: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Get signals - returns empty list."""
+        return []
+
+    async def get_orders(
+        self,
+        limit: int,
+        offset: int,
+        as_of: datetime,
+        symbol: str | None = None,
+        exchange: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Get orders - returns empty list."""
+        return []
+
+    async def get_executions(self, limit: int, as_of: datetime) -> list[dict[str, Any]]:
+        """Get executions - returns empty list."""
+        return []
+
+    async def get_positions(self, as_of: datetime) -> list[dict[str, Any]]:
+        """Get positions - returns empty list."""
+        return []
+
+    async def get_settings(
+        self, as_of: datetime, category: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Get settings - returns empty list."""
+        return []
+
+    async def get_setting_by_key(self, key: str, as_of: datetime) -> dict[str, Any] | None:
+        """Get setting by key - returns None."""
+        return None
+
+    async def get_setting_categories(self, as_of: datetime) -> list[str]:
+        """Get setting categories - returns empty list."""
         return []
 
 
@@ -1823,6 +1886,10 @@ class TestSQLAlchemyRepositoryDialects:
         mock_row.volume = 1000.0
         mock_row.vwap = None
         mock_row.trades = 10
+        mock_row.public_id = "candle-pub-1"
+        mock_row.timestamp = datetime(2024, 1, 1, tzinfo=UTC)
+        mock_row.session_id = "sess-1"
+        mock_row.sequence_id = 1
         mock_candles_result.all.return_value = [mock_row]
         mock_session.execute.side_effect = [mock_sym_result, mock_inst_result, mock_candles_result]
         with patch.object(mock_postgres_repo, "session") as mock_session_ctx:
@@ -1844,6 +1911,10 @@ class TestSQLAlchemyRepositoryDialects:
                     "volume": 1000.0,
                     "vwap": None,
                     "trades": 10,
+                    "public_id": "candle-pub-1",
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "session_id": "sess-1",
+                    "sequence_id": 1,
                 }
             ]
             assert result == expected
@@ -2075,6 +2146,16 @@ class _MinimalRepository(Repository):
     ) -> int:
         return 0
 
+    async def revise_instrument_spec(
+        self,
+        instrument_public_id: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+        spec: InstrumentSpecInput,
+    ) -> int:
+        return 0
+
     async def get_candles(
         self,
         instrument: str,
@@ -2083,6 +2164,8 @@ class _MinimalRepository(Repository):
         end: datetime,
         exchange: str,
         as_of: datetime,
+        limit: int | None = None,
+        order: str = "asc",
     ) -> list[dict[str, Any]]:
         return []
 
@@ -2103,6 +2186,53 @@ class _MinimalRepository(Repository):
         end: datetime,
         as_of: datetime,
     ) -> list[dict[str, Any]]:
+        return []
+
+    async def upsert_market_snapshots(self, rows: list[dict[str, Any]]) -> int:
+        return 0
+
+    async def get_exchanges(self, as_of: datetime) -> list[str]:
+        return []
+
+    async def get_exchange_instruments(self, exchange: str, as_of: datetime) -> list[str]:
+        return []
+
+    async def get_signals(
+        self,
+        since: datetime,
+        limit: int,
+        as_of: datetime,
+        instrument: str | None = None,
+        strategy: str | None = None,
+        exchange: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return []
+
+    async def get_orders(
+        self,
+        limit: int,
+        offset: int,
+        as_of: datetime,
+        symbol: str | None = None,
+        exchange: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return []
+
+    async def get_executions(self, limit: int, as_of: datetime) -> list[dict[str, Any]]:
+        return []
+
+    async def get_positions(self, as_of: datetime) -> list[dict[str, Any]]:
+        return []
+
+    async def get_settings(
+        self, as_of: datetime, category: str | None = None
+    ) -> list[dict[str, Any]]:
+        return []
+
+    async def get_setting_by_key(self, key: str, as_of: datetime) -> dict[str, Any] | None:
+        return None
+
+    async def get_setting_categories(self, as_of: datetime) -> list[str]:
         return []
 
 
@@ -2141,3 +2271,536 @@ class TestWhereActive:
         ts_clause, known_to_clause = where_active(MarketSnapshot, at=fixed_time)
         assert "timestamp" in str(ts_clause)
         assert "known_to" in str(known_to_clause)
+
+
+async def _seed_full_repo(tmp_path: Path) -> tuple[SQLAlchemyRepository, str, str]:
+    """Seed a repository with symbol, alias, instrument, and related records.
+
+    Returns (repo, symbol_public_id, instrument_public_id).
+    """
+    db_path = tmp_path / "rest_repo.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    async with r.session() as s:
+        sym = Symbol(
+            native_symbol="BTC-USD",
+            base="BTC",
+            quote="USD",
+            asset_type="crypto",
+            created_at=now,
+            timestamp=now,
+            session_id="s1",
+            sequence_id=1,
+        )
+        s.add(sym)
+        await s.commit()
+        await s.refresh(sym)
+        alias = SymbolAlias(
+            symbol_public_id=sym.public_id,
+            exchange="kraken",
+            exchange_symbol="XXBTZUSD",
+            channel="ws",
+            created_at=now,
+            timestamp=now,
+            session_id="s1",
+            sequence_id=2,
+        )
+        s.add(alias)
+        await s.commit()
+    _, inst_pid = await r.ensure_instrument(
+        symbol_public_id=sym.public_id,
+        exchange="kraken",
+        session_id="s1",
+        sequence_id=3,
+        timestamp=now,
+    )
+    return r, sym.public_id, inst_pid
+
+
+@pytest.mark.asyncio
+async def test_get_exchanges_returns_active(tmp_path: Path) -> None:
+    """Verify get_exchanges returns distinct active exchange names.
+
+    Given: Repository with active symbol alias,
+    When: get_exchanges is called,
+    Then: Returns list containing the exchange name.
+    """
+    r, _, _ = await _seed_full_repo(tmp_path)
+    result = await r.get_exchanges(as_of=datetime.now(UTC))
+    assert result == ["kraken"]
+
+
+@pytest.mark.asyncio
+async def test_get_exchange_instruments_returns_symbols(tmp_path: Path) -> None:
+    """Verify get_exchange_instruments returns native symbols for exchange.
+
+    Given: Repository with symbol alias for kraken,
+    When: get_exchange_instruments is called for kraken,
+    Then: Returns list containing 'BTC-USD'.
+    """
+    r, _, _ = await _seed_full_repo(tmp_path)
+    result = await r.get_exchange_instruments("kraken", as_of=datetime.now(UTC))
+    assert result == ["BTC-USD"]
+
+
+@pytest.mark.asyncio
+async def test_get_signals_returns_data(tmp_path: Path) -> None:
+    """Verify get_signals returns signal dicts with instrument info.
+
+    Given: Repository with signal record,
+    When: get_signals is called,
+    Then: Returns denormalized signal dicts.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    async with r.session() as s:
+        s.add(
+            Signal(
+                instrument_public_id=inst_pid,
+                strategy_name="rsi",
+                side="buy",
+                strength=0.9,
+                reason="oversold",
+                price=50000.0,
+                fired_at=now - timedelta(minutes=5),
+                timestamp=now,
+                session_id="s1",
+                sequence_id=10,
+            )
+        )
+        await s.commit()
+    result = await r.get_signals(since=now - timedelta(hours=1), limit=10, as_of=now)
+    assert len(result) == 1
+    assert result[0]["instrument"] == "BTC-USD"
+    assert result[0]["exchange"] == "kraken"
+    assert result[0]["strategy_name"] == "rsi"
+
+
+@pytest.mark.asyncio
+async def test_get_signals_filters_by_exchange(tmp_path: Path) -> None:
+    """Verify get_signals filters by exchange.
+
+    Given: Repository with signal on kraken,
+    When: get_signals is called with exchange='zonda',
+    Then: Returns empty list.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    async with r.session() as s:
+        s.add(
+            Signal(
+                instrument_public_id=inst_pid,
+                strategy_name="rsi",
+                side="buy",
+                strength=0.9,
+                reason="oversold",
+                price=50000.0,
+                fired_at=now - timedelta(minutes=5),
+                timestamp=now,
+                session_id="s1",
+                sequence_id=10,
+            )
+        )
+        await s.commit()
+    result = await r.get_signals(
+        since=now - timedelta(hours=1), limit=10, as_of=now, exchange="zonda"
+    )
+    assert len(result) == 0
+
+
+@pytest.mark.asyncio
+async def test_get_orders_returns_data(tmp_path: Path) -> None:
+    """Verify get_orders returns order dicts with instrument info.
+
+    Given: Repository with order record,
+    When: get_orders is called,
+    Then: Returns denormalized order dicts.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    await r.insert_order(
+        instrument_public_id=inst_pid,
+        client_order_id="c1",
+        exchange_order_id="e1",
+        created_at=now,
+        side="buy",
+        order_type="limit",
+        price=50000.0,
+        size=1.0,
+        status="open",
+        session_id="s1",
+        sequence_id=20,
+        timestamp=now,
+    )
+    result = await r.get_orders(limit=10, offset=0, as_of=now)
+    assert len(result) == 1
+    assert result[0]["instrument"] == "BTC-USD"
+    assert result[0]["exchange"] == "kraken"
+    assert result[0]["side"] == "buy"
+
+
+@pytest.mark.asyncio
+async def test_get_orders_filters_by_exchange(tmp_path: Path) -> None:
+    """Verify get_orders filters by exchange.
+
+    Given: Repository with order on kraken,
+    When: get_orders is called with exchange='zonda',
+    Then: Returns empty list.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    await r.insert_order(
+        instrument_public_id=inst_pid,
+        client_order_id="c1",
+        exchange_order_id="e1",
+        created_at=now,
+        side="buy",
+        order_type="limit",
+        price=50000.0,
+        size=1.0,
+        status="open",
+        session_id="s1",
+        sequence_id=20,
+        timestamp=now,
+    )
+    result = await r.get_orders(limit=10, offset=0, as_of=now, exchange="zonda")
+    assert len(result) == 0
+
+
+@pytest.mark.asyncio
+async def test_get_executions_returns_data(tmp_path: Path) -> None:
+    """Verify get_executions returns execution dicts.
+
+    Given: Repository with order and execution records,
+    When: get_executions is called,
+    Then: Returns denormalized execution dicts.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    _, order_pid = await r.insert_order(
+        instrument_public_id=inst_pid,
+        client_order_id="c1",
+        exchange_order_id="e1",
+        created_at=now,
+        side="buy",
+        order_type="limit",
+        price=50000.0,
+        size=1.0,
+        status="filled",
+        session_id="s1",
+        sequence_id=20,
+        timestamp=now,
+    )
+    await r.insert_execution(
+        order_public_id=order_pid,
+        timestamp=now,
+        side="buy",
+        status="filled",
+        price=50000.0,
+        size=1.0,
+        fee=10.0,
+        fee_asset="USD",
+        session_id="s1",
+        sequence_id=21,
+    )
+    result = await r.get_executions(limit=10, as_of=now)
+    assert len(result) == 1
+    assert result[0]["instrument"] == "BTC-USD"
+    assert result[0]["exchange"] == "kraken"
+
+
+@pytest.mark.asyncio
+async def test_get_positions_returns_data(tmp_path: Path) -> None:
+    """Verify get_positions returns position dicts.
+
+    Given: Repository with position record,
+    When: get_positions is called,
+    Then: Returns denormalized position dicts.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    async with r.session() as s:
+        s.add(
+            Position(
+                instrument_public_id=inst_pid,
+                quantity=1.5,
+                average_price=48000.0,
+                unrealized_pnl=3000.0,
+                realized_pnl=500.0,
+                timestamp=now,
+                session_id="s1",
+                sequence_id=30,
+            )
+        )
+        await s.commit()
+    result = await r.get_positions(as_of=now)
+    assert len(result) == 1
+    assert result[0]["instrument"] == "BTC-USD"
+    assert result[0]["quantity"] == 1.5
+
+
+@pytest.mark.asyncio
+async def test_get_candles_with_limit_and_order(tmp_path: Path) -> None:
+    """Verify get_candles supports limit and order params.
+
+    Given: Repository with multiple candles,
+    When: get_candles is called with limit=1 and order='desc',
+    Then: Returns only the latest candle.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    base = now - timedelta(hours=2)
+    rows = [
+        {
+            "instrument_public_id": inst_pid,
+            "timeframe": "1h",
+            "open_at": base,
+            "timestamp": now,
+            "open": 10.0,
+            "high": 12.0,
+            "low": 9.0,
+            "close": 11.0,
+            "volume": 100.0,
+            "vwap": 10.5,
+            "trades": 5,
+            "session_id": "s1",
+            "sequence_id": 40,
+        },
+        {
+            "instrument_public_id": inst_pid,
+            "timeframe": "1h",
+            "open_at": base + timedelta(hours=1),
+            "timestamp": now,
+            "open": 11.0,
+            "high": 13.0,
+            "low": 10.0,
+            "close": 12.0,
+            "volume": 200.0,
+            "vwap": 11.5,
+            "trades": 8,
+            "session_id": "s1",
+            "sequence_id": 41,
+        },
+    ]
+    await r.upsert_candles(rows)
+    result = await r.get_candles(
+        "BTC-USD",
+        "1h",
+        start=base,
+        end=base + timedelta(hours=2),
+        exchange="kraken",
+        as_of=now,
+        limit=1,
+        order="desc",
+    )
+    assert len(result) == 1
+    assert result[0]["close"] == 12.0
+
+
+@pytest.mark.asyncio
+async def test_get_candles_latest_mode(tmp_path: Path) -> None:
+    """Verify get_candles works without start/end (latest-as-of mode).
+
+    Given: Repository with candles,
+    When: get_candles is called with limit only (start/end passed but not used as range),
+    Then: Returns up to limit candles.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    rows = [
+        {
+            "instrument_public_id": inst_pid,
+            "timeframe": "1m",
+            "open_at": now - timedelta(minutes=i),
+            "timestamp": now,
+            "open": 10.0,
+            "high": 12.0,
+            "low": 9.0,
+            "close": 11.0,
+            "volume": 100.0,
+            "vwap": 10.5,
+            "trades": 5,
+            "session_id": "s1",
+            "sequence_id": 50 + i,
+        }
+        for i in range(5)
+    ]
+    await r.upsert_candles(rows)
+    result = await r.get_candles(
+        "BTC-USD",
+        "1m",
+        start=None,
+        end=None,
+        exchange="kraken",
+        as_of=now,
+        limit=3,
+        order="desc",
+    )
+    assert len(result) == 3
+
+
+@pytest.mark.asyncio
+async def test_get_settings_returns_data(tmp_path: Path) -> None:
+    """Verify get_settings returns setting dicts.
+
+    Given: Repository with setting records,
+    When: get_settings is called,
+    Then: Returns setting dicts with all fields.
+    """
+    r, _, _ = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    async with r.session() as s:
+        s.add(
+            Setting(
+                key="api_key",
+                value="secret123",
+                category="auth",
+                description="API key",
+                updated_by="admin",
+                timestamp=now,
+                session_id="s1",
+                sequence_id=60,
+            )
+        )
+        s.add(
+            Setting(
+                key="theme",
+                value="dark",
+                category="ui",
+                description="UI theme",
+                updated_by="admin",
+                timestamp=now,
+                session_id="s1",
+                sequence_id=61,
+            )
+        )
+        await s.commit()
+    result = await r.get_settings(as_of=now)
+    assert len(result) == 2
+    keys = {s["key"] for s in result}
+    assert keys == {"api_key", "theme"}
+
+
+@pytest.mark.asyncio
+async def test_get_settings_filters_by_category(tmp_path: Path) -> None:
+    """Verify get_settings filters by category.
+
+    Given: Settings in different categories,
+    When: get_settings is called with category='auth',
+    Then: Returns only auth settings.
+    """
+    r, _, _ = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    async with r.session() as s:
+        s.add(
+            Setting(
+                key="api_key",
+                value="secret",
+                category="auth",
+                description="key",
+                updated_by="admin",
+                timestamp=now,
+                session_id="s1",
+                sequence_id=60,
+            )
+        )
+        s.add(
+            Setting(
+                key="theme",
+                value="dark",
+                category="ui",
+                description="theme",
+                updated_by="admin",
+                timestamp=now,
+                session_id="s1",
+                sequence_id=61,
+            )
+        )
+        await s.commit()
+    result = await r.get_settings(as_of=now, category="auth")
+    assert len(result) == 1
+    assert result[0]["key"] == "api_key"
+
+
+@pytest.mark.asyncio
+async def test_get_setting_by_key_found(tmp_path: Path) -> None:
+    """Verify get_setting_by_key returns setting dict when found.
+
+    Given: Repository with a setting,
+    When: get_setting_by_key is called with the key,
+    Then: Returns the setting dict.
+    """
+    r, _, _ = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    async with r.session() as s:
+        s.add(
+            Setting(
+                key="api_key",
+                value="secret",
+                category="auth",
+                description="key",
+                updated_by="admin",
+                timestamp=now,
+                session_id="s1",
+                sequence_id=60,
+            )
+        )
+        await s.commit()
+    result = await r.get_setting_by_key("api_key", as_of=now)
+    assert result is not None
+    assert result["key"] == "api_key"
+    assert result["value"] == "secret"
+
+
+@pytest.mark.asyncio
+async def test_get_setting_by_key_not_found(tmp_path: Path) -> None:
+    """Verify get_setting_by_key returns None when not found.
+
+    Given: Repository with no matching setting,
+    When: get_setting_by_key is called,
+    Then: Returns None.
+    """
+    r, _, _ = await _seed_full_repo(tmp_path)
+    result = await r.get_setting_by_key("nonexistent", as_of=datetime.now(UTC))
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_setting_categories_returns_sorted(tmp_path: Path) -> None:
+    """Verify get_setting_categories returns sorted distinct categories.
+
+    Given: Settings in multiple categories,
+    When: get_setting_categories is called,
+    Then: Returns sorted list of category names.
+    """
+    r, _, _ = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    async with r.session() as s:
+        s.add(
+            Setting(
+                key="k1",
+                value="v1",
+                category="ui",
+                description="d",
+                updated_by="admin",
+                timestamp=now,
+                session_id="s1",
+                sequence_id=60,
+            )
+        )
+        s.add(
+            Setting(
+                key="k2",
+                value="v2",
+                category="auth",
+                description="d",
+                updated_by="admin",
+                timestamp=now,
+                session_id="s1",
+                sequence_id=61,
+            )
+        )
+        await s.commit()
+    result = await r.get_setting_categories(as_of=now)
+    assert result == ["auth", "ui"]
