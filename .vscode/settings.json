@@ -69,5 +69,6 @@
   "python-envs.defaultEnvManager": "ms-python.python:venv",
   "python-envs.workspaceSearchPaths": [
     ".venv"
-  ]
+  ],
+  "chat.subagents.allowInvocationsFromSubagents": true
 }
