@@ -3208,8 +3208,10 @@ class TestHeartbeatWithFeedHealth:
             await strategy._heartbeat_loop()
         assert len(published_messages) >= 1
         hb: HeartbeatData = published_messages[0]
-        assert hb.meta["feed_health"] is not None
-        assert "kraken" in hb.meta["feed_health"]
+        feed_health = hb.meta["feed_health"]
+        assert feed_health is not None
+        assert isinstance(feed_health, dict)
+        assert "kraken" in feed_health
 
 
 class TestHeartbeatNoPublisher:

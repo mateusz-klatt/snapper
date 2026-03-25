@@ -34,7 +34,6 @@ System message classes:
 """
 
 from datetime import datetime
-from typing import Any
 from typing import Literal
 from typing import Self
 
@@ -42,6 +41,7 @@ from pydantic import Field
 from pydantic import model_validator
 
 from snapper.api.schemas.base import StrictDataSchema
+from snapper.core.json_types import JsonObject
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import OrderEventType
 from snapper.core.types import OrderExchange
@@ -407,7 +407,7 @@ class HeartbeatData(StrictDataSchema[Literal["heartbeat"]]):
     sequence: int
     status: HealthStatus
     lag_ms: int
-    meta: dict[str, Any] = Field(default={})
+    meta: JsonObject = Field(default={})
 
 
 class SettingChangedData(StrictDataSchema[Literal["setting_changed"]]):

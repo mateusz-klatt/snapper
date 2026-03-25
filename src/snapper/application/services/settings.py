@@ -21,6 +21,7 @@ import zmq.asyncio
 from loguru import logger
 from sqlalchemy import select
 
+from snapper.core.json_types import JsonValue
 from snapper.data.models import Setting
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
@@ -98,7 +99,7 @@ class SettingsService:
             return
         self.db_url = db_url
         self.zmq_broker_xpub = zmq_broker_xpub
-        self._cache: dict[str, Any] = {}
+        self._cache: dict[str, JsonValue] = {}
         self._loaded = False
         self._zmq_context: zmq.asyncio.Context | None = None
         self._tracker: SequenceTracker = SequenceTracker()
@@ -141,7 +142,7 @@ class SettingsService:
             self._loaded = True
             logger.info(f"Loaded {len(settings)} settings from database")
 
-    def _parse_value(self, value: str) -> Any:
+    def _parse_value(self, value: str) -> JsonValue:
         """Parse string value to appropriate Python type.
 
         Attempts parsing in order: JSON, bool, int, float, string.
@@ -153,7 +154,8 @@ class SettingsService:
             Parsed value as appropriate Python type.
         """
         try:
-            return json.loads(value)
+            parsed: JsonValue = json.loads(value)
+            return parsed
         except (json.JSONDecodeError, TypeError):
             pass
         if value.lower() in ("true", "false"):
@@ -321,7 +323,7 @@ class SettingsService:
         except Exception as e:
             logger.error(f"Failed to broadcast setting change: {e}")
 
-    async def get_all_settings(self) -> dict[str, Any]:
+    async def get_all_settings(self) -> dict[str, JsonValue]:
         """Get all settings from cache.
 
         Returns:
@@ -330,7 +332,7 @@ class SettingsService:
         await asyncio.sleep(0)
         return self._cache.copy()
 
-    async def get_settings_by_category(self, category: str) -> dict[str, Any]:
+    async def get_settings_by_category(self, category: str) -> dict[str, JsonValue]:
         """Get settings filtered by category.
 
         Loads directly from database to ensure accuracy.

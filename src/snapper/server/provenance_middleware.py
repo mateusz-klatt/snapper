@@ -30,6 +30,7 @@ from starlette.types import Receive
 from starlette.types import Scope
 from starlette.types import Send
 
+from snapper.core.json_types import JsonObject
 from snapper.core.redact import redact
 from snapper.data.models import Control
 from snapper.data.models import Telemetry
@@ -199,7 +200,7 @@ class ClientProvenanceMiddleware:
         finally:
             full_body = b"".join(body_chunks)
             path: str = scope.get("path", "")
-            payload_dict: dict[str, Any] | None = None
+            payload_dict: JsonObject | None = None
             if full_body:
                 payload_dict = self._inspect_provenance(full_body, path)
             await self._record_control(
@@ -210,7 +211,7 @@ class ClientProvenanceMiddleware:
                 payload_dict=payload_dict,
             )
 
-    def _inspect_provenance(self, body: bytes, path: str) -> dict[str, Any] | None:
+    def _inspect_provenance(self, body: bytes, path: str) -> JsonObject | None:
         """Extract and log provenance fields from a JSON request body.
 
         Args:
@@ -261,7 +262,7 @@ class ClientProvenanceMiddleware:
         method: str,
         outcome: str,
         detail: str | None,
-        payload_dict: dict[str, Any] | None,
+        payload_dict: JsonObject | None,
     ) -> None:
         """Persist a control row for this mutation request.
 

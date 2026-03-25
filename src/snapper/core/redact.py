@@ -8,6 +8,8 @@ always returns a JSON string (or None for None input).
 import json
 from typing import Any
 
+from snapper.core.json_types import JsonObject
+
 _SENSITIVE_KEYS = frozenset(
     {
         "password",
@@ -24,7 +26,7 @@ _SENSITIVE_KEYS = frozenset(
 _REDACTED = "[REDACTED]"
 
 
-def _redact_dict(data: dict[str, Any]) -> dict[str, Any]:
+def _redact_dict(data: JsonObject) -> JsonObject:
     """Return a shallow copy of *data* with sensitive values replaced.
 
     Recurses into nested dicts and lists of dicts.
@@ -35,7 +37,7 @@ def _redact_dict(data: dict[str, Any]) -> dict[str, Any]:
     Returns:
         New dictionary with sensitive leaf values replaced by ``[REDACTED]``.
     """
-    result: dict[str, Any] = {}
+    result: JsonObject = {}
     for key, value in data.items():
         if key.lower() in _SENSITIVE_KEYS:
             result[key] = _REDACTED
@@ -48,7 +50,7 @@ def _redact_dict(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def redact(payload: dict[str, Any] | str | None) -> str | None:
+def redact(payload: JsonObject | str | None) -> str | None:
     """Redact sensitive keys from *payload* and return a JSON string.
 
     Args:

@@ -1578,7 +1578,9 @@ class TestFeedPublisherCoverage:
 
         async def publish_side_effect(topic: str, message: HeartbeatData) -> None:
             assert "symbols" in message.meta
-            assert "BTC-USD" in message.meta["symbols"]
+            symbols = message.meta["symbols"]
+            assert isinstance(symbols, list)
+            assert "BTC-USD" in symbols
             assert message.meta["symbol_count"] == 1
             publisher_any.running = False
 

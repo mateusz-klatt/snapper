@@ -25,6 +25,8 @@ from sqlalchemy.orm import Mapped
 from sqlalchemy.orm import mapped_column
 from sqlalchemy.types import TypeDecorator
 
+from snapper.core.json_types import JsonObject
+
 KNOWN_TO_MAX = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
 
 
@@ -627,8 +629,8 @@ class ProcessRun(TemporalMixin, Base):
     role: Mapped[str] = mapped_column(String(16))
     lifecycle: Mapped[str] = mapped_column(String(16))
     status: Mapped[str] = mapped_column(String(16), index=True)
-    parameters: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    result: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    parameters: Mapped[JsonObject | None] = mapped_column(JSON)
+    result: Mapped[JsonObject | None] = mapped_column(JSON)
     error: Mapped[str | None] = mapped_column(String(1024))
     tags: Mapped[list[str] | None] = mapped_column(JSON)
     started_at: Mapped[datetime] = mapped_column(TZDateTime(), index=True)

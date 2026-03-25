@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid7
 
+from snapper.core.json_types import JsonObject
 from snapper.interface.websocket.schemas import HealthStatus
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.topics.builders import heartbeat_topic_from_component
@@ -53,7 +54,7 @@ class StrategyHealthMonitor:
             return "warning"
         return "error"
 
-    def build_feed_health(self) -> dict[str, dict[str, Any]] | None:
+    def build_feed_health(self) -> JsonObject | None:
         """Build feed health summary from cached heartbeats.
 
         Returns:
@@ -62,15 +63,16 @@ class StrategyHealthMonitor:
         if not self.strategy._feed_heartbeats:
             return None
         current_time = time.time()
-        feed_health: dict[str, dict[str, Any]] = {}
+        feed_health: JsonObject = {}
         for feed_key, heartbeat in self.strategy._feed_heartbeats.items():
             age_ms = int((current_time - heartbeat["timestamp"]) * 1000)
-            feed_health[feed_key] = {
+            entry: JsonObject = {
                 "status": heartbeat["status"],
                 "lag_ms": heartbeat["lag_ms"],
                 "heartbeat_age_ms": age_ms,
                 "healthy": age_ms < 5000,
             }
+            feed_health[feed_key] = entry
         return feed_health
 
     def build_heartbeat_envelope(self, lag_ms: int, topic: str) -> HeartbeatData:
