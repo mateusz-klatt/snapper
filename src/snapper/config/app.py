@@ -290,7 +290,7 @@ class AppSettings:
             "instruments",
             {
                 "kraken": ["BTC-USD", "BTC-EUR", "BTC-USDC", "BTC-EURC", "EUR-USD"],
-                "zonda": ["BTC-PLN", "USDC-PLN"],
+                "zonda": ["BTC-PLN", "USDC-PLN", "ETH-PLN", "SOL-USDC", "BTC-EUR"],
                 "walutomat": ["EUR-PLN", "USD-PLN", "EUR-USD"],
                 "polygon": ["BTC-USD", "BTC-EUR", "EUR-USD", "EUR-PLN", "USD-PLN"],
             },
