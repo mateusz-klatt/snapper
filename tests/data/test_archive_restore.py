@@ -15,6 +15,7 @@ from typer.testing import CliRunner
 from snapper.cli.app import app
 from snapper.data.archiver import EVENT_TABLES
 from snapper.data.archiver import ArchiveRestorer
+from snapper.data.archiver import CandleAuditArchiver
 from snapper.data.archiver import EventArchiver
 from snapper.data.archiver import RestoreResult
 from snapper.data.archiver import StateArchiver
@@ -29,6 +30,7 @@ from snapper.data.archiver import _parse_str_csv
 from snapper.data.archiver import _parser_for_column
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
+from snapper.data.models import Candle
 from snapper.data.models import Instrument
 from snapper.data.models import Setting
 from snapper.data.models import Symbol
@@ -130,6 +132,39 @@ def test_build_column_parsers_tick() -> None:
     assert parsers[header.index("timestamp")] is _parse_datetime_csv
     assert parsers[header.index("bid")] is _parse_float_csv
     assert parsers[header.index("sequence_id")] is _parse_int_csv
+
+
+def test_build_column_parsers_unknown_column() -> None:
+    """Build parsers raises ValueError for unknown column name.
+
+    Given: Header with column not in model,
+    When: _build_column_parsers is called,
+    Then: Raises ValueError with column name.
+    """
+    with pytest.raises(ValueError, match="bogus_col"):
+        _build_column_parsers(Tick, ["public_id", "bogus_col"])
+
+
+def test_restore_malformed_csv_header(tmp_path: Path) -> None:
+    """Restore fails gracefully when CSV has unknown columns.
+
+    Given: CSV with a column name not in the model,
+    When: restore is called,
+    Then: Raises ValueError (not KeyError).
+    """
+    csv_path = tmp_path / "bad.csv"
+    csv_path.write_text(
+        "public_id,timestamp,known_to,bogus_column\n"
+        "pub-1,2024-01-01T14:30:00+00:00,9999-12-31T23:59:59+00:00,oops\n",
+        encoding="utf-8",
+    )
+    db_url = f"sqlite:///{tmp_path / 'bad.db'}"
+    repo = DatabaseRepository(db_url)
+    Base.metadata.create_all(repo.engine)
+    restorer = ArchiveRestorer(repo)
+    with pytest.raises(ValueError, match="bogus_column"):
+        restorer.restore(table="ticks", paths=[csv_path])
+    repo.dispose()
 
 
 def test_restore_unknown_table() -> None:
@@ -342,6 +377,86 @@ def _make_db_with_setting(tmp_path: Path) -> tuple[DatabaseRepository, Path]:
     return repo, csv_dir
 
 
+def _make_db_with_candle_versions(tmp_path: Path) -> tuple[DatabaseRepository, Path, str]:
+    """Create DB with closed + active Candle versions, export, and return test fixtures."""
+    db_url = f"sqlite:///{tmp_path / 'restore_candles.db'}"
+    repo = DatabaseRepository(db_url)
+    Base.metadata.create_all(repo.engine)
+    ts = datetime(2024, 1, 1, tzinfo=UTC)
+    inst_id = "inst-btc"
+    with repo.get_session() as session:
+        sym = Symbol(
+            public_id="sym-btc",
+            native_symbol="BTC-USD",
+            base="BTC",
+            quote="USD",
+            asset_type="crypto",
+            session_id="test",
+            sequence_id=1,
+            timestamp=ts,
+            created_at=ts,
+        )
+        session.add(sym)
+        session.flush()
+        inst = Instrument(
+            public_id=inst_id,
+            symbol_public_id="sym-btc",
+            exchange="polygon",
+            session_id="test",
+            sequence_id=2,
+            timestamp=ts,
+        )
+        session.add(inst)
+        session.flush()
+        closed = Candle(
+            public_id="candle-1",
+            instrument_public_id=inst_id,
+            open_at=datetime(2024, 1, 1, 14, 30, tzinfo=UTC),
+            timeframe="1m",
+            open=100.0,
+            high=110.0,
+            low=90.0,
+            close=105.0,
+            volume=1234.0,
+            vwap=103.0,
+            trades=42,
+            session_id="test",
+            sequence_id=3,
+            timestamp=ts,
+            known_to=datetime(2024, 1, 1, 15, 0, tzinfo=UTC),
+        )
+        session.add(closed)
+        session.flush()
+        active = Candle(
+            public_id="candle-1",
+            instrument_public_id=inst_id,
+            open_at=datetime(2024, 1, 1, 14, 30, tzinfo=UTC),
+            timeframe="1m",
+            open=100.0,
+            high=112.0,
+            low=90.0,
+            close=107.0,
+            volume=1500.0,
+            vwap=104.0,
+            trades=55,
+            session_id="test",
+            sequence_id=4,
+            timestamp=datetime(2024, 1, 1, 15, 0, tzinfo=UTC),
+            known_to=KNOWN_TO_MAX,
+        )
+        session.add(active)
+        session.commit()
+
+    csv_dir = tmp_path / "export"
+    archiver = CandleAuditArchiver(repo, csv_dir)
+    archiver.export(
+        timeframe="1m",
+        day_start=date(2024, 1, 1),
+        day_end=date(2024, 1, 1),
+    )
+    return repo, csv_dir, inst_id
+
+
 def test_round_trip_purge_restore_state(tmp_path: Path) -> None:
     """Round-trip: export state -> purge -> restore -> verify identical.
 
@@ -437,6 +552,50 @@ def test_round_trip_purge_restore_events(tmp_path: Path) -> None:
     )
     assert len(rows_restored) == 1
     assert rows_restored[0][1] == rows_before[0][1]
+    repo.dispose()
+
+
+def test_round_trip_purge_restore_candle_audit(tmp_path: Path) -> None:
+    """Round-trip: export candle audit -> purge closed -> restore -> verify identical."""
+    repo, csv_dir, inst_id = _make_db_with_candle_versions(tmp_path)
+
+    rows_before = repo.get_candle_versions_for_archive(
+        inst_id,
+        "1m",
+        date(2024, 1, 1),
+        date(2024, 1, 1),
+    )
+    assert len(rows_before) == 2
+
+    archiver = CandleAuditArchiver(repo, csv_dir)
+    archiver.export(
+        timeframe="1m",
+        day_start=date(2024, 1, 1),
+        day_end=date(2024, 1, 1),
+        closed_only=True,
+        purge=True,
+    )
+    rows_after_purge = repo.get_candle_versions_for_archive(
+        inst_id,
+        "1m",
+        date(2024, 1, 1),
+        date(2024, 1, 1),
+    )
+    assert len(rows_after_purge) == 1
+    assert rows_after_purge[0][3] == KNOWN_TO_MAX
+
+    csv_files = sorted(csv_dir.rglob("*.csv"))
+    restorer = ArchiveRestorer(repo)
+    result = restorer.restore(table="candles", paths=csv_files)
+    assert result.rows_inserted == 1
+
+    rows_after_restore = repo.get_candle_versions_for_archive(
+        inst_id,
+        "1m",
+        date(2024, 1, 1),
+        date(2024, 1, 1),
+    )
+    assert [row[1:] for row in rows_after_restore] == [row[1:] for row in rows_before]
     repo.dispose()
 
 

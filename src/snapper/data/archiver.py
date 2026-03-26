@@ -1412,6 +1412,11 @@ def _build_column_parsers(
         List of parser functions, one per header column.
     """
     table_cols = {c.name: c for c in model.__table__.columns}
+    unknown = [name for name in header if name not in table_cols]
+    if unknown:
+        raise ValueError(
+            f"CSV header contains unknown columns for {model.__tablename__}: {unknown}"
+        )
     return [_parser_for_column(table_cols[name].type) for name in header]
 
 

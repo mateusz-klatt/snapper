@@ -529,6 +529,34 @@ def test_archiver_export_daily_timespan_monthly_files(tmp_path: Path) -> None:
     assert feb.exists()
 
 
+def test_archiver_export_daily_timespan_year_boundary(tmp_path: Path) -> None:
+    """Daily timespan handles year boundary (Dec -> Jan) correctly.
+
+    Given: Candles with 1d timeframe spanning 2023-12 and 2024-01,
+    When: export is called with timeframe=1d,
+    Then: Creates monthly files in correct year directories.
+    """
+    candle_rows = [
+        (datetime(2023, 12, 31, tzinfo=UTC), 100.0, 110.0, 90.0, 105.0, 1234.0, None, None),
+        (datetime(2024, 1, 2, tzinfo=UTC), 200.0, 210.0, 190.0, 205.0, 5000.0, None, None),
+    ]
+    repo = _StubRepo(
+        instruments={"inst-1": ("BTC-USD", "polygon")},
+        candles={"inst-1": candle_rows},
+    )
+    archiver = CandleCacheArchiver(repo, tmp_path)
+    result = archiver.export(
+        timeframe="1d",
+        day_start=date(2023, 12, 1),
+        day_end=date(2024, 1, 31),
+    )
+    assert result.files_written == 2
+    dec = tmp_path / "polygon" / "cache" / "day" / "BTC-USD" / "2023" / "2023-12.csv"
+    jan = tmp_path / "polygon" / "cache" / "day" / "BTC-USD" / "2024" / "2024-01.csv"
+    assert dec.exists()
+    assert jan.exists()
+
+
 def test_archiver_export_daily_timespan_dry_run(tmp_path: Path) -> None:
     """Daily timespan dry run counts without writing.
 

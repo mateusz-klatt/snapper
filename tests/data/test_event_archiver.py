@@ -822,6 +822,77 @@ def test_repo_delete_rows_by_id_empty_list(tmp_path: Path) -> None:
     repo.dispose()
 
 
+def test_repo_delete_rows_by_id_batch_boundary(tmp_path: Path) -> None:
+    """Delete >500 rows crosses batch boundary correctly.
+
+    Given: DB with 520 ticks,
+    When: delete_rows_by_id called with all 520 ids,
+    Then: All 520 deleted (two batches: 500 + 20).
+    """
+    db_url = f"sqlite:///{tmp_path / 'batch.db'}"
+    repo = DatabaseRepository(db_url)
+    Base.metadata.create_all(repo.engine)
+    ts_base = datetime(2024, 1, 1, tzinfo=UTC)
+    with repo.get_session() as session:
+        sym = Symbol(
+            public_id="sym-btc",
+            native_symbol="BTC-USD",
+            base="BTC",
+            quote="USD",
+            asset_type="crypto",
+            session_id="test",
+            sequence_id=1,
+            timestamp=ts_base,
+            created_at=ts_base,
+        )
+        session.add(sym)
+        session.flush()
+        inst = Instrument(
+            public_id="inst-btc",
+            symbol_public_id="sym-btc",
+            exchange="polygon",
+            session_id="test",
+            sequence_id=2,
+            timestamp=ts_base,
+        )
+        session.add(inst)
+        session.flush()
+        for i in range(520):
+            tick = Tick(
+                public_id=f"tick-{i}",
+                instrument_public_id="inst-btc",
+                bid=100.0 + i,
+                ask=101.0 + i,
+                last=100.0 + i,
+                volume=1000.0,
+                session_id="test",
+                sequence_id=100 + i,
+                timestamp=ts_base.replace(second=i % 60, minute=i // 60),
+                known_to=KNOWN_TO_MAX,
+            )
+            session.add(tick)
+        session.commit()
+    spec = EVENT_TABLES["ticks"]
+    rows = repo.get_event_rows_for_archive(
+        spec.model,
+        spec.columns,
+        date(2024, 1, 1),
+        date(2024, 1, 1),
+    )
+    assert len(rows) == 520
+    all_ids = [r[0] for r in rows]
+    deleted = repo.delete_rows_by_id(Tick, all_ids)
+    assert deleted == 520
+    remaining = repo.get_event_rows_for_archive(
+        spec.model,
+        spec.columns,
+        date(2024, 1, 1),
+        date(2024, 1, 1),
+    )
+    assert len(remaining) == 0
+    repo.dispose()
+
+
 def test_repo_get_order_archive_map(tmp_path: Path) -> None:
     """Repository maps order_public_id to (archive_symbol, exchange).
 
