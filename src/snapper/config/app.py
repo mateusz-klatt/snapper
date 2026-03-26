@@ -289,7 +289,15 @@ class AppSettings:
         return self._get_db_setting(
             "instruments",
             {
-                "kraken": ["BTC-USD", "BTC-EUR", "BTC-USDC", "BTC-EURC", "EUR-USD"],
+                "kraken": [
+                    "BTC-USD",
+                    "BTC-EUR",
+                    "BTC-USDC",
+                    "BTC-EURC",
+                    "EUR-USD",
+                    "ETH-USD",
+                    "SPY",
+                ],
                 "zonda": ["BTC-PLN", "USDC-PLN", "ETH-PLN", "SOL-USDC", "BTC-EUR"],
                 "walutomat": ["EUR-PLN", "USD-PLN", "EUR-USD"],
                 "polygon": ["BTC-USD", "BTC-EUR", "EUR-USD", "EUR-PLN", "USD-PLN"],
