@@ -41,6 +41,7 @@ import asyncio
 import signal
 import threading
 from datetime import UTC
+from datetime import date as date_type
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
@@ -66,7 +67,10 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.user_service import UserService
 from snapper.config.settings import BootstrapSettingsLoader
 from snapper.config.settings import get_settings
+from snapper.data.archive_symbols import safe_path
+from snapper.data.archiver import CandleCacheArchiver
 from snapper.data.models import Setting
+from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import where_active_now
 from snapper.data.seed.loader import run_seed
@@ -976,3 +980,64 @@ def polygon_backfill_grouped(
             raise typer.Exit(code=1) from e
 
     asyncio.run(run_grouped_backfill())
+
+
+@app.command(name="archive")
+def archive_candles(
+    exchange: str | None = typer.Option(None, help="Exchange filter (e.g. polygon, kraken)."),
+    symbol: str | None = typer.Option(None, help="Native symbol filter (e.g. BTC-USD)."),
+    timeframe: str = typer.Option("1m", help="Candle timeframe (e.g. 1m, 1h, 1d)."),
+    day: str | None = typer.Option(None, help="Single day to archive (YYYY-MM-DD)."),
+    from_date: str | None = typer.Option(None, "--from", help="Start of date range (YYYY-MM-DD)."),
+    to_date: str | None = typer.Option(None, "--to", help="End of date range (YYYY-MM-DD)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report counts without writing files."),
+    output_dir: str = typer.Option("data", help="Base output directory."),
+) -> None:
+    """Export active candle data to polygon-compatible CSV cache files.
+
+    Produces per-day (or per-month for daily timespan) CSV files under
+    ``{output_dir}/{exchange}/cache/{timespan}/{archive_symbol}/{year}/``.
+    Merges with existing files and deduplicates rows.
+
+    Args:
+        exchange: Exchange filter.
+        symbol: Native symbol filter (resolved to archive_symbol).
+        timeframe: Candle timeframe.
+        day: Single day to archive.
+        from_date: Start of date range.
+        to_date: End of date range.
+        dry_run: Count only.
+        output_dir: Base output directory.
+    """
+    if day is not None:
+        start = date_type.fromisoformat(day)
+        end = start
+    elif from_date is not None and to_date is not None:
+        start = date_type.fromisoformat(from_date)
+        end = date_type.fromisoformat(to_date)
+    else:
+        typer.echo("Error: provide --day or --from + --to")
+        raise typer.Exit(code=1)
+
+    bootstrap = BootstrapSettingsLoader()
+    repo = DatabaseRepository(bootstrap.db_url)
+    archive_symbol_filter: str | None = None
+    if symbol is not None:
+        archive_symbol_filter = repo.resolve_native_to_archive_symbol(symbol)
+        if archive_symbol_filter is None:
+            typer.echo(f"Warning: symbol '{symbol}' not found in DB, using safe_path fallback")
+            archive_symbol_filter = safe_path(symbol)
+
+    archiver = CandleCacheArchiver(repo, Path(output_dir))
+    label = "Dry run:" if dry_run else "Exporting"
+    typer.echo(f"{label} candle cache ({timeframe}) from {start} to {end}...")
+    result = archiver.export(
+        exchange=exchange,
+        archive_symbol=archive_symbol_filter,
+        timeframe=timeframe,
+        day_start=start,
+        day_end=end,
+        dry_run=dry_run,
+    )
+    typer.echo(f"Done: {result.rows_exported} rows in {result.files_written} files")
+    repo.dispose()

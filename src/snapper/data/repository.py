@@ -36,7 +36,9 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from dataclasses import dataclass
 from datetime import UTC
+from datetime import date
 from datetime import datetime
+from datetime import timedelta
 from inspect import isawaitable
 from typing import Any
 from typing import cast
@@ -1891,6 +1893,109 @@ class DatabaseRepository:
             if pub_id not in seen or (ts, row_id) < seen[pub_id]:
                 seen[pub_id] = (ts, row_id)
         return {row_id for _ts, row_id in seen.values()}
+
+    def resolve_native_to_archive_symbol(self, native_symbol: str) -> str | None:
+        """Resolve a current native_symbol to its stable archive_symbol.
+
+        Looks up the active Symbol row by native_symbol, then maps its
+        public_id through the archive_symbols mapping.  Works correctly
+        even after symbol renames.
+
+        Args:
+            native_symbol: Current native symbol name (e.g. ``BTC-USD``).
+
+        Returns:
+            Archive symbol string, or None if no active Symbol found.
+        """
+        archive_symbols = self.get_archive_symbols()
+        with self.get_session() as session:
+            now = datetime.now(UTC)
+            ts_filter, kt_filter = where_active(Symbol, now)
+            row = session.execute(
+                select(Symbol.public_id).where(
+                    Symbol.native_symbol == native_symbol,
+                    ts_filter,
+                    kt_filter,
+                )
+            ).scalar_one_or_none()
+        if row is None:
+            return None
+        return archive_symbols.get(row)
+
+    def get_instrument_archive_map(self) -> dict[str, tuple[str, str]]:
+        """Build mapping from instrument_public_id to (archive_symbol, exchange).
+
+        Joins active Instrument rows with Symbol anchor rows to resolve
+        stable archive paths for each instrument.
+
+        Returns:
+            ``{instrument_public_id: (archive_symbol, exchange)}`` mapping.
+        """
+        archive_symbols = self.get_archive_symbols()
+        with self.get_session() as session:
+            now = datetime.now(UTC)
+            ts_filter, kt_filter = where_active(Instrument, now)
+            rows = session.execute(
+                select(
+                    Instrument.public_id,
+                    Instrument.symbol_public_id,
+                    Instrument.exchange,
+                ).where(ts_filter, kt_filter)
+            ).all()
+        result: dict[str, tuple[str, str]] = {}
+        for inst_pub_id, sym_pub_id, exchange in rows:
+            arch_sym = archive_symbols.get(sym_pub_id)
+            if arch_sym is not None:
+                result[inst_pub_id] = (arch_sym, exchange)
+        return result
+
+    def get_candles_for_cache_export(
+        self,
+        instrument_public_id: str,
+        timeframe: str,
+        day_start: date,
+        day_end: date,
+    ) -> list[tuple[datetime, float, float, float, float, float, float | None, int | None]]:
+        """Query latest candle versions for cache projection export.
+
+        Returns only the active version (``known_to = KNOWN_TO_MAX``) per
+        ``(instrument_public_id, timeframe, open_at)``, sorted by ``open_at``.
+        Output tuples match the Polygon CSV column order.
+
+        Args:
+            instrument_public_id: Instrument to export candles for.
+            timeframe: Candle timeframe (e.g. ``1m``, ``1h``, ``1d``).
+            day_start: First day (inclusive) of ``open_at`` range.
+            day_end: Last day (inclusive) of ``open_at`` range.
+
+        Returns:
+            List of ``(open_at, open, high, low, close, volume, vwap, trades)``
+            tuples sorted by ``open_at ASC``.
+        """
+        from_dt = datetime.combine(day_start, datetime.min.time(), tzinfo=UTC)
+        to_dt = datetime.combine(day_end + timedelta(days=1), datetime.min.time(), tzinfo=UTC)
+        with self.get_session() as session:
+            rows = session.execute(
+                select(
+                    Candle.open_at,
+                    Candle.open,
+                    Candle.high,
+                    Candle.low,
+                    Candle.close,
+                    Candle.volume,
+                    Candle.vwap,
+                    Candle.trades,
+                )
+                .where(
+                    Candle.instrument_public_id == instrument_public_id,
+                    Candle.timeframe == timeframe,
+                    Candle.open_at >= from_dt,
+                    Candle.open_at < to_dt,
+                    Candle.known_to == KNOWN_TO_MAX,
+                )
+                .order_by(Candle.open_at)
+            ).all()
+        return [tuple(r) for r in rows]
 
     def dispose(self) -> None:
         """Dispose the engine and release open database resources."""
