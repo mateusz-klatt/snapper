@@ -468,6 +468,9 @@ snapper archive --table trades --from 2024-01-01 --to 2024-03-31 --purge
 snapper archive --table control --day 2024-03-15
 snapper archive --table candles-audit --day 2024-03-15 --timeframe 1m
 snapper archive --table candles-audit --day 2024-03-15 --closed-only --purge
+snapper archive --table orders --day 2024-03-15
+snapper archive --table symbols --day 2024-03-15 --closed-only --purge
+snapper archive --table instruments --day 2024-03-15
 ```
 
 **Notes:**

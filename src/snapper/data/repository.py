@@ -2036,6 +2036,47 @@ class DatabaseRepository:
             ).all()
         return [tuple(r) for r in rows]
 
+    def get_scd2_rows_for_archive(
+        self,
+        model: type[Any],
+        columns: tuple[str, ...],
+        day_start: date,
+        day_end: date,
+        closed_only: bool = False,
+    ) -> list[tuple[Any, ...]]:
+        """Query state-SCD2 rows in a timestamp range.
+
+        Similar to ``get_event_rows_for_archive`` but supports
+        ``closed_only`` filtering for SCD2 tables where ``known_to``
+        is meaningful (not always ``KNOWN_TO_MAX``).
+
+        Args:
+            model: SQLAlchemy model class.
+            columns: Column names to select, in desired CSV order.
+            day_start: First day (inclusive) of ``timestamp`` range.
+            day_end: Last day (inclusive) of ``timestamp`` range.
+            closed_only: If True, only rows with
+                ``known_to < now`` (closed versions).
+
+        Returns:
+            List of ``(id, col1, col2, ...)`` tuples sorted by
+            ``(timestamp, id)``.
+        """
+        from_dt = datetime.combine(day_start, datetime.min.time(), tzinfo=UTC)
+        to_dt = datetime.combine(day_end + timedelta(days=1), datetime.min.time(), tzinfo=UTC)
+        conditions = [
+            model.timestamp >= from_dt,
+            model.timestamp < to_dt,
+        ]
+        if closed_only:
+            conditions.append(model.known_to < datetime.now(UTC))
+        col_attrs = [getattr(model, name) for name in columns]
+        with self.get_session() as session:
+            rows = session.execute(
+                select(model.id, *col_attrs).where(*conditions).order_by(model.timestamp, model.id)
+            ).all()
+        return [tuple(r) for r in rows]
+
     def delete_rows_by_id(self, model: type[Any], row_ids: list[int]) -> int:
         """Delete rows by primary key id in batches.
 

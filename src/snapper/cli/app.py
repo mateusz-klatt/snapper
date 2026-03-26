@@ -69,10 +69,12 @@ from snapper.config.settings import BootstrapSettingsLoader
 from snapper.config.settings import get_settings
 from snapper.data.archive_symbols import safe_path
 from snapper.data.archiver import EVENT_TABLES
+from snapper.data.archiver import STATE_TABLES
 from snapper.data.archiver import CandleAuditArchiver
 from snapper.data.archiver import CandleCacheArchiver
 from snapper.data.archiver import EventArchiver
 from snapper.data.archiver import ExportResult
+from snapper.data.archiver import StateArchiver
 from snapper.data.models import Setting
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import close_and_insert
@@ -990,7 +992,7 @@ def polygon_backfill_grouped(
 def archive_data(
     table: str = typer.Option(
         "candles",
-        help="Table (candles, candles-audit, ticks, trades, signals, executions, telemetry, control).",
+        help="Table to archive (candles, candles-audit, orders, symbols, ... or any event/state table).",
     ),
     exchange: str | None = typer.Option(None, help="Exchange filter (e.g. polygon, kraken)."),
     symbol: str | None = typer.Option(None, help="Native symbol filter (e.g. BTC-USD)."),
@@ -1003,7 +1005,7 @@ def archive_data(
         False, "--purge", help="Delete exported rows from DB after writing."
     ),
     closed_only: bool = typer.Option(
-        False, "--closed-only", help="Only closed SCD2 versions (candles-audit only)."
+        False, "--closed-only", help="Only closed SCD2 versions (candles-audit and state tables)."
     ),
     output_dir: str = typer.Option("data", help="Base output directory."),
 ) -> None:
@@ -1033,7 +1035,7 @@ def archive_data(
         closed_only: Only closed SCD2 versions (candles-audit only).
         output_dir: Base output directory.
     """
-    valid_tables = {"candles", "candles-audit", *EVENT_TABLES}
+    valid_tables = {"candles", "candles-audit", *EVENT_TABLES, *STATE_TABLES}
     if table not in valid_tables:
         typer.echo(f"Error: unknown table '{table}'")
         raise typer.Exit(code=1)
@@ -1042,8 +1044,9 @@ def archive_data(
         typer.echo("Error: --purge is not supported for candle cache export")
         raise typer.Exit(code=1)
 
-    if table == "candles-audit" and purge and not closed_only:
-        typer.echo("Error: --purge requires --closed-only for candles-audit")
+    scd2_tables = {"candles-audit", *STATE_TABLES}
+    if table in scd2_tables and purge and not closed_only:
+        typer.echo(f"Error: --purge requires --closed-only for {table}")
         raise typer.Exit(code=1)
 
     if day is not None:
@@ -1134,13 +1137,25 @@ def _run_archive_export(
             purge=purge,
         )
 
-    typer.echo(f"{label} {table} from {start} to {end}...")
-    return EventArchiver(repo, output_dir).export(
+    if table in EVENT_TABLES:
+        typer.echo(f"{label} {table} from {start} to {end}...")
+        return EventArchiver(repo, output_dir).export(
+            table=table,
+            exchange=exchange,
+            archive_symbol=archive_symbol_filter,
+            day_start=start,
+            day_end=end,
+            dry_run=dry_run,
+            purge=purge,
+        )
+
+    mode = "closed-only" if closed_only else "all versions"
+    typer.echo(f"{label} {table} ({mode}) from {start} to {end}...")
+    return StateArchiver(repo, output_dir).export(
         table=table,
-        exchange=exchange,
-        archive_symbol=archive_symbol_filter,
         day_start=start,
         day_end=end,
+        closed_only=closed_only,
         dry_run=dry_run,
         purge=purge,
     )

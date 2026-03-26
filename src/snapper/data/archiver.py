@@ -16,6 +16,7 @@ Event archive structure:
 """
 
 import csv
+import json
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
@@ -27,10 +28,22 @@ from typing import Any
 from snapper.data.models import Candle
 from snapper.data.models import Control
 from snapper.data.models import Execution
+from snapper.data.models import Instrument
+from snapper.data.models import InstrumentSpec
+from snapper.data.models import MarketSnapshot
+from snapper.data.models import Order
+from snapper.data.models import Position
+from snapper.data.models import ProcessRun
+from snapper.data.models import Setting
 from snapper.data.models import Signal
+from snapper.data.models import Symbol
+from snapper.data.models import SymbolAlias
+from snapper.data.models import SymbolExchangeCapability
 from snapper.data.models import Telemetry
 from snapper.data.models import Tick
 from snapper.data.models import Trade
+from snapper.data.models import User
+from snapper.data.models import UserLoginEvent
 from snapper.data.repository import DatabaseRepository
 
 _HEADER = [
@@ -543,15 +556,16 @@ EVENT_TABLES: dict[str, EventTableSpec] = {
 }
 
 
-def _format_value(value: datetime | float | int | str | None) -> str:
-    """Format a value for event archive CSV output.
+def _format_value(value: datetime | float | int | str | dict[str, Any] | list[Any] | None) -> str:
+    """Format a value for archive CSV output.
 
     Args:
         value: Column value from DB row.
 
     Returns:
         String representation: ISO format for datetime, full-precision
-        decimal for float, empty string for None.
+        decimal for float, compact JSON for dict/list, empty string
+        for None.
     """
     if value is None:
         return ""
@@ -559,6 +573,8 @@ def _format_value(value: datetime | float | int | str | None) -> str:
         return value.isoformat()
     if isinstance(value, float):
         return _format_decimal(value)
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, separators=(",", ":"))
     return str(value)
 
 
@@ -1035,3 +1051,277 @@ class CandleAuditArchiver:
             files_written += 1
 
         return files_written, len(row_ids), row_ids
+
+
+_TEMPORAL_ORDER = ("public_id", "timestamp", "known_to", "session_id", "sequence_id")
+
+
+def _get_model_archive_columns(model: type[Any]) -> tuple[str, ...]:
+    """Derive CSV column list from a model, temporal columns first.
+
+    Ensures ``(public_id, timestamp, known_to)`` are at indices 0-2 for
+    consistent merge/dedup key positioning across all archivers.
+
+    Args:
+        model: SQLAlchemy model class with TemporalMixin.
+
+    Returns:
+        Tuple of column names excluding ``id``.
+    """
+    temporal_set = set(_TEMPORAL_ORDER)
+    domain = tuple(
+        c.name for c in model.__table__.columns if c.name != "id" and c.name not in temporal_set
+    )
+    return (*_TEMPORAL_ORDER, *domain)
+
+
+@dataclass(frozen=True, slots=True)
+class StateTableSpec:
+    """Configuration for a state-SCD2 table archive.
+
+    Attributes:
+        model: SQLAlchemy model class.
+        group_column: Column name for exchange/symbol partitioning
+            (``instrument_public_id``, ``symbol_public_id``, or None
+            for flat tables).
+    """
+
+    model: type[Any]
+    group_column: str | None
+
+
+STATE_TABLES: dict[str, StateTableSpec] = {
+    "orders": StateTableSpec(model=Order, group_column=None),
+    "positions": StateTableSpec(model=Position, group_column=None),
+    "instruments": StateTableSpec(model=Instrument, group_column="symbol_public_id"),
+    "instrument_specs": StateTableSpec(model=InstrumentSpec, group_column=None),
+    "settings": StateTableSpec(model=Setting, group_column=None),
+    "symbols": StateTableSpec(model=Symbol, group_column=None),
+    "symbol_aliases": StateTableSpec(model=SymbolAlias, group_column=None),
+    "symbol_exchange_capabilities": StateTableSpec(
+        model=SymbolExchangeCapability,
+        group_column=None,
+    ),
+    "users": StateTableSpec(model=User, group_column=None),
+    "user_login_events": StateTableSpec(model=UserLoginEvent, group_column=None),
+    "market_snapshots": StateTableSpec(model=MarketSnapshot, group_column="instrument_public_id"),
+    "process_runs": StateTableSpec(model=ProcessRun, group_column=None),
+}
+
+
+class StateArchiver:
+    """Export state-SCD2 table rows to per-day CSV archive files.
+
+    Handles all state-SCD2 tables (Order, Position, Instrument, Setting,
+    Symbol, etc.) with full temporal metadata.  Most tables use a flat
+    archive layout; Instrument and MarketSnapshot are partitioned by
+    exchange and archive_symbol.
+
+    Supports ``closed_only`` filtering and purge with Symbol anchor
+    row protection.
+
+    Attributes:
+        _repo: Sync database repository.
+        _base_dir: Base data directory for archive output.
+    """
+
+    def __init__(self, repo: DatabaseRepository, base_dir: Path) -> None:
+        """Initialize the state archiver.
+
+        Args:
+            repo: Sync database repository.
+            base_dir: Base data directory (e.g. ``Path("data")``).
+        """
+        self._repo = repo
+        self._base_dir = base_dir
+
+    def export(
+        self,
+        *,
+        table: str,
+        day_start: date,
+        day_end: date,
+        closed_only: bool = False,
+        dry_run: bool = False,
+        purge: bool = False,
+    ) -> ExportResult:
+        """Export state-SCD2 rows for a date range to CSV.
+
+        Args:
+            table: State table name (key in ``STATE_TABLES``).
+            day_start: First day (inclusive) of ``timestamp`` range.
+            day_end: Last day (inclusive) of ``timestamp`` range.
+            closed_only: If True, only closed versions (known_to < now).
+            dry_run: If True, count rows without writing files.
+            purge: If True, delete exported rows from DB.
+                Requires ``closed_only=True``.
+
+        Returns:
+            ExportResult with file, row, and purge counts.
+
+        Raises:
+            ValueError: If table unknown or purge without closed_only.
+        """
+        spec = STATE_TABLES.get(table)
+        if spec is None:
+            raise ValueError(f"Unknown state table: {table}")
+        if purge and not closed_only:
+            raise ValueError("Purge requires closed_only=True for state tables")
+
+        columns = _get_model_archive_columns(spec.model)
+        rows = self._repo.get_scd2_rows_for_archive(
+            spec.model,
+            columns,
+            day_start,
+            day_end,
+            closed_only,
+        )
+        if not rows:
+            return ExportResult(files_written=0, rows_exported=0, rows_purged=0)
+
+        files, row_ids = self._group_rows(spec, table, columns, rows)
+
+        if dry_run:
+            return ExportResult(
+                files_written=len(files),
+                rows_exported=len(row_ids),
+                rows_purged=0,
+            )
+
+        files_written = 0
+        for path in sorted(files):
+            existing = _read_existing_csv(path)
+            merged = _merge_and_dedup_events(existing, files[path])
+            _write_event_csv(path, columns, merged)
+            files_written += 1
+
+        rows_purged = 0
+        if purge and row_ids:
+            purge_ids = self._apply_purge_protection(spec, row_ids)
+            rows_purged = self._repo.delete_rows_by_id(spec.model, purge_ids)
+
+        return ExportResult(
+            files_written=files_written,
+            rows_exported=len(row_ids),
+            rows_purged=rows_purged,
+        )
+
+    def _group_rows(
+        self,
+        spec: StateTableSpec,
+        table: str,
+        columns: tuple[str, ...],
+        rows: list[tuple[Any, ...]],
+    ) -> tuple[dict[Path, list[tuple[str, ...]]], list[int]]:
+        """Convert DB rows to CSV tuples and group by output file path.
+
+        Args:
+            spec: State table specification.
+            table: Table name (for path construction).
+            columns: Column names (for index lookup).
+            rows: Raw DB rows ``(id, col1, col2, ...)``.
+
+        Returns:
+            Tuple of (files_dict, row_ids).
+        """
+        group_map, group_col_idx, exchange_col_idx = self._build_group_context(
+            spec,
+            columns,
+        )
+
+        files: dict[Path, list[tuple[str, ...]]] = defaultdict(list)
+        row_ids: list[int] = []
+
+        for row in rows:
+            csv_values = tuple(_format_value(v) for v in row[1:])
+            path = self._resolve_row_path(
+                row,
+                table,
+                group_map,
+                group_col_idx,
+                exchange_col_idx,
+            )
+            if path is None:
+                continue
+            files[path].append(csv_values)
+            row_ids.append(row[0])
+
+        return files, row_ids
+
+    def _build_group_context(
+        self,
+        spec: StateTableSpec,
+        columns: tuple[str, ...],
+    ) -> tuple[dict[str, tuple[str, str]] | dict[str, str] | None, int | None, int | None]:
+        """Build grouping context for path resolution.
+
+        Returns:
+            Tuple of (group_map, group_col_idx, exchange_col_idx).
+        """
+        if spec.group_column is None:
+            return None, None, None
+        group_col_idx = columns.index(spec.group_column) + 1
+        if spec.group_column == "instrument_public_id":
+            return self._repo.get_instrument_archive_map(), group_col_idx, None
+        if spec.group_column == "symbol_public_id":
+            exchange_col_idx = columns.index("exchange") + 1
+            return self._repo.get_archive_symbols(), group_col_idx, exchange_col_idx
+        raise ValueError(f"Unknown group_column: {spec.group_column}")
+
+    def _resolve_row_path(
+        self,
+        row: tuple[Any, ...],
+        table: str,
+        group_map: dict[str, tuple[str, str]] | dict[str, str] | None,
+        group_col_idx: int | None,
+        exchange_col_idx: int | None,
+    ) -> Path | None:
+        """Determine the output CSV path for a single state row.
+
+        Args:
+            row: Raw DB row ``(id, col1, col2, ...)``.
+            table: Table name.
+            group_map: FK mapping, or None for flat.
+            group_col_idx: Index of grouping column in row.
+            exchange_col_idx: Index of exchange column (symbol partition).
+
+        Returns:
+            Output path, or None to skip.
+        """
+        ts: datetime = row[2]
+        if group_col_idx is None or group_map is None:
+            return _resolve_event_path(self._base_dir, table, ts.date())
+        fk_value = row[group_col_idx]
+        if exchange_col_idx is not None:
+            arch_sym = group_map.get(fk_value)
+            if arch_sym is None:
+                return None
+            exch: str = row[exchange_col_idx]
+            return _resolve_event_path(self._base_dir, table, ts.date(), exch, str(arch_sym))
+        mapping = group_map.get(fk_value)
+        if mapping is None or not isinstance(mapping, tuple):
+            return None
+        arch_sym_str, exch = mapping
+        return _resolve_event_path(self._base_dir, table, ts.date(), exch, arch_sym_str)
+
+    def _apply_purge_protection(
+        self,
+        spec: StateTableSpec,
+        row_ids: list[int],
+    ) -> list[int]:
+        """Filter row IDs for purge, applying anchor protection for Symbol.
+
+        Symbol anchor rows (first version per public_id) are excluded
+        from purge to preserve archive_symbol stability.
+
+        Args:
+            spec: State table specification.
+            row_ids: All exported row IDs.
+
+        Returns:
+            Filtered row IDs safe to purge.
+        """
+        if spec.model is not Symbol:
+            return row_ids
+        anchor_ids = self._repo.get_symbol_anchor_ids()
+        return [rid for rid in row_ids if rid not in anchor_ids]
