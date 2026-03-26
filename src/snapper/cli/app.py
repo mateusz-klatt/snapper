@@ -70,6 +70,7 @@ from snapper.config.settings import get_settings
 from snapper.data.archive_symbols import safe_path
 from snapper.data.archiver import EVENT_TABLES
 from snapper.data.archiver import STATE_TABLES
+from snapper.data.archiver import ArchiveRestorer
 from snapper.data.archiver import CandleAuditArchiver
 from snapper.data.archiver import CandleCacheArchiver
 from snapper.data.archiver import EventArchiver
@@ -1159,3 +1160,55 @@ def _run_archive_export(
         dry_run=dry_run,
         purge=purge,
     )
+
+
+@app.command(name="restore")
+def restore_data(
+    table: str = typer.Option(..., help="Table name to restore into."),
+    file: str | None = typer.Option(None, help="Single CSV file to restore."),
+    directory: str | None = typer.Option(None, "--dir", help="Directory of CSV files to restore."),
+    source: str = typer.Option("audit", help="Restore source (audit)."),
+) -> None:
+    """Restore archived CSV data back into the database.
+
+    Reads CSV files exported by ``snapper archive`` and inserts rows
+    back into the database, deduplicating against existing data.
+
+    Args:
+        table: Table name.
+        file: Single CSV file path.
+        directory: Directory to scan recursively for CSV files.
+        source: Restore mode (audit for full history).
+    """
+    if file is None and directory is None:
+        typer.echo("Error: provide --file or --dir")
+        raise typer.Exit(code=1)
+
+    paths: list[Path] = []
+    if file is not None:
+        p = Path(file)
+        if not p.exists():
+            typer.echo(f"Error: file not found: {file}")
+            raise typer.Exit(code=1)
+        paths.append(p)
+    if directory is not None:
+        d = Path(directory)
+        if not d.is_dir():
+            typer.echo(f"Error: directory not found: {directory}")
+            raise typer.Exit(code=1)
+        paths.extend(sorted(d.rglob("*.csv")))
+
+    if not paths:
+        typer.echo("No CSV files found")
+        raise typer.Exit(code=1)
+
+    bootstrap = BootstrapSettingsLoader()
+    repo = DatabaseRepository(bootstrap.db_url)
+    restorer = ArchiveRestorer(repo)
+    typer.echo(f"Restoring {table} from {len(paths)} file(s) (source={source})...")
+    result = restorer.restore(table=table, paths=paths, source=source)
+    typer.echo(
+        f"Done: {result.rows_inserted} inserted, {result.rows_skipped} skipped "
+        f"({result.files_processed} files)"
+    )
+    repo.dispose()

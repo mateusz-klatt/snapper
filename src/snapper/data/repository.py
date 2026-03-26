@@ -2186,6 +2186,60 @@ class DatabaseRepository:
             ).all()
         return [tuple(r) for r in rows]
 
+    def get_existing_archive_keys(
+        self,
+        model: type[Any],
+        day_start: date,
+        day_end: date,
+    ) -> set[tuple[str, str, str]]:
+        """Get existing (public_id, timestamp_iso, known_to_iso) for dedup.
+
+        Returns a set of string triples for comparison against CSV row
+        values, avoiding datetime precision mismatches.
+
+        Args:
+            model: SQLAlchemy model class.
+            day_start: First day (inclusive) of ``timestamp`` range.
+            day_end: Last day (inclusive) of ``timestamp`` range.
+
+        Returns:
+            Set of ``(public_id, timestamp_iso, known_to_iso)`` tuples.
+        """
+        from_dt = datetime.combine(day_start, datetime.min.time(), tzinfo=UTC)
+        to_dt = datetime.combine(day_end + timedelta(days=1), datetime.min.time(), tzinfo=UTC)
+        with self.get_session() as session:
+            rows = session.execute(
+                select(model.public_id, model.timestamp, model.known_to).where(
+                    model.timestamp >= from_dt,
+                    model.timestamp < to_dt,
+                )
+            ).all()
+        return {(r[0], r[1].isoformat(), r[2].isoformat()) for r in rows}
+
+    def bulk_insert_from_archive(
+        self,
+        model: type[Any],
+        rows: list[dict[str, Any]],
+    ) -> int:
+        """Bulk insert archive rows into a table.
+
+        Rows must contain all non-id columns with properly typed values.
+        No dedup is performed — caller must filter duplicates before calling.
+
+        Args:
+            model: SQLAlchemy model class.
+            rows: List of column dicts to insert.
+
+        Returns:
+            Number of rows inserted.
+        """
+        if not rows:
+            return 0
+        with self.get_session() as session:
+            session.execute(insert(model), rows)
+            session.commit()
+        return len(rows)
+
     def dispose(self) -> None:
         """Dispose the engine and release open database resources."""
         self.engine.dispose()

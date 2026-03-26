@@ -488,6 +488,39 @@ snapper archive --table instruments --day 2024-03-15
 - ``candles-audit`` exports all SCD2 versions (closed + active) grouped by
   ``open_at`` date.  ``--purge`` requires ``--closed-only`` to protect active rows.
 
+### `restore`
+
+Restore archived CSV data back into the database.  Reads CSV files
+exported by ``snapper archive`` and inserts rows, deduplicating against
+existing data by ``(public_id, timestamp, known_to)``.
+
+```bash
+snapper restore [OPTIONS]
+```
+
+**Options:**
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--table` | TEXT | (required) | Table name to restore into |
+| `--file` | PATH | None | Single CSV file to restore |
+| `--dir` | PATH | None | Directory to scan recursively for CSV files |
+| `--source` | TEXT | `audit` | Restore mode (`audit` for full history) |
+
+**Examples:**
+
+```bash
+snapper restore --table ticks --file data/archive/ticks/polygon/BTC-USD/2024/2024-01-01.csv
+snapper restore --table settings --dir data/archive/settings/
+snapper restore --table candles --dir data/archive/candles/polygon/BTC-USD/
+```
+
+**Notes:**
+
+- At least one of `--file` or `--dir` is required.
+- Rows already present in DB (matching `public_id + timestamp + known_to`) are skipped.
+- Audit restore inserts all temporal columns exactly as exported.
+
 ### One-time cache directory migration
 
 Renames legacy Polygon cache directories from API ticker format

@@ -18,12 +18,20 @@ Event archive structure:
 import csv
 import json
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+
+from sqlalchemy import JSON
+from sqlalchemy import Boolean
+from sqlalchemy import DateTime
+from sqlalchemy import Float
+from sqlalchemy import Integer
+from sqlalchemy.types import TypeDecorator
 
 from snapper.data.models import Candle
 from snapper.data.models import Control
@@ -1325,3 +1333,219 @@ class StateArchiver:
             return row_ids
         anchor_ids = self._repo.get_symbol_anchor_ids()
         return [rid for rid in row_ids if rid not in anchor_ids]
+
+
+_ALL_TABLE_SPECS: dict[str, type[Any]] = {
+    **{name: spec.model for name, spec in EVENT_TABLES.items()},
+    **{name: spec.model for name, spec in STATE_TABLES.items()},
+    "candles": Candle,
+}
+
+
+def _parser_for_column(col_type: Any) -> Callable[[str], Any]:
+    """Return a CSV string parser for a SQLAlchemy column type.
+
+    Handles TypeDecorator wrapping (TZDateTime, UUIDColumn) and
+    standard SQLAlchemy types.
+
+    Args:
+        col_type: SQLAlchemy column type instance.
+
+    Returns:
+        Function that converts a CSV string to the correct Python type.
+    """
+    if isinstance(col_type, TypeDecorator):
+        impl = col_type.impl
+        if impl is DateTime or isinstance(impl, DateTime):
+            return _parse_datetime_csv
+        return _parse_str_csv
+    if isinstance(col_type, Float):
+        return _parse_float_csv
+    if isinstance(col_type, Integer):
+        return _parse_int_csv
+    if isinstance(col_type, Boolean):
+        return _parse_bool_csv
+    if isinstance(col_type, JSON):
+        return _parse_json_csv
+    if isinstance(col_type, DateTime):
+        return _parse_datetime_csv
+    return _parse_str_csv
+
+
+def _parse_str_csv(s: str) -> str | None:
+    return s if s else None
+
+
+def _parse_datetime_csv(s: str) -> datetime | None:
+    return datetime.fromisoformat(s) if s else None
+
+
+def _parse_float_csv(s: str) -> float | None:
+    return float(s) if s else None
+
+
+def _parse_int_csv(s: str) -> int | None:
+    return int(s) if s else None
+
+
+def _parse_bool_csv(s: str) -> bool | None:
+    if not s:
+        return None
+    return s in ("True", "1", "true")
+
+
+def _parse_json_csv(s: str) -> dict[str, Any] | list[Any] | None:
+    return json.loads(s) if s else None
+
+
+def _build_column_parsers(
+    model: type[Any],
+    header: list[str],
+) -> list[Callable[[str], Any]]:
+    """Build a list of CSV value parsers matching the CSV header order.
+
+    Args:
+        model: SQLAlchemy model class.
+        header: CSV header column names.
+
+    Returns:
+        List of parser functions, one per header column.
+    """
+    table_cols = {c.name: c for c in model.__table__.columns}
+    return [_parser_for_column(table_cols[name].type) for name in header]
+
+
+@dataclass(slots=True)
+class RestoreResult:
+    """Result of an archive restore operation.
+
+    Attributes:
+        files_processed: Number of CSV files read.
+        rows_inserted: Number of rows inserted into DB.
+        rows_skipped: Number of rows skipped (already exist).
+    """
+
+    files_processed: int
+    rows_inserted: int
+    rows_skipped: int
+
+
+class ArchiveRestorer:
+    """Restore archived CSV data back into the database.
+
+    Supports audit restore (full history with temporal metadata) for
+    all table types.  Deduplicates against existing rows by
+    ``(public_id, timestamp, known_to)`` to prevent double-inserts.
+
+    Attributes:
+        _repo: Sync database repository.
+    """
+
+    def __init__(self, repo: DatabaseRepository) -> None:
+        """Initialize the archive restorer.
+
+        Args:
+            repo: Sync database repository.
+        """
+        self._repo = repo
+
+    def restore(
+        self,
+        *,
+        table: str,
+        paths: list[Path],
+        source: str = "audit",
+    ) -> RestoreResult:
+        """Restore archived rows from CSV files.
+
+        Args:
+            table: Table name (must be a known event, state, or candle table).
+            paths: List of CSV file paths to restore.
+            source: Restore mode — ``audit`` for full history.
+
+        Returns:
+            RestoreResult with counts.
+
+        Raises:
+            ValueError: If table unknown or source not supported.
+        """
+        model = _ALL_TABLE_SPECS.get(table)
+        if model is None:
+            raise ValueError(f"Unknown table for restore: {table}")
+        if source != "audit":
+            raise ValueError(f"Restore source '{source}' not yet supported (use 'audit')")
+
+        total_inserted = 0
+        total_skipped = 0
+        files_processed = 0
+
+        for path in paths:
+            inserted, skipped = self._restore_file(model, path)
+            total_inserted += inserted
+            total_skipped += skipped
+            files_processed += 1
+
+        return RestoreResult(
+            files_processed=files_processed,
+            rows_inserted=total_inserted,
+            rows_skipped=total_skipped,
+        )
+
+    def _restore_file(
+        self,
+        model: type[Any],
+        path: Path,
+    ) -> tuple[int, int]:
+        """Restore a single CSV file into the database.
+
+        Args:
+            model: SQLAlchemy model class.
+            path: CSV file path.
+
+        Returns:
+            Tuple of (rows_inserted, rows_skipped).
+        """
+        with path.open(encoding="utf-8", newline="") as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            if header is None:
+                return 0, 0
+            raw_rows = [tuple(row) for row in reader]
+
+        if not raw_rows:
+            return 0, 0
+
+        parsers = _build_column_parsers(model, header)
+        existing_keys = self._get_existing_keys(model, raw_rows)
+
+        new_rows: list[dict[str, Any]] = []
+        skipped = 0
+        for raw in raw_rows:
+            key = (raw[0], raw[1], raw[2])
+            if key in existing_keys:
+                skipped += 1
+                continue
+            row_dict = {header[i]: parsers[i](raw[i]) for i in range(len(header))}
+            new_rows.append(row_dict)
+
+        inserted = self._repo.bulk_insert_from_archive(model, new_rows)
+        return inserted, skipped
+
+    def _get_existing_keys(
+        self,
+        model: type[Any],
+        raw_rows: list[tuple[str, ...]],
+    ) -> set[tuple[str, str, str]]:
+        """Extract date range from CSV rows and query existing dedup keys.
+
+        Args:
+            model: SQLAlchemy model class.
+            raw_rows: Raw CSV string rows (timestamp at index 1).
+
+        Returns:
+            Set of (public_id, timestamp_iso, known_to_iso) tuples.
+        """
+        timestamps = [r[1] for r in raw_rows]
+        min_date = datetime.fromisoformat(min(timestamps)).date()
+        max_date = datetime.fromisoformat(max(timestamps)).date()
+        return self._repo.get_existing_archive_keys(model, min_date, max_date)
