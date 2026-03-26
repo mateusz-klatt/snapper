@@ -1508,8 +1508,8 @@ packages:
   '@vitest/utils@4.1.1':
     resolution: {integrity: sha512-cNxAlaB3sHoCdL6pj6yyUXv9Gry1NHNg0kFTXdvSIZXLHsqKH7chiWOkwJ5s5+d/oMwcoG9T0bKU38JZWKusrQ==}
 
-  '@zenuml/core@3.46.0':
-    resolution: {integrity: sha512-bjG37doCwXer4DhlBh1d7bHUuJbqAK/1I+kHyL7Evy0eWZnBOTEOfp6LodB5cokw3w2IMxzYuj7qyRzwjqoeiA==}
+  '@zenuml/core@3.46.1':
+    resolution: {integrity: sha512-H+f9373BnjD0Lq4qweWEvCnOcY4m7NFycuh7Vp2GVvETZJ6gRiX+z4R7p+f0HvEuLxKKaZfGaX391YJKJVAtBw==}
     engines: {node: '>=20'}
 
   abort-controller@3.0.0:
@@ -2949,13 +2949,6 @@ packages:
   quick-format-unescaped@4.0.4:
     resolution: {integrity: sha512-tYC1Q1hgyRuHgloV/YXs2w15unPVh8qfu/qCTfhTYamaw7fyhumKa2yGpdSo87vY32rIclj+4fWYQXUMs9EHvg==}
 
-  radash@12.1.1:
-    resolution: {integrity: sha512-h36JMxKRqrAxVD8201FrCpyeNuUY9Y5zZwujr20fFO77tpUtGa6EZzfKw/3WaiBX95fq7+MpsuMLNdSnORAwSA==}
-    engines: {node: '>=14.18.0'}
-
-  ramda@0.28.0:
-    resolution: {integrity: sha512-9QnLuG/kPVgWvMQ4aODhsBUFKOUmnbUnsSXACv+NCQZcHbeb+v8Lodp8OVxtRULN1/xOyYLLaL6npE6dMq5QTA==}
-
   react-dom@19.2.4:
     resolution: {integrity: sha512-AXJdLo8kgMbimY95O2aKQqsz2iWi9jMgKJhRBAxECE4IFxfcazB2LmzloIoibJI3C12IlY20+KFaLv+71bUJeQ==}
     peerDependencies:
@@ -3930,7 +3923,7 @@ snapshots:
 
   '@mermaid-js/mermaid-zenuml@0.2.2(@babel/core@7.29.0)(@babel/template@7.28.6)(@types/react@19.2.14)(mermaid@11.13.0)(yaml@2.8.3)':
     dependencies:
-      '@zenuml/core': 3.46.0(@babel/core@7.29.0)(@babel/template@7.28.6)(@types/react@19.2.14)(yaml@2.8.3)
+      '@zenuml/core': 3.46.1(@babel/core@7.29.0)(@babel/template@7.28.6)(@types/react@19.2.14)(yaml@2.8.3)
       mermaid: 11.13.0
     transitivePeerDependencies:
       - '@babel/core'
@@ -4905,7 +4898,7 @@ snapshots:
       convert-source-map: 2.0.0
       tinyrainbow: 3.1.0
 
-  '@zenuml/core@3.46.0(@babel/core@7.29.0)(@babel/template@7.28.6)(@types/react@19.2.14)(yaml@2.8.3)':
+  '@zenuml/core@3.46.1(@babel/core@7.29.0)(@babel/template@7.28.6)(@types/react@19.2.14)(yaml@2.8.3)':
     dependencies:
       '@floating-ui/react': 0.27.19(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@headlessui/react': 2.2.9(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -4923,8 +4916,6 @@ snapshots:
       marked: 4.3.0
       pako: 2.1.0
       pino: 8.21.0
-      radash: 12.1.1
-      ramda: 0.28.0
       react: 19.2.4
       react-dom: 19.2.4(react@19.2.4)
       tailwind-merge: 3.5.0
@@ -6377,10 +6368,6 @@ snapshots:
   queue-microtask@1.2.3: {}
 
   quick-format-unescaped@4.0.4: {}
-
-  radash@12.1.1: {}
-
-  ramda@0.28.0: {}
 
   react-dom@19.2.4(react@19.2.4):
     dependencies:
