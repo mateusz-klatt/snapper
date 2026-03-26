@@ -1,14 +1,18 @@
-"""Candle cache projection archiver.
+"""Data archivers for candle cache projection and append-only event tables.
 
-Exports active candle data to polygon-compatible CSV files, organized
-by exchange and archive_symbol.  Supports merge/dedup with existing
-CSV files on disk.
+CandleCacheArchiver exports active candle data to polygon-compatible CSV,
+organized by exchange and archive_symbol.
 
-Cache structure:
+EventArchiver exports append-only event rows (Tick, Trade, Signal,
+Execution, Telemetry, Control) to per-day CSV files with full temporal
+metadata, supporting merge/dedup and optional purge.
+
+Candle cache structure:
     ``data/{exchange}/cache/{timespan}/{archive_symbol}/{year}/{date}.csv``
 
-CSV format (identical to Polygon loader output):
-    ``timestamp,open,high,low,close,volume,vwap,transactions``
+Event archive structure:
+    ``data/archive/{table}/{exchange}/{archive_symbol}/{year}/{date}.csv``
+    ``data/archive/{table}/{year}/{date}.csv``  (flat tables)
 """
 
 import csv
@@ -18,7 +22,14 @@ from datetime import date
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
+from snapper.data.models import Control
+from snapper.data.models import Execution
+from snapper.data.models import Signal
+from snapper.data.models import Telemetry
+from snapper.data.models import Tick
+from snapper.data.models import Trade
 from snapper.data.repository import DatabaseRepository
 
 _HEADER = [
@@ -55,15 +66,17 @@ def _format_decimal(value: float | None) -> str:
 
 @dataclass(slots=True)
 class ExportResult:
-    """Result of a candle cache export operation.
+    """Result of an archive export operation.
 
     Attributes:
         files_written: Number of CSV files written.
-        rows_exported: Total number of candle rows exported.
+        rows_exported: Total number of rows exported.
+        rows_purged: Number of rows deleted from DB (0 unless purge requested).
     """
 
     files_written: int
     rows_exported: int
+    rows_purged: int = 0
 
 
 def _candle_row_to_csv_tuple(
@@ -421,3 +434,423 @@ class CandleCacheArchiver:
             rows_exported += len(new_rows)
             files_written += 1
         return ExportResult(files_written=files_written, rows_exported=rows_exported)
+
+
+_TEMPORAL_COLUMNS = ("public_id", "timestamp", "known_to", "session_id", "sequence_id")
+
+
+@dataclass(frozen=True, slots=True)
+class EventTableSpec:
+    """Configuration for an append-only event table archive.
+
+    Attributes:
+        model: SQLAlchemy model class.
+        columns: Column names to export (temporal + domain), in CSV order.
+        group_column: Column used for path partitioning
+            (``instrument_public_id``, ``order_public_id``, or None for
+            flat tables like Telemetry/Control).
+    """
+
+    model: type[Any]
+    columns: tuple[str, ...]
+    group_column: str | None
+
+
+EVENT_TABLES: dict[str, EventTableSpec] = {
+    "ticks": EventTableSpec(
+        model=Tick,
+        columns=(
+            *_TEMPORAL_COLUMNS,
+            "instrument_public_id",
+            "bid",
+            "ask",
+            "last",
+            "volume",
+        ),
+        group_column="instrument_public_id",
+    ),
+    "trades": EventTableSpec(
+        model=Trade,
+        columns=(
+            *_TEMPORAL_COLUMNS,
+            "instrument_public_id",
+            "price",
+            "size",
+            "side",
+            "trade_id",
+            "executed_at",
+        ),
+        group_column="instrument_public_id",
+    ),
+    "signals": EventTableSpec(
+        model=Signal,
+        columns=(
+            *_TEMPORAL_COLUMNS,
+            "instrument_public_id",
+            "fired_at",
+            "side",
+            "strength",
+            "reason",
+            "strategy_name",
+            "price",
+        ),
+        group_column="instrument_public_id",
+    ),
+    "executions": EventTableSpec(
+        model=Execution,
+        columns=(
+            *_TEMPORAL_COLUMNS,
+            "order_public_id",
+            "exec_id",
+            "trade_id",
+            "side",
+            "status",
+            "price",
+            "size",
+            "fee",
+            "fee_asset",
+            "executed_at",
+        ),
+        group_column="order_public_id",
+    ),
+    "telemetry": EventTableSpec(
+        model=Telemetry,
+        columns=(
+            *_TEMPORAL_COLUMNS,
+            "transport",
+            "direction",
+            "message_type",
+            "payload",
+        ),
+        group_column=None,
+    ),
+    "control": EventTableSpec(
+        model=Control,
+        columns=(
+            *_TEMPORAL_COLUMNS,
+            "transport",
+            "direction",
+            "message_type",
+            "outcome",
+            "detail",
+            "payload",
+            "client_session_id",
+            "client_public_id",
+        ),
+        group_column=None,
+    ),
+}
+
+
+def _format_value(value: datetime | float | int | str | None) -> str:
+    """Format a value for event archive CSV output.
+
+    Args:
+        value: Column value from DB row.
+
+    Returns:
+        String representation: ISO format for datetime, full-precision
+        decimal for float, empty string for None.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, float):
+        return _format_decimal(value)
+    return str(value)
+
+
+def _merge_and_dedup_events(
+    existing: list[tuple[str, ...]],
+    new_rows: list[tuple[str, ...]],
+) -> list[tuple[str, ...]]:
+    """Merge event rows, dedup by (public_id, timestamp, known_to).
+
+    New rows take priority over existing on key collision (e.g. re-export
+    of the same event).
+
+    Args:
+        existing: Rows already in CSV file.
+        new_rows: New rows from DB export.
+
+    Returns:
+        Deduplicated rows sorted by timestamp.
+    """
+    seen: dict[tuple[str, str, str], tuple[str, ...]] = {}
+    for row in existing:
+        key = (row[0], row[1], row[2])
+        seen[key] = row
+    for row in new_rows:
+        key = (row[0], row[1], row[2])
+        seen[key] = row
+    return sorted(seen.values(), key=lambda r: r[1])
+
+
+def _write_event_csv(
+    path: Path,
+    header: tuple[str, ...],
+    rows: list[tuple[str, ...]],
+) -> None:
+    """Write event rows to CSV file with header.
+
+    Creates parent directories as needed.
+
+    Args:
+        path: Target file path.
+        header: Column names for the header row.
+        rows: Pre-formatted string tuples to write.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n", quoting=csv.QUOTE_MINIMAL)
+        writer.writerow(header)
+        writer.writerows(rows)
+
+
+def _resolve_event_path(
+    base_dir: Path,
+    table_name: str,
+    day: date,
+    exchange: str | None = None,
+    archive_symbol: str | None = None,
+) -> Path:
+    """Resolve CSV path for event archive export.
+
+    Instrument/order-bound tables include exchange and archive_symbol
+    in the path.  Flat tables (telemetry, control) use a simpler layout.
+
+    Args:
+        base_dir: Base data directory (e.g. ``Path("data")``).
+        table_name: Table name (e.g. ``ticks``, ``telemetry``).
+        day: Date for the file.
+        exchange: Exchange name (for partitioned tables).
+        archive_symbol: Archive symbol (for partitioned tables).
+
+    Returns:
+        Path to the CSV file.
+    """
+    parts = base_dir / "archive" / table_name
+    if exchange is not None and archive_symbol is not None:
+        parts = parts / exchange / archive_symbol
+    return parts / str(day.year) / f"{day.isoformat()}.csv"
+
+
+class EventArchiver:
+    """Export append-only event rows to per-day CSV archive files.
+
+    Handles three table categories:
+
+    - **Instrument-bound** (Tick, Trade, Signal): partitioned by
+      exchange and archive_symbol via ``instrument_public_id``.
+    - **Order-bound** (Execution): partitioned by exchange and
+      archive_symbol via ``order_public_id`` -> Order -> Instrument.
+    - **Flat** (Telemetry, Control): no instrument partitioning.
+
+    CSV files contain full temporal metadata (``public_id``, ``timestamp``,
+    ``known_to``, ``session_id``, ``sequence_id``) plus all domain columns.
+    Merge/dedup with existing files uses ``(public_id, timestamp, known_to)``
+    as the dedup key.
+
+    Attributes:
+        _repo: Sync database repository.
+        _base_dir: Base data directory for archive output.
+    """
+
+    def __init__(self, repo: DatabaseRepository, base_dir: Path) -> None:
+        """Initialize the event archiver.
+
+        Args:
+            repo: Sync database repository.
+            base_dir: Base data directory (e.g. ``Path("data")``).
+        """
+        self._repo = repo
+        self._base_dir = base_dir
+
+    def export(
+        self,
+        *,
+        table: str,
+        exchange: str | None = None,
+        archive_symbol: str | None = None,
+        day_start: date,
+        day_end: date,
+        dry_run: bool = False,
+        purge: bool = False,
+    ) -> ExportResult:
+        """Export event rows for a date range to CSV.
+
+        Queries all rows whose ``timestamp`` falls within
+        ``[day_start, day_end]``, groups them by day (and optionally
+        by exchange/archive_symbol), and writes per-day CSV files with
+        merge/dedup against existing files on disk.
+
+        Args:
+            table: Event table name (``ticks``, ``trades``, ``signals``,
+                ``executions``, ``telemetry``, ``control``).
+            exchange: Filter by exchange (instrument/order-bound only).
+            archive_symbol: Filter by archive_symbol.
+            day_start: First day (inclusive) of timestamp range.
+            day_end: Last day (inclusive) of timestamp range.
+            dry_run: If True, count rows without writing files.
+            purge: If True, delete exported rows from DB after writing.
+
+        Returns:
+            ExportResult with file, row, and purge counts.
+
+        Raises:
+            ValueError: If table name is not a valid event table.
+        """
+        spec = EVENT_TABLES.get(table)
+        if spec is None:
+            raise ValueError(f"Unknown event table: {table}")
+
+        rows = self._repo.get_event_rows_for_archive(
+            spec.model,
+            spec.columns,
+            day_start,
+            day_end,
+        )
+        if not rows:
+            return ExportResult(files_written=0, rows_exported=0, rows_purged=0)
+
+        files, row_ids = self._group_rows(
+            spec,
+            table,
+            rows,
+            exchange,
+            archive_symbol,
+        )
+
+        if dry_run:
+            return ExportResult(
+                files_written=len(files),
+                rows_exported=len(row_ids),
+                rows_purged=0,
+            )
+
+        files_written = 0
+        for path in sorted(files):
+            existing = _read_existing_csv(path)
+            merged = _merge_and_dedup_events(existing, files[path])
+            _write_event_csv(path, spec.columns, merged)
+            files_written += 1
+
+        rows_purged = 0
+        if purge and row_ids:
+            rows_purged = self._repo.delete_rows_by_id(spec.model, row_ids)
+
+        return ExportResult(
+            files_written=files_written,
+            rows_exported=len(row_ids),
+            rows_purged=rows_purged,
+        )
+
+    def _group_rows(
+        self,
+        spec: EventTableSpec,
+        table: str,
+        rows: list[tuple[Any, ...]],
+        exchange: str | None,
+        archive_symbol: str | None,
+    ) -> tuple[dict[Path, list[tuple[str, ...]]], list[int]]:
+        """Convert DB rows to CSV tuples and group by output file path.
+
+        Args:
+            spec: Event table specification.
+            table: Table name (for path construction).
+            rows: Raw DB rows ``(id, col1, col2, ...)``.
+            exchange: Optional exchange filter.
+            archive_symbol: Optional archive_symbol filter.
+
+        Returns:
+            Tuple of (files_dict, row_ids) where files_dict maps
+            output paths to CSV row lists, and row_ids tracks exported
+            DB ids for purge.
+        """
+        group_map = self._build_group_map(spec)
+        group_col_idx = spec.columns.index(spec.group_column) + 1 if spec.group_column else None
+
+        files: dict[Path, list[tuple[str, ...]]] = defaultdict(list)
+        row_ids: list[int] = []
+
+        for row in rows:
+            csv_values = tuple(_format_value(v) for v in row[1:])
+            path = self._resolve_row_path(
+                row,
+                table,
+                group_col_idx,
+                group_map,
+                exchange,
+                archive_symbol,
+            )
+            if path is None:
+                continue
+            files[path].append(csv_values)
+            row_ids.append(row[0])
+
+        return files, row_ids
+
+    def _resolve_row_path(
+        self,
+        row: tuple[Any, ...],
+        table: str,
+        group_col_idx: int | None,
+        group_map: dict[str, tuple[str, str]] | None,
+        exchange: str | None,
+        archive_symbol: str | None,
+    ) -> Path | None:
+        """Determine the output CSV path for a single row.
+
+        Returns None if the row should be skipped (unmapped FK or
+        filtered out by exchange/archive_symbol).
+
+        Args:
+            row: Raw DB row ``(id, col1, col2, ...)``.
+            table: Table name.
+            group_col_idx: Index of the grouping column in the row,
+                or None for flat tables.
+            group_map: FK -> (archive_symbol, exchange) mapping.
+            exchange: Optional exchange filter.
+            archive_symbol: Optional archive_symbol filter.
+
+        Returns:
+            Output path, or None to skip.
+        """
+        ts: datetime = row[2]
+        if group_col_idx is None or group_map is None:
+            return _resolve_event_path(self._base_dir, table, ts.date())
+        fk_value = row[group_col_idx]
+        mapping = group_map.get(fk_value)
+        if mapping is None:
+            return None
+        arch_sym, exch = mapping
+        if exchange is not None and exch != exchange:
+            return None
+        if archive_symbol is not None and arch_sym != archive_symbol:
+            return None
+        return _resolve_event_path(
+            self._base_dir,
+            table,
+            ts.date(),
+            exch,
+            arch_sym,
+        )
+
+    def _build_group_map(
+        self,
+        spec: EventTableSpec,
+    ) -> dict[str, tuple[str, str]] | None:
+        """Build the FK -> (archive_symbol, exchange) mapping for a table.
+
+        Args:
+            spec: Event table specification.
+
+        Returns:
+            Mapping dict, or None for flat tables.
+        """
+        if spec.group_column == "instrument_public_id":
+            return self._repo.get_instrument_archive_map()
+        if spec.group_column == "order_public_id":
+            return self._repo.get_order_archive_map()
+        return None

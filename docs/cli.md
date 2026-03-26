@@ -425,9 +425,9 @@ snapper polygon-backfill-grouped [OPTIONS]
 
 ### `archive`
 
-Export active candle data to polygon-compatible CSV cache files.
-Produces per-day (or per-month for daily timespan) CSV files organized
-by exchange and archive_symbol.  Merges with existing files and deduplicates rows.
+Export data to CSV archive files.  Supports candle cache projection
+and append-only event tables (ticks, trades, signals, executions,
+telemetry, control).  Merges with existing files and deduplicates rows.
 
 ```bash
 snapper archive [OPTIONS]
@@ -437,19 +437,23 @@ snapper archive [OPTIONS]
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
+| `--table` | TEXT | `candles` | Table to archive (`candles`, `ticks`, `trades`, `signals`, `executions`, `telemetry`, `control`) |
 | `--exchange` | TEXT | None | Exchange filter (e.g. `polygon`, `kraken`) |
 | `--symbol` | TEXT | None | Native symbol filter (e.g. `BTC-USD`), resolved to stable archive_symbol |
-| `--timeframe` | TEXT | `1m` | Candle timeframe (`1m`, `5m`, `1h`, `1d`) |
+| `--timeframe` | TEXT | `1m` | Candle timeframe (`1m`, `5m`, `1h`, `1d`) — candles only |
 | `--day` | DATE | None | Single day to archive (`YYYY-MM-DD`) |
 | `--from` | DATE | None | Start of date range (`YYYY-MM-DD`) |
 | `--to` | DATE | None | End of date range (`YYYY-MM-DD`) |
 | `--dry-run` | FLAG | False | Report counts without writing files |
+| `--purge` | FLAG | False | Delete exported rows from DB after writing (event tables only) |
 | `--output-dir` | PATH | `data` | Base output directory |
 
 **Output structure:**
 
 ```text
-{output_dir}/{exchange}/cache/{timespan}/{archive_symbol}/{year}/{date}.csv
+Candles:  {output_dir}/{exchange}/cache/{timespan}/{archive_symbol}/{year}/{date}.csv
+Events:   {output_dir}/archive/{table}/{exchange}/{archive_symbol}/{year}/{date}.csv
+Flat:     {output_dir}/archive/{table}/{year}/{date}.csv  (telemetry, control)
 ```
 
 **Examples:**
@@ -458,6 +462,9 @@ snapper archive [OPTIONS]
 snapper archive --day 2024-03-15 --exchange polygon --symbol BTC-USD
 snapper archive --from 2024-01-01 --to 2024-03-31 --dry-run
 snapper archive --day 2024-03-15 --timeframe 1d
+snapper archive --table ticks --day 2024-03-15 --exchange polygon
+snapper archive --table trades --from 2024-01-01 --to 2024-03-31 --purge
+snapper archive --table control --day 2024-03-15
 ```
 
 **Notes:**
@@ -467,6 +474,11 @@ snapper archive --day 2024-03-15 --timeframe 1d
   the output directory may differ.
 - `--day` or `--from`/`--to` is required.
 - Daily timespan (`1d`) produces monthly CSV files to match Polygon layout.
+- `--purge` is only supported for event tables, not candle cache export.
+- Event archive CSV files include full temporal metadata (`public_id`,
+  `timestamp`, `known_to`, `session_id`, `sequence_id`).
+- Merge/dedup for events uses `(public_id, timestamp, known_to)` as key.
+- Executions are partitioned by exchange/archive_symbol via order -> instrument.
 
 ### One-time cache directory migration
 

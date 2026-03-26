@@ -68,7 +68,9 @@ from snapper.auth.user_service import UserService
 from snapper.config.settings import BootstrapSettingsLoader
 from snapper.config.settings import get_settings
 from snapper.data.archive_symbols import safe_path
+from snapper.data.archiver import EVENT_TABLES
 from snapper.data.archiver import CandleCacheArchiver
+from snapper.data.archiver import EventArchiver
 from snapper.data.models import Setting
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import close_and_insert
@@ -983,7 +985,10 @@ def polygon_backfill_grouped(
 
 
 @app.command(name="archive")
-def archive_candles(
+def archive_data(
+    table: str = typer.Option(
+        "candles", help="Table (candles, ticks, trades, signals, executions, telemetry, control)."
+    ),
     exchange: str | None = typer.Option(None, help="Exchange filter (e.g. polygon, kraken)."),
     symbol: str | None = typer.Option(None, help="Native symbol filter (e.g. BTC-USD)."),
     timeframe: str = typer.Option("1m", help="Candle timeframe (e.g. 1m, 1h, 1d)."),
@@ -991,24 +996,41 @@ def archive_candles(
     from_date: str | None = typer.Option(None, "--from", help="Start of date range (YYYY-MM-DD)."),
     to_date: str | None = typer.Option(None, "--to", help="End of date range (YYYY-MM-DD)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Report counts without writing files."),
+    purge: bool = typer.Option(
+        False, "--purge", help="Delete exported rows from DB after writing."
+    ),
     output_dir: str = typer.Option("data", help="Base output directory."),
 ) -> None:
-    """Export active candle data to polygon-compatible CSV cache files.
+    """Export data to CSV archive files.
 
-    Produces per-day (or per-month for daily timespan) CSV files under
+    For candles: polygon-compatible cache files under
     ``{output_dir}/{exchange}/cache/{timespan}/{archive_symbol}/{year}/``.
+
+    For event tables (ticks, trades, signals, executions, telemetry,
+    control): full audit rows under ``{output_dir}/archive/{table}/...``.
+
     Merges with existing files and deduplicates rows.
 
     Args:
+        table: Table to archive.
         exchange: Exchange filter.
         symbol: Native symbol filter (resolved to archive_symbol).
-        timeframe: Candle timeframe.
+        timeframe: Candle timeframe (candles only).
         day: Single day to archive.
         from_date: Start of date range.
         to_date: End of date range.
         dry_run: Count only.
+        purge: Delete exported rows from DB (event tables only).
         output_dir: Base output directory.
     """
+    if table == "candles" and purge:
+        typer.echo("Error: --purge is not supported for candle cache export")
+        raise typer.Exit(code=1)
+
+    if table != "candles" and table not in EVENT_TABLES:
+        typer.echo(f"Error: unknown table '{table}'")
+        raise typer.Exit(code=1)
+
     if day is not None:
         start = date_type.fromisoformat(day)
         end = start
@@ -1028,16 +1050,34 @@ def archive_candles(
             typer.echo(f"Warning: symbol '{symbol}' not found in DB, using safe_path fallback")
             archive_symbol_filter = safe_path(symbol)
 
-    archiver = CandleCacheArchiver(repo, Path(output_dir))
     label = "Dry run:" if dry_run else "Exporting"
-    typer.echo(f"{label} candle cache ({timeframe}) from {start} to {end}...")
-    result = archiver.export(
-        exchange=exchange,
-        archive_symbol=archive_symbol_filter,
-        timeframe=timeframe,
-        day_start=start,
-        day_end=end,
-        dry_run=dry_run,
-    )
-    typer.echo(f"Done: {result.rows_exported} rows in {result.files_written} files")
+
+    if table == "candles":
+        archiver = CandleCacheArchiver(repo, Path(output_dir))
+        typer.echo(f"{label} candle cache ({timeframe}) from {start} to {end}...")
+        result = archiver.export(
+            exchange=exchange,
+            archive_symbol=archive_symbol_filter,
+            timeframe=timeframe,
+            day_start=start,
+            day_end=end,
+            dry_run=dry_run,
+        )
+    else:
+        event_archiver = EventArchiver(repo, Path(output_dir))
+        typer.echo(f"{label} {table} from {start} to {end}...")
+        result = event_archiver.export(
+            table=table,
+            exchange=exchange,
+            archive_symbol=archive_symbol_filter,
+            day_start=start,
+            day_end=end,
+            dry_run=dry_run,
+            purge=purge,
+        )
+
+    msg = f"Done: {result.rows_exported} rows in {result.files_written} files"
+    if result.rows_purged > 0:
+        msg += f" ({result.rows_purged} purged)"
+    typer.echo(msg)
     repo.dispose()

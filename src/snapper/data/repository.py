@@ -47,6 +47,7 @@ from uuid import uuid7
 from loguru import logger
 from sqlalchemy import and_
 from sqlalchemy import create_engine as create_sync_engine
+from sqlalchemy import delete
 from sqlalchemy import desc
 from sqlalchemy import distinct
 from sqlalchemy import event
@@ -56,6 +57,7 @@ from sqlalchemy import select
 from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.engine import Engine as SyncEngine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -1996,6 +1998,89 @@ class DatabaseRepository:
                 .order_by(Candle.open_at)
             ).all()
         return [tuple(r) for r in rows]
+
+    def get_event_rows_for_archive(
+        self,
+        model: type[Any],
+        columns: tuple[str, ...],
+        day_start: date,
+        day_end: date,
+    ) -> list[tuple[Any, ...]]:
+        """Query append-only event rows in a timestamp range.
+
+        Returns ``(id, *column_values)`` tuples where column order matches
+        the supplied *columns* tuple.  The ``id`` is included as the first
+        element for purge tracking but should be excluded from CSV output.
+
+        Args:
+            model: SQLAlchemy model class (e.g. Tick, Trade, Signal).
+            columns: Column names to select, in desired CSV order.
+            day_start: First day (inclusive) of ``timestamp`` range.
+            day_end: Last day (inclusive) of ``timestamp`` range.
+
+        Returns:
+            List of ``(id, col1, col2, ...)`` tuples sorted by
+            ``(timestamp, id)``.
+        """
+        from_dt = datetime.combine(day_start, datetime.min.time(), tzinfo=UTC)
+        to_dt = datetime.combine(day_end + timedelta(days=1), datetime.min.time(), tzinfo=UTC)
+        col_attrs = [getattr(model, name) for name in columns]
+        with self.get_session() as session:
+            rows = session.execute(
+                select(model.id, *col_attrs)
+                .where(
+                    model.timestamp >= from_dt,
+                    model.timestamp < to_dt,
+                )
+                .order_by(model.timestamp, model.id)
+            ).all()
+        return [tuple(r) for r in rows]
+
+    def delete_rows_by_id(self, model: type[Any], row_ids: list[int]) -> int:
+        """Delete rows by primary key id in batches.
+
+        Uses batch size of 500 to stay within SQLite parameter limits.
+
+        Args:
+            model: SQLAlchemy model class.
+            row_ids: List of ``id`` values to delete.
+
+        Returns:
+            Number of rows actually deleted.
+        """
+        if not row_ids:
+            return 0
+        total = 0
+        with self.get_session() as session:
+            for i in range(0, len(row_ids), 500):
+                batch = row_ids[i : i + 500]
+                result = session.execute(delete(model).where(model.id.in_(batch)))
+                total += cast(CursorResult[Any], result).rowcount
+            session.commit()
+        return total
+
+    def get_order_archive_map(self) -> dict[str, tuple[str, str]]:
+        """Map order_public_id to (archive_symbol, exchange) via instrument.
+
+        Joins all Order rows (active and closed) through their
+        ``instrument_public_id`` to the instrument archive map.
+        Needed for Execution archiving, which references orders
+        rather than instruments directly.
+
+        Returns:
+            ``{order_public_id: (archive_symbol, exchange)}`` mapping.
+        """
+        inst_map = self.get_instrument_archive_map()
+        with self.get_session() as session:
+            rows = session.execute(
+                select(Order.public_id, Order.instrument_public_id).distinct()
+            ).all()
+        result: dict[str, tuple[str, str]] = {}
+        for order_pub_id, inst_pub_id in rows:
+            inst_info = inst_map.get(inst_pub_id)
+            if inst_info is not None:
+                result[order_pub_id] = inst_info
+        return result
 
     def dispose(self) -> None:
         """Dispose the engine and release open database resources."""

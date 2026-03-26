@@ -120,6 +120,7 @@ Persistence layer with SQLAlchemy:
 - **SQLAlchemyRepository** (`repository.py`) — Async CRUD for SQLite/PostgreSQL
 - **DatabaseRepository** (`repository.py`) — Sync access for scripts, archiver, and background updaters
 - **CandleCacheArchiver** (`archiver.py`) — Exports active candle data to polygon-compatible CSV cache files per exchange/archive_symbol
+- **EventArchiver** (`archiver.py`) — Exports append-only event rows (Tick, Trade, Signal, Execution, Telemetry, Control) to per-day CSV archive files with full temporal metadata, merge/dedup, and optional purge
 - **Archive symbol resolution** (`archive_symbols.py`) — Stable filesystem-safe symbol naming derived from Symbol anchor rows, with seniority-based collision handling
 
 ### Strategies (`src/snapper/strategies/`)
