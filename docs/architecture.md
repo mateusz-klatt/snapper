@@ -78,7 +78,8 @@ Persistence layer with SQLAlchemy:
     - `Signal` — Signal events
     - `User` — System users
     - `Setting` — Settings (encrypted)
-    - `Symbol` — Symbol identity with versioned attributes (native_symbol, base, quote, asset_type) via SCD Type 2
+    - `Symbol` — Symbol identity with versioned attributes (native_symbol, base, quote, asset_type) via SCD Type 2.
+      Archive symbols for filesystem paths are derived from the anchor row (first version per public_id)
     - `SymbolAlias` — Exchange-specific symbol aliases (one row per native/exchange/channel)
     - `SymbolExchangeCapability` — Exchange-specific symbol capabilities
     - `ProcessRun` — Background process execution records
@@ -117,7 +118,9 @@ Persistence layer with SQLAlchemy:
     referential integrity.
 
 - **SQLAlchemyRepository** (`repository.py`) — Async CRUD for SQLite/PostgreSQL
-- **DatabaseRepository** (`repository.py`) — Sync access for scripts and background updaters
+- **DatabaseRepository** (`repository.py`) — Sync access for scripts, archiver, and background updaters
+- **CandleCacheArchiver** (`archiver.py`) — Exports active candle data to polygon-compatible CSV cache files per exchange/archive_symbol
+- **Archive symbol resolution** (`archive_symbols.py`) — Stable filesystem-safe symbol naming derived from Symbol anchor rows, with seniority-based collision handling
 
 ### Strategies (`src/snapper/strategies/`)
 

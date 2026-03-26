@@ -421,6 +421,62 @@ Fetches grouped daily data from the Polygon.io API.
 snapper polygon-backfill-grouped [OPTIONS]
 ```
 
+## Data Archive
+
+### `archive`
+
+Export active candle data to polygon-compatible CSV cache files.
+Produces per-day (or per-month for daily timespan) CSV files organized
+by exchange and archive_symbol.  Merges with existing files and deduplicates rows.
+
+```bash
+snapper archive [OPTIONS]
+```
+
+**Options:**
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--exchange` | TEXT | None | Exchange filter (e.g. `polygon`, `kraken`) |
+| `--symbol` | TEXT | None | Native symbol filter (e.g. `BTC-USD`), resolved to stable archive_symbol |
+| `--timeframe` | TEXT | `1m` | Candle timeframe (`1m`, `5m`, `1h`, `1d`) |
+| `--day` | DATE | None | Single day to archive (`YYYY-MM-DD`) |
+| `--from` | DATE | None | Start of date range (`YYYY-MM-DD`) |
+| `--to` | DATE | None | End of date range (`YYYY-MM-DD`) |
+| `--dry-run` | FLAG | False | Report counts without writing files |
+| `--output-dir` | PATH | `data` | Base output directory |
+
+**Output structure:**
+
+```text
+{output_dir}/{exchange}/cache/{timespan}/{archive_symbol}/{year}/{date}.csv
+```
+
+**Examples:**
+
+```bash
+snapper archive --day 2024-03-15 --exchange polygon --symbol BTC-USD
+snapper archive --from 2024-01-01 --to 2024-03-31 --dry-run
+snapper archive --day 2024-03-15 --timeframe 1d
+```
+
+**Notes:**
+
+- `--symbol` resolves the current native_symbol to the stable archive_symbol
+  via the Symbol anchor row.  After a symbol rename, the CLI argument and
+  the output directory may differ.
+- `--day` or `--from`/`--to` is required.
+- Daily timespan (`1d`) produces monthly CSV files to match Polygon layout.
+
+### One-time cache directory migration
+
+Renames legacy Polygon cache directories from API ticker format
+(`X_BTCUSD`) to archive_symbol format (`BTC-USD`).
+
+```bash
+python -m scripts.migrate_polygon_cache_dirs [--dry-run] [--cache-root PATH]
+```
+
 ## Encryption Management
 
 ### `settings-rotate-encryption`

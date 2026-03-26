@@ -165,6 +165,8 @@ snapper reset-password      # Reset password
 snapper update-kraken-symbols        # Sync Kraken symbols
 snapper update-polygon-symbols       # Sync Polygon symbols
 snapper polygon-backfill-aggregates  # Backfill historical data
+snapper archive --day 2024-01-15     # Export candle cache to CSV
+snapper archive --from 2024-01-01 --to 2024-01-31 --exchange polygon
 ```
 
 ## Strategies
