@@ -437,7 +437,7 @@ snapper archive [OPTIONS]
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--table` | TEXT | `candles` | Table to archive (`candles`, `ticks`, `trades`, `signals`, `executions`, `telemetry`, `control`) |
+| `--table` | TEXT | `candles` | Table to archive (`candles`, `candles-audit`, `ticks`, `trades`, `signals`, `executions`, `telemetry`, `control`) |
 | `--exchange` | TEXT | None | Exchange filter (e.g. `polygon`, `kraken`) |
 | `--symbol` | TEXT | None | Native symbol filter (e.g. `BTC-USD`), resolved to stable archive_symbol |
 | `--timeframe` | TEXT | `1m` | Candle timeframe (`1m`, `5m`, `1h`, `1d`) — candles only |
@@ -445,7 +445,8 @@ snapper archive [OPTIONS]
 | `--from` | DATE | None | Start of date range (`YYYY-MM-DD`) |
 | `--to` | DATE | None | End of date range (`YYYY-MM-DD`) |
 | `--dry-run` | FLAG | False | Report counts without writing files |
-| `--purge` | FLAG | False | Delete exported rows from DB after writing (event tables only) |
+| `--purge` | FLAG | False | Delete exported rows from DB after writing (event tables and candles-audit with --closed-only) |
+| `--closed-only` | FLAG | False | Only closed SCD2 versions (candles-audit only) |
 | `--output-dir` | PATH | `data` | Base output directory |
 
 **Output structure:**
@@ -465,6 +466,8 @@ snapper archive --day 2024-03-15 --timeframe 1d
 snapper archive --table ticks --day 2024-03-15 --exchange polygon
 snapper archive --table trades --from 2024-01-01 --to 2024-03-31 --purge
 snapper archive --table control --day 2024-03-15
+snapper archive --table candles-audit --day 2024-03-15 --timeframe 1m
+snapper archive --table candles-audit --day 2024-03-15 --closed-only --purge
 ```
 
 **Notes:**
@@ -479,6 +482,8 @@ snapper archive --table control --day 2024-03-15
   `timestamp`, `known_to`, `session_id`, `sequence_id`).
 - Merge/dedup for events uses `(public_id, timestamp, known_to)` as key.
 - Executions are partitioned by exchange/archive_symbol via order -> instrument.
+- ``candles-audit`` exports all SCD2 versions (closed + active) grouped by
+  ``open_at`` date.  ``--purge`` requires ``--closed-only`` to protect active rows.
 
 ### One-time cache directory migration
 

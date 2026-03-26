@@ -69,8 +69,10 @@ from snapper.config.settings import BootstrapSettingsLoader
 from snapper.config.settings import get_settings
 from snapper.data.archive_symbols import safe_path
 from snapper.data.archiver import EVENT_TABLES
+from snapper.data.archiver import CandleAuditArchiver
 from snapper.data.archiver import CandleCacheArchiver
 from snapper.data.archiver import EventArchiver
+from snapper.data.archiver import ExportResult
 from snapper.data.models import Setting
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import close_and_insert
@@ -987,7 +989,8 @@ def polygon_backfill_grouped(
 @app.command(name="archive")
 def archive_data(
     table: str = typer.Option(
-        "candles", help="Table (candles, ticks, trades, signals, executions, telemetry, control)."
+        "candles",
+        help="Table (candles, candles-audit, ticks, trades, signals, executions, telemetry, control).",
     ),
     exchange: str | None = typer.Option(None, help="Exchange filter (e.g. polygon, kraken)."),
     symbol: str | None = typer.Option(None, help="Native symbol filter (e.g. BTC-USD)."),
@@ -999,12 +1002,18 @@ def archive_data(
     purge: bool = typer.Option(
         False, "--purge", help="Delete exported rows from DB after writing."
     ),
+    closed_only: bool = typer.Option(
+        False, "--closed-only", help="Only closed SCD2 versions (candles-audit only)."
+    ),
     output_dir: str = typer.Option("data", help="Base output directory."),
 ) -> None:
     """Export data to CSV archive files.
 
     For candles: polygon-compatible cache files under
     ``{output_dir}/{exchange}/cache/{timespan}/{archive_symbol}/{year}/``.
+
+    For candles-audit: all SCD2 versions with full temporal metadata
+    under ``{output_dir}/archive/candles/{exchange}/{archive_symbol}/{year}/``.
 
     For event tables (ticks, trades, signals, executions, telemetry,
     control): full audit rows under ``{output_dir}/archive/{table}/...``.
@@ -1015,20 +1024,26 @@ def archive_data(
         table: Table to archive.
         exchange: Exchange filter.
         symbol: Native symbol filter (resolved to archive_symbol).
-        timeframe: Candle timeframe (candles only).
+        timeframe: Candle timeframe (candles/candles-audit only).
         day: Single day to archive.
         from_date: Start of date range.
         to_date: End of date range.
         dry_run: Count only.
-        purge: Delete exported rows from DB (event tables only).
+        purge: Delete exported rows from DB.
+        closed_only: Only closed SCD2 versions (candles-audit only).
         output_dir: Base output directory.
     """
+    valid_tables = {"candles", "candles-audit", *EVENT_TABLES}
+    if table not in valid_tables:
+        typer.echo(f"Error: unknown table '{table}'")
+        raise typer.Exit(code=1)
+
     if table == "candles" and purge:
         typer.echo("Error: --purge is not supported for candle cache export")
         raise typer.Exit(code=1)
 
-    if table != "candles" and table not in EVENT_TABLES:
-        typer.echo(f"Error: unknown table '{table}'")
+    if table == "candles-audit" and purge and not closed_only:
+        typer.echo("Error: --purge requires --closed-only for candles-audit")
         raise typer.Exit(code=1)
 
     if day is not None:
@@ -1043,19 +1058,60 @@ def archive_data(
 
     bootstrap = BootstrapSettingsLoader()
     repo = DatabaseRepository(bootstrap.db_url)
-    archive_symbol_filter: str | None = None
-    if symbol is not None:
-        archive_symbol_filter = repo.resolve_native_to_archive_symbol(symbol)
-        if archive_symbol_filter is None:
-            typer.echo(f"Warning: symbol '{symbol}' not found in DB, using safe_path fallback")
-            archive_symbol_filter = safe_path(symbol)
+    archive_symbol_filter = _resolve_archive_symbol_filter(repo, symbol)
+    result = _run_archive_export(
+        table,
+        repo,
+        Path(output_dir),
+        archive_symbol_filter,
+        exchange,
+        timeframe,
+        start,
+        end,
+        closed_only,
+        dry_run,
+        purge,
+    )
+    msg = f"Done: {result.rows_exported} rows in {result.files_written} files"
+    if result.rows_purged > 0:
+        msg += f" ({result.rows_purged} purged)"
+    typer.echo(msg)
+    repo.dispose()
 
+
+def _resolve_archive_symbol_filter(
+    repo: DatabaseRepository,
+    symbol: str | None,
+) -> str | None:
+    """Resolve --symbol CLI argument to archive_symbol via DB lookup."""
+    if symbol is None:
+        return None
+    result = repo.resolve_native_to_archive_symbol(symbol)
+    if result is None:
+        typer.echo(f"Warning: symbol '{symbol}' not found in DB, using safe_path fallback")
+        return safe_path(symbol)
+    return result
+
+
+def _run_archive_export(
+    table: str,
+    repo: DatabaseRepository,
+    output_dir: Path,
+    archive_symbol_filter: str | None,
+    exchange: str | None,
+    timeframe: str,
+    start: date_type,
+    end: date_type,
+    closed_only: bool,
+    dry_run: bool,
+    purge: bool,
+) -> ExportResult:
+    """Dispatch archive export to the appropriate archiver class."""
     label = "Dry run:" if dry_run else "Exporting"
 
     if table == "candles":
-        archiver = CandleCacheArchiver(repo, Path(output_dir))
         typer.echo(f"{label} candle cache ({timeframe}) from {start} to {end}...")
-        result = archiver.export(
+        return CandleCacheArchiver(repo, output_dir).export(
             exchange=exchange,
             archive_symbol=archive_symbol_filter,
             timeframe=timeframe,
@@ -1063,21 +1119,28 @@ def archive_data(
             day_end=end,
             dry_run=dry_run,
         )
-    else:
-        event_archiver = EventArchiver(repo, Path(output_dir))
-        typer.echo(f"{label} {table} from {start} to {end}...")
-        result = event_archiver.export(
-            table=table,
+
+    if table == "candles-audit":
+        mode = "closed-only" if closed_only else "all versions"
+        typer.echo(f"{label} candle audit ({timeframe}, {mode}) from {start} to {end}...")
+        return CandleAuditArchiver(repo, output_dir).export(
             exchange=exchange,
             archive_symbol=archive_symbol_filter,
+            timeframe=timeframe,
             day_start=start,
             day_end=end,
+            closed_only=closed_only,
             dry_run=dry_run,
             purge=purge,
         )
 
-    msg = f"Done: {result.rows_exported} rows in {result.files_written} files"
-    if result.rows_purged > 0:
-        msg += f" ({result.rows_purged} purged)"
-    typer.echo(msg)
-    repo.dispose()
+    typer.echo(f"{label} {table} from {start} to {end}...")
+    return EventArchiver(repo, output_dir).export(
+        table=table,
+        exchange=exchange,
+        archive_symbol=archive_symbol_filter,
+        day_start=start,
+        day_end=end,
+        dry_run=dry_run,
+        purge=purge,
+    )

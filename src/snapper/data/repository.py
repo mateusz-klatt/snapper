@@ -2082,6 +2082,69 @@ class DatabaseRepository:
                 result[order_pub_id] = inst_info
         return result
 
+    def get_candle_versions_for_archive(
+        self,
+        instrument_public_id: str,
+        timeframe: str,
+        day_start: date,
+        day_end: date,
+        closed_only: bool = False,
+    ) -> list[tuple[Any, ...]]:
+        """Query candle versions for audit archive.
+
+        Returns all SCD2 versions (closed and/or active) within the
+        ``open_at`` date range.  Filters by ``open_at`` (candle time),
+        not ``timestamp`` (bus_time), so a correction at T+1 for a
+        candle at open_at=T archives with T's day.
+
+        Args:
+            instrument_public_id: Instrument to query.
+            timeframe: Candle timeframe (e.g. ``1m``, ``1h``, ``1d``).
+            day_start: First day (inclusive) of ``open_at`` range.
+            day_end: Last day (inclusive) of ``open_at`` range.
+            closed_only: If True, only closed versions
+                (``known_to < now``).
+
+        Returns:
+            ``(id, public_id, timestamp, known_to, session_id,
+            sequence_id, instrument_public_id, open_at, timeframe,
+            open, high, low, close, volume, vwap, trades)`` tuples
+            sorted by ``(open_at, timestamp)``.
+        """
+        from_dt = datetime.combine(day_start, datetime.min.time(), tzinfo=UTC)
+        to_dt = datetime.combine(day_end + timedelta(days=1), datetime.min.time(), tzinfo=UTC)
+        conditions = [
+            Candle.instrument_public_id == instrument_public_id,
+            Candle.timeframe == timeframe,
+            Candle.open_at >= from_dt,
+            Candle.open_at < to_dt,
+        ]
+        if closed_only:
+            conditions.append(Candle.known_to < datetime.now(UTC))
+        cols = [
+            Candle.id,
+            Candle.public_id,
+            Candle.timestamp,
+            Candle.known_to,
+            Candle.session_id,
+            Candle.sequence_id,
+            Candle.instrument_public_id,
+            Candle.open_at,
+            Candle.timeframe,
+            Candle.open,
+            Candle.high,
+            Candle.low,
+            Candle.close,
+            Candle.volume,
+            Candle.vwap,
+            Candle.trades,
+        ]
+        with self.get_session() as session:
+            rows = session.execute(
+                select(*cols).where(*conditions).order_by(Candle.open_at, Candle.timestamp)
+            ).all()
+        return [tuple(r) for r in rows]
+
     def dispose(self) -> None:
         """Dispose the engine and release open database resources."""
         self.engine.dispose()

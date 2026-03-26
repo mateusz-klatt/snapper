@@ -24,6 +24,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from snapper.data.models import Candle
 from snapper.data.models import Control
 from snapper.data.models import Execution
 from snapper.data.models import Signal
@@ -854,3 +855,183 @@ class EventArchiver:
         if spec.group_column == "order_public_id":
             return self._repo.get_order_archive_map()
         return None
+
+
+_CANDLE_AUDIT_COLUMNS = (
+    "public_id",
+    "timestamp",
+    "known_to",
+    "session_id",
+    "sequence_id",
+    "instrument_public_id",
+    "open_at",
+    "timeframe",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "vwap",
+    "trades",
+)
+
+
+class CandleAuditArchiver:
+    """Export all candle SCD2 versions to per-day CSV archive files.
+
+    Unlike CandleCacheArchiver (which exports only the latest active
+    version in polygon format), this archiver exports the full version
+    history with temporal metadata for audit and recovery.
+
+    Output path:
+        ``data/archive/candles/{exchange}/{archive_symbol}/{year}/{date}.csv``
+
+    Date grouping uses ``open_at`` (candle time), not ``timestamp``
+    (bus_time), so a correction at T+1 for open_at=T archives with
+    T's day file.
+
+    Attributes:
+        _repo: Sync database repository.
+        _base_dir: Base data directory for archive output.
+    """
+
+    def __init__(self, repo: DatabaseRepository, base_dir: Path) -> None:
+        """Initialize the candle audit archiver.
+
+        Args:
+            repo: Sync database repository.
+            base_dir: Base data directory (e.g. ``Path("data")``).
+        """
+        self._repo = repo
+        self._base_dir = base_dir
+
+    def export(
+        self,
+        *,
+        exchange: str | None = None,
+        archive_symbol: str | None = None,
+        timeframe: str = "1m",
+        day_start: date,
+        day_end: date,
+        closed_only: bool = False,
+        dry_run: bool = False,
+        purge: bool = False,
+    ) -> ExportResult:
+        """Export candle audit rows for a date range to CSV.
+
+        Args:
+            exchange: Filter by exchange (optional).
+            archive_symbol: Filter by archive_symbol (optional).
+            timeframe: Candle timeframe (e.g. ``1m``, ``1h``, ``1d``).
+            day_start: First day (inclusive) of ``open_at`` range.
+            day_end: Last day (inclusive) of ``open_at`` range.
+            closed_only: If True, only closed versions (known_to < now).
+            dry_run: If True, count rows without writing files.
+            purge: If True, delete exported rows from DB.
+                Only allowed with ``closed_only=True``.
+
+        Returns:
+            ExportResult with file, row, and purge counts.
+
+        Raises:
+            ValueError: If purge requested without closed_only.
+        """
+        if purge and not closed_only:
+            raise ValueError("Purge requires closed_only=True for candle audit")
+
+        inst_map = self._repo.get_instrument_archive_map()
+        files_written = 0
+        rows_exported = 0
+        all_row_ids: list[int] = []
+
+        for inst_pub_id, (arch_sym, exch) in sorted(inst_map.items()):
+            if exchange is not None and exch != exchange:
+                continue
+            if archive_symbol is not None and arch_sym != archive_symbol:
+                continue
+            fw, re, ids = self._export_instrument(
+                inst_pub_id,
+                arch_sym,
+                exch,
+                timeframe,
+                day_start,
+                day_end,
+                closed_only,
+                dry_run,
+            )
+            files_written += fw
+            rows_exported += re
+            all_row_ids.extend(ids)
+
+        rows_purged = 0
+        if purge and all_row_ids:
+            rows_purged = self._repo.delete_rows_by_id(Candle, all_row_ids)
+
+        return ExportResult(
+            files_written=files_written,
+            rows_exported=rows_exported,
+            rows_purged=rows_purged,
+        )
+
+    def _export_instrument(
+        self,
+        instrument_public_id: str,
+        archive_symbol: str,
+        exchange_name: str,
+        timeframe: str,
+        day_start: date,
+        day_end: date,
+        closed_only: bool,
+        dry_run: bool,
+    ) -> tuple[int, int, list[int]]:
+        """Export candle audit rows for one instrument.
+
+        Args:
+            instrument_public_id: Instrument to export.
+            archive_symbol: Stable archive symbol for path.
+            exchange_name: Exchange name for path.
+            timeframe: Candle timeframe.
+            day_start: First day (inclusive).
+            day_end: Last day (inclusive).
+            closed_only: Only closed versions.
+            dry_run: Count only.
+
+        Returns:
+            Tuple of (files_written, rows_exported, row_ids).
+        """
+        db_rows = self._repo.get_candle_versions_for_archive(
+            instrument_public_id,
+            timeframe,
+            day_start,
+            day_end,
+            closed_only,
+        )
+        if not db_rows:
+            return 0, 0, []
+
+        by_day: dict[date, list[tuple[str, ...]]] = defaultdict(list)
+        row_ids: list[int] = []
+        for row in db_rows:
+            row_ids.append(row[0])
+            csv_values = tuple(_format_value(v) for v in row[1:])
+            open_at: datetime = row[7]
+            by_day[open_at.date()].append(csv_values)
+
+        if dry_run:
+            return len(by_day), len(row_ids), row_ids
+
+        files_written = 0
+        for day in sorted(by_day):
+            path = _resolve_event_path(
+                self._base_dir,
+                "candles",
+                day,
+                exchange_name,
+                archive_symbol,
+            )
+            existing = _read_existing_csv(path)
+            merged = _merge_and_dedup_events(existing, by_day[day])
+            _write_event_csv(path, _CANDLE_AUDIT_COLUMNS, merged)
+            files_written += 1
+
+        return files_written, len(row_ids), row_ids
