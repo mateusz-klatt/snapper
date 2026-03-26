@@ -38,6 +38,14 @@ def _patch_resolve_spid(monkeypatch: pytest.MonkeyPatch) -> None:
         AsyncMock(return_value="stub-spid"),
     )
 
+    original_init = PolygonAggregatesBackfillService.__init__
+
+    def _patched_init(self: PolygonAggregatesBackfillService, *args: Any, **kwargs: Any) -> None:
+        original_init(self, *args, **kwargs)
+        self._archive_symbols = _PermissiveArchiveSymbols()
+
+    monkeypatch.setattr(PolygonAggregatesBackfillService, "__init__", _patched_init)
+
 
 class _StubScalarsResult:
     """Test stub for SQLAlchemy scalars result."""
@@ -146,6 +154,8 @@ def _symbol_context(
     polygon_symbol: str,
     base_currency: str,
     quote_currency: str | None,
+    archive_symbol: str = "",
+    symbol_public_id: str = "stub-spid",
 ) -> Any:
     context_cls = cast(type[Any], aggregates_module._SymbolContext)
     return context_cls(
@@ -153,7 +163,16 @@ def _symbol_context(
         polygon_symbol=polygon_symbol,
         base_currency=base_currency,
         quote_currency=quote_currency,
+        archive_symbol=archive_symbol or native_symbol,
+        symbol_public_id=symbol_public_id,
     )
+
+
+class _PermissiveArchiveSymbols(dict[str, str]):
+    """Dict subclass that returns a test default for any key via .get()."""
+
+    def get(self, key: str, default: str | None = None) -> str | None:
+        return super().get(key, key)
 
 
 @pytest.fixture(name="service")
@@ -261,6 +280,44 @@ def test_resolve_symbol_context_missing(service: PolygonAggregatesBackfillServic
     assert context is None
 
 
+def test_lookup_native_raises_when_archive_symbol_missing(
+    service: PolygonAggregatesBackfillService,
+) -> None:
+    """Raise ValueError when symbol public_id not in _archive_symbols.
+
+    Given: Symbol found in DB but _archive_symbols has no entry,
+    When: _lookup_context_by_native called,
+    Then: ValueError raised instead of silent fallback.
+    """
+    catalog = SimpleNamespace(
+        native_symbol="BTC-USD", base="BTC", quote="USD", public_id="orphan-pub-id"
+    )
+    alias = SimpleNamespace(symbol_public_id="orphan-pub-id", exchange_symbol="X:BTCUSD")
+    cast(Any, service)._db_sync = _StubSyncRepo([[catalog], [alias]])
+    cast(Any, service)._archive_symbols = {}
+    with pytest.raises(ValueError, match="No archive_symbol for symbol"):
+        cast(Any, service)._lookup_context_by_native("BTC-USD")
+
+
+def test_lookup_polygon_raises_when_archive_symbol_missing(
+    service: PolygonAggregatesBackfillService,
+) -> None:
+    """Raise ValueError when symbol public_id not in _archive_symbols.
+
+    Given: Alias and symbol found in DB but _archive_symbols has no entry,
+    When: _lookup_context_by_polygon_symbol called,
+    Then: ValueError raised instead of silent fallback.
+    """
+    alias = SimpleNamespace(symbol_public_id="orphan-pub-id", exchange_symbol="X:BTCUSD")
+    catalog = SimpleNamespace(
+        native_symbol="BTC-USD", base="BTC", quote="USD", public_id="orphan-pub-id"
+    )
+    cast(Any, service)._db_sync = _StubSyncRepo([[alias], [catalog]])
+    cast(Any, service)._archive_symbols = {}
+    with pytest.raises(ValueError, match="No archive_symbol for symbol"):
+        cast(Any, service)._lookup_context_by_polygon_symbol("X:BTCUSD")
+
+
 @pytest.mark.asyncio
 async def test_ensure_instrument_caches_result(service: PolygonAggregatesBackfillService) -> None:
     """Verify _ensure_instrument caches instrument ID.
@@ -276,6 +333,7 @@ async def test_ensure_instrument_caches_result(service: PolygonAggregatesBackfil
         polygon_symbol="X:ETHUSD",
         base_currency="ETH",
         quote_currency="USD",
+        symbol_public_id="",
     )
     ensure_instrument = cast(Any, service)._ensure_instrument
     result = await ensure_instrument(context, as_of=datetime.now(UTC))
@@ -310,10 +368,52 @@ async def test_ensure_instrument_raises_when_symbol_not_resolved(
         polygon_symbol="X:ETHUSD",
         base_currency="ETH",
         quote_currency="USD",
+        symbol_public_id="",
     )
     ensure_instrument = cast(Any, service)._ensure_instrument
     with pytest.raises(ValueError, match="No active Symbol row for ETH-USD"):
         await ensure_instrument(context, as_of=datetime.now(UTC))
+
+
+@pytest.mark.asyncio
+async def test_ensure_instrument_uses_context_symbol_public_id(
+    service: PolygonAggregatesBackfillService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify _ensure_instrument prefers symbol_public_id from context.
+
+    Given: A context resolved from the active Symbol row and a backfill
+    timestamp earlier than the Symbol timestamp,
+    When: _ensure_instrument is called,
+    Then: It uses context.symbol_public_id directly and does not fail on
+    historical resolve_symbol_public_id lookup. Instrument ensure uses
+    current time, not the historical backfill boundary.
+    """
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.datetime",
+        _FixedDateTime,
+    )
+    resolve_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.resolve_symbol_public_id",
+        resolve_mock,
+    )
+    async_repo = _StubAsyncRepo()
+    cast(Any, service)._db_async = async_repo
+    context = _symbol_context(
+        native_symbol="BTC-USD",
+        polygon_symbol="X:BTCUSD",
+        base_currency="BTC",
+        quote_currency="USD",
+        symbol_public_id="sym-pub-btcusd",
+    )
+    ensure_instrument = cast(Any, service)._ensure_instrument
+    result = await ensure_instrument(context, as_of=datetime(2026, 2, 22, tzinfo=UTC))
+    assert result == async_repo.return_value[1]
+    assert len(async_repo.calls) == 1
+    assert async_repo.calls[0]["symbol_public_id"] == "sym-pub-btcusd"
+    assert async_repo.calls[0]["timestamp"] == _FIXED_NOW
+    resolve_mock.assert_not_awaited()
 
 
 def test_build_candle_rows(service: PolygonAggregatesBackfillService) -> None:
@@ -427,6 +527,10 @@ async def test_start_all_mapped_returns_when_no_symbols(monkeypatch: pytest.Monk
         "snapper.application.updaters.historical.aggregates.get_repository",
         lambda url: None,
     )
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.DatabaseRepository",
+        lambda _url: SimpleNamespace(get_archive_symbols=_PermissiveArchiveSymbols),
+    )
     svc._get_all_mapped_symbols = Mock(return_value=[])
     await svc.start()
     svc._get_all_mapped_symbols.assert_called_once()
@@ -455,6 +559,7 @@ async def test_process_symbol_with_empty_candles(monkeypatch: pytest.MonkeyPatch
         polygon_symbol="X:BTCUSD",
         base_currency="BTC",
         quote_currency="USD",
+        archive_symbol="BTC-USD",
     )
     await svc._process_symbol(context)
     repo.ensure_instrument.assert_awaited_once()
@@ -585,6 +690,7 @@ async def test_process_symbol_skips_small_chunk_when_all_csv_exist(
         polygon_symbol="X:BTCUSD",
         base_currency="BTC",
         quote_currency="USD",
+        archive_symbol="BTC-USD",
     )
     await svc._process_symbol(context)
     assert cast(Any, svc._loader).fetch_calls == 0
@@ -625,7 +731,7 @@ async def test_process_symbol_optimizes_large_chunk(monkeypatch: pytest.MonkeyPa
             self.fetch_calls = 0
 
         def get_aggregate_csv_path_for_day(
-            self, _symbol: str, _timespan: str, day: Any
+            self, _archive_symbol: str, _timespan: str, day: Any
         ) -> DummyPath:
             return DummyPath(day not in missing_days)
 
@@ -651,6 +757,7 @@ async def test_process_symbol_optimizes_large_chunk(monkeypatch: pytest.MonkeyPa
         polygon_symbol="X:BTCUSD",
         base_currency="BTC",
         quote_currency="USD",
+        archive_symbol="BTC-USD",
     )
     await svc._process_symbol(context)
     db_async = cast(Any, svc._db_async)
@@ -712,6 +819,7 @@ async def test_process_symbol_hour_timespan_fetches(monkeypatch: pytest.MonkeyPa
         polygon_symbol="C:EURUSD",
         base_currency="EUR",
         quote_currency="USD",
+        archive_symbol="EUR-USD",
     )
     await svc._process_symbol(context)
     repo = cast(Any, svc._db_async)
@@ -759,6 +867,7 @@ async def test_process_symbol_day_timespan_skips_when_csv_exist(tmp_path: Any) -
         polygon_symbol="AAPL",
         base_currency="AAPL",
         quote_currency=None,
+        archive_symbol="AAPL",
     )
     await svc._process_symbol(context)
     repo = cast(Any, svc._db_async)
@@ -808,6 +917,7 @@ async def test_process_symbol_large_chunk_all_csv_exist_skips_fetch(
         polygon_symbol="X:BTCUSD",
         base_currency="BTC",
         quote_currency="USD",
+        archive_symbol="BTC-USD",
     )
     await svc._process_symbol(context)
     repo = cast(Any, svc._db_async)
@@ -1084,6 +1194,9 @@ class _StubBackfillSyncRepo:
     def get_session(self) -> _StubBackfillSession:
         return _StubBackfillSession([list(row) for row in self._template])
 
+    def get_archive_symbols(self) -> dict[str, str]:
+        return _PermissiveArchiveSymbols()
+
 
 class _StubBackfillAsyncRepo:
     """Test stub for asynchronous backfill repository."""
@@ -1130,8 +1243,10 @@ class _StubLoader:
         symbol: str,
         multiplier: int,
         timespan: str,
+        *,
         from_ts: datetime,
         to_ts: datetime,
+        archive_symbol: str | None = None,
         resume_from: datetime | None = None,
         save_csv: bool = True,
         limit: int = 50000,
@@ -1143,6 +1258,7 @@ class _StubLoader:
                 "timespan": timespan,
                 "from_ts": from_ts,
                 "to_ts": to_ts,
+                "archive_symbol": archive_symbol,
                 "resume_from": resume_from,
                 "save_csv": save_csv,
                 "limit": limit,
@@ -1150,7 +1266,9 @@ class _StubLoader:
         )
         return self.candles
 
-    def get_aggregate_csv_path_for_day(self, symbol: str, timespan: str, day: date) -> Path | None:
+    def get_aggregate_csv_path_for_day(
+        self, archive_symbol: str, timespan: str, day: date
+    ) -> Path | None:
         return None
 
 
@@ -1409,7 +1527,7 @@ async def test_chunk_optimization_skip_when_all_csv_exist() -> None:
 
     class _StubLoaderWithCSV(_StubLoader):
         def get_aggregate_csv_path_for_day(
-            self, symbol: str, timespan: str, day: date
+            self, archive_symbol: str, ticker: str, timespan: str, day: date
         ) -> Path | None:
             mock_path = MagicMock(spec=Path)
             mock_path.exists.return_value = True
@@ -1486,7 +1604,11 @@ async def test_start_without_symbols_returns(monkeypatch: pytest.MonkeyPatch) ->
         "get_settings_with_service",
         lambda _svc: svc.settings,
     )
-    monkeypatch.setattr(aggregates_module, "DatabaseRepository", lambda _url: SimpleNamespace())
+    monkeypatch.setattr(
+        aggregates_module,
+        "DatabaseRepository",
+        lambda _url: SimpleNamespace(get_archive_symbols=_PermissiveArchiveSymbols),
+    )
     monkeypatch.setattr(aggregates_module, "get_repository", lambda _url: SimpleNamespace())
     monkeypatch.setattr(
         aggregates_module,
@@ -1535,7 +1657,11 @@ async def test_start_all_mapped_without_results(
         "get_settings_with_service",
         lambda _svc: svc.settings,
     )
-    monkeypatch.setattr(aggregates_module, "DatabaseRepository", lambda _url: SimpleNamespace())
+    monkeypatch.setattr(
+        aggregates_module,
+        "DatabaseRepository",
+        lambda _url: SimpleNamespace(get_archive_symbols=_PermissiveArchiveSymbols),
+    )
     monkeypatch.setattr(aggregates_module, "get_repository", lambda _url: SimpleNamespace())
     monkeypatch.setattr(
         aggregates_module,
@@ -1585,7 +1711,11 @@ async def test_start_skips_symbol_without_context(
         "get_settings_with_service",
         lambda _svc: svc.settings,
     )
-    monkeypatch.setattr(aggregates_module, "DatabaseRepository", lambda _url: SimpleNamespace())
+    monkeypatch.setattr(
+        aggregates_module,
+        "DatabaseRepository",
+        lambda _url: SimpleNamespace(get_archive_symbols=_PermissiveArchiveSymbols),
+    )
     monkeypatch.setattr(aggregates_module, "get_repository", lambda _url: SimpleNamespace())
     monkeypatch.setattr(
         aggregates_module,
@@ -1611,6 +1741,9 @@ class _DummyRepo:
 
     def get_session(self) -> _DummyRepo:
         return self
+
+    def get_archive_symbols(self) -> dict[str, str]:
+        return _PermissiveArchiveSymbols()
 
     def __enter__(self) -> _DummyRepo:
         return self
@@ -1663,6 +1796,7 @@ class _DummyLoader:
         *,
         from_ts: datetime,
         to_ts: datetime,
+        archive_symbol: str | None = None,
         resume_from: None,
         save_csv: bool,
         limit: int,
@@ -1734,6 +1868,7 @@ async def test_start_all_mapped_uses_fetched_symbols(monkeypatch: pytest.MonkeyP
             polygon_symbol="X:BTCUSD",
             base_currency="BTC",
             quote_currency="USD",
+            archive_symbol="BTC-USD",
         )
 
     async def fake_process(context: _SymbolContext) -> None:
@@ -1776,6 +1911,7 @@ async def test_process_symbol_caps_to_max_ts(monkeypatch: pytest.MonkeyPatch) ->
         polygon_symbol="X:BTCUSD",
         base_currency="BTC",
         quote_currency="USD",
+        archive_symbol="BTC-USD",
     )
 
     class _FakeDateTime(datetime):
@@ -2330,6 +2466,7 @@ async def test_process_symbol_skips_when_all_csv_exist(
         polygon_symbol="X:BTCUSD",
         base_currency="BTC",
         quote_currency="USD",
+        archive_symbol="BTC-USD",
     )
     await service_private._process_symbol(context)
     assert repo.candle_batches == []
@@ -2378,6 +2515,7 @@ async def test_process_symbol_persists_fetched_rows(
         polygon_symbol="X:BTCUSD",
         base_currency="BTC",
         quote_currency="USD",
+        archive_symbol="BTC-USD",
     )
     await service_private._process_symbol(context)
     assert len(repo.instrument_calls) == 1
@@ -2466,6 +2604,7 @@ async def test_fetch_and_persist_chunk_splits_into_batches(
         polygon_symbol="X:BTCUSD",
         base_currency="BTC",
         quote_currency="USD",
+        archive_symbol="BTC-USD",
     )
     await service_private._process_symbol(context)
     batch_sizes = [len(b) for b in repo.candle_batches]

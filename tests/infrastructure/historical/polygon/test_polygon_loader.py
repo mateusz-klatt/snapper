@@ -88,15 +88,16 @@ class _StubPolygonClient:
 
 
 @pytest.mark.asyncio
-async def test_fetch_aggregates_writes_csv_and_empty_marker(
+async def test_fetch_aggregates_writes_csv_with_archive_symbol(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Fetch aggregates with resume_from filters and writes CSV.
+    """Fetch aggregates writes CSV under archive_symbol directory.
 
     Given: Stub client returning aggregates with mixed timestamps,
-    When: fetch_aggregates called with resume_from filter,
-    Then: Only newer candles are returned and CSV files are created.
+    When: fetch_aggregates called with archive_symbol and resume_from filter,
+    Then: Only newer candles are returned and CSV files are created
+          under the archive_symbol directory path.
     """
     resume_from = datetime(2024, 1, 1, 12, tzinfo=UTC)
     included_late = datetime(2024, 1, 1, 16, tzinfo=UTC)
@@ -153,13 +154,14 @@ async def test_fetch_aggregates_writes_csv_and_empty_marker(
         timespan="minute",
         from_ts=datetime(2024, 1, 1, 0, tzinfo=UTC),
         to_ts=datetime(2024, 1, 2, 0, tzinfo=UTC),
+        archive_symbol="BTC-USD",
         resume_from=resume_from,
         save_csv=True,
     )
     assert [c.timestamp for c in candles] == [included_early, included_late]
     assert stub_client.aggregate_calls[0]["from_ts"] == resume_from
     assert sleep_calls == [0.0]
-    data_csv = tmp_path / "minute" / "X_BTCUSD" / "2024" / "2024-01-01.csv"
+    data_csv = tmp_path / "minute" / "BTC-USD" / "2024" / "2024-01-01.csv"
     assert data_csv.exists()
     with data_csv.open(encoding="utf-8") as csv_file:
         rows = list(csv.reader(csv_file))
@@ -175,13 +177,60 @@ async def test_fetch_aggregates_writes_csv_and_empty_marker(
     ]
     assert rows[1][0] == included_early.isoformat()
     assert rows[2][0] == included_late.isoformat()
-    empty_marker = tmp_path / "minute" / "X_BTCUSD" / "2024" / "2024-01-02.csv"
+    empty_marker = tmp_path / "minute" / "BTC-USD" / "2024" / "2024-01-02.csv"
     assert empty_marker.exists()
     with empty_marker.open(encoding="utf-8") as marker_file:
         marker_rows = list(csv.reader(marker_file))
     assert marker_rows == [
         ["timestamp", "open", "high", "low", "close", "volume", "vwap", "transactions"]
     ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_aggregates_raises_when_save_csv_without_archive_symbol(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fetch aggregates raises ValueError when save_csv=True but no archive_symbol.
+
+    Given: Stub client returning one aggregate,
+    When: fetch_aggregates called with save_csv=True and no archive_symbol,
+    Then: ValueError is raised.
+    """
+    aggregates = [
+        SimpleNamespace(
+            timestamp=int(datetime(2024, 1, 1, 14, tzinfo=UTC).timestamp() * 1000),
+            open=1.2,
+            high=1.25,
+            low=1.15,
+            close=1.22,
+            volume=200,
+            vwap=1.21,
+            transactions=5,
+        ),
+    ]
+    stub_client = _StubPolygonClient(aggregates=aggregates)
+    loader = PolygonHistoricalLoader(
+        cast(PolygonExchangeClient, stub_client),
+        cache_root=tmp_path,
+        rate_delay_seconds=0.0,
+    )
+
+    async def fake_sleep(delay: float) -> None:
+        """Stub for asyncio.sleep."""
+
+    monkeypatch.setattr(
+        "snapper.infrastructure.historical.polygon.loader.asyncio.sleep", fake_sleep
+    )
+    with pytest.raises(ValueError, match="archive_symbol is required"):
+        await loader.fetch_aggregates(
+            ticker="X:BTCUSD",
+            multiplier=1,
+            timespan="minute",
+            from_ts=datetime(2024, 1, 1, 0, tzinfo=UTC),
+            to_ts=datetime(2024, 1, 1, 0, tzinfo=UTC),
+            save_csv=True,
+        )
 
 
 @pytest.mark.asyncio
@@ -394,10 +443,10 @@ async def test_fetch_grouped_daily_creates_empty_marker(
 async def test_fetch_aggregates_skips_existing_empty_marker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Preserve existing CSV files.
+    """Preserve existing CSV files under archive_symbol path.
 
-    Given: Pre-existing CSV file in cache directory,
-    When: fetch_aggregates is called,
+    Given: Pre-existing CSV file in archive_symbol cache directory,
+    When: fetch_aggregates is called with that archive_symbol,
     Then: Existing file content is preserved.
     """
     stub_client = _StubPolygonClient(aggregates=[])
@@ -406,7 +455,7 @@ async def test_fetch_aggregates_skips_existing_empty_marker(
         cache_root=tmp_path,
         rate_delay_seconds=0.0,
     )
-    existing_marker = tmp_path / "minute" / "X_BTCUSD" / "2024" / "2024-01-01.csv"
+    existing_marker = tmp_path / "minute" / "BTC-USD" / "2024" / "2024-01-01.csv"
     existing_marker.parent.mkdir(parents=True, exist_ok=True)
     existing_marker.write_text("already here\n", encoding="utf-8")
     sleep_calls: list[float] = []
@@ -423,6 +472,7 @@ async def test_fetch_aggregates_skips_existing_empty_marker(
         timespan="minute",
         from_ts=datetime(2024, 1, 1, 0, tzinfo=UTC),
         to_ts=datetime(2024, 1, 1, 0, tzinfo=UTC),
+        archive_symbol="BTC-USD",
         resume_from=None,
         save_csv=True,
     )
@@ -496,19 +546,21 @@ def test_get_aggregate_csv_path_for_day_variants(tmp_path: Path) -> None:
 
     Given: Loader with cache root,
     When: get_aggregate_csv_path_for_day called with minute/day,
-    Then: Returns appropriate filename pattern.
+    Then: Returns appropriate filename pattern under archive_symbol directory.
     """
     loader = PolygonHistoricalLoader(
         cast(PolygonExchangeClient, _StubPolygonClient()),
         cache_root=tmp_path,
         rate_delay_seconds=0.0,
     )
-    minute_path = loader.get_aggregate_csv_path_for_day("X:BTCUSD", "minute", date(2024, 1, 1))
-    day_path = loader.get_aggregate_csv_path_for_day("X:BTCUSD", "day", date(2024, 1, 1))
+    minute_path = loader.get_aggregate_csv_path_for_day("BTC-USD", "minute", date(2024, 1, 1))
+    day_path = loader.get_aggregate_csv_path_for_day("BTC-USD", "day", date(2024, 1, 1))
     assert minute_path.name == "2024-01-01.csv"
     assert day_path.name == "2024-01.csv"
-    assert minute_path.parent.exists()
-    assert day_path.parent.exists()
+    assert "BTC-USD" in str(minute_path)
+    assert "BTC-USD" in str(day_path)
+    assert not minute_path.parent.exists()
+    assert not day_path.parent.exists()
 
 
 def test_get_grouped_csv_path_accepts_datetime(tmp_path: Path) -> None:

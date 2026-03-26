@@ -58,12 +58,16 @@ class _SymbolContext:
         polygon_symbol: Polygon API symbol (e.g., "X:BTCUSD").
         base_currency: Base currency code.
         quote_currency: Quote currency code (optional).
+        archive_symbol: Stable filesystem key for CSV cache paths.
+        symbol_public_id: Stable public identity of the active Symbol row.
     """
 
     native_symbol: str
     polygon_symbol: str
     base_currency: str
     quote_currency: str | None
+    archive_symbol: str
+    symbol_public_id: str = ""
 
 
 def _timeframe_label(multiplier: int, timespan: str) -> str:
@@ -175,6 +179,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         self._db_async: Repository | None = None
         self._loader: PolygonHistoricalLoader | None = None
         self._instrument_cache: dict[str, str] = {}
+        self._archive_symbols: dict[str, str] = {}
         self._symbol_mapper = SymbolMapperService.get_instance()
         self._tracker: SequenceTracker = SequenceTracker()
 
@@ -196,6 +201,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             raise ValueError("Polygon API key not configured in settings")
         self._db_sync = DatabaseRepository(self.settings.db_url)
         self._db_async = get_repository(self.settings.db_url)
+        self._archive_symbols = self._db_sync.get_archive_symbols()
         client = PolygonExchangeClient(api_key=api_key)
         self._loader = PolygonHistoricalLoader(client, cache_root=_CACHE_ROOT)
         if self._all_mapped:
@@ -288,11 +294,11 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             return 24
         return 1
 
-    def _all_csv_exist_in_range(self, polygon_symbol: str, day_start: date, day_end: date) -> bool:
+    def _all_csv_exist_in_range(self, archive_symbol: str, day_start: date, day_end: date) -> bool:
         """Check whether all daily CSV files exist in a date range.
 
         Args:
-            polygon_symbol: Polygon symbol string.
+            archive_symbol: Stable archive symbol for cache directory.
             day_start: First date to check.
             day_end: Last date to check.
 
@@ -303,7 +309,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         check_day = day_start
         while check_day <= day_end:
             csv_path = self._loader.get_aggregate_csv_path_for_day(
-                polygon_symbol, self._timespan, check_day
+                archive_symbol, self._timespan, check_day
             )
             if not csv_path or not csv_path.exists():
                 return False
@@ -311,12 +317,16 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         return True
 
     def _find_missing_csv_boundary(
-        self, polygon_symbol: str, day_start: date, day_end: date, forward: bool
+        self,
+        archive_symbol: str,
+        day_start: date,
+        day_end: date,
+        forward: bool,
     ) -> date:
         """Scan from one end of a date range to find the first missing CSV.
 
         Args:
-            polygon_symbol: Polygon symbol string.
+            archive_symbol: Stable archive symbol for cache directory.
             day_start: Start of the search range.
             day_end: End of the search range.
             forward: If True scan from day_start forward, else from day_end backward.
@@ -329,7 +339,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         step = timedelta(days=1) if forward else timedelta(days=-1)
         while (forward and current <= day_end) or (not forward and current >= day_start):
             csv_path = self._loader.get_aggregate_csv_path_for_day(
-                polygon_symbol, self._timespan, current
+                archive_symbol, self._timespan, current
             )
             if not csv_path or not csv_path.exists():
                 return current
@@ -338,14 +348,14 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
 
     def _optimize_chunk_small(
         self,
-        polygon_symbol: str,
+        archive_symbol: str,
         chunk_start: date,
         chunk_end: date,
     ) -> date | None:
         """Attempt skip optimization for small chunks where all CSVs may exist.
 
         Args:
-            polygon_symbol: Polygon symbol string.
+            archive_symbol: Stable archive symbol for cache directory.
             chunk_start: Chunk start date.
             chunk_end: Chunk end date.
 
@@ -355,25 +365,25 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         """
         chunk_days_count = (chunk_end - chunk_start).days + 1
         estimated_bars = chunk_days_count * self._bars_per_day()
-        if self._all_csv_exist_in_range(polygon_symbol, chunk_start, chunk_end):
+        if self._all_csv_exist_in_range(archive_symbol, chunk_start, chunk_end):
             logger.info(
                 f" Skipping chunk {chunk_start.isoformat()} -> "
                 f"{chunk_end.isoformat()} ({chunk_days_count}d) - "
                 f"all CSV files exist",
-                symbol=polygon_symbol,
+                symbol=archive_symbol,
             )
             return None
         logger.debug(
             f"Chunk {chunk_start.isoformat()}->{chunk_end.isoformat()} "
             f"({chunk_days_count}d ~ {estimated_bars} bars) fits in 1 API call - "
             f"fetching all to capture adjustments",
-            symbol=polygon_symbol,
+            symbol=archive_symbol,
         )
         return chunk_end
 
     def _optimize_chunk_large(
         self,
-        polygon_symbol: str,
+        archive_symbol: str,
         chunk_start: date,
         chunk_end: date,
         chunk_days: int,
@@ -382,7 +392,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         """Trim edges of a large chunk where CSVs already exist.
 
         Args:
-            polygon_symbol: Polygon symbol string.
+            archive_symbol: Stable archive symbol for cache directory.
             chunk_start: Original chunk start date.
             chunk_end: Original chunk end date.
             chunk_days: Chunk size in days.
@@ -392,16 +402,16 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             Tuple of (optimized_start, optimized_end) or None to skip entirely.
         """
         optimized_end = self._find_missing_csv_boundary(
-            polygon_symbol, chunk_start, chunk_end, forward=False
+            archive_symbol, chunk_start, chunk_end, forward=False
         )
         optimized_start = self._find_missing_csv_boundary(
-            polygon_symbol, chunk_start, optimized_end, forward=True
+            archive_symbol, chunk_start, optimized_end, forward=True
         )
         if optimized_end < chunk_start or optimized_start > optimized_end:
             logger.info(
                 f" Skipping chunk {chunk_start.isoformat()} -> "
                 f"{chunk_end.isoformat()} - all CSV files exist",
-                symbol=polygon_symbol,
+                symbol=archive_symbol,
             )
             return None
         original_chunk_end = chunk_end
@@ -414,13 +424,13 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
                 f"{original_chunk_end.isoformat()} ({original_days}d) -> "
                 f"{optimized_start.isoformat()}->{optimized_end.isoformat()} "
                 f"({final_days}d) - skipping edge CSVs",
-                symbol=polygon_symbol,
+                symbol=archive_symbol,
             )
         return optimized_start, optimized_end
 
     def _apply_resume_optimization(
         self,
-        polygon_symbol: str,
+        archive_symbol: str,
         chunk_start: date,
         chunk_end: date,
         chunk_days: int,
@@ -429,7 +439,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         """Apply CSV-based resume optimization to a chunk.
 
         Args:
-            polygon_symbol: Polygon symbol string.
+            archive_symbol: Stable archive symbol for cache directory.
             chunk_start: Chunk start date.
             chunk_end: Chunk end date.
             chunk_days: Chunk size in days.
@@ -442,12 +452,12 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         estimated_bars = chunk_days_count * self._bars_per_day()
         skip_optimization = estimated_bars <= 50000
         if skip_optimization:
-            result = self._optimize_chunk_small(polygon_symbol, chunk_start, chunk_end)
+            result = self._optimize_chunk_small(archive_symbol, chunk_start, chunk_end)
             if result is None:
                 return None
             return chunk_start, chunk_end
         large_result = self._optimize_chunk_large(
-            polygon_symbol, chunk_start, chunk_end, chunk_days, start_date
+            archive_symbol, chunk_start, chunk_end, chunk_days, start_date
         )
         if large_result is None:
             return None
@@ -490,6 +500,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             self._timespan,
             from_ts=from_ts,
             to_ts=to_ts,
+            archive_symbol=context.archive_symbol,
             resume_from=None,
             save_csv=self._save_csv,
             limit=50000,
@@ -548,7 +559,11 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         if not (self._resume and self._save_csv):
             return chunk_start, chunk_end
         return self._apply_resume_optimization(
-            context.polygon_symbol, chunk_start, chunk_end, chunk_days, start_date
+            context.archive_symbol,
+            chunk_start,
+            chunk_end,
+            chunk_days,
+            start_date,
         )
 
     async def _process_symbol(self, context: _SymbolContext) -> None:
@@ -629,11 +644,19 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             ).scalar_one_or_none()
             if not alias:
                 return None
+            arch_sym = self._archive_symbols.get(symbol.public_id)
+            if arch_sym is None:
+                raise ValueError(
+                    f"No archive_symbol for symbol public_id={symbol.public_id} "
+                    f"({symbol.native_symbol}). Ensure resolve_archive_symbols ran at startup."
+                )
             return _SymbolContext(
                 native_symbol=symbol.native_symbol,
                 polygon_symbol=alias.exchange_symbol,
                 base_currency=symbol.base,
                 quote_currency=symbol.quote or symbol.base,
+                symbol_public_id=symbol.public_id,
+                archive_symbol=arch_sym,
             )
 
     def _lookup_context_by_polygon_symbol(self, polygon_symbol: str) -> _SymbolContext | None:
@@ -670,11 +693,19 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             ).scalar_one_or_none()
             if not symbol:
                 return None
+            arch_sym = self._archive_symbols.get(symbol.public_id)
+            if arch_sym is None:
+                raise ValueError(
+                    f"No archive_symbol for symbol public_id={symbol.public_id} "
+                    f"({symbol.native_symbol}). Ensure resolve_archive_symbols ran at startup."
+                )
             return _SymbolContext(
                 native_symbol=symbol.native_symbol,
                 polygon_symbol=alias.exchange_symbol,
                 base_currency=symbol.base,
                 quote_currency=symbol.quote or symbol.base,
+                symbol_public_id=symbol.public_id,
+                archive_symbol=arch_sym,
             )
 
     def _resolve_polygon_symbol(self, symbol: str) -> _SymbolContext | None:
@@ -740,12 +771,15 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         """Ensure instrument exists in database, return its public_id.
 
         Uses cache to avoid repeated database lookups.  Resolves the
-        Symbol.public_id from the database so the Instrument can reference
-        the stable symbol identity.
+        Symbol.public_id from the already-resolved symbol context when
+        available, so the Instrument can reference the stable symbol
+        identity even when the historical backfill window predates the
+        symbol row's creation time.
 
         Args:
             context: Symbol context.
-            as_of: Point-in-time for symbol/instrument resolution.
+            as_of: Historical backfill boundary. Used only as a fallback
+                for symbol lookup when the context lacks symbol_public_id.
 
         Returns:
             The instrument_public_id string.
@@ -753,17 +787,20 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         assert self._db_async is not None
         if context.native_symbol in self._instrument_cache:
             return self._instrument_cache[context.native_symbol]
-        symbol_pid = await resolve_symbol_public_id(
-            self._db_async, context.native_symbol, as_of=as_of
-        )
+        symbol_pid = getattr(context, "symbol_public_id", "")
+        if not symbol_pid:
+            symbol_pid = await resolve_symbol_public_id(
+                self._db_async, context.native_symbol, as_of=as_of
+            )
         if symbol_pid is None:
             raise ValueError(f"No active Symbol row for {context.native_symbol}")
+        ensure_time = datetime.now(UTC)
         _id, instrument_public_id = await self._db_async.ensure_instrument(
             symbol_public_id=symbol_pid,
             exchange="polygon",
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence("instruments"),
-            timestamp=as_of,
+            timestamp=ensure_time,
         )
         self._instrument_cache[context.native_symbol] = instrument_public_id
         return instrument_public_id

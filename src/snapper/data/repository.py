@@ -66,6 +66,7 @@ from sqlalchemy.pool import NullPool
 from sqlalchemy.pool import StaticPool
 
 from snapper.core.types import AllExchange
+from snapper.data.archive_symbols import resolve_archive_symbols
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
 from snapper.data.models import Candle
@@ -1838,6 +1839,58 @@ class DatabaseRepository:
     def create_all(self) -> None:
         """Create all database tables from model metadata."""
         Base.metadata.create_all(self.engine)
+
+    def get_archive_symbols(self) -> dict[str, str]:
+        """Resolve stable archive symbols for all Symbol entities.
+
+        Queries the anchor row (first version) of each Symbol, ordered
+        by ``(timestamp, id)`` for deterministic seniority.  Delegates
+        to ``resolve_archive_symbols`` for normalization and collision
+        handling.
+
+        Returns:
+            ``{symbol_public_id: archive_symbol}`` mapping.
+        """
+        with self.get_session() as session:
+            stmt = select(
+                Symbol.public_id,
+                Symbol.native_symbol,
+                Symbol.timestamp,
+                Symbol.id,
+            ).order_by(Symbol.timestamp, Symbol.id)
+            all_rows = session.execute(stmt).all()
+        seen: dict[str, tuple[str, datetime, int]] = {}
+        for pub_id, native, ts, row_id in all_rows:
+            if pub_id not in seen or (ts, row_id) < (seen[pub_id][1], seen[pub_id][2]):
+                seen[pub_id] = (native, ts, row_id)
+        anchor_rows: list[tuple[str, str]] = []
+        ordered = sorted(seen.items(), key=lambda kv: (kv[1][1], kv[1][2]))
+        for pub_id, (native, _ts, _rid) in ordered:
+            anchor_rows.append((pub_id, native))
+        return resolve_archive_symbols(anchor_rows)
+
+    def get_symbol_anchor_ids(self) -> set[int]:
+        """Return row IDs of Symbol anchor rows (first version per public_id).
+
+        Uses the same selection logic as ``get_archive_symbols`` to ensure
+        identical anchor row identification.  These rows must be excluded
+        from Symbol purge to preserve archive_symbol stability.
+
+        Returns:
+            Set of ``Symbol.id`` values for anchor rows.
+        """
+        with self.get_session() as session:
+            stmt = select(
+                Symbol.public_id,
+                Symbol.timestamp,
+                Symbol.id,
+            ).order_by(Symbol.timestamp, Symbol.id)
+            all_rows = session.execute(stmt).all()
+        seen: dict[str, tuple[datetime, int]] = {}
+        for pub_id, ts, row_id in all_rows:
+            if pub_id not in seen or (ts, row_id) < seen[pub_id]:
+                seen[pub_id] = (ts, row_id)
+        return {row_id for _ts, row_id in seen.values()}
 
     def dispose(self) -> None:
         """Dispose the engine and release open database resources."""

@@ -6,7 +6,7 @@ candles and grouped daily data with automatic CSV persistence.
 
 Features:
     - Rate-limited API access with configurable delays
-    - Automatic CSV caching organized by ticker, timespan, and date
+    - Automatic CSV caching organized by archive_symbol, timespan, and date
     - Support for resuming interrupted downloads
     - Decimal precision for financial calculations
     - Empty marker files for dates with no data
@@ -22,6 +22,7 @@ Example:
     >>> loader = PolygonHistoricalLoader(client, Path("./cache"))
     >>> candles = await loader.fetch_aggregates(
     ...     "AAPL", 1, "day",
+    ...     archive_symbol="AAPL",
     ...     from_ts=datetime(2024, 1, 1),
     ...     to_ts=datetime(2024, 1, 31),
     ... )
@@ -148,7 +149,7 @@ class PolygonHistoricalLoader:
     resuming interrupted downloads.
 
     Cache structure:
-        - Aggregates: ``{cache_root}/{timespan}/{ticker}/{year}/{date}.csv``
+        - Aggregates: ``{cache_root}/{timespan}/{archive_symbol}/{year}/{date}.csv``
         - Grouped: ``{cache_root}/grouped/{market_type}/{year}/{date}.csv``
 
     Attributes:
@@ -216,7 +217,7 @@ class PolygonHistoricalLoader:
     def _save_candles_to_csv(
         self,
         candles: list[AggregateCandle],
-        ticker: str,
+        archive_symbol: str,
         timespan: str,
         from_ts: datetime,
         to_ts: datetime,
@@ -228,7 +229,7 @@ class PolygonHistoricalLoader:
 
         Args:
             candles: List of candles to save.
-            ticker: Ticker symbol for path resolution.
+            archive_symbol: Stable archive symbol for path resolution.
             timespan: Timespan for path resolution.
             from_ts: Start of the full date range.
             to_ts: End of the full date range.
@@ -244,7 +245,7 @@ class PolygonHistoricalLoader:
             all_days.add(current_day)
             current_day += timedelta(days=1)
         for day in sorted(all_days):
-            csv_path = self._resolve_csv_path(ticker, timespan, day)
+            csv_path = self.get_aggregate_csv_path_for_day(archive_symbol, timespan, day)
             if day in candles_by_day:
                 day_candles = candles_by_day[day]
                 day_candles.sort(key=lambda c: c.timestamp)
@@ -261,6 +262,7 @@ class PolygonHistoricalLoader:
         *,
         from_ts: datetime,
         to_ts: datetime,
+        archive_symbol: str | None = None,
         adjusted: bool = True,
         sort: str = "asc",
         limit: int = 50000,
@@ -278,6 +280,8 @@ class PolygonHistoricalLoader:
             timespan: Timespan unit (``minute``, ``hour``, ``day``, etc.).
             from_ts: Start of date range (UTC).
             to_ts: End of date range (UTC).
+            archive_symbol: Stable archive symbol for CSV directory naming.
+                Required when ``save_csv=True``.
             adjusted: Whether to adjust for splits/dividends.
             sort: Sort order (``asc`` or ``desc``).
             limit: Maximum candles per API call.
@@ -308,8 +312,10 @@ class PolygonHistoricalLoader:
         candles = self._parse_aggregate_response(response, ticker, resume_from)
         logger.info(f"Received {len(candles)} candles")
         if save_csv:
+            if archive_symbol is None:
+                raise ValueError("archive_symbol is required when save_csv=True")
             await asyncio.to_thread(
-                self._save_candles_to_csv, candles, ticker, timespan, from_ts, to_ts
+                self._save_candles_to_csv, candles, archive_symbol, timespan, from_ts, to_ts
             )
         await asyncio.sleep(self._rate_delay)
         return candles
@@ -390,55 +396,40 @@ class PolygonHistoricalLoader:
             await asyncio.sleep(self._rate_delay)
         return rows
 
-    def get_aggregate_csv_path(self, ticker: str, timespan: str) -> Path:
-        """Get base directory for a ticker's aggregate CSV files.
+    def get_aggregate_csv_path(self, archive_symbol: str, timespan: str) -> Path:
+        """Get base directory for an archive symbol's aggregate CSV files.
+
+        Pure path resolution without side effects. Does not create
+        directories (use ``_write_csv`` for that).
 
         Args:
-            ticker: Security ticker symbol.
+            archive_symbol: Stable archive symbol (e.g. ``BTC-USD``).
             timespan: Timespan unit.
 
         Returns:
-            Path to the ticker's aggregate directory.
+            Path to the archive symbol's aggregate directory.
         """
-        safe_ticker = ticker.replace(":", "_")
-        directory = self._cache_root / timespan / safe_ticker
-        directory.mkdir(parents=True, exist_ok=True)
-        return directory
+        return self._cache_root / timespan / archive_symbol
 
-    def get_aggregate_csv_path_for_day(self, ticker: str, timespan: str, day: date) -> Path:
+    def get_aggregate_csv_path_for_day(self, archive_symbol: str, timespan: str, day: date) -> Path:
         """Get CSV file path for a specific day's aggregate data.
 
-        For daily timespan, groups by month. For other timespans,
-        creates a file per day.
+        Pure path resolution without side effects. For daily timespan,
+        groups by month. For other timespans, creates a file per day.
 
         Args:
-            ticker: Security ticker symbol.
+            archive_symbol: Stable archive symbol.
             timespan: Timespan unit.
             day: Date for the data.
 
         Returns:
-            Path to the CSV file.
+            Path to the CSV file (may not exist yet).
         """
-        base_directory = self.get_aggregate_csv_path(ticker, timespan)
+        base_directory = self.get_aggregate_csv_path(archive_symbol, timespan)
         year_directory = base_directory / str(day.year)
-        year_directory.mkdir(parents=True, exist_ok=True)
         if timespan.lower() == "day":
             return year_directory / f"{day.year}-{day.month:02d}.csv"
-        else:
-            return year_directory / f"{day.isoformat()}.csv"
-
-    def _resolve_csv_path(self, ticker: str, timespan: str, day: date) -> Path:
-        """Resolve CSV path for aggregate data.
-
-        Args:
-            ticker: Security ticker symbol.
-            timespan: Timespan unit.
-            day: Date for the data.
-
-        Returns:
-            Path to the CSV file.
-        """
-        return self.get_aggregate_csv_path_for_day(ticker, timespan, day)
+        return year_directory / f"{day.isoformat()}.csv"
 
     def get_grouped_csv_path(self, day: date | datetime, market_type: str, locale: str) -> Path:
         """Get CSV file path for grouped daily data.
