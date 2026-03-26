@@ -35,6 +35,9 @@ Thumbs.db.idea
 data/*.db
 data/*.log
 data/seed/
+data/archive/
+data/kraken/
+data/walutomat/
 
 # Frontend
 frontend/node_modules/
