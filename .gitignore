@@ -38,6 +38,7 @@ data/seed/
 data/archive/
 data/kraken/
 data/walutomat/
+data/zonda/
 
 # Frontend
 frontend/node_modules/
