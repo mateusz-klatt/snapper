@@ -344,11 +344,9 @@ class ZondaExecutionData(ExchangeResponse):
             order_type=OrderTypeEnum.LIMIT,
             order_status=OrderStatusEnum.FILLED,
             timestamp=self.timestamp,
-            cum_qty=self.quantity,
-            cum_cost=self.quantity * self.price,
+            exec_id=self.id,
             last_qty=self.quantity,
             last_price=self.price,
-            average_price=self.price,
         )
 
 

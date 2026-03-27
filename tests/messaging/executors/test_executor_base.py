@@ -233,6 +233,16 @@ class MergedDummyExecutor(ExchangeExecutorService[Any]):
         return "kraken"
 
 
+class ZondaDummyExecutor(ExchangeExecutorService[Any]):
+    """Test stub for Zonda-specific execution handling."""
+
+    def _create_exchange_client(self) -> MergedDummyClient:
+        return MergedDummyClient()
+
+    def _get_exchange_name(self) -> str:
+        return "zonda"
+
+
 def make_order(**overrides: Any) -> OrderRequestData:
     """Create an OrderRequestData with optional overrides."""
     return OrderRequestData(
@@ -5058,6 +5068,54 @@ class TestDeltaFillSemantics:
         assert fill_3.last_size == pytest.approx(0.3)
         assert fill_3.last_price == pytest.approx(50150.0)
         assert fill_3.status == "filled"
+
+    @pytest.mark.asyncio
+    async def test_build_execution_data_zonda_delta_partials_accumulate(self) -> None:
+        """Verify Zonda trade events are accumulated until requested size is reached.
+
+        Given: Two Zonda trade executions where each payload reports only delta quantity,
+        When: _build_execution_data is called for both events,
+        Then: The first fill stays partial and the second closes the order.
+        """
+        ex: Any = ZondaDummyExecutor()
+        ex.running = True
+        order = make_order(client_order_id="zonda-delta", quantity=0.0001, exchange="zonda")
+        ex.pending_orders[order.client_order_id] = base_module.PendingOrderState(request=order)
+
+        first = ExecutionUpdate(
+            order_id="zonda-ex-1",
+            exec_type="trade",
+            symbol="BTC-PLN",
+            side=OrderSideEnum.SELL,
+            order_type=OrderTypeEnum.LIMIT,
+            order_status=OrderStatusEnum.FILLED,
+            timestamp=datetime.now(UTC),
+            last_qty=0.00002073,
+            last_price=248468.97,
+        )
+        _topic, fill_1 = ex._build_execution_data(first, "zonda-ex-1", order, "zonda")
+        assert fill_1.size == pytest.approx(0.00002073)
+        assert fill_1.last_size == pytest.approx(0.00002073)
+        assert fill_1.status == "partial"
+        assert ex.pending_orders[order.client_order_id].last_seen_cum_qty == pytest.approx(
+            0.00002073
+        )
+
+        second = ExecutionUpdate(
+            order_id="zonda-ex-1",
+            exec_type="trade",
+            symbol="BTC-PLN",
+            side=OrderSideEnum.SELL,
+            order_type=OrderTypeEnum.LIMIT,
+            order_status=OrderStatusEnum.FILLED,
+            timestamp=datetime.now(UTC),
+            last_qty=0.00007927,
+            last_price=248468.97,
+        )
+        _topic, fill_2 = ex._build_execution_data(second, "zonda-ex-1", order, "zonda")
+        assert fill_2.size == pytest.approx(0.0001)
+        assert fill_2.last_size == pytest.approx(0.00007927)
+        assert fill_2.status == "filled"
 
     @pytest.mark.asyncio
     async def test_last_seen_cum_qty_cleaned_on_filled(self) -> None:

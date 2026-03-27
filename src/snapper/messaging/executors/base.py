@@ -13,6 +13,7 @@ from dataclasses import field
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from typing import Literal
 from typing import cast
 from uuid import uuid7
 
@@ -935,20 +936,37 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Returns:
             Tuple of (stream_key, ExecutionData) ready for publishing.
         """
-        status = to_fill_status(execution)
         total_fee = execution.fee_usd_equiv or 0.0
         now = datetime.now(UTC)
         topic = order_event_topic(exchange_name, original_order.instrument, "executed")
-        cum_qty = execution.cum_qty or 0.0
         client_id = original_order.client_order_id
         pending = self.pending_orders.get(client_id)
+        prev_cum = pending.last_seen_cum_qty if pending else 0.0
+        if execution.cum_qty is not None:
+            cum_qty = execution.cum_qty
+        elif execution.last_qty is not None:
+            cum_qty = prev_cum + execution.last_qty
+        else:
+            cum_qty = 0.0
         if execution.last_qty is not None and execution.last_price is not None:
             delta_size = execution.last_qty
             delta_price = execution.last_price
         else:
-            prev_cum = pending.last_seen_cum_qty if pending else 0.0
             delta_size = cum_qty - prev_cum
             delta_price = execution.average_price or 0.0
+        avg_price = execution.average_price or delta_price
+        status: Literal["filled", "partial"]
+        if execution.cum_qty is not None or execution.last_qty is not None:
+            expected_qty = abs(float(original_order.quantity))
+            tolerance = max(1e-12, expected_qty * 1e-6)
+            qty_complete = cum_qty >= expected_qty - tolerance
+            exchange_terminal = execution.cum_qty is not None and execution.order_status in (
+                OrderStatusEnum.CLOSED,
+                OrderStatusEnum.CANCELED,
+            )
+            status = "filled" if qty_complete or exchange_terminal else "partial"
+        else:
+            status = to_fill_status(execution)
         if pending:
             pending.last_seen_cum_qty = cum_qty
         return topic, ExecutionData(
@@ -963,7 +981,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             exchange=exchange_name,
             side=original_order.side,
             size=cum_qty,
-            price=execution.average_price or 0.0,
+            price=avg_price,
             last_size=delta_size,
             last_price=delta_price,
             fee=total_fee,
