@@ -103,6 +103,7 @@ class TradingEngineService:
         self.pending_client_order_id: str | None = None
         self._in_flight_since: float | None = None
         self.seen_exec_ids: set[str] = set()
+        self.read_only = False
 
     def _check_in_flight_timeout(self) -> None:
         """Clear in-flight guard if timeout has elapsed.
@@ -225,7 +226,7 @@ class TradingEngineService:
         """
         if self.position_qty <= 0:
             return False
-        if self.order_in_flight:
+        if self.read_only or self.order_in_flight:
             return False
         stop_ref = self.entry_price
         if stop_ref is None:
@@ -311,6 +312,9 @@ class TradingEngineService:
             current_price: Current market price for sizing calculations.
             signaled_at: Unix timestamp when signal was generated.
         """
+        if self.read_only:
+            logger.warning(f"Engine {self.instrument} in degraded read-only mode, dropping signal")
+            return
         self._check_in_flight_timeout()
         if self.order_in_flight:
             logger.warning(

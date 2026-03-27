@@ -32,6 +32,7 @@ from snapper.core.types import OrderExchange
 from snapper.core.types import ReplaceEventType
 from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
+from snapper.data.repository_types import OrderRow
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
@@ -183,6 +184,153 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             f"Publishing to broker {self.settings.zmq_broker_xsub}"
         )
 
+    async def _recover_pending_orders(self, exchange_name: str) -> None:
+        """Rebuild pending order state from exchange and database on startup.
+
+        Runs before the order handler loop to ensure in-flight orders from
+        a previous session are tracked. This prevents orphaned execution
+        events from being dropped.
+
+        Steps:
+        1. Query exchange for open orders via get_orders(status=OPEN).
+        2. Query DB for active orders via get_active_orders_for_recovery.
+        3. Correlate: rebuild PendingOrderState for orders found on exchange.
+        4. For DB-active orders missing on exchange: verify via get_order()
+           and mark terminal if genuinely absent.
+
+        Args:
+            exchange_name: Exchange name for logging and DB queries.
+        """
+        assert self.exchange_client is not None
+        if self.repository is None:
+            logger.warning(f"[{exchange_name}] No repository, skipping recovery")
+            return
+        try:
+            exchange_open = await self.exchange_client.get_orders(status=OrderStatusEnum.OPEN)
+        except Exception as e:
+            logger.error(f"[{exchange_name}] Failed to query exchange open orders: {e}")
+            exchange_open = []
+        exchange_by_id: dict[str, Any] = {o.id: o for o in exchange_open}
+        now = datetime.now(UTC)
+        try:
+            db_active = await self.repository.get_active_orders_for_recovery(
+                exchange=exchange_name, as_of=now
+            )
+        except Exception as e:
+            logger.error(f"[{exchange_name}] Failed to query DB active orders: {e}")
+            db_active = []
+        recovered = 0
+        for db_order in db_active:
+            result = await self._recover_single_order(db_order, exchange_by_id, exchange_name)
+            if result:
+                recovered += 1
+        logger.info(
+            f"[{exchange_name}] Recovery complete: {recovered} pending orders restored "
+            f"from {len(db_active)} DB active / {len(exchange_open)} exchange open"
+        )
+
+    async def _recover_single_order(
+        self,
+        db_order: OrderRow,
+        exchange_by_id: dict[str, Any],
+        exchange_name: str,
+    ) -> bool:
+        """Attempt to recover a single order from DB into pending state.
+
+        Args:
+            db_order: Order row from DB recovery query.
+            exchange_by_id: Map of exchange_order_id to ExchangeOrderSnapshot.
+            exchange_name: Exchange name for logging.
+
+        Returns:
+            True if order was recovered into pending state.
+        """
+        assert self.exchange_client is not None
+        exchange_order_id = db_order.get("exchange_order_id")
+        client_order_id = db_order.get("client_order_id", "")
+        if not exchange_order_id or not client_order_id:
+            return False
+        filled = await self._resolve_order_fill_state(
+            exchange_order_id, client_order_id, db_order, exchange_by_id, exchange_name
+        )
+        if filled is None:
+            return False
+        fake_request = OrderRequestData(
+            public_id=db_order["public_id"],
+            timestamp=db_order["timestamp"],
+            session_id=db_order["session_id"],
+            sequence_id=db_order["sequence_id"],
+            strategy_id="recovered",
+            instrument=db_order["instrument"],
+            mode="live" if exchange_name != "paper" else "paper",
+            side=cast(Any, db_order["side"]),
+            order_type=cast(Any, db_order["order_type"]),
+            quantity=db_order["size"],
+            price=db_order.get("price"),
+            client_order_id=client_order_id,
+            exchange=cast(OrderExchange, exchange_name),
+        )
+        pending = PendingOrderState(
+            request=fake_request,
+            db_order_id=None,
+            order_public_id=db_order["public_id"],
+            exchange_order_id=exchange_order_id,
+            last_seen_cum_qty=filled,
+        )
+        self.pending_orders[client_order_id] = pending
+        self.client_by_exchange[exchange_order_id] = client_order_id
+        return True
+
+    async def _resolve_order_fill_state(
+        self,
+        exchange_order_id: str,
+        client_order_id: str,
+        db_order: OrderRow,
+        exchange_by_id: dict[str, Any],
+        exchange_name: str,
+    ) -> float | None:
+        """Resolve the current fill state of an order against the exchange.
+
+        Returns cumulative filled quantity if the order is still active,
+        or None if the order is terminal or cannot be verified.
+
+        Args:
+            exchange_order_id: Exchange-assigned order ID.
+            client_order_id: Client-assigned order ID.
+            db_order: DB order row for instrument context.
+            exchange_by_id: Pre-fetched exchange open order snapshots.
+            exchange_name: Exchange name for logging.
+
+        Returns:
+            Cumulative filled quantity, or None if order is terminal/unverifiable.
+        """
+        assert self.exchange_client is not None
+        if exchange_order_id in exchange_by_id:
+            snap = exchange_by_id[exchange_order_id]
+            return snap.filled or 0.0
+        try:
+            snap = await self.exchange_client.get_order(
+                exchange_order_id, symbol=db_order["instrument"]
+            )
+        except Exception as e:
+            logger.warning(
+                f"[{exchange_name}] Recovery: cannot verify order "
+                f"{exchange_order_id} on exchange: {e}"
+            )
+            return None
+        terminal = (OrderStatusEnum.CLOSED, OrderStatusEnum.CANCELED, OrderStatusEnum.EXPIRED)
+        if snap.status in terminal:
+            await self.exchange_client._log_order_update_to_db(
+                db_order_id=db_order["sequence_id"],
+                status=snap.status,
+            )
+            logger.info(
+                f"[{exchange_name}] Recovery: order {client_order_id} "
+                f"is {snap.status.value} on exchange, updated DB"
+            )
+            return None
+        return snap.filled or 0.0
+
     async def start(self) -> None:
         """Start the execution service and subscribe to order topics."""
         exchange_name = self._get_exchange_name()
@@ -200,6 +348,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 f"ExchangeExecutorService[{exchange_name}]: "
                 f"Exchange client initialized with WebSocket"
             )
+            await self._recover_pending_orders(exchange_name)
             self.running = True
             tasks = [
                 asyncio.create_task(self._order_handler()),

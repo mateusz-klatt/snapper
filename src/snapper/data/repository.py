@@ -596,6 +596,47 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_active_orders_for_recovery(
+        self, exchange: str, as_of: datetime
+    ) -> list[OrderRow]:
+        """Retrieve non-terminal orders for startup recovery.
+
+        Returns orders with active status (open, pending, pending_new,
+        new, partially_filled) for a given exchange. Used exclusively
+        by executor and trader recovery, not by API endpoints.
+
+        Args:
+            exchange: Exchange name to filter by.
+            as_of: Point-in-time for temporal query.
+
+        Returns:
+            Active order dicts ordered by created_at ASC (chronological
+            for replay), denormalized with instrument and symbol info.
+        """
+        ...
+
+    @abstractmethod
+    async def get_executions_for_recovery(
+        self, as_of: datetime, exchange: str | None = None, instrument: str | None = None
+    ) -> list[ExecutionRow]:
+        """Retrieve all executions for startup state reconstruction.
+
+        Unlike get_executions(), this method has no limit and returns
+        results in chronological order (ASC) for correct replay.
+        Optional exchange/instrument filters narrow the scope.
+
+        Args:
+            as_of: Point-in-time for temporal query.
+            exchange: Optional exchange filter.
+            instrument: Optional native symbol filter.
+
+        Returns:
+            Execution dicts ordered by timestamp ASC for replay,
+            denormalized with order, instrument and symbol info.
+        """
+        ...
+
+    @abstractmethod
     async def get_positions(self, as_of: datetime) -> list[PositionRow]:
         """Retrieve active positions with instrument/symbol info.
 
@@ -1642,6 +1683,126 @@ class SQLAlchemyRepository(Repository):
                 .order_by(desc(Execution.timestamp))
                 .limit(limit)
             )
+            result = await s.execute(query)
+            return [
+                {
+                    "public_id": exe.public_id,
+                    "timestamp": exe.timestamp,
+                    "session_id": exe.session_id,
+                    "sequence_id": exe.sequence_id,
+                    "trade_id": exe.trade_id,
+                    "exchange_order_id": order.exchange_order_id,
+                    "client_order_id": order.client_order_id or "",
+                    "instrument": sym.native_symbol,
+                    "exchange": inst.exchange,
+                    "side": exe.side,
+                    "size": exe.size,
+                    "price": exe.price,
+                    "fee": exe.fee,
+                    "fee_asset": exe.fee_asset,
+                    "status": exe.status,
+                    "executed_at": exe.executed_at or exe.timestamp,
+                }
+                for exe, order, inst, sym in result.all()
+            ]
+
+    _ACTIVE_ORDER_STATUSES = ("open", "pending", "pending_new", "new", "partially_filled")
+
+    async def get_active_orders_for_recovery(
+        self, exchange: str, as_of: datetime
+    ) -> list[OrderRow]:
+        """Retrieve non-terminal orders for startup recovery."""
+        async with self.session() as s:
+            query = (
+                select(Order, Instrument, Symbol)
+                .join(
+                    Instrument,
+                    and_(
+                        Order.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument, as_of),
+                    ),
+                )
+                .join(
+                    Symbol,
+                    and_(
+                        Instrument.symbol_public_id == Symbol.public_id,
+                        *where_active(Symbol, as_of),
+                    ),
+                )
+                .where(
+                    *where_active(Order, as_of),
+                    Instrument.exchange == exchange,
+                    Order.status.in_(self._ACTIVE_ORDER_STATUSES),
+                )
+                .order_by(Order.created_at)
+            )
+            result = await s.execute(query)
+            return [
+                {
+                    "public_id": order.public_id,
+                    "timestamp": order.timestamp,
+                    "session_id": order.session_id,
+                    "sequence_id": order.sequence_id,
+                    "instrument": sym.native_symbol,
+                    "exchange": inst.exchange,
+                    "client_order_id": order.client_order_id or "",
+                    "exchange_order_id": order.exchange_order_id,
+                    "created_at": order.created_at,
+                    "updated_at": order.updated_at,
+                    "side": order.side,
+                    "order_type": order.order_type,
+                    "price": order.price,
+                    "size": order.size,
+                    "filled_size": order.filled_size,
+                    "average_price": order.average_price,
+                    "status": order.status,
+                    "time_in_force": order.time_in_force,
+                    "error": order.error,
+                }
+                for order, inst, sym in result.all()
+            ]
+
+    async def get_executions_for_recovery(
+        self, as_of: datetime, exchange: str | None = None, instrument: str | None = None
+    ) -> list[ExecutionRow]:
+        """Retrieve all executions for startup state reconstruction."""
+        async with self.session() as s:
+            query = (
+                select(Execution, Order, Instrument, Symbol)
+                .join(
+                    Order,
+                    and_(
+                        Execution.order_public_id == Order.public_id,
+                        *where_active(Order, as_of),
+                    ),
+                )
+                .join(
+                    Instrument,
+                    and_(
+                        Order.instrument_public_id == Instrument.public_id,
+                        *where_active(Instrument, as_of),
+                    ),
+                )
+                .join(
+                    Symbol,
+                    and_(
+                        Instrument.symbol_public_id == Symbol.public_id,
+                        *where_active(Symbol, as_of),
+                    ),
+                )
+                .where(*where_active(Execution, as_of))
+                .order_by(Execution.timestamp)
+            )
+            if exchange:
+                query = query.where(Instrument.exchange == exchange)
+            if instrument:
+                s_ts, s_kt = where_active(Symbol, as_of)
+                sym_subq = (
+                    select(Symbol.public_id)
+                    .where(Symbol.native_symbol == instrument, s_ts, s_kt)
+                    .scalar_subquery()
+                )
+                query = query.where(Instrument.symbol_public_id == sym_subq)
             result = await s.execute(query)
             return [
                 {

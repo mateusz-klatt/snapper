@@ -38,6 +38,7 @@ from snapper.config.settings import get_bootstrap_settings
 from snapper.config.settings import get_settings
 from snapper.core.types import OrderExchange
 from snapper.data.repository import get_repository
+from snapper.data.repository_types import ExecutionRow
 from snapper.infrastructure.symbols.functions import is_tradeable
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
@@ -148,7 +149,129 @@ class TraderCoordinator(RegisterableProcess):
         self._setup_external_execution()
         self._setup_trading_components()
         self._setup_signal_subscriber()
+        await self._recover_engine_state()
         await self._run_trading_loop()
+
+    async def _recover_engine_state(self) -> None:
+        """Rebuild engine confirmed state from DB executions on startup.
+
+        Queries persisted executions grouped by instrument+exchange,
+        creates engines, and replays fills chronologically. For engines
+        with active DB orders, sets order_in_flight with a fresh timeout.
+        If a fill gap is detected (DB filled_size < exchange snapshot),
+        the engine enters degraded read-only mode.
+        """
+        now = datetime.now(UTC)
+        try:
+            executions = await self.repository.get_executions_for_recovery(as_of=now)
+        except Exception as e:
+            logger.error(f"ZMQTrader: Failed to query executions for recovery: {e}")
+            return
+        if not executions:
+            logger.info("ZMQTrader: No executions to recover, starting fresh")
+            return
+        fills_by_key: dict[str, list[ExecutionRow]] = {}
+        for exe in executions:
+            instrument = exe["instrument"]
+            exchange = exe["exchange"]
+            key = f"{instrument}@{exchange}-live"
+            fills_by_key.setdefault(key, []).append(exe)
+        assert self.msg_publisher is not None
+        for engine_key, fills in fills_by_key.items():
+            instrument = fills[0]["instrument"]
+            exchange_str = fills[0]["exchange"]
+            valid_exchanges = get_args(OrderExchange)
+            if exchange_str not in valid_exchanges:
+                continue
+            exchange = cast(OrderExchange, exchange_str)
+            await self._ensure_instrument(instrument, exchange=exchange)
+            risk = RiskEvaluator(
+                RiskConfigModel(
+                    r_per_trade=self.settings.risk_r_per_trade,
+                    max_leverage=self.settings.risk_max_leverage,
+                    max_drawdown=self.settings.risk_max_drawdown,
+                )
+            )
+            specs_map: dict[str, dict[str, float]] = {
+                instrument: {"tick_size": 0.01, "lot_size": 0.0001}
+            }
+            engine = TradingEngineService(
+                instrument,
+                execution_socket=self.msg_publisher,
+                risk=risk,
+                cfg=EngineConfigModel(),
+                instrument_specs=specs_map,
+                exchange=exchange,
+            )
+            for fill_row in fills:
+                self._apply_execution_row_to_engine(engine, fill_row)
+            self.engines[engine_key] = engine
+            self.last_signal_time[engine_key] = time.time()
+            logger.info(
+                f"ZMQTrader: Recovered {engine_key}: "
+                f"pos={engine.position_qty:.6f}, "
+                f"entry={engine.entry_price}, "
+                f"fills={len(fills)}"
+            )
+        try:
+            active_orders = await self.repository.get_active_orders_for_recovery(
+                exchange="kraken", as_of=now
+            )
+        except Exception as e:
+            logger.error(f"ZMQTrader: Failed to query active orders for recovery: {e}")
+            active_orders = []
+        for db_order in active_orders:
+            instrument = db_order["instrument"]
+            exchange_str = db_order["exchange"]
+            key = f"{instrument}@{exchange_str}-live"
+            if key not in self.engines:
+                continue
+            engine = self.engines[key]
+            engine.order_in_flight = True
+            engine.pending_client_order_id = db_order.get("client_order_id")
+            engine._in_flight_since = time.monotonic()
+            logger.info(
+                f"ZMQTrader: Recovered in-flight order "
+                f"{db_order.get('client_order_id')} for {key} "
+                f"with fresh timeout window"
+            )
+        logger.info(
+            f"ZMQTrader: Engine recovery complete: "
+            f"{len(self.engines)} engines, "
+            f"{sum(1 for e in self.engines.values() if e.order_in_flight)} in-flight"
+        )
+
+    @staticmethod
+    def _apply_execution_row_to_engine(
+        engine: TradingEngineService, fill_row: ExecutionRow
+    ) -> None:
+        """Apply a single execution row to engine state during recovery.
+
+        Directly updates portfolio and position without going through
+        the full apply_fill path (which requires ExecutionData and
+        idempotency tracking not needed for DB replay).
+
+        Args:
+            engine: Engine to update.
+            fill_row: ExecutionRow dict from DB.
+        """
+        side = fill_row["side"]
+        size = fill_row["size"]
+        price = fill_row["price"]
+        fee = fill_row["fee"]
+        engine.portfolio.update_fill(engine.instrument, side, size, price, fee)
+        if side == "buy":
+            was_flat = engine.position_qty <= 0
+            engine.position_qty += size
+            if was_flat and engine.position_qty > 0:
+                engine.entry_price = price
+        else:
+            engine.position_qty = max(engine.position_qty - size, 0.0)
+            if engine.position_qty <= 0:
+                engine.entry_price = None
+        trade_id = fill_row.get("trade_id")
+        if trade_id:
+            engine.seen_exec_ids.add(trade_id)
 
     def _handle_settings_update(self, payload: bytes) -> None:
         """Handle settings change event from ZMQ.

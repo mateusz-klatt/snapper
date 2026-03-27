@@ -5383,3 +5383,198 @@ class TestExecutorBasePersistence:
         await ex._process_cancel(cancel_data)
         mock_client._log_order_update_to_db.assert_awaited_once()
         assert order.client_order_id not in ex.pending_orders
+
+
+def _make_db_order(
+    client_order_id: str = "c1",
+    exchange_order_id: str = "ex-1",
+    instrument: str = "BTC-USD",
+    exchange: str = "kraken",
+    status: str = "open",
+    side: str = "buy",
+    size: float = 1.0,
+    filled_size: float = 0.0,
+) -> dict[str, Any]:
+    """Create a mock DB OrderRow dict for recovery tests."""
+    return {
+        "public_id": f"pub-{client_order_id}",
+        "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+        "session_id": "s1",
+        "sequence_id": 1,
+        "instrument": instrument,
+        "exchange": exchange,
+        "client_order_id": client_order_id,
+        "exchange_order_id": exchange_order_id,
+        "created_at": datetime(2024, 1, 1, tzinfo=UTC),
+        "updated_at": None,
+        "side": side,
+        "order_type": "market",
+        "price": None,
+        "size": size,
+        "filled_size": filled_size,
+        "average_price": None,
+        "status": status,
+        "time_in_force": None,
+        "error": None,
+    }
+
+
+class TestExecutorRecovery:
+    """Tests for Stage D: executor startup recovery."""
+
+    @pytest.mark.asyncio
+    async def test_recover_pending_from_exchange_open_order(self) -> None:
+        """Verify open exchange order is recovered into pending state.
+
+        Given: Exchange reports one open order matching DB active order,
+        When: _recover_pending_orders runs,
+        Then: PendingOrderState is created with correct fill state.
+        """
+        ex: Any = MergedDummyExecutor()
+        mock_client = AsyncMock()
+        snap = SimpleNamespace(
+            id="ex-1",
+            filled=0.3,
+            remaining=0.7,
+            status=OrderStatusEnum.OPEN,
+            db_order_id=None,
+            db_order_public_id=None,
+        )
+        mock_client.get_orders = AsyncMock(return_value=[snap])
+        ex.exchange_client = mock_client
+        mock_repo = AsyncMock()
+        mock_repo.get_active_orders_for_recovery = AsyncMock(
+            return_value=[_make_db_order(exchange_order_id="ex-1", filled_size=0.3)]
+        )
+        ex.repository = mock_repo
+        await ex._recover_pending_orders("kraken")
+        assert "c1" in ex.pending_orders
+        pending = ex.pending_orders["c1"]
+        assert pending.exchange_order_id == "ex-1"
+        assert pending.last_seen_cum_qty == pytest.approx(0.3)
+        assert "ex-1" in ex.client_by_exchange
+
+    @pytest.mark.asyncio
+    async def test_recover_db_order_missing_on_exchange_closed(self) -> None:
+        """Verify DB active order that is closed on exchange gets updated.
+
+        Given: DB says order is open, but exchange says CLOSED,
+        When: _recover_pending_orders runs,
+        Then: DB is updated and order is NOT added to pending.
+        """
+        ex: Any = MergedDummyExecutor()
+        mock_client = AsyncMock()
+        mock_client.get_orders = AsyncMock(return_value=[])
+        closed_snap = SimpleNamespace(
+            id="ex-1",
+            filled=1.0,
+            remaining=0.0,
+            status=OrderStatusEnum.CLOSED,
+        )
+        mock_client.get_order = AsyncMock(return_value=closed_snap)
+        mock_client._log_order_update_to_db = AsyncMock()
+        ex.exchange_client = mock_client
+        mock_repo = AsyncMock()
+        mock_repo.get_active_orders_for_recovery = AsyncMock(
+            return_value=[_make_db_order(exchange_order_id="ex-1")]
+        )
+        ex.repository = mock_repo
+        await ex._recover_pending_orders("kraken")
+        assert "c1" not in ex.pending_orders
+        mock_client._log_order_update_to_db.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_recover_no_active_orders(self) -> None:
+        """Verify clean start with no active orders.
+
+        Given: No open orders on exchange or in DB,
+        When: _recover_pending_orders runs,
+        Then: No pending state created, no errors.
+        """
+        ex: Any = MergedDummyExecutor()
+        mock_client = AsyncMock()
+        mock_client.get_orders = AsyncMock(return_value=[])
+        ex.exchange_client = mock_client
+        mock_repo = AsyncMock()
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
+        ex.repository = mock_repo
+        await ex._recover_pending_orders("kraken")
+        assert len(ex.pending_orders) == 0
+
+    @pytest.mark.asyncio
+    async def test_recover_exchange_query_failure_continues(self) -> None:
+        """Verify recovery continues if exchange query fails.
+
+        Given: Exchange get_orders raises exception,
+        When: _recover_pending_orders runs,
+        Then: Recovery continues with DB-only data.
+        """
+        ex: Any = MergedDummyExecutor()
+        mock_client = AsyncMock()
+        mock_client.get_orders = AsyncMock(side_effect=RuntimeError("network"))
+        mock_client.get_order = AsyncMock(
+            return_value=SimpleNamespace(
+                id="ex-1",
+                filled=0.0,
+                status=OrderStatusEnum.OPEN,
+            )
+        )
+        ex.exchange_client = mock_client
+        mock_repo = AsyncMock()
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[_make_db_order()])
+        ex.repository = mock_repo
+        await ex._recover_pending_orders("kraken")
+        assert "c1" in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_recover_no_repository_skips(self) -> None:
+        """Verify recovery is skipped when no repository is configured.
+
+        Given: Executor without repository,
+        When: _recover_pending_orders runs,
+        Then: Recovery is skipped gracefully.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.exchange_client = AsyncMock()
+        ex.repository = None
+        await ex._recover_pending_orders("kraken")
+        assert len(ex.pending_orders) == 0
+
+    @pytest.mark.asyncio
+    async def test_recover_order_unverifiable_on_exchange(self) -> None:
+        """Verify unverifiable order is skipped during recovery.
+
+        Given: DB active order, exchange get_order raises,
+        When: _recover_pending_orders runs,
+        Then: Order is skipped (not added to pending).
+        """
+        ex: Any = MergedDummyExecutor()
+        mock_client = AsyncMock()
+        mock_client.get_orders = AsyncMock(return_value=[])
+        mock_client.get_order = AsyncMock(side_effect=RuntimeError("not found"))
+        ex.exchange_client = mock_client
+        mock_repo = AsyncMock()
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[_make_db_order()])
+        ex.repository = mock_repo
+        await ex._recover_pending_orders("kraken")
+        assert "c1" not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_recover_skips_orders_without_exchange_id(self) -> None:
+        """Verify orders without exchange_order_id are skipped.
+
+        Given: DB active order with no exchange_order_id,
+        When: _recover_pending_orders runs,
+        Then: Order is skipped.
+        """
+        ex: Any = MergedDummyExecutor()
+        mock_client = AsyncMock()
+        mock_client.get_orders = AsyncMock(return_value=[])
+        ex.exchange_client = mock_client
+        mock_repo = AsyncMock()
+        mock_repo.get_active_orders_for_recovery = AsyncMock(
+            return_value=[_make_db_order(exchange_order_id="")]
+        )
+        ex.repository = mock_repo
+        await ex._recover_pending_orders("kraken")
+        assert len(ex.pending_orders) == 0

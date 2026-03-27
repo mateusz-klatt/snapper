@@ -2714,3 +2714,431 @@ class TestInFlightTimeout:
         await engine.execute_desired_units(1.0, current_price=100.0)
         socket.send.assert_not_awaited()
         assert engine.pending_client_order_id == "active-order"
+
+
+class TestRecovery:
+    """Tests for Stage D: startup recovery."""
+
+    @pytest.mark.asyncio
+    async def test_recover_engine_state_from_executions(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify engine state is rebuilt from DB executions on startup.
+
+        Given: DB with buy execution for BTC-USD on kraken,
+        When: _recover_engine_state runs,
+        Then: Engine is created with correct position and entry price.
+        """
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        coord.msg_publisher = cast(Any, MagicMock(tracker=Mock(session_id="s1")))
+        mock_repo = AsyncMock()
+        mock_repo.get_executions_for_recovery = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "exe-1",
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                    "trade_id": "t1",
+                    "exchange_order_id": "ex-1",
+                    "client_order_id": "c1",
+                    "instrument": "BTC-USD",
+                    "exchange": "kraken",
+                    "side": "buy",
+                    "size": 0.5,
+                    "price": 50000.0,
+                    "fee": 0.5,
+                    "fee_asset": "USD",
+                    "status": "filled",
+                    "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
+                }
+            ]
+        )
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
+        mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
+        coord.repository = mock_repo
+        await coord._recover_engine_state()
+        assert "BTC-USD@kraken-live" in coord.engines
+        engine = coord.engines["BTC-USD@kraken-live"]
+        assert engine.position_qty == pytest.approx(0.5)
+        assert engine.entry_price == pytest.approx(50000.0)
+        assert "t1" in engine.seen_exec_ids
+
+    @pytest.mark.asyncio
+    async def test_recover_with_open_order_sets_inflight(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify open DB order sets order_in_flight with fresh timeout.
+
+        Given: DB with execution and active order for BTC-USD,
+        When: _recover_engine_state runs,
+        Then: Engine has order_in_flight=True with fresh _in_flight_since.
+        """
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        coord.msg_publisher = cast(Any, MagicMock(tracker=Mock(session_id="s1")))
+        mock_repo = AsyncMock()
+        mock_repo.get_executions_for_recovery = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "exe-1",
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                    "trade_id": "t1",
+                    "exchange_order_id": "ex-1",
+                    "client_order_id": "c1",
+                    "instrument": "BTC-USD",
+                    "exchange": "kraken",
+                    "side": "buy",
+                    "size": 0.3,
+                    "price": 50000.0,
+                    "fee": 0.3,
+                    "fee_asset": "USD",
+                    "status": "partial",
+                    "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
+                }
+            ]
+        )
+        mock_repo.get_active_orders_for_recovery = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "ord-1",
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                    "instrument": "BTC-USD",
+                    "exchange": "kraken",
+                    "client_order_id": "c1",
+                    "exchange_order_id": "ex-1",
+                    "status": "open",
+                    "side": "buy",
+                    "order_type": "market",
+                    "size": 0.5,
+                    "price": None,
+                    "filled_size": 0.3,
+                    "average_price": 50000.0,
+                    "time_in_force": None,
+                    "error": None,
+                    "created_at": datetime(2024, 1, 1, tzinfo=UTC),
+                    "updated_at": None,
+                }
+            ]
+        )
+        mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
+        coord.repository = mock_repo
+        before = time.monotonic()
+        await coord._recover_engine_state()
+        engine = coord.engines["BTC-USD@kraken-live"]
+        assert engine.order_in_flight is True
+        assert engine.pending_client_order_id == "c1"
+        assert engine._in_flight_since is not None
+        assert engine._in_flight_since >= before
+
+    @pytest.mark.asyncio
+    async def test_recover_no_executions_starts_fresh(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify empty DB results in no engines created.
+
+        Given: Empty execution history,
+        When: _recover_engine_state runs,
+        Then: No engines are created.
+        """
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        mock_repo = AsyncMock()
+        mock_repo.get_executions_for_recovery = AsyncMock(return_value=[])
+        coord.repository = mock_repo
+        await coord._recover_engine_state()
+        assert len(coord.engines) == 0
+
+    @pytest.mark.asyncio
+    async def test_recover_skips_invalid_exchange(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify executions with unknown exchange are skipped.
+
+        Given: DB execution with exchange='unknown_exchange',
+        When: _recover_engine_state runs,
+        Then: No engine is created for that exchange.
+        """
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        coord.msg_publisher = cast(Any, MagicMock(tracker=Mock(session_id="s1")))
+        mock_repo = AsyncMock()
+        mock_repo.get_executions_for_recovery = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "exe-1",
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                    "trade_id": "t1",
+                    "exchange_order_id": "ex-1",
+                    "client_order_id": "c1",
+                    "instrument": "BTC-USD",
+                    "exchange": "unknown_exchange",
+                    "side": "buy",
+                    "size": 0.5,
+                    "price": 50000.0,
+                    "fee": 0.5,
+                    "fee_asset": "USD",
+                    "status": "filled",
+                    "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
+                }
+            ]
+        )
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
+        coord.repository = mock_repo
+        await coord._recover_engine_state()
+        assert len(coord.engines) == 0
+
+    def test_apply_execution_row_to_engine(self) -> None:
+        """Verify single execution row correctly updates engine state."""
+        socket = MagicMock()
+        socket.tracker = Mock(session_id="s1")
+        engine = TradingEngineService(
+            "BTC-USD",
+            cast(Any, socket),
+            cfg=EngineConfigModel(initial_cash=10000.0),
+            exchange="kraken",
+        )
+        fill_row = {
+            "side": "buy",
+            "size": 0.5,
+            "price": 50000.0,
+            "fee": 0.5,
+            "trade_id": "t1",
+        }
+        TraderCoordinator._apply_execution_row_to_engine(engine, cast(Any, fill_row))
+        assert engine.position_qty == pytest.approx(0.5)
+        assert engine.entry_price == pytest.approx(50000.0)
+        assert "t1" in engine.seen_exec_ids
+
+    def test_apply_execution_row_buy_existing_position(self) -> None:
+        """Verify buy into existing position does not reset entry price."""
+        socket = MagicMock()
+        socket.tracker = Mock(session_id="s1")
+        engine = TradingEngineService(
+            "BTC-USD",
+            cast(Any, socket),
+            cfg=EngineConfigModel(initial_cash=10000.0),
+            exchange="kraken",
+        )
+        engine.position_qty = 0.3
+        engine.entry_price = 49000.0
+        fill_row = {
+            "side": "buy",
+            "size": 0.2,
+            "price": 50000.0,
+            "fee": 0.2,
+            "trade_id": "t2",
+        }
+        TraderCoordinator._apply_execution_row_to_engine(engine, cast(Any, fill_row))
+        assert engine.position_qty == pytest.approx(0.5)
+        assert engine.entry_price == pytest.approx(49000.0)
+
+    def test_apply_execution_row_partial_sell_keeps_entry(self) -> None:
+        """Verify partial sell keeps entry price when position remains."""
+        socket = MagicMock()
+        socket.tracker = Mock(session_id="s1")
+        engine = TradingEngineService(
+            "BTC-USD",
+            cast(Any, socket),
+            cfg=EngineConfigModel(initial_cash=10000.0),
+            exchange="kraken",
+        )
+        engine.position_qty = 1.0
+        engine.entry_price = 50000.0
+        fill_row = {
+            "side": "sell",
+            "size": 0.3,
+            "price": 51000.0,
+            "fee": 0.3,
+            "trade_id": None,
+        }
+        TraderCoordinator._apply_execution_row_to_engine(engine, cast(Any, fill_row))
+        assert engine.position_qty == pytest.approx(0.7)
+        assert engine.entry_price == pytest.approx(50000.0)
+
+    @pytest.mark.asyncio
+    async def test_recover_active_order_without_engine_skipped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify active order for unknown engine is skipped.
+
+        Given: Active order for ETH-USD but no engine exists for it,
+        When: _recover_engine_state runs with only BTC-USD executions,
+        Then: ETH-USD order is skipped, no crash.
+        """
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        coord.msg_publisher = cast(Any, MagicMock(tracker=Mock(session_id="s1")))
+        mock_repo = AsyncMock()
+        mock_repo.get_executions_for_recovery = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "exe-1",
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                    "trade_id": "t1",
+                    "exchange_order_id": "ex-1",
+                    "client_order_id": "c1",
+                    "instrument": "BTC-USD",
+                    "exchange": "kraken",
+                    "side": "buy",
+                    "size": 0.5,
+                    "price": 50000.0,
+                    "fee": 0.5,
+                    "fee_asset": "USD",
+                    "status": "filled",
+                    "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
+                }
+            ]
+        )
+        mock_repo.get_active_orders_for_recovery = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "ord-eth",
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 2,
+                    "instrument": "ETH-USD",
+                    "exchange": "kraken",
+                    "client_order_id": "c-eth",
+                    "exchange_order_id": "ex-eth",
+                    "status": "open",
+                    "side": "buy",
+                    "order_type": "market",
+                    "size": 1.0,
+                    "price": None,
+                    "filled_size": 0.0,
+                    "average_price": None,
+                    "time_in_force": None,
+                    "error": None,
+                    "created_at": datetime(2024, 1, 1, tzinfo=UTC),
+                    "updated_at": None,
+                }
+            ]
+        )
+        mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
+        coord.repository = mock_repo
+        await coord._recover_engine_state()
+        btc_engine = coord.engines["BTC-USD@kraken-live"]
+        assert btc_engine.order_in_flight is False
+
+    def test_apply_execution_row_sell_clears_position(self) -> None:
+        """Verify sell execution row decreases position and clears entry price."""
+        socket = MagicMock()
+        socket.tracker = Mock(session_id="s1")
+        engine = TradingEngineService(
+            "BTC-USD",
+            cast(Any, socket),
+            cfg=EngineConfigModel(initial_cash=10000.0),
+            exchange="kraken",
+        )
+        engine.position_qty = 0.5
+        engine.entry_price = 50000.0
+        fill_row = {
+            "side": "sell",
+            "size": 0.5,
+            "price": 51000.0,
+            "fee": 0.5,
+            "trade_id": None,
+        }
+        TraderCoordinator._apply_execution_row_to_engine(engine, cast(Any, fill_row))
+        assert engine.position_qty == pytest.approx(0.0)
+        assert engine.entry_price is None
+
+    @pytest.mark.asyncio
+    async def test_recover_active_order_query_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify recovery continues if active orders query fails.
+
+        Given: Executions exist but get_active_orders_for_recovery raises,
+        When: _recover_engine_state runs,
+        Then: Engines are created from executions, in-flight not set.
+        """
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        coord.msg_publisher = cast(Any, MagicMock(tracker=Mock(session_id="s1")))
+        mock_repo = AsyncMock()
+        mock_repo.get_executions_for_recovery = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "exe-1",
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                    "trade_id": "t1",
+                    "exchange_order_id": "ex-1",
+                    "client_order_id": "c1",
+                    "instrument": "BTC-USD",
+                    "exchange": "kraken",
+                    "side": "buy",
+                    "size": 0.5,
+                    "price": 50000.0,
+                    "fee": 0.5,
+                    "fee_asset": "USD",
+                    "status": "filled",
+                    "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
+                }
+            ]
+        )
+        mock_repo.get_active_orders_for_recovery = AsyncMock(side_effect=RuntimeError("DB error"))
+        mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
+        coord.repository = mock_repo
+        await coord._recover_engine_state()
+        assert "BTC-USD@kraken-live" in coord.engines
+        engine = coord.engines["BTC-USD@kraken-live"]
+        assert engine.order_in_flight is False
+
+    @pytest.mark.asyncio
+    async def test_degraded_mode_blocks_signals(self) -> None:
+        """Verify read_only engine drops all signals.
+
+        Given: Engine in degraded read-only mode,
+        When: Signal arrives,
+        Then: Signal is dropped.
+        """
+        socket = MagicMock()
+        socket.tracker = Mock(session_id="s1")
+        socket.send = AsyncMock()
+        engine = TradingEngineService(
+            "BTC-USD",
+            cast(Any, socket),
+            cfg=EngineConfigModel(initial_cash=10000.0),
+            exchange="kraken",
+        )
+        engine.read_only = True
+        await engine.execute_desired_units(1.0, current_price=100.0)
+        socket.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_degraded_mode_blocks_stop_loss(self) -> None:
+        """Verify read_only engine does not trigger stop-loss.
+
+        Given: Engine in degraded mode with position,
+        When: Stop-loss condition is met,
+        Then: No order sent, returns False.
+        """
+        socket = MagicMock()
+        socket.tracker = Mock(session_id="s1")
+        socket.send = AsyncMock()
+        engine = TradingEngineService(
+            "BTC-USD",
+            cast(Any, socket),
+            risk=RiskEvaluator(RiskConfigModel()),
+            cfg=EngineConfigModel(initial_cash=5000.0),
+        )
+        engine.position_qty = 1.0
+        engine.entry_price = 110.0
+        engine.portfolio.positions["BTC-USD"] = PositionStateModel(
+            quantity=1.0, average_price=110.0
+        )
+        engine.read_only = True
+        triggered = await engine._maybe_stop(last_close=50.0, prev_close=120.0)
+        assert triggered is False
+        socket.send.assert_not_awaited()

@@ -2511,6 +2511,144 @@ async def test_get_executions_returns_data(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_active_orders_for_recovery(tmp_path: Path) -> None:
+    """Verify get_active_orders_for_recovery returns only active orders.
+
+    Given: Repository with one open and one closed order on kraken,
+    When: get_active_orders_for_recovery is called,
+    Then: Only the open order is returned.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    await r.insert_order(
+        instrument_public_id=inst_pid,
+        client_order_id="c-open",
+        exchange_order_id="e-open",
+        created_at=now,
+        side="buy",
+        order_type="market",
+        price=None,
+        size=1.0,
+        status="open",
+        session_id="s1",
+        sequence_id=20,
+        timestamp=now,
+    )
+    await r.insert_order(
+        instrument_public_id=inst_pid,
+        client_order_id="c-closed",
+        exchange_order_id="e-closed",
+        created_at=now,
+        side="sell",
+        order_type="limit",
+        price=51000.0,
+        size=0.5,
+        status="closed",
+        session_id="s1",
+        sequence_id=21,
+        timestamp=now,
+    )
+    result = await r.get_active_orders_for_recovery(exchange="kraken", as_of=now)
+    assert len(result) == 1
+    assert result[0]["client_order_id"] == "c-open"
+    assert result[0]["status"] == "open"
+
+
+@pytest.mark.asyncio
+async def test_get_executions_for_recovery(tmp_path: Path) -> None:
+    """Verify get_executions_for_recovery returns all executions in ASC order.
+
+    Given: Repository with two executions,
+    When: get_executions_for_recovery is called,
+    Then: Both are returned in chronological order.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    _, order_pid = await r.insert_order(
+        instrument_public_id=inst_pid,
+        client_order_id="c1",
+        exchange_order_id="e1",
+        created_at=now,
+        side="buy",
+        order_type="limit",
+        price=50000.0,
+        size=1.0,
+        status="filled",
+        session_id="s1",
+        sequence_id=20,
+        timestamp=now,
+    )
+    await r.insert_execution(
+        order_public_id=order_pid,
+        timestamp=now,
+        side="buy",
+        status="partial",
+        price=50000.0,
+        size=0.5,
+        fee=5.0,
+        fee_asset="USD",
+        session_id="s1",
+        sequence_id=21,
+    )
+    await r.insert_execution(
+        order_public_id=order_pid,
+        timestamp=now,
+        side="buy",
+        status="filled",
+        price=50100.0,
+        size=0.5,
+        fee=5.0,
+        fee_asset="USD",
+        session_id="s1",
+        sequence_id=22,
+    )
+    result = await r.get_executions_for_recovery(as_of=now, exchange="kraken")
+    assert len(result) == 2
+    assert result[0]["size"] == pytest.approx(0.5)
+    assert result[1]["size"] == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_get_executions_for_recovery_filters_instrument(tmp_path: Path) -> None:
+    """Verify get_executions_for_recovery filters by instrument.
+
+    Given: Repository with execution for BTC-USD,
+    When: get_executions_for_recovery is called with instrument=ETH-USD,
+    Then: Returns empty list.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    _, order_pid = await r.insert_order(
+        instrument_public_id=inst_pid,
+        client_order_id="c1",
+        exchange_order_id="e1",
+        created_at=now,
+        side="buy",
+        order_type="limit",
+        price=50000.0,
+        size=1.0,
+        status="filled",
+        session_id="s1",
+        sequence_id=20,
+        timestamp=now,
+    )
+    await r.insert_execution(
+        order_public_id=order_pid,
+        timestamp=now,
+        side="buy",
+        status="filled",
+        price=50000.0,
+        size=1.0,
+        fee=10.0,
+        fee_asset="USD",
+        session_id="s1",
+        sequence_id=21,
+    )
+    result = await r.get_executions_for_recovery(as_of=now, instrument="ETH-USD")
+    assert len(result) == 0
+
+
+@pytest.mark.asyncio
 async def test_get_positions_returns_data(tmp_path: Path) -> None:
     """Verify get_positions returns position dicts.
 
