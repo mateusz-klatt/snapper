@@ -719,14 +719,14 @@ class ZondaExchangeClient(ExchangeClientBase):
                 id=ccxt_order["id"],
                 client_order_id=ccxt_order.get("clientOrderId"),
                 symbol=request.symbol,
-                side=OrderSideEnum(ccxt_order["side"]),
-                type=OrderTypeEnum(ccxt_order["type"]),
-                amount=float(ccxt_order["amount"]),
+                side=OrderSideEnum(ccxt_order.get("side", request.side.value)),
+                type=OrderTypeEnum(ccxt_order.get("type", request.type.value)),
+                amount=float(ccxt_order.get("amount") or request.amount),
                 price=float(ccxt_order["price"]) if ccxt_order.get("price") else None,
-                status=OrderStatusEnum(ccxt_order["status"]),
-                filled=float(ccxt_order.get("filled", 0)),
-                remaining=float(ccxt_order.get("remaining", 0)),
-                timestamp=float(ccxt_order["timestamp"]) / 1000.0,
+                status=OrderStatusEnum(ccxt_order.get("status", "open")),
+                filled=float(ccxt_order.get("filled") or 0),
+                remaining=float(ccxt_order.get("remaining") or 0),
+                timestamp=float(ccxt_order.get("timestamp") or time.time() * 1000) / 1000.0,
                 fee=float(ccxt_order["fee"]["cost"]) if ccxt_order.get("fee") else None,
             )
             db_result = await self._log_order_to_db(request, order)
@@ -735,7 +735,8 @@ class ZondaExchangeClient(ExchangeClientBase):
                 order.db_order_public_id = db_result[1]
             return order
         except Exception as e:
-            logger.error(f"Failed to create order: {e}")
+            raw = locals().get("ccxt_order")
+            logger.error(f"Failed to create order: {e}" + (f" | raw_response={raw}" if raw else ""))
             raise
 
     async def cancel_order(self, order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
