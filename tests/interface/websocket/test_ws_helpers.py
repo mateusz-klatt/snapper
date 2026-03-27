@@ -5,10 +5,12 @@ from unittest.mock import patch
 
 import pytest
 
+from snapper.auth.domain.roles import UserRole
 from snapper.auth.tokens import TokenManager
 from snapper.auth.user_service import UserService
 from snapper.interface.websocket.helpers import build_allowed_origins
 from snapper.interface.websocket.helpers import determine_topic_category
+from snapper.interface.websocket.helpers import get_allowed_topics_for_role
 from snapper.interface.websocket.helpers import role_allowed_categories
 from snapper.messaging.infrastructure.logger import ZmqMessageLogger
 from snapper.utils.logging import _get_context_bg_color
@@ -102,17 +104,17 @@ class TestWebSocketHelpersRuntimeError:
         assert "http://example.com:3000" in origins
         assert "http://example.com:8000" in origins
 
-    def test_role_allowed_categories_returns_default_for_unknown_role(self) -> None:
-        """Role allowed categories returns default for unknown role.
+    def test_role_allowed_categories_returns_empty_for_unknown_role(self) -> None:
+        """Role allowed categories returns empty set for unknown role.
 
         Given: A mock role with unknown name,
         When: Getting allowed categories,
-        Then: Returns default set {'market', 'system'}.
+        Then: Returns empty set (no permissions match).
         """
         mock_role = MagicMock(spec=[])
         mock_role.name = "UNKNOWN"
         result = role_allowed_categories(mock_role)
-        assert result == {"market", "system"}
+        assert result == set()
 
     def test_determine_topic_category_covers_direct_prefixes(self) -> None:
         """Determine topic category handles direct category-only names.
@@ -134,6 +136,87 @@ class TestWebSocketHelpersRuntimeError:
         Then: Category resolves to market via prefix fallback.
         """
         assert determine_topic_category("market.kraken.") == "market"
+
+
+class TestRoleCategorySecurityMatrix:
+    """Role x category x topic security boundary tests.
+
+    Verifies that each role gets exactly the expected WS categories
+    and topic patterns, with no over- or under-provisioning.
+    """
+
+    def test_viewer_gets_market_and_system_only(self) -> None:
+        """VIEWER role receives only market and system categories.
+
+        Given: A VIEWER role,
+        When: Getting allowed categories,
+        Then: Only market and system are allowed (no trade, strategy, admin).
+        """
+        categories = role_allowed_categories(UserRole.VIEWER)
+        assert categories == {"market", "system"}
+
+    def test_operator_gets_market_trade_strategy_system(self) -> None:
+        """OPERATOR role receives market, trade, strategy, and system categories.
+
+        Given: An OPERATOR role,
+        When: Getting allowed categories,
+        Then: market, trade, strategy, system are allowed but NOT admin.
+        """
+        categories = role_allowed_categories(UserRole.OPERATOR)
+        assert categories == {"market", "trade", "strategy", "system"}
+        assert "admin" not in categories
+
+    def test_admin_gets_all_categories_including_admin(self) -> None:
+        """ADMIN role receives all categories including admin.
+
+        Given: An ADMIN role,
+        When: Getting allowed categories,
+        Then: All five categories are allowed (market, trade, strategy, system, admin).
+        """
+        categories = role_allowed_categories(UserRole.ADMIN)
+        assert categories == {"market", "trade", "strategy", "system", "admin"}
+
+    def test_admin_available_topics_include_admin_prefix(self) -> None:
+        """ADMIN available topics include the admin. registry root.
+
+        Given: An ADMIN role,
+        When: Getting allowed topics,
+        Then: admin. prefix pattern is present in the topic list.
+        """
+        topics = get_allowed_topics_for_role(UserRole.ADMIN)
+        assert "admin." in topics
+
+    def test_operator_available_topics_exclude_admin_prefix(self) -> None:
+        """OPERATOR available topics do not include admin. registry root.
+
+        Given: An OPERATOR role,
+        When: Getting allowed topics,
+        Then: admin. prefix pattern is absent.
+        """
+        topics = get_allowed_topics_for_role(UserRole.OPERATOR)
+        assert "admin." not in topics
+
+    def test_viewer_available_topics_exclude_trade_and_strategy(self) -> None:
+        """VIEWER available topics exclude trade and strategy patterns.
+
+        Given: A VIEWER role,
+        When: Getting allowed topics,
+        Then: No trade or strategy patterns are present.
+        """
+        topics = get_allowed_topics_for_role(UserRole.VIEWER)
+        assert "orders.commands." not in topics
+        assert "orders.events." not in topics
+        assert "signals." not in topics
+
+    def test_viewer_available_topics_include_market(self) -> None:
+        """VIEWER available topics include market pattern.
+
+        Given: A VIEWER role,
+        When: Getting allowed topics,
+        Then: market. pattern is present.
+        """
+        topics = get_allowed_topics_for_role(UserRole.VIEWER)
+        assert "market." in topics
 
 
 class TestLoggingColorConversion:

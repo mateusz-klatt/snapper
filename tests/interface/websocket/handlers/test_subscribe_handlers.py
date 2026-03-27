@@ -152,6 +152,167 @@ class TestHandleSubscribeEdgeCases:
         assert found_error, "Expected ZMQ bridge error message"
 
 
+class TestAdminCategorySubscription:
+    """Handler-level tests proving ADMIN/OPERATOR boundary for admin topics."""
+
+    @pytest.fixture
+    def mock_websocket(self) -> AsyncMock:
+        """Provide mock WebSocket with send_text capability."""
+        ws = AsyncMock()
+        ws.send_text = AsyncMock()
+        return ws
+
+    @pytest.fixture
+    def mock_manager(self) -> MagicMock:
+        """Provide mock WebSocket connection manager."""
+        manager = MagicMock()
+        manager.get_client_subscriptions = MagicMock(return_value=set())
+        manager.subscribe_client = MagicMock()
+        manager.zmq_bridge = MagicMock()
+        manager.zmq_bridge.add_subscription = AsyncMock()
+        type(manager).tracker = PropertyMock(return_value=SequenceTracker())
+        return manager
+
+    @pytest.mark.asyncio
+    async def test_admin_subscribes_to_admin_topic_successfully(
+        self, mock_websocket: AsyncMock, mock_manager: MagicMock
+    ) -> None:
+        """ADMIN can subscribe to admin.users through the handler.
+
+        Given: An ADMIN role subscribing to admin.users,
+        When: Handling subscribe request through handle_subscribe,
+        Then: The topic appears in the subscribed topics list.
+        """
+        message = WSSubscribeRequest(
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            session_id="",
+            sequence_id=0,
+            topics=["admin.users"],
+        )
+        await handle_subscribe(mock_websocket, message, mock_manager, UserRole.ADMIN)
+        mock_websocket.send_text.assert_called_once()
+        response = json.loads(mock_websocket.send_text.call_args[0][0])
+        assert response["type"] == "subscription_success"
+        assert "admin.users" in response["topics"]
+        assert response["status"] in {"subscribed", "partial"}
+
+    @pytest.mark.asyncio
+    async def test_operator_denied_admin_topic(
+        self, mock_websocket: AsyncMock, mock_manager: MagicMock
+    ) -> None:
+        """OPERATOR is denied admin.users through the handler.
+
+        Given: An OPERATOR role subscribing to admin.users,
+        When: Handling subscribe request through handle_subscribe,
+        Then: The topic appears in denied_topics.
+        """
+        message = WSSubscribeRequest(
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            session_id="",
+            sequence_id=0,
+            topics=["admin.users"],
+        )
+        await handle_subscribe(mock_websocket, message, mock_manager, UserRole.OPERATOR)
+        mock_websocket.send_text.assert_called_once()
+        response = json.loads(mock_websocket.send_text.call_args[0][0])
+        assert response["type"] == "subscription_success"
+        assert response["status"] == "denied"
+        assert "admin.users" in response["denied_topics"]
+
+    @pytest.mark.asyncio
+    async def test_admin_subscribes_to_admin_root_pattern(
+        self, mock_websocket: AsyncMock, mock_manager: MagicMock
+    ) -> None:
+        """ADMIN can subscribe to admin. root pattern through the handler.
+
+        Given: An ADMIN role subscribing to admin. prefix,
+        When: Handling subscribe request through handle_subscribe,
+        Then: admin. appears in the subscribed topics.
+        """
+        message = WSSubscribeRequest(
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            session_id="",
+            sequence_id=0,
+            topics=["admin."],
+        )
+        await handle_subscribe(mock_websocket, message, mock_manager, UserRole.ADMIN)
+        mock_websocket.send_text.assert_called_once()
+        response = json.loads(mock_websocket.send_text.call_args[0][0])
+        assert response["type"] == "subscription_success"
+        assert "admin." in response["topics"]
+
+
+class TestIntermediatePrefixRejection:
+    """Tests for intermediate prefix rejection in WS subscription validation."""
+
+    @pytest.fixture
+    def mock_websocket(self) -> AsyncMock:
+        """Provide mock WebSocket with send_text capability."""
+        ws = AsyncMock()
+        ws.send_text = AsyncMock()
+        return ws
+
+    @pytest.fixture
+    def mock_manager(self) -> MagicMock:
+        """Provide mock WebSocket connection manager."""
+        manager = MagicMock()
+        manager.get_client_subscriptions = MagicMock(return_value=set())
+        manager.subscribe_client = MagicMock()
+        manager.zmq_bridge = MagicMock()
+        manager.zmq_bridge.add_subscription = AsyncMock()
+        type(manager).tracker = PropertyMock(return_value=SequenceTracker())
+        return manager
+
+    @pytest.mark.asyncio
+    async def test_subscribe_rejects_intermediate_prefix(
+        self, mock_websocket: AsyncMock, mock_manager: MagicMock
+    ) -> None:
+        """Subscribe rejects prefix patterns not in TOPIC_REGISTRY.
+
+        Given: An intermediate prefix like ``market.kraken.`` (not a registry root),
+        When: Handling subscribe request,
+        Then: Returns error response naming the invalid prefix.
+        """
+        message = WSSubscribeRequest(
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            session_id="",
+            sequence_id=0,
+            topics=["market.kraken."],
+        )
+        await handle_subscribe(mock_websocket, message, mock_manager, UserRole.ADMIN)
+        mock_websocket.send_text.assert_called_once()
+        response = json.loads(mock_websocket.send_text.call_args[0][0])
+        assert response["type"] == "error"
+        assert "market.kraken." in response["message"]
+        assert "registry root" in response["message"]
+
+    @pytest.mark.asyncio
+    async def test_subscribe_accepts_registry_root_prefix(
+        self, mock_websocket: AsyncMock, mock_manager: MagicMock
+    ) -> None:
+        """Subscribe accepts prefix patterns that ARE in TOPIC_REGISTRY.
+
+        Given: A valid registry root like ``market.``,
+        When: Handling subscribe request,
+        Then: Returns subscription success (not an error).
+        """
+        message = WSSubscribeRequest(
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            session_id="",
+            sequence_id=0,
+            topics=["market."],
+        )
+        await handle_subscribe(mock_websocket, message, mock_manager, UserRole.ADMIN)
+        mock_websocket.send_text.assert_called_once()
+        response = json.loads(mock_websocket.send_text.call_args[0][0])
+        assert response["type"] == "subscription_success"
+
+
 class TestHandleUnsubscribeEdgeCases:
     """Edge case tests for WebSocket unsubscribe handler."""
 
@@ -222,6 +383,34 @@ class TestHandleUnsubscribeEdgeCases:
         response = json.loads(mock_websocket.send_text.call_args[0][0])
         assert response["type"] == "error"
         assert "ZMQ bridge is not available" in response["message"]
+
+    @pytest.mark.asyncio
+    async def test_unsubscribe_partial_success(
+        self, mock_websocket: AsyncMock, mock_manager: MagicMock
+    ) -> None:
+        """Unsubscribe returns partial status for mixed subscribed/not-subscribed topics.
+
+        Given: Client subscribed to one topic but not another,
+        When: Unsubscribing from both,
+        Then: Returns partial status with allowed and denied lists.
+        """
+        mock_manager.get_client_subscriptions = MagicMock(
+            return_value={"market.kraken.BTC-USD.candles.1m"}
+        )
+        message = WSUnsubscribeRequest(
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            session_id="",
+            sequence_id=0,
+            topics=["market.kraken.BTC-USD.candles.1m", "market.zonda.ETH-PLN.candles.1m"],
+        )
+        await handle_unsubscribe(mock_websocket, message, mock_manager)
+        mock_websocket.send_text.assert_called_once()
+        response = json.loads(mock_websocket.send_text.call_args[0][0])
+        assert response["type"] == "subscription_success"
+        assert response["status"] == "partial"
+        assert "market.kraken.BTC-USD.candles.1m" in response["topics"]
+        assert "market.zonda.ETH-PLN.candles.1m" in response["denied_topics"]
 
     @pytest.mark.asyncio
     async def test_unsubscribe_with_whitespace_only_topics(

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 __all__ = [
     "TopicSchema",
     "TOPIC_REGISTRY",
+    "REGISTRY_ROOTS",
     "get_topics_by_category",
 ]
 
@@ -37,6 +38,15 @@ TOPIC_REGISTRY: tuple[TopicSchema, ...] = (
     TopicSchema(pattern="orders.commands.", category="trade", throttle_ms=0),
     TopicSchema(pattern="orders.events.", category="trade", throttle_ms=0),
 )
+
+
+REGISTRY_ROOTS: frozenset[str] = frozenset(schema.pattern for schema in TOPIC_REGISTRY)
+"""Immutable set of all TOPIC_REGISTRY root patterns (e.g. ``"market."``, ``"signals."``).
+
+WS clients may only subscribe to these prefixes — intermediate prefixes
+like ``"market.kraken."`` are rejected.  Used by both the subscribe
+handler and the bridge for defense-in-depth validation.
+"""
 
 
 def get_topics_by_category(category: str) -> list[TopicSchema]:

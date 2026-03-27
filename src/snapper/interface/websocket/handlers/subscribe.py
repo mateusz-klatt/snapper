@@ -21,6 +21,7 @@ from snapper.interface.websocket.schemas import WSSubscribeRequest
 from snapper.interface.websocket.schemas import WSSubscriptionsListResponse
 from snapper.interface.websocket.schemas import WSSubscriptionSuccessResponse
 from snapper.interface.websocket.schemas import WSUnsubscribeRequest
+from snapper.messaging.topics.schemas import REGISTRY_ROOTS
 from snapper.messaging.topics.validation import validate_subscription_pattern
 
 __all__ = [
@@ -28,6 +29,45 @@ __all__ = [
     "handle_unsubscribe",
     "handle_get_subscriptions",
 ]
+
+
+def _validate_ws_topics(
+    raw_topics: list[str],
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """Validate and classify raw topic strings for WS subscription.
+
+    Applies standard topic validation and additionally rejects prefix
+    patterns that are not TOPIC_REGISTRY roots (intermediate prefixes
+    like ``market.kraken.`` are not allowed for WS clients).
+
+    Args:
+        raw_topics: Raw topic strings from client request.
+
+    Returns:
+        Tuple of (valid_topics, invalid_topics) where invalid_topics
+        contains (topic, error_message) pairs.
+    """
+    valid: list[str] = []
+    invalid: list[tuple[str, str]] = []
+    for raw_topic in raw_topics:
+        cleaned = raw_topic.strip()
+        if not cleaned:
+            continue
+        is_valid, error_msg_str = validate_subscription_pattern(cleaned)
+        if not is_valid:
+            invalid.append((cleaned, error_msg_str))
+        elif cleaned.endswith(".") and cleaned not in REGISTRY_ROOTS:
+            registry_roots = ", ".join(sorted(REGISTRY_ROOTS))
+            invalid.append(
+                (
+                    cleaned,
+                    f"Prefix '{cleaned}' is not a registry root. "
+                    f"Allowed prefix subscriptions: {registry_roots}",
+                )
+            )
+        else:
+            valid.append(cleaned)
+    return valid, invalid
 
 
 async def handle_subscribe(
@@ -47,16 +87,7 @@ async def handle_subscribe(
         manager: WebSocket connection manager.
         role: User's role for permission checking.
     """
-    topics: list[str] = []
-    invalid_topics: list[tuple[str, str]] = []
-    for raw_topic in message.topics:
-        cleaned = raw_topic.strip()
-        if cleaned:
-            is_valid, error_msg_str = validate_subscription_pattern(cleaned)
-            if is_valid:
-                topics.append(cleaned)
-            else:
-                invalid_topics.append((cleaned, error_msg_str))
+    topics, invalid_topics = _validate_ws_topics(message.topics)
     if invalid_topics:
         error_details = [f"{topic}: {error}" for topic, error in invalid_topics]
         error_msg = WSErrorResponse(

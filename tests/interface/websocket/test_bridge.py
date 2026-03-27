@@ -86,7 +86,7 @@ async def test_forward_to_clients_raw_passthrough() -> None:
     bridge.topic_subscriptions["foo"] = [TopicSubscriptionModel(websocket=ws, throttle_ms=0)]
     bridge.topic_metrics["foo"] = TopicMetricsModel()
     raw_json = '{"foo": "bar"}'
-    await bridge._forward_to_clients("foo", "unknown.topic", raw_json)
+    await bridge._forward_to_clients("foo", "foo", raw_json)
     ws.send_text.assert_awaited_once_with(raw_json)
 
 
@@ -152,7 +152,7 @@ async def test_forward_to_clients_timeout_disconnects(monkeypatch: pytest.Monkey
         "trades": 10,
         "timestamp": datetime.now(tz=UTC).isoformat(),
     }
-    await bridge._forward_to_clients(topic, f"{topic}.candles", candle_payload)
+    await bridge._forward_to_clients(topic, topic, candle_payload)
     assert bridge.topic_metrics[topic].timeout_count == 1
     bridge.disconnect_client.assert_awaited_once_with(ws)
 
@@ -383,7 +383,7 @@ class TestBridgeMissingBranches:
                 "timestamp": datetime.now(tz=UTC).isoformat(),
             }
         )
-        await bridge._forward_to_clients(topic, "market.ticks.btc", tick_data_str)
+        await bridge._forward_to_clients(topic, topic, tick_data_str)
         assert bridge.topic_metrics[topic].timeout_count == 1
 
     @pytest.mark.asyncio
@@ -412,7 +412,7 @@ class TestBridgeMissingBranches:
                 "timestamp": datetime.now(tz=UTC).isoformat(),
             }
         )
-        await bridge._forward_to_clients(topic, "market.ticks.btc", tick_data_str)
+        await bridge._forward_to_clients(topic, topic, tick_data_str)
         bridge.disconnect_client.assert_awaited_once_with(ws)
 
     @pytest.mark.asyncio
@@ -609,7 +609,7 @@ class TestForwardToClientsTimeoutCoverage:
         bridge.topic_metrics[topic] = TopicMetricsModel()
         bridge.client_subscriptions[mock_ws] = {topic}
         bridge.disconnect_client = AsyncMock()
-        await bridge._forward_to_clients(topic, "market.candles.BTC", '{"type":"candle"}')
+        await bridge._forward_to_clients(topic, topic, '{"type":"candle"}')
         bridge.disconnect_client.assert_awaited_once_with(mock_ws)
         assert bridge.topic_metrics[topic].timeout_count == 1
 
@@ -629,7 +629,7 @@ class TestForwardToClientsTimeoutCoverage:
         bridge.topic_subscriptions[topic] = [sub]
         bridge.client_subscriptions[mock_ws] = {topic}
         bridge.disconnect_client = AsyncMock()
-        await bridge._forward_to_clients(topic, "market.candles.BTC", '{"type":"candle"}')
+        await bridge._forward_to_clients(topic, topic, '{"type":"candle"}')
         bridge.disconnect_client.assert_awaited_once_with(mock_ws)
 
     @pytest.mark.asyncio
@@ -661,7 +661,7 @@ class TestForwardToClientsTimeoutCoverage:
                 bridge.topic_subscriptions[topic].clear()
 
         bridge.disconnect_client = AsyncMock(side_effect=disconnect_clears_list)
-        await bridge._forward_to_clients(topic, "market.candles.BTC", '{"type":"candle"}')
+        await bridge._forward_to_clients(topic, topic, '{"type":"candle"}')
         assert bridge.disconnect_client.await_count == 2
 
 
@@ -1123,14 +1123,14 @@ class TestSubscribeWebsocketBranchCoverage:
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         bridge._start_zmq_subscription = AsyncMock()
         bridge.available_topics = {
-            "market.candles.": TopicConfigurationModel(
+            "market.": TopicConfigurationModel(
                 endpoint="tcp://localhost:5555",
-                pattern="market.candles.",
+                pattern="market.",
             )
         }
         mock_ws = MagicMock()
-        await bridge.subscribe_client(mock_ws, ["market.candles."])
-        assert "market.candles." in bridge.topic_subscriptions
+        await bridge.subscribe_client(mock_ws, ["market."])
+        assert "market." in bridge.topic_subscriptions
 
 
 class TestUnsubscribeWebsocketBranchCoverage:
@@ -1163,7 +1163,7 @@ class TestUnsubscribeWebsocketAllBranchCoverage:
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         mock_ws = MagicMock()
         bridge._stop_zmq_subscription = AsyncMock()
-        topic1 = "market.candles."
+        topic1 = "market."
         topic2 = "orders"
         bridge.topic_subscriptions[topic1] = [
             TopicSubscriptionModel(websocket=mock_ws, throttle_ms=0)
@@ -1314,7 +1314,7 @@ class TestZmqSubscriptionLoopBranchCoverage:
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         bridge._forward_to_clients = AsyncMock()
-        topic = "market.candles.BTC"
+        topic = "market.BTC"
         mock_socket = MagicMock(spec=zmq.asyncio.Socket)
         valid_message = [
             topic.encode(),
@@ -1336,7 +1336,7 @@ class TestZmqSubscriptionLoopBranchCoverage:
         Then: Error is handled without exception.
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
-        topic = "market.candles.BTC"
+        topic = "market.BTC"
         mock_socket = MagicMock(spec=zmq.asyncio.Socket)
         invalid_json_message = [topic.encode(), b"not valid json"]
         mock_socket.recv_multipart = AsyncMock(
@@ -1354,7 +1354,7 @@ class TestZmqSubscriptionLoopBranchCoverage:
         Then: Error is handled and loop continues.
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
-        topic = "market.candles.BTC"
+        topic = "market.BTC"
         mock_socket = MagicMock(spec=zmq.asyncio.Socket)
         mock_socket.recv_multipart = AsyncMock(
             side_effect=[RuntimeError("Unexpected"), asyncio.CancelledError()]
@@ -1392,7 +1392,7 @@ class TestHandleZmqMessagesBranchCoverage:
         """
         bridge = ZmqWebSocketBridgeService(connection_manager=None)
         bridge._process_zmq_message = AsyncMock()
-        topic = "market.candles.BTC"
+        topic = "market.BTC"
         config = TopicConfigurationModel(
             endpoint="tcp://localhost:5555",
             pattern=topic,
@@ -1534,3 +1534,133 @@ class TestCheckGap:
         )
         assert len(forwarded) == 1
         assert forwarded[0][2] == payload
+
+
+class TestForwardToClientsRoutingMismatch:
+    """Tests for defense-in-depth routing mismatch detection in _forward_to_clients."""
+
+    @pytest.mark.asyncio
+    async def test_root_pattern_mismatch_drops_message(self) -> None:
+        """Root-pattern subscription drops message when received_topic does not match.
+
+        Given: A root-pattern subscription ``market.`` with metrics,
+        When: Forwarding a message whose received_topic does NOT start with ``market.``,
+        Then: Message is dropped and invalid_messages counter increments.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        ws = DummyWebSocket()
+        topic = "market."
+        bridge.topic_subscriptions[topic] = [
+            TopicSubscriptionModel(websocket=ws, throttle_ms=0),
+        ]
+        bridge.topic_metrics[topic] = TopicMetricsModel()
+        await bridge._forward_to_clients(topic, "signals.paper.FOO", '{"type":"candle"}')
+        ws.send_text.assert_not_called()
+        assert bridge.topic_metrics[topic].invalid_messages == 1
+
+    @pytest.mark.asyncio
+    async def test_root_pattern_mismatch_without_metrics(self) -> None:
+        """Root-pattern mismatch drops message even when no metrics entry exists.
+
+        Given: A root-pattern subscription ``market.`` without a metrics entry,
+        When: Forwarding a mismatched message,
+        Then: Message is dropped without error.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        ws = DummyWebSocket()
+        topic = "market."
+        bridge.topic_subscriptions[topic] = [
+            TopicSubscriptionModel(websocket=ws, throttle_ms=0),
+        ]
+        await bridge._forward_to_clients(topic, "signals.paper.FOO", '{"type":"candle"}')
+        ws.send_text.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_exact_topic_mismatch_drops_message(self) -> None:
+        """Exact-topic subscription drops message when received_topic differs.
+
+        Given: An exact-topic subscription ``market.kraken.BTC-USD.ticks`` with metrics,
+        When: Forwarding a message with a different received_topic,
+        Then: Message is dropped and invalid_messages counter increments.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        ws = DummyWebSocket()
+        topic = "market.kraken.BTC-USD.ticks"
+        bridge.topic_subscriptions[topic] = [
+            TopicSubscriptionModel(websocket=ws, throttle_ms=0),
+        ]
+        bridge.topic_metrics[topic] = TopicMetricsModel()
+        await bridge._forward_to_clients(topic, "market.kraken.ETH-USD.ticks", '{"type":"tick"}')
+        ws.send_text.assert_not_called()
+        assert bridge.topic_metrics[topic].invalid_messages == 1
+
+    @pytest.mark.asyncio
+    async def test_exact_topic_mismatch_without_metrics(self) -> None:
+        """Exact-topic mismatch drops message even when no metrics entry exists.
+
+        Given: An exact-topic subscription without a metrics entry,
+        When: Forwarding a mismatched message,
+        Then: Message is dropped without error.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        ws = DummyWebSocket()
+        topic = "market.kraken.BTC-USD.ticks"
+        bridge.topic_subscriptions[topic] = [
+            TopicSubscriptionModel(websocket=ws, throttle_ms=0),
+        ]
+        await bridge._forward_to_clients(topic, "market.kraken.ETH-USD.ticks", '{"type":"tick"}')
+        ws.send_text.assert_not_called()
+
+
+class TestBridgeIntermediatePrefixDefense:
+    """Defense-in-depth: bridge rejects intermediate prefix subscriptions."""
+
+    @pytest.mark.asyncio
+    async def test_subscribe_client_skips_intermediate_prefix(self) -> None:
+        """subscribe_client silently skips intermediate prefixes.
+
+        Given: A bridge with no prior subscriptions,
+        When: subscribe_client is called with an intermediate prefix,
+        Then: The prefix is not added to topic_subscriptions.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        bridge.context = MagicMock()
+        ws = DummyWebSocket()
+        await bridge.subscribe_client(ws, ["market.kraken."])
+        assert "market.kraken." not in bridge.topic_subscriptions
+        assert ws not in bridge.client_subscriptions
+
+    @pytest.mark.asyncio
+    async def test_subscribe_client_accepts_registry_root(self) -> None:
+        """subscribe_client accepts valid registry root prefixes.
+
+        Given: A bridge with ZMQ context,
+        When: subscribe_client is called with a registry root,
+        Then: The subscription is registered.
+        """
+        bridge = ZmqWebSocketBridgeService(connection_manager=None)
+        mock_ctx = MagicMock()
+        mock_socket = MagicMock()
+        mock_socket.connect = MagicMock()
+        mock_socket.setsockopt = MagicMock()
+        mock_ctx.socket = MagicMock(return_value=mock_socket)
+        bridge.context = mock_ctx
+        ws = DummyWebSocket()
+        await bridge.subscribe_client(ws, ["market."])
+        assert "market." in bridge.topic_subscriptions
+
+    @pytest.mark.asyncio
+    async def test_subscribe_websocket_rejects_intermediate_prefix(self) -> None:
+        """subscribe_websocket returns False for intermediate prefixes.
+
+        Given: A bridge with connection_manager,
+        When: subscribe_websocket is called with an intermediate prefix,
+        Then: Returns False and records a control event.
+        """
+        mock_cm = MagicMock()
+        bridge = ZmqWebSocketBridgeService(connection_manager=mock_cm)
+        bridge._record_bridge_control = AsyncMock()
+        ws = DummyWebSocket()
+        result = await bridge.subscribe_websocket(ws, "market.kraken.")
+        assert result is False
+        bridge._record_bridge_control.assert_awaited_once()

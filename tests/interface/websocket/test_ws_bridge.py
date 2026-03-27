@@ -46,9 +46,9 @@ def bridge() -> ZmqWebSocketBridgeService:
         instance = ZmqWebSocketBridgeService(mock_cm)
     instance.context = MagicMock()
     instance.available_topics = {
-        "market.candles.": TopicConfigurationModel(
+        "market.": TopicConfigurationModel(
             endpoint="tcp://127.0.0.1:5555",
-            pattern="market.candles.",
+            pattern="market.",
             throttle_ms=100,
         ),
         "orders": TopicConfigurationModel(
@@ -70,14 +70,12 @@ async def test_unsubscribe_updates_metrics_and_stops(bridge: ZmqWebSocketBridgeS
     """
     websocket = MagicMock()
     with patch.object(bridge, "_start_zmq_subscription", new_callable=AsyncMock):
-        await bridge.subscribe_client(websocket, ["market.candles."])
-    bridge.topic_metrics["market.candles."].active_subscribers = len(
-        bridge.topic_subscriptions["market.candles."]
-    )
+        await bridge.subscribe_client(websocket, ["market."])
+    bridge.topic_metrics["market."].active_subscribers = len(bridge.topic_subscriptions["market."])
     with patch.object(bridge, "_stop_zmq_subscription", new_callable=AsyncMock) as stop_mock:
-        await bridge.unsubscribe_client(websocket, ["market.candles."])
-    stop_mock.assert_awaited_once_with("market.candles.")
-    assert "market.candles." not in bridge.topic_subscriptions
+        await bridge.unsubscribe_client(websocket, ["market."])
+    stop_mock.assert_awaited_once_with("market.")
+    assert "market." not in bridge.topic_subscriptions
 
 
 @pytest.mark.asyncio
@@ -90,7 +88,7 @@ async def test_unsubscribe_skips_metrics_when_missing(
     When: The client unsubscribes from the topic,
     Then: Unsubscribe completes without error and subscription is cleaned up.
     """
-    topic = "market.candles."
+    topic = "market."
     websocket = MagicMock()
     bridge.client_subscriptions[websocket] = {topic}
     bridge.topic_subscriptions[topic] = [TopicSubscriptionModel(websocket=websocket)]
@@ -132,7 +130,7 @@ async def test_subscription_loop_invalid_format_continues(
     When: An invalid message format is received,
     Then: The loop continues without incrementing received count.
     """
-    topic = "market.candles."
+    topic = "market."
     bridge.topic_metrics[topic] = TopicMetricsModel()
     fake_socket = MagicMock()
     fake_socket.recv_multipart = AsyncMock(
@@ -154,7 +152,7 @@ async def test_subscription_loop_fatal_error_path(bridge: ZmqWebSocketBridgeServ
     When: Error recovery sleep also fails,
     Then: The fatal error is logged.
     """
-    topic = "market.candles."
+    topic = "market."
     fake_socket = MagicMock()
     fake_socket.recv_multipart = AsyncMock(side_effect=zmq.ZMQError(zmq.EAGAIN))
     with (
@@ -265,7 +263,7 @@ async def test_forward_to_clients_market_backpressure(
     When: Another message is forwarded,
     Then: The message is dropped and dropped count is incremented.
     """
-    topic = "market.candles."
+    topic = "market."
     websocket = AsyncMock()
     subscription = TopicSubscriptionModel(
         websocket=websocket,
@@ -292,7 +290,7 @@ async def test_forward_to_clients_timeout_disconnects(
     When: Send times out,
     Then: The client is disconnected and timeout count is incremented.
     """
-    topic = "market.candles."
+    topic = "market."
     websocket = AsyncMock()
     websocket.send_text.side_effect = TimeoutError()
     subscription = TopicSubscriptionModel(
@@ -320,7 +318,7 @@ async def test_forward_to_clients_timeout_without_metrics(
     When: Send times out,
     Then: The client is disconnected without metrics error.
     """
-    topic = "market.candles."
+    topic = "market."
     websocket = AsyncMock()
     websocket.send_text.side_effect = TimeoutError()
     subscription = TopicSubscriptionModel(
@@ -347,7 +345,7 @@ async def test_forward_to_clients_throttled_increments_metrics(
     When: A message is forwarded within throttle window,
     Then: The message is throttled and count is incremented.
     """
-    topic = "market.candles."
+    topic = "market."
     websocket = AsyncMock()
     now = time.time()
     subscription = TopicSubscriptionModel(
@@ -374,7 +372,7 @@ async def test_forward_to_clients_throttled_without_metrics(
     When: A message is forwarded within throttle window,
     Then: The message is not sent.
     """
-    topic = "market.candles."
+    topic = "market."
     websocket = AsyncMock()
     now = time.time()
     subscription = TopicSubscriptionModel(
@@ -441,7 +439,7 @@ async def test_start_zmq_subscription_missing_pattern(
     When: Starting a subscription for unknown topic,
     Then: No subscriber is created.
     """
-    bridge.available_topics = {"market.candles.": bridge.available_topics["market.candles."]}
+    bridge.available_topics = {"market.": bridge.available_topics["market."]}
     bridge.context = MagicMock()
     await bridge._start_zmq_subscription("strategy.signals")
     assert "strategy.signals" not in bridge.zmq_subscribers
@@ -458,7 +456,7 @@ async def test_start_zmq_subscription_already_active(
     When: Starting a subscription for the same topic,
     Then: The existing task is preserved.
     """
-    topic = "market.candles."
+    topic = "market."
     bridge.context = MagicMock()
     running = asyncio.create_task(asyncio.sleep(0.01))
     bridge.subscriber_tasks[topic] = running
@@ -482,7 +480,7 @@ async def test_start_zmq_subscriber_success_creates_task(
     When: Starting a subscriber for the topic,
     Then: A socket is created and task is started.
     """
-    topic = "market.candles."
+    topic = "market."
     mock_socket = MagicMock()
     mock_context = cast(MagicMock, bridge.context)
     mock_context.socket.return_value = mock_socket
@@ -523,7 +521,7 @@ async def test_forward_to_clients_send_error_disconnects(
     When: Send raises an exception,
     Then: The client is disconnected.
     """
-    topic = "market.candles."
+    topic = "market."
     websocket = AsyncMock()
     websocket.send_text.side_effect = RuntimeError("boom")
     subscription = TopicSubscriptionModel(
@@ -549,7 +547,7 @@ async def test_unsubscribe_retains_topic_when_other_clients_present(
     When: One client unsubscribes,
     Then: The topic subscription remains for other clients.
     """
-    topic = "market.candles."
+    topic = "market."
     ws1 = MagicMock()
     ws2 = MagicMock()
     with patch.object(bridge, "_start_zmq_subscription", new_callable=AsyncMock):
@@ -572,7 +570,7 @@ async def test_forward_to_clients_throttled_skip(
     When: A message is forwarded,
     Then: The message is skipped without sending.
     """
-    topic = "market.candles."
+    topic = "market."
     websocket = AsyncMock()
     subscription = TopicSubscriptionModel(
         websocket=websocket,
@@ -598,7 +596,7 @@ async def test_handle_zmq_messages_forwards_raw_json(
     When: A valid JSON message is received,
     Then: The raw JSON is forwarded to websockets.
     """
-    topic = "market.candles."
+    topic = "market."
     config = bridge.available_topics[topic]
     mock_socket = MagicMock()
     raw_json = '{"type":"candle","instrument":"BTCUSD","exchange":"kraken"}'
@@ -634,7 +632,7 @@ async def test_forward_to_clients_timeout_disconnects_inline(
     When: Send times out,
     Then: The client is disconnected and timeout metric is incremented.
     """
-    topic = "market.candles."
+    topic = "market."
     websocket = AsyncMock()
     websocket.send_text.side_effect = TimeoutError()
     subscription = TopicSubscriptionModel(
@@ -2140,7 +2138,7 @@ class TestZMQBridgeIntegration:
             }
         )
         zmq_bridge.disconnect_client = AsyncMock()
-        await zmq_bridge._forward_to_clients(topic, "market.BTCUSD.candles", valid_candle_payload)
+        await zmq_bridge._forward_to_clients(topic, topic, valid_candle_payload)
         zmq_bridge.disconnect_client.assert_awaited_once_with(mock_websocket)
 
 
@@ -2500,7 +2498,7 @@ class TestZMQWebSocketBridgeCore:
         When: Subscribing client to new topics,
         Then: Subscriptions are created and ZMQ subscriptions started.
         """
-        topics = ["market.candles.", "signals.kraken.BTC-USD.live"]
+        topics = ["market.", "signals.kraken.BTC-USD.live"]
         with patch.object(zmq_bridge, "_start_zmq_subscription") as mock_start:
             await zmq_bridge.subscribe_client(mock_websocket, topics)
         assert mock_websocket in zmq_bridge.client_subscriptions
@@ -2524,11 +2522,11 @@ class TestZMQWebSocketBridgeCore:
         When: Subscribing same client to additional topic,
         Then: Both topics are in client's subscriptions.
         """
-        await zmq_bridge.subscribe_client(mock_websocket, ["market.candles."])
+        await zmq_bridge.subscribe_client(mock_websocket, ["market."])
         with patch.object(zmq_bridge, "_start_zmq_subscription") as mock_start:
             await zmq_bridge.subscribe_client(mock_websocket, ["signals.kraken.BTC-USD.live"])
         assert zmq_bridge.client_subscriptions[mock_websocket] == {
-            "market.candles.",
+            "market.",
             "signals.kraken.BTC-USD.live",
         }
         mock_start.assert_called_once_with("signals.kraken.BTC-USD.live")
@@ -2544,11 +2542,11 @@ class TestZMQWebSocketBridgeCore:
         Then: Both clients tracked, no new ZMQ subscription started.
         """
         mock_websocket2 = MagicMock(spec=WebSocket)
-        await zmq_bridge.subscribe_client(mock_websocket, ["market.candles."])
+        await zmq_bridge.subscribe_client(mock_websocket, ["market."])
         with patch.object(zmq_bridge, "_start_zmq_subscription") as mock_start:
-            await zmq_bridge.subscribe_client(mock_websocket2, ["market.candles."])
-        assert len(zmq_bridge.topic_subscriptions["market.candles."]) == 2
-        assert zmq_bridge.topic_metrics["market.candles."].active_subscribers == 2
+            await zmq_bridge.subscribe_client(mock_websocket2, ["market."])
+        assert len(zmq_bridge.topic_subscriptions["market."]) == 2
+        assert zmq_bridge.topic_metrics["market."].active_subscribers == 2
         mock_start.assert_not_called()
 
     @pytest.mark.asyncio
@@ -2562,13 +2560,13 @@ class TestZMQWebSocketBridgeCore:
         Then: Topic subscription stopped, other topic remains.
         """
         await zmq_bridge.subscribe_client(
-            mock_websocket, ["market.candles.", "signals.kraken.BTC-USD.live"]
+            mock_websocket, ["market.", "signals.kraken.BTC-USD.live"]
         )
         with patch.object(zmq_bridge, "_stop_zmq_subscription") as mock_stop:
-            await zmq_bridge.unsubscribe_client(mock_websocket, ["market.candles."])
+            await zmq_bridge.unsubscribe_client(mock_websocket, ["market."])
         assert zmq_bridge.client_subscriptions[mock_websocket] == {"signals.kraken.BTC-USD.live"}
-        assert "market.candles." not in zmq_bridge.topic_subscriptions
-        mock_stop.assert_called_once_with("market.candles.")
+        assert "market." not in zmq_bridge.topic_subscriptions
+        mock_stop.assert_called_once_with("market.")
 
     @pytest.mark.asyncio
     async def test_unsubscribe_client_with_other_subscribers(
@@ -2581,12 +2579,12 @@ class TestZMQWebSocketBridgeCore:
         Then: Topic remains with one subscriber, ZMQ not stopped.
         """
         mock_websocket2 = MagicMock(spec=WebSocket)
-        await zmq_bridge.subscribe_client(mock_websocket, ["market.candles."])
-        await zmq_bridge.subscribe_client(mock_websocket2, ["market.candles."])
+        await zmq_bridge.subscribe_client(mock_websocket, ["market."])
+        await zmq_bridge.subscribe_client(mock_websocket2, ["market."])
         with patch.object(zmq_bridge, "_stop_zmq_subscription") as mock_stop:
-            await zmq_bridge.unsubscribe_client(mock_websocket, ["market.candles."])
-        assert len(zmq_bridge.topic_subscriptions["market.candles."]) == 1
-        assert zmq_bridge.topic_metrics["market.candles."].active_subscribers == 1
+            await zmq_bridge.unsubscribe_client(mock_websocket, ["market."])
+        assert len(zmq_bridge.topic_subscriptions["market."]) == 1
+        assert zmq_bridge.topic_metrics["market."].active_subscribers == 1
         mock_stop.assert_not_called()
 
     @pytest.mark.asyncio
@@ -2599,7 +2597,7 @@ class TestZMQWebSocketBridgeCore:
         When: Attempting to unsubscribe,
         Then: No error occurs, client remains not tracked.
         """
-        await zmq_bridge.unsubscribe_client(mock_websocket, ["market.candles."])
+        await zmq_bridge.unsubscribe_client(mock_websocket, ["market."])
         assert mock_websocket not in zmq_bridge.client_subscriptions
 
     @pytest.mark.asyncio
@@ -2613,7 +2611,7 @@ class TestZMQWebSocketBridgeCore:
         Then: Unsubscribe called with all client's topics.
         """
         await zmq_bridge.subscribe_client(
-            mock_websocket, ["market.candles.", "signals.kraken.BTC-USD.live"]
+            mock_websocket, ["market.", "signals.kraken.BTC-USD.live"]
         )
         mock_unsub = AsyncMock()
         with patch.object(zmq_bridge, "unsubscribe_client", new=mock_unsub):
@@ -2621,7 +2619,7 @@ class TestZMQWebSocketBridgeCore:
         mock_unsub.assert_called_once()
         call_args = mock_unsub.call_args[0]
         assert call_args[0] == mock_websocket
-        assert set(call_args[1]) == {"market.candles.", "signals.kraken.BTC-USD.live"}
+        assert set(call_args[1]) == {"market.", "signals.kraken.BTC-USD.live"}
 
     @pytest.mark.asyncio
     async def test_disconnect_client_not_tracked(
@@ -2827,7 +2825,7 @@ class TestZMQBridgeAdditionalCoverage:
         When: Forwarding a message,
         Then: All WebSockets receive the message.
         """
-        topic = "market.kraken.BTC-USD.candles"
+        topic = "market.kraken.BTC-USD.candles.1m"
         zmq_topic = "market.kraken.BTC-USD.candles.1m"
         message_str = '{"type":"tick","instrument":"BTC-USD","exchange":"kraken","timestamp":"2024-01-01T00:00:00+00:00"}'
         mock_ws1 = AsyncMock(spec=WebSocket)
@@ -2850,7 +2848,7 @@ class TestZMQBridgeAdditionalCoverage:
         When: Forwarding another message within throttle window,
         Then: Message is not sent to throttled WebSocket.
         """
-        topic = "market.kraken.BTC-USD.candles"
+        topic = "market.kraken.BTC-USD.candles.1m"
         zmq_topic = "market.kraken.BTC-USD.candles.1m"
         message_str = '{"type":"tick","instrument":"BTC-USD"}'
         throttle_ms = 1000
@@ -2871,7 +2869,7 @@ class TestZMQBridgeAdditionalCoverage:
         When: Forwarding a message,
         Then: Client is disconnected via disconnect_client.
         """
-        topic = "market.kraken.BTC-USD.candles"
+        topic = "market.kraken.BTC-USD.candles.1m"
         zmq_topic = "market.kraken.BTC-USD.candles.1m"
         message_str = '{"type":"tick","instrument":"BTC-USD"}'
         throttle_ms = 100
@@ -3120,7 +3118,7 @@ class TestBackpressure:
         Then: Message is dropped and dropped_count incremented.
         """
         mock_ws = AsyncMock()
-        topic = "market.candles."
+        topic = "market."
         sub = TopicSubscriptionModel(
             websocket=mock_ws,
             throttle_ms=0,
@@ -3130,7 +3128,7 @@ class TestBackpressure:
         bridge.topic_subscriptions[topic] = [sub]
         bridge.topic_metrics[topic] = TopicMetricsModel()
         raw_json = '{"type": "candle", "instrument": "BTC-USD"}'
-        await bridge._forward_to_clients(topic, "market.candles.BTC-USD.1m", raw_json)
+        await bridge._forward_to_clients(topic, "market.BTC-USD.1m", raw_json)
         mock_ws.send_text.assert_not_awaited()
         assert bridge.topic_metrics[topic].dropped_count == 1
 
@@ -3219,9 +3217,9 @@ class TestBridgeControlRecording:
             instance = ZmqWebSocketBridgeService(mock_cm)
         instance.context = MagicMock()
         instance.available_topics = {
-            "market.candles.": TopicConfigurationModel(
+            "market.": TopicConfigurationModel(
                 endpoint="tcp://127.0.0.1:5555",
-                pattern="market.candles.",
+                pattern="market.",
                 throttle_ms=100,
             ),
         }
@@ -3350,8 +3348,8 @@ class TestBridgeControlRecording:
         """Client disconnect with active subscriptions records control."""
         mock_ws = MagicMock()
         mock_ws.close = AsyncMock()
-        recording_bridge.client_subscriptions[mock_ws] = {"market.candles."}
-        recording_bridge.topic_subscriptions["market.candles."] = [
+        recording_bridge.client_subscriptions[mock_ws] = {"market."}
+        recording_bridge.topic_subscriptions["market."] = [
             TopicSubscriptionModel(websocket=mock_ws, throttle_ms=100)
         ]
 

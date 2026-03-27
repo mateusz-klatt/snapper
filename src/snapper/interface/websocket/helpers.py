@@ -11,6 +11,7 @@ from uuid import uuid7
 
 from fastapi import WebSocket
 
+from snapper.auth.domain.permissions import get_role_allowed_categories
 from snapper.auth.domain.roles import UserRole
 from snapper.config.app import AppSettings
 from snapper.interface.websocket.models import SERVER_CONTROL_SEQ
@@ -107,19 +108,17 @@ async def validate_origin(
 def role_allowed_categories(role: UserRole) -> set[str]:
     """Get topic categories allowed for a user role.
 
+    Delegates to ``get_role_allowed_categories`` which derives categories
+    from ``ROLE_PERMISSIONS`` and ``CATEGORY_PERMISSIONS`` (single source
+    of truth).
+
     Args:
         role: User role to check.
 
     Returns:
         Set of allowed category names.
     """
-    if role == UserRole.VIEWER:
-        return {"market", "system"}
-    if role == UserRole.OPERATOR:
-        return {"market", "system", "trade", "strategy"}
-    if role == UserRole.ADMIN:
-        return {"market", "system", "trade", "strategy"}
-    return {"market", "system"}
+    return get_role_allowed_categories(role)
 
 
 def get_allowed_topics_for_role(role: UserRole) -> list[str]:

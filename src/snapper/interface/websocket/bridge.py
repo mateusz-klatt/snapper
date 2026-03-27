@@ -38,6 +38,7 @@ from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.messages import GapEnvelope
 from snapper.messaging.topics.builders import is_order_topic
+from snapper.messaging.topics.schemas import REGISTRY_ROOTS
 from snapper.messaging.topics.schemas import TOPIC_REGISTRY
 from snapper.utils.logging import set_log_context
 
@@ -187,6 +188,11 @@ class ZmqWebSocketBridgeService:
         if websocket not in self.client_subscriptions:
             self.client_subscriptions[websocket] = set()
         for topic in topics:
+            if topic.endswith(".") and topic not in REGISTRY_ROOTS:
+                logger.warning(
+                    "Rejected intermediate prefix subscription: %s (not a registry root)", topic
+                )
+                continue
             self.client_subscriptions[websocket].add(topic)
             if topic not in self.topic_subscriptions:
                 self.topic_subscriptions[topic] = []
@@ -202,9 +208,11 @@ class ZmqWebSocketBridgeService:
             self.topic_metrics[topic].active_subscribers = len(self.topic_subscriptions[topic])
             if len(self.topic_subscriptions[topic]) == 1:
                 await self._start_zmq_subscription(topic)
+        if websocket in self.client_subscriptions and not self.client_subscriptions[websocket]:
+            del self.client_subscriptions[websocket]
         logger.info(
             f"Client {client_id} subscribed. Active subscriptions: "
-            f"{len(self.client_subscriptions[websocket])}"
+            f"{len(self.client_subscriptions.get(websocket, set()))}"
         )
 
     async def unsubscribe_client(self, websocket: WebSocket, topics: list[str]) -> None:
@@ -530,18 +538,44 @@ class ZmqWebSocketBridgeService:
         if topic in self.topic_metrics:
             self.topic_metrics[topic].forwarded_count += 1
 
-    async def _forward_to_clients(self, topic: str, _received_topic: str, message_str: str) -> None:
+    async def _forward_to_clients(self, topic: str, received_topic: str, message_str: str) -> None:
         """Forward a message to all subscribed WebSocket clients.
 
         Implements throttling and backpressure control. Trade topics
         disconnect slow clients, market data topics drop messages.
 
+        Validates that ``received_topic`` matches the subscription contract:
+        registry root subscriptions require prefix match, exact topic
+        subscriptions require equality. Mismatches are logged and dropped.
+
         Args:
-            topic: The subscription topic.
-            _received_topic: The actual topic from ZMQ message (reserved for future use).
+            topic: The subscription topic (client key).
+            received_topic: The actual topic from ZMQ message frame.
             message_str: The message payload string.
         """
         if topic not in self.topic_subscriptions:
+            return
+        is_root = topic.endswith(".")
+        if is_root:
+            if not received_topic.startswith(topic):
+                logger.warning(
+                    "Bridge routing mismatch: received_topic=%s does not match "
+                    "root subscription=%s, dropping message",
+                    received_topic,
+                    topic,
+                )
+                if topic in self.topic_metrics:
+                    self.topic_metrics[topic].invalid_messages += 1
+                return
+        elif received_topic != topic:
+            logger.warning(
+                "Bridge routing mismatch: received_topic=%s does not match "
+                "exact subscription=%s, dropping message",
+                received_topic,
+                topic,
+            )
+            if topic in self.topic_metrics:
+                self.topic_metrics[topic].invalid_messages += 1
             return
         current_time = time.time()
         max_pending = self._get_max_pending(topic)
@@ -642,6 +676,16 @@ class ZmqWebSocketBridgeService:
         Returns:
             True if subscription successful, False otherwise.
         """
+        if topic.endswith(".") and topic not in REGISTRY_ROOTS:
+            logger.warning(
+                "Rejected intermediate prefix subscription: %s (not a registry root)", topic
+            )
+            await self._record_bridge_control(
+                "zmq_subscribe",
+                "error",
+                detail=f"Intermediate prefix rejected: {topic}",
+            )
+            return False
         topic_config = self._find_matching_pattern(topic)
         if not topic_config:
             available = list(self.available_topics)

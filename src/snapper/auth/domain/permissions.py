@@ -76,3 +76,41 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
     },
     UserRole.ADMIN: set(Permission),
 }
+
+
+CATEGORY_PERMISSIONS: dict[str, frozenset[Permission]] = {
+    "market": frozenset({Permission.READ_MARKET_DATA}),
+    "trade": frozenset({Permission.CREATE_ORDERS}),
+    "strategy": frozenset({Permission.START_STRATEGIES}),
+    "system": frozenset({Permission.READ_SYSTEM_STATUS}),
+    "admin": frozenset({Permission.MANAGE_USERS}),
+}
+"""Permission sets required for each WS topic category.
+
+A role is allowed a category when it holds **all** permissions in the
+category's frozenset.  This is intentionally stricter than REST read
+access: a VIEWER can GET /orders (READ_ORDERS) but cannot subscribe
+to live order events (requires CREATE_ORDERS, i.e. OPERATOR+).
+
+Using frozensets instead of single permissions makes the model
+extensible: adding a second permission to a category's set is a
+one-line change, and ``get_role_allowed_categories`` already handles it.
+"""
+
+
+def get_role_allowed_categories(role: UserRole) -> set[str]:
+    """Derive allowed WS topic categories from ROLE_PERMISSIONS.
+
+    A role is allowed a category when it holds every permission
+    listed in ``CATEGORY_PERMISSIONS`` for that category.
+
+    Args:
+        role: User role to check.
+
+    Returns:
+        Set of allowed WS topic category names.
+    """
+    role_perms = ROLE_PERMISSIONS.get(role, set())
+    return {
+        category for category, required in CATEGORY_PERMISSIONS.items() if required <= role_perms
+    }
