@@ -22,6 +22,9 @@ from snapper.application.engine.config import EngineConfigModel
 from snapper.application.engine.service import TradingEngineService
 from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.engine.trader import run_zmq_trader
+from snapper.application.portfolio.models import PositionStateModel
+from snapper.application.risk.models import RiskConfigModel
+from snapper.application.risk.models import RiskEvaluator
 from snapper.config.app import AppSettings
 from snapper.messaging.infrastructure.gap_detector import GapDetector
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -2613,13 +2616,6 @@ class TestMaybeStopInFlight:
         When: Stop-loss condition is met,
         Then: _maybe_stop returns False and no new order is sent.
         """
-        from snapper.application.engine.config import EngineConfigModel
-        from snapper.application.engine.service import TradingEngineService
-        from snapper.application.portfolio.models import PositionStateModel
-        from snapper.application.risk.models import RiskConfigModel
-        from snapper.application.risk.models import RiskEvaluator
-        from snapper.messaging.infrastructure.publisher import SequenceTracker
-
         socket = MagicMock()
         socket.tracker = SequenceTracker()
         socket.send = AsyncMock()

@@ -255,12 +255,12 @@ async def test_simulate_fill_handles_queue_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancel_order_logs_db_update() -> None:
-    """Verify cancel_order logs database update.
+async def test_cancel_order_sets_canceled_status() -> None:
+    """Verify cancel_order sets CANCELED status without DB calls.
 
-    Given: A running client with an order having db_order_id,
+    Given: A running client with an open order,
     When: cancel_order() is called,
-    Then: _log_order_update_to_db is called.
+    Then: Order status is set to CANCELED (DB persistence handled by executor base).
     """
     client = PaperExchangeClient()
     client._running = True
@@ -278,12 +278,9 @@ async def test_cancel_order_logs_db_update() -> None:
         timestamp=0.0,
         fee=None,
     )
-    order.db_order_id = 42
     client._orders[order.id] = order
-    log_update = AsyncMock()
-    client._log_order_update_to_db = log_update
-    await client.cancel_order(order.id, symbol=order.symbol)
-    log_update.assert_awaited_once()
+    result = await client.cancel_order(order.id, symbol=order.symbol)
+    assert result.status == OrderStatusEnum.CANCELED
 
 
 @pytest.mark.asyncio
@@ -729,14 +726,11 @@ async def test_create_order_logs_and_executes_with_db_updates() -> None:
 
     Given: A connected client with mocked DB logging,
     When: create_order() is called with limit order,
-    Then: Order is created with db_order_id and execution logged.
+    Then: Order is created with db_order_id and execution queued
+        (status update and execution persistence handled by executor base).
     """
     client = PaperExchangeClient(repository=cast(Repository, _ReplayRepo()), fill_delay=0)
-    with (
-        patch.object(client, "_log_order_to_db", AsyncMock(return_value=(123, "order-pub-abc"))),
-        patch.object(client, "_log_order_update_to_db", AsyncMock()) as log_update,
-        patch.object(client, "_log_execution_to_db", AsyncMock()) as log_exec,
-    ):
+    with patch.object(client, "_log_order_to_db", AsyncMock(return_value=(123, "order-pub-abc"))):
         await client.connect()
         request = ExchangeOrderRequest(
             symbol="BTC/USD",
@@ -749,8 +743,6 @@ async def test_create_order_logs_and_executes_with_db_updates() -> None:
         execution = await asyncio.wait_for(client._execution_queue.get(), timeout=0.5)
     assert order.db_order_id == 123
     assert order.db_order_public_id == "order-pub-abc"
-    log_update.assert_awaited_once()
-    log_exec.assert_awaited_once()
     assert execution.order_status == OrderStatusEnum.CLOSED
 
 

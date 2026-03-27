@@ -322,7 +322,15 @@ class TestKrakenExchangeClient:
     ) -> None:
         """Verify create order."""
         mock_client = AsyncMock()
-        with patch.object(kraken_client, "_ccxt_client", mock_client):
+        with (
+            patch.object(kraken_client, "_ccxt_client", mock_client),
+            patch.object(
+                kraken_client,
+                "_log_order_to_db",
+                new_callable=AsyncMock,
+                return_value=(42, "pub-42"),
+            ),
+        ):
             mock_client.create_order.return_value = {
                 "id": "test_order_123",
                 "symbol": "BTC/USD",
@@ -350,6 +358,8 @@ class TestKrakenExchangeClient:
             assert order.amount == float("0.1")
             assert order.status == OrderStatusEnum.OPEN
             assert order.fee == float("5.0")
+            assert order.db_order_id == 42
+            assert order.db_order_public_id == "pub-42"
             mock_client.create_order.assert_called_once()
 
     @patch("snapper.infrastructure.exchanges.implementations.kraken.ccxt")
@@ -1476,6 +1486,12 @@ class TestKrakenCoverageImprovement:
                 side_effect=ValueError("Unknown native symbol"),
             ),
             patch.object(kraken_client, "_get_trade_client", return_value=trade_client),
+            patch.object(
+                kraken_client,
+                "_log_order_to_db",
+                new_callable=AsyncMock,
+                return_value=(42, "pub-42"),
+            ),
         ):
             result = await kraken_client.create_order(order_request)
         trade_client.create_order.assert_called_once()
@@ -1487,6 +1503,8 @@ class TestKrakenCoverageImprovement:
         }
         assert result.id == "ORDER123"
         assert result.symbol == "AAPL-USD"
+        assert result.db_order_id == 42
+        assert result.db_order_public_id == "pub-42"
 
     @patch("snapper.infrastructure.exchanges.implementations.kraken.native_to_ccxt")
     async def test_cancel_order_fallback_to_native_api(

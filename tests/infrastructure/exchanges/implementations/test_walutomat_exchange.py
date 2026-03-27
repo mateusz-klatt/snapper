@@ -1002,7 +1002,8 @@ async def test_create_order_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
     Given: A connected client with credentials,
     When: create_order() is called with valid request,
-    Then: ExchangeOrderSnapshot with PENDING status is returned.
+    Then: ExchangeOrderSnapshot with PENDING status is returned and
+          db_order_id / db_order_public_id are populated from _log_order_to_db.
     """
     client = WalutomatExchangeClient(
         api_key="key",
@@ -1017,6 +1018,7 @@ async def test_create_order_success(monkeypatch: pytest.MonkeyPatch) -> None:
         return {"X-API-Key": "key"}
 
     monkeypatch.setattr(client, "_get_auth_headers", auth_headers)
+    monkeypatch.setattr(client, "_log_order_to_db", AsyncMock(return_value=(42, "pub-42")))
     request = ExchangeOrderRequest(
         symbol="EUR-PLN",
         side=OrderSideEnum.BUY,
@@ -1027,6 +1029,8 @@ async def test_create_order_success(monkeypatch: pytest.MonkeyPatch) -> None:
     order = await client.create_order(request)
     assert order.id == "abc123"
     assert order.status == OrderStatusEnum.PENDING
+    assert order.db_order_id == 42
+    assert order.db_order_public_id == "pub-42"
     assert stub_client.post_calls[0][0].endswith("/market_fx/orders")
 
 

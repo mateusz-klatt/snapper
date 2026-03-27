@@ -221,15 +221,6 @@ class PaperExchangeClient(ExchangeClientBase):
             order.status = OrderStatusEnum.CLOSED
             order.filled = order.amount
             order.remaining = 0.0
-            if order.db_order_id is not None and order.db_order_public_id is not None:
-                await self._log_order_update_to_db(
-                    db_order_id=order.db_order_id,
-                    status=OrderStatusEnum.CLOSED,
-                )
-                await self._log_execution_to_db(
-                    order_public_id=order.db_order_public_id,
-                    execution=execution,
-                )
             await self._execution_queue.put(execution)
             logger.info(f"PAPER FILL: {order.id} - {order.amount}@{order.price}")
         except Exception as e:
@@ -254,11 +245,6 @@ class PaperExchangeClient(ExchangeClientBase):
         if order_id in self._orders:
             order = self._orders[order_id]
             order.status = OrderStatusEnum.CANCELED
-            if order.db_order_id is not None:
-                await self._log_order_update_to_db(
-                    db_order_id=order.db_order_id,
-                    status=OrderStatusEnum.CANCELED,
-                )
             return order
         return ExchangeOrderSnapshot(
             id=order_id,

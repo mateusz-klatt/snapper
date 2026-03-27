@@ -712,7 +712,10 @@ class WalutomatExchangeClient(ExchangeClientBase):
             remaining=request.amount,
             timestamp=time.time(),
         )
-        await self._log_order_to_db(request, order)
+        db_result = await self._log_order_to_db(request, order)
+        if db_result is not None:
+            order.db_order_id = db_result[0]
+            order.db_order_public_id = db_result[1]
         return order
 
     async def cancel_order(self, order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:

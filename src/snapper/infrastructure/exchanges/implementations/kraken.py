@@ -365,7 +365,10 @@ class KrakenExchangeClient(ExchangeClientBase):
             ccxt_params,
         )
         order = self._convert_ccxt_order(order_data)
-        await self._log_order_to_db(request, order)
+        db_result = await self._log_order_to_db(request, order)
+        if db_result is not None:
+            order.db_order_id = db_result[0]
+            order.db_order_public_id = db_result[1]
         return order
 
     async def _create_order_via_native(
@@ -403,7 +406,10 @@ class KrakenExchangeClient(ExchangeClientBase):
                 extra_params=extra_params or None,
             )
             order = self._convert_kraken_native_order(result, request)
-            await self._log_order_to_db(request, order)
+            db_result = await self._log_order_to_db(request, order)
+            if db_result is not None:
+                order.db_order_id = db_result[0]
+                order.db_order_public_id = db_result[1]
             return order
         except Exception as fallback_error:
             logger.error(f"Failed to create order with native Kraken API: {fallback_error}")

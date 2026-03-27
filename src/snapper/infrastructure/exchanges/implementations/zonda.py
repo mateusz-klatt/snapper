@@ -729,7 +729,10 @@ class ZondaExchangeClient(ExchangeClientBase):
                 timestamp=float(ccxt_order["timestamp"]) / 1000.0,
                 fee=float(ccxt_order["fee"]["cost"]) if ccxt_order.get("fee") else None,
             )
-            await self._log_order_to_db(request, order)
+            db_result = await self._log_order_to_db(request, order)
+            if db_result is not None:
+                order.db_order_id = db_result[0]
+                order.db_order_public_id = db_result[1]
             return order
         except Exception as e:
             logger.error(f"Failed to create order: {e}")

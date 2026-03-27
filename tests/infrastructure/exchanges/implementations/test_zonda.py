@@ -699,7 +699,8 @@ class TestZondaRestAPI:
 
         Given: Client with credentials and mocked create_order returning order data.
         When: create_order() is called with limit buy request.
-        Then: ExchangeOrder has correct id, symbol, side, type, amount, price, status.
+        Then: ExchangeOrder has correct id, symbol, side, type, amount, price, status,
+              and db_order_id / db_order_public_id populated from _log_order_to_db.
         """
         client.api_key = "test_key"
         client.api_secret = "test_secret"
@@ -717,10 +718,18 @@ class TestZondaRestAPI:
             "timestamp": 1609459200000,
             "fee": {"cost": 50.0},
         }
-        with patch.object(
-            client._ccxt_client,
-            "create_order",
-            return_value=mock_ccxt_order,
+        with (
+            patch.object(
+                client._ccxt_client,
+                "create_order",
+                return_value=mock_ccxt_order,
+            ),
+            patch.object(
+                client,
+                "_log_order_to_db",
+                new_callable=AsyncMock,
+                return_value=(42, "pub-42"),
+            ),
         ):
             request = ExchangeOrderRequest(
                 symbol="BTC-EUR",
@@ -738,6 +747,8 @@ class TestZondaRestAPI:
             assert order.amount == pytest.approx(1.0)
             assert order.price == pytest.approx(50000.0)
             assert order.status == OrderStatusEnum.OPEN
+            assert order.db_order_id == 42
+            assert order.db_order_public_id == "pub-42"
 
     @pytest.mark.asyncio
     async def test_create_order_no_credentials(self, client: ZondaExchangeClient) -> None:

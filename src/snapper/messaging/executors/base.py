@@ -8,6 +8,8 @@ import asyncio
 import time
 from abc import ABC
 from abc import abstractmethod
+from dataclasses import dataclass
+from dataclasses import field
 from datetime import UTC
 from datetime import datetime
 from typing import Any
@@ -66,6 +68,29 @@ from snapper.utils.logging import set_log_context
 _EXCHANGE_NOT_INIT_MSG = "Exchange client not initialized"
 
 
+@dataclass
+class PendingOrderState:
+    """Per-order executor state for tracking orders through their lifecycle.
+
+    Consolidates request data, DB identifiers, and cumulative fill tracking
+    into a single model. Used by the executor base for persistence and
+    delta fill computation.
+
+    Attributes:
+        request: Original order request data.
+        db_order_id: Database row ID from _log_order_to_db (for status updates).
+        order_public_id: Logical order identity (for execution inserts).
+        exchange_order_id: Exchange-assigned order ID (set after ACK).
+        last_seen_cum_qty: Running cumulative fill quantity for delta fallback.
+    """
+
+    request: OrderRequestData
+    db_order_id: int | None = field(default=None)
+    order_public_id: str | None = field(default=None)
+    exchange_order_id: str | None = field(default=None)
+    last_seen_cum_qty: float = field(default=0.0)
+
+
 class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     """Base service for executing orders on exchanges via ZMQ messaging."""
 
@@ -94,9 +119,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self.heartbeat_seq = 0
         self.exchange_client: T | None = None
         self.repository: Repository | None = None
-        self.pending_orders: dict[str, OrderRequestData] = {}
+        self.pending_orders: dict[str, PendingOrderState] = {}
         self.client_by_exchange: dict[str, str] = {}
-        self.last_seen_cum_qty: dict[str, float] = {}
         self.orphaned_executions: dict[str, tuple[ExecutionUpdate, float]] = {}
         self.orphan_ttl_seconds: float = 5.0
         self.orphan_drop_count: int = 0
@@ -403,7 +427,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             await self._publish_order_status(order, "rejected")
             return
         try:
-            self.pending_orders[order.client_order_id] = order
+            self.pending_orders[order.client_order_id] = PendingOrderState(request=order)
             await self._publish_order_status(order, "submitted")
             exchange_order_id = await self._execute_live_order(order)
             if exchange_order_id:
@@ -442,8 +466,13 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             if result and result.status == OrderStatusEnum.CANCELED:
                 client_id = self.client_by_exchange.pop(cancel.exchange_order_id, None)
                 if client_id:
-                    self.pending_orders.pop(client_id, None)
-                    self.last_seen_cum_qty.pop(client_id, None)
+                    pending = self.pending_orders.pop(client_id, None)
+                    if pending and pending.db_order_id is not None:
+                        assert self.exchange_client is not None
+                        await self.exchange_client._log_order_update_to_db(
+                            db_order_id=pending.db_order_id,
+                            status=OrderStatusEnum.CANCELED,
+                        )
                 await self._publish_cancel_event(cancel, "cancelled")
                 logger.info(
                     f"[{exchange_name}] Order {cancel.exchange_order_id} cancelled successfully"
@@ -569,7 +598,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             result = await self.exchange_client.create_order(order_request)
             exchange_order_id = result.id if result else None
             if exchange_order_id:
-                self.pending_orders[exchange_order_id] = order
+                pending = self.pending_orders.get(order.client_order_id)
+                if pending is not None:
+                    pending.exchange_order_id = exchange_order_id
+                    pending.db_order_id = result.db_order_id
+                    pending.order_public_id = result.db_order_public_id
                 logger.info(
                     f"[{exchange_name}] ExchangeOrderSnapshot submitted: {order.client_order_id} -> "
                     f"{exchange_order_id}, waiting for execution via WebSocket"
@@ -689,16 +722,16 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     f"(status={execution.exec_type}, awaiting ACK or TTL expiry)"
                 )
             return None
-        original_order = self.pending_orders.get(client_order_id)
-        if original_order is None:
+        pending = self.pending_orders.get(client_order_id)
+        if pending is None:
             logger.warning(
                 f"[{exchange_name}] Received execution for unknown client order: "
                 f"{client_order_id} (exchange: {exchange_order_id})"
             )
             return None
-        return exchange_order_id, client_order_id, original_order
+        return exchange_order_id, client_order_id, pending.request
 
-    def _handle_cancellation(
+    async def _handle_cancellation(
         self,
         execution: ExecutionUpdate,
         exchange_order_id: str,
@@ -718,9 +751,17 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         if execution.exec_type not in ("canceled", "expired"):
             return False
-        self.pending_orders.pop(client_order_id, None)
+        pending = self.pending_orders.pop(client_order_id, None)
         self.client_by_exchange.pop(exchange_order_id, None)
-        self.last_seen_cum_qty.pop(client_order_id, None)
+        if pending and pending.db_order_id is not None and self.exchange_client is not None:
+            status = (
+                OrderStatusEnum.CANCELED
+                if execution.exec_type == "canceled"
+                else OrderStatusEnum.EXPIRED
+            )
+            await self.exchange_client._log_order_update_to_db(
+                db_order_id=pending.db_order_id, status=status
+            )
         logger.info(
             f"[{exchange_name}] Order {client_order_id} {execution.exec_type}, "
             f"cleaned up maps (no execution published)"
@@ -751,14 +792,16 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         topic = order_event_topic(exchange_name, original_order.instrument, "executed")
         cum_qty = execution.cum_qty or 0.0
         client_id = original_order.client_order_id
+        pending = self.pending_orders.get(client_id)
         if execution.last_qty is not None and execution.last_price is not None:
             delta_size = execution.last_qty
             delta_price = execution.last_price
         else:
-            prev_cum = self.last_seen_cum_qty.get(client_id, 0.0)
+            prev_cum = pending.last_seen_cum_qty if pending else 0.0
             delta_size = cum_qty - prev_cum
             delta_price = execution.average_price or 0.0
-        self.last_seen_cum_qty[client_id] = cum_qty
+        if pending:
+            pending.last_seen_cum_qty = cum_qty
         return topic, ExecutionData(
             public_id=str(uuid7()),
             timestamp=now,
@@ -800,7 +843,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             if resolved is None:
                 return
             exchange_order_id, client_order_id, original_order = resolved
-            if self._handle_cancellation(
+            if await self._handle_cancellation(
                 execution, exchange_order_id, client_order_id, exchange_name
             ):
                 return
@@ -808,10 +851,24 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 execution, exchange_order_id, original_order, exchange_name
             )
             await self._publish_execution(topic, fill)
+            pending = self.pending_orders.get(client_order_id)
+            if pending and self.exchange_client is not None:
+                if pending.order_public_id is not None:
+                    await self.exchange_client._log_execution_to_db(
+                        order_public_id=pending.order_public_id,
+                        execution=execution,
+                    )
+                if pending.db_order_id is not None:
+                    db_status = (
+                        OrderStatusEnum.CLOSED if fill.status == "filled" else OrderStatusEnum.OPEN
+                    )
+                    await self.exchange_client._log_order_update_to_db(
+                        db_order_id=pending.db_order_id,
+                        status=db_status,
+                    )
             if fill.status == "filled":
                 self.pending_orders.pop(client_order_id, None)
                 self.client_by_exchange.pop(exchange_order_id, None)
-                self.last_seen_cum_qty.pop(client_order_id, None)
                 logger.info(
                     f"[{exchange_name}] Order {client_order_id} filled, removed from pending"
                 )

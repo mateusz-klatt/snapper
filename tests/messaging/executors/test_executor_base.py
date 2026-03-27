@@ -215,7 +215,7 @@ class MergedDummyClient(SimpleNamespace):
 
     async def create_order(self, request: Any) -> SimpleNamespace:
         """Create a test order."""
-        return SimpleNamespace(id="ex123")
+        return SimpleNamespace(id="ex123", db_order_id=None, db_order_public_id=None)
 
     async def subscribe_executions(self) -> AsyncIterator[Any]:
         """Subscribe to execution updates."""
@@ -308,9 +308,11 @@ async def test_execute_live_order_tracks_pending(monkeypatch: pytest.MonkeyPatch
     ex: Any = MergedDummyExecutor()
     ex.exchange_client = MergedDummyClient()
     order = make_order()
+    ex.pending_orders[order.client_order_id] = base_module.PendingOrderState(request=order)
     order_id = await ex._execute_live_order(order)
     assert order_id == "ex123"
-    assert "ex123" in ex.pending_orders
+    pending = ex.pending_orders[order.client_order_id]
+    assert pending.exchange_order_id == "ex123"
 
 
 @pytest.mark.asyncio
@@ -737,7 +739,7 @@ async def test_process_execution_default_filled_and_removes_pending(
     ex: Any = MergedDummyExecutor()
     ex.running = True
     order = make_order()
-    ex.pending_orders[order.client_order_id] = order
+    ex.pending_orders[order.client_order_id] = base_module.PendingOrderState(request=order)
     ex.client_by_exchange["ex1"] = order.client_order_id
     ex._publish_execution = AsyncMock()
     execution = SimpleNamespace(
@@ -754,7 +756,6 @@ async def test_process_execution_default_filled_and_removes_pending(
     )
     await ex._process_execution(execution)
     assert order.client_order_id not in ex.pending_orders
-    assert order.client_order_id not in ex.last_seen_cum_qty
     ex._publish_execution.assert_awaited()
 
 
@@ -769,7 +770,7 @@ async def test_process_execution_none_exchange_order_id() -> None:
     ex: Any = MergedDummyExecutor()
     ex.running = True
     order = make_order()
-    ex.pending_orders[order.client_order_id] = order
+    ex.pending_orders[order.client_order_id] = base_module.PendingOrderState(request=order)
     published_fills: list[Any] = []
 
     async def track_publish_execution(topic: str, fill: Any) -> None:
@@ -860,7 +861,7 @@ async def test_process_execution_orphan_buffering_and_replay() -> None:
     ex: Any = MergedDummyExecutor()
     ex.running = True
     order = make_order()
-    ex.pending_orders[order.client_order_id] = order
+    ex.pending_orders[order.client_order_id] = base_module.PendingOrderState(request=order)
     published_fills: list[Any] = []
 
     async def track_publish_execution(topic: str, fill: Any) -> None:
@@ -944,7 +945,7 @@ async def test_process_execution_exception_path(monkeypatch: pytest.MonkeyPatch)
     ex: Any = MergedDummyExecutor()
     ex.running = True
     order = make_order()
-    ex.pending_orders[order.client_order_id] = order
+    ex.pending_orders[order.client_order_id] = base_module.PendingOrderState(request=order)
     ex.client_by_exchange["ex1"] = order.client_order_id
     ex._publish_execution = AsyncMock(side_effect=RuntimeError("fail"))
     execution = SimpleNamespace(
@@ -1472,7 +1473,9 @@ class TestProcessExecution:
             quantity=0.1,
             client_order_id="order_123",
         )
-        service_any.pending_orders = {order.client_order_id: order}
+        service_any.pending_orders = {
+            order.client_order_id: base_module.PendingOrderState(request=order)
+        }
         service_any.client_by_exchange = {"exchange_order_456": order.client_order_id}
         published_fills: list[Any] = []
 
@@ -1525,7 +1528,9 @@ class TestProcessExecution:
             price=50000.0,
             client_order_id="order_expired_123",
         )
-        service_any.pending_orders = {order.client_order_id: order}
+        service_any.pending_orders = {
+            order.client_order_id: base_module.PendingOrderState(request=order)
+        }
         service_any.client_by_exchange = {"exchange_order_789": order.client_order_id}
         published_fills: list[Any] = []
 
@@ -1575,7 +1580,9 @@ class TestProcessExecution:
             price=50000.0,
             client_order_id="order_123",
         )
-        service_any.pending_orders = {order.client_order_id: order}
+        service_any.pending_orders = {
+            order.client_order_id: base_module.PendingOrderState(request=order)
+        }
         service_any.client_by_exchange = {"exchange_order_456": order.client_order_id}
         published_fills: list[Any] = []
 
@@ -2820,10 +2827,18 @@ class TestExecutorCoverage:
         order = self._create_order(mode="live")
         mock_order_result = MagicMock()
         mock_order_result.id = "abc123"
+        mock_order_result.db_order_id = 42
+        mock_order_result.db_order_public_id = "pub-42"
         mock_exchange_client.create_order = AsyncMock(return_value=mock_order_result)
+        service_any.pending_orders[order.client_order_id] = base_module.PendingOrderState(
+            request=order
+        )
         result = await service_any._execute_live_order(order)
         assert result == "abc123"
-        assert "abc123" in service_any.pending_orders
+        pending = service_any.pending_orders[order.client_order_id]
+        assert pending.exchange_order_id == "abc123"
+        assert pending.db_order_id == 42
+        assert pending.order_public_id == "pub-42"
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -2933,7 +2948,9 @@ class TestExecutorCoverage:
         service_any.running = True
         service_any._publish_execution = AsyncMock()
         order = self._create_order(mode="live")
-        service_any.pending_orders[order.client_order_id] = order
+        service_any.pending_orders[order.client_order_id] = base_module.PendingOrderState(
+            request=order
+        )
         service_any.client_by_exchange = {"ex123": order.client_order_id}
         execution = ExecutionUpdate(
             order_id="ex123",
@@ -3659,13 +3676,18 @@ class TestExecutorWebSocketExecutions:
             client_order_id="test-order-123",
             exchange="kraken",
         )
-        mock_order_result = type("ExchangeOrderSnapshot", (), {"id": "KRAKEN-ORDER-ABC123"})()
+        mock_order_result = type(
+            "ExchangeOrderSnapshot",
+            (),
+            {"id": "KRAKEN-ORDER-ABC123", "db_order_id": None, "db_order_public_id": None},
+        )()
         mock_exchange_client.create_order = AsyncMock(return_value=mock_order_result)
+        service.pending_orders[order.client_order_id] = base_module.PendingOrderState(request=order)
         result = await service._execute_live_order(order)
-        assert isinstance(result, str), "Should return order_id string, not ExecutionData!"
+        assert isinstance(result, str)
         assert result == "KRAKEN-ORDER-ABC123"
-        assert "KRAKEN-ORDER-ABC123" in service.pending_orders
-        assert service.pending_orders["KRAKEN-ORDER-ABC123"] == order
+        pending = service.pending_orders[order.client_order_id]
+        assert pending.exchange_order_id == "KRAKEN-ORDER-ABC123"
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -3700,8 +3722,15 @@ class TestExecutorWebSocketExecutions:
             client_order_id="test-limit-123",
             exchange="kraken",
         )
-        mock_order_result = type("ExchangeOrderSnapshot", (), {"id": "KRAKEN-LIMIT-XYZ"})()
+        mock_order_result = type(
+            "ExchangeOrderSnapshot",
+            (),
+            {"id": "KRAKEN-LIMIT-XYZ", "db_order_id": None, "db_order_public_id": None},
+        )()
         mock_exchange_client.create_order = AsyncMock(return_value=mock_order_result)
+        service_any.pending_orders[order.client_order_id] = base_module.PendingOrderState(
+            request=order
+        )
         result = await service._execute_live_order(order)
         assert result == "KRAKEN-LIMIT-XYZ"
 
@@ -3771,7 +3800,7 @@ class TestExecutorWebSocketExecutions:
             client_order_id="test-order-123",
             exchange="kraken",
         )
-        service.pending_orders[order.client_order_id] = order
+        service.pending_orders[order.client_order_id] = base_module.PendingOrderState(request=order)
         service.client_by_exchange = {"KRAKEN-ORDER-ABC123": order.client_order_id}
         execution = ExecutionUpdate(
             order_id="KRAKEN-ORDER-ABC123",
@@ -3802,7 +3831,6 @@ class TestExecutorWebSocketExecutions:
             assert fill.fee_asset == "USD"
             assert fill.status == "filled"
             assert order.client_order_id not in service.pending_orders
-            assert order.client_order_id not in service.last_seen_cum_qty
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -3834,7 +3862,7 @@ class TestExecutorWebSocketExecutions:
             client_order_id="test-partial-123",
             exchange="kraken",
         )
-        service.pending_orders[order.client_order_id] = order
+        service.pending_orders[order.client_order_id] = base_module.PendingOrderState(request=order)
         service.client_by_exchange = {"KRAKEN-PARTIAL-XYZ": order.client_order_id}
         execution = ExecutionUpdate(
             order_id="KRAKEN-PARTIAL-XYZ",
@@ -3857,7 +3885,9 @@ class TestExecutorWebSocketExecutions:
             assert fill.last_price == pytest.approx(45000.0)
             assert fill.status == "partial"
             assert order.client_order_id in service.pending_orders
-            assert service.last_seen_cum_qty[order.client_order_id] == pytest.approx(0.5)
+            assert service.pending_orders[order.client_order_id].last_seen_cum_qty == pytest.approx(
+                0.5
+            )
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -3889,7 +3919,7 @@ class TestExecutorWebSocketExecutions:
             client_order_id="test-cancel-123",
             exchange="kraken",
         )
-        service.pending_orders[order.client_order_id] = order
+        service.pending_orders[order.client_order_id] = base_module.PendingOrderState(request=order)
         service.client_by_exchange = {"KRAKEN-CANCEL-ABC": order.client_order_id}
         execution = ExecutionUpdate(
             order_id="KRAKEN-CANCEL-ABC",
@@ -4461,7 +4491,9 @@ class TestCancelReplaceHandlers:
             price=50000.0,
             client_order_id="client_456",
         )
-        service_any.pending_orders = {order.client_order_id: order}
+        service_any.pending_orders = {
+            order.client_order_id: base_module.PendingOrderState(request=order)
+        }
         service_any.client_by_exchange = {"KRAKEN-123": order.client_order_id}
         mock_client = AsyncMock()
         mock_result = MagicMock()
@@ -4939,7 +4971,9 @@ class TestDeltaFillSemantics:
         ex: Any = MergedDummyExecutor()
         ex.running = True
         order = make_order(client_order_id="delta-2")
-        ex.last_seen_cum_qty["delta-2"] = 0.3
+        ex.pending_orders["delta-2"] = base_module.PendingOrderState(
+            request=order, last_seen_cum_qty=0.3
+        )
         execution = ExecutionUpdate(
             order_id="ex-2",
             exec_type="trade",
@@ -4955,7 +4989,7 @@ class TestDeltaFillSemantics:
         assert fill.size == pytest.approx(0.5)
         assert fill.last_size == pytest.approx(0.2)
         assert fill.last_price == pytest.approx(50050.0)
-        assert ex.last_seen_cum_qty["delta-2"] == pytest.approx(0.5)
+        assert ex.pending_orders["delta-2"].last_seen_cum_qty == pytest.approx(0.5)
 
     @pytest.mark.asyncio
     async def test_build_execution_data_two_partials_then_filled(self) -> None:
@@ -5036,9 +5070,9 @@ class TestDeltaFillSemantics:
         ex: Any = MergedDummyExecutor()
         ex.running = True
         order = make_order(client_order_id="cleanup-1")
-        ex.pending_orders[order.client_order_id] = order
+        ex.pending_orders[order.client_order_id] = base_module.PendingOrderState(request=order)
         ex.client_by_exchange["ex-cleanup"] = order.client_order_id
-        ex.last_seen_cum_qty[order.client_order_id] = 0.3
+        ex.pending_orders[order.client_order_id].last_seen_cum_qty = 0.3
         ex._publish_execution = AsyncMock()
         execution = ExecutionUpdate(
             order_id="ex-cleanup",
@@ -5054,7 +5088,6 @@ class TestDeltaFillSemantics:
             last_price=50100.0,
         )
         await ex._process_execution(execution)
-        assert order.client_order_id not in ex.last_seen_cum_qty
         assert order.client_order_id not in ex.pending_orders
 
     @pytest.mark.asyncio
@@ -5068,9 +5101,9 @@ class TestDeltaFillSemantics:
         ex: Any = MergedDummyExecutor()
         ex.running = True
         order = make_order(client_order_id="cancel-1")
-        ex.pending_orders[order.client_order_id] = order
+        ex.pending_orders[order.client_order_id] = base_module.PendingOrderState(request=order)
         ex.client_by_exchange["ex-cancel"] = order.client_order_id
-        ex.last_seen_cum_qty[order.client_order_id] = 0.2
+        ex.pending_orders[order.client_order_id].last_seen_cum_qty = 0.2
         ex._publish_execution = AsyncMock()
         execution = ExecutionUpdate(
             order_id="ex-cancel",
@@ -5082,7 +5115,6 @@ class TestDeltaFillSemantics:
             timestamp=datetime.now(UTC),
         )
         await ex._process_execution(execution)
-        assert order.client_order_id not in ex.last_seen_cum_qty
         assert order.client_order_id not in ex.pending_orders
 
     @pytest.mark.asyncio
@@ -5096,9 +5128,9 @@ class TestDeltaFillSemantics:
         ex: Any = MergedDummyExecutor()
         ex.running = True
         order = make_order(client_order_id="expire-1")
-        ex.pending_orders[order.client_order_id] = order
+        ex.pending_orders[order.client_order_id] = base_module.PendingOrderState(request=order)
         ex.client_by_exchange["ex-expire"] = order.client_order_id
-        ex.last_seen_cum_qty[order.client_order_id] = 0.1
+        ex.pending_orders[order.client_order_id].last_seen_cum_qty = 0.1
         ex._publish_execution = AsyncMock()
         execution = ExecutionUpdate(
             order_id="ex-expire",
@@ -5110,7 +5142,6 @@ class TestDeltaFillSemantics:
             timestamp=datetime.now(UTC),
         )
         await ex._process_execution(execution)
-        assert order.client_order_id not in ex.last_seen_cum_qty
         assert order.client_order_id not in ex.pending_orders
 
     @pytest.mark.asyncio
@@ -5165,3 +5196,190 @@ class TestDeltaFillSemantics:
         ex.msg_publisher.send.assert_awaited_once()
         published = ex.msg_publisher.send.call_args[0][1]
         assert published.filled_size == 0.0
+
+
+class TestExecutorBasePersistence:
+    """Tests for Stage C: DB persistence in executor base."""
+
+    @pytest.mark.asyncio
+    async def test_process_execution_logs_to_db_on_fill(self) -> None:
+        """Verify _process_execution calls DB logging for fill with DB IDs.
+
+        Given: Pending order with db_order_id and order_public_id set,
+        When: Filled execution is processed,
+        Then: _log_execution_to_db and _log_order_update_to_db are called.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        order = make_order(client_order_id="db-fill-1")
+        pending = base_module.PendingOrderState(
+            request=order, db_order_id=42, order_public_id="pub-42"
+        )
+        ex.pending_orders[order.client_order_id] = pending
+        ex.client_by_exchange["ex-db"] = order.client_order_id
+        mock_client = AsyncMock()
+        ex.exchange_client = mock_client
+        ex._publish_execution = AsyncMock()
+        execution = ExecutionUpdate(
+            order_id="ex-db",
+            exec_type="trade",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=OrderTypeEnum.LIMIT,
+            order_status=OrderStatusEnum.CLOSED,
+            timestamp=datetime.now(UTC),
+            cum_qty=1.0,
+            average_price=50000.0,
+            last_qty=1.0,
+            last_price=50000.0,
+            fee_usd_equiv=0.5,
+        )
+        await ex._process_execution(execution)
+        mock_client._log_execution_to_db.assert_awaited_once()
+        mock_client._log_order_update_to_db.assert_awaited_once()
+        call_args = mock_client._log_order_update_to_db.call_args
+        assert call_args.kwargs["db_order_id"] == 42
+        assert call_args.kwargs["status"] == OrderStatusEnum.CLOSED
+
+    @pytest.mark.asyncio
+    async def test_process_execution_partial_logs_open_status(self) -> None:
+        """Verify partial fill logs OPEN status (not CLOSED) to DB.
+
+        Given: Pending order with DB IDs,
+        When: Partial fill is processed,
+        Then: Order status update uses OPEN, order remains pending.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        order = make_order(client_order_id="db-partial-1")
+        pending = base_module.PendingOrderState(
+            request=order, db_order_id=42, order_public_id="pub-42"
+        )
+        ex.pending_orders[order.client_order_id] = pending
+        ex.client_by_exchange["ex-partial"] = order.client_order_id
+        mock_client = AsyncMock()
+        ex.exchange_client = mock_client
+        ex._publish_execution = AsyncMock()
+        execution = ExecutionUpdate(
+            order_id="ex-partial",
+            exec_type="trade",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=OrderTypeEnum.LIMIT,
+            order_status=OrderStatusEnum.OPEN,
+            timestamp=datetime.now(UTC),
+            cum_qty=0.5,
+            average_price=50000.0,
+            last_qty=0.5,
+            last_price=50000.0,
+            fee_usd_equiv=0.25,
+        )
+        await ex._process_execution(execution)
+        call_args = mock_client._log_order_update_to_db.call_args
+        assert call_args.kwargs["status"] == OrderStatusEnum.OPEN
+        assert order.client_order_id in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_process_execution_no_db_ids_skips_logging(self) -> None:
+        """Verify execution without DB IDs skips DB logging.
+
+        Given: Pending order without db_order_id,
+        When: Execution is processed,
+        Then: No DB logging calls are made.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        order = make_order(client_order_id="no-db-1")
+        ex.pending_orders[order.client_order_id] = base_module.PendingOrderState(request=order)
+        ex.client_by_exchange["ex-nodb"] = order.client_order_id
+        mock_client = AsyncMock()
+        ex.exchange_client = mock_client
+        ex._publish_execution = AsyncMock()
+        execution = ExecutionUpdate(
+            order_id="ex-nodb",
+            exec_type="trade",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=OrderTypeEnum.LIMIT,
+            order_status=OrderStatusEnum.CLOSED,
+            timestamp=datetime.now(UTC),
+            cum_qty=1.0,
+            average_price=50000.0,
+            last_qty=1.0,
+            last_price=50000.0,
+        )
+        await ex._process_execution(execution)
+        mock_client._log_execution_to_db.assert_not_awaited()
+        mock_client._log_order_update_to_db.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_handle_cancellation_logs_db_update(self) -> None:
+        """Verify cancellation handler logs CANCELED status to DB.
+
+        Given: Pending order with db_order_id,
+        When: Canceled execution is handled,
+        Then: _log_order_update_to_db is called with CANCELED status.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        order = make_order(client_order_id="cancel-db-1")
+        pending = base_module.PendingOrderState(
+            request=order, db_order_id=99, order_public_id="pub-99"
+        )
+        ex.pending_orders[order.client_order_id] = pending
+        ex.client_by_exchange["ex-cancel-db"] = order.client_order_id
+        mock_client = AsyncMock()
+        ex.exchange_client = mock_client
+        execution = ExecutionUpdate(
+            order_id="ex-cancel-db",
+            exec_type="canceled",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=OrderTypeEnum.LIMIT,
+            order_status=OrderStatusEnum.CANCELED,
+            timestamp=datetime.now(UTC),
+        )
+        result = await ex._handle_cancellation(
+            execution, "ex-cancel-db", order.client_order_id, "kraken"
+        )
+        assert result is True
+        mock_client._log_order_update_to_db.assert_awaited_once()
+        call_args = mock_client._log_order_update_to_db.call_args
+        assert call_args.kwargs["db_order_id"] == 99
+        assert call_args.kwargs["status"] == OrderStatusEnum.CANCELED
+
+    @pytest.mark.asyncio
+    async def test_process_cancel_logs_db_update(self) -> None:
+        """Verify _process_cancel logs CANCELED status to DB.
+
+        Given: Pending order with db_order_id and successful cancel,
+        When: Cancel is processed,
+        Then: _log_order_update_to_db is called via exchange client.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        order = make_order(client_order_id="cancel-process-1")
+        pending = base_module.PendingOrderState(
+            request=order, db_order_id=77, order_public_id="pub-77"
+        )
+        ex.pending_orders[order.client_order_id] = pending
+        ex.client_by_exchange["ex-cancel-proc"] = order.client_order_id
+        mock_client = AsyncMock()
+        cancel_result = MagicMock()
+        cancel_result.status = OrderStatusEnum.CANCELED
+        mock_client.cancel_order = AsyncMock(return_value=cancel_result)
+        ex.exchange_client = mock_client
+        ex.msg_publisher = AsyncMock()
+        cancel_data = OrderCancelData(
+            session_id="",
+            sequence_id=0,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            exchange="kraken",
+            instrument="BTC-USD",
+            exchange_order_id="ex-cancel-proc",
+            client_order_id=order.client_order_id,
+        )
+        await ex._process_cancel(cancel_data)
+        mock_client._log_order_update_to_db.assert_awaited_once()
+        assert order.client_order_id not in ex.pending_orders
