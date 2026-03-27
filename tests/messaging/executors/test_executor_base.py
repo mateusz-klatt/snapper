@@ -748,10 +748,13 @@ async def test_process_execution_default_filled_and_removes_pending(
         cum_qty=None,
         average_price=None,
         fee_usd_equiv=None,
+        last_qty=None,
+        last_price=None,
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
     )
     await ex._process_execution(execution)
     assert order.client_order_id not in ex.pending_orders
+    assert order.client_order_id not in ex.last_seen_cum_qty
     ex._publish_execution.assert_awaited()
 
 
@@ -2636,6 +2639,8 @@ class TestExecutorCoverage:
             side="buy",
             size=0.1,
             price=50000.0,
+            last_size=0.1,
+            last_price=50000.0,
             fee=5.0,
             fee_asset="USD",
             status="filled",
@@ -2671,6 +2676,8 @@ class TestExecutorCoverage:
             side="buy",
             size=0.1,
             price=50000.0,
+            last_size=0.1,
+            last_price=50000.0,
             fee=0.0,
             fee_asset="USD",
             status="filled",
@@ -3319,6 +3326,8 @@ class TestExecutorCoverage:
             side="buy",
             size=0.0,
             price=0.0,
+            last_size=0.0,
+            last_price=0.0,
             fee=0.0,
             fee_asset="USD",
             status="filled",
@@ -3787,10 +3796,13 @@ class TestExecutorWebSocketExecutions:
             assert fill.instrument == "BTC-USD"
             assert fill.size == pytest.approx(0.1)
             assert fill.price == pytest.approx(45123.50)
+            assert fill.last_size == pytest.approx(0.1)
+            assert fill.last_price == pytest.approx(45123.50)
             assert fill.fee == pytest.approx(4.51)
             assert fill.fee_asset == "USD"
             assert fill.status == "filled"
             assert order.client_order_id not in service.pending_orders
+            assert order.client_order_id not in service.last_seen_cum_qty
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -3841,8 +3853,11 @@ class TestExecutorWebSocketExecutions:
             await service._process_execution(execution)
             fill: ExecutionData = mock_publish.call_args[0][1]
             assert fill.size == pytest.approx(0.5)
+            assert fill.last_size == pytest.approx(0.5)
+            assert fill.last_price == pytest.approx(45000.0)
             assert fill.status == "partial"
             assert order.client_order_id in service.pending_orders
+            assert service.last_seen_cum_qty[order.client_order_id] == pytest.approx(0.5)
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -4878,3 +4893,275 @@ class TestCancelReplaceHandlers:
         service_any._handle_submit_command.assert_not_awaited()
         service_any._handle_cancel_command.assert_not_awaited()
         service_any._handle_replace_command.assert_not_awaited()
+
+
+class TestDeltaFillSemantics:
+    """Tests for Stage A: delta fill fields and order status cleanup."""
+
+    @pytest.mark.asyncio
+    async def test_build_execution_data_uses_last_qty_when_available(self) -> None:
+        """Verify executor propagates exchange-provided last_qty/last_price.
+
+        Given: ExecutionUpdate with last_qty and last_price from exchange,
+        When: _build_execution_data is called,
+        Then: last_size and last_price use exchange values directly.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        order = make_order(client_order_id="delta-1")
+        execution = ExecutionUpdate(
+            order_id="ex-1",
+            exec_type="trade",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=OrderTypeEnum.LIMIT,
+            order_status=OrderStatusEnum.OPEN,
+            timestamp=datetime.now(UTC),
+            cum_qty=0.5,
+            average_price=50100.0,
+            last_qty=0.5,
+            last_price=50100.0,
+        )
+        _topic, fill = ex._build_execution_data(execution, "ex-1", order, "kraken")
+        assert fill.size == pytest.approx(0.5)
+        assert fill.price == pytest.approx(50100.0)
+        assert fill.last_size == pytest.approx(0.5)
+        assert fill.last_price == pytest.approx(50100.0)
+
+    @pytest.mark.asyncio
+    async def test_build_execution_data_fallback_delta_from_cumulative(self) -> None:
+        """Verify executor computes delta from cumulative when last_qty missing.
+
+        Given: ExecutionUpdate without last_qty/last_price,
+        When: _build_execution_data is called with prior cumulative state,
+        Then: last_size is computed as cum_qty minus last_seen_cum_qty.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        order = make_order(client_order_id="delta-2")
+        ex.last_seen_cum_qty["delta-2"] = 0.3
+        execution = ExecutionUpdate(
+            order_id="ex-2",
+            exec_type="trade",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=OrderTypeEnum.LIMIT,
+            order_status=OrderStatusEnum.OPEN,
+            timestamp=datetime.now(UTC),
+            cum_qty=0.5,
+            average_price=50050.0,
+        )
+        _topic, fill = ex._build_execution_data(execution, "ex-2", order, "kraken")
+        assert fill.size == pytest.approx(0.5)
+        assert fill.last_size == pytest.approx(0.2)
+        assert fill.last_price == pytest.approx(50050.0)
+        assert ex.last_seen_cum_qty["delta-2"] == pytest.approx(0.5)
+
+    @pytest.mark.asyncio
+    async def test_build_execution_data_two_partials_then_filled(self) -> None:
+        """Verify correct delta across a sequence of partial fills.
+
+        Given: Three execution events for the same order (partial, partial, filled),
+        When: _build_execution_data is called for each,
+        Then: Each event carries the correct incremental delta.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        order = make_order(client_order_id="delta-seq")
+
+        partial_1 = ExecutionUpdate(
+            order_id="ex-seq",
+            exec_type="trade",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=OrderTypeEnum.LIMIT,
+            order_status=OrderStatusEnum.OPEN,
+            timestamp=datetime.now(UTC),
+            cum_qty=0.3,
+            average_price=50000.0,
+            last_qty=0.3,
+            last_price=50000.0,
+        )
+        _topic, fill_1 = ex._build_execution_data(partial_1, "ex-seq", order, "kraken")
+        assert fill_1.last_size == pytest.approx(0.3)
+        assert fill_1.last_price == pytest.approx(50000.0)
+        assert fill_1.status == "partial"
+
+        partial_2 = ExecutionUpdate(
+            order_id="ex-seq",
+            exec_type="trade",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=OrderTypeEnum.LIMIT,
+            order_status=OrderStatusEnum.OPEN,
+            timestamp=datetime.now(UTC),
+            cum_qty=0.5,
+            average_price=50050.0,
+            last_qty=0.2,
+            last_price=50100.0,
+        )
+        _topic, fill_2 = ex._build_execution_data(partial_2, "ex-seq", order, "kraken")
+        assert fill_2.size == pytest.approx(0.5)
+        assert fill_2.last_size == pytest.approx(0.2)
+        assert fill_2.last_price == pytest.approx(50100.0)
+        assert fill_2.status == "partial"
+
+        final = ExecutionUpdate(
+            order_id="ex-seq",
+            exec_type="trade",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=OrderTypeEnum.LIMIT,
+            order_status=OrderStatusEnum.CLOSED,
+            timestamp=datetime.now(UTC),
+            cum_qty=0.8,
+            average_price=50075.0,
+            last_qty=0.3,
+            last_price=50150.0,
+        )
+        _topic, fill_3 = ex._build_execution_data(final, "ex-seq", order, "kraken")
+        assert fill_3.size == pytest.approx(0.8)
+        assert fill_3.last_size == pytest.approx(0.3)
+        assert fill_3.last_price == pytest.approx(50150.0)
+        assert fill_3.status == "filled"
+
+    @pytest.mark.asyncio
+    async def test_last_seen_cum_qty_cleaned_on_filled(self) -> None:
+        """Verify last_seen_cum_qty is removed after final fill.
+
+        Given: Pending order with cumulative tracking state,
+        When: Final fill is processed via _process_execution,
+        Then: last_seen_cum_qty entry is cleaned up.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        order = make_order(client_order_id="cleanup-1")
+        ex.pending_orders[order.client_order_id] = order
+        ex.client_by_exchange["ex-cleanup"] = order.client_order_id
+        ex.last_seen_cum_qty[order.client_order_id] = 0.3
+        ex._publish_execution = AsyncMock()
+        execution = ExecutionUpdate(
+            order_id="ex-cleanup",
+            exec_type="trade",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=OrderTypeEnum.LIMIT,
+            order_status=OrderStatusEnum.CLOSED,
+            timestamp=datetime.now(UTC),
+            cum_qty=1.0,
+            average_price=50000.0,
+            last_qty=0.7,
+            last_price=50100.0,
+        )
+        await ex._process_execution(execution)
+        assert order.client_order_id not in ex.last_seen_cum_qty
+        assert order.client_order_id not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_last_seen_cum_qty_cleaned_on_canceled(self) -> None:
+        """Verify last_seen_cum_qty is removed on order cancellation.
+
+        Given: Pending order with cumulative tracking state,
+        When: Cancellation event is processed,
+        Then: last_seen_cum_qty entry is cleaned up.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        order = make_order(client_order_id="cancel-1")
+        ex.pending_orders[order.client_order_id] = order
+        ex.client_by_exchange["ex-cancel"] = order.client_order_id
+        ex.last_seen_cum_qty[order.client_order_id] = 0.2
+        ex._publish_execution = AsyncMock()
+        execution = ExecutionUpdate(
+            order_id="ex-cancel",
+            exec_type="canceled",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=OrderTypeEnum.LIMIT,
+            order_status=OrderStatusEnum.CANCELED,
+            timestamp=datetime.now(UTC),
+        )
+        await ex._process_execution(execution)
+        assert order.client_order_id not in ex.last_seen_cum_qty
+        assert order.client_order_id not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_last_seen_cum_qty_cleaned_on_expired(self) -> None:
+        """Verify last_seen_cum_qty is removed on order expiration.
+
+        Given: Pending order with cumulative tracking state,
+        When: Expiration event is processed,
+        Then: last_seen_cum_qty entry is cleaned up.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        order = make_order(client_order_id="expire-1")
+        ex.pending_orders[order.client_order_id] = order
+        ex.client_by_exchange["ex-expire"] = order.client_order_id
+        ex.last_seen_cum_qty[order.client_order_id] = 0.1
+        ex._publish_execution = AsyncMock()
+        execution = ExecutionUpdate(
+            order_id="ex-expire",
+            exec_type="expired",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=OrderTypeEnum.LIMIT,
+            order_status=OrderStatusEnum.EXPIRED,
+            timestamp=datetime.now(UTC),
+        )
+        await ex._process_execution(execution)
+        assert order.client_order_id not in ex.last_seen_cum_qty
+        assert order.client_order_id not in ex.pending_orders
+
+    @pytest.mark.asyncio
+    async def test_publish_order_status_filled_size_zero_for_submitted(self) -> None:
+        """Verify submitted order status publishes filled_size=0.0.
+
+        Given: Running executor with publisher,
+        When: Order status is published as 'submitted',
+        Then: filled_size is 0.0, not order.quantity.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex.msg_publisher = AsyncMock()
+        order = make_order(quantity=1.0)
+        await ex._publish_order_status(order, "submitted")
+        ex.msg_publisher.send.assert_awaited_once()
+        published = ex.msg_publisher.send.call_args[0][1]
+        assert published.filled_size == 0.0
+        assert published.size == 1.0
+
+    @pytest.mark.asyncio
+    async def test_publish_order_status_filled_size_zero_for_accepted(self) -> None:
+        """Verify accepted order status publishes filled_size=0.0.
+
+        Given: Running executor with publisher,
+        When: Order status is published as 'accepted',
+        Then: filled_size is 0.0, not order.quantity.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex.msg_publisher = AsyncMock()
+        order = make_order(quantity=2.0)
+        await ex._publish_order_status(order, "accepted", exchange_order_id="ex-abc")
+        ex.msg_publisher.send.assert_awaited_once()
+        published = ex.msg_publisher.send.call_args[0][1]
+        assert published.filled_size == 0.0
+        assert published.size == 2.0
+
+    @pytest.mark.asyncio
+    async def test_publish_order_status_filled_size_zero_for_rejected(self) -> None:
+        """Verify rejected order status publishes filled_size=0.0.
+
+        Given: Running executor with publisher,
+        When: Order status is published as 'rejected',
+        Then: filled_size is 0.0.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex.msg_publisher = AsyncMock()
+        order = make_order(quantity=1.5)
+        await ex._publish_order_status(order, "rejected")
+        ex.msg_publisher.send.assert_awaited_once()
+        published = ex.msg_publisher.send.call_args[0][1]
+        assert published.filled_size == 0.0

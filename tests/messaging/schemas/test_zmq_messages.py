@@ -159,6 +159,8 @@ class TestMessages:
             side="buy",
             size=0.01,
             price=50000.0,
+            last_size=0.01,
+            last_price=50000.0,
             fee=0.001,
             fee_asset="USD",
             status="filled",

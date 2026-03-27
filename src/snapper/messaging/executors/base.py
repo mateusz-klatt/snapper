@@ -96,6 +96,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self.repository: Repository | None = None
         self.pending_orders: dict[str, OrderRequestData] = {}
         self.client_by_exchange: dict[str, str] = {}
+        self.last_seen_cum_qty: dict[str, float] = {}
         self.orphaned_executions: dict[str, tuple[ExecutionUpdate, float]] = {}
         self.orphan_ttl_seconds: float = 5.0
         self.orphan_drop_count: int = 0
@@ -718,6 +719,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             return False
         self.pending_orders.pop(client_order_id, None)
         self.client_by_exchange.pop(exchange_order_id, None)
+        self.last_seen_cum_qty.pop(client_order_id, None)
         logger.info(
             f"[{exchange_name}] Order {client_order_id} {execution.exec_type}, "
             f"cleaned up maps (no execution published)"
@@ -746,6 +748,16 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         total_fee = execution.fee_usd_equiv or 0.0
         now = datetime.now(UTC)
         topic = order_event_topic(exchange_name, original_order.instrument, "executed")
+        cum_qty = execution.cum_qty or 0.0
+        client_id = original_order.client_order_id
+        if execution.last_qty is not None and execution.last_price is not None:
+            delta_size = execution.last_qty
+            delta_price = execution.last_price
+        else:
+            prev_cum = self.last_seen_cum_qty.get(client_id, 0.0)
+            delta_size = cum_qty - prev_cum
+            delta_price = execution.average_price or 0.0
+        self.last_seen_cum_qty[client_id] = cum_qty
         return topic, ExecutionData(
             public_id=str(uuid7()),
             timestamp=now,
@@ -753,12 +765,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             sequence_id=self._tracker.next_sequence(topic),
             trade_id=execution.exec_id,
             exchange_order_id=exchange_order_id,
-            client_order_id=original_order.client_order_id,
+            client_order_id=client_id,
             instrument=original_order.instrument,
             exchange=exchange_name,
             side=original_order.side,
-            size=execution.cum_qty or 0.0,
+            size=cum_qty,
             price=execution.average_price or 0.0,
+            last_size=delta_size,
+            last_price=delta_price,
             fee=total_fee,
             fee_asset="USD" if total_fee > 0 else "",
             status=status,
@@ -796,6 +810,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             if fill.status == "filled":
                 self.pending_orders.pop(client_order_id, None)
                 self.client_by_exchange.pop(exchange_order_id, None)
+                self.last_seen_cum_qty.pop(client_order_id, None)
                 logger.info(
                     f"[{exchange_name}] Order {client_order_id} filled, removed from pending"
                 )
@@ -837,7 +852,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 status=status,
                 order_type=order.order_type,
                 size=order.quantity,
-                filled_size=0.0 if status == "rejected" else order.quantity,
+                filled_size=0.0,
                 price=order.price,
                 created_at=order.timestamp,
             )

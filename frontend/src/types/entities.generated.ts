@@ -57,6 +57,8 @@ export interface Execution {
   side: TradeSide
   size: number
   price: number
+  lastSize: number
+  lastPrice: number
   fee: number
   feeAsset: string
   status: 'filled' | 'partial'

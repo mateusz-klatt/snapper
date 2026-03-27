@@ -1290,8 +1290,10 @@ export type Components = {
          *         instrument: Trading pair symbol.
          *         exchange: Exchange where the fill occurred.
          *         side: Trade direction ('buy' or 'sell').
-         *         size: Filled quantity.
-         *         price: Execution price.
+         *         size: Cumulative filled quantity across all fills for the order.
+         *         price: Cumulative average execution price across all fills.
+         *         last_size: Incremental quantity filled by this execution event (delta).
+         *         last_price: Price of the incremental fill (delta).
          *         fee: Transaction fee charged.
          *         fee_asset: Currency of the fee (e.g., 'USD', 'BTC').
          *         status: Fill status ('filled', 'partial', etc.).
@@ -1337,6 +1339,10 @@ export type Components = {
             size: number;
             /** Price */
             price: number;
+            /** Last Size */
+            last_size: number;
+            /** Last Price */
+            last_price: number;
             /** Fee */
             fee: number;
             /** Fee Asset */

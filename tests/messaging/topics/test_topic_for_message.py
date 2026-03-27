@@ -215,6 +215,8 @@ class TestTopicForMessage:
             side="buy",
             size=1.0,
             price=50000.0,
+            last_size=1.0,
+            last_price=50000.0,
             fee=5.0,
             fee_asset="USD",
             status="filled",

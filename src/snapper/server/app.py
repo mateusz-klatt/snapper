@@ -782,7 +782,16 @@ def _create_orders_executions_router() -> APIRouter:
         processing_date = as_of or datetime.now(UTC)
         try:
             rows = await repo.get_executions(limit=limit, as_of=processing_date)
-            items = [ExecutionData(**cast(dict[str, Any], r)) for r in rows]
+            items = [
+                ExecutionData(
+                    **{
+                        "last_size": r["size"],
+                        "last_price": r["price"],
+                        **cast(dict[str, Any], r),
+                    }
+                )
+                for r in rows
+            ]
             tracker: SequenceTracker = request.app.state.rest_tracker
             sid = tracker.session_id
             seq = tracker.next_sequence(_REST_DATA_STREAM)

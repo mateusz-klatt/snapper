@@ -317,6 +317,8 @@ export function createExecution(
     side?: 'buy' | 'sell'
     size?: number
     price?: number
+    last_size?: number
+    last_price?: number
     fee?: number
     fee_asset?: string
     status?: 'filled' | 'partial'
@@ -335,6 +337,8 @@ export function createExecution(
     side: overrides.side ?? ('buy' as const),
     size: overrides.size ?? 0.5,
     price: overrides.price ?? 50000,
+    last_size: overrides.last_size ?? overrides.size ?? 0.5,
+    last_price: overrides.last_price ?? overrides.price ?? 50000,
     fee: overrides.fee ?? 0.001,
     fee_asset: overrides.fee_asset ?? 'BTC',
     status: overrides.status ?? ('filled' as const),

@@ -664,6 +664,8 @@ class MockRepository:
                 "side": exe.side,
                 "size": exe.size,
                 "price": exe.price,
+                "last_size": exe.size,
+                "last_price": exe.price,
                 "fee": exe.fee,
                 "fee_asset": exe.fee_asset,
                 "status": exe.status,

@@ -51,6 +51,8 @@ export const ExecutionDataSchema = z
     side: z.enum(['buy', 'sell']),
     size: z.number(),
     price: z.number(),
+    last_size: z.number(),
+    last_price: z.number(),
     fee: z.number(),
     fee_asset: z.string(),
     status: z.enum(['filled', 'partial']),
