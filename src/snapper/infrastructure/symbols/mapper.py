@@ -95,7 +95,6 @@ def make_native_symbol(base: str, quote: str) -> str:
 _SHORTCUT_FORWARD: tuple[tuple[str, str, str], ...] = (
     ("kraken", "ws", "native_to_kraken_ws"),
     ("kraken", "rest", "native_to_kraken_rest"),
-    ("kraken", "ccxt", "native_to_ccxt"),
     ("zonda", "ws", "native_to_zonda_ws"),
     ("walutomat", "ws", "native_to_walutomat_ws"),
     ("walutomat", "rest", "native_to_walutomat_rest"),
@@ -105,7 +104,6 @@ _SHORTCUT_FORWARD: tuple[tuple[str, str, str], ...] = (
 _SHORTCUT_REVERSE: tuple[tuple[str, str, str], ...] = (
     ("kraken", "ws", "kraken_ws_to_native"),
     ("kraken", "rest", "kraken_rest_to_native"),
-    ("kraken", "ccxt", "ccxt_to_native"),
     ("zonda", "ws", "zonda_ws_to_native"),
     ("walutomat", "ws", "walutomat_ws_to_native"),
     ("walutomat", "rest", "walutomat_rest_to_native"),
@@ -135,14 +133,14 @@ class SymbolMapperService:
         reverse: Exchange-to-native maps keyed by ``(exchange, channel)``.
         native_to_kraken_ws: Alias for ``forward[("kraken", "ws")]``.
         native_to_kraken_rest: Alias for ``forward[("kraken", "rest")]``.
-        native_to_ccxt: Alias for ``forward[("kraken", "ccxt")]``.
+        native_to_ccxt: Union of all ``forward[(*, "ccxt")]`` across exchanges.
         native_to_zonda_ws: Alias for ``forward[("zonda", "ws")]``.
         native_to_walutomat_ws: Alias for ``forward[("walutomat", "ws")]``.
         native_to_walutomat_rest: Alias for ``forward[("walutomat", "rest")]``.
         native_to_polygon_rest: Alias for ``forward[("polygon", "rest")]``.
         kraken_ws_to_native: Alias for ``reverse[("kraken", "ws")]``.
         kraken_rest_to_native: Alias for ``reverse[("kraken", "rest")]``.
-        ccxt_to_native: Alias for ``reverse[("kraken", "ccxt")]``.
+        ccxt_to_native: Union of all ``reverse[(*, "ccxt")]`` across exchanges.
         zonda_ws_to_native: Alias for ``reverse[("zonda", "ws")]``.
         walutomat_ws_to_native: Alias for ``reverse[("walutomat", "ws")]``.
         walutomat_rest_to_native: Alias for ``reverse[("walutomat", "rest")]``.
@@ -283,6 +281,16 @@ class SymbolMapperService:
             setattr(self, attr_name, fwd.get((exchange, channel), {}))
         for exchange, channel, attr_name in _SHORTCUT_REVERSE:
             setattr(self, attr_name, rev.get((exchange, channel), {}))
+        ccxt_fwd: dict[str, str] = {}
+        ccxt_rev: dict[str, str] = {}
+        for (_ex, ch), mapping in fwd.items():
+            if ch == "ccxt":
+                ccxt_fwd.update(mapping)
+        for (_ex, ch), mapping in rev.items():
+            if ch == "ccxt":
+                ccxt_rev.update(mapping)
+        self.native_to_ccxt = ccxt_fwd
+        self.ccxt_to_native = ccxt_rev
 
     def load_capabilities_from_db(
         self,
