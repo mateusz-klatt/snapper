@@ -365,6 +365,8 @@ struct ExecutionData: Codable, Sendable {
     let side: String
     let size: Double
     let price: Double
+    let lastSize: Double
+    let lastPrice: Double
     let fee: Double
     let feeAsset: String
     let status: String
@@ -384,6 +386,8 @@ struct ExecutionData: Codable, Sendable {
         case side
         case size
         case price
+        case lastSize = "last_size"
+        case lastPrice = "last_price"
         case fee
         case feeAsset = "fee_asset"
         case status

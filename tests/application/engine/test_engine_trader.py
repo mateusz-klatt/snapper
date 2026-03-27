@@ -18,10 +18,13 @@ from unittest.mock import patch
 import pytest
 
 import snapper.application.engine.trader as trader_module
+from snapper.application.engine.config import EngineConfigModel
+from snapper.application.engine.service import TradingEngineService
 from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.engine.trader import run_zmq_trader
 from snapper.config.app import AppSettings
 from snapper.messaging.infrastructure.gap_detector import GapDetector
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import OrderEventData
@@ -2220,3 +2223,498 @@ def test_gap_detector_initialized_on_coordinator() -> None:
     coord._gap_detector = GapDetector("trader")
     coord._gap_detector.check("test.topic", "session-1", 1)
     assert coord._gap_detector.stats.gaps_detected == 0
+
+
+def _make_fill(
+    client_order_id: str = "order-123",
+    instrument: str = "BTC-USD",
+    exchange: str = "kraken",
+    side: str = "buy",
+    size: float = 0.5,
+    price: float = 50000.0,
+    last_size: float = 0.5,
+    last_price: float = 50000.0,
+    fee: float = 0.5,
+    status: str = "filled",
+    trade_id: str | None = "trade-456",
+) -> ExecutionData:
+    """Create an ExecutionData fill for testing."""
+    return ExecutionData(
+        session_id="",
+        sequence_id=0,
+        public_id="test-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        trade_id=trade_id,
+        exchange_order_id="exec-456",
+        client_order_id=client_order_id,
+        instrument=instrument,
+        exchange=exchange,
+        side=side,
+        size=size,
+        price=price,
+        last_size=last_size,
+        last_price=last_price,
+        fee=fee,
+        fee_asset="USD",
+        status=status,
+        executed_at=datetime.now(UTC),
+    )
+
+
+def _make_engine_with_inflight(
+    monkeypatch: pytest.MonkeyPatch,
+    instrument: str = "BTC-USD",
+    exchange: str = "kraken",
+    client_order_id: str = "order-123",
+    position_qty: float = 0.0,
+    entry_price: float | None = None,
+) -> tuple[TraderCoordinator, Any]:
+    """Create a coordinator with an engine that has an in-flight order."""
+    _configure_settings(monkeypatch)
+    coord = TraderCoordinator()
+    engine = MagicMock()
+    engine.instrument = instrument
+    engine.exchange = exchange
+    engine.pending_client_order_id = client_order_id
+    engine.order_in_flight = True
+    engine.position_qty = position_qty
+    engine.entry_price = entry_price
+    engine.apply_fill = MagicMock(return_value=True)
+    engine.clear_pending_intent = MagicMock(return_value=True)
+    coord.engines[f"{instrument}@{exchange}-live"] = engine
+    return coord, engine
+
+
+class TestFillApplication:
+    """Tests for Stage B: confirmed-state booking via fill events."""
+
+    def test_fill_applied_to_matching_engine(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify fill is routed to engine with matching pending order.
+
+        Given: Coordinator with engine that has order-123 in flight,
+        When: Fill arrives for order-123,
+        Then: Engine.apply_fill is called with the fill.
+        """
+        coord, engine = _make_engine_with_inflight(monkeypatch)
+        fill = _make_fill(client_order_id="order-123")
+        coord._handle_execution_fill("orders.events.kraken.BTC-USD.executed", fill)
+        engine.apply_fill.assert_called_once_with(fill)
+
+    def test_fill_matched_by_instrument_exchange_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify fill routes to engine by instrument+exchange when no pending match.
+
+        Given: Engine with different pending_client_order_id (e.g. after timeout),
+        When: Fill arrives for old order matching instrument+exchange,
+        Then: Engine.apply_fill is still called (late fill booking).
+        """
+        coord, engine = _make_engine_with_inflight(monkeypatch, client_order_id="new-order-456")
+        fill = _make_fill(client_order_id="old-order-123")
+        coord._handle_execution_fill("orders.events.kraken.BTC-USD.executed", fill)
+        engine.apply_fill.assert_called_once_with(fill)
+
+    def test_fill_no_matching_engine(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify fill for unknown instrument is logged and dropped.
+
+        Given: Coordinator with no engine for ETH-USD,
+        When: Fill arrives for ETH-USD with unrelated client_order_id,
+        Then: No apply_fill is called.
+        """
+        coord, engine = _make_engine_with_inflight(
+            monkeypatch, instrument="BTC-USD", client_order_id="btc-order"
+        )
+        fill = _make_fill(instrument="ETH-USD", client_order_id="eth-order")
+        coord._handle_execution_fill("orders.events.kraken.ETH-USD.executed", fill)
+        engine.apply_fill.assert_not_called()
+
+    def test_duplicate_fill_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify duplicate fills are silently dropped by apply_fill.
+
+        Given: Engine whose apply_fill returns False (duplicate),
+        When: Fill is processed,
+        Then: No error, duplicate is logged.
+        """
+        coord, engine = _make_engine_with_inflight(monkeypatch)
+        engine.apply_fill.return_value = False
+        fill = _make_fill()
+        coord._handle_execution_fill("orders.events.kraken.BTC-USD.executed", fill)
+        engine.apply_fill.assert_called_once()
+
+
+class TestRejectClearsIntent:
+    """Tests for reject/cancel clearing pending intent."""
+
+    def test_reject_clears_matching_pending_intent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify order rejection clears in-flight state on matching engine.
+
+        Given: Engine with order-123 in flight,
+        When: OrderData reject arrives for order-123,
+        Then: Engine.clear_pending_intent is called with order-123.
+        """
+        coord, engine = _make_engine_with_inflight(monkeypatch)
+        order_status = OrderData(
+            session_id="",
+            sequence_id=0,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            client_order_id="order-123",
+            instrument="BTC-USD",
+            exchange="kraken",
+            side="buy",
+            status="rejected",
+            order_type="market",
+            size=0.5,
+            filled_size=0.0,
+            created_at=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+        coord._handle_order_status("orders.events.kraken.BTC-USD.rejected", order_status)
+        engine.clear_pending_intent.assert_called_once_with("order-123")
+
+    def test_reject_does_not_clear_different_order(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify reject for different order does not clear current intent.
+
+        Given: Engine with new-order in flight,
+        When: Reject arrives for old-order,
+        Then: clear_pending_intent returns False, state unchanged.
+        """
+        coord, engine = _make_engine_with_inflight(monkeypatch, client_order_id="new-order")
+        engine.clear_pending_intent.return_value = False
+        order_status = OrderData(
+            session_id="",
+            sequence_id=0,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            client_order_id="old-order",
+            instrument="BTC-USD",
+            exchange="kraken",
+            side="buy",
+            status="rejected",
+            order_type="market",
+            size=0.5,
+            filled_size=0.0,
+            created_at=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+        coord._handle_order_status("orders.events.kraken.BTC-USD.rejected", order_status)
+        engine.clear_pending_intent.assert_called_once_with("old-order")
+
+    def test_cancel_event_clears_matching_pending_intent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify cancel event clears in-flight state on matching engine.
+
+        Given: Engine with order-123 in flight,
+        When: OrderEventData cancelled arrives for order-123,
+        Then: Engine.clear_pending_intent is called.
+        """
+        coord, engine = _make_engine_with_inflight(monkeypatch)
+        cancel_event = OrderEventData(
+            session_id="",
+            sequence_id=0,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            exchange_order_id="ex-789",
+            client_order_id="order-123",
+            instrument="BTC-USD",
+            exchange="kraken",
+            event="cancelled",
+        )
+        coord._handle_order_event("orders.events.kraken.BTC-USD.cancelled", cancel_event)
+        engine.clear_pending_intent.assert_called_once_with("order-123")
+
+    def test_cancel_event_no_matching_engine(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify cancel for non-matching order iterates all engines without clearing.
+
+        Given: Engine with different pending order,
+        When: Cancel arrives for unrelated order,
+        Then: clear_pending_intent is called but returns False, no state change.
+        """
+        coord, engine = _make_engine_with_inflight(monkeypatch, client_order_id="active-order")
+        engine.clear_pending_intent.return_value = False
+        cancel_event = OrderEventData(
+            session_id="",
+            sequence_id=0,
+            public_id="test-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            exchange_order_id="ex-789",
+            client_order_id="stale-order",
+            instrument="BTC-USD",
+            exchange="kraken",
+            event="cancelled",
+        )
+        coord._handle_order_event("orders.events.kraken.BTC-USD.cancelled", cancel_event)
+        engine.clear_pending_intent.assert_called_once_with("stale-order")
+
+
+class TestEngineApplyFill:
+    """Tests for TradingEngineService.apply_fill direct unit tests."""
+
+    def _make_engine(self, position_qty: float = 0.0, entry_price: float | None = None) -> Any:
+        """Create a real TradingEngineService for testing."""
+        socket = MagicMock()
+        socket.tracker = SequenceTracker()
+        engine = TradingEngineService(
+            "BTC-USD",
+            cast(Any, socket),
+            cfg=EngineConfigModel(initial_cash=10000.0),
+            exchange="kraken",
+        )
+        engine.position_qty = position_qty
+        engine.entry_price = entry_price
+        return engine
+
+    def test_buy_fill_updates_position(self) -> None:
+        """Verify buy fill increases position and sets entry price.
+
+        Given: Flat engine,
+        When: Buy fill applied,
+        Then: position_qty increases and entry_price is set.
+        """
+        engine = self._make_engine()
+        fill = _make_fill(side="buy", last_size=0.5, last_price=50000.0, status="filled")
+        result = engine.apply_fill(fill)
+        assert result is True
+        assert engine.position_qty == pytest.approx(0.5)
+        assert engine.entry_price == pytest.approx(50000.0)
+        assert engine.order_in_flight is False
+
+    def test_sell_fill_decreases_position(self) -> None:
+        """Verify sell fill decreases position and clears entry price.
+
+        Given: Engine with long position,
+        When: Sell fill applied,
+        Then: position_qty decreases, entry_price cleared when flat.
+        """
+        engine = self._make_engine(position_qty=1.0, entry_price=45000.0)
+        engine.order_in_flight = True
+        engine.pending_client_order_id = "order-123"
+        fill = _make_fill(side="sell", last_size=1.0, last_price=50000.0, status="filled")
+        result = engine.apply_fill(fill)
+        assert result is True
+        assert engine.position_qty == pytest.approx(0.0)
+        assert engine.entry_price is None
+        assert engine.order_in_flight is False
+
+    def test_partial_fill_keeps_in_flight(self) -> None:
+        """Verify partial fill updates position but keeps order_in_flight.
+
+        Given: Flat engine with buy order in flight,
+        When: Partial buy fill applied,
+        Then: position_qty increases but order_in_flight stays True.
+        """
+        engine = self._make_engine()
+        engine.order_in_flight = True
+        engine.pending_client_order_id = "order-123"
+        fill = _make_fill(
+            client_order_id="order-123",
+            side="buy",
+            size=0.3,
+            last_size=0.3,
+            last_price=50000.0,
+            status="partial",
+            trade_id="trade-1",
+        )
+        result = engine.apply_fill(fill)
+        assert result is True
+        assert engine.position_qty == pytest.approx(0.3)
+        assert engine.order_in_flight is True
+
+    def test_final_fill_after_partial_clears_in_flight(self) -> None:
+        """Verify final fill after partial clears in-flight state.
+
+        Given: Engine with partial fill already applied,
+        When: Final fill arrives,
+        Then: position_qty updated, order_in_flight cleared.
+        """
+        engine = self._make_engine(position_qty=0.3, entry_price=50000.0)
+        engine.order_in_flight = True
+        engine.pending_client_order_id = "order-123"
+        engine.seen_exec_ids.add("trade-1")
+        fill = _make_fill(
+            client_order_id="order-123",
+            side="buy",
+            size=0.5,
+            last_size=0.2,
+            last_price=50100.0,
+            status="filled",
+            trade_id="trade-2",
+        )
+        result = engine.apply_fill(fill)
+        assert result is True
+        assert engine.position_qty == pytest.approx(0.5)
+        assert engine.order_in_flight is False
+
+    def test_partial_sell_keeps_entry_price(self) -> None:
+        """Verify partial sell does not clear entry price when position remains.
+
+        Given: Engine with 1.0 position,
+        When: Partial sell fill of 0.3 applied,
+        Then: position_qty reduced but entry_price preserved.
+        """
+        engine = self._make_engine(position_qty=1.0, entry_price=45000.0)
+        fill = _make_fill(
+            side="sell",
+            last_size=0.3,
+            last_price=50000.0,
+            status="partial",
+            trade_id="trade-partial-sell",
+        )
+        result = engine.apply_fill(fill)
+        assert result is True
+        assert engine.position_qty == pytest.approx(0.7)
+        assert engine.entry_price == pytest.approx(45000.0)
+
+    def test_duplicate_fill_rejected(self) -> None:
+        """Verify duplicate fill with same trade_id is rejected.
+
+        Given: Engine that already saw trade-456,
+        When: Same trade_id arrives again,
+        Then: apply_fill returns False, state unchanged.
+        """
+        engine = self._make_engine(position_qty=0.5)
+        engine.seen_exec_ids.add("trade-456")
+        fill = _make_fill(trade_id="trade-456", side="buy", last_size=0.5, last_price=50000.0)
+        result = engine.apply_fill(fill)
+        assert result is False
+        assert engine.position_qty == pytest.approx(0.5)
+
+    def test_late_fill_from_old_order_does_not_clear_new_inflight(self) -> None:
+        """Verify late fill from previous order books position but keeps new guard.
+
+        Given: Engine with new order (order-456) in flight,
+        When: Late fill from old order (order-123) arrives,
+        Then: Position is updated but order_in_flight stays True.
+        """
+        engine = self._make_engine()
+        engine.order_in_flight = True
+        engine.pending_client_order_id = "order-456"
+        fill = _make_fill(
+            client_order_id="order-123",
+            side="buy",
+            last_size=0.5,
+            last_price=50000.0,
+            status="filled",
+        )
+        result = engine.apply_fill(fill)
+        assert result is True
+        assert engine.position_qty == pytest.approx(0.5)
+        assert engine.order_in_flight is True
+        assert engine.pending_client_order_id == "order-456"
+
+
+class TestMaybeStopInFlight:
+    """Tests for _maybe_stop in-flight guard."""
+
+    @pytest.mark.asyncio
+    async def test_maybe_stop_skips_when_order_in_flight(self) -> None:
+        """Verify _maybe_stop returns False when order is already in flight.
+
+        Given: Engine with position and order already in flight,
+        When: Stop-loss condition is met,
+        Then: _maybe_stop returns False and no new order is sent.
+        """
+        from snapper.application.engine.config import EngineConfigModel
+        from snapper.application.engine.service import TradingEngineService
+        from snapper.application.portfolio.models import PositionStateModel
+        from snapper.application.risk.models import RiskConfigModel
+        from snapper.application.risk.models import RiskEvaluator
+        from snapper.messaging.infrastructure.publisher import SequenceTracker
+
+        socket = MagicMock()
+        socket.tracker = SequenceTracker()
+        socket.send = AsyncMock()
+        risk = RiskEvaluator(RiskConfigModel())
+        engine = TradingEngineService(
+            "BTC-USD",
+            cast(Any, socket),
+            risk=risk,
+            cfg=EngineConfigModel(initial_cash=5000.0),
+        )
+        engine.position_qty = 1.0
+        engine.entry_price = 110.0
+        engine.portfolio.positions["BTC-USD"] = PositionStateModel(
+            quantity=1.0, average_price=110.0
+        )
+        engine.order_in_flight = True
+        engine.pending_client_order_id = "existing-order"
+        triggered = await engine._maybe_stop(last_close=50.0, prev_close=120.0)
+        assert triggered is False
+        socket.send.assert_not_awaited()
+
+
+class TestClearPendingIntent:
+    """Tests for TradingEngineService.clear_pending_intent."""
+
+    def test_clear_matching_order(self) -> None:
+        """Verify clear_pending_intent clears state for matching order."""
+        engine = TradingEngineService.__new__(TradingEngineService)
+        engine.order_in_flight = True
+        engine.pending_client_order_id = "order-123"
+        engine._in_flight_since = 100.0
+        result = engine.clear_pending_intent("order-123")
+        assert result is True
+        assert engine.order_in_flight is False
+        assert engine.pending_client_order_id is None
+
+    def test_clear_non_matching_order(self) -> None:
+        """Verify clear_pending_intent does not clear for non-matching order."""
+        engine = TradingEngineService.__new__(TradingEngineService)
+        engine.order_in_flight = True
+        engine.pending_client_order_id = "order-456"
+        engine._in_flight_since = 100.0
+        result = engine.clear_pending_intent("order-123")
+        assert result is False
+        assert engine.order_in_flight is True
+        assert engine.pending_client_order_id == "order-456"
+
+
+class TestInFlightTimeout:
+    """Tests for order_in_flight timeout behavior."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_clears_guard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify in-flight timeout clears guard and allows new signal.
+
+        Given: Engine with order in flight for longer than timeout,
+        When: New signal arrives,
+        Then: Timeout clears guard and signal is processed.
+        """
+        socket = MagicMock()
+        socket.tracker = SequenceTracker()
+        socket.send = AsyncMock()
+        engine = TradingEngineService(
+            "BTC-USD",
+            cast(Any, socket),
+            cfg=EngineConfigModel(initial_cash=10000.0),
+            exchange="kraken",
+        )
+        engine.order_in_flight = True
+        engine.pending_client_order_id = "old-order"
+        engine._in_flight_since = time.monotonic() - 120.0
+        await engine.execute_desired_units(1.0, current_price=100.0)
+        assert engine.order_in_flight is True
+        assert engine.pending_client_order_id != "old-order"
+
+    @pytest.mark.asyncio
+    async def test_inflight_blocks_new_signal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify in-flight guard blocks new signals.
+
+        Given: Engine with recent order in flight,
+        When: New signal arrives,
+        Then: Signal is dropped and no order is sent.
+        """
+        socket = MagicMock()
+        socket.tracker = SequenceTracker()
+        socket.send = AsyncMock()
+        engine = TradingEngineService(
+            "BTC-USD",
+            cast(Any, socket),
+            cfg=EngineConfigModel(initial_cash=10000.0),
+            exchange="kraken",
+        )
+        engine.order_in_flight = True
+        engine.pending_client_order_id = "active-order"
+        engine._in_flight_since = time.monotonic()
+        await engine.execute_desired_units(1.0, current_price=100.0)
+        socket.send.assert_not_awaited()
+        assert engine.pending_client_order_id == "active-order"

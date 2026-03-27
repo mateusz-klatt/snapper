@@ -1,6 +1,5 @@
 """Tests for TradingEngineService and EngineConfigModel."""
 
-import math
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
@@ -103,8 +102,10 @@ async def test_engine_execute_desired_units_buy_flow() -> None:
     assert order.side == "buy"
     assert order.instrument == "BTC-USD"
     assert order.strategy_id == "engine-buy"
-    assert engine.position_qty > 0.0
-    assert engine.entry_price == pytest.approx(100.0)
+    assert engine.order_in_flight is True
+    assert engine.pending_client_order_id is not None
+    assert engine.position_qty == pytest.approx(0.0)
+    assert engine.entry_price is None
     assert risk.can_open_calls
 
 
@@ -129,7 +130,9 @@ async def test_engine_maybe_stop_triggers_sell() -> None:
     engine.portfolio.positions["BTC-USD"] = PositionStateModel(quantity=1.0, average_price=110.0)
     triggered: bool = await engine._maybe_stop(last_close=100.0, prev_close=120.0)
     assert triggered is True
-    assert engine.position_qty == pytest.approx(0.0)
+    assert engine.order_in_flight is True
+    assert engine.pending_client_order_id is not None
+    assert engine.position_qty == pytest.approx(1.0)
     assert engine.entry_price is None
     assert len(socket.sent) == 1
     order = socket.sent[0]
@@ -164,8 +167,10 @@ async def test_engine_execute_desired_units_sell_flow() -> None:
     assert order.side == "sell"
     assert order.instrument == "BTC-USD"
     assert order.strategy_id == "engine-sell"
-    assert math.isclose(engine.position_qty, 0.0, abs_tol=1e-9)
-    assert engine.entry_price is None
+    assert engine.order_in_flight is True
+    assert engine.pending_client_order_id is not None
+    assert engine.position_qty == pytest.approx(0.3)
+    assert engine.entry_price == pytest.approx(100.0)
 
 
 def _replace_execution_publisher_with_async_stub(trader: TraderCoordinator) -> MagicMock:
@@ -212,9 +217,11 @@ class TestEngineExecuteDesiredUnits:
         assert order.mode == "live"
         assert order.quantity > 0
         assert order.quantity <= desired_units
-        assert engine.portfolio.cash < 10000.0
-        assert engine.position_qty > 0
-        assert engine.entry_price == current_price
+        assert engine.order_in_flight is True
+        assert engine.pending_client_order_id is not None
+        assert engine.portfolio.cash == pytest.approx(10000.0)
+        assert engine.position_qty == pytest.approx(0.0)
+        assert engine.entry_price is None
 
     @pytest.mark.asyncio
     async def test_execute_desired_units_zero_signal(self) -> None:
@@ -247,8 +254,10 @@ class TestEngineExecuteDesiredUnits:
         assert order.instrument == "BTC-USD"
         assert order.side == "sell"
         assert order.quantity == pytest.approx(0.1)
-        assert engine.position_qty == pytest.approx(0.0)
-        assert engine.entry_price is None
+        assert engine.order_in_flight is True
+        assert engine.pending_client_order_id is not None
+        assert engine.position_qty == pytest.approx(0.1)
+        assert engine.entry_price == pytest.approx(48000.0)
 
     @pytest.mark.asyncio
     async def test_execute_buy_signal_respects_risk_limits(self) -> None:
@@ -274,8 +283,9 @@ class TestEngineExecuteDesiredUnits:
         current_price = 50000.0
         initial_cash = engine.portfolio.cash
         await engine.execute_desired_units(desired_units, current_price)
-        assert engine.portfolio.cash <= initial_cash
-        assert engine.portfolio.cash >= 0
+        assert engine.portfolio.cash == pytest.approx(initial_cash)
+        assert engine.order_in_flight is True
+        assert engine.pending_client_order_id is not None
 
     @pytest.mark.asyncio
     async def test_execute_buy_signal_when_already_in_position(self) -> None:
@@ -749,14 +759,17 @@ async def test_maybe_stop_triggers_using_entry_price(monkeypatch: pytest.MonkeyP
     engine.entry_price = 100.0
     captured: list[tuple[Any, ...]] = []
 
-    async def _capture_send(*args: Any, **kwargs: Any) -> None:
+    async def _capture_send(*args: Any, **kwargs: Any) -> str:
         captured.append((args, kwargs))
+        return "test-client-order-id"
 
     monkeypatch.setattr(engine, "_send_order", _capture_send)
     assert await engine._maybe_stop(last_close=90.0, prev_close=95.0) is True
     assert captured, "Stop order should be sent when threshold is breached"
-    assert engine.position_qty == pytest.approx(0.0)
-    assert engine.entry_price is None
+    assert engine.order_in_flight is True
+    assert engine.pending_client_order_id == "test-client-order-id"
+    assert engine.position_qty == pytest.approx(2.0)
+    assert engine.entry_price == pytest.approx(100.0)
 
 
 @pytest.mark.asyncio
@@ -819,8 +832,10 @@ async def test_execute_desired_units_sets_entry_price_when_opening_position() ->
         instrument_specs={"BTC-USD": {"lot_size": 0.1, "tick_size": 0.01}},
     )
     await engine.execute_desired_units(desired_units=0.5, current_price=50.0)
-    assert engine.entry_price == pytest.approx(50.0)
-    assert engine.position_qty > 0.0
+    assert engine.order_in_flight is True
+    assert engine.pending_client_order_id is not None
+    assert engine.entry_price is None
+    assert engine.position_qty == pytest.approx(0.0)
     assert socket.sent, "Engine should publish order on successful entry"
 
 
@@ -843,7 +858,9 @@ async def test_execute_desired_units_does_not_update_entry_when_position_still_s
         quantity=-0.3, average_price=75.0
     )
     await engine.execute_desired_units(desired_units=0.2, current_price=40.0)
-    assert abs(engine.position_qty + 0.1) < 1e-9
+    assert engine.order_in_flight is True
+    assert engine.pending_client_order_id is not None
+    assert engine.position_qty == pytest.approx(-0.3)
     assert engine.entry_price == pytest.approx(80.0)
     assert socket.sent, "Engine should publish order even when reducing short exposure"
 

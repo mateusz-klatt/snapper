@@ -195,11 +195,32 @@ class TraderCoordinator(RegisterableProcess):
         else:
             logger.debug(f"ZMQTrader: Ignoring orders.events message type={msg.type} on {topic}")
 
+    def _find_engine_for_fill(self, fill: ExecutionData) -> TradingEngineService | None:
+        """Find engine matching an execution fill by client_order_id or instrument.
+
+        Searches engines in two passes:
+        1. Exact match on pending_client_order_id (current in-flight order).
+        2. Fallback match on instrument + exchange (for late fills after timeout).
+
+        Args:
+            fill: Execution fill to match.
+
+        Returns:
+            Matching engine or None if no engine found.
+        """
+        for engine in self.engines.values():
+            if engine.pending_client_order_id == fill.client_order_id:
+                return engine
+        for engine in self.engines.values():
+            if engine.instrument == fill.instrument and engine.exchange == fill.exchange:
+                return engine
+        return None
+
     def _handle_execution_fill(self, topic: str, fill: ExecutionData) -> None:
         """Handle execution fill event from ZMQ.
 
-        Logs fill information when an order is executed.
-        Performs invariant checks: topic exchange/instrument must match payload.
+        Finds the matching engine and applies the fill using delta semantics.
+        Duplicate fills are silently dropped via idempotency guard.
 
         Args:
             topic: ZMQ topic (e.g., "orders.events.kraken.BTC-USD.executed").
@@ -215,11 +236,26 @@ class TraderCoordinator(RegisterableProcess):
                 f"!= payload '{fill.exchange}/{fill.instrument}'"
             )
             return
-        logger.info(
-            f"ZMQTrader: Fill received - {fill.client_order_id} "
-            f"(exchange_order_id={fill.exchange_order_id}, trade_id={fill.trade_id}) "
-            f"{fill.side} {fill.size}@{fill.price} {fill.instrument} on {parsed.exchange}"
-        )
+        engine = self._find_engine_for_fill(fill)
+        if engine is None:
+            logger.info(
+                f"ZMQTrader: No engine found for fill {fill.client_order_id} "
+                f"{fill.instrument} on {fill.exchange}"
+            )
+            return
+        applied = engine.apply_fill(fill)
+        if applied:
+            logger.info(
+                f"ZMQTrader: Fill applied - {fill.client_order_id} "
+                f"{fill.side} {fill.last_size}@{fill.last_price} "
+                f"{fill.instrument} on {parsed.exchange} "
+                f"(pos={engine.position_qty:.6f}, status={fill.status})"
+            )
+        else:
+            logger.info(
+                f"ZMQTrader: Duplicate fill ignored - {fill.client_order_id} "
+                f"trade_id={fill.trade_id} {fill.instrument} on {parsed.exchange}"
+            )
 
     def _handle_order_status(self, topic: str, order_status: OrderData) -> None:
         """Handle order status event from ZMQ.
@@ -254,6 +290,13 @@ class TraderCoordinator(RegisterableProcess):
             )
             return
         if parsed.suffix == "rejected":
+            for engine in self.engines.values():
+                if engine.clear_pending_intent(order_status.client_order_id):
+                    logger.info(
+                        f"ZMQTrader: Cleared in-flight for rejected order "
+                        f"{order_status.client_order_id} on {parsed.exchange}"
+                    )
+                    break
             logger.info(
                 f"ZMQTrader: Order status [OrderData] - {order_status.client_order_id} "
                 f"{parsed.suffix} (submit rejection) {order_status.instrument} "
@@ -297,6 +340,14 @@ class TraderCoordinator(RegisterableProcess):
                 f"!= payload event '{order_event.event}', dropping message"
             )
             return
+        if parsed.suffix in ("cancelled", "expired"):
+            for engine in self.engines.values():
+                if engine.clear_pending_intent(order_event.client_order_id):
+                    logger.info(
+                        f"ZMQTrader: Cleared in-flight for {parsed.suffix} order "
+                        f"{order_event.client_order_id} on {parsed.exchange}"
+                    )
+                    break
         if parsed.suffix == "rejected":
             logger.info(
                 f"ZMQTrader: Order event [OrderEventData] - {order_event.client_order_id} "

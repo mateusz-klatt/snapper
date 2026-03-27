@@ -443,6 +443,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 client_id = self.client_by_exchange.pop(cancel.exchange_order_id, None)
                 if client_id:
                     self.pending_orders.pop(client_id, None)
+                    self.last_seen_cum_qty.pop(client_id, None)
                 await self._publish_cancel_event(cancel, "cancelled")
                 logger.info(
                     f"[{exchange_name}] Order {cancel.exchange_order_id} cancelled successfully"

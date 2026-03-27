@@ -6,6 +6,7 @@ stop-loss logic, fee calculation, and order publication to ZMQ.
 """
 
 import datetime as dt
+import time
 import uuid
 from uuid import uuid7
 
@@ -20,6 +21,7 @@ from snapper.core.types import OrderExchange
 from snapper.interface.websocket.schemas import ExecutionMode
 from snapper.interface.websocket.schemas import TradeSide
 from snapper.messaging.infrastructure.publisher import MessagePublisher
+from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderRequestData
 from snapper.messaging.topics.builders import order_command_topic
 
@@ -51,6 +53,8 @@ class TradingEngineService:
         instrument_specs: Lot size and tick size specifications.
     """
 
+    IN_FLIGHT_TIMEOUT: float = 60.0
+
     instrument: str
     execution_socket: MessagePublisher
     exchange: OrderExchange
@@ -61,6 +65,9 @@ class TradingEngineService:
     peak_equity: float
     entry_price: float | None
     instrument_specs: dict[str, dict[str, float]]
+    order_in_flight: bool
+    pending_client_order_id: str | None
+    seen_exec_ids: set[str]
 
     def __init__(
         self,
@@ -92,6 +99,87 @@ class TradingEngineService:
         self.peak_equity = self.cfg.initial_cash
         self.entry_price: float | None = None
         self.instrument_specs = instrument_specs or {}
+        self.order_in_flight = False
+        self.pending_client_order_id: str | None = None
+        self._in_flight_since: float | None = None
+        self.seen_exec_ids: set[str] = set()
+
+    def _check_in_flight_timeout(self) -> None:
+        """Clear in-flight guard if timeout has elapsed.
+
+        Called before processing new signals. If the configured timeout
+        has passed since the order was sent, logs a warning and clears
+        the guard so new signals can be processed.
+        """
+        if not self.order_in_flight or self._in_flight_since is None:
+            return
+        elapsed = time.monotonic() - self._in_flight_since
+        if elapsed > self.IN_FLIGHT_TIMEOUT:
+            logger.warning(
+                f"Order {self.pending_client_order_id} in-flight timeout "
+                f"after {elapsed:.1f}s for {self.instrument}, clearing guard"
+            )
+            self.order_in_flight = False
+            self.pending_client_order_id = None
+            self._in_flight_since = None
+
+    def apply_fill(self, fill: ExecutionData) -> bool:
+        """Apply a confirmed execution fill to engine state.
+
+        Uses delta fields (last_size/last_price) for booking. Duplicate
+        fills are detected by exec_id/trade_id and silently dropped.
+        Clears order_in_flight only when the fill matches the current
+        pending order and status is 'filled' (complete).
+
+        Args:
+            fill: Execution event with delta fill data.
+
+        Returns:
+            True if fill was applied, False if duplicate.
+        """
+        guard_key = (
+            fill.trade_id or f"fallback-{fill.client_order_id}-{fill.last_size}-{fill.last_price}"
+        )
+        if guard_key in self.seen_exec_ids:
+            logger.info(f"Duplicate execution {guard_key} ignored for {self.instrument}")
+            return False
+        self.seen_exec_ids.add(guard_key)
+        self.portfolio.update_fill(
+            self.instrument, fill.side, fill.last_size, fill.last_price, fill.fee
+        )
+        if fill.side == "buy":
+            was_flat = self.position_qty <= 0
+            self.position_qty += fill.last_size
+            if was_flat and self.position_qty > 0:
+                self.entry_price = fill.last_price
+        else:
+            self.position_qty = max(self.position_qty - fill.last_size, 0.0)
+            if self.position_qty <= 0:
+                self.entry_price = None
+        if fill.client_order_id == self.pending_client_order_id and fill.status == "filled":
+            self.order_in_flight = False
+            self.pending_client_order_id = None
+            self._in_flight_since = None
+        return True
+
+    def clear_pending_intent(self, client_order_id: str) -> bool:
+        """Clear in-flight state for a rejected or cancelled order.
+
+        Only clears if the given client_order_id matches the current
+        pending order, preventing stale events from clearing newer orders.
+
+        Args:
+            client_order_id: Order ID from the reject/cancel event.
+
+        Returns:
+            True if intent was cleared, False if ID did not match.
+        """
+        if client_order_id != self.pending_client_order_id:
+            return False
+        self.order_in_flight = False
+        self.pending_client_order_id = None
+        self._in_flight_since = None
+        return True
 
     @property
     def mode(self) -> ExecutionMode:
@@ -137,6 +225,8 @@ class TradingEngineService:
         """
         if self.position_qty <= 0:
             return False
+        if self.order_in_flight:
+            return False
         stop_ref = self.entry_price
         if stop_ref is None:
             pos = self.portfolio.positions.get(self.instrument)
@@ -145,16 +235,15 @@ class TradingEngineService:
         trigger_ref = stop_ref is not None and last_close <= stop_ref * (1 - stop_pct)
         trigger_fast = prev_close is not None and last_close <= prev_close * (1 - stop_pct)
         if trigger_ref or trigger_fast:
-            await self._send_order(
+            client_order_id = await self._send_order(
                 side="sell",
                 size=self.position_qty,
                 price=last_close,
                 reason="engine-stop",
             )
-            fee = last_close * self.position_qty * (self.cfg.fee_bps / 10000.0)
-            self.portfolio.update_fill(self.instrument, "sell", self.position_qty, last_close, fee)
-            self.position_qty = 0.0
-            self.entry_price = None
+            self.order_in_flight = True
+            self.pending_client_order_id = client_order_id
+            self._in_flight_since = time.monotonic()
             return True
         return False
 
@@ -165,7 +254,7 @@ class TradingEngineService:
         price: float,
         reason: str,
         signaled_at: float | None = None,
-    ) -> None:
+    ) -> str:
         """Publish order request to ZMQ execution topic.
 
         Creates and sends an order request to the execution system
@@ -177,6 +266,9 @@ class TradingEngineService:
             price: Reference price (for market orders, used for logging).
             reason: Order reason tag (e.g., "engine-buy", "engine-stop").
             signaled_at: Unix timestamp when signal was generated.
+
+        Returns:
+            Client order ID assigned to the published order.
         """
         signaled_at_dt = None
         if signaled_at is not None:
@@ -200,6 +292,7 @@ class TradingEngineService:
         )
         await self.execution_socket.send(topic, order, flags=zmq.NOBLOCK)
         logger.debug(f"Published order command: {order.client_order_id}")
+        return order.client_order_id
 
     async def execute_desired_units(
         self, desired_units: float, current_price: float, signaled_at: float | None = None
@@ -207,23 +300,24 @@ class TradingEngineService:
         """Execute position change based on desired position size.
 
         Main entry point for strategy signal execution. Compares desired position
-        with current position and executes appropriate buy/sell orders.
+        with current position and sends appropriate buy/sell orders. Portfolio and
+        position state are NOT updated here; they change only when confirmed fills
+        arrive via apply_fill().
 
-        For buy signals (desired_units > 0):
-        - Checks risk constraints (drawdown, leverage)
-        - Calculates position size respecting cash available and fees
-        - Rounds to lot size specifications
-        - Sends buy order and updates portfolio
-
-        For sell signals (desired_units <= 0):
-        - Sells current position (rounded to lot size)
-        - Sends sell order and updates portfolio
+        Drops the signal if an order is already in flight for this engine.
 
         Args:
             desired_units: Target position size (positive = long, <= 0 = flat).
             current_price: Current market price for sizing calculations.
             signaled_at: Unix timestamp when signal was generated.
         """
+        self._check_in_flight_timeout()
+        if self.order_in_flight:
+            logger.warning(
+                f"Order {self.pending_client_order_id} still in flight for "
+                f"{self.instrument}, dropping signal"
+            )
+            return
         equity = self._mark_to_market(current_price)
         if desired_units > 0 and self.position_qty <= 0:
             if not self.risk.can_open_new_trade(equity, self.peak_equity):
@@ -244,34 +338,29 @@ class TradingEngineService:
             desired_units = self.risk.round_size(desired_units, lot, current_price, tick)
             if desired_units <= 0:
                 return
-            was_flat = self.position_qty <= 0
-            await self._send_order(
+            client_order_id = await self._send_order(
                 side="buy",
                 size=desired_units,
                 price=current_price,
                 reason="engine-buy",
                 signaled_at=signaled_at,
             )
-            fee = current_price * desired_units * fee_rate
-            self.portfolio.update_fill(self.instrument, "buy", desired_units, current_price, fee)
-            self.position_qty += desired_units
-            if was_flat and self.position_qty > 0:
-                self.entry_price = current_price
+            self.order_in_flight = True
+            self.pending_client_order_id = client_order_id
+            self._in_flight_since = time.monotonic()
         elif desired_units <= 0 and self.position_qty > 0:
             specs = self.instrument_specs.get(self.instrument, {})
             lot = float(specs.get("lot_size", 0.0))
             qty_to_sell = self.risk.round_down_to_step(self.position_qty, lot)
             if qty_to_sell <= 0:
                 return
-            await self._send_order(
+            client_order_id = await self._send_order(
                 side="sell",
                 size=qty_to_sell,
                 price=current_price,
                 reason="engine-sell",
                 signaled_at=signaled_at,
             )
-            fee_rate = self.cfg.fee_bps / 10000.0
-            fee = current_price * qty_to_sell * fee_rate
-            self.portfolio.update_fill(self.instrument, "sell", qty_to_sell, current_price, fee)
-            self.position_qty = max(self.position_qty - qty_to_sell, 0.0)
-            self.entry_price = None
+            self.order_in_flight = True
+            self.pending_client_order_id = client_order_id
+            self._in_flight_since = time.monotonic()
