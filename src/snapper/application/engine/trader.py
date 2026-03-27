@@ -36,6 +36,8 @@ from snapper.application.services.settings import SettingsService
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_bootstrap_settings
 from snapper.config.settings import get_settings
+from snapper.config.settings import get_settings_service
+from snapper.config.settings import get_settings_with_service
 from snapper.core.types import OrderExchange
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import ExecutionRow
@@ -146,63 +148,71 @@ class TraderCoordinator(RegisterableProcess):
         """
         logger.info("Starting ZMQ Signal TraderCoordinator (Central - ONE per system)")
         logger.info(f"Signal Topics: {self.signal_topics}")
+        await self._initialize_settings()
         self._setup_external_execution()
         self._setup_trading_components()
         self._setup_signal_subscriber()
         await self._recover_engine_state()
         await self._run_trading_loop()
 
-    async def _recover_engine_state(self) -> None:
-        """Rebuild engine confirmed state from DB executions on startup.
+    async def _initialize_settings(self) -> None:
+        """Upgrade settings to DB-backed instance for runtime access.
 
-        Queries persisted executions grouped by instrument+exchange,
-        creates engines, and replays fills chronologically. For engines
-        with active DB orders, sets order_in_flight with a fresh timeout.
-        If a fill gap is detected (DB filled_size < exchange snapshot),
-        the engine enters degraded read-only mode.
+        Without this, accessing DB settings like risk_r_per_trade would
+        raise RuntimeError because the bootstrap-only AppSettings does
+        not have a SettingsService.
+        """
+        settings_service = await get_settings_service(
+            self.settings.db_url,
+            self.settings.zmq_broker_xpub,
+        )
+        self.settings = get_settings_with_service(settings_service)
+        self.repository = get_repository(self.settings.db_url)
+        logger.info("ZMQTrader: Settings service initialized with database access")
+
+    async def _recover_engine_state(self) -> None:
+        """Rebuild engine confirmed state from DB executions and active orders.
+
+        Phase 1: Replay persisted executions to reconstruct position/portfolio.
+        Phase 2: Query active orders across ALL exchanges, create engines
+            for orders that have no executions yet, set order_in_flight.
+        Phase 3: Detect fill gaps (DB filled_size vs order filled_size)
+            and enter degraded read-only mode if cost basis is unrecoverable.
         """
         now = datetime.now(UTC)
+        executions = await self._recover_from_executions(now)
+        await self._recover_active_orders(now, executions)
+        logger.info(
+            f"ZMQTrader: Engine recovery complete: "
+            f"{len(self.engines)} engines, "
+            f"{sum(1 for e in self.engines.values() if e.order_in_flight)} in-flight, "
+            f"{sum(1 for e in self.engines.values() if e.read_only)} degraded"
+        )
+
+    async def _recover_from_executions(self, now: datetime) -> list[ExecutionRow]:
+        """Phase 1: Replay DB executions to rebuild engine state.
+
+        Returns:
+            All recovered execution rows (for fill-gap detection in phase 2).
+        """
         try:
             executions = await self.repository.get_executions_for_recovery(as_of=now)
         except Exception as e:
             logger.error(f"ZMQTrader: Failed to query executions for recovery: {e}")
-            return
+            return []
         if not executions:
-            logger.info("ZMQTrader: No executions to recover, starting fresh")
-            return
+            logger.info("ZMQTrader: No executions to recover")
+            return []
         fills_by_key: dict[str, list[ExecutionRow]] = {}
         for exe in executions:
-            instrument = exe["instrument"]
-            exchange = exe["exchange"]
-            key = f"{instrument}@{exchange}-live"
+            key = f"{exe['instrument']}@{exe['exchange']}-live"
             fills_by_key.setdefault(key, []).append(exe)
-        assert self.msg_publisher is not None
         for engine_key, fills in fills_by_key.items():
-            instrument = fills[0]["instrument"]
-            exchange_str = fills[0]["exchange"]
-            valid_exchanges = get_args(OrderExchange)
-            if exchange_str not in valid_exchanges:
+            engine = await self._create_engine_for_recovery(
+                fills[0]["instrument"], fills[0]["exchange"]
+            )
+            if engine is None:
                 continue
-            exchange = cast(OrderExchange, exchange_str)
-            await self._ensure_instrument(instrument, exchange=exchange)
-            risk = RiskEvaluator(
-                RiskConfigModel(
-                    r_per_trade=self.settings.risk_r_per_trade,
-                    max_leverage=self.settings.risk_max_leverage,
-                    max_drawdown=self.settings.risk_max_drawdown,
-                )
-            )
-            specs_map: dict[str, dict[str, float]] = {
-                instrument: {"tick_size": 0.01, "lot_size": 0.0001}
-            }
-            engine = TradingEngineService(
-                instrument,
-                execution_socket=self.msg_publisher,
-                risk=risk,
-                cfg=EngineConfigModel(),
-                instrument_specs=specs_map,
-                exchange=exchange,
-            )
             for fill_row in fills:
                 self._apply_execution_row_to_engine(engine, fill_row)
             self.engines[engine_key] = engine
@@ -213,32 +223,80 @@ class TraderCoordinator(RegisterableProcess):
                 f"entry={engine.entry_price}, "
                 f"fills={len(fills)}"
             )
-        try:
-            active_orders = await self.repository.get_active_orders_for_recovery(
-                exchange="kraken", as_of=now
-            )
-        except Exception as e:
-            logger.error(f"ZMQTrader: Failed to query active orders for recovery: {e}")
-            active_orders = []
-        for db_order in active_orders:
+        return executions
+
+    async def _recover_active_orders(self, now: datetime, executions: list[ExecutionRow]) -> None:
+        """Phase 2+3: Process active orders across all exchanges."""
+        valid_exchanges = get_args(OrderExchange)
+        all_active: list[Any] = []
+        for exchange_str in valid_exchanges:
+            try:
+                orders = await self.repository.get_active_orders_for_recovery(
+                    exchange=exchange_str, as_of=now
+                )
+                all_active.extend(orders)
+            except Exception as e:
+                logger.error(f"ZMQTrader: Failed to query active orders for {exchange_str}: {e}")
+        for db_order in all_active:
             instrument = db_order["instrument"]
             exchange_str = db_order["exchange"]
             key = f"{instrument}@{exchange_str}-live"
             if key not in self.engines:
-                continue
+                engine = await self._create_engine_for_recovery(instrument, exchange_str)
+                if engine is None:
+                    continue
+                self.engines[key] = engine
+                self.last_signal_time[key] = time.time()
             engine = self.engines[key]
             engine.order_in_flight = True
-            engine.pending_client_order_id = db_order.get("client_order_id")
+            client_oid = db_order.get("client_order_id", "")
+            engine.pending_client_order_id = client_oid
             engine._in_flight_since = time.monotonic()
-            logger.info(
-                f"ZMQTrader: Recovered in-flight order "
-                f"{db_order.get('client_order_id')} for {key} "
-                f"with fresh timeout window"
+            db_filled = float(db_order.get("filled_size", 0.0))
+            exec_filled = sum(
+                e["size"] for e in executions if e.get("client_order_id") == client_oid
             )
-        logger.info(
-            f"ZMQTrader: Engine recovery complete: "
-            f"{len(self.engines)} engines, "
-            f"{sum(1 for e in self.engines.values() if e.order_in_flight)} in-flight"
+            if db_filled > 0 and abs(db_filled - exec_filled) > 1e-9:
+                engine.read_only = True
+                logger.warning(
+                    f"ZMQTrader: DEGRADED MODE for {key} - fill gap detected: "
+                    f"order filled_size={db_filled}, replayed executions={exec_filled}. "
+                    f"Cost basis cannot be reconstructed. Manual resolution required."
+                )
+            else:
+                logger.info(
+                    f"ZMQTrader: Recovered in-flight order "
+                    f"{db_order.get('client_order_id')} for {key} "
+                    f"with fresh timeout window"
+                )
+
+    async def _create_engine_for_recovery(
+        self, instrument: str, exchange_str: str
+    ) -> TradingEngineService | None:
+        """Create a TradingEngineService for recovery if exchange is valid."""
+        valid_exchanges = get_args(OrderExchange)
+        if exchange_str not in valid_exchanges:
+            return None
+        exchange = cast(OrderExchange, exchange_str)
+        assert self.msg_publisher is not None
+        await self._ensure_instrument(instrument, exchange=exchange)
+        risk = RiskEvaluator(
+            RiskConfigModel(
+                r_per_trade=self.settings.risk_r_per_trade,
+                max_leverage=self.settings.risk_max_leverage,
+                max_drawdown=self.settings.risk_max_drawdown,
+            )
+        )
+        specs_map: dict[str, dict[str, float]] = {
+            instrument: {"tick_size": 0.01, "lot_size": 0.0001}
+        }
+        return TradingEngineService(
+            instrument,
+            execution_socket=self.msg_publisher,
+            risk=risk,
+            cfg=EngineConfigModel(),
+            instrument_specs=specs_map,
+            exchange=exchange,
         )
 
     @staticmethod

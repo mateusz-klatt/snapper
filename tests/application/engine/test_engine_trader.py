@@ -774,6 +774,7 @@ def _configure_settings(monkeypatch: pytest.MonkeyPatch) -> tuple[SimpleNamespac
     settings = SimpleNamespace(
         db_url=TEST_DB_URL,
         zmq_broker_xsub="tcp://broker.xsub",
+        zmq_broker_xpub="tcp://broker.xpub",
         risk_r_per_trade=0.01,
         risk_max_leverage=2.0,
         risk_max_drawdown=0.15,
@@ -787,6 +788,16 @@ def _configure_settings(monkeypatch: pytest.MonkeyPatch) -> tuple[SimpleNamespac
 
     monkeypatch.setattr(trader_module, "get_settings", _stub_get_settings, raising=True)
     monkeypatch.setattr(trader_module, "get_repository", _stub_get_repository, raising=True)
+    monkeypatch.setattr(
+        trader_module,
+        "get_settings_service",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        trader_module,
+        "get_settings_with_service",
+        lambda _svc: settings,
+    )
     monkeypatch.setattr(
         trader_module,
         "resolve_symbol_public_id",
@@ -2837,12 +2848,10 @@ class TestRecovery:
         assert engine._in_flight_since >= before
 
     @pytest.mark.asyncio
-    async def test_recover_no_executions_starts_fresh(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_recover_no_executions_no_orders(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify empty DB results in no engines created.
 
-        Given: Empty execution history,
+        Given: Empty execution history AND no active orders,
         When: _recover_engine_state runs,
         Then: No engines are created.
         """
@@ -2850,9 +2859,106 @@ class TestRecovery:
         coord = TraderCoordinator()
         mock_repo = AsyncMock()
         mock_repo.get_executions_for_recovery = AsyncMock(return_value=[])
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
         coord.repository = mock_repo
         await coord._recover_engine_state()
         assert len(coord.engines) == 0
+
+    @pytest.mark.asyncio
+    async def test_recover_active_order_without_executions(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify active order without executions creates engine with in-flight.
+
+        Given: No executions but one active order in DB,
+        When: _recover_engine_state runs,
+        Then: Engine is created with order_in_flight=True and position=0.
+        """
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        coord.msg_publisher = cast(Any, MagicMock(tracker=Mock(session_id="s1")))
+        mock_repo = AsyncMock()
+        mock_repo.get_executions_for_recovery = AsyncMock(return_value=[])
+        mock_repo.get_active_orders_for_recovery = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "ord-1",
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                    "instrument": "BTC-USD",
+                    "exchange": "kraken",
+                    "client_order_id": "c1",
+                    "exchange_order_id": "ex-1",
+                    "status": "open",
+                    "side": "buy",
+                    "order_type": "market",
+                    "size": 0.5,
+                    "price": None,
+                    "filled_size": 0.0,
+                    "average_price": None,
+                    "time_in_force": None,
+                    "error": None,
+                    "created_at": datetime(2024, 1, 1, tzinfo=UTC),
+                    "updated_at": None,
+                }
+            ]
+        )
+        mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
+        coord.repository = mock_repo
+        await coord._recover_engine_state()
+        assert "BTC-USD@kraken-live" in coord.engines
+        engine = coord.engines["BTC-USD@kraken-live"]
+        assert engine.order_in_flight is True
+        assert engine.pending_client_order_id == "c1"
+        assert engine.position_qty == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_recover_fill_gap_enters_degraded_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify fill gap between order and executions triggers degraded mode.
+
+        Given: Order shows filled_size=0.5 but no executions exist,
+        When: _recover_engine_state runs,
+        Then: Engine enters read_only=True (degraded mode).
+        """
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        coord.msg_publisher = cast(Any, MagicMock(tracker=Mock(session_id="s1")))
+        mock_repo = AsyncMock()
+        mock_repo.get_executions_for_recovery = AsyncMock(return_value=[])
+        mock_repo.get_active_orders_for_recovery = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "ord-gap",
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                    "instrument": "BTC-USD",
+                    "exchange": "kraken",
+                    "client_order_id": "c-gap",
+                    "exchange_order_id": "ex-gap",
+                    "status": "open",
+                    "side": "buy",
+                    "order_type": "market",
+                    "size": 1.0,
+                    "price": None,
+                    "filled_size": 0.5,
+                    "average_price": 50000.0,
+                    "time_in_force": None,
+                    "error": None,
+                    "created_at": datetime(2024, 1, 1, tzinfo=UTC),
+                    "updated_at": None,
+                }
+            ]
+        )
+        mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
+        coord.repository = mock_repo
+        await coord._recover_engine_state()
+        engine = coord.engines["BTC-USD@kraken-live"]
+        assert engine.read_only is True
+        assert engine.order_in_flight is True
 
     @pytest.mark.asyncio
     async def test_recover_skips_invalid_exchange(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2962,52 +3068,32 @@ class TestRecovery:
         assert engine.entry_price == pytest.approx(50000.0)
 
     @pytest.mark.asyncio
-    async def test_recover_active_order_without_engine_skipped(
+    @pytest.mark.asyncio
+    async def test_recover_active_order_engine_creation_fails(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Verify active order for unknown engine is skipped.
+        """Verify active order is skipped when engine creation fails.
 
-        Given: Active order for ETH-USD but no engine exists for it,
-        When: _recover_engine_state runs with only BTC-USD executions,
-        Then: ETH-USD order is skipped, no crash.
+        Given: Active order for which _create_engine_for_recovery returns None,
+        When: _recover_engine_state runs,
+        Then: No engine created, no crash.
         """
         _configure_settings(monkeypatch)
         coord = TraderCoordinator()
         coord.msg_publisher = cast(Any, MagicMock(tracker=Mock(session_id="s1")))
         mock_repo = AsyncMock()
-        mock_repo.get_executions_for_recovery = AsyncMock(
-            return_value=[
-                {
-                    "public_id": "exe-1",
-                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
-                    "session_id": "s1",
-                    "sequence_id": 1,
-                    "trade_id": "t1",
-                    "exchange_order_id": "ex-1",
-                    "client_order_id": "c1",
-                    "instrument": "BTC-USD",
-                    "exchange": "kraken",
-                    "side": "buy",
-                    "size": 0.5,
-                    "price": 50000.0,
-                    "fee": 0.5,
-                    "fee_asset": "USD",
-                    "status": "filled",
-                    "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
-                }
-            ]
-        )
+        mock_repo.get_executions_for_recovery = AsyncMock(return_value=[])
         mock_repo.get_active_orders_for_recovery = AsyncMock(
             return_value=[
                 {
-                    "public_id": "ord-eth",
+                    "public_id": "ord-fail",
                     "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
                     "session_id": "s1",
-                    "sequence_id": 2,
-                    "instrument": "ETH-USD",
+                    "sequence_id": 1,
+                    "instrument": "BTC-USD",
                     "exchange": "kraken",
-                    "client_order_id": "c-eth",
-                    "exchange_order_id": "ex-eth",
+                    "client_order_id": "c-fail",
+                    "exchange_order_id": "ex-fail",
                     "status": "open",
                     "side": "buy",
                     "order_type": "market",
@@ -3022,11 +3108,10 @@ class TestRecovery:
                 }
             ]
         )
-        mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
         coord.repository = mock_repo
+        monkeypatch.setattr(coord, "_create_engine_for_recovery", AsyncMock(return_value=None))
         await coord._recover_engine_state()
-        btc_engine = coord.engines["BTC-USD@kraken-live"]
-        assert btc_engine.order_in_flight is False
+        assert len(coord.engines) == 0
 
     def test_apply_execution_row_sell_clears_position(self) -> None:
         """Verify sell execution row decreases position and clears entry price."""

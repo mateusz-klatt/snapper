@@ -7,7 +7,6 @@ stop-loss logic, fee calculation, and order publication to ZMQ.
 
 import datetime as dt
 import time
-import uuid
 from uuid import uuid7
 
 import zmq
@@ -275,8 +274,9 @@ class TradingEngineService:
         if signaled_at is not None:
             signaled_at_dt = dt.datetime.fromtimestamp(signaled_at, tz=dt.UTC)
         topic = order_command_topic(self.exchange, self.instrument, "submit")
+        order_public_id = str(uuid7())
         order = OrderRequestData(
-            public_id=str(uuid7()),
+            public_id=order_public_id,
             timestamp=dt.datetime.now(dt.UTC),
             session_id=self.execution_socket.tracker.session_id,
             sequence_id=self.execution_socket.tracker.next_sequence(topic),
@@ -287,7 +287,7 @@ class TradingEngineService:
             order_type="market",
             quantity=size,
             price=None,
-            client_order_id=f"{reason}-{uuid.uuid4().hex[:8]}",
+            client_order_id=order_public_id,
             exchange=self.exchange,
             signaled_at=signaled_at_dt,
         )
