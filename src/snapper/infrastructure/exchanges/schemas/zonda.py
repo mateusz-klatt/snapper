@@ -346,6 +346,9 @@ class ZondaExecutionData(ExchangeResponse):
             timestamp=self.timestamp,
             cum_qty=self.quantity,
             cum_cost=self.quantity * self.price,
+            last_qty=self.quantity,
+            last_price=self.price,
+            average_price=self.price,
         )
 
 

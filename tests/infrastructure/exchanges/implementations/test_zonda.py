@@ -1733,6 +1733,9 @@ class TestZondaExecutions:
         assert execution.exec_type == "trade"
         assert execution.cum_qty == pytest.approx(0.0001)
         assert execution.cum_cost == pytest.approx(0.0001 * 248487.27)
+        assert execution.last_qty == pytest.approx(0.0001)
+        assert execution.last_price == pytest.approx(248487.27)
+        assert execution.average_price == pytest.approx(248487.27)
 
     @pytest.mark.asyncio
     async def test_subscribe_executions_basic_flow(
