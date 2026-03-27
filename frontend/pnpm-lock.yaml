@@ -1508,8 +1508,8 @@ packages:
   '@vitest/utils@4.1.2':
     resolution: {integrity: sha512-xw2/TiX82lQHA06cgbqRKFb5lCAy3axQ4H4SoUFhUsg+wztiet+co86IAMDtF6Vm1hc7J6j09oh/rgDn+JdKIQ==}
 
-  '@zenuml/core@3.46.3':
-    resolution: {integrity: sha512-V5HhPYfavrEjR4VQzThVUtTK8ezR2TMuIK62M2V2ca1HHis7gwnoX80ekmaIP0RcyIT8Szmoc+Q9/nXBgFUONQ==}
+  '@zenuml/core@3.46.4':
+    resolution: {integrity: sha512-cPI4isHQmHrvbNPkRRQ3QrihxSsaHHhLmcJrtoKB5uLgjSpaXyRnFLVZ/HnOKsLLyD62hNsxMmts5QjHV8H7Uw==}
     engines: {node: '>=20'}
 
   abort-controller@3.0.0:
@@ -1664,8 +1664,8 @@ packages:
     resolution: {integrity: sha512-Ceh+7ox5qe7LJuLHoY0feh3pHuUDHAcRUeyL2VYghZwfpkNIy/+8Ocg0a3UuSoYzavmylwuLWQOf3hl0jjMMIw==}
     engines: {node: '>=8'}
 
-  brace-expansion@2.0.2:
-    resolution: {integrity: sha512-Jt0vHyM+jmUBqojB7E1NIYadt0vI0Qxjxd2TErW94wDz+E2LAm5vKMXXwg6ZZBTHPuUlDgQHKXvjGBdfcF1ZDQ==}
+  brace-expansion@2.0.3:
+    resolution: {integrity: sha512-MCV/fYJEbqx68aE58kv2cA/kiky1G8vux3OR6/jbS+jIMe/6fJWa0DTzJU7dqijOWYwHi1t29FlfYI9uytqlpA==}
 
   brace-expansion@5.0.5:
     resolution: {integrity: sha512-VZznLgtwhn+Mact9tfiwx64fA9erHH/MCXEUfB/0bX/6Fz6ny5EGTXYltMocqg4xFAQZtnO3DHWWXi8RiuN7cQ==}
@@ -3920,7 +3920,7 @@ snapshots:
 
   '@mermaid-js/mermaid-zenuml@0.2.2(@babel/core@7.29.0)(@babel/template@7.28.6)(@types/react@19.2.14)(mermaid@11.13.0)(yaml@2.8.3)':
     dependencies:
-      '@zenuml/core': 3.46.3(@babel/core@7.29.0)(@babel/template@7.28.6)(@types/react@19.2.14)(yaml@2.8.3)
+      '@zenuml/core': 3.46.4(@babel/core@7.29.0)(@babel/template@7.28.6)(@types/react@19.2.14)(yaml@2.8.3)
       mermaid: 11.13.0
     transitivePeerDependencies:
       - '@babel/core'
@@ -4895,7 +4895,7 @@ snapshots:
       convert-source-map: 2.0.0
       tinyrainbow: 3.1.0
 
-  '@zenuml/core@3.46.3(@babel/core@7.29.0)(@babel/template@7.28.6)(@types/react@19.2.14)(yaml@2.8.3)':
+  '@zenuml/core@3.46.4(@babel/core@7.29.0)(@babel/template@7.28.6)(@types/react@19.2.14)(yaml@2.8.3)':
     dependencies:
       '@floating-ui/react': 0.27.19(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@headlessui/react': 2.2.9(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -5034,7 +5034,7 @@ snapshots:
 
   binary-extensions@2.3.0: {}
 
-  brace-expansion@2.0.2:
+  brace-expansion@2.0.3:
     dependencies:
       balanced-match: 1.0.2
 
@@ -6029,7 +6029,7 @@ snapshots:
 
   minimatch@5.1.9:
     dependencies:
-      brace-expansion: 2.0.2
+      brace-expansion: 2.0.3
 
   minimist@1.2.8: {}
 
