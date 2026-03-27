@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from scripts.check_balances import _run
 from scripts.check_balances import build_exchange_factories
 from scripts.check_balances import check_single_exchange
 from scripts.check_balances import format_balances
@@ -199,8 +200,6 @@ async def test_run_no_factories_returns_one(
     When: _run() is called,
     Then: Returns 1.
     """
-    from scripts.check_balances import _run
-
     mock_bootstrap.return_value = SimpleNamespace(db_url="sqlite://", zmq_broker_xpub="tcp://x")
     mock_get_settings.return_value = _make_settings()
     result = await _run()
@@ -224,8 +223,6 @@ async def test_run_with_factories_returns_zero(
     When: _run() is called,
     Then: Returns 0 after checking balances.
     """
-    from scripts.check_balances import _run
-
     mock_bootstrap.return_value = SimpleNamespace(db_url="sqlite://", zmq_broker_xpub="tcp://x")
     mock_get_settings.return_value = _make_settings(kraken_api_key="k", kraken_api_secret="s")
     mock_check.return_value = {"BTC": AccountBalance(currency="BTC", free=0.1, used=0.0, total=0.1)}
