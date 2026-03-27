@@ -2205,7 +2205,7 @@ async def test_on_signal_converts_iso_timestamp(monkeypatch: pytest.MonkeyPatch)
     coordinator = TraderCoordinator()
     coordinator.execution_publisher = cast(Any, SimpleNamespace())
     coordinator.msg_publisher = cast(Any, SimpleNamespace(publish=AsyncMock()))
-    coordinator._current_topic = "signals.paper.BTC-USD.live"
+    coordinator._current_topic = "signals.paper.BTC-USD.demo"
     signal = SignalData(
         session_id="",
         sequence_id=0,
@@ -2221,7 +2221,7 @@ async def test_on_signal_converts_iso_timestamp(monkeypatch: pytest.MonkeyPatch)
         reason="test",
     )
     await coordinator._on_signal(signal)
-    engine = cast(StubEngine, coordinator.engines["BTC-USD@paper-live"])
+    engine = cast(StubEngine, coordinator.engines["BTC-USD@paper-demo"])
     assert engine.calls
     assert isinstance(engine.calls[0][1], float)
 
