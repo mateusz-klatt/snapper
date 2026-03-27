@@ -58,7 +58,7 @@ from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
-from snapper.infrastructure.exchanges.schemas.zonda import ZondaExecutionsMessage
+from snapper.infrastructure.exchanges.schemas.zonda import ZondaExecutionData
 from snapper.infrastructure.exchanges.schemas.zonda import ZondaStatsMessage
 from snapper.infrastructure.exchanges.schemas.zonda import ZondaTickerMessage
 from snapper.infrastructure.exchanges.schemas.zonda import ZondaTransactionsMessage
@@ -600,16 +600,21 @@ class ZondaExchangeClient(ExchangeClientBase):
         return signed_payload
 
     async def _parse_executions_message(self, data: dict[str, Any]) -> None:
+        """Parse private execution push from trading/history/transactions.
+
+        WS push delivers a single flat execution object in 'message' field,
+        not a list wrapped in 'history'.
+        """
         try:
-            msg = ZondaExecutionsMessage.model_validate(data)
-            for exec_data in msg.message.history:
-                execution = exec_data.to_execution_update()
-                await self._execution_queue.put(execution)
-                logger.debug(
-                    f"Zonda execution: {exec_data.market} {exec_data.user_action.lower()} "
-                    f"{exec_data.quantity:.6f} @ {exec_data.price:.2f} "
-                    f"(order: {exec_data.offer_id}, taker: {exec_data.was_taker})"
-                )
+            raw_msg = data.get("message", {})
+            exec_data = ZondaExecutionData.model_validate(raw_msg)
+            execution = exec_data.to_execution_update()
+            await self._execution_queue.put(execution)
+            logger.debug(
+                f"Zonda execution: {exec_data.market} {exec_data.user_action.lower()} "
+                f"{exec_data.quantity:.6f} @ {exec_data.price:.2f} "
+                f"(order: {exec_data.offer_id}, taker: {exec_data.was_taker})"
+            )
         except (ValueError, KeyError) as e:
             logger.warning(f"Failed to parse Zonda executions data: {e}, data={data}")
 
@@ -1109,7 +1114,7 @@ class ZondaExchangeClient(ExchangeClientBase):
             await self._emit_completed_candles()
 
     async def _subscribe_to_private_executions(self) -> None:
-        """Send private subscription message for execution reports."""
+        """Send private subscription for execution reports (history/transactions)."""
         assert self._ws is not None
         payload = {
             "action": "subscribe-private",

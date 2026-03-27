@@ -1616,20 +1616,16 @@ class TestZondaExecutions:
             "action": "push",
             "topic": "trading/history/transactions",
             "message": {
-                "history": [
-                    {
-                        "id": "exec_123",
-                        "market": "BTC-PLN",
-                        "time": "1000000000000",
-                        "amount": "0.5",
-                        "rate": "50000",
-                        "initializedBy": "Sell",
-                        "wasTaker": True,
-                        "userAction": "Buy",
-                        "offerId": "order_456",
-                        "commissionValue": "0.001",
-                    }
-                ]
+                "id": "exec_123",
+                "market": "BTC-PLN",
+                "time": "1000000000000",
+                "amount": "0.5",
+                "rate": "50000",
+                "initializedBy": "Sell",
+                "wasTaker": True,
+                "userAction": "Buy",
+                "offerId": "order_456",
+                "commissionValue": "0.001",
             },
             "timestamp": "1000000000000",
             "seqNo": 1,
@@ -1649,41 +1645,42 @@ class TestZondaExecutions:
     async def test_parse_executions_multiple(
         self, authenticated_client: ZondaExchangeClient
     ) -> None:
-        """Test parsing multiple executions queues multiple ExecutionUpdates.
+        """Test parsing two separate execution pushes queues two ExecutionUpdates.
 
-        Given: An executions message with two trades (BTC-PLN and ETH-PLN).
-        When: _parse_executions_message() is called.
+        Given: Two execution push messages (BTC-PLN and ETH-PLN).
+        When: _parse_executions_message() is called for each.
         Then: Two ExecutionUpdates with correct order_ids and symbols are queued.
         """
-        data = {
+        data1 = {
             "action": "push",
             "topic": "trading/history/transactions",
             "message": {
-                "history": [
-                    {
-                        "id": "exec_1",
-                        "market": "BTC-PLN",
-                        "time": "1000000000000",
-                        "amount": "0.1",
-                        "rate": "50000",
-                        "userAction": "Buy",
-                        "offerId": "order_1",
-                        "wasTaker": True,
-                    },
-                    {
-                        "id": "exec_2",
-                        "market": "ETH-PLN",
-                        "time": "1000000001000",
-                        "amount": "1.0",
-                        "rate": "3000",
-                        "userAction": "Sell",
-                        "offerId": "order_2",
-                        "wasTaker": False,
-                    },
-                ]
+                "id": "exec_1",
+                "market": "BTC-PLN",
+                "time": "1000000000000",
+                "amount": "0.1",
+                "rate": "50000",
+                "userAction": "Buy",
+                "offerId": "order_1",
+                "wasTaker": True,
             },
         }
-        await authenticated_client._parse_executions_message(data)
+        data2 = {
+            "action": "push",
+            "topic": "trading/history/transactions",
+            "message": {
+                "id": "exec_2",
+                "market": "ETH-PLN",
+                "time": "1000000001000",
+                "amount": "1.0",
+                "rate": "3000",
+                "userAction": "Sell",
+                "offerId": "order_2",
+                "wasTaker": False,
+            },
+        }
+        await authenticated_client._parse_executions_message(data1)
+        await authenticated_client._parse_executions_message(data2)
         exec1 = await asyncio.wait_for(
             authenticated_client._execution_queue.get(),
             timeout=1.0,
@@ -1696,6 +1693,46 @@ class TestZondaExecutions:
         assert exec1.symbol == "BTC-PLN"
         assert exec2.order_id == "order_2"
         assert exec2.symbol == "ETH-PLN"
+
+    @pytest.mark.asyncio
+    async def test_parse_executions_real_uat_payload(
+        self, authenticated_client: ZondaExchangeClient
+    ) -> None:
+        """Test parsing real Zonda WS execution payload from UAT 2026-03-27.
+
+        Given: Exact WS push captured from live Zonda market buy execution.
+        When: _parse_executions_message() is called.
+        Then: ExecutionUpdate has correct order_id, symbol, side, qty, cost.
+        """
+        data = {
+            "action": "push",
+            "topic": "trading/history/transactions",
+            "message": {
+                "id": "e848bab9-2a1b-11f1-81a9-4ea2d0fa018b",
+                "market": "BTC-PLN",
+                "time": "1774643477476",
+                "amount": "0.0001",
+                "rate": "248487.27",
+                "initializedBy": "Buy",
+                "wasTaker": True,
+                "userAction": "Buy",
+                "offerId": "e84893a8-2a1b-11f1-81a9-4ea2d0fa018b",
+                "commissionValue": "0.00000020",
+            },
+            "timestamp": "1774643477476",
+            "seqNo": 4,
+        }
+        await authenticated_client._parse_executions_message(data)
+        execution = await asyncio.wait_for(
+            authenticated_client._execution_queue.get(),
+            timeout=1.0,
+        )
+        assert execution.order_id == "e84893a8-2a1b-11f1-81a9-4ea2d0fa018b"
+        assert execution.symbol == "BTC-PLN"
+        assert execution.side == OrderSideEnum.BUY
+        assert execution.exec_type == "trade"
+        assert execution.cum_qty == pytest.approx(0.0001)
+        assert execution.cum_cost == pytest.approx(0.0001 * 248487.27)
 
     @pytest.mark.asyncio
     async def test_subscribe_executions_basic_flow(
@@ -1716,9 +1753,9 @@ class TestZondaExecutions:
             async def mock_messages() -> Any:
                 yield (
                     '{"action":"push","topic":"trading/history/transactions",'
-                    '"message":{"history":[{"id":"exec_1","market":"BTC-PLN",'
+                    '"message":{"id":"exec_1","market":"BTC-PLN",'
                     '"time":"1000000000000","amount":"0.5","rate":"50000",'
-                    '"userAction":"Buy","offerId":"order_1","wasTaker":true}]}}'
+                    '"userAction":"Buy","offerId":"order_1","wasTaker":true}}'
                 )
 
             mock_ws.__aiter__ = lambda _self: mock_messages()
@@ -1767,9 +1804,9 @@ class TestZondaExecutions:
             async def mock_messages() -> Any:
                 yield (
                     '{"action":"push","topic":"trading/history/transactions",'
-                    '"message":{"history":[{"id":"exec_1","market":"BTC-PLN",'
+                    '"message":{"id":"exec_1","market":"BTC-PLN",'
                     '"time":"1000000000000","amount":"0.1","rate":"50000",'
-                    '"userAction":"Buy","offerId":"order_1","wasTaker":true}]}}'
+                    '"userAction":"Buy","offerId":"order_1","wasTaker":true}}'
                 )
 
             mock_ws.__aiter__ = lambda _self: mock_messages()
@@ -1797,7 +1834,7 @@ MODULE_ASYNCIO = getattr(zonda_module, "asyncio")
 ZONDA_TICKER_MESSAGE = getattr(zonda_module, "ZondaTickerMessage")
 ZONDA_STATS_MESSAGE = getattr(zonda_module, "ZondaStatsMessage")
 ZONDA_TRANSACTIONS_MESSAGE = getattr(zonda_module, "ZondaTransactionsMessage")
-ZONDA_EXECUTIONS_MESSAGE = getattr(zonda_module, "ZondaExecutionsMessage")
+ZONDA_EXECUTION_DATA = getattr(zonda_module, "ZondaExecutionData")
 
 
 class DummyWs:
@@ -2185,17 +2222,17 @@ async def test_parse_transactions_handles_validation_error() -> None:
 async def test_parse_executions_handles_validation_error() -> None:
     """Test parsing executions handles model validation error gracefully.
 
-    Given: ZondaExecutionsMessage.model_validate raises ValueError.
+    Given: ZondaExecutionData.model_validate raises ValueError.
     When: _parse_executions_message() is called.
     Then: No exception is raised.
     """
     client = ZondaExchangeClient()
     with patch.object(
-        ZONDA_EXECUTIONS_MESSAGE,
+        ZONDA_EXECUTION_DATA,
         "model_validate",
         side_effect=ValueError("boom"),
     ):
-        await client._parse_executions_message({})
+        await client._parse_executions_message({"message": {}})
 
 
 @pytest.mark.asyncio
@@ -2262,6 +2299,122 @@ async def test_create_order_without_client_order_id() -> None:
         await client.create_order(request)
         order_params = mock_create.call_args[0][5]
         assert order_params == {}
+
+
+@pytest.mark.asyncio
+async def test_create_order_market_with_none_fields() -> None:
+    """Test create_order handles Zonda market order CCXT response with None fields.
+
+    Given: CCXT response with timestamp=None, fee=None, clientOrderId=None
+           (real Zonda market order behavior).
+    When: create_order() is called.
+    Then: ExchangeOrderSnapshot parsed without errors, fallback values used.
+    """
+    client = ZondaExchangeClient(api_key="key", api_secret="secret")
+    mock_order: dict[str, Any] = {
+        "id": "e84893a8-2a1b-11f1-81a9-4ea2d0fa018b",
+        "info": {
+            "status": "Ok",
+            "completed": True,
+            "offerId": "e84893a8-2a1b-11f1-81a9-4ea2d0fa018b",
+            "transactions": [{"amount": "0.0001", "rate": "248487.27"}],
+        },
+        "timestamp": None,
+        "datetime": None,
+        "lastTradeTimestamp": None,
+        "status": "closed",
+        "symbol": "BTC/PLN",
+        "type": "market",
+        "side": "buy",
+        "price": 248487.27,
+        "amount": 0.0001,
+        "cost": 24.848727,
+        "filled": 0.0001,
+        "remaining": 0.0,
+        "average": 248487.27,
+        "fee": None,
+        "trades": [
+            {
+                "id": None,
+                "price": 248487.27,
+                "amount": 0.0001,
+                "cost": 24.848727,
+                "info": {"amount": "0.0001", "rate": "248487.27"},
+                "fees": [],
+            }
+        ],
+        "clientOrderId": None,
+        "fees": [],
+    }
+    with patch.object(client._ccxt_client, "create_order", return_value=mock_order):
+        request = ExchangeOrderRequest(
+            symbol="BTC-PLN",
+            side=OrderSideEnum.BUY,
+            type=OrderTypeEnum.MARKET,
+            amount=0.0001,
+        )
+        order = await client.create_order(request)
+        assert order.id == "e84893a8-2a1b-11f1-81a9-4ea2d0fa018b"
+        assert order.status == OrderStatusEnum.CLOSED
+        assert order.filled == pytest.approx(0.0001)
+        assert order.remaining == pytest.approx(0.0)
+        assert order.price == pytest.approx(248487.27)
+        assert order.fee is None
+        assert order.client_order_id is None
+        assert order.timestamp > 0
+
+
+@pytest.mark.asyncio
+async def test_create_order_limit_maker_with_none_fields() -> None:
+    """Test create_order handles Zonda limit order CCXT response with None fields.
+
+    Given: CCXT response for unfilled limit order with filled=None, remaining=None
+           (real Zonda limit order behavior).
+    When: create_order() is called.
+    Then: ExchangeOrderSnapshot parsed with status=open, filled=0, remaining=0.
+    """
+    client = ZondaExchangeClient(api_key="key", api_secret="secret")
+    mock_order: dict[str, Any] = {
+        "id": "4d0b4b98-2a1d-11f1-81a9-4ea2d0fa018b",
+        "info": {
+            "status": "Ok",
+            "completed": False,
+            "offerId": "4d0b4b98-2a1d-11f1-81a9-4ea2d0fa018b",
+            "transactions": [],
+        },
+        "timestamp": None,
+        "datetime": None,
+        "status": "open",
+        "symbol": "BTC/PLN",
+        "type": "limit",
+        "side": "sell",
+        "price": 999999.0,
+        "amount": 0.00002,
+        "cost": None,
+        "filled": None,
+        "remaining": None,
+        "average": None,
+        "fee": None,
+        "trades": [],
+        "clientOrderId": None,
+    }
+    with patch.object(client._ccxt_client, "create_order", return_value=mock_order):
+        request = ExchangeOrderRequest(
+            symbol="BTC-PLN",
+            side=OrderSideEnum.SELL,
+            type=OrderTypeEnum.LIMIT,
+            amount=0.00002,
+            price=999999.0,
+        )
+        order = await client.create_order(request)
+        assert order.id == "4d0b4b98-2a1d-11f1-81a9-4ea2d0fa018b"
+        assert order.status == OrderStatusEnum.OPEN
+        assert order.filled == pytest.approx(0.0)
+        assert order.remaining == pytest.approx(0.0)
+        assert order.price == pytest.approx(999999.0)
+        assert order.amount == pytest.approx(0.00002)
+        assert order.fee is None
+        assert order.timestamp > 0
 
 
 @pytest.mark.asyncio

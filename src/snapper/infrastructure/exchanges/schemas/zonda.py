@@ -349,22 +349,6 @@ class ZondaExecutionData(ExchangeResponse):
         )
 
 
-class ZondaExecutionsPayload(ExchangeResponse):
-    """Payload containing execution history from Zonda."""
-
-    history: list[ZondaExecutionData] = Field(default_factory=list)
-
-
-class ZondaExecutionsMessage(ExchangeResponse):
-    """WebSocket message containing executions from Zonda."""
-
-    action: str = ""
-    topic: str = ""
-    message: ZondaExecutionsPayload = Field(default_factory=ZondaExecutionsPayload)
-    timestamp: str = ""
-    seq_no: int = Field(default=0, alias="seqNo")
-
-
 def create_ticker_update_from_caches(
     symbol: str,
     ticker_cache: dict[str, Any],
@@ -407,8 +391,6 @@ def create_ticker_update_from_caches(
 
 __all__ = [
     "ZondaExecutionData",
-    "ZondaExecutionsMessage",
-    "ZondaExecutionsPayload",
     "ZondaMarketInfo",
     "ZondaStatsData",
     "ZondaStatsMessage",
