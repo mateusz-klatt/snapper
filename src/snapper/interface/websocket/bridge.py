@@ -538,6 +538,43 @@ class ZmqWebSocketBridgeService:
         if topic in self.topic_metrics:
             self.topic_metrics[topic].forwarded_count += 1
 
+    def _validate_topic_match(self, topic: str, received_topic: str) -> bool:
+        """Check whether received_topic matches the subscription contract.
+
+        Root subscriptions (ending with ``"."``) require a prefix match;
+        exact subscriptions require equality.  Mismatches are logged and
+        counted as invalid.
+
+        Args:
+            topic: The subscription topic (client key).
+            received_topic: The actual topic from ZMQ message frame.
+
+        Returns:
+            True when the topic matches, False when it should be dropped.
+        """
+        is_root = topic.endswith(".")
+        if is_root and not received_topic.startswith(topic):
+            logger.warning(
+                "Bridge routing mismatch: received_topic=%s does not match "
+                "root subscription=%s, dropping message",
+                received_topic,
+                topic,
+            )
+            if topic in self.topic_metrics:
+                self.topic_metrics[topic].invalid_messages += 1
+            return False
+        if not is_root and received_topic != topic:
+            logger.warning(
+                "Bridge routing mismatch: received_topic=%s does not match "
+                "exact subscription=%s, dropping message",
+                received_topic,
+                topic,
+            )
+            if topic in self.topic_metrics:
+                self.topic_metrics[topic].invalid_messages += 1
+            return False
+        return True
+
     async def _forward_to_clients(self, topic: str, received_topic: str, message_str: str) -> None:
         """Forward a message to all subscribed WebSocket clients.
 
@@ -555,27 +592,7 @@ class ZmqWebSocketBridgeService:
         """
         if topic not in self.topic_subscriptions:
             return
-        is_root = topic.endswith(".")
-        if is_root:
-            if not received_topic.startswith(topic):
-                logger.warning(
-                    "Bridge routing mismatch: received_topic=%s does not match "
-                    "root subscription=%s, dropping message",
-                    received_topic,
-                    topic,
-                )
-                if topic in self.topic_metrics:
-                    self.topic_metrics[topic].invalid_messages += 1
-                return
-        elif received_topic != topic:
-            logger.warning(
-                "Bridge routing mismatch: received_topic=%s does not match "
-                "exact subscription=%s, dropping message",
-                received_topic,
-                topic,
-            )
-            if topic in self.topic_metrics:
-                self.topic_metrics[topic].invalid_messages += 1
+        if not self._validate_topic_match(topic, received_topic):
             return
         current_time = time.time()
         max_pending = self._get_max_pending(topic)

@@ -918,6 +918,61 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         )
         return True
 
+    @staticmethod
+    def _resolve_fill_quantities(
+        execution: ExecutionUpdate,
+        prev_cum: float,
+    ) -> tuple[float, float, float, float]:
+        """Derive cumulative and delta quantities from an execution update.
+
+        Args:
+            execution: Execution update from exchange.
+            prev_cum: Previously seen cumulative quantity for this order.
+
+        Returns:
+            Tuple of (cum_qty, delta_size, delta_price, avg_price).
+        """
+        if execution.cum_qty is not None:
+            cum_qty = execution.cum_qty
+        elif execution.last_qty is not None:
+            cum_qty = prev_cum + execution.last_qty
+        else:
+            cum_qty = 0.0
+        if execution.last_qty is not None and execution.last_price is not None:
+            delta_size = execution.last_qty
+            delta_price = execution.last_price
+        else:
+            delta_size = cum_qty - prev_cum
+            delta_price = execution.average_price or 0.0
+        avg_price = execution.average_price or delta_price
+        return cum_qty, delta_size, delta_price, avg_price
+
+    @staticmethod
+    def _determine_fill_status(
+        execution: ExecutionUpdate,
+        cum_qty: float,
+        expected_qty: float,
+    ) -> Literal["filled", "partial"]:
+        """Determine whether execution represents a full or partial fill.
+
+        Args:
+            execution: Execution update from exchange.
+            cum_qty: Resolved cumulative filled quantity.
+            expected_qty: Absolute expected order quantity.
+
+        Returns:
+            Fill status literal.
+        """
+        if execution.cum_qty is None and execution.last_qty is None:
+            return to_fill_status(execution)
+        tolerance = max(1e-12, expected_qty * 1e-6)
+        qty_complete = cum_qty >= expected_qty - tolerance
+        exchange_terminal = execution.cum_qty is not None and execution.order_status in (
+            OrderStatusEnum.CLOSED,
+            OrderStatusEnum.CANCELED,
+        )
+        return "filled" if qty_complete or exchange_terminal else "partial"
+
     def _build_execution_data(
         self,
         execution: ExecutionUpdate,
@@ -942,31 +997,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         client_id = original_order.client_order_id
         pending = self.pending_orders.get(client_id)
         prev_cum = pending.last_seen_cum_qty if pending else 0.0
-        if execution.cum_qty is not None:
-            cum_qty = execution.cum_qty
-        elif execution.last_qty is not None:
-            cum_qty = prev_cum + execution.last_qty
-        else:
-            cum_qty = 0.0
-        if execution.last_qty is not None and execution.last_price is not None:
-            delta_size = execution.last_qty
-            delta_price = execution.last_price
-        else:
-            delta_size = cum_qty - prev_cum
-            delta_price = execution.average_price or 0.0
-        avg_price = execution.average_price or delta_price
-        status: Literal["filled", "partial"]
-        if execution.cum_qty is not None or execution.last_qty is not None:
-            expected_qty = abs(float(original_order.quantity))
-            tolerance = max(1e-12, expected_qty * 1e-6)
-            qty_complete = cum_qty >= expected_qty - tolerance
-            exchange_terminal = execution.cum_qty is not None and execution.order_status in (
-                OrderStatusEnum.CLOSED,
-                OrderStatusEnum.CANCELED,
-            )
-            status = "filled" if qty_complete or exchange_terminal else "partial"
-        else:
-            status = to_fill_status(execution)
+        cum_qty, delta_size, delta_price, avg_price = self._resolve_fill_quantities(
+            execution, prev_cum
+        )
+        status = self._determine_fill_status(
+            execution, cum_qty, abs(float(original_order.quantity))
+        )
         if pending:
             pending.last_seen_cum_qty = cum_qty
         return topic, ExecutionData(

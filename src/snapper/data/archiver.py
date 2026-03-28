@@ -344,8 +344,6 @@ class CandleCacheArchiver:
                 exchange,
                 timespan,
                 archive_symbol,
-                day_start,
-                day_end,
                 dry_run,
             )
         return self._write_daily_files(
@@ -408,8 +406,6 @@ class CandleCacheArchiver:
         exchange: str,
         timespan: str,
         archive_symbol: str,
-        day_start: date,
-        day_end: date,
         dry_run: bool,
     ) -> ExportResult:
         """Group candle rows by month and write per-month CSV files.
@@ -421,8 +417,6 @@ class CandleCacheArchiver:
             exchange: Exchange name.
             timespan: Timespan directory name.
             archive_symbol: Archive symbol directory name.
-            day_start: Range start (for month iteration).
-            day_end: Range end.
             dry_run: Count only.
 
         Returns:
