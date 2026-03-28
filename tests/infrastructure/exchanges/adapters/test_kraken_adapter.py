@@ -278,7 +278,7 @@ def test_parse_kraken_trade_valid() -> None:
     assert result.quantity == pytest.approx(0.5)
     assert result.price == pytest.approx(45000.0)
     assert result.ord_type == "limit"
-    assert result.trade_id == 12345
+    assert result.trade_id == "12345"
 
 
 def test_parse_kraken_trade_list_valid() -> None:
@@ -349,6 +349,46 @@ def test_parse_kraken_trade_list_skips_bad_item(mock_symbol_mapper: Any) -> None
     result = parse_kraken_trade_list(raw_data)
     assert len(result) == 1
     assert result[0].symbol == "BTC-USD"
+
+
+def test_parse_kraken_trade_missing_trade_id_returns_none() -> None:
+    """Kraken trade without trade_id yields None, not 0.
+
+    Given: Raw trade data with trade_id absent,
+    When: parse_kraken_trade is called,
+    Then: TradeUpdate.trade_id is None.
+    """
+    raw_data: dict[str, Any] = {
+        "symbol": "BTC/USD",
+        "side": "buy",
+        "qty": 0.5,
+        "price": 45000.0,
+        "ord_type": "limit",
+        "timestamp": "2024-12-22T10:00:00.000000Z",
+    }
+    result = parse_kraken_trade(raw_data)
+    assert result.trade_id is None
+
+
+def test_parse_kraken_trade_id_returns_string() -> None:
+    """Kraken trade with trade_id yields string, not int.
+
+    Given: Raw trade data with integer trade_id,
+    When: parse_kraken_trade is called,
+    Then: TradeUpdate.trade_id is a string representation.
+    """
+    raw_data: dict[str, Any] = {
+        "symbol": "BTC/USD",
+        "side": "buy",
+        "qty": 0.5,
+        "price": 45000.0,
+        "ord_type": "limit",
+        "trade_id": 12345,
+        "timestamp": "2024-12-22T10:00:00.000000Z",
+    }
+    result = parse_kraken_trade(raw_data)
+    assert result.trade_id == "12345"
+    assert isinstance(result.trade_id, str)
 
 
 def test_parse_kraken_execution_valid() -> None:

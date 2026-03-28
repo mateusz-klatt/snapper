@@ -706,7 +706,7 @@ class _ReplayRepo:
                 "size": 1.0,
                 "price": 100.0,
                 "timestamp": now,
-                "trade_id": 42,
+                "trade_id": "42",
             }
         ]
 
@@ -1079,7 +1079,7 @@ async def test_subscribe_candles_and_trades_replay() -> None:
         trades.append(trade)
         break
     assert candles and isinstance(candles[0], CandleUpdate)
-    assert trades and trades[0].trade_id == 42
+    assert trades and trades[0].trade_id == "42"
 
 
 @pytest.mark.asyncio

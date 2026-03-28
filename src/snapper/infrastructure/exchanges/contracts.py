@@ -232,8 +232,8 @@ class TradeUpdate:
     quantity: float
     price: float
     ord_type: str
-    trade_id: int
     timestamp: datetime
+    trade_id: str | None = None
 
 
 @dataclass

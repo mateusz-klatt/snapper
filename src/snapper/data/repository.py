@@ -1062,7 +1062,7 @@ class SQLAlchemyRepository(Repository):
         """Insert trades with dialect-specific conflict handling."""
         if not rows:
             return 0
-        return await self._upsert_batch(Trade, rows, ["trade_id"])
+        return await self._upsert_batch(Trade, rows, ["instrument_public_id", "trade_id"])
 
     async def upsert_ticks(self, rows: list[TickUpsertRow]) -> int:
         """Insert ticks as append-only (no dedup key)."""

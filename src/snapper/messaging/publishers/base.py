@@ -446,7 +446,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     price=trade.price,
                     volume=trade.quantity,
                     side=trade.side if trade.side in ["buy", "sell"] else None,
-                    trade_id=str(trade.trade_id),
+                    trade_id=trade.trade_id,
                 )
                 published = await self._publish_message(topic, trade_msg)
                 self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
@@ -599,19 +599,14 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
     async def _save_trade_to_db(self, native_symbol: str, trade_msg: TradeData) -> None:
         """Persist trade data to the database.
 
-        Skips persistence when trade_id is missing because the Trade model
-        uses trade_id as a unique dedup key and replay code casts it to int.
+        Trades with trade_id are deduplicated by (instrument_public_id, trade_id).
+        Trades without trade_id are inserted as append-only.
 
         Args:
             native_symbol: Native exchange symbol identifier.
             trade_msg: TradeData containing price/volume/side to persist.
         """
         try:
-            if trade_msg.trade_id is None:
-                logger.debug(
-                    f"Skipping trade persistence for {native_symbol}: no exchange trade_id"
-                )
-                return
             instrument_public_id = await self._ensure_instrument(native_symbol)
             if instrument_public_id is None:
                 return

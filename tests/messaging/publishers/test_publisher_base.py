@@ -250,7 +250,7 @@ async def test_trade_loop_publishes_and_saves(monkeypatch: pytest.MonkeyPatch) -
             price=100.0,
             quantity=1.0,
             side="buy",
-            trade_id=12345,
+            trade_id="12345",
             timestamp=datetime.now(UTC),
         )
         pub.running = False
@@ -925,7 +925,7 @@ async def test_trade_loop_breaks_when_not_running(monkeypatch: pytest.MonkeyPatc
             price=1.0,
             quantity=1.0,
             side="buy",
-            trade_id=99,
+            trade_id="99",
             timestamp=datetime.now(UTC),
         )
 
@@ -1845,7 +1845,7 @@ class TestFeedPublisherCoverage:
                 quantity=0.5,
                 price=130.0,
                 ord_type="market",
-                trade_id=12345,
+                trade_id="12345",
                 timestamp=datetime.now(UTC),
             )
             yield TradeUpdate(
@@ -1854,7 +1854,7 @@ class TestFeedPublisherCoverage:
                 quantity=1.0,
                 price=129.0,
                 ord_type="market",
-                trade_id=12346,
+                trade_id="12346",
                 timestamp=datetime.now(UTC),
             )
 
@@ -2773,18 +2773,20 @@ async def test_save_trade_to_db_logs_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_save_trade_to_db_skips_when_no_trade_id() -> None:
-    """Verify _save_trade_to_db skips persistence when trade_id is None.
+async def test_save_trade_to_db_persists_with_null_trade_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify _save_trade_to_db persists trade even without trade_id.
 
     Given: A TradeData message without exchange trade_id,
     When: _save_trade_to_db is called,
-    Then: No trade is upserted.
+    Then: Trade is upserted as append-only (NULL trade_id).
     """
-    pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    pub.repository = SimpleNamespace(
-        ensure_instrument=AsyncMock(return_value=(1, "inst-pub-1")),
-        upsert_trades=AsyncMock(),
-    )
+    repo = DummyRepository()
+    resolve_mock = AsyncMock(return_value="fake-spid")
+    monkeypatch.setattr("snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock)
+    publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+    publisher.repository = repo
     trade_msg = TradeData(
         session_id="test-session",
         sequence_id=1,
@@ -2796,8 +2798,40 @@ async def test_save_trade_to_db_skips_when_no_trade_id() -> None:
         volume=1.0,
         side="buy",
     )
-    await pub._save_trade_to_db("BTC-USD", trade_msg)
-    pub.repository.upsert_trades.assert_not_awaited()
+    await publisher._save_trade_to_db("BTC-USD", trade_msg)
+    assert len(repo.trade_calls) == 1
+    row = repo.trade_calls[0][0]
+    assert row["trade_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_save_trade_to_db_persists_when_no_trade_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify _save_trade_to_db persists trade even when trade_id is None.
+
+    Given: A TradeData message without exchange trade_id,
+    When: _save_trade_to_db is called,
+    Then: Trade is still upserted (append-only for NULL trade_id).
+    """
+    repo = DummyRepository()
+    resolve_mock = AsyncMock(return_value="fake-spid")
+    monkeypatch.setattr("snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock)
+    publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+    publisher.repository = repo
+    trade_msg = TradeData(
+        session_id="test-session",
+        sequence_id=1,
+        public_id="trade-pub-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        instrument="BTC-USD",
+        exchange="kraken",
+        price=100.0,
+        volume=1.0,
+        side="buy",
+    )
+    await publisher._save_trade_to_db("BTC-USD", trade_msg)
+    assert len(repo.trade_calls) == 1
+    row = repo.trade_calls[0][0]
+    assert row["trade_id"] is None
 
 
 @pytest.mark.asyncio
@@ -2846,7 +2880,7 @@ async def test_trade_loop_publishes_and_saves_to_db(monkeypatch: pytest.MonkeyPa
             price=100.0,
             quantity=1.0,
             side="buy",
-            trade_id=12345,
+            trade_id="12345",
             timestamp=datetime.now(UTC),
         )
         pub.running = False

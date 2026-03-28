@@ -224,7 +224,7 @@ class Trade(TemporalMixin, Base):
 
     __tablename__ = "trades"
     __table_args__ = (
-        UniqueConstraint("trade_id", name="uq_trade_trade_id"),
+        UniqueConstraint("instrument_public_id", "trade_id", name="uq_trade_instrument_trade_id"),
         Index("ix_trade_instrument_ts", "instrument_public_id", "timestamp"),
         Index(
             "ix_trades_public_id",
@@ -238,7 +238,7 @@ class Trade(TemporalMixin, Base):
     price: Mapped[float] = mapped_column(Float)
     size: Mapped[float] = mapped_column(Float)
     side: Mapped[str] = mapped_column(String(4))
-    trade_id: Mapped[str] = mapped_column(String(64))
+    trade_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     executed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
 
 

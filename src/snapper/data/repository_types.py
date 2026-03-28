@@ -43,7 +43,7 @@ class TradeUpsertRow(TypedDict, total=False):
     price: float
     size: float
     side: str
-    trade_id: str
+    trade_id: str | None
     executed_at: datetime | None
     session_id: str
     sequence_id: int
@@ -126,7 +126,7 @@ class TradeRow(TypedDict):
     price: float
     size: float
     side: str
-    trade_id: str
+    trade_id: str | None
 
 
 class MarketSnapshotRow(TypedDict):

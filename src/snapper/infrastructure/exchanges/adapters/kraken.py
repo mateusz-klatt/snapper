@@ -163,7 +163,7 @@ def parse_kraken_trade(data: dict[str, Any]) -> TradeUpdate:
         quantity=float(schema.qty),
         price=float(schema.price),
         ord_type=schema.ord_type or "unknown",
-        trade_id=schema.trade_id or 0,
+        trade_id=str(schema.trade_id) if schema.trade_id is not None else None,
         timestamp=timestamp,
     )
 

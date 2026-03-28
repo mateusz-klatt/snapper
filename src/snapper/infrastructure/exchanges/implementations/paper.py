@@ -763,7 +763,7 @@ class PaperExchangeClient(ExchangeClientBase):
                         quantity=trade_dict["size"],
                         price=trade_dict["price"],
                         ord_type="unknown",
-                        trade_id=int(trade_dict.get("trade_id") or 0),
+                        trade_id=trade_dict.get("trade_id"),
                         timestamp=trade_dict.get("executed_at") or trade_dict["timestamp"],
                     )
                 )

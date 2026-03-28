@@ -869,7 +869,7 @@ class TestKrakenExchangeClient:
                 quantity=0.1,
                 price=50000.0,
                 ord_type="limit",
-                trade_id=12345,
+                trade_id="12345",
                 timestamp=datetime.now(UTC),
             )
 

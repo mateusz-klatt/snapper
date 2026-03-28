@@ -172,13 +172,13 @@ class ZondaTransactionData(ExchangeResponse):
     ty: str = ""
 
     @property
-    def trade_id(self) -> int:
-        """Return a unique trade ID derived from the transaction ID.
+    def trade_id(self) -> str | None:
+        """Return the raw exchange transaction ID for deduplication.
 
         Returns:
-            Hash value of the transaction ID.
+            Transaction ID string, or None if empty.
         """
-        return hash(self.id)
+        return self.id if self.id else None
 
     @property
     def timestamp_ms(self) -> int:

@@ -18,6 +18,7 @@ from urllib3.util.retry import RequestHistory
 from snapper.data.models import Symbol
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import get_repository
+from snapper.data.repository_types import TradeUpsertRow
 from snapper.infrastructure.exchanges.implementations import polygon as polygon_module
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonRetryPolicy
@@ -470,6 +471,139 @@ async def test_upsert_trades_sqlite(tmp_path: Path) -> None:
     ]
     inserted = await repo.upsert_trades(rows)
     assert inserted in (0, 1, 2)
+
+
+async def _make_repo_with_two_instruments(
+    tmp_path: Path,
+) -> tuple[SQLAlchemyRepository, str, str]:
+    """Create a SQLite repo with two instruments on different exchanges."""
+    db_path = tmp_path / "trade_contract.db"
+    url = f"sqlite+aiosqlite:///{db_path.as_posix()}"
+    repo = SQLAlchemyRepository(url)
+    await repo.create_all()
+    async with repo.session() as s:
+        s.add(
+            Symbol(
+                native_symbol="BTC-USD",
+                base="BTC",
+                quote="USD",
+                asset_type="crypto",
+                created_at=datetime.now(UTC),
+                timestamp=datetime.now(UTC),
+                session_id="test-session",
+                sequence_id=1,
+            )
+        )
+        await s.commit()
+    spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=datetime.now(UTC))
+    assert spid is not None
+    _, inst_a = await repo.ensure_instrument(
+        symbol_public_id=spid,
+        exchange="kraken",
+        session_id="test-session",
+        sequence_id=1,
+        timestamp=datetime.now(UTC),
+    )
+    _, inst_b = await repo.ensure_instrument(
+        symbol_public_id=spid,
+        exchange="zonda",
+        session_id="test-session",
+        sequence_id=2,
+        timestamp=datetime.now(UTC),
+    )
+    return repo, inst_a, inst_b
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_upsert_trades_same_trade_id_different_instruments(tmp_path: Path) -> None:
+    """Composite unique allows same trade_id on different instruments.
+
+    Given: Two instruments on different exchanges,
+    When: upsert_trades is called with the same trade_id for each,
+    Then: Both trades are inserted (no false cross-instrument dedup).
+    """
+    repo, inst_a, inst_b = await _make_repo_with_two_instruments(tmp_path)
+    ts = datetime(2024, 1, 1, tzinfo=UTC)
+    rows = [
+        {
+            "trade_id": "12345",
+            "instrument_public_id": inst_a,
+            "timestamp": ts,
+            "price": 100.0,
+            "size": 0.5,
+            "side": "buy",
+            "session_id": "test-session",
+            "sequence_id": 1,
+        },
+        {
+            "trade_id": "12345",
+            "instrument_public_id": inst_b,
+            "timestamp": ts,
+            "price": 100.0,
+            "size": 0.5,
+            "side": "buy",
+            "session_id": "test-session",
+            "sequence_id": 2,
+        },
+    ]
+    inserted = await repo.upsert_trades(rows)
+    assert inserted == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_upsert_trades_same_trade_id_same_instrument_deduped(tmp_path: Path) -> None:
+    """Composite unique deduplicates same trade_id on the same instrument.
+
+    Given: One instrument,
+    When: upsert_trades is called twice with the same trade_id,
+    Then: Second insert is skipped (correct dedup).
+    """
+    repo, inst_a, _ = await _make_repo_with_two_instruments(tmp_path)
+    ts = datetime(2024, 1, 1, tzinfo=UTC)
+    row: TradeUpsertRow = {
+        "trade_id": "99999",
+        "instrument_public_id": inst_a,
+        "timestamp": ts,
+        "price": 50.0,
+        "size": 1.0,
+        "side": "sell",
+        "session_id": "test-session",
+        "sequence_id": 1,
+    }
+    first = await repo.upsert_trades([row])
+    assert first == 1
+    second = await repo.upsert_trades([row])
+    assert second == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+async def test_upsert_trades_null_trade_id_append_only(tmp_path: Path) -> None:
+    """Trades without trade_id are inserted as append-only (no dedup).
+
+    Given: One instrument,
+    When: upsert_trades is called with multiple rows where trade_id is None,
+    Then: All rows are inserted (SQL NULL != NULL).
+    """
+    repo, inst_a, _ = await _make_repo_with_two_instruments(tmp_path)
+    ts = datetime(2024, 1, 1, tzinfo=UTC)
+    rows = [
+        {
+            "trade_id": None,
+            "instrument_public_id": inst_a,
+            "timestamp": ts,
+            "price": 100.0,
+            "size": 0.5,
+            "side": "buy",
+            "session_id": "test-session",
+            "sequence_id": i,
+        }
+        for i in range(3)
+    ]
+    inserted = await repo.upsert_trades(rows)
+    assert inserted == 3
 
 
 @pytest.mark.asyncio

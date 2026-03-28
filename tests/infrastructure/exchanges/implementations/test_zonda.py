@@ -1032,7 +1032,7 @@ class TestZondaTradesAndCandles:
                 quantity=0.5,
                 price=40000.0,
                 ord_type="limit",
-                trade_id=1,
+                trade_id="1",
                 timestamp=trade_minute,
             ),
             TradeUpdate(
@@ -1041,7 +1041,7 @@ class TestZondaTradesAndCandles:
                 quantity=0.3,
                 price=40100.0,
                 ord_type="limit",
-                trade_id=2,
+                trade_id="2",
                 timestamp=trade_minute + timedelta(seconds=30),
             ),
             TradeUpdate(
@@ -1050,7 +1050,7 @@ class TestZondaTradesAndCandles:
                 quantity=0.2,
                 price=40200.0,
                 ord_type="limit",
-                trade_id=3,
+                trade_id="3",
                 timestamp=trade_minute + timedelta(minutes=1),
             ),
         ]
@@ -1158,6 +1158,8 @@ class TestZondaTradesAndCandles:
         assert trade.quantity == pytest.approx(0.03245411)
         assert trade.price == pytest.approx(27787.66)
         assert trade.ord_type == "unknown"
+        assert trade.trade_id == "50764c8c-232a-11ea-8d5d-0242ac110008"
+        assert isinstance(trade.trade_id, str)
 
     @pytest.mark.asyncio
     async def test_parse_transactions_multiple_trades(self, client: ZondaExchangeClient) -> None:

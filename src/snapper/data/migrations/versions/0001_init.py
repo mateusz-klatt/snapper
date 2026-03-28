@@ -331,7 +331,7 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
         sa.Column("instrument_public_id", sa.String(36), nullable=False),
-        sa.Column("trade_id", sa.String(64), nullable=False),
+        sa.Column("trade_id", sa.String(64), nullable=True),
         sa.Column("price", sa.Float(), nullable=False),
         sa.Column("size", sa.Float(), nullable=False),
         sa.Column("side", sa.String(4), nullable=False),
@@ -341,7 +341,9 @@ def upgrade() -> None:
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("trade_id", name="uq_trade_trade_id"),
+        sa.UniqueConstraint(
+            "instrument_public_id", "trade_id", name="uq_trade_instrument_trade_id"
+        ),
         sa.CheckConstraint(_CK_SESSION_ID, name="ck_trades_session_id"),
         sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_trades_sequence_id"),
     )

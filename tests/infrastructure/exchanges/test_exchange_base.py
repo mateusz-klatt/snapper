@@ -171,7 +171,7 @@ class DummyExchangeClient(ExchangeClientBase):
             quantity=1.0,
             price=100.0,
             ord_type="market",
-            trade_id=12345,
+            trade_id="12345",
             timestamp=datetime.now(UTC),
         )
 

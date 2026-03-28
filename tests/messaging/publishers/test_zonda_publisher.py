@@ -286,7 +286,7 @@ class TestZondaPublisherLoops:
             quantity=0.5,
             price=101000.0,
             ord_type="market",
-            trade_id=123,
+            trade_id="123",
             timestamp=datetime.now(UTC),
         )
 
