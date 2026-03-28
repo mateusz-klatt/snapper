@@ -1508,8 +1508,8 @@ packages:
   '@vitest/utils@4.1.2':
     resolution: {integrity: sha512-xw2/TiX82lQHA06cgbqRKFb5lCAy3axQ4H4SoUFhUsg+wztiet+co86IAMDtF6Vm1hc7J6j09oh/rgDn+JdKIQ==}
 
-  '@zenuml/core@3.46.6':
-    resolution: {integrity: sha512-YkjEH5hafGKj2YAxKvR3ZXZGJtJReYDP2W6YjbKzjWpQlqZOC3yJaVtS+NyYABmwYfBfjJ4adwnL38HwE+tTag==}
+  '@zenuml/core@3.46.8':
+    resolution: {integrity: sha512-YPjMukTRP2XdZZsBGveOlxOd6NqFuzbFB18OuWD6gwcyejoNBgCDS/ctNjRugTe/apMxvHmtVtiF3spkk3VGLQ==}
     engines: {node: '>=20'}
 
   abort-controller@3.0.0:
@@ -3920,7 +3920,7 @@ snapshots:
 
   '@mermaid-js/mermaid-zenuml@0.2.2(@babel/core@7.29.0)(@babel/template@7.28.6)(@types/react@19.2.14)(mermaid@11.13.0)(yaml@2.8.3)':
     dependencies:
-      '@zenuml/core': 3.46.6(@babel/core@7.29.0)(@babel/template@7.28.6)(@types/react@19.2.14)(yaml@2.8.3)
+      '@zenuml/core': 3.46.8(@babel/core@7.29.0)(@babel/template@7.28.6)(@types/react@19.2.14)(yaml@2.8.3)
       mermaid: 11.13.0
     transitivePeerDependencies:
       - '@babel/core'
@@ -4895,7 +4895,7 @@ snapshots:
       convert-source-map: 2.0.0
       tinyrainbow: 3.1.0
 
-  '@zenuml/core@3.46.6(@babel/core@7.29.0)(@babel/template@7.28.6)(@types/react@19.2.14)(yaml@2.8.3)':
+  '@zenuml/core@3.46.8(@babel/core@7.29.0)(@babel/template@7.28.6)(@types/react@19.2.14)(yaml@2.8.3)':
     dependencies:
       '@floating-ui/react': 0.27.19(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@headlessui/react': 2.2.9(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
