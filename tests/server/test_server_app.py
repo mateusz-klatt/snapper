@@ -63,6 +63,7 @@ def _build_mock_process_factory(started_processes: dict[str, object]) -> MagicMo
     mock_factory.sync_registry_to_database = AsyncMock()
     mock_factory.start_all_processes = AsyncMock()
     mock_factory.stop_all_processes = AsyncMock()
+    mock_factory.get_core_health = AsyncMock(return_value="healthy")
     return mock_factory
 
 
@@ -245,6 +246,7 @@ class TestCreateApiRouter:
 
         self.app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         self.app.dependency_overrides[require_authentication] = skip_authentication
+        self.app.state.process_factory = _build_mock_process_factory({})
         self.client = TestClient(self.app)
 
     def test_router_creation_without_errors(self) -> None:
@@ -480,6 +482,7 @@ class TestMainAppIntegration:
     def setup_method(self) -> None:
         """Initialize test client with application instance."""
         self.app = create_app()
+        self.app.state.process_factory = _build_mock_process_factory({})
         self.client = TestClient(self.app)
 
     @patch("snapper.server.app.get_settings")
@@ -1217,6 +1220,7 @@ class TestAppCoverageImprovement:
     def setup_method(self) -> None:
         """Initialize test client with dependency overrides."""
         self.app = create_app()
+        self.app.state.process_factory = _build_mock_process_factory({})
         self.client = TestClient(self.app)
 
         def skip_csrf_validation() -> None:
@@ -1275,9 +1279,9 @@ class TestAppCoverageImprovement:
         assert "errors" in data["payload"]
 
     def test_health_endpoint(self) -> None:
-        """Verify health endpoint returns healthy status.
+        """Verify health endpoint returns healthy status when all CORE running.
 
-        Given: Running application,
+        Given: Running application with all enabled long-running CORE processes up,
         When: GET /health is called,
         Then: Response is 200 with healthy status and timestamp.
         """
@@ -1286,6 +1290,21 @@ class TestAppCoverageImprovement:
         data = response.json()
         assert data["payload"]["status"] == "healthy"
         assert "timestamp" in data
+
+    def test_health_endpoint_reflects_core_error(self) -> None:
+        """Verify health endpoint propagates error status from get_core_health.
+
+        Given: An enabled long-running CORE process that is not running,
+        When: GET /health is called,
+        Then: Response is 200 with error status.
+        """
+        mock_factory = _build_mock_process_factory({})
+        mock_factory.get_core_health = AsyncMock(return_value="error")
+        self.app.state.process_factory = mock_factory
+        response = self.client.get("/api/health")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["payload"]["status"] == "error"
 
     def test_root_dashboard_endpoint(self) -> None:
         """Verify root endpoint returns HTML dashboard.
@@ -1307,6 +1326,7 @@ class TestAppCoverageImprovement:
         """
         app = create_app()
         assert app is not None
+        app.state.process_factory = _build_mock_process_factory({})
         test_client = _track_test_client(TestClient(app))
         response = test_client.get("/api/health")
         assert response.status_code == 200

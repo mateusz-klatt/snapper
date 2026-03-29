@@ -4738,6 +4738,34 @@ async def test_start_all_processes_non_core_failure_continues(
 
 
 @pytest.mark.asyncio()
+async def test_start_all_processes_one_shot_core_failure_does_not_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify one-shot CORE failure does not abort startup.
+
+    Given: An enabled ONE_SHOT CORE process that raises on start,
+    When: start_all_processes is called,
+    Then: No CoreProcessStartupError is raised (one-shot CORE is not fail-closed).
+    """
+    settings = _create_settings()
+    factory = ProcessLauncherService(settings)
+    cast(Any, factory)._start_native_process_monitoring = mock.Mock()
+    config = ProcessConfigModel(
+        name="init_db",
+        enabled=True,
+        mode="thread",
+        class_path="test.InitDb",
+        method="start",
+        parameters={},
+        role=ProcessRoleEnum.CORE,
+        lifecycle=ProcessLifecycleEnum.ONE_SHOT,
+    )
+    monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+    monkeypatch.setattr(factory, "start_process", mock.AsyncMock(side_effect=RuntimeError("boom")))
+    await factory.start_all_processes()
+
+
+@pytest.mark.asyncio()
 async def test_get_core_health_all_running(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify healthy when all enabled long-running CORE running.
 

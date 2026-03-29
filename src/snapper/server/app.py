@@ -929,6 +929,8 @@ def _create_monitoring_endpoints_router(
             manager,
             middleware_detectors,
         )
+        factory: ProcessLauncherService = request.app.state.process_factory
+        core_status: HealthStatus = await factory.get_core_health()
         return HealthCheckResponse(
             session_id=sid,
             sequence_id=seq,
@@ -939,7 +941,7 @@ def _create_monitoring_endpoints_router(
                 sequence_id=seq,
                 public_id=str(uuid7()),
                 timestamp=ts,
-                status="healthy",
+                status=core_status,
                 version="0.1.0",
                 connections=ConnectionStats(
                     **asdict(stats.connections),

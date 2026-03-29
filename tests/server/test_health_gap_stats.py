@@ -2,6 +2,7 @@
 
 import contextlib
 from typing import Any
+from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
@@ -110,6 +111,9 @@ class TestHealthEndpointGapStats:
 
         self.app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
         self.app.dependency_overrides[require_authentication] = skip_authentication
+        mock_factory = MagicMock()
+        mock_factory.get_core_health = AsyncMock(return_value="healthy")
+        self.app.state.process_factory = mock_factory
         self.client = TestClient(self.app)
 
     def teardown_method(self) -> None:

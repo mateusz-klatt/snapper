@@ -434,7 +434,10 @@ class ProcessLauncherService:
                 except Exception as e:
                     logger.error(f"Failed to start process '{config.name}': {e}")
                     failed_count += 1
-                    if config.role is ProcessRoleEnum.CORE:
+                    if (
+                        config.role is ProcessRoleEnum.CORE
+                        and config.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
+                    ):
                         failed_core_names.append(config.name)
             else:
                 disabled_count += 1
