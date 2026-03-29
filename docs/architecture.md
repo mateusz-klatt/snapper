@@ -362,7 +362,8 @@ Key concepts:
 
 The system manages processes through Process Manager:
 
-- **Core** — Broker, Feed, Bridge (required)
+- **Core** — Broker, Feed, Bridge (required — startup is aborted if any
+  enabled long-running CORE process fails to start)
 - **Strategy** — Trading strategies
 - **Task** — One-time tasks
 - **Backtest** — Backtesting processes

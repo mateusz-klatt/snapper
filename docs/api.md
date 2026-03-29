@@ -203,6 +203,11 @@ known at that point in time. When omitted, the current time is used.
 
 Public health check endpoint. No authentication required.
 
+`status` reflects the health of enabled long-running CORE processes:
+`"healthy"` when all are running, `"error"` if any are missing. In
+`SERVER_API_ONLY` mode the status is always `"healthy"` (no processes
+are started by design).
+
 **Response (200):**
 
 ```json
@@ -781,12 +786,12 @@ Content-Type: application/json
 X-CSRF-Token: <csrf_token>
 
 {
-    "mode": "process",
-    "autostart": true
+    "mode": "process"
 }
 ```
 
-All fields are optional. When omitted, stored configuration values are used.
+All fields are optional. `mode` overrides the stored execution mode for this
+run only — it does not persist to Settings. Omitting it uses the stored value.
 
 **Response (200):**
 
