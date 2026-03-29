@@ -19,10 +19,12 @@ from unittest.mock import patch
 from uuid import UUID
 
 import pytest
+from pydantic import BaseModel
 
 from snapper.application.process_manager.enums import ProcessLifecycleEnum
 from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.enums import ProcessRunStatusEnum
+from snapper.application.process_manager.launcher import CoreProcessStartupError
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import ProcessInstanceInfo
@@ -547,6 +549,7 @@ class TestStartAllProcesses:
             class_path="test.BadClass",
             method="run",
             parameters={},
+            role=ProcessRoleEnum.TASK,
         )
         config3 = ProcessConfigModel(
             name="another_good_process",
@@ -707,11 +710,11 @@ class TestStartProcessByName:
     async def test_start_process_by_name_success(
         self, mock_get_repo: MagicMock, mock_start: AsyncMock
     ) -> None:
-        """Verify successful process start and database commit.
+        """Verify successful process start returns success.
 
         Given: Valid process configuration in database.
         When: start_process_by_name is called.
-        Then: Returns 'success', calls start_process, commits changes.
+        Then: Returns 'success', calls start_process with correct config.
         """
         mock_setting = MagicMock()
         mock_setting.value = json.dumps(
@@ -727,7 +730,6 @@ class TestStartProcessByName:
         mock_result.scalar_one_or_none.return_value = mock_setting
         mock_session = MagicMock()
         mock_session.execute = AsyncMock(return_value=mock_result)
-        mock_session.commit = AsyncMock()
         mock_repo = MagicMock()
         mock_repo.session.return_value.__aenter__.return_value = mock_session
         mock_repo.session.return_value.__aexit__.return_value = AsyncMock()
@@ -739,9 +741,8 @@ class TestStartProcessByName:
         assert result.status == "success"
         assert "started successfully" in result.message
         mock_start.assert_awaited_once()
-        mock_session.commit.assert_awaited_once()
-        updated_config = json.loads(mock_setting.value)
-        assert updated_config["enabled"] is False
+        call_config = mock_start.call_args[0][0]
+        assert call_config.enabled is False
 
     @pytest.mark.asyncio
     @patch("snapper.application.process_manager.launcher.ProcessLauncherService.start_process")
@@ -749,11 +750,11 @@ class TestStartProcessByName:
     async def test_start_process_by_name_one_shot_stays_disabled(
         self, mock_get_repo: MagicMock, mock_start: AsyncMock
     ) -> None:
-        """Verify one_shot lifecycle processes stay disabled after execution.
+        """Verify one_shot lifecycle processes report executed successfully.
 
         Given: Process config with lifecycle='one_shot' and enabled=False.
         When: start_process_by_name is called.
-        Then: Process executes, returns 'success', enabled remains False.
+        Then: Process executes, returns 'success' with 'executed successfully'.
         """
         mock_setting = MagicMock()
         mock_setting.value = json.dumps(
@@ -770,7 +771,6 @@ class TestStartProcessByName:
         mock_result.scalar_one_or_none.return_value = mock_setting
         mock_session = MagicMock()
         mock_session.execute = AsyncMock(return_value=mock_result)
-        mock_session.commit = AsyncMock()
         mock_repo = MagicMock()
         mock_repo.session.return_value.__aenter__.return_value = mock_session
         mock_repo.session.return_value.__aexit__.return_value = AsyncMock()
@@ -781,11 +781,10 @@ class TestStartProcessByName:
         result = await factory.start_process_by_name("symbol_updater")
         assert result.status == "success"
         assert "executed successfully" in result.message
-        updated_config = json.loads(mock_setting.value)
-        assert updated_config["enabled"] is False
-        assert updated_config["lifecycle"] == "one_shot"
         mock_start.assert_awaited_once()
-        mock_session.commit.assert_awaited_once()
+        call_config = mock_start.call_args[0][0]
+        assert call_config.enabled is False
+        assert call_config.lifecycle == ProcessLifecycleEnum.ONE_SHOT
 
     @pytest.mark.asyncio
     @patch("snapper.application.process_manager.launcher.ProcessLauncherService.start_process")
@@ -793,11 +792,11 @@ class TestStartProcessByName:
     async def test_start_process_by_name_with_overrides(
         self, mock_get_repo: MagicMock, mock_start: AsyncMock
     ) -> None:
-        """Verify config overrides are applied and persisted.
+        """Verify config overrides are applied at runtime.
 
         Given: Process config in database with default values.
-        When: start_process_by_name called with mode, parameters, autostart.
-        Then: Overrides applied to config, persisted, and process started.
+        When: start_process_by_name called with mode and parameters overrides.
+        Then: Overrides applied to config passed to start_process.
         """
         mock_setting = MagicMock()
         mock_setting.value = json.dumps(
@@ -812,7 +811,6 @@ class TestStartProcessByName:
         mock_result.scalar_one_or_none.return_value = mock_setting
         mock_session = MagicMock()
         mock_session.execute = AsyncMock(return_value=mock_result)
-        mock_session.commit = AsyncMock()
         mock_repo = MagicMock()
         mock_repo.session.return_value.__aenter__.return_value = mock_session
         mock_repo.session.return_value.__aexit__.return_value = AsyncMock()
@@ -824,17 +822,11 @@ class TestStartProcessByName:
             "test_process",
             mode="process",
             parameters={"override": "value"},
-            autostart=True,
         )
         assert result.status == "success"
-        call_args = mock_start.call_args[0][0]
-        assert call_args.mode == "process"
-        assert call_args.parameters == {"override": "value"}
-        mock_session.commit.assert_awaited_once()
-        mock_session.add.assert_called_once()
-        new_row = mock_session.add.call_args[0][0]
-        updated_config = json.loads(new_row.value)
-        assert updated_config["enabled"] is True
+        call_config = mock_start.call_args[0][0]
+        assert call_config.mode == "process"
+        assert call_config.parameters == {"override": "value"}
 
     @pytest.mark.asyncio
     @patch("snapper.application.process_manager.launcher.ProcessLauncherService.start_process")
@@ -891,13 +883,12 @@ class TestStopProcessByName:
         assert "not running" in result.message
 
     @pytest.mark.asyncio
-    @patch("snapper.application.process_manager.launcher.get_repository")
-    async def test_stop_process_by_name_success(self, mock_get_repo: MagicMock) -> None:
-        """Verify successful stop disables autostart in database.
+    async def test_stop_process_by_name_success(self) -> None:
+        """Verify successful stop removes process from tracking.
 
-        Given: Running process with async stop method and db config.
+        Given: Running process with async stop method.
         When: stop_process_by_name is called.
-        Then: Process stopped, removed, enabled set to False in db.
+        Then: Process stopped, removed from tracking.
         """
         mock_instance = MagicMock()
         mock_instance.stop = AsyncMock()
@@ -905,36 +896,20 @@ class TestStopProcessByName:
         settings.db_url = "sqlite:///:memory:"
         factory = ProcessLauncherService(settings)
         factory.started_processes["test_process"] = mock_instance
-        mock_setting = MagicMock()
-        mock_setting.value = json.dumps({"enabled": True, "class": "test.Class"})
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = mock_setting
-        mock_session = MagicMock()
-        mock_session.execute = AsyncMock(return_value=mock_result)
-        mock_session.commit = AsyncMock()
-        mock_repo = MagicMock()
-        mock_repo.session.return_value.__aenter__.return_value = mock_session
-        mock_repo.session.return_value.__aexit__.return_value = AsyncMock()
-        mock_get_repo.return_value = mock_repo
+        factory._finalize_process_run = AsyncMock()
         result = await factory.stop_process_by_name("test_process")
         assert result.status == "success"
-        assert "stopped and marked as disabled" in result.message
+        assert "stopped successfully" in result.message
         mock_instance.stop.assert_awaited_once()
         assert "test_process" not in factory.started_processes
-        mock_session.commit.assert_awaited_once()
-        mock_session.add.assert_called_once()
-        new_row = mock_session.add.call_args[0][0]
-        updated_config = json.loads(new_row.value)
-        assert updated_config["enabled"] is False
 
     @pytest.mark.asyncio
-    @patch("snapper.application.process_manager.launcher.get_repository")
-    async def test_stop_process_by_name_with_task(self, mock_get_repo: MagicMock) -> None:
+    async def test_stop_process_by_name_with_task(self) -> None:
         """Verify process with associated task cancels task on stop.
 
         Given: Running process with associated asyncio task.
         When: stop_process_by_name is called.
-        Then: Task cancelled, process removed, db updated.
+        Then: Task cancelled, process removed from tracking.
         """
         mock_instance = MagicMock(spec=[])
         mock_instance.stop = AsyncMock()
@@ -944,28 +919,13 @@ class TestStopProcessByName:
         factory = ProcessLauncherService(settings)
         factory.started_processes["task_process"] = mock_instance
         factory.process_tasks["task_process"] = task
-        mock_setting = MagicMock()
-        mock_setting.value = json.dumps({"enabled": True, "class": "test.Class"})
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = mock_setting
-        mock_session = MagicMock()
-        mock_session.execute = AsyncMock(return_value=mock_result)
-        mock_session.commit = AsyncMock()
-        mock_repo = MagicMock()
-        mock_repo.session.return_value.__aenter__.return_value = mock_session
-        mock_repo.session.return_value.__aexit__.return_value = AsyncMock()
-        mock_get_repo.return_value = mock_repo
+        factory._finalize_process_run = AsyncMock()
         result = await factory.stop_process_by_name("task_process")
         assert result.status == "success"
-        assert "stopped and marked as disabled" in result.message
+        assert "stopped successfully" in result.message
         assert task.cancelled()
         assert "task_process" not in factory.process_tasks
         assert "task_process" not in factory.started_processes
-        mock_session.commit.assert_awaited_once()
-        mock_session.add.assert_called_once()
-        new_row = mock_session.add.call_args[0][0]
-        updated_config = json.loads(new_row.value)
-        assert updated_config["enabled"] is False
 
     @pytest.mark.asyncio
     async def test_stop_process_by_name_stop_error(self) -> None:
@@ -1507,7 +1467,6 @@ async def test_start_process_by_name_one_shot_message(
     result = await factory.start_process_by_name("once")
     assert result.status == "success"
     assert "executed successfully" in result.message
-    assert repo.last_session is not None and repo.last_session.commit_called is True
     cast(mock.AsyncMock, factory.start_process).assert_awaited_once()
 
 
@@ -1564,17 +1523,12 @@ async def test_start_process_by_name_updates_config_and_persists_overrides(
         "worker",
         mode="process",
         parameters={"x": 1},
-        autostart=True,
     )
     assert result.status == "success"
     assert mock_start.called
-    assert repo.last_session is not None and repo.last_session.commit_called is True
-    assert len(repo.last_session.added) > 0
-    new_row = repo.last_session.added[-1]
-    persisted = json.loads(new_row.value)
-    assert persisted["enabled"] is True
-    assert persisted["mode"] == "process"
-    assert persisted["parameters"] == {"x": 1}
+    call_config = mock_start.call_args[0][0]
+    assert call_config.mode == "process"
+    assert call_config.parameters == {"x": 1}
 
 
 @pytest.mark.asyncio()
@@ -1585,11 +1539,12 @@ async def test_start_process_by_name_keeps_tags_when_present(
 
     Given: Config with tags=['keep'] and parameters_schema in database.
     When: start_process_by_name is called.
-    Then: Tags remain ['keep'] in persisted config.
+    Then: Tags remain ('keep',) in the ProcessConfigModel passed to start_process.
     """
     settings = _create_settings()
     factory = ProcessLauncherService(settings)
-    cast(Any, factory).start_process = mock.AsyncMock()
+    mock_start = mock.AsyncMock()
+    cast(Any, factory).start_process = mock_start
     config_dict = {
         "enabled": True,
         "mode": "thread",
@@ -1613,10 +1568,8 @@ async def test_start_process_by_name_keeps_tags_when_present(
     )
     result = await factory.start_process_by_name("tagged")
     assert result.status == "success"
-    assert repo.last_session is not None
-    new_row = repo.last_session.added[-1]
-    persisted = json.loads(new_row.value)
-    assert cast(list[str], persisted["tags"]) == ["keep"]
+    call_config = mock_start.call_args[0][0]
+    assert call_config.tags == ("keep",)
 
 
 @pytest.mark.asyncio()
@@ -1637,11 +1590,11 @@ async def test_stop_process_by_name_not_running() -> None:
 async def test_stop_process_by_name_async_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify async stop method awaited and db config updated.
+    """Verify async stop method awaited and process removed from tracking.
 
     Given: Running process with async stop method.
     When: stop_process_by_name is called.
-    Then: stop awaited, process removed, db commit called.
+    Then: stop awaited, process removed from tracking.
     """
     settings = _create_settings()
     factory = ProcessLauncherService(settings)
@@ -1655,21 +1608,12 @@ async def test_stop_process_by_name_async_stop(
 
     proc = _AsyncProcess()
     factory.started_processes["worker"] = proc
-    setting = Setting(
-        key="process_worker",
-        value=json.dumps({"class": "x", "enabled": True, "parameters": {}}),
-        session_id="test-session",
-        sequence_id=1,
-    )
-    repo = _DummyRepository(setting)
-    monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
-    )
     monkeypatch.setattr(factory, "_finalize_process_run", mock.AsyncMock())
     result = await factory.stop_process_by_name("worker")
     assert result.status == "success"
+    assert "stopped successfully" in result.message
+    assert proc.stopped is True
     assert "worker" not in factory.started_processes
-    assert repo.last_session is not None and repo.last_session.commit_called is True
 
 
 @pytest.mark.asyncio()
@@ -1709,35 +1653,22 @@ async def test_stop_process_by_name_with_coroutine_stop_and_no_setting(
 
 
 @pytest.mark.asyncio()
-async def test_stop_process_by_name_when_instance_missing_disables_autostart(
+async def test_stop_process_by_name_when_instance_is_none_cleans_up(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify None instance still disables autostart in database.
+    """Verify None instance is cleaned up from tracking on stop.
 
     Given: Process tracked but instance is None.
     When: stop_process_by_name is called.
-    Then: Autostart disabled in db, process removed from tracking.
+    Then: Process removed from tracking.
     """
     settings = _create_settings()
     factory = ProcessLauncherService(settings)
     factory.started_processes["ghost"] = None
-    setting = Setting(
-        key="process_ghost",
-        value=json.dumps({"class": "x", "enabled": True, "parameters": {}}),
-        session_id="test-session",
-        sequence_id=1,
-    )
-    repo = _DummyRepository(setting)
-    monkeypatch.setattr(
-        "snapper.application.process_manager.launcher.get_repository", lambda _url: repo
-    )
     monkeypatch.setattr(factory, "_finalize_process_run", mock.AsyncMock())
     result = await factory.stop_process_by_name("ghost")
     assert result.status == "success"
-    assert repo.last_session is not None
-    new_row = repo.last_session.added[-1]
-    persisted = json.loads(new_row.value)
-    assert persisted["enabled"] is False
+    assert "stopped successfully" in result.message
     assert "ghost" not in factory.started_processes
 
 
@@ -2145,6 +2076,7 @@ async def test_start_all_processes_continues_on_errors(
         class_path="tests.application.process_manager.test_process_launcher.SyncProcess",
         method="start",
         parameters={},
+        role=ProcessRoleEnum.TASK,
     )
     config_disabled = ProcessConfigModel(
         name="disabled",
@@ -2603,15 +2535,16 @@ async def test_handle_process_completion_warns_for_long_running_non_native(
 async def test_start_process_by_name_removes_empty_tags_and_updates_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify empty tags array is removed and schema preserved.
+    """Verify empty tags resolved to empty tuple and schema preserved.
 
     Given: A config with empty tags array and existing parameters_schema,
     When: start_process_by_name is called,
-    Then: Empty tags are removed from persisted config, schema kept.
+    Then: ProcessConfigModel has empty tags and parameters_schema from config.
     """
     settings = _create_settings()
     factory = ProcessLauncherService(settings)
-    cast(Any, factory).start_process = mock.AsyncMock()
+    mock_start = mock.AsyncMock()
+    cast(Any, factory).start_process = mock_start
     config_dict = {
         "enabled": True,
         "mode": "thread",
@@ -2632,26 +2565,25 @@ async def test_start_process_by_name_removes_empty_tags_and_updates_schema(
     )
     result = await factory.start_process_by_name("clean")
     assert result.status == "success"
-    assert repo.last_session is not None
-    new_row = repo.last_session.added[-1]
-    persisted = json.loads(new_row.value)
-    assert "tags" not in persisted
-    assert persisted["parameters_schema"] == {"p": 1}
+    call_config = mock_start.call_args[0][0]
+    assert call_config.tags == ()
+    assert call_config.parameters_schema == {"p": 1}
 
 
 @pytest.mark.asyncio()
 async def test_start_process_by_name_skips_persisting_schema_when_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify parameters_schema is not added if not present.
+    """Verify parameters_schema is None when not present in config or registry.
 
     Given: A config without parameters_schema field,
     When: start_process_by_name is called,
-    Then: Persisted config does not contain parameters_schema.
+    Then: ProcessConfigModel has parameters_schema=None.
     """
     settings = _create_settings()
     factory = ProcessLauncherService(settings)
-    cast(Any, factory).start_process = mock.AsyncMock()
+    mock_start = mock.AsyncMock()
+    cast(Any, factory).start_process = mock_start
     config_dict = {
         "enabled": True,
         "mode": "thread",
@@ -2670,25 +2602,24 @@ async def test_start_process_by_name_skips_persisting_schema_when_absent(
     )
     result = await factory.start_process_by_name("plain")
     assert result.status == "success"
-    assert repo.last_session is not None
-    new_row = repo.last_session.added[-1]
-    persisted = json.loads(new_row.value)
-    assert "parameters_schema" not in persisted
+    call_config = mock_start.call_args[0][0]
+    assert call_config.parameters_schema is None
 
 
 @pytest.mark.asyncio()
 async def test_start_process_by_name_removes_stale_tags_without_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify stale tags are removed when no schema in registry.
+    """Verify stale tags are cleared when no schema in registry.
 
     Given: A config with tags but registry has no parameters_schema,
     When: start_process_by_name is called,
-    Then: Tags are removed from persisted config.
+    Then: ProcessConfigModel has empty tags tuple.
     """
     settings = _create_settings()
     factory = ProcessLauncherService(settings)
-    cast(Any, factory).start_process = mock.AsyncMock()
+    mock_start = mock.AsyncMock()
+    cast(Any, factory).start_process = mock_start
     config_dict = {
         "enabled": True,
         "mode": "thread",
@@ -2711,10 +2642,8 @@ async def test_start_process_by_name_removes_stale_tags_without_schema(
     )
     result = await factory.start_process_by_name("drop_tags")
     assert result.status == "success"
-    assert repo.last_session is not None
-    new_row = repo.last_session.added[-1]
-    persisted = json.loads(new_row.value)
-    assert "tags" not in persisted
+    call_config = mock_start.call_args[0][0]
+    assert call_config.tags == ()
 
 
 @pytest.mark.asyncio()
@@ -2725,11 +2654,12 @@ async def test_start_process_by_name_drops_metadata_tags_when_schema_missing(
 
     Given: A config without tags and registry with tags but no schema,
     When: start_process_by_name is called,
-    Then: Tags from registry are not applied without schema.
+    Then: ProcessConfigModel has empty tags tuple.
     """
     settings = _create_settings()
     factory = ProcessLauncherService(settings)
-    cast(Any, factory).start_process = mock.AsyncMock()
+    mock_start = mock.AsyncMock()
+    cast(Any, factory).start_process = mock_start
     config_dict = {
         "enabled": True,
         "mode": "thread",
@@ -2767,10 +2697,8 @@ async def test_start_process_by_name_drops_metadata_tags_when_schema_missing(
     )
     result = await factory.start_process_by_name("meta_drop")
     assert result.status == "success"
-    assert repo.last_session is not None
-    new_row = repo.last_session.added[-1]
-    persisted = json.loads(new_row.value)
-    assert "tags" not in persisted
+    call_config = mock_start.call_args[0][0]
+    assert call_config.tags == ()
 
 
 @pytest.mark.asyncio()
@@ -3884,15 +3812,15 @@ class TestProcessFactoryDatabasePersistence:
 @pytest.mark.asyncio()
 @patch("snapper.application.process_manager.launcher.get_registered_processes")
 @patch("snapper.application.process_manager.launcher.get_repository")
-async def test_start_process_by_name_persists_overrides_and_clears_tags_when_schema_missing(
+async def test_start_process_by_name_clears_tags_when_schema_missing(
     mock_get_repo: MagicMock,
     mock_get_registry: MagicMock,
 ) -> None:
-    """Verify overrides are persisted and tags cleared when schema is missing.
+    """Verify tags cleared in ProcessConfigModel when schema is missing.
 
     Given: A registered process with tags but no parameters_schema,
     When: start_process_by_name is called,
-    Then: Lifecycle/role are persisted, tags removed, and process started.
+    Then: ProcessConfigModel has empty tags, correct lifecycle/role/mode/parameters.
     """
     factory = ProcessLauncherService(get_settings())
     mock_get_registry.return_value = {
@@ -3926,23 +3854,20 @@ async def test_start_process_by_name_persists_overrides_and_clears_tags_when_sch
     session = AsyncMock()
     session.add = MagicMock()
     session.execute.return_value = select_result
-    session.commit = AsyncMock()
     mock_repo = MagicMock()
     mock_repo.session.return_value.__aenter__.return_value = session
     mock_get_repo.return_value = mock_repo
-    cast(Any, factory).start_process = AsyncMock()
+    mock_start = AsyncMock()
+    cast(Any, factory).start_process = mock_start
     cast(Any, factory)._start_native_process_monitoring = MagicMock()
     response = await factory.start_process_by_name("test_process")
     assert response.status == "success"
-    session.add.assert_called_once()
-    new_row = session.add.call_args[0][0]
-    persisted = json.loads(new_row.value)
-    assert "tags" not in persisted
-    assert persisted["lifecycle"] == ProcessLifecycleEnum.LONG_RUNNING.value
-    assert persisted["mode"] == "thread"
-    assert persisted["parameters"] == {}
-    assert persisted["role"] == ProcessRoleEnum.CORE.value
-    session.commit.assert_awaited_once()
+    call_config = mock_start.call_args[0][0]
+    assert call_config.tags == ()
+    assert call_config.lifecycle == ProcessLifecycleEnum.LONG_RUNNING
+    assert call_config.mode == "thread"
+    assert call_config.parameters == {}
+    assert call_config.role == ProcessRoleEnum.CORE
 
 
 @pytest.mark.asyncio()
@@ -4753,3 +4678,240 @@ class TestProcessFactoryRegistrySync:
         mock_repo.session.return_value.__aenter__.return_value = mock_session
         mock_get_repo.return_value = mock_repo
         await factory.sync_registry_to_database()
+
+
+@pytest.mark.asyncio()
+async def test_start_all_processes_core_failure_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify CoreProcessStartupError raised when enabled CORE fails.
+
+    Given: An enabled CORE process that raises on start,
+    When: start_all_processes is called,
+    Then: CoreProcessStartupError is raised with the failed process name.
+    """
+    settings = _create_settings()
+    factory = ProcessLauncherService(settings)
+    cast(Any, factory)._start_native_process_monitoring = mock.Mock()
+    config = ProcessConfigModel(
+        name="zmq_broker",
+        enabled=True,
+        mode="thread",
+        class_path="test.Broker",
+        method="start",
+        parameters={},
+        role=ProcessRoleEnum.CORE,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+    )
+    monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+    monkeypatch.setattr(factory, "start_process", mock.AsyncMock(side_effect=RuntimeError("boom")))
+    with pytest.raises(CoreProcessStartupError) as exc_info:
+        await factory.start_all_processes()
+    assert "zmq_broker" in exc_info.value.failed_processes
+
+
+@pytest.mark.asyncio()
+async def test_start_all_processes_non_core_failure_continues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify non-CORE failure does not raise.
+
+    Given: An enabled TASK process that raises on start,
+    When: start_all_processes is called,
+    Then: No exception is raised.
+    """
+    settings = _create_settings()
+    factory = ProcessLauncherService(settings)
+    cast(Any, factory)._start_native_process_monitoring = mock.Mock()
+    config = ProcessConfigModel(
+        name="backfill",
+        enabled=True,
+        mode="thread",
+        class_path="test.Backfill",
+        method="start",
+        parameters={},
+        role=ProcessRoleEnum.TASK,
+    )
+    monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+    monkeypatch.setattr(factory, "start_process", mock.AsyncMock(side_effect=RuntimeError("boom")))
+    await factory.start_all_processes()
+
+
+@pytest.mark.asyncio()
+async def test_get_core_health_all_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify healthy when all enabled long-running CORE running.
+
+    Given: An enabled long-running CORE process is in started_processes,
+    When: get_core_health is called,
+    Then: Returns "healthy".
+    """
+    settings = _create_settings()
+    factory = ProcessLauncherService(settings)
+    config = ProcessConfigModel(
+        name="zmq_broker",
+        enabled=True,
+        mode="thread",
+        class_path="test.Broker",
+        method="start",
+        parameters={},
+        role=ProcessRoleEnum.CORE,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+    )
+    factory.started_processes["zmq_broker"] = mock.MagicMock()
+    monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+    assert await factory.get_core_health() == "healthy"
+
+
+@pytest.mark.asyncio()
+async def test_get_core_health_core_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify error when enabled long-running CORE is missing.
+
+    Given: An enabled long-running CORE process is NOT in started_processes,
+    When: get_core_health is called,
+    Then: Returns "error".
+    """
+    settings = _create_settings()
+    factory = ProcessLauncherService(settings)
+    config = ProcessConfigModel(
+        name="zmq_broker",
+        enabled=True,
+        mode="thread",
+        class_path="test.Broker",
+        method="start",
+        parameters={},
+        role=ProcessRoleEnum.CORE,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+    )
+    monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+    assert await factory.get_core_health() == "error"
+
+
+@pytest.mark.asyncio()
+async def test_get_core_health_disabled_core_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify disabled CORE does not cause error.
+
+    Given: A disabled CORE process is not running,
+    When: get_core_health is called,
+    Then: Returns "healthy" because disabled is intentional.
+    """
+    settings = _create_settings()
+    factory = ProcessLauncherService(settings)
+    config = ProcessConfigModel(
+        name="zmq_broker",
+        enabled=False,
+        mode="thread",
+        class_path="test.Broker",
+        method="start",
+        parameters={},
+        role=ProcessRoleEnum.CORE,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+    )
+    monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+    assert await factory.get_core_health() == "healthy"
+
+
+@pytest.mark.asyncio()
+async def test_get_core_health_no_core_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify healthy when no CORE processes exist.
+
+    Given: Only TASK processes are configured,
+    When: get_core_health is called,
+    Then: Returns "healthy".
+    """
+    settings = _create_settings()
+    factory = ProcessLauncherService(settings)
+    config = ProcessConfigModel(
+        name="backfill",
+        enabled=True,
+        mode="thread",
+        class_path="test.Backfill",
+        method="start",
+        parameters={},
+        role=ProcessRoleEnum.TASK,
+    )
+    monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+    assert await factory.get_core_health() == "healthy"
+
+
+@pytest.mark.asyncio()
+async def test_get_core_health_one_shot_completed_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify one-shot CORE is not treated as missing.
+
+    Given: An enabled one-shot CORE process not in started_processes,
+    When: get_core_health is called,
+    Then: Returns "healthy" because one-shot is not long-running.
+    """
+    settings = _create_settings()
+    factory = ProcessLauncherService(settings)
+    config = ProcessConfigModel(
+        name="init_task",
+        enabled=True,
+        mode="thread",
+        class_path="test.Init",
+        method="start",
+        parameters={},
+        role=ProcessRoleEnum.CORE,
+        lifecycle=ProcessLifecycleEnum.ONE_SHOT,
+    )
+    monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
+    assert await factory.get_core_health() == "healthy"
+
+
+@pytest.mark.asyncio()
+async def test_get_core_health_api_only_returns_healthy() -> None:
+    """Verify healthy in API-only mode.
+
+    Given: server_api_only is True and no processes started,
+    When: get_core_health is called,
+    Then: Returns "healthy" because processes are intentionally not started.
+    """
+    settings = mock.MagicMock()
+    settings.server_api_only = True
+    settings.db_url = "sqlite:///:memory:"
+    factory = ProcessLauncherService(settings)
+    assert await factory.get_core_health() == "healthy"
+
+
+def test_validate_parameters_with_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify _validate_parameters applies Pydantic model when available.
+
+    Given: A process with parameters_model in its registry entry,
+    When: _validate_parameters is called,
+    Then: Parameters are validated and dumped through the model.
+    """
+
+    class _TestParams(BaseModel):
+        """Test parameter model."""
+
+        endpoint: str = "default"
+
+    settings = _create_settings()
+    factory = ProcessLauncherService(settings)
+    config = ProcessConfigModel(
+        name="validated_proc",
+        enabled=True,
+        mode="thread",
+        class_path="test.Proc",
+        method="start",
+        parameters={"endpoint": "tcp://localhost:5555"},
+    )
+    entry = ProcessRegistryEntry(
+        class_ref=SyncProcess,
+        class_path="test.Proc",
+        method="start",
+        description="test",
+        priority=50,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+        role=ProcessRoleEnum.CORE,
+        tags=(),
+        parameters_model=_TestParams,
+        parameters_schema=None,
+        enabled=True,
+        mode="thread",
+    )
+    monkeypatch.setattr(
+        "snapper.application.process_manager.launcher.get_registered_processes",
+        lambda: {"validated_proc": entry},
+    )
+    result = factory._validate_parameters(config)
+    assert result == {"endpoint": "tcp://localhost:5555"}

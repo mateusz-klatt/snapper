@@ -481,7 +481,6 @@ class TestStartProcess:
             payload=ProcessStartBody(
                 mode="process",
                 parameters={"endpoint": "tcp://0.0.0.0:6666"},
-                autostart=True,
             ),
         )
         result = await start_process(
@@ -499,7 +498,6 @@ class TestStartProcess:
             name="zmq_broker",
             mode="process",
             parameters={"endpoint": "tcp://0.0.0.0:6666"},
-            autostart=True,
         )
 
     @pytest.mark.asyncio
@@ -522,7 +520,6 @@ class TestStartProcess:
             payload=ProcessStartBody(
                 mode=None,
                 parameters=None,
-                autostart=None,
             ),
         )
         result = await start_process(
@@ -535,7 +532,7 @@ class TestStartProcess:
         )
         assert result.payload.status == "success"
         mock_factory.start_process_by_name.assert_awaited_once_with(
-            name="zmq_broker", mode=None, parameters=None, autostart=None
+            name="zmq_broker", mode=None, parameters=None
         )
 
 
@@ -584,12 +581,10 @@ class TestProcessStartRequest:
             payload=ProcessStartBody(
                 mode="process",
                 parameters={"key": "value"},
-                autostart=False,
             ),
         )
         assert request.payload.mode == "process"
         assert request.payload.parameters == {"key": "value"}
-        assert request.payload.autostart is False
 
     def test_process_start_request_defaults(self) -> None:
         """Test ProcessStartRequest with None defaults.
@@ -606,12 +601,10 @@ class TestProcessStartRequest:
             payload=ProcessStartBody(
                 mode=None,
                 parameters=None,
-                autostart=None,
             ),
         )
         assert request.payload.mode is None
         assert request.payload.parameters is None
-        assert request.payload.autostart is None
 
 
 class TestCreateProcessConfiguration:

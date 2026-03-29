@@ -672,13 +672,11 @@ describe('queries', () => {
           name: 'collector',
           mode: 'thread',
           parameters: { key: 'value' },
-          autostart: true,
         })
       })
       expect(mockedApiClient.startProcessByName).toHaveBeenCalledWith('collector', {
         mode: 'thread',
         parameters: { key: 'value' },
-        autostart: true,
       })
     })
     it('uses exponential retryDelay', async () => {

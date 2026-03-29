@@ -883,7 +883,6 @@ export const ProcessStartBodySchema = z
   .object({
     mode: z.enum(['thread', 'process']).nullable().optional(),
     parameters: z.record(z.string(), z.any()).nullable().optional(),
-    autostart: z.boolean().nullable().optional(),
   })
   .strict()
 

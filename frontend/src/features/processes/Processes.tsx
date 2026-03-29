@@ -28,13 +28,11 @@ export const Processes: React.FC = () => {
     open: boolean
     componentName: string
     description: string
-    defaultAutostart: boolean
-    onStart: (options: { executionMode: 'thread' | 'process'; autostart: boolean }) => void
+    onStart: (options: { executionMode: 'thread' | 'process' }) => void
   }>({
     open: false,
     componentName: '',
     description: '',
-    defaultAutostart: false,
     onStart: noop,
   })
   const heartbeatTopics = React.useMemo(
@@ -129,7 +127,6 @@ export const Processes: React.FC = () => {
       open: false,
       componentName: '',
       description: '',
-      defaultAutostart: false,
       onStart: noop,
     })
   }, [])
@@ -138,14 +135,12 @@ export const Processes: React.FC = () => {
     (
       componentName: string,
       description: string,
-      defaultAutostart: boolean,
-      onStart: (options: { executionMode: 'thread' | 'process'; autostart: boolean }) => void
+      onStart: (options: { executionMode: 'thread' | 'process' }) => void
     ) => {
       setExecutionModeModal({
         open: true,
         componentName,
         description,
-        defaultAutostart,
         onStart,
       })
     },
@@ -153,9 +148,9 @@ export const Processes: React.FC = () => {
   )
 
   const handleStart = React.useCallback(
-    (name: string, description: string, defaultAutostart: boolean) => {
-      showExecutionModeModal(name, description, defaultAutostart, ({ executionMode, autostart }) =>
-        startProcess.mutate({ name, mode: executionMode, autostart })
+    (name: string, description: string) => {
+      showExecutionModeModal(name, description, ({ executionMode }) =>
+        startProcess.mutate({ name, mode: executionMode })
       )
     },
     [startProcess, showExecutionModeModal]
@@ -236,7 +231,7 @@ export const Processes: React.FC = () => {
                 status={process.running ? 'running' : 'stopped'}
                 details={undefined}
                 heartbeat={heartbeat}
-                onStart={() => handleStart(process.name, description, process.enabled)}
+                onStart={() => handleStart(process.name, description)}
                 onStop={() =>
                   handleStop(process.name, `This will stop the ${process.name} process.`)
                 }
@@ -244,7 +239,7 @@ export const Processes: React.FC = () => {
                   handleRestart(
                     process.name,
                     `This will restart the ${process.name} process.`,
-                    () => handleStart(process.name, description, process.enabled)
+                    () => handleStart(process.name, description)
                   )
                 }
                 isStarting={startProcess.isPending && startProcess.variables?.name === process.name}
@@ -281,7 +276,7 @@ export const Processes: React.FC = () => {
                   status={status}
                   statusBadge={statusBadge}
                   details={details}
-                  onStart={() => handleStart(process.name, description, process.enabled)}
+                  onStart={() => handleStart(process.name, description)}
                   onStop={() =>
                     handleStop(process.name, `This will stop the ${process.name} process.`)
                   }
@@ -289,7 +284,7 @@ export const Processes: React.FC = () => {
                     handleRestart(
                       process.name,
                       `This will restart the ${process.name} process.`,
-                      () => handleStart(process.name, description, process.enabled)
+                      () => handleStart(process.name, description)
                     )
                   }
                   isStarting={
@@ -310,7 +305,6 @@ export const Processes: React.FC = () => {
         onStart={executionModeModal.onStart}
         componentName={executionModeModal.componentName}
         description={executionModeModal.description}
-        defaultAutostart={executionModeModal.defaultAutostart}
       />
     </div>
   )

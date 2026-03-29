@@ -215,14 +215,14 @@ class TestStartProcessByNameNoSetting:
     """Tests for start_process_by_name when setting is missing."""
 
     @pytest.mark.asyncio
-    async def test_start_process_by_name_setting_deleted_before_update(
+    async def test_start_process_by_name_one_shot_succeeds(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Test process start when setting deleted mid-operation.
+        """Test one-shot process starts without persisting config.
 
-        Given: Process config exists initially but deleted before update.
+        Given: Process config exists with one_shot lifecycle.
         When: start_process_by_name is called.
-        Then: Process starts successfully, close_and_insert inserts fresh row.
+        Then: Process starts successfully without DB config writes.
         """
         launcher: Any = ProcessLauncherService(settings=cast(Any, DummySettings()))
         launcher.start_process = AsyncMock()
@@ -236,21 +236,11 @@ class TestStartProcessByNameNoSetting:
             "lifecycle": "one_shot",
             "role": "core",
         }
-        call_count = [0]
-
-        def get_scalar_result() -> Any:
-            call_count[0] += 1
-            if call_count[0] == 1:
-                mock_setting = MagicMock()
-                mock_setting.value = json.dumps(initial_config)
-                return mock_setting
-            else:
-                return None
-
-        mock_session = AsyncMock()
-        mock_session.add = MagicMock()
+        mock_setting = MagicMock()
+        mock_setting.value = json.dumps(initial_config)
         mock_result = MagicMock()
-        mock_result.scalar_one_or_none = get_scalar_result
+        mock_result.scalar_one_or_none.return_value = mock_setting
+        mock_session = AsyncMock()
         mock_session.execute = AsyncMock(return_value=mock_result)
         mock_context = AsyncMock()
         mock_context.__aenter__ = AsyncMock(return_value=mock_session)
@@ -284,7 +274,6 @@ class TestStartProcessByNameNoSetting:
             result = await launcher.start_process_by_name("test_proc")
         assert result.status == "success"
         assert "executed successfully" in result.message
-        mock_session.commit.assert_called_once()
 
 
 class TestSyncRegistryTagsNotIterable:

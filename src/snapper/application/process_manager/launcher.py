@@ -17,8 +17,6 @@ import contextlib
 import inspect
 import json
 from collections.abc import Iterable
-from datetime import UTC
-from datetime import datetime
 from typing import Any
 
 from loguru import logger
@@ -48,15 +46,21 @@ from snapper.application.process_manager.run_recorder import ProcessRunRecorder
 from snapper.application.process_manager.spawner import ProcessSpawnerService
 from snapper.config.settings import AppSettings
 from snapper.core.json_types import JsonObject
+from snapper.core.types import HealthStatus
 from snapper.core.types import ProcessMode
 from snapper.data.models import Setting
-from snapper.data.repository import Repository
-from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active_now
-from snapper.messaging.infrastructure.publisher import SequenceTracker
 
-_SETTINGS_TOPIC = "settings"
+
+class CoreProcessStartupError(RuntimeError):
+    """Raised when one or more enabled CORE processes fail to start."""
+
+    def __init__(self, failed_processes: list[str]) -> None:
+        """Initialize with list of failed CORE process names."""
+        self.failed_processes = failed_processes
+        names = ", ".join(failed_processes)
+        super().__init__(f"CORE process startup failed: {names}")
 
 
 class ProcessLauncherService:
@@ -99,7 +103,6 @@ class ProcessLauncherService:
         self.expected_terminations: set[str] = set()
         self._run_recorder = ProcessRunRecorder(settings)
         self._registry_syncer = ProcessRegistrySyncer(settings)
-        self._tracker = SequenceTracker()
 
     async def _create_process_run_record(
         self,
@@ -406,6 +409,9 @@ class ProcessLauncherService:
 
         Loads configurations, sorts by priority (lower first),
         and starts each enabled process. Tracks success/failure counts.
+
+        Raises:
+            CoreProcessStartupError: If any enabled CORE process fails to start.
         """
         configs = await self.get_process_configs()
         registry = get_registered_processes()
@@ -419,6 +425,7 @@ class ProcessLauncherService:
         started_count = 0
         failed_count = 0
         disabled_count = 0
+        failed_core_names: list[str] = []
         for config in sorted_configs:
             if config.enabled:
                 try:
@@ -427,6 +434,8 @@ class ProcessLauncherService:
                 except Exception as e:
                     logger.error(f"Failed to start process '{config.name}': {e}")
                     failed_count += 1
+                    if config.role is ProcessRoleEnum.CORE:
+                        failed_core_names.append(config.name)
             else:
                 disabled_count += 1
         logger.info(
@@ -434,6 +443,8 @@ class ProcessLauncherService:
             f"{failed_count} failed, {disabled_count} disabled"
         )
         self._start_native_process_monitoring()
+        if failed_core_names:
+            raise CoreProcessStartupError(failed_core_names)
 
     async def stop_all_processes(self) -> None:
         """Stop all running processes in reverse priority order.
@@ -729,26 +740,22 @@ class ProcessLauncherService:
         config_dict: dict[str, Any],
         mode: ProcessMode | None,
         parameters: dict[str, Any] | None,
-        autostart: bool | None,
     ) -> bool:
         """Apply runtime overrides to a config dictionary.
 
         Mutates config_dict in place with any non-None overrides and
-        sets defaults for missing keys.
+        sets defaults for missing keys. Overrides are runtime-only and
+        do not persist to the database.
 
         Args:
             config_dict: Mutable config dictionary.
             mode: Optional execution mode override.
             parameters: Optional constructor parameters override.
-            autostart: Optional autostart override.
 
         Returns:
             The resolved autostart_enabled value.
         """
         autostart_enabled = bool(config_dict.get("enabled", False))
-        if autostart is not None:
-            autostart_enabled = bool(autostart)
-        config_dict["enabled"] = autostart_enabled
         if mode is not None:
             config_dict["mode"] = mode
         config_dict.setdefault("mode", "thread")
@@ -806,63 +813,21 @@ class ProcessLauncherService:
             parameters_schema=parameters_schema,
         )
 
-    async def _persist_config_after_start(
-        self,
-        repository: Repository,
-        config_key: str,
-        config_dict: dict[str, Any],
-        config: ProcessConfigModel,
-    ) -> None:
-        """Persist updated config to database after successful start.
-
-        Args:
-            repository: Database repository instance.
-            config_key: Setting key (e.g. "process_myproc").
-            config_dict: Original config dictionary for base values.
-            config: Resolved ProcessConfigModel with final values.
-        """
-        persisted_config = dict(config_dict)
-        persisted_config["lifecycle"] = config.lifecycle.value
-        persisted_config["mode"] = config.mode
-        persisted_config["parameters"] = config.parameters
-        persisted_config["role"] = config.role.value
-        if config.tags:
-            persisted_config["tags"] = list(config.tags)
-        elif "tags" in persisted_config:
-            persisted_config.pop("tags", None)
-        if config.parameters_schema is not None:
-            persisted_config["parameters_schema"] = config.parameters_schema
-        async with repository.session() as session:
-            now = datetime.now(UTC)
-            await close_and_insert(
-                session=session,
-                model=Setting,
-                match_filters=[Setting.key == config_key],
-                new_values={
-                    "key": config_key,
-                    "value": json.dumps(persisted_config),
-                    "category": "process",
-                    "session_id": self._tracker.session_id,
-                    "sequence_id": self._tracker.next_sequence(_SETTINGS_TOPIC),
-                },
-                bus_time=now,
-            )
-            await session.commit()
-
     async def start_process_by_name(
         self,
         name: str,
         mode: ProcessMode | None = None,
         parameters: dict[str, Any] | None = None,
-        autostart: bool | None = None,
     ) -> ProcessStartResult:
         """Start a process by its registered name.
 
+        Overrides (mode, parameters) are applied at runtime only and
+        are not persisted back to the database.
+
         Args:
             name: Process name from registry.
-            mode: Execution mode (thread/process).
-            parameters: Constructor parameters for the process.
-            autostart: Whether to enable autostart on boot.
+            mode: Execution mode override (thread/process).
+            parameters: Constructor parameters override for the process.
 
         Returns:
             Typed result with operation status, message, and optional public_id.
@@ -887,9 +852,7 @@ class ProcessLauncherService:
                     message=f"Process '{name}' not found in configuration",
                 )
             config_dict = json.loads(setting.value)
-            autostart_enabled = self._apply_overrides_to_config_dict(
-                config_dict, mode, parameters, autostart
-            )
+            autostart_enabled = self._apply_overrides_to_config_dict(config_dict, mode, parameters)
             config = self._build_config_for_start_by_name(name, config_dict, autostart_enabled)
         try:
             await self.start_process(config)
@@ -900,7 +863,6 @@ class ProcessLauncherService:
                 message=f"Failed to start process '{name}': {str(e)}",
             )
         self._start_native_process_monitoring()
-        await self._persist_config_after_start(repository, config_key, config_dict, config)
         public_id = self.active_runs.get(name)
         if config.lifecycle is ProcessLifecycleEnum.ONE_SHOT:
             return ProcessStartResult(
@@ -931,41 +893,6 @@ class ProcessLauncherService:
                 await task
         del self.process_tasks[name]
 
-    async def _disable_process_in_db(self, name: str) -> None:
-        """Mark a process as disabled in the database.
-
-        Args:
-            name: Process name to disable.
-        """
-        repository = get_repository(self.settings.db_url)
-        config_key = f"process_{name}"
-        async with repository.session() as session:
-            result = await session.execute(
-                select(Setting).where(Setting.key == config_key, *where_active_now(Setting))
-            )
-            setting = result.scalar_one_or_none()
-            if setting:
-                config_dict = json.loads(setting.value)
-                config_dict["enabled"] = False
-                now = datetime.now(UTC)
-                await close_and_insert(
-                    session=session,
-                    model=Setting,
-                    match_filters=[Setting.key == config_key],
-                    new_values={
-                        "key": config_key,
-                        "value": json.dumps(config_dict),
-                        "category": setting.category,
-                        "description": setting.description,
-                        "is_encrypted": setting.is_encrypted,
-                        "updated_by": setting.updated_by,
-                        "session_id": self._tracker.session_id,
-                        "sequence_id": self._tracker.next_sequence(_SETTINGS_TOPIC),
-                    },
-                    bus_time=now,
-                )
-                await session.commit()
-
     async def stop_process_by_name(self, name: str) -> ProcessStopResult:
         """Stop a running process by name.
 
@@ -991,12 +918,11 @@ class ProcessLauncherService:
             self.started_processes.pop(name, None)
             self.process_lifecycles.pop(name, None)
             self.process_roles.pop(name, None)
-            await self._disable_process_in_db(name)
-            logger.info(f"Process '{name}' stopped and marked as disabled in database")
+            logger.info(f"Process '{name}' stopped successfully")
             await self._finalize_process_run(name, ProcessRunStatusEnum.CANCELLED)
             return ProcessStopResult(
                 status="success",
-                message=f"Process '{name}' stopped and marked as disabled in database",
+                message=f"Process '{name}' stopped successfully",
             )
         except Exception as e:
             logger.error(f"Failed to stop process '{name}': {e}")
@@ -1047,6 +973,32 @@ class ProcessLauncherService:
             List of run record dictionaries.
         """
         return await self._run_recorder.get_recent_runs(limit=limit, name=name)
+
+    async def get_core_health(self) -> HealthStatus:
+        """Check health of enabled long-running CORE processes.
+
+        Returns "healthy" when all enabled long-running CORE processes are
+        running, or "error" when any are missing. Disabled CORE processes
+        and completed one-shot CORE processes are ignored.
+
+        In API-only mode (no autostart), returns "healthy" unconditionally
+        since processes are intentionally not started.
+
+        Returns:
+            "healthy" or "error" as HealthStatus string.
+        """
+        if self.settings.server_api_only:
+            return "healthy"
+        configs = await self.get_process_configs()
+        for config in configs:
+            if (
+                config.enabled
+                and config.role is ProcessRoleEnum.CORE
+                and config.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
+                and config.name not in self.started_processes
+            ):
+                return "error"
+        return "healthy"
 
     async def sync_registry_to_database(self) -> None:
         """Delegate to registry_syncer.sync_registry_to_database."""

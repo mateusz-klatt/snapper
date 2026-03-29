@@ -23,7 +23,6 @@ describe('ExecutionModeModal', () => {
         onStart={mockOnStart}
         componentName='Test Component'
         description='Test description'
-        defaultAutostart={false}
       />
     )
     const buttons = screen.getAllByText('Start Test Component')
@@ -38,12 +37,11 @@ describe('ExecutionModeModal', () => {
         onStart={mockOnStart}
         componentName='Test Component'
         description='Test description'
-        defaultAutostart={false}
       />
     )
     expect(screen.queryByText('Start Test Component')).not.toBeInTheDocument()
   })
-  it('calls onStart with thread mode and autostart false by default', async () => {
+  it('calls onStart with thread mode by default', async () => {
     const user = userEvent.setup()
 
     renderWithMocks(
@@ -53,7 +51,6 @@ describe('ExecutionModeModal', () => {
         onStart={mockOnStart}
         componentName='Test Component'
         description='Test description'
-        defaultAutostart={false}
       />
     )
     const startButton = screen.getAllByRole('button', { name: /Start Test Component/i })[0]
@@ -61,7 +58,6 @@ describe('ExecutionModeModal', () => {
     await user.click(startButton)
     expect(mockOnStart).toHaveBeenCalledWith({
       executionMode: 'thread',
-      autostart: false,
     })
     expect(mockOnClose).toHaveBeenCalled()
   })
@@ -75,7 +71,6 @@ describe('ExecutionModeModal', () => {
         onStart={mockOnStart}
         componentName='Test Component'
         description='Test description'
-        defaultAutostart={false}
       />
     )
     const processRadio = screen.getByRole('radio', { name: /Process Mode/i })
@@ -86,7 +81,6 @@ describe('ExecutionModeModal', () => {
     await user.click(startButton)
     expect(mockOnStart).toHaveBeenCalledWith({
       executionMode: 'process',
-      autostart: false,
     })
   })
   it('allows switching back to thread mode', async () => {
@@ -99,7 +93,6 @@ describe('ExecutionModeModal', () => {
         onStart={mockOnStart}
         componentName='Test Component'
         description='Test description'
-        defaultAutostart={false}
       />
     )
     const processRadio = screen.getByRole('radio', { name: /Process Mode/i })
@@ -109,30 +102,6 @@ describe('ExecutionModeModal', () => {
     expect(processRadio).toBeChecked()
     await user.click(threadRadio)
     expect(threadRadio).toBeChecked()
-  })
-  it('allows toggling autostart', async () => {
-    const user = userEvent.setup()
-
-    renderWithMocks(
-      <ExecutionModeModal
-        open={true}
-        onClose={mockOnClose}
-        onStart={mockOnStart}
-        componentName='Test Component'
-        description='Test description'
-        defaultAutostart={false}
-      />
-    )
-    const autostartCheckbox = screen.getByRole('checkbox')
-
-    await user.click(autostartCheckbox)
-    const startButton = screen.getAllByRole('button', { name: /Start Test Component/i })[0]
-
-    await user.click(startButton)
-    expect(mockOnStart).toHaveBeenCalledWith({
-      executionMode: 'thread',
-      autostart: true,
-    })
   })
   it('calls onClose when cancel is clicked', async () => {
     const user = userEvent.setup()
@@ -144,34 +113,12 @@ describe('ExecutionModeModal', () => {
         onStart={mockOnStart}
         componentName='Test Component'
         description='Test description'
-        defaultAutostart={false}
       />
     )
     const cancelButton = screen.getByRole('button', { name: /Cancel/i })
 
     await user.click(cancelButton)
     expect(mockOnClose).toHaveBeenCalled()
-  })
-  it('initializes with defaultAutostart true', async () => {
-    const user = userEvent.setup()
-
-    renderWithMocks(
-      <ExecutionModeModal
-        open={true}
-        onClose={mockOnClose}
-        onStart={mockOnStart}
-        componentName='Test Component'
-        description='Test description'
-        defaultAutostart={true}
-      />
-    )
-    const startButton = screen.getAllByRole('button', { name: /Start Test Component/i })[0]
-
-    await user.click(startButton)
-    expect(mockOnStart).toHaveBeenCalledWith({
-      executionMode: 'thread',
-      autostart: true,
-    })
   })
   it('resets state when modal reopens', async () => {
     const user = userEvent.setup()
@@ -182,7 +129,6 @@ describe('ExecutionModeModal', () => {
         onStart={mockOnStart}
         componentName='Test Component'
         description='Test description'
-        defaultAutostart={false}
       />
     )
     const processRadio = screen.getByRole('radio', { name: /Process Mode/i })
@@ -195,7 +141,6 @@ describe('ExecutionModeModal', () => {
         onStart={mockOnStart}
         componentName='Test Component'
         description='Test description'
-        defaultAutostart={false}
       />
     )
     rerender(
@@ -205,7 +150,6 @@ describe('ExecutionModeModal', () => {
         onStart={mockOnStart}
         componentName='Test Component'
         description='Test description'
-        defaultAutostart={false}
       />
     )
     const threadRadio = screen.getByRole('radio', { name: /Thread Mode/i })

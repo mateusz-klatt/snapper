@@ -255,13 +255,11 @@ export const useStartProcessByName = () => {
       name,
       mode,
       parameters,
-      autostart,
     }: {
       name: string
       mode?: 'thread' | 'process'
       parameters?: Record<string, unknown>
-      autostart?: boolean
-    }) => apiClient.startProcessByName(name, { mode, parameters, autostart }),
+    }) => apiClient.startProcessByName(name, { mode, parameters }),
     retry: 2,
     retryDelay: attemptIndex => Math.min(1000 * 2 ** attemptIndex, 30000),
     onSuccess: (_data, variables) => {

@@ -4022,31 +4022,28 @@ export type Components = {
          * ProcessStartBody
          * @description Process start request body.
          *
+         *     Runtime overrides apply to this run only and are not persisted
+         *     to boot config.  Use the Settings API to change persistent config.
+         *
          *     Attributes:
-         *         mode: Execution mode (thread/process) override.
-         *         parameters: Constructor parameters override.
-         *         autostart: Toggle autostart flag (None keeps stored value).
+         *         mode: Execution mode (thread/process) override for this run.
+         *         parameters: Constructor parameters override for this run.
          */
         ProcessStartBody: {
             /**
              * Mode
-             * @description Execution mode (thread/process) - for ProcessLauncherService, not constructor
+             * @description Execution mode (thread/process) override for this run
              * @example thread
              * @example process
              */
             mode?: ("thread" | "process") | null;
             /**
-             * @description Constructor parameters override
+             * @description Constructor parameters override for this run
              * @example {
              *       "endpoint": "tcp://0.0.0.0:5555"
              *     }
              */
             parameters?: Record<string, unknown> | null;
-            /**
-             * Autostart
-             * @description Toggle autostart flag; None keeps stored value
-             */
-            autostart?: boolean | null;
         };
     };
     responses: never;

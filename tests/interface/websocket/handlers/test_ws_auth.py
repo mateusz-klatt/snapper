@@ -99,28 +99,39 @@ has_trading_permission = cast(Any, has_trading_permission)
 @pytest.fixture
 def test_client(mock_settings_for_tests: Any) -> Generator[Any]:
     """Provide a TestClient with mocked authentication."""
-    app: Any = create_app()
-    app.state.settings = SimpleNamespace(
-        session_secure=False,
-        session_same_site="lax",
-        instruments={
-            "kraken": ["BTC-USD", "ETH-USD", "EUR-USD"],
-            "zonda": ["BTC-PLN"],
-            "walutomat": [],
-            "polygon": [],
-        },
-    )
+    with (
+        patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
+        patch("snapper.server.app.discover_processes", return_value=None),
+    ):
+        mock_factory = MagicMock()
+        mock_factory.sync_registry_to_database = AsyncMock(return_value=None)
+        mock_factory.start_all_processes = AsyncMock(return_value=None)
+        mock_factory.stop_all_processes = AsyncMock(return_value=None)
+        mock_factory.get_core_health = AsyncMock(return_value="healthy")
+        mock_factory.started_processes = {}
+        mock_factory_cls.return_value = mock_factory
+        app: Any = create_app()
+        app.state.settings = SimpleNamespace(
+            session_secure=False,
+            session_same_site="lax",
+            instruments={
+                "kraken": ["BTC-USD", "ETH-USD", "EUR-USD"],
+                "zonda": ["BTC-PLN"],
+                "walutomat": [],
+                "polygon": [],
+            },
+        )
 
-    def skip_csrf_validation() -> None:
-        return None
+        def skip_csrf_validation() -> None:
+            return None
 
-    def skip_authentication() -> AuthPrincipal:
-        return AuthPrincipal(username="test_user", role=UserRole.ADMIN)
+        def skip_authentication() -> AuthPrincipal:
+            return AuthPrincipal(username="test_user", role=UserRole.ADMIN)
 
-    app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
-    app.dependency_overrides[require_authentication] = skip_authentication
-    with TestClient(app) as client:
-        yield client
+        app.dependency_overrides[validate_csrf_token] = skip_csrf_validation
+        app.dependency_overrides[require_authentication] = skip_authentication
+        with TestClient(app) as client:
+            yield client
 
 
 WS_PATH = "/api/ws"
@@ -4041,6 +4052,7 @@ def auth_routes_app_fixture() -> Generator[FastAPI]:
         mock_factory.sync_registry_to_database = AsyncMock(return_value=None)
         mock_factory.start_all_processes = AsyncMock(return_value=None)
         mock_factory.stop_all_processes = AsyncMock(return_value=None)
+        mock_factory.get_core_health = AsyncMock(return_value="healthy")
         mock_factory.started_processes = {}
         mock_factory_cls.return_value = mock_factory
         yield create_app()

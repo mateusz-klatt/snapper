@@ -1299,7 +1299,6 @@ describe('domain API methods', () => {
     const result = await apiClient.startProcessByName('test-process', {
       mode: 'live' as 'thread',
       parameters: { param: 'value' },
-      autostart: true,
     })
 
     expect(result).toEqual(responseData)

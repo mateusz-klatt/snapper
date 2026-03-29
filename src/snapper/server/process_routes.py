@@ -25,7 +25,7 @@ Example:
     Start a process::
 
         POST /api/processes/my-strategy/start
-        {"mode": "process", "autostart": true}
+        {"mode": "process"}
 """
 
 from datetime import UTC
@@ -426,7 +426,6 @@ async def start_process(
         name=name,
         mode=payload.mode,
         parameters=payload.parameters,
-        autostart=payload.autostart,
     )
     sid, seq, pid, ts = _mint_provenance(http_request)
     data = ProcessStartData(

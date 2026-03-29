@@ -1920,10 +1920,8 @@ struct ProcessStartRequest: Codable, Sendable {
 }
 
 struct ProcessStartBody: Codable, Sendable {
-    /// Execution mode (thread/process) - for ProcessLauncherService, not constructor
+    /// Execution mode (thread/process) override for this run
     let mode: String?
-    /// Constructor parameters override
+    /// Constructor parameters override for this run
     let parameters: JsonObject?
-    /// Toggle autostart flag; None keeps stored value
-    let autostart: Bool?
 }

@@ -85,25 +85,23 @@ __all__ = [
 class ProcessStartBody(StrictBody):
     """Process start request body.
 
+    Runtime overrides apply to this run only and are not persisted
+    to boot config.  Use the Settings API to change persistent config.
+
     Attributes:
-        mode: Execution mode (thread/process) override.
-        parameters: Constructor parameters override.
-        autostart: Toggle autostart flag (None keeps stored value).
+        mode: Execution mode (thread/process) override for this run.
+        parameters: Constructor parameters override for this run.
     """
 
     mode: ProcessMode | None = Field(
         None,
-        description="Execution mode (thread/process) - for ProcessLauncherService, not constructor",
+        description="Execution mode (thread/process) override for this run",
         examples=["thread", "process"],
     )
     parameters: JsonObject | None = Field(
         None,
-        description="Constructor parameters override",
+        description="Constructor parameters override for this run",
         examples=[{"endpoint": "tcp://0.0.0.0:5555"}],
-    )
-    autostart: bool | None = Field(
-        None,
-        description="Toggle autostart flag; None keeps stored value",
     )
 
 

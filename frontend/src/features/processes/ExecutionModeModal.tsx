@@ -4,10 +4,9 @@ import { Modal } from '../../components/ui/Modal'
 interface ExecutionModeModalProps {
   open: boolean
   onClose: () => void
-  onStart: (options: { executionMode: 'thread' | 'process'; autostart: boolean }) => void
+  onStart: (options: { executionMode: 'thread' | 'process' }) => void
   componentName: string
   description: string
-  defaultAutostart: boolean
 }
 
 export const ExecutionModeModal: React.FC<Readonly<ExecutionModeModalProps>> = ({
@@ -16,20 +15,17 @@ export const ExecutionModeModal: React.FC<Readonly<ExecutionModeModalProps>> = (
   onStart,
   componentName,
   description,
-  defaultAutostart,
 }) => {
   const [executionMode, setExecutionMode] = useState<'thread' | 'process'>('thread')
-  const [autostart, setAutostart] = useState<boolean>(defaultAutostart)
 
   useEffect(() => {
     if (open) {
       setExecutionMode('thread')
-      setAutostart(defaultAutostart)
     }
-  }, [open, defaultAutostart])
+  }, [open])
 
   const handleStart = () => {
-    onStart({ executionMode, autostart })
+    onStart({ executionMode })
     onClose()
   }
 
@@ -85,30 +81,6 @@ export const ExecutionModeModal: React.FC<Readonly<ExecutionModeModalProps>> = (
               </div>
             </label>
           </div>
-        </div>
-        <div className='space-y-2'>
-          <h4 className='text-sm font-medium text-muted-700'>Autostart:</h4>
-          <label
-            htmlFor='exec-mode-autostart'
-            aria-label='Enable automatic restart'
-            className='flex items-start cursor-pointer p-3 rounded border border-dark-600 hover:border-muted-400'
-          >
-            <input
-              id='exec-mode-autostart'
-              type='checkbox'
-              checked={autostart}
-              onChange={(event: React.ChangeEvent<HTMLInputElement>) =>
-                setAutostart(event.target.checked)
-              }
-              className='mr-3 mt-1'
-            />
-            <div>
-              <div className='text-alpine-900 font-medium'>Enable automatic restart</div>
-              <div className='text-sm text-muted-500'>
-                Keep this process enabled so it starts automatically with the server.
-              </div>
-            </div>
-          </label>
         </div>
         <div className='flex justify-end space-x-3 pt-4'>
           <button
