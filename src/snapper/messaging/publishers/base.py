@@ -5,6 +5,7 @@ real-time market data from exchanges.
 """
 
 import asyncio
+import contextlib
 import math
 from abc import ABC
 from abc import abstractmethod
@@ -17,6 +18,7 @@ from uuid import uuid7
 import zmq
 import zmq.asyncio
 from loguru import logger
+from sqlalchemy.exc import IntegrityError
 
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.services.settings import SettingsService
@@ -33,6 +35,9 @@ from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import TickUpsertRow
 from snapper.data.repository_types import TradeUpsertRow
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
+from snapper.infrastructure.exchanges.contracts import CandleUpdate
+from snapper.infrastructure.exchanges.contracts import TickerUpdate
+from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.messaging.infrastructure.publisher import MessagePublisher
@@ -53,6 +58,26 @@ from snapper.utils.logging import set_log_context
 
 _EXCHANGE_NOT_INIT_MSG = "Exchange client not initialized"
 _REPO_NOT_INIT_MSG = "Repository not initialized"
+
+
+def _cleanup_pending_future(fut: asyncio.Future[Any] | None) -> None:
+    """Cancel or consume a pending anext() future to avoid leaked task warnings.
+
+    Must be called in the finally block of every producer loop so that
+    pending futures do not produce 'Task exception was never retrieved'
+    warnings when the exchange disconnects after shutdown.
+
+    Args:
+        fut: The persistent future from ensure_future(anext(iterator)),
+             or None if already consumed.
+    """
+    if fut is None:
+        return
+    if not fut.done():
+        fut.cancel()
+    else:
+        with contextlib.suppress(StopAsyncIteration, asyncio.CancelledError, Exception):
+            fut.result()
 
 
 class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC):
@@ -86,6 +111,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._instrument_cache: dict[str, str] = {}
         self._candle_id_cache: dict[tuple[str, str], tuple[datetime, str]] = {}
         self._exchange_client: T | None = None
+        self._flush_errors: dict[str, int] = {"candle": 0, "tick": 0, "trade": 0}
+        self._candle_batch_max_rows: int = 100
+        self._tick_batch_max_rows: int = 500
+        self._trade_batch_max_rows: int = 500
+        self._batch_max_age_s: float = 0.05
 
     @abstractmethod
     def _create_exchange_client(self) -> T:
@@ -146,6 +176,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         )
         self.settings = get_settings_with_service(settings_service)
         logger.info(f"{process_name}: AppSettings initialized with database access")
+        self._candle_batch_max_rows = self.settings.write_buffer_candle_max_rows
+        self._tick_batch_max_rows = self.settings.write_buffer_tick_max_rows
+        self._trade_batch_max_rows = self.settings.write_buffer_trade_max_rows
+        self._batch_max_age_s = self.settings.write_buffer_flush_ms / 1000.0
         self.repository = get_repository(self.settings.db_url)
         self._candle_id_cache = await self.repository.get_latest_candle_ids(as_of=datetime.now(UTC))
         logger.info(
@@ -330,10 +364,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         return public_id
 
     async def _candle_loop(self, symbols: list[str], timeframe: str) -> None:
-        """Subscribe to candle data and publish to ZMQ.
+        """Subscribe to candle data, publish to ZMQ, and batch DB writes.
 
         Uses the candle ID cache to ensure the same public_id is used on ZMQ
         and in the database for a given (instrument, timeframe, open_at) window.
+        DB writes are micro-batched: flushed on size or age threshold.
 
         Args:
             symbols: List of symbols to subscribe to for candle data.
@@ -343,9 +378,29 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             logger.error(_EXCHANGE_NOT_INIT_MSG)
             return
         exchange = self._get_data_exchange()
+        batch: list[CandleUpsertRow] = []
+        batch_start: float | None = None
+        loop = asyncio.get_event_loop()
+        iterator = self._exchange_client.subscribe_candles(symbols, timeframe).__aiter__()
+        next_fut: asyncio.Future[CandleUpdate] | None = None
         try:
-            async for candle in self._exchange_client.subscribe_candles(symbols, timeframe):
-                if not self.running:
+            while self.running:
+                if next_fut is None:
+                    next_fut = asyncio.ensure_future(anext(iterator))
+                remaining = self._batch_max_age_s
+                if batch_start is not None:
+                    remaining = max(0.0, self._batch_max_age_s - (loop.time() - batch_start))
+                done, _ = await asyncio.wait({next_fut}, timeout=remaining)
+                if not done:
+                    if batch:
+                        await self._flush_candle_batch(batch)
+                        batch.clear()
+                        batch_start = None
+                    continue
+                next_fut = None
+                try:
+                    candle = done.pop().result()
+                except StopAsyncIteration:
                     break
                 native_symbol = candle.symbol
                 instrument_public_id = await self._ensure_instrument(native_symbol)
@@ -373,16 +428,35 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     vwap=candle.vwap,
                     trades=candle.trades,
                 )
-                published = await self._publish_message(topic, candle_msg)
-                self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
-                await self._save_to_db(
-                    native_symbol, cast(CandleData, published) if published else candle_msg
-                )
+                try:
+                    await self._publish_message(topic, candle_msg)
+                    self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
+                    row = self._build_candle_row(candle_msg, instrument_public_id)
+                    batch.append(row)
+                    if batch_start is None:
+                        batch_start = loop.time()
+                except asyncio.CancelledError:
+                    row = self._build_candle_row(candle_msg, instrument_public_id)
+                    batch.append(row)
+                    raise
+                if len(batch) >= self._candle_batch_max_rows:
+                    await self._flush_candle_batch(batch)
+                    batch.clear()
+                    batch_start = None
+        except asyncio.CancelledError:
+            pass
         except Exception as e:
             logger.error(f"Candle loop error for {symbols}: {e}")
+        finally:
+            _cleanup_pending_future(next_fut)
+            if batch:
+                await self._flush_candle_batch(batch)
 
     async def _tick_loop(self, symbols: list[str]) -> None:
-        """Subscribe to tick data and publish to ZMQ.
+        """Subscribe to tick data, publish to ZMQ, and batch DB writes.
+
+        Publish-first: ZMQ publish happens before instrument resolution,
+        so missing instruments skip DB but not ZMQ delivery.
 
         Args:
             symbols: List of symbols to subscribe to for tick data.
@@ -391,9 +465,29 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             logger.error(_EXCHANGE_NOT_INIT_MSG)
             return
         exchange = self._get_data_exchange()
+        batch: list[TickUpsertRow] = []
+        batch_start: float | None = None
+        loop = asyncio.get_event_loop()
+        iterator = self._exchange_client.subscribe_ticks(symbols).__aiter__()
+        next_fut: asyncio.Future[TickerUpdate] | None = None
         try:
-            async for message in self._exchange_client.subscribe_ticks(symbols):
-                if not self.running:
+            while self.running:
+                if next_fut is None:
+                    next_fut = asyncio.ensure_future(anext(iterator))
+                remaining = self._batch_max_age_s
+                if batch_start is not None:
+                    remaining = max(0.0, self._batch_max_age_s - (loop.time() - batch_start))
+                done, _ = await asyncio.wait({next_fut}, timeout=remaining)
+                if not done:
+                    if batch:
+                        await self._flush_tick_batch(batch)
+                        batch.clear()
+                        batch_start = None
+                    continue
+                next_fut = None
+                try:
+                    message = done.pop().result()
+                except StopAsyncIteration:
                     break
                 native_symbol = message.symbol
                 topic = self._build_data_topic(native_symbol, "ticks")
@@ -410,16 +504,33 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     ask=message.ask if not math.isclose(message.ask, 0.0) else None,
                     last=message.last,
                 )
-                published = await self._publish_message(topic, tick_msg)
+                await self._publish_message(topic, tick_msg)
                 self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
-                await self._save_tick_to_db(
-                    native_symbol, cast(TickData, published) if published else tick_msg
-                )
+                instrument_public_id = await self._ensure_instrument(native_symbol)
+                if instrument_public_id is None:
+                    continue
+                row = self._build_tick_row(tick_msg, instrument_public_id)
+                batch.append(row)
+                if batch_start is None:
+                    batch_start = loop.time()
+                if len(batch) >= self._tick_batch_max_rows:
+                    await self._flush_tick_batch(batch)
+                    batch.clear()
+                    batch_start = None
+        except asyncio.CancelledError:
+            pass
         except Exception as e:
             logger.error(f"Tick loop error for {symbols}: {e}")
+        finally:
+            _cleanup_pending_future(next_fut)
+            if batch:
+                await self._flush_tick_batch(batch)
 
     async def _trade_loop(self, symbols: list[str]) -> None:
-        """Subscribe to trade data and publish to ZMQ.
+        """Subscribe to trade data, publish to ZMQ, and batch DB writes.
+
+        Publish-first: ZMQ publish happens before instrument resolution,
+        so missing instruments skip DB but not ZMQ delivery.
 
         Args:
             symbols: List of symbols to subscribe to for trade data.
@@ -428,9 +539,29 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             logger.error(_EXCHANGE_NOT_INIT_MSG)
             return
         exchange = self._get_data_exchange()
+        batch: list[TradeUpsertRow] = []
+        batch_start: float | None = None
+        loop = asyncio.get_event_loop()
+        iterator = self._exchange_client.subscribe_trades(symbols).__aiter__()
+        next_fut: asyncio.Future[TradeUpdate] | None = None
         try:
-            async for trade in self._exchange_client.subscribe_trades(symbols):
-                if not self.running:
+            while self.running:
+                if next_fut is None:
+                    next_fut = asyncio.ensure_future(anext(iterator))
+                remaining = self._batch_max_age_s
+                if batch_start is not None:
+                    remaining = max(0.0, self._batch_max_age_s - (loop.time() - batch_start))
+                done, _ = await asyncio.wait({next_fut}, timeout=remaining)
+                if not done:
+                    if batch:
+                        await self._flush_trade_batch(batch)
+                        batch.clear()
+                        batch_start = None
+                    continue
+                next_fut = None
+                try:
+                    trade = done.pop().result()
+                except StopAsyncIteration:
                     break
                 native_symbol = trade.symbol
                 topic = self._build_data_topic(native_symbol, "trades")
@@ -448,13 +579,27 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     side=trade.side if trade.side in ["buy", "sell"] else None,
                     trade_id=trade.trade_id,
                 )
-                published = await self._publish_message(topic, trade_msg)
+                await self._publish_message(topic, trade_msg)
                 self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
-                await self._save_trade_to_db(
-                    native_symbol, cast(TradeData, published) if published else trade_msg
-                )
+                instrument_public_id = await self._ensure_instrument(native_symbol)
+                if instrument_public_id is None:
+                    continue
+                row = self._build_trade_row(trade_msg, instrument_public_id)
+                batch.append(row)
+                if batch_start is None:
+                    batch_start = loop.time()
+                if len(batch) >= self._trade_batch_max_rows:
+                    await self._flush_trade_batch(batch)
+                    batch.clear()
+                    batch_start = None
+        except asyncio.CancelledError:
+            pass
         except Exception as e:
             logger.error(f"Trade loop error for {symbols}: {e}")
+        finally:
+            _cleanup_pending_future(next_fut)
+            if batch:
+                await self._flush_trade_batch(batch)
 
     async def _publish_message(
         self, topic: str, message: MarketDataMessage
@@ -501,7 +646,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     sequence_id=self._tracker.next_sequence(hb_topic),
                     component=component_name,
                     sequence=self.heartbeat_seq,
-                    status="healthy",
+                    status="warning" if any(self._flush_errors.values()) else "healthy",
                     lag_ms=max_lag_ms,
                     meta={
                         "symbols": list(self.symbols),
@@ -527,105 +672,152 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         except Exception as e:
             logger.error(f"Error publishing heartbeat: {e}")
 
-    async def _save_to_db(self, native_symbol: str, candle_msg: CandleData) -> None:
-        """Persist candle data to the database.
-
-        The candle_msg.public_id carries the public_id resolved by the candle ID
-        cache, ensuring DB and ZMQ use the same identifier.
-
-        Args:
-            native_symbol: Native exchange symbol identifier.
-            candle_msg: CandleData containing OHLCV data to persist.
-        """
-        try:
-            instrument_public_id = await self._ensure_instrument(native_symbol)
-            if instrument_public_id is None:
-                return
-            timeframe = candle_msg.timeframe or "1m"
-            open_price = candle_msg.open if candle_msg.open is not None else candle_msg.close
-            high_price = candle_msg.high if candle_msg.high is not None else candle_msg.close
-            low_price = candle_msg.low if candle_msg.low is not None else candle_msg.close
-            close_price = candle_msg.close if candle_msg.close is not None else 0.0
-            vwap_price = candle_msg.vwap if candle_msg.vwap is not None else candle_msg.close
-            trades = candle_msg.trades if candle_msg.trades is not None else 0
-            candle_row: CandleUpsertRow = {
-                "public_id": candle_msg.public_id,
-                "instrument_public_id": instrument_public_id,
-                "open_at": candle_msg.open_at,
-                "timestamp": candle_msg.timestamp,
-                "timeframe": timeframe,
-                "open": open_price,
-                "high": high_price,
-                "low": low_price,
-                "close": close_price,
-                "volume": float(candle_msg.volume),
-                "vwap": vwap_price,
-                "trades": trades,
-                "session_id": candle_msg.session_id,
-                "sequence_id": candle_msg.sequence_id,
-            }
-            assert self.repository is not None, _REPO_NOT_INIT_MSG
-            await self.repository.upsert_candles([candle_row])
-        except Exception as e:
-            logger.error(f"Error saving candle to DB: {e}")
-
-    async def _save_tick_to_db(self, native_symbol: str, tick_msg: TickData) -> None:
-        """Persist tick data to the database.
+    def _build_candle_row(
+        self, candle_msg: CandleData, instrument_public_id: str
+    ) -> CandleUpsertRow:
+        """Build a CandleUpsertRow from a published CandleData message.
 
         Args:
-            native_symbol: Native exchange symbol identifier.
-            tick_msg: TickData containing bid/ask/last/volume to persist.
+            candle_msg: Published CandleData with OHLCV fields.
+            instrument_public_id: Resolved instrument identity.
+
+        Returns:
+            Fully materialized row dict ready for repository upsert.
         """
-        try:
-            instrument_public_id = await self._ensure_instrument(native_symbol)
-            if instrument_public_id is None:
-                return
-            tick_row: TickUpsertRow = {
-                "public_id": tick_msg.public_id,
-                "instrument_public_id": instrument_public_id,
-                "timestamp": tick_msg.timestamp,
-                "bid": tick_msg.bid,
-                "ask": tick_msg.ask,
-                "last": tick_msg.last,
-                "volume": tick_msg.volume,
-                "session_id": tick_msg.session_id,
-                "sequence_id": tick_msg.sequence_id,
-            }
-            assert self.repository is not None, _REPO_NOT_INIT_MSG
-            await self.repository.upsert_ticks([tick_row])
-        except Exception as e:
-            logger.error(f"Error saving tick to DB: {e}")
+        return {
+            "public_id": candle_msg.public_id,
+            "instrument_public_id": instrument_public_id,
+            "open_at": candle_msg.open_at,
+            "timestamp": candle_msg.timestamp,
+            "timeframe": candle_msg.timeframe or "1m",
+            "open": candle_msg.open if candle_msg.open is not None else candle_msg.close,
+            "high": candle_msg.high if candle_msg.high is not None else candle_msg.close,
+            "low": candle_msg.low if candle_msg.low is not None else candle_msg.close,
+            "close": candle_msg.close if candle_msg.close is not None else 0.0,
+            "volume": float(candle_msg.volume),
+            "vwap": candle_msg.vwap if candle_msg.vwap is not None else candle_msg.close,
+            "trades": candle_msg.trades if candle_msg.trades is not None else 0,
+            "session_id": candle_msg.session_id,
+            "sequence_id": candle_msg.sequence_id,
+        }
 
-    async def _save_trade_to_db(self, native_symbol: str, trade_msg: TradeData) -> None:
-        """Persist trade data to the database.
-
-        Trades with trade_id are deduplicated by (instrument_public_id, trade_id).
-        Trades without trade_id are inserted as append-only.
+    def _build_tick_row(self, tick_msg: TickData, instrument_public_id: str) -> TickUpsertRow:
+        """Build a TickUpsertRow from a published TickData message.
 
         Args:
-            native_symbol: Native exchange symbol identifier.
-            trade_msg: TradeData containing price/volume/side to persist.
+            tick_msg: Published TickData with bid/ask/last/volume.
+            instrument_public_id: Resolved instrument identity.
+
+        Returns:
+            Fully materialized row dict ready for repository upsert.
         """
+        return {
+            "public_id": tick_msg.public_id,
+            "instrument_public_id": instrument_public_id,
+            "timestamp": tick_msg.timestamp,
+            "bid": tick_msg.bid,
+            "ask": tick_msg.ask,
+            "last": tick_msg.last,
+            "volume": tick_msg.volume,
+            "session_id": tick_msg.session_id,
+            "sequence_id": tick_msg.sequence_id,
+        }
+
+    def _build_trade_row(self, trade_msg: TradeData, instrument_public_id: str) -> TradeUpsertRow:
+        """Build a TradeUpsertRow from a published TradeData message.
+
+        Args:
+            trade_msg: Published TradeData with price/volume/side.
+            instrument_public_id: Resolved instrument identity.
+
+        Returns:
+            Fully materialized row dict ready for repository upsert.
+        """
+        return {
+            "public_id": trade_msg.public_id,
+            "instrument_public_id": instrument_public_id,
+            "timestamp": trade_msg.timestamp,
+            "executed_at": trade_msg.executed_at,
+            "price": trade_msg.price,
+            "size": trade_msg.volume,
+            "side": trade_msg.side or "",
+            "trade_id": trade_msg.trade_id,
+            "session_id": trade_msg.session_id,
+            "sequence_id": trade_msg.sequence_id,
+        }
+
+    async def _flush_candle_batch(self, batch: list[CandleUpsertRow]) -> None:
+        """Flush candle batch to DB. On IntegrityError, retry row-by-row.
+
+        Args:
+            batch: List of candle rows to persist.
+        """
+        if not batch:
+            return
+        assert self.repository is not None, _REPO_NOT_INIT_MSG
         try:
-            instrument_public_id = await self._ensure_instrument(native_symbol)
-            if instrument_public_id is None:
-                return
-            trade_row: TradeUpsertRow = {
-                "public_id": trade_msg.public_id,
-                "instrument_public_id": instrument_public_id,
-                "timestamp": trade_msg.timestamp,
-                "executed_at": trade_msg.executed_at,
-                "price": trade_msg.price,
-                "size": trade_msg.volume,
-                "side": trade_msg.side or "",
-                "trade_id": trade_msg.trade_id,
-                "session_id": trade_msg.session_id,
-                "sequence_id": trade_msg.sequence_id,
-            }
-            assert self.repository is not None, _REPO_NOT_INIT_MSG
-            await self.repository.upsert_trades([trade_row])
+            await self.repository.upsert_candles(batch)
+            self._flush_errors["candle"] = 0
+        except IntegrityError:
+            await self._flush_candle_batch_row_by_row(batch)
         except Exception as e:
-            logger.error(f"Error saving trade to DB: {e}")
+            self._flush_errors["candle"] += 1
+            logger.error(f"Candle batch flush failed ({len(batch)} rows): {e}")
+
+    async def _flush_candle_batch_row_by_row(self, batch: list[CandleUpsertRow]) -> None:
+        """Fallback: retry each candle individually to isolate bad rows.
+
+        Args:
+            batch: List of candle rows where batch upsert failed.
+        """
+        assert self.repository is not None, _REPO_NOT_INIT_MSG
+        had_generic_error = False
+        for row in batch:
+            try:
+                await self.repository.upsert_candles([row])
+            except IntegrityError as exc:
+                logger.warning(
+                    f"Candle upsert skipped: instrument={row.get('instrument_public_id')}, "
+                    f"open_at={row.get('open_at')}, error={exc}"
+                )
+            except Exception as e:
+                had_generic_error = True
+                self._flush_errors["candle"] += 1
+                logger.error(f"Candle row flush failed: {e}")
+        if not had_generic_error:
+            self._flush_errors["candle"] = 0
+
+    async def _flush_tick_batch(self, batch: list[TickUpsertRow]) -> None:
+        """Flush tick batch to DB (append-only, no conflict possible).
+
+        Args:
+            batch: List of tick rows to persist.
+        """
+        if not batch:
+            return
+        assert self.repository is not None, _REPO_NOT_INIT_MSG
+        try:
+            await self.repository.upsert_ticks(batch)
+            self._flush_errors["tick"] = 0
+        except Exception as e:
+            self._flush_errors["tick"] += 1
+            logger.error(f"Tick batch flush failed ({len(batch)} rows): {e}")
+
+    async def _flush_trade_batch(self, batch: list[TradeUpsertRow]) -> None:
+        """Flush trade batch to DB (ON CONFLICT DO NOTHING).
+
+        Args:
+            batch: List of trade rows to persist.
+        """
+        if not batch:
+            return
+        assert self.repository is not None, _REPO_NOT_INIT_MSG
+        try:
+            await self.repository.upsert_trades(batch)
+            self._flush_errors["trade"] = 0
+        except Exception as e:
+            self._flush_errors["trade"] += 1
+            logger.error(f"Trade batch flush failed ({len(batch)} rows): {e}")
 
     async def _symbol_aliases_loop(self) -> None:
         """Listen for system messages and handle cache invalidation."""
@@ -686,4 +878,5 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             "broker_endpoint": self.pub_endpoint,
             "heartbeat_seq": self.heartbeat_seq,
             "exchange": self._get_exchange_name(),
+            "flush_errors": dict(self._flush_errors),
         }

@@ -179,20 +179,18 @@ class TestPerSourcePaperPublisher:
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
-    async def test_save_to_db_is_noop(self, mock_get_settings: MagicMock) -> None:
-        """Verify save_to_db does nothing for paper replay.
+    async def test_flush_candle_batch_is_noop(self, mock_get_settings: MagicMock) -> None:
+        """Verify _flush_candle_batch does nothing for paper replay.
 
         Given a per-source publisher,
-        When _save_to_db is called,
-        Then no side effects occur.
+        When _flush_candle_batch is called,
+        Then no side effects occur (no DB writes).
         """
         mock_settings = MagicMock()
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
         mock_get_settings.return_value = mock_settings
         pub = PerSourcePaperPublisher(source_exchange="kraken", symbols=["BTC-USD"])
-        before = dict(pub._last_data_timestamps)
-        await pub._save_to_db("BTC-USD", MagicMock())
-        assert pub._last_data_timestamps == before
+        await pub._flush_candle_batch([{"public_id": "c1"}])
 
     @patch("snapper.config.settings.get_settings")
     def test_get_status(self, mock_get_settings: MagicMock) -> None:

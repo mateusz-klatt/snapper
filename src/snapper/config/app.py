@@ -447,6 +447,45 @@ class AppSettings:
         return self._get_db_setting("zmq_heartbeat_interval_ms", 1000)
 
     @property
+    def write_buffer_flush_ms(self) -> int:
+        """Return flush age threshold for publisher micro-batch in milliseconds.
+
+        Batched DB writes are flushed when the oldest item exceeds this age.
+        Not hot-reloaded; publisher caches at start, requires restart to change.
+
+        Returns:
+            Flush age threshold in milliseconds.
+        """
+        return self._get_db_setting("write_buffer_flush_ms", 50)
+
+    @property
+    def write_buffer_candle_max_rows(self) -> int:
+        """Return candle batch size trigger for publisher micro-batch.
+
+        Returns:
+            Maximum candle rows before flush is triggered.
+        """
+        return self._get_db_setting("write_buffer_candle_max_rows", 100)
+
+    @property
+    def write_buffer_tick_max_rows(self) -> int:
+        """Return tick batch size trigger for publisher micro-batch.
+
+        Returns:
+            Maximum tick rows before flush is triggered.
+        """
+        return self._get_db_setting("write_buffer_tick_max_rows", 500)
+
+    @property
+    def write_buffer_trade_max_rows(self) -> int:
+        """Return trade batch size trigger for publisher micro-batch.
+
+        Returns:
+            Maximum trade rows before flush is triggered.
+        """
+        return self._get_db_setting("write_buffer_trade_max_rows", 500)
+
+    @property
     def auth_algorithm(self) -> str:
         """Return JWT signing algorithm.
 

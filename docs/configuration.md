@@ -75,6 +75,18 @@ Sensitive data is stored encrypted in the `settings` table.
 | `risk_max_leverage` | `1.0` | Maximum leverage |
 | `risk_r_per_trade` | `0.005` | Risk per trade (0.5%) |
 
+### Publisher Micro-Batch
+
+| Key                            | Default | Description                                       |
+| ------------------------------ | ------- | ------------------------------------------------- |
+| `write_buffer_flush_ms`        | `50`    | Flush age threshold in ms (cached at start)       |
+| `write_buffer_candle_max_rows` | `100`   | Candle batch size trigger                         |
+| `write_buffer_tick_max_rows`   | `500`   | Tick batch size trigger                           |
+| `write_buffer_trade_max_rows`  | `500`   | Trade batch size trigger                          |
+
+These settings are cached when the publisher starts and require a process
+restart to take effect.
+
 ### Authentication
 
 | Key | Default | Description |

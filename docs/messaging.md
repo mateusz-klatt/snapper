@@ -430,6 +430,35 @@ identity across ZMQ, WebSocket, and the database.  When `open_at` advances
 to a new interval, a fresh UUID7 is minted and the cache entry is replaced.
 This avoids any DB reads on the hot path.
 
+### Micro-Batch DB Persistence
+
+DB writes are decoupled from the ZMQ publish path via per-loop micro-batching.
+Each producer loop (candles, ticks, trades) accumulates rows in a local batch
+and flushes to the database on a size or age threshold:
+
+- **Size trigger**: candles flush at 100 rows, ticks/trades at 500 rows
+- **Age trigger**: all streams flush after 50 ms since the first batch item
+- **Publish-first**: ZMQ delivery happens before DB persistence; subscribers
+    receive data without waiting for the database
+
+Thresholds are configurable via `write_buffer_flush_ms`,
+`write_buffer_candle_max_rows`, `write_buffer_tick_max_rows`,
+and `write_buffer_trade_max_rows` settings (cached at publisher start,
+require process restart to change).
+
+On shutdown (launcher cancellation or direct stop), each loop flushes its
+remaining batch in a `finally` block.  The `asyncio.wait` age trigger uses
+a persistent future that is never cancelled on timeout, preserving the
+underlying exchange subscription iterator.
+
+Candle flushes that hit an `IntegrityError` (e.g. out-of-order timestamps)
+fall back to row-by-row retry, isolating the bad row without losing the
+rest of the batch.  The repository `upsert_candles()` contract is unchanged.
+
+Per-stream flush error counters (`_flush_errors`) drive the heartbeat
+`status` field: `"warning"` if any stream has errors, `"healthy"` otherwise.
+Counters reset to zero on the next successful flush of that same stream.
+
 ## Order Executor
 
 Service executing orders:

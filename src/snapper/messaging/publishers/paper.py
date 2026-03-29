@@ -27,9 +27,9 @@ from snapper.config.settings import AppSettings
 from snapper.core.types import AllExchange
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketDataType
+from snapper.data.repository_types import CandleUpsertRow
 from snapper.infrastructure.exchanges.implementations.paper import PaperExchangeClient
 from snapper.messaging.publishers.base import MarketDataPublisherService
-from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.topics.builders import market_topic
 
 
@@ -105,10 +105,9 @@ class PerSourcePaperPublisher(MarketDataPublisherService[PaperExchangeClient]):
         """Return source exchange for envelope payloads."""
         return self._source_exchange
 
-    async def _save_to_db(self, native_symbol: str, candle_msg: CandleData) -> None:
+    async def _flush_candle_batch(self, batch: list[CandleUpsertRow]) -> None:
         """Skip candle persistence for replayed paper market data."""
-        _ = native_symbol
-        _ = candle_msg
+        _ = batch
 
 
 @register_process(

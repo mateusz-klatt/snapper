@@ -194,14 +194,9 @@ class TestZondaPublisherLoops:
         async def publish_stub(topic: str, message: CandleData) -> None:
             published_messages.append((topic, message))
 
-        saved_payloads: list[tuple[str, CandleData]] = []
-
-        async def save_stub(symbol: str, envelope: CandleData) -> None:
-            saved_payloads.append((symbol, envelope))
-
         publisher_any._publish_message = publish_stub
-        publisher_any._save_to_db = save_stub
-        publisher_any._ensure_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
+        publisher_any._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+        publisher_any.repository = SimpleNamespace(upsert_candles=AsyncMock())
         await publisher_any._candle_loop(["BTC-PLN"], "1m")
         assert len(published_messages) == 1
         topic, msg = published_messages[0]

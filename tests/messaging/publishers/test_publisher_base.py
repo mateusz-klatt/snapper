@@ -15,11 +15,13 @@ from unittest.mock import patch
 
 import pytest
 import zmq
+from sqlalchemy.exc import IntegrityError
 
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.messaging.publishers.base import MarketDataPublisherService
+from snapper.messaging.publishers.base import _cleanup_pending_future
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import HeartbeatData
@@ -166,6 +168,10 @@ async def test_start_warns_on_symbol_limit(monkeypatch: pytest.MonkeyPatch) -> N
     pub._create_exchange_client = lambda: dummy_client
     pub.settings.timeframes = []
     pub.settings.zmq_heartbeat_interval_ms = 0
+    pub.settings.write_buffer_candle_max_rows = 100
+    pub.settings.write_buffer_tick_max_rows = 500
+    pub.settings.write_buffer_trade_max_rows = 500
+    pub.settings.write_buffer_flush_ms = 50
     pub._heartbeat_loop = AsyncMock()
     pub._symbol_aliases_loop = AsyncMock()
     pub._tick_loop = AsyncMock()
@@ -280,7 +286,7 @@ async def test_candle_loop_handles_errors(monkeypatch: pytest.MonkeyPatch) -> No
         raise RuntimeError("boom")
 
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
-    pub._ensure_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
+    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
     await pub._candle_loop(["BTC-USD"], "1m")
 
 
@@ -406,58 +412,90 @@ async def test_symbol_aliases_loop_invokes_invalidation(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
-async def test_save_to_db_handles_non_candle_and_missing_repo(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Test save_to_db handles non-candle messages.
+async def test_build_candle_row_materializes_fields() -> None:
+    """Verify _build_candle_row materializes a CandleUpsertRow from CandleData.
 
-    Given: A publisher with optional repository,
-    When: Non-candle or candle message is saved,
-    Then: Only candle messages are persisted.
+    Given: A publisher and a CandleData message,
+    When: _build_candle_row is called,
+    Then: The returned dict contains all required fields.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    msg = TickData(
-        session_id="",
-        sequence_id=0,
-        instrument="i",
-        volume=0.0,
-        last=1.0,
-        exchange="kraken",
-        public_id="test-public-id",
-        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-    )
-    await pub._save_to_db("i", msg)
-    repo = SimpleNamespace(
-        ensure_instrument=AsyncMock(return_value=(1, "inst-pub-1")), upsert_candles=AsyncMock()
-    )
-    pub.repository = repo
-    resolve_mock = AsyncMock(return_value="fake-spid")
-    monkeypatch.setattr("snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock)
     candle = CandleData(
-        session_id="",
-        sequence_id=0,
-        public_id="test-public-id",
+        session_id="sess-1",
+        sequence_id=5,
+        public_id="candle-pub-id",
         instrument="BTC-USD",
         volume=1.0,
         timeframe="1m",
         open=100.0,
-        high=100.0,
-        low=100.0,
-        close=100.0,
-        vwap=None,
-        trades=None,
-        timestamp=datetime.now(tz=UTC),
+        high=110.0,
+        low=90.0,
+        close=105.0,
+        vwap=102.0,
+        trades=7,
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         exchange="kraken",
-        open_at=datetime.now(UTC),
+        open_at=datetime(2024, 1, 1, tzinfo=UTC),
     )
-    await pub._save_to_db("BTC-USD", candle)
-    resolve_mock.assert_awaited_once_with(repo, "BTC-USD", as_of=ANY)
-    call_kwargs = repo.ensure_instrument.call_args.kwargs
-    assert call_kwargs["symbol_public_id"] == "fake-spid"
-    assert call_kwargs["exchange"] == "kraken"
-    assert call_kwargs["session_id"] != ""
-    assert call_kwargs["sequence_id"] >= 1
-    repo.upsert_candles.assert_awaited_once()
+    row = pub._build_candle_row(candle, "inst-pub-1")
+    assert row["public_id"] == "candle-pub-id"
+    assert row["instrument_public_id"] == "inst-pub-1"
+    assert row["open"] == pytest.approx(100.0)
+    assert row["high"] == pytest.approx(110.0)
+    assert row["low"] == pytest.approx(90.0)
+    assert row["close"] == pytest.approx(105.0)
+    assert row["vwap"] == pytest.approx(102.0)
+    assert row["trades"] == 7
+    assert row["volume"] == pytest.approx(1.0)
+    assert row["session_id"] == "sess-1"
+    assert row["sequence_id"] == 5
+
+
+@pytest.mark.asyncio
+async def test_flush_candle_batch_upserts_rows() -> None:
+    """Verify _flush_candle_batch upserts rows to repository.
+
+    Given: A publisher with a repository,
+    When: _flush_candle_batch is called with rows,
+    Then: Rows are upserted and flush_errors reset to zero.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.repository = SimpleNamespace(upsert_candles=AsyncMock())
+    batch = [
+        {
+            "public_id": "c1",
+            "instrument_public_id": "inst-1",
+            "open_at": datetime(2024, 1, 1, tzinfo=UTC),
+            "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+            "timeframe": "1m",
+            "open": 1.0,
+            "high": 2.0,
+            "low": 0.5,
+            "close": 1.5,
+            "volume": 10.0,
+            "vwap": 1.2,
+            "trades": 5,
+            "session_id": "",
+            "sequence_id": 0,
+        }
+    ]
+    await pub._flush_candle_batch(batch)
+    pub.repository.upsert_candles.assert_awaited_once_with(batch)
+    assert pub._flush_errors["candle"] == 0
+
+
+@pytest.mark.asyncio
+async def test_flush_candle_batch_empty_is_noop() -> None:
+    """Verify _flush_candle_batch does nothing for empty batch.
+
+    Given: A publisher with a repository,
+    When: _flush_candle_batch is called with empty list,
+    Then: No repository call is made.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.repository = SimpleNamespace(upsert_candles=AsyncMock())
+    await pub._flush_candle_batch([])
+    pub.repository.upsert_candles.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -542,6 +580,10 @@ async def test_start_handles_cancelled_tasks(monkeypatch: pytest.MonkeyPatch) ->
     pub._create_exchange_client = lambda: client
     pub.settings.timeframes = []
     pub.settings.zmq_heartbeat_interval_ms = 0
+    pub.settings.write_buffer_candle_max_rows = 100
+    pub.settings.write_buffer_tick_max_rows = 500
+    pub.settings.write_buffer_trade_max_rows = 500
+    pub.settings.write_buffer_flush_ms = 50
 
     async def noop(*_args: Any, **_kwargs: Any) -> None:
         return None
@@ -751,34 +793,37 @@ async def test_publish_heartbeat_logs_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_save_to_db_logs_errors() -> None:
-    """Test save_to_db logs errors.
+async def test_flush_candle_batch_logs_errors() -> None:
+    """Verify _flush_candle_batch increments flush_errors on failure.
 
-    Given: A publisher with failing repository,
-    When: DB save fails,
-    Then: Error is logged.
+    Given: A publisher with a failing repository,
+    When: upsert_candles raises a non-IntegrityError,
+    Then: flush_errors is incremented.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.repository = SimpleNamespace(
-        ensure_instrument=AsyncMock(side_effect=RuntimeError("db fail")),
-        upsert_candles=AsyncMock(),
+        upsert_candles=AsyncMock(side_effect=RuntimeError("db fail")),
     )
-    candle = CandleData(
-        session_id="",
-        sequence_id=0,
-        public_id="test-public-id",
-        instrument="BTC-USD",
-        volume=1.0,
-        timeframe="1m",
-        open=10.0,
-        high=10.0,
-        low=10.0,
-        close=10.0,
-        timestamp=datetime.now(tz=UTC),
-        exchange="kraken",
-        open_at=datetime.now(UTC),
-    )
-    await pub._save_to_db("BTC-USD", candle)
+    batch = [
+        {
+            "public_id": "c1",
+            "instrument_public_id": "inst-1",
+            "open_at": datetime(2024, 1, 1, tzinfo=UTC),
+            "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+            "timeframe": "1m",
+            "open": 1.0,
+            "high": 2.0,
+            "low": 0.5,
+            "close": 1.5,
+            "volume": 10.0,
+            "vwap": 1.2,
+            "trades": 5,
+            "session_id": "",
+            "sequence_id": 0,
+        }
+    ]
+    await pub._flush_candle_batch(batch)
+    assert pub._flush_errors["candle"] == 1
 
 
 @pytest.mark.asyncio
@@ -868,11 +913,11 @@ async def test_stop_skips_missing_resources() -> None:
 
 @pytest.mark.asyncio
 async def test_candle_loop_processes_message(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test candle loop processes message.
+    """Verify candle loop publishes message and flushes batch on exit.
 
     Given: A running publisher with candle data,
-    When: Candle arrives,
-    Then: Message published and saved to DB.
+    When: Candle arrives and stream ends,
+    Then: Message published, batch flushed in finally block.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
@@ -898,7 +943,7 @@ async def test_candle_loop_processes_message(monkeypatch: pytest.MonkeyPatch) ->
         pub.running = False
 
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
-    pub._ensure_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
+    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
     await pub._candle_loop(["BTC-USD"], "1m")
     pub.msg_publisher.send.assert_awaited_once()
     pub._ensure_instrument.assert_awaited()
@@ -955,43 +1000,14 @@ async def test_heartbeat_loop_handles_errors(monkeypatch: pytest.MonkeyPatch) ->
     await pub._heartbeat_loop()
 
 
-@pytest.mark.asyncio
-async def test_save_to_db_invalid_symbol_logs_warning() -> None:
-    """Test save_to_db logs warning for invalid symbol.
+def test_build_candle_row_null_coalesces_optional_fields() -> None:
+    """Verify _build_candle_row coalesces None vwap/trades to close/zero.
 
-    Given: A publisher saving invalid symbol,
-    When: Save is called,
-    Then: Warning is logged.
+    Given: A CandleData with None vwap and trades,
+    When: _build_candle_row is called,
+    Then: vwap falls back to close and trades falls back to 0.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    candle = CandleData(
-        session_id="",
-        sequence_id=0,
-        public_id="test-public-id",
-        instrument="BAD",
-        volume=1.0,
-        timeframe="1m",
-        open=1.0,
-        high=1.0,
-        low=1.0,
-        close=1.0,
-        timestamp=datetime.now(tz=UTC),
-        exchange="kraken",
-        open_at=datetime.now(UTC),
-    )
-    await pub._save_to_db("INVALID", candle)
-
-
-@pytest.mark.asyncio
-async def test_save_to_db_returns_when_ensure_instrument_none() -> None:
-    """Verify _save_to_db returns early when _ensure_instrument yields None.
-
-    Given: A publisher whose _ensure_instrument resolves to None,
-    When: _save_to_db is called,
-    Then: No candle is persisted and the method returns without error.
-    """
-    pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    pub.repository = SimpleNamespace(upsert_candles=AsyncMock())
     candle = CandleData(
         session_id="",
         sequence_id=0,
@@ -999,47 +1015,76 @@ async def test_save_to_db_returns_when_ensure_instrument_none() -> None:
         instrument="BTC-USD",
         volume=1.0,
         timeframe="1m",
-        open=1.0,
-        high=1.0,
-        low=1.0,
-        close=1.0,
+        open=100.0,
+        high=110.0,
+        low=90.0,
+        close=50.0,
+        vwap=None,
+        trades=None,
         timestamp=datetime.now(tz=UTC),
         exchange="kraken",
         open_at=datetime.now(UTC),
     )
-    with patch.object(pub, "_ensure_instrument", new=AsyncMock(return_value=None)):
-        await pub._save_to_db("BTC-USD", candle)
-    pub.repository.upsert_candles.assert_not_awaited()
+    row = pub._build_candle_row(candle, "inst-pub-1")
+    assert row["vwap"] == pytest.approx(50.0)
+    assert row["trades"] == 0
 
 
 @pytest.mark.asyncio
-async def test_save_to_db_uses_cached_instrument() -> None:
-    """Verify save_to_db uses cached instrument ID.
+async def test_flush_tick_batch_upserts_rows() -> None:
+    """Verify _flush_tick_batch upserts rows to repository.
 
-    Given a publisher with a cached instrument ID,
-    When _save_to_db is called for the cached symbol,
-    Then the cached ID is used without querying the database.
+    Given: A publisher with a repository,
+    When: _flush_tick_batch is called with rows,
+    Then: Rows are upserted and flush_errors reset to zero.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    pub._instrument_cache["BTC-USD"] = (7, "inst-pub-7")
-    pub.repository = SimpleNamespace(upsert_candles=AsyncMock())
-    candle = CandleData(
-        session_id="",
-        sequence_id=0,
-        public_id="test-public-id",
-        instrument="BTC-USD",
-        volume=1.0,
-        timeframe="1m",
-        open=1.0,
-        high=1.0,
-        low=1.0,
-        close=1.0,
-        timestamp=datetime.now(tz=UTC),
-        exchange="kraken",
-        open_at=datetime.now(UTC),
-    )
-    await pub._save_to_db("BTC-USD", candle)
-    pub.repository.upsert_candles.assert_awaited_once()
+    pub.repository = SimpleNamespace(upsert_ticks=AsyncMock())
+    batch = [
+        {
+            "public_id": "t1",
+            "instrument_public_id": "inst-1",
+            "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+            "bid": 100.0,
+            "ask": 101.0,
+            "last": 100.5,
+            "volume": 5.0,
+            "session_id": "",
+            "sequence_id": 0,
+        }
+    ]
+    await pub._flush_tick_batch(batch)
+    pub.repository.upsert_ticks.assert_awaited_once_with(batch)
+    assert pub._flush_errors["tick"] == 0
+
+
+@pytest.mark.asyncio
+async def test_flush_trade_batch_upserts_rows() -> None:
+    """Verify _flush_trade_batch upserts rows to repository.
+
+    Given: A publisher with a repository,
+    When: _flush_trade_batch is called with rows,
+    Then: Rows are upserted and flush_errors reset to zero.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.repository = SimpleNamespace(upsert_trades=AsyncMock())
+    batch = [
+        {
+            "public_id": "tr1",
+            "instrument_public_id": "inst-1",
+            "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+            "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
+            "price": 100.0,
+            "size": 1.5,
+            "side": "buy",
+            "trade_id": "exch-42",
+            "session_id": "",
+            "sequence_id": 0,
+        }
+    ]
+    await pub._flush_trade_batch(batch)
+    pub.repository.upsert_trades.assert_awaited_once_with(batch)
+    assert pub._flush_errors["trade"] == 0
 
 
 @pytest.mark.asyncio
@@ -1158,6 +1203,10 @@ async def test_start_skips_trade_loop_when_unsupported(monkeypatch: pytest.Monke
     pub._create_exchange_client = lambda: dummy_client
     pub.settings.timeframes = []
     pub.settings.zmq_heartbeat_interval_ms = 0
+    pub.settings.write_buffer_candle_max_rows = 100
+    pub.settings.write_buffer_tick_max_rows = 500
+    pub.settings.write_buffer_trade_max_rows = 500
+    pub.settings.write_buffer_flush_ms = 50
     pub._heartbeat_loop = AsyncMock()
     pub._symbol_aliases_loop = AsyncMock()
     pub._tick_loop = AsyncMock()
@@ -1200,7 +1249,7 @@ async def test_candle_loop_breaks_when_stopped() -> None:
         pub.running = False
 
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
-    pub._ensure_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
+    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
     await pub._candle_loop(["BTC-USD"], "1m")
 
 
@@ -1235,7 +1284,7 @@ async def test_candle_loop_stops_when_running_false() -> None:
         )
 
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
-    pub._ensure_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
+    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
     await pub._candle_loop(["BTC-USD"], "1m")
     pub.msg_publisher.send.assert_not_awaited()
 
@@ -1716,7 +1765,7 @@ class TestFeedPublisherCoverage:
 
         Given: A running publisher with mock exchange client,
         When: _candle_loop processes candles,
-        Then: Messages are published and saved to DB.
+        Then: Messages are published and batch flushed to DB.
         """
         mock_settings = MagicMock()
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
@@ -1725,9 +1774,8 @@ class TestFeedPublisherCoverage:
         publisher_any = cast(Any, publisher)
         publisher_any.running = True
         publish_mock = AsyncMock()
-        save_mock = AsyncMock()
         publisher_any._publish_message = publish_mock
-        publisher_any._save_to_db = save_mock
+        publisher_any.repository = SimpleNamespace(upsert_candles=AsyncMock())
 
         async def generator() -> AsyncIterator[CandleUpdate]:
             yield CandleUpdate(
@@ -1761,7 +1809,7 @@ class TestFeedPublisherCoverage:
             async for item in generator():
                 yield item
 
-        ensure_instrument_mock = AsyncMock(return_value=(1, "inst-pub-1"))
+        ensure_instrument_mock = AsyncMock(return_value="inst-pub-1")
         publisher_any._ensure_instrument = ensure_instrument_mock
         publisher_any._exchange_client = cast(
             Any,
@@ -1769,7 +1817,7 @@ class TestFeedPublisherCoverage:
         )
         await publisher_any._candle_loop(["BTC-USD"], "1m")
         assert publish_mock.await_count == 2
-        assert save_mock.await_count == 2
+        publisher_any.repository.upsert_candles.assert_awaited_once()
         assert "BTC-USD" in publisher_any._last_data_timestamps
 
     @pytest.mark.asyncio
@@ -1779,7 +1827,7 @@ class TestFeedPublisherCoverage:
 
         Given: A running publisher with mock exchange client,
         When: _tick_loop processes ticks,
-        Then: Tick messages are published with correct topic.
+        Then: Tick messages are published and batch flushed.
         """
         mock_settings = MagicMock()
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
@@ -1789,6 +1837,8 @@ class TestFeedPublisherCoverage:
         publisher_any.running = True
         publish_mock = AsyncMock()
         publisher_any._publish_message = publish_mock
+        publisher_any.repository = SimpleNamespace(upsert_ticks=AsyncMock())
+        publisher_any._ensure_instrument = AsyncMock(return_value="inst-pub-1")
 
         async def generator() -> AsyncIterator[TickerUpdate]:
             yield TickerUpdate(
@@ -1814,11 +1864,10 @@ class TestFeedPublisherCoverage:
             Any,
             SimpleNamespace(subscribe_ticks=tick_stream),
         )
-        publisher_any._save_tick_to_db = AsyncMock()
         await publisher_any._tick_loop(["BTC-USD"])
         publish_mock.assert_awaited_once()
         assert "BTC-USD" in publisher_any._last_data_timestamps
-        publisher_any._save_tick_to_db.assert_awaited_once()
+        publisher_any.repository.upsert_ticks.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -1827,7 +1876,7 @@ class TestFeedPublisherCoverage:
 
         Given: A running publisher with mock exchange client,
         When: _trade_loop processes trades,
-        Then: Trade messages are published with correct topic.
+        Then: Trade messages are published and batch flushed.
         """
         mock_settings = MagicMock()
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
@@ -1837,6 +1886,8 @@ class TestFeedPublisherCoverage:
         publisher_any.running = True
         publish_mock = AsyncMock()
         publisher_any._publish_message = publish_mock
+        publisher_any.repository = SimpleNamespace(upsert_trades=AsyncMock())
+        publisher_any._ensure_instrument = AsyncMock(return_value="inst-pub-1")
 
         async def generator() -> AsyncIterator[TradeUpdate]:
             yield TradeUpdate(
@@ -1866,43 +1917,33 @@ class TestFeedPublisherCoverage:
             Any,
             SimpleNamespace(subscribe_trades=trade_stream),
         )
-        publisher_any._save_trade_to_db = AsyncMock()
         await publisher_any._trade_loop(["BTC-USD"])
         assert publish_mock.await_count == 2
         assert "BTC-USD" in publisher_any._last_data_timestamps
-        assert publisher_any._save_trade_to_db.await_count == 2
+        publisher_any.repository.upsert_trades.assert_awaited_once()
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
-    async def test_save_to_db_inserts_candle(
+    async def test_build_and_flush_candle(
         self,
         mock_get_settings: MagicMock,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Verify save_to_db inserts candle to database.
+        """Verify _build_candle_row + _flush_candle_batch round-trip.
 
         Given: A publisher with mock repository,
-        When: _save_to_db is called with candle message,
-        Then: Instrument and candle are upserted.
+        When: _build_candle_row then _flush_candle_batch is called,
+        Then: Row is correctly materialized and upserted.
         """
         mock_settings = MagicMock()
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
-        mock_settings.db_url = "sqlite:///:memory:"
         mock_get_settings.return_value = mock_settings
-        mock_repository = SimpleNamespace(
-            ensure_instrument=AsyncMock(return_value=(42, "inst-pub-42")),
-            upsert_candles=AsyncMock(),
-        )
-        resolve_mock = AsyncMock(return_value="fake-spid")
-        monkeypatch.setattr(
-            "snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock
-        )
+        mock_repository = SimpleNamespace(upsert_candles=AsyncMock())
         publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
         publisher.repository = mock_repository
         publisher_any = cast(Any, publisher)
         bar_message = CandleData(
-            session_id="",
-            sequence_id=0,
+            session_id="sess-1",
+            sequence_id=3,
             public_id="test-public-id",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
             instrument="BTC-USD",
@@ -1917,17 +1958,12 @@ class TestFeedPublisherCoverage:
             trades=7,
             open_at=datetime.now(UTC),
         )
-        await publisher_any._save_to_db("BTC-USD", bar_message)
-        resolve_mock.assert_awaited_once_with(mock_repository, "BTC-USD", as_of=ANY)
-        call_kwargs = mock_repository.ensure_instrument.call_args.kwargs
-        assert call_kwargs["symbol_public_id"] == "fake-spid"
-        assert call_kwargs["exchange"] == "kraken"
-        assert call_kwargs["session_id"] != ""
-        assert call_kwargs["sequence_id"] >= 1
-        mock_repository.upsert_candles.assert_awaited_once()
-        await publisher_any._save_to_db("BTC-USD", bar_message)
-        mock_repository.ensure_instrument.assert_awaited_once()
-        assert publisher_any._instrument_cache["BTC-USD"] == "inst-pub-42"
+        row = publisher_any._build_candle_row(bar_message, "inst-pub-42")
+        assert row["instrument_public_id"] == "inst-pub-42"
+        assert row["open"] == pytest.approx(108.0)
+        assert row["session_id"] == "sess-1"
+        await publisher_any._flush_candle_batch([row])
+        mock_repository.upsert_candles.assert_awaited_once_with([row])
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -2031,12 +2067,12 @@ def _build_bar_message(instrument: str) -> CandleData:
 
 
 @pytest.mark.asyncio
-async def test_save_to_db_caches_instrument(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify instrument caching in database save operations.
+async def test_build_candle_row_and_flush(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify _build_candle_row materializes correct row and flush persists.
 
     Given a publisher with a repository,
-    When _save_to_db is called for a new symbol,
-    Then the instrument ID is cached for subsequent calls.
+    When _build_candle_row is called and the result flushed,
+    Then the row is correctly formed and persisted.
     """
     repo = DummyRepository()
 
@@ -2046,40 +2082,28 @@ async def test_save_to_db_caches_instrument(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(
         "snapper.infrastructure.symbols.functions.native_to_kraken_websocket", _native_to_ws
     )
-    resolve_mock = AsyncMock(return_value="fake-spid")
-    monkeypatch.setattr("snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock)
     publisher = KrakenMarketDataPublisher(symbols=["EUR-USD"])
     publisher.repository = repo
     bar_message = _build_bar_message("EUR-USD")
-    await publisher._save_to_db("EUR-USD", bar_message)
-    resolve_mock.assert_awaited_once_with(repo, "EUR-USD", as_of=ANY)
-    assert len(repo.instrument_calls) == 1
-    call = repo.instrument_calls[0]
-    assert call["symbol_public_id"] == "fake-spid"
-    assert call["exchange"] == "kraken"
-    assert call["session_id"] == publisher._tracker.session_id
-    assert call["sequence_id"] == 1
+    row = publisher._build_candle_row(bar_message, "inst-pub-100")
+    assert row["instrument_public_id"] == "inst-pub-100"
+    assert row["open"] == pytest.approx(1.2)
+    assert row["close"] == pytest.approx(1.24)
+    await publisher._flush_candle_batch([row])
     assert len(repo.candle_calls) == 1
     assert repo.candle_calls[0][0]["instrument_public_id"] == "inst-pub-100"
-    cache = publisher._instrument_cache
-    assert cache["EUR-USD"] == "inst-pub-100"
-    repo.instrument_calls.clear()
-    await publisher._save_to_db("EUR-USD", bar_message)
-    assert repo.instrument_calls == []
-    assert len(repo.candle_calls) == 2
 
 
 @pytest.mark.asyncio
-async def test_save_to_db_handles_invalid_symbol(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+async def test_flush_candle_batch_integrity_error_fallback(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify invalid symbol is logged and skipped.
+    """Verify _flush_candle_batch retries row-by-row on IntegrityError.
 
-    Given a publisher with a repository,
-    When _save_to_db is called with an invalid symbol,
-    Then the operation is skipped and a warning is logged.
+    Given a publisher with a repository that fails batch but succeeds per-row,
+    When _flush_candle_batch is called,
+    Then it falls back to row-by-row upsert.
     """
-    repo = DummyRepository()
 
     def _native_to_ws(symbol: str) -> str:
         return symbol.replace("-", "/")
@@ -2088,12 +2112,21 @@ async def test_save_to_db_handles_invalid_symbol(
         "snapper.infrastructure.symbols.functions.native_to_kraken_websocket", _native_to_ws
     )
     publisher = KrakenMarketDataPublisher(symbols=["EUR-USD"])
-    publisher.repository = repo
-    invalid_message = _build_bar_message("INVALID")
-    with caplog.at_level("WARNING"):
-        await publisher._save_to_db("INVALID", invalid_message)
-    assert repo.instrument_calls == []
-    assert repo.candle_calls == []
+    call_count = 0
+
+    async def upsert_candles_side_effect(rows: list[dict[str, Any]]) -> int:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise IntegrityError("dup", params=None, orig=Exception("dup"))
+        return len(rows)
+
+    publisher.repository = SimpleNamespace(
+        upsert_candles=AsyncMock(side_effect=upsert_candles_side_effect)
+    )
+    row = publisher._build_candle_row(_build_bar_message("EUR-USD"), "inst-pub-1")
+    await publisher._flush_candle_batch([row])
+    assert call_count == 2
 
 
 class PublisherSocketStub:
@@ -2139,7 +2172,7 @@ class TestFeedPublisherCandleLoop:
 
         Given: A running publisher with mock exchange client,
         When: _candle_loop processes candles,
-        Then: Bar messages are published with correct topics.
+        Then: Bar messages are published with correct topics and batch flushed.
         """
         mock_settings = MagicMock()
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
@@ -2185,14 +2218,9 @@ class TestFeedPublisherCandleLoop:
         async def publish_stub(topic: str, message: CandleData) -> None:
             published_messages.append((topic, message))
 
-        saved_payloads: list[tuple[str, CandleData]] = []
-
-        async def save_stub(symbol: str, envelope: CandleData) -> None:
-            saved_payloads.append((symbol, envelope))
-
         publisher_any._publish_message = publish_stub
-        publisher_any._save_to_db = save_stub
-        publisher_any._ensure_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
+        publisher_any._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+        publisher_any.repository = SimpleNamespace(upsert_candles=AsyncMock())
         await publisher_any._candle_loop(
             ["BTC-USD", "ETH-USD"],
             "1m",
@@ -2216,7 +2244,7 @@ class TestFeedPublisherCandleLoop:
         assert eth_msg.type == "candle"
         assert eth_msg.instrument == "ETH-USD"
         assert eth_msg.close == pytest.approx(3000.0)
-        assert len(saved_payloads) == 2
+        publisher_any.repository.upsert_candles.assert_awaited_once()
         assert "BTC-USD" in publisher_any._last_data_timestamps
         assert "ETH-USD" in publisher_any._last_data_timestamps
 
@@ -2265,7 +2293,7 @@ class TestFeedPublisherCandleLoop:
             published_topics.append(topic)
 
         publisher_any._publish_message = publish_stub
-        publisher_any._ensure_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
+        publisher_any._ensure_instrument = AsyncMock(return_value="inst-pub-1")
         task = asyncio.create_task(publisher_any._candle_loop(["BTC-USD"], "1m"))
         await asyncio.sleep(0.05)
         publisher.running = False
@@ -2302,7 +2330,7 @@ class TestFeedPublisherCandleLoop:
         publisher.running = True
         publisher_any = cast(Any, publisher)
         publisher_any._exchange_client = mock_exchange_client
-        publisher_any._ensure_instrument = AsyncMock(return_value=(1, "inst-pub-1"))
+        publisher_any._ensure_instrument = AsyncMock(return_value="inst-pub-1")
         await publisher_any._candle_loop(["BTC-USD"], "1m")
 
 
@@ -2631,54 +2659,41 @@ def _build_trade_message(instrument: str) -> TradeData:
 
 
 @pytest.mark.asyncio
-async def test_save_tick_to_db_inserts_tick(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify _save_tick_to_db persists tick and caches instrument.
+async def test_build_tick_row_materializes_fields() -> None:
+    """Verify _build_tick_row materializes a TickUpsertRow from TickData.
 
-    Given: A publisher with a repository,
-    When: _save_tick_to_db is called with a tick message,
-    Then: The tick is upserted and instrument cached.
+    Given: A publisher and a TickData message,
+    When: _build_tick_row is called,
+    Then: The returned dict contains all required fields.
     """
     repo = DummyRepository()
-    resolve_mock = AsyncMock(return_value="fake-spid")
-    monkeypatch.setattr("snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock)
     publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
     publisher.repository = repo
     tick_msg = _build_tick_message("BTC-USD")
-    await publisher._save_tick_to_db("BTC-USD", tick_msg)
-    resolve_mock.assert_awaited_once_with(repo, "BTC-USD", as_of=ANY)
-    assert len(repo.tick_calls) == 1
-    row = repo.tick_calls[0][0]
+    row = publisher._build_tick_row(tick_msg, "inst-pub-100")
     assert row["instrument_public_id"] == "inst-pub-100"
     assert row["bid"] == 100.0
     assert row["ask"] == 101.0
     assert row["last"] == 100.5
     assert row["volume"] == 5.0
     assert row["public_id"] == "tick-pub-id"
-    assert publisher._instrument_cache["BTC-USD"] == "inst-pub-100"
-    repo.instrument_calls.clear()
-    await publisher._save_tick_to_db("BTC-USD", tick_msg)
-    assert repo.instrument_calls == []
-    assert len(repo.tick_calls) == 2
+    assert row["session_id"] == "test-session"
+    assert row["sequence_id"] == 1
 
 
 @pytest.mark.asyncio
-async def test_save_trade_to_db_inserts_trade(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify _save_trade_to_db persists trade and caches instrument.
+async def test_build_trade_row_materializes_fields() -> None:
+    """Verify _build_trade_row materializes a TradeUpsertRow from TradeData.
 
-    Given: A publisher with a repository,
-    When: _save_trade_to_db is called with a trade message,
-    Then: The trade is upserted and instrument cached.
+    Given: A publisher and a TradeData message,
+    When: _build_trade_row is called,
+    Then: The returned dict contains all required fields.
     """
     repo = DummyRepository()
-    resolve_mock = AsyncMock(return_value="fake-spid")
-    monkeypatch.setattr("snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock)
     publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
     publisher.repository = repo
     trade_msg = _build_trade_message("BTC-USD")
-    await publisher._save_trade_to_db("BTC-USD", trade_msg)
-    resolve_mock.assert_awaited_once_with(repo, "BTC-USD", as_of=ANY)
-    assert len(repo.trade_calls) == 1
-    row = repo.trade_calls[0][0]
+    row = publisher._build_trade_row(trade_msg, "inst-pub-100")
     assert row["instrument_public_id"] == "inst-pub-100"
     assert row["price"] == 100.0
     assert row["size"] == 1.5
@@ -2687,104 +2702,77 @@ async def test_save_trade_to_db_inserts_trade(monkeypatch: pytest.MonkeyPatch) -
     assert row["timestamp"] == datetime(2024, 1, 1, tzinfo=UTC)
     assert row["executed_at"] == datetime(2023, 12, 31, 23, 59, 59, tzinfo=UTC)
     assert row["public_id"] == "trade-pub-id"
-    assert publisher._instrument_cache["BTC-USD"] == "inst-pub-100"
-    repo.instrument_calls.clear()
-    await publisher._save_trade_to_db("BTC-USD", trade_msg)
-    assert repo.instrument_calls == []
-    assert len(repo.trade_calls) == 2
 
 
 @pytest.mark.asyncio
-async def test_save_tick_to_db_returns_when_instrument_none(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify _save_tick_to_db skips persistence when instrument resolution fails.
-
-    Given: A publisher where symbol resolution returns None,
-    When: _save_tick_to_db is called,
-    Then: No tick is upserted.
-    """
-    resolve_mock = AsyncMock(return_value=None)
-    monkeypatch.setattr("snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock)
-    pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    pub.repository = SimpleNamespace(
-        ensure_instrument=AsyncMock(return_value=(1, "inst-pub-1")),
-        upsert_ticks=AsyncMock(),
-    )
-    tick_msg = _build_tick_message("BTC-USD")
-    await pub._save_tick_to_db("BTC-USD", tick_msg)
-    pub.repository.upsert_ticks.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_save_trade_to_db_returns_when_instrument_none(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify _save_trade_to_db skips persistence when instrument resolution fails.
-
-    Given: A publisher where symbol resolution returns None,
-    When: _save_trade_to_db is called,
-    Then: No trade is upserted.
-    """
-    resolve_mock = AsyncMock(return_value=None)
-    monkeypatch.setattr("snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock)
-    pub: Any = DummyPublisher(symbols=["BTC-USD"])
-    pub.repository = SimpleNamespace(
-        ensure_instrument=AsyncMock(return_value=(1, "inst-pub-1")),
-        upsert_trades=AsyncMock(),
-    )
-    trade_msg = _build_trade_message("BTC-USD")
-    await pub._save_trade_to_db("BTC-USD", trade_msg)
-    pub.repository.upsert_trades.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_save_tick_to_db_logs_errors() -> None:
-    """Verify _save_tick_to_db logs errors without raising.
+async def test_flush_tick_batch_logs_errors() -> None:
+    """Verify _flush_tick_batch increments flush_errors on failure.
 
     Given: A publisher with a failing repository,
-    When: DB save fails,
-    Then: Error is logged and no exception propagates.
+    When: upsert_ticks raises,
+    Then: flush_errors['tick'] is incremented.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.repository = SimpleNamespace(
-        ensure_instrument=AsyncMock(side_effect=RuntimeError("db fail")),
-        upsert_ticks=AsyncMock(),
+        upsert_ticks=AsyncMock(side_effect=RuntimeError("db fail")),
     )
     tick_msg = _build_tick_message("BTC-USD")
-    await pub._save_tick_to_db("BTC-USD", tick_msg)
+    row = pub._build_tick_row(tick_msg, "inst-pub-1")
+    await pub._flush_tick_batch([row])
+    assert pub._flush_errors["tick"] == 1
 
 
 @pytest.mark.asyncio
-async def test_save_trade_to_db_logs_errors() -> None:
-    """Verify _save_trade_to_db logs errors without raising.
+async def test_flush_trade_batch_logs_errors() -> None:
+    """Verify _flush_trade_batch increments flush_errors on failure.
 
     Given: A publisher with a failing repository,
-    When: DB save fails,
-    Then: Error is logged and no exception propagates.
+    When: upsert_trades raises,
+    Then: flush_errors['trade'] is incremented.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.repository = SimpleNamespace(
-        ensure_instrument=AsyncMock(side_effect=RuntimeError("db fail")),
-        upsert_trades=AsyncMock(),
+        upsert_trades=AsyncMock(side_effect=RuntimeError("db fail")),
     )
     trade_msg = _build_trade_message("BTC-USD")
-    await pub._save_trade_to_db("BTC-USD", trade_msg)
+    row = pub._build_trade_row(trade_msg, "inst-pub-1")
+    await pub._flush_trade_batch([row])
+    assert pub._flush_errors["trade"] == 1
 
 
 @pytest.mark.asyncio
-async def test_save_trade_to_db_persists_with_null_trade_id(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify _save_trade_to_db persists trade even without trade_id.
+async def test_build_trade_row_handles_null_trade_id() -> None:
+    """Verify _build_trade_row persists trade with None trade_id.
 
     Given: A TradeData message without exchange trade_id,
-    When: _save_trade_to_db is called,
-    Then: Trade is upserted as append-only (NULL trade_id).
+    When: _build_trade_row is called,
+    Then: Row has trade_id=None.
+    """
+    publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+    trade_msg = TradeData(
+        session_id="test-session",
+        sequence_id=1,
+        public_id="trade-pub-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        instrument="BTC-USD",
+        exchange="kraken",
+        price=100.0,
+        volume=1.0,
+        side="buy",
+    )
+    row = publisher._build_trade_row(trade_msg, "inst-pub-1")
+    assert row["trade_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_build_trade_row_persists_when_no_trade_id() -> None:
+    """Verify _build_trade_row handles missing trade_id (None).
+
+    Given: A TradeData message with trade_id=None,
+    When: _build_trade_row is called and flushed,
+    Then: Row has trade_id=None and flushes successfully.
     """
     repo = DummyRepository()
-    resolve_mock = AsyncMock(return_value="fake-spid")
-    monkeypatch.setattr("snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock)
     publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
     publisher.repository = repo
     trade_msg = TradeData(
@@ -2798,49 +2786,20 @@ async def test_save_trade_to_db_persists_with_null_trade_id(
         volume=1.0,
         side="buy",
     )
-    await publisher._save_trade_to_db("BTC-USD", trade_msg)
-    assert len(repo.trade_calls) == 1
-    row = repo.trade_calls[0][0]
+    row = publisher._build_trade_row(trade_msg, "inst-pub-1")
     assert row["trade_id"] is None
-
-
-@pytest.mark.asyncio
-async def test_save_trade_to_db_persists_when_no_trade_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify _save_trade_to_db persists trade even when trade_id is None.
-
-    Given: A TradeData message without exchange trade_id,
-    When: _save_trade_to_db is called,
-    Then: Trade is still upserted (append-only for NULL trade_id).
-    """
-    repo = DummyRepository()
-    resolve_mock = AsyncMock(return_value="fake-spid")
-    monkeypatch.setattr("snapper.messaging.publishers.base.resolve_symbol_public_id", resolve_mock)
-    publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
-    publisher.repository = repo
-    trade_msg = TradeData(
-        session_id="test-session",
-        sequence_id=1,
-        public_id="trade-pub-id",
-        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-        instrument="BTC-USD",
-        exchange="kraken",
-        price=100.0,
-        volume=1.0,
-        side="buy",
-    )
-    await publisher._save_trade_to_db("BTC-USD", trade_msg)
+    await publisher._flush_trade_batch([row])
     assert len(repo.trade_calls) == 1
-    row = repo.trade_calls[0][0]
-    assert row["trade_id"] is None
+    assert repo.trade_calls[0][0]["trade_id"] is None
 
 
 @pytest.mark.asyncio
 async def test_tick_loop_publishes_and_saves(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify tick loop publishes to ZMQ and persists to DB.
+    """Verify tick loop publishes to ZMQ and flushes batch to DB.
 
     Given: A running publisher with tick data,
-    When: Tick arrives,
-    Then: Message is published and saved to DB.
+    When: Tick arrives and stream ends,
+    Then: Message is published and batch flushed on exit.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
@@ -2861,11 +2820,11 @@ async def test_tick_loop_publishes_and_saves(monkeypatch: pytest.MonkeyPatch) ->
 
 @pytest.mark.asyncio
 async def test_trade_loop_publishes_and_saves_to_db(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify trade loop publishes to ZMQ and persists to DB.
+    """Verify trade loop publishes to ZMQ and flushes batch to DB.
 
     Given: A running publisher with trade data,
-    When: Trade arrives,
-    Then: Message is published and saved to DB.
+    When: Trade arrives and stream ends,
+    Then: Message is published and batch flushed on exit.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
@@ -2889,3 +2848,595 @@ async def test_trade_loop_publishes_and_saves_to_db(monkeypatch: pytest.MonkeyPa
     await pub._trade_loop(["BTC-USD"])
     pub.msg_publisher.send.assert_awaited()
     pub.repository.upsert_trades.assert_awaited_once()
+
+
+def test_cleanup_pending_future_done_with_result() -> None:
+    """Verify _cleanup_pending_future consumes result from a done future.
+
+    Given: A future that completed with a result,
+    When: _cleanup_pending_future is called,
+    Then: The result is consumed without error.
+    """
+    loop = asyncio.new_event_loop()
+    fut: asyncio.Future[int] = loop.create_future()
+    fut.set_result(42)
+    _cleanup_pending_future(fut)
+    loop.close()
+
+
+def test_cleanup_pending_future_done_with_exception() -> None:
+    """Verify _cleanup_pending_future suppresses exception from a done future.
+
+    Given: A future that completed with an exception,
+    When: _cleanup_pending_future is called,
+    Then: The exception is suppressed.
+    """
+    loop = asyncio.new_event_loop()
+    fut: asyncio.Future[int] = loop.create_future()
+    fut.set_exception(RuntimeError("boom"))
+    _cleanup_pending_future(fut)
+    loop.close()
+
+
+def test_cleanup_pending_future_done_with_stop_async_iteration() -> None:
+    """Verify _cleanup_pending_future suppresses StopAsyncIteration from done future.
+
+    Given: A future that completed with StopAsyncIteration,
+    When: _cleanup_pending_future is called,
+    Then: The StopAsyncIteration is suppressed.
+    """
+    loop = asyncio.new_event_loop()
+    fut: asyncio.Future[int] = loop.create_future()
+    fut.set_exception(StopAsyncIteration())
+    _cleanup_pending_future(fut)
+    loop.close()
+
+
+def test_cleanup_pending_future_done_with_cancelled_error() -> None:
+    """Verify _cleanup_pending_future suppresses CancelledError from done future.
+
+    Given: A future that completed with CancelledError,
+    When: _cleanup_pending_future is called,
+    Then: The CancelledError is suppressed (no propagation).
+    """
+    loop = asyncio.new_event_loop()
+    fut: asyncio.Future[int] = loop.create_future()
+    fut.cancel()
+    _cleanup_pending_future(fut)
+    loop.close()
+
+
+@pytest.mark.asyncio
+async def test_candle_loop_age_trigger_flush() -> None:
+    """Verify candle loop flushes batch on age timeout.
+
+    Given: A publisher with a candle in the batch and no new data arriving,
+    When: The age timer expires,
+    Then: The batch is flushed.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub.msg_publisher = AsyncMock()
+    pub.repository = SimpleNamespace(upsert_candles=AsyncMock())
+    pub._exchange_client = SimpleNamespace()
+    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+    pub._batch_max_age_s = 0.01
+    flush_count = 0
+
+    async def gen() -> AsyncIterator[Any]:
+        yield SimpleNamespace(
+            symbol="BTC-USD",
+            open=1.0,
+            high=2.0,
+            low=0.5,
+            close=1.5,
+            vwap=1.2,
+            volume=10.0,
+            trades=5,
+            interval_begin=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+        )
+        nonlocal flush_count
+        await asyncio.sleep(0.05)
+        flush_count = pub.repository.upsert_candles.await_count
+        pub.running = False
+
+    pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
+    await pub._candle_loop(["BTC-USD"], "1m")
+    assert flush_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_candle_loop_batch_size_threshold_flush() -> None:
+    """Verify candle loop flushes when batch reaches max size.
+
+    Given: A publisher with _candle_batch_max_rows=2,
+    When: Two candles arrive,
+    Then: The batch is flushed mid-loop before stream ends.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub.msg_publisher = AsyncMock()
+    pub.repository = SimpleNamespace(upsert_candles=AsyncMock())
+    pub._exchange_client = SimpleNamespace()
+    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+    pub._candle_batch_max_rows = 2
+    flush_after_two = 0
+
+    async def gen() -> AsyncIterator[Any]:
+        nonlocal flush_after_two
+        for i in range(3):
+            yield SimpleNamespace(
+                symbol="BTC-USD",
+                open=1.0,
+                high=2.0,
+                low=0.5,
+                close=1.5,
+                vwap=1.2,
+                volume=10.0,
+                trades=5,
+                interval_begin=datetime(2026, 1, 1, 0, i, tzinfo=UTC),
+            )
+            if i == 1:
+                await asyncio.sleep(0)
+                flush_after_two = pub.repository.upsert_candles.await_count
+        pub.running = False
+
+    pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
+    await pub._candle_loop(["BTC-USD"], "1m")
+    assert flush_after_two >= 1
+
+
+@pytest.mark.asyncio
+async def test_candle_loop_cancelled_error_during_publish() -> None:
+    """Verify candle loop appends row and flushes on CancelledError during publish.
+
+    Given: A publisher whose _publish_message raises CancelledError,
+    When: _candle_loop processes a candle,
+    Then: The row is still appended and flushed in finally block.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub.msg_publisher = AsyncMock()
+    pub.repository = SimpleNamespace(upsert_candles=AsyncMock())
+    pub._exchange_client = SimpleNamespace()
+    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+
+    async def publish_cancel(topic: str, msg: Any) -> None:
+        raise asyncio.CancelledError()
+
+    pub._publish_message = publish_cancel
+
+    async def gen() -> AsyncIterator[Any]:
+        yield SimpleNamespace(
+            symbol="BTC-USD",
+            open=1.0,
+            high=2.0,
+            low=0.5,
+            close=1.5,
+            vwap=1.2,
+            volume=10.0,
+            trades=5,
+            interval_begin=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+        )
+
+    pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
+    await pub._candle_loop(["BTC-USD"], "1m")
+    pub.repository.upsert_candles.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_tick_loop_age_trigger_flush() -> None:
+    """Verify tick loop flushes batch on age timeout.
+
+    Given: A publisher with a tick in the batch and no new data arriving,
+    When: The age timer expires,
+    Then: The batch is flushed.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub.msg_publisher = AsyncMock()
+    pub.repository = SimpleNamespace(upsert_ticks=AsyncMock())
+    pub._exchange_client = SimpleNamespace()
+    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+    pub._batch_max_age_s = 0.01
+    flush_count = 0
+
+    async def gen() -> AsyncIterator[Any]:
+        yield SimpleNamespace(symbol="BTC-USD", last=10.0, volume=5.0, bid=1.0, ask=2.0)
+        nonlocal flush_count
+        await asyncio.sleep(0.05)
+        flush_count = pub.repository.upsert_ticks.await_count
+        pub.running = False
+
+    pub._exchange_client.subscribe_ticks = lambda symbols: gen()
+    await pub._tick_loop(["BTC-USD"])
+    assert flush_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_tick_loop_batch_size_threshold_flush() -> None:
+    """Verify tick loop flushes when batch reaches max size.
+
+    Given: A publisher with _tick_batch_max_rows=2,
+    When: Two ticks arrive,
+    Then: The batch is flushed mid-loop.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub.msg_publisher = AsyncMock()
+    pub.repository = SimpleNamespace(upsert_ticks=AsyncMock())
+    pub._exchange_client = SimpleNamespace()
+    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+    pub._tick_batch_max_rows = 2
+    flush_after_two = 0
+
+    async def gen() -> AsyncIterator[Any]:
+        nonlocal flush_after_two
+        for i in range(3):
+            yield SimpleNamespace(symbol="BTC-USD", last=10.0 + i, volume=5.0, bid=1.0, ask=2.0)
+            if i == 1:
+                await asyncio.sleep(0)
+                flush_after_two = pub.repository.upsert_ticks.await_count
+        pub.running = False
+
+    pub._exchange_client.subscribe_ticks = lambda symbols: gen()
+    await pub._tick_loop(["BTC-USD"])
+    assert flush_after_two >= 1
+
+
+@pytest.mark.asyncio
+async def test_tick_loop_skips_db_when_instrument_is_none() -> None:
+    """Verify tick loop skips DB write when instrument resolution returns None.
+
+    Given: A publisher whose _ensure_instrument returns None,
+    When: _tick_loop processes a tick,
+    Then: ZMQ message is published but no DB row is appended.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub.msg_publisher = AsyncMock()
+    pub.repository = SimpleNamespace(upsert_ticks=AsyncMock())
+    pub._exchange_client = SimpleNamespace()
+    pub._ensure_instrument = AsyncMock(return_value=None)
+
+    async def gen() -> AsyncIterator[Any]:
+        yield SimpleNamespace(symbol="BTC-USD", last=10.0, volume=5.0, bid=1.0, ask=2.0)
+        pub.running = False
+
+    pub._exchange_client.subscribe_ticks = lambda symbols: gen()
+    await pub._tick_loop(["BTC-USD"])
+    pub.msg_publisher.send.assert_awaited()
+    pub.repository.upsert_ticks.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_tick_loop_cancelled_error() -> None:
+    """Verify tick loop handles CancelledError gracefully.
+
+    Given: A publisher whose tick generator raises CancelledError,
+    When: _tick_loop is running,
+    Then: The exception is caught and any pending batch flushed.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub.msg_publisher = AsyncMock()
+    pub.repository = SimpleNamespace(upsert_ticks=AsyncMock())
+    pub._exchange_client = SimpleNamespace()
+    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+
+    call_count = 0
+
+    async def publish_then_cancel(topic: str, msg: Any) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return None
+        raise asyncio.CancelledError()
+
+    pub.msg_publisher.send = publish_then_cancel
+
+    async def gen() -> AsyncIterator[Any]:
+        yield SimpleNamespace(symbol="BTC-USD", last=10.0, volume=5.0, bid=1.0, ask=2.0)
+        yield SimpleNamespace(symbol="BTC-USD", last=11.0, volume=6.0, bid=1.1, ask=2.1)
+
+    pub._exchange_client.subscribe_ticks = lambda symbols: gen()
+    await pub._tick_loop(["BTC-USD"])
+    pub.repository.upsert_ticks.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_trade_loop_age_trigger_flush() -> None:
+    """Verify trade loop flushes batch on age timeout.
+
+    Given: A publisher with a trade in the batch and no new data arriving,
+    When: The age timer expires,
+    Then: The batch is flushed.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub.msg_publisher = AsyncMock()
+    pub.repository = SimpleNamespace(upsert_trades=AsyncMock())
+    pub._exchange_client = SimpleNamespace()
+    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+    pub._batch_max_age_s = 0.01
+    flush_count = 0
+
+    async def gen() -> AsyncIterator[Any]:
+        yield SimpleNamespace(
+            symbol="BTC-USD",
+            price=100.0,
+            quantity=1.0,
+            side="buy",
+            trade_id="12345",
+            timestamp=datetime.now(UTC),
+        )
+        nonlocal flush_count
+        await asyncio.sleep(0.05)
+        flush_count = pub.repository.upsert_trades.await_count
+        pub.running = False
+
+    pub._exchange_client.subscribe_trades = lambda symbols: gen()
+    await pub._trade_loop(["BTC-USD"])
+    assert flush_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_trade_loop_batch_size_threshold_flush() -> None:
+    """Verify trade loop flushes when batch reaches max size.
+
+    Given: A publisher with _trade_batch_max_rows=2,
+    When: Two trades arrive,
+    Then: The batch is flushed mid-loop.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub.msg_publisher = AsyncMock()
+    pub.repository = SimpleNamespace(upsert_trades=AsyncMock())
+    pub._exchange_client = SimpleNamespace()
+    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+    pub._trade_batch_max_rows = 2
+    flush_after_two = 0
+
+    async def gen() -> AsyncIterator[Any]:
+        nonlocal flush_after_two
+        for i in range(3):
+            yield SimpleNamespace(
+                symbol="BTC-USD",
+                price=100.0 + i,
+                quantity=1.0,
+                side="buy",
+                trade_id=f"t-{i}",
+                timestamp=datetime.now(UTC),
+            )
+            if i == 1:
+                await asyncio.sleep(0)
+                flush_after_two = pub.repository.upsert_trades.await_count
+        pub.running = False
+
+    pub._exchange_client.subscribe_trades = lambda symbols: gen()
+    await pub._trade_loop(["BTC-USD"])
+    assert flush_after_two >= 1
+
+
+@pytest.mark.asyncio
+async def test_trade_loop_skips_db_when_instrument_is_none() -> None:
+    """Verify trade loop skips DB write when instrument resolution returns None.
+
+    Given: A publisher whose _ensure_instrument returns None,
+    When: _trade_loop processes a trade,
+    Then: ZMQ message is published but no DB row is appended.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub.msg_publisher = AsyncMock()
+    pub.repository = SimpleNamespace(upsert_trades=AsyncMock())
+    pub._exchange_client = SimpleNamespace()
+    pub._ensure_instrument = AsyncMock(return_value=None)
+
+    async def gen() -> AsyncIterator[Any]:
+        yield SimpleNamespace(
+            symbol="BTC-USD",
+            price=100.0,
+            quantity=1.0,
+            side="buy",
+            trade_id="12345",
+            timestamp=datetime.now(UTC),
+        )
+        pub.running = False
+
+    pub._exchange_client.subscribe_trades = lambda symbols: gen()
+    await pub._trade_loop(["BTC-USD"])
+    pub.msg_publisher.send.assert_awaited()
+    pub.repository.upsert_trades.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_trade_loop_cancelled_error() -> None:
+    """Verify trade loop handles CancelledError gracefully.
+
+    Given: A publisher whose trade processing raises CancelledError,
+    When: _trade_loop is running,
+    Then: The exception is caught and pending batch flushed.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub.msg_publisher = AsyncMock()
+    pub.repository = SimpleNamespace(upsert_trades=AsyncMock())
+    pub._exchange_client = SimpleNamespace()
+    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+
+    call_count = 0
+
+    async def publish_then_cancel(topic: str, msg: Any) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return None
+        raise asyncio.CancelledError()
+
+    pub.msg_publisher.send = publish_then_cancel
+
+    async def gen() -> AsyncIterator[Any]:
+        yield SimpleNamespace(
+            symbol="BTC-USD",
+            price=100.0,
+            quantity=1.0,
+            side="buy",
+            trade_id="t1",
+            timestamp=datetime.now(UTC),
+        )
+        yield SimpleNamespace(
+            symbol="BTC-USD",
+            price=101.0,
+            quantity=2.0,
+            side="sell",
+            trade_id="t2",
+            timestamp=datetime.now(UTC),
+        )
+
+    pub._exchange_client.subscribe_trades = lambda symbols: gen()
+    await pub._trade_loop(["BTC-USD"])
+    pub.repository.upsert_trades.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_flush_candle_batch_row_by_row_integrity_error() -> None:
+    """Verify _flush_candle_batch_row_by_row skips rows with IntegrityError.
+
+    Given: A publisher whose repository raises IntegrityError on one row,
+    When: _flush_candle_batch_row_by_row is called,
+    Then: The bad row is skipped with a warning, flush_errors reset to 0.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    call_count = 0
+
+    async def upsert_side_effect(rows: list[dict[str, Any]]) -> int:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise IntegrityError("dup", params=None, orig=Exception("dup"))
+        return len(rows)
+
+    pub.repository = SimpleNamespace(upsert_candles=AsyncMock(side_effect=upsert_side_effect))
+    batch = [
+        {
+            "public_id": "c1",
+            "instrument_public_id": "inst-1",
+            "open_at": datetime(2024, 1, 1, tzinfo=UTC),
+            "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+            "timeframe": "1m",
+            "open": 1.0,
+            "high": 2.0,
+            "low": 0.5,
+            "close": 1.5,
+            "volume": 10.0,
+            "vwap": 1.2,
+            "trades": 5,
+            "session_id": "",
+            "sequence_id": 0,
+        },
+        {
+            "public_id": "c2",
+            "instrument_public_id": "inst-1",
+            "open_at": datetime(2024, 1, 2, tzinfo=UTC),
+            "timestamp": datetime(2024, 1, 2, tzinfo=UTC),
+            "timeframe": "1m",
+            "open": 2.0,
+            "high": 3.0,
+            "low": 1.5,
+            "close": 2.5,
+            "volume": 20.0,
+            "vwap": 2.2,
+            "trades": 10,
+            "session_id": "",
+            "sequence_id": 1,
+        },
+    ]
+    await pub._flush_candle_batch_row_by_row(batch)
+    assert call_count == 2
+    assert pub._flush_errors["candle"] == 0
+
+
+@pytest.mark.asyncio
+async def test_flush_candle_batch_row_by_row_generic_exception() -> None:
+    """Verify _flush_candle_batch_row_by_row handles generic Exception per row.
+
+    Given: A publisher whose repository raises a generic Exception on one row,
+    When: _flush_candle_batch_row_by_row is called,
+    Then: flush_errors remains incremented (not reset when generic errors occurred).
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    call_count = 0
+
+    async def upsert_side_effect(rows: list[dict[str, Any]]) -> int:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("db fail")
+        return len(rows)
+
+    pub.repository = SimpleNamespace(upsert_candles=AsyncMock(side_effect=upsert_side_effect))
+    batch = [
+        {
+            "public_id": "c1",
+            "instrument_public_id": "inst-1",
+            "open_at": datetime(2024, 1, 1, tzinfo=UTC),
+            "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+            "timeframe": "1m",
+            "open": 1.0,
+            "high": 2.0,
+            "low": 0.5,
+            "close": 1.5,
+            "volume": 10.0,
+            "vwap": 1.2,
+            "trades": 5,
+            "session_id": "",
+            "sequence_id": 0,
+        },
+        {
+            "public_id": "c2",
+            "instrument_public_id": "inst-1",
+            "open_at": datetime(2024, 1, 2, tzinfo=UTC),
+            "timestamp": datetime(2024, 1, 2, tzinfo=UTC),
+            "timeframe": "1m",
+            "open": 2.0,
+            "high": 3.0,
+            "low": 1.5,
+            "close": 2.5,
+            "volume": 20.0,
+            "vwap": 2.2,
+            "trades": 10,
+            "session_id": "",
+            "sequence_id": 1,
+        },
+    ]
+    await pub._flush_candle_batch_row_by_row(batch)
+    assert pub._flush_errors["candle"] == 1
+
+
+@pytest.mark.asyncio
+async def test_flush_tick_batch_empty_is_noop() -> None:
+    """Verify _flush_tick_batch does nothing for empty batch.
+
+    Given: A publisher with a repository,
+    When: _flush_tick_batch is called with empty list,
+    Then: No repository call is made.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.repository = SimpleNamespace(upsert_ticks=AsyncMock())
+    await pub._flush_tick_batch([])
+    pub.repository.upsert_ticks.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_flush_trade_batch_empty_is_noop() -> None:
+    """Verify _flush_trade_batch does nothing for empty batch.
+
+    Given: A publisher with a repository,
+    When: _flush_trade_batch is called with empty list,
+    Then: No repository call is made.
+    """
+    pub: Any = DummyPublisher(symbols=["BTC-USD"])
+    pub.repository = SimpleNamespace(upsert_trades=AsyncMock())
+    await pub._flush_trade_batch([])
+    pub.repository.upsert_trades.assert_not_awaited()
