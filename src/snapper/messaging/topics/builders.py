@@ -55,7 +55,11 @@ def market_topic(
     """Build a market data topic string.
 
     Args:
-        exchange: Exchange name (OrderExchange literal).
+        exchange: Exchange name from AllExchange.
+            This builder accepts all known exchange identifiers, including
+            venues that may be enabled for live publishing in the future.
+            Runtime support for live feed topics is enforced separately by
+            topic validation.
         instrument: Trading instrument symbol (e.g., 'BTC-USD').
         data_type: Type of market data ('ticks', 'trades', 'candles').
         timeframe: Candle timeframe (required when data_type is 'candles').

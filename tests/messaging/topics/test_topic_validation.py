@@ -9,8 +9,11 @@ from typing import Any
 
 import pytest
 
+from snapper.core.types import ExchangeEnum
+from snapper.core.types import MarketDataTypeEnum
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.topics import validation
+from snapper.messaging.topics.builders import market_topic
 from snapper.messaging.topics.validation import TopicValidationError
 from snapper.messaging.topics.validation import _is_valid_timeframe
 from snapper.messaging.topics.validation import _validate_admin_topic
@@ -3341,6 +3344,21 @@ def test_validate_market_polygon_live_topic_rejected() -> None:
     Then it returns False because polygon has no live market publisher.
     """
     valid, msg = validate_topic("market.polygon.AAPL.candles.1m")
+    assert valid is False
+    assert "Unknown market feed exchange 'polygon'" in msg
+
+
+def test_market_topic_builder_allows_polygon_but_validation_rejects_it() -> None:
+    """Verify builder is future-proofed while validation enforces current support.
+
+    Given polygon is a known exchange identifier but not an enabled live feed,
+    When market_topic builds a live polygon topic and validate_topic checks it,
+    Then builder returns the topic and validation rejects current runtime use.
+    """
+    topic = market_topic(ExchangeEnum.POLYGON, "AAPL", MarketDataTypeEnum.CANDLES, "1m")
+    assert topic == "market.polygon.AAPL.candles.1m"
+
+    valid, msg = validate_topic(topic)
     assert valid is False
     assert "Unknown market feed exchange 'polygon'" in msg
 
