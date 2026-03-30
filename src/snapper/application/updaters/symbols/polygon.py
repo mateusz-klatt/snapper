@@ -16,7 +16,9 @@ from snapper.application.process_manager.process_parameters import PolygonSymbol
 from snapper.application.process_manager.registry import register_process
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.config.settings import AppSettings
-from snapper.core.types import AssetType
+from snapper.core.types import AliasChannelEnum
+from snapper.core.types import AssetTypeEnum
+from snapper.core.types import ExchangeEnum
 from snapper.data.models import Symbol
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
 
@@ -120,7 +122,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
         quote_value: str | None = currency.upper() if currency else None
         return native_symbol, quote_value
 
-    def _determine_polygon_asset_type(self, ticker: str) -> AssetType:
+    def _determine_polygon_asset_type(self, ticker: str) -> AssetTypeEnum:
         """Determine asset type from Polygon ticker prefix.
 
         Args:
@@ -130,12 +132,12 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
             Asset type string: crypto, forex, index, or equity.
         """
         if ticker.startswith("X:"):
-            return "crypto"
+            return AssetTypeEnum.CRYPTO
         if ticker.startswith("C:"):
-            return "forex"
+            return AssetTypeEnum.FOREX
         if ticker.startswith("I:"):
-            return "index"
-        return "equity"
+            return AssetTypeEnum.INDEX
+        return AssetTypeEnum.EQUITY
 
     def _upsert_polygon_mapping(
         self,
@@ -189,8 +191,8 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
         alias_result = self._upsert_alias(
             session,
             symbol_public_id,
-            "polygon",
-            "rest",
+            ExchangeEnum.POLYGON,
+            AliasChannelEnum.REST,
             ticker,
             now,
             session_id=sid,
@@ -199,7 +201,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
         self._upsert_capability(
             session,
             symbol_public_id,
-            "polygon",
+            ExchangeEnum.POLYGON,
             True,
             False,
             "polygon_updater",
@@ -211,7 +213,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
         self._ensure_instrument_identity(
             session,
             symbol_public_id,
-            "polygon",
+            ExchangeEnum.POLYGON,
             now,
             session_id=sid,
             sequence_id=self._tracker.next_sequence("instruments"),
@@ -254,7 +256,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
                         logger.info(f"Committed batch: {stats}")
                 deactivated = self._reconcile_capabilities(
                     session,
-                    "polygon",
+                    ExchangeEnum.POLYGON,
                     processed_symbol_public_ids,
                     "polygon_updater",
                     now,

@@ -28,6 +28,8 @@ from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
 from snapper.core.types import CancelEventType
+from snapper.core.types import ExchangeEnum
+from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import OrderEventType
 from snapper.core.types import OrderExchange
 from snapper.core.types import ReplaceEventType
@@ -157,7 +159,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self.settings = get_settings_with_service(settings_service)
         logger.info("AppSettings service initialized with database access")
 
-    def _setup_zmq_sockets(self, exchange_name: str) -> None:
+    def _setup_zmq_sockets(self, exchange_name: OrderExchange) -> None:
         """Create and connect ZMQ subscriber and publisher sockets.
 
         Args:
@@ -168,7 +170,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         apply_hwm(raw_sub_socket, rcvhwm=HWM_ORDER_FLOW)
         raw_sub_socket.connect(self.settings.zmq_broker_xpub)
         self.subscriber = ValidatedSubscriber(raw_sub_socket)
-        cmd_prefix = order_commands_prefix(cast(OrderExchange, exchange_name))
+        cmd_prefix = order_commands_prefix(exchange_name)
         self.subscriber.subscribe(cmd_prefix)
         self.subscriber.subscribe("system.symbol_aliases")
         self.subscriber.subscribe("system.settings")
@@ -186,7 +188,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             f"Publishing to broker {self.settings.zmq_broker_xsub}"
         )
 
-    async def _recover_pending_orders(self, exchange_name: str) -> None:
+    async def _recover_pending_orders(self, exchange_name: OrderExchange) -> None:
         """Rebuild pending order state from exchange and database on startup.
 
         Runs before the order handler loop to ensure in-flight orders from
@@ -235,7 +237,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self,
         db_order: OrderRow,
         exchange_by_id: dict[str, Any],
-        exchange_name: str,
+        exchange_name: OrderExchange,
     ) -> bool:
         """Attempt to recover a single order from DB into pending state.
 
@@ -264,13 +266,17 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             sequence_id=db_order["sequence_id"],
             strategy_id="recovered",
             instrument=db_order["instrument"],
-            mode="live" if exchange_name != "paper" else "paper",
+            mode=(
+                ExecutionModeEnum.LIVE
+                if exchange_name != ExchangeEnum.PAPER
+                else ExecutionModeEnum.PAPER
+            ),
             side=cast(Any, db_order["side"]),
             order_type=cast(Any, db_order["order_type"]),
             quantity=db_order["size"],
             price=db_order.get("price"),
             client_order_id=client_order_id,
-            exchange=cast(OrderExchange, exchange_name),
+            exchange=exchange_name,
         )
         pending = PendingOrderState(
             request=fake_request,
@@ -289,7 +295,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         client_order_id: str,
         db_order: OrderRow,
         exchange_by_id: dict[str, Any],
-        exchange_name: str,
+        exchange_name: OrderExchange,
     ) -> float | None:
         """Resolve the current fill state of an order against the exchange.
 
@@ -364,7 +370,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 logger.info(f"ExchangeExecutorService[{exchange_name}] tasks cancelled")
                 raise
 
-    def _create_reconciliation_task(self, exchange_name: str) -> asyncio.Task[None] | None:
+    def _create_reconciliation_task(
+        self, exchange_name: OrderExchange
+    ) -> asyncio.Task[None] | None:
         """Reconciliation placeholder — runs from coordinator, not executor.
 
         Reconciliation needs the shared TradeService (for circuit breaker)
@@ -396,7 +404,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         logger.info(f"ExchangeExecutorService[{exchange_name}] stopped")
 
     async def _dispatch_command(
-        self, parsed_suffix: str, payload_str: str, exchange_name: str, instrument: str
+        self, parsed_suffix: str, payload_str: str, exchange_name: OrderExchange, instrument: str
     ) -> None:
         """Dispatch a parsed order command to its handler.
 
@@ -418,7 +426,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.debug(f"Ignoring unknown command suffix: {parsed_suffix}")
 
     async def _route_message(
-        self, topic_str: str, payload_str: str, exchange_name: str, commands_prefix: str
+        self, topic_str: str, payload_str: str, exchange_name: OrderExchange, commands_prefix: str
     ) -> None:
         """Route a received ZMQ message to the appropriate handler.
 
@@ -475,7 +483,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     logger.error(f"Error handling order: {e}")
 
     @staticmethod
-    def _validate_command_invariants(msg: Any, exchange_name: str, topic_instrument: str) -> bool:
+    def _validate_command_invariants(
+        msg: Any, exchange_name: OrderExchange, topic_instrument: str
+    ) -> bool:
         """Validate topic/payload invariants for a command message.
 
         Args:
@@ -501,7 +511,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         return True
 
     async def _handle_submit_command(
-        self, payload_str: str, exchange_name: str, topic_instrument: str
+        self, payload_str: str, exchange_name: OrderExchange, topic_instrument: str
     ) -> None:
         """Handle submit command from orders.commands.*.*.submit topic.
 
@@ -522,7 +532,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             await self._process_order(order_msg)
 
     async def _handle_cancel_command(
-        self, payload_str: str, exchange_name: str, topic_instrument: str
+        self, payload_str: str, exchange_name: OrderExchange, topic_instrument: str
     ) -> None:
         """Handle cancel command from orders.commands.*.*.cancel topic.
 
@@ -543,7 +553,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             await self._process_cancel(cancel_msg)
 
     async def _handle_replace_command(
-        self, payload_str: str, exchange_name: str, topic_instrument: str
+        self, payload_str: str, exchange_name: OrderExchange, topic_instrument: str
     ) -> None:
         """Handle replace command from orders.commands.*.*.replace topic.
 
@@ -824,7 +834,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     async def _record_venue_event(
         self,
         event_type: str,
-        exchange_name: str,
+        exchange_name: OrderExchange,
         instrument: str,
         exchange_order_id: str | None = None,
         client_order_id: str | None = None,
@@ -865,7 +875,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         if not isinstance(self.repository, SQLAlchemyRepository):
             return
-        mode = "paper" if exchange_name == "paper" else "live"
+        mode = (
+            ExecutionModeEnum.PAPER
+            if exchange_name == ExchangeEnum.PAPER
+            else ExecutionModeEnum.LIVE
+        )
         shard_key = f"{exchange_name}.{instrument}.{mode}"
         now = datetime.now(UTC)
         try:
@@ -968,7 +982,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             task.add_done_callback(self._background_tasks.discard)
 
     def _resolve_execution_order(
-        self, execution: ExecutionUpdate, exchange_name: str
+        self, execution: ExecutionUpdate, exchange_name: OrderExchange
     ) -> tuple[str, str, OrderRequestData] | None:
         """Resolve execution to its order using two-level correlation.
 
@@ -1010,7 +1024,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         execution: ExecutionUpdate,
         exchange_order_id: str,
         client_order_id: str,
-        exchange_name: str,
+        exchange_name: OrderExchange,
     ) -> bool:
         """Handle cancelled or expired execution by cleaning up maps.
 

@@ -7,6 +7,7 @@ cointegration between two correlated instruments.
 import pandas as pd
 from loguru import logger
 
+from snapper.core.types import ExchangeEnum
 from snapper.core.types import TradeSide
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.topics.builders import parse_market_topic
@@ -27,7 +28,7 @@ from snapper.strategies.decorators import register_strategy
             "market.paper.kraken.ETH-USD.candles.1h",
         ],
         "outputs": ["BTC-USD", "ETH-USD"],
-        "exchange": "paper",
+        "exchange": ExchangeEnum.PAPER,
         "params": {
             "beta": 0.05,
             "entry_threshold": 2.0,

@@ -35,6 +35,7 @@ from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.process_parameters import PublisherSymbolsParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
+from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataExchange
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
@@ -87,7 +88,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             Dictionary with symbols list for Kraken.
         """
         instruments = settings.instruments
-        kraken_symbols = instruments.get("kraken", [])
+        kraken_symbols = instruments.get(ExchangeEnum.KRAKEN, [])
         return {
             "symbols": kraken_symbols,
         }
@@ -106,7 +107,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         Returns:
             "kraken" exchange name.
         """
-        return "kraken"
+        return ExchangeEnum.KRAKEN
 
     def _validate_symbols(self, symbols: list[str]) -> list[str]:
         """Validate and filter symbols for Kraken.

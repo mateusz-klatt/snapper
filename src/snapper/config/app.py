@@ -35,6 +35,7 @@ from typing import Any
 
 from snapper.application.services.settings import SettingsService
 from snapper.config.bootstrap import BootstrapSettingsLoader
+from snapper.core.types import ExchangeEnum
 
 __all__ = ["AppSettings"]
 
@@ -289,7 +290,7 @@ class AppSettings:
         return self._get_db_setting(
             "instruments",
             {
-                "kraken": [
+                ExchangeEnum.KRAKEN: [
                     "BTC-USD",
                     "BTC-EUR",
                     "BTC-USDC",
@@ -298,9 +299,9 @@ class AppSettings:
                     "ETH-USD",
                     "SPY",
                 ],
-                "zonda": ["BTC-PLN", "USDC-PLN", "ETH-PLN", "SOL-USDC", "BTC-EUR"],
-                "walutomat": ["EUR-PLN", "USD-PLN", "EUR-USD"],
-                "polygon": ["BTC-USD", "BTC-EUR", "EUR-USD", "EUR-PLN", "USD-PLN"],
+                ExchangeEnum.ZONDA: ["BTC-PLN", "USDC-PLN", "ETH-PLN", "SOL-USDC", "BTC-EUR"],
+                ExchangeEnum.WALUTOMAT: ["EUR-PLN", "USD-PLN", "EUR-USD"],
+                ExchangeEnum.POLYGON: ["BTC-USD", "BTC-EUR", "EUR-USD", "EUR-PLN", "USD-PLN"],
             },
         )
 
@@ -314,9 +315,9 @@ class AppSettings:
         return self._get_db_setting(
             "paper_instruments",
             {
-                "kraken": ["BTC-USD", "EUR-USD"],
-                "zonda": ["BTC-PLN"],
-                "walutomat": ["EUR-PLN", "USD-PLN"],
+                ExchangeEnum.KRAKEN: ["BTC-USD", "EUR-USD"],
+                ExchangeEnum.ZONDA: ["BTC-PLN"],
+                ExchangeEnum.WALUTOMAT: ["EUR-PLN", "USD-PLN"],
             },
         )
 

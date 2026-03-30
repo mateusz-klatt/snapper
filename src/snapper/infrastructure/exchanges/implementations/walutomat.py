@@ -39,6 +39,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from loguru import logger
 
+from snapper.core.types import ExchangeEnum
 from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import AccountBalance
@@ -115,7 +116,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
         Raises:
             ValueError: If private key format is invalid.
         """
-        super().__init__(repository=repository, exchange_name="walutomat")
+        super().__init__(repository=repository, exchange_name=ExchangeEnum.WALUTOMAT)
         self.market_data_url = "https://user.walutomat.pl/api/public/marketBrief"
         self.api_base_url = "https://api.walutomat.pl/api/v2.0.0"
         self.polling_interval = polling_interval

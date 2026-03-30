@@ -44,6 +44,7 @@ from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
+from snapper.core.types import ExchangeEnum
 from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import AccountBalance
@@ -104,7 +105,7 @@ class ZondaExchangeClient(ExchangeClientBase):
             enable_rate_limit: Enable automatic rate limiting (default: True).
             repository: Database repository for order/execution logging.
         """
-        super().__init__(repository=repository, exchange_name="zonda")
+        super().__init__(repository=repository, exchange_name=ExchangeEnum.ZONDA)
         self.ws_url = "wss://api.zondacrypto.exchange/websocket/"
         self.api_key = api_key
         self.api_secret = api_secret

@@ -30,6 +30,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
 from snapper.config.bootstrap import BootstrapSettingsLoader
+from snapper.core.types import AliasChannelEnum
+from snapper.core.types import ExchangeEnum
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
@@ -93,21 +95,21 @@ def make_native_symbol(base: str, quote: str) -> str:
 
 
 _SHORTCUT_FORWARD: tuple[tuple[str, str, str], ...] = (
-    ("kraken", "ws", "native_to_kraken_ws"),
-    ("kraken", "rest", "native_to_kraken_rest"),
-    ("zonda", "ws", "native_to_zonda_ws"),
-    ("walutomat", "ws", "native_to_walutomat_ws"),
-    ("walutomat", "rest", "native_to_walutomat_rest"),
-    ("polygon", "rest", "native_to_polygon_rest"),
+    (ExchangeEnum.KRAKEN, AliasChannelEnum.WS, "native_to_kraken_ws"),
+    (ExchangeEnum.KRAKEN, AliasChannelEnum.REST, "native_to_kraken_rest"),
+    (ExchangeEnum.ZONDA, AliasChannelEnum.WS, "native_to_zonda_ws"),
+    (ExchangeEnum.WALUTOMAT, AliasChannelEnum.WS, "native_to_walutomat_ws"),
+    (ExchangeEnum.WALUTOMAT, AliasChannelEnum.REST, "native_to_walutomat_rest"),
+    (ExchangeEnum.POLYGON, AliasChannelEnum.REST, "native_to_polygon_rest"),
 )
 
 _SHORTCUT_REVERSE: tuple[tuple[str, str, str], ...] = (
-    ("kraken", "ws", "kraken_ws_to_native"),
-    ("kraken", "rest", "kraken_rest_to_native"),
-    ("zonda", "ws", "zonda_ws_to_native"),
-    ("walutomat", "ws", "walutomat_ws_to_native"),
-    ("walutomat", "rest", "walutomat_rest_to_native"),
-    ("polygon", "rest", "polygon_rest_to_native"),
+    (ExchangeEnum.KRAKEN, AliasChannelEnum.WS, "kraken_ws_to_native"),
+    (ExchangeEnum.KRAKEN, AliasChannelEnum.REST, "kraken_rest_to_native"),
+    (ExchangeEnum.ZONDA, AliasChannelEnum.WS, "zonda_ws_to_native"),
+    (ExchangeEnum.WALUTOMAT, AliasChannelEnum.WS, "walutomat_ws_to_native"),
+    (ExchangeEnum.WALUTOMAT, AliasChannelEnum.REST, "walutomat_rest_to_native"),
+    (ExchangeEnum.POLYGON, AliasChannelEnum.REST, "polygon_rest_to_native"),
 )
 
 
@@ -284,10 +286,10 @@ class SymbolMapperService:
         ccxt_fwd: dict[str, str] = {}
         ccxt_rev: dict[str, str] = {}
         for (_ex, ch), mapping in fwd.items():
-            if ch == "ccxt":
+            if ch == AliasChannelEnum.CCXT:
                 ccxt_fwd.update(mapping)
         for (_ex, ch), mapping in rev.items():
-            if ch == "ccxt":
+            if ch == AliasChannelEnum.CCXT:
                 ccxt_rev.update(mapping)
         self.native_to_ccxt = ccxt_fwd
         self.ccxt_to_native = ccxt_rev

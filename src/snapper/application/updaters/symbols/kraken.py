@@ -19,8 +19,9 @@ from snapper.application.process_manager.process_parameters import SymbolUpdater
 from snapper.application.process_manager.registry import register_process
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.config.settings import AppSettings
-from snapper.core.types import AliasChannel
-from snapper.core.types import AssetType
+from snapper.core.types import AliasChannelEnum
+from snapper.core.types import AssetTypeEnum
+from snapper.core.types import ExchangeEnum
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.symbols.mapper import make_native_symbol
 
@@ -637,8 +638,8 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             result = self._upsert_alias(
                 session,
                 symbol_public_id,
-                "kraken",
-                "ws",
+                ExchangeEnum.KRAKEN,
+                AliasChannelEnum.WS,
                 ws_symbol,
                 now,
                 session_id=sid,
@@ -651,7 +652,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         self._upsert_capability(
             session,
             symbol_public_id,
-            "kraken",
+            ExchangeEnum.KRAKEN,
             True,
             False,
             "kraken_updater",
@@ -663,7 +664,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         self._ensure_instrument_identity(
             session,
             symbol_public_id,
-            "kraken",
+            ExchangeEnum.KRAKEN,
             now,
             session_id=sid,
             sequence_id=self._tracker.next_sequence("instruments"),
@@ -687,10 +688,10 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         created = 0
         updated = 0
         sid = self._tracker.session_id
-        alias_mappings: tuple[tuple[str, AliasChannel, str], ...] = (
-            ("kraken", "ws", "kraken_websocket_symbol"),
-            ("kraken", "rest", "kraken_rest_symbol"),
-            ("kraken", "ccxt", "ccxt_symbol"),
+        alias_mappings: tuple[tuple[str, AliasChannelEnum, str], ...] = (
+            (ExchangeEnum.KRAKEN, AliasChannelEnum.WS, "kraken_websocket_symbol"),
+            (ExchangeEnum.KRAKEN, AliasChannelEnum.REST, "kraken_rest_symbol"),
+            (ExchangeEnum.KRAKEN, AliasChannelEnum.CCXT, "ccxt_symbol"),
         )
         for exchange, channel, key in alias_mappings:
             exchange_symbol = symbol_data.get(key)
@@ -713,7 +714,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         self._upsert_capability(
             session,
             symbol_public_id,
-            "kraken",
+            ExchangeEnum.KRAKEN,
             True,
             True,
             "kraken_updater",
@@ -725,7 +726,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         self._ensure_instrument_identity(
             session,
             symbol_public_id,
-            "kraken",
+            ExchangeEnum.KRAKEN,
             now,
             session_id=sid,
             sequence_id=self._tracker.next_sequence("instruments"),
@@ -756,10 +757,10 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                 now = datetime.now(UTC)
                 for symbol_data in symbols:
                     native_symbol = symbol_data["native_symbol"]
-                    asset_type: AssetType = (
-                        "equity"
+                    asset_type: AssetTypeEnum = (
+                        AssetTypeEnum.EQUITY
                         if symbol_data.get("asset_class") == "tokenized_asset"
-                        else "crypto"
+                        else AssetTypeEnum.CRYPTO
                     )
                     symbol_public_id = self._upsert_symbol(
                         session,
@@ -786,7 +787,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                     updated_count += u
                 deactivated = self._reconcile_capabilities(
                     session,
-                    "kraken",
+                    ExchangeEnum.KRAKEN,
                     processed_symbol_public_ids,
                     "kraken_updater",
                     now,

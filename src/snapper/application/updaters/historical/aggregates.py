@@ -31,6 +31,8 @@ from snapper.application.services.settings import get_settings_service
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
+from snapper.core.types import AliasChannelEnum
+from snapper.core.types import ExchangeEnum
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.repository import DatabaseRepository
@@ -138,7 +140,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             Default parameters including symbols, timeframe, days_back.
         """
         return {
-            "symbols": settings.instruments.get("polygon", []),
+            "symbols": settings.instruments.get(ExchangeEnum.POLYGON, []),
             "multiplier": 1,
             "timespan": "minute",
             "days_back": settings.backfill_days,
@@ -211,7 +213,9 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
                 return
             logger.info(f"Fetched {len(symbols)} symbols with Polygon mapping from database")
         else:
-            symbols = self._requested_symbols or self.settings.instruments.get("polygon", [])
+            symbols = self._requested_symbols or self.settings.instruments.get(
+                ExchangeEnum.POLYGON, []
+            )
             if not symbols:
                 logger.warning("No Polygon symbols configured for backfill")
                 return
@@ -234,8 +238,8 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             stmt = (
                 select(SymbolAlias.exchange_symbol)
                 .where(
-                    SymbolAlias.exchange == "polygon",
-                    SymbolAlias.channel == "rest",
+                    SymbolAlias.exchange == ExchangeEnum.POLYGON,
+                    SymbolAlias.channel == AliasChannelEnum.REST,
                     SymbolAlias.exchange_symbol.is_not(None),
                     SymbolAlias.timestamp <= now,
                     SymbolAlias.known_to > now,
@@ -637,8 +641,8 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             alias = session.execute(
                 select(SymbolAlias)
                 .where(SymbolAlias.symbol_public_id == symbol.public_id)
-                .where(SymbolAlias.exchange == "polygon")
-                .where(SymbolAlias.channel == "rest")
+                .where(SymbolAlias.exchange == ExchangeEnum.POLYGON)
+                .where(SymbolAlias.channel == AliasChannelEnum.REST)
                 .where(SymbolAlias.timestamp <= now)
                 .where(SymbolAlias.known_to > now)
             ).scalar_one_or_none()
@@ -676,8 +680,8 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             now = datetime.now(UTC)
             alias = session.execute(
                 select(SymbolAlias)
-                .where(SymbolAlias.exchange == "polygon")
-                .where(SymbolAlias.channel == "rest")
+                .where(SymbolAlias.exchange == ExchangeEnum.POLYGON)
+                .where(SymbolAlias.channel == AliasChannelEnum.REST)
                 .where(SymbolAlias.exchange_symbol == polygon_symbol)
                 .where(SymbolAlias.timestamp <= now)
                 .where(SymbolAlias.known_to > now)
@@ -797,7 +801,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         ensure_time = datetime.now(UTC)
         _id, instrument_public_id = await self._db_async.ensure_instrument(
             symbol_public_id=symbol_pid,
-            exchange="polygon",
+            exchange=ExchangeEnum.POLYGON,
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence("instruments"),
             timestamp=ensure_time,

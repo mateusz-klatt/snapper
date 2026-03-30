@@ -24,8 +24,8 @@ from snapper.application.services.settings import get_settings_service
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
-from snapper.core.types import AliasChannel
-from snapper.core.types import AssetType
+from snapper.core.types import AliasChannelEnum
+from snapper.core.types import AssetTypeEnum
 from snapper.core.types import UpsertResult
 from snapper.data.models import Instrument
 from snapper.data.models import Setting
@@ -138,7 +138,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         native_symbol: str,
         base: str,
         quote: str | None,
-        asset_type: AssetType,
+        asset_type: AssetTypeEnum,
         now: datetime,
         session_id: str,
         sequence_id: int,
@@ -210,7 +210,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         session: Any,
         symbol_public_id: str,
         exchange: str,
-        channel: AliasChannel,
+        channel: AliasChannelEnum,
         exchange_symbol: str,
         now: datetime,
         session_id: str,

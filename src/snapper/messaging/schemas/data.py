@@ -42,6 +42,8 @@ from pydantic import model_validator
 
 from snapper.api.schemas.base import StrictDataSchema
 from snapper.core.json_types import JsonObject
+from snapper.core.types import ExchangeEnum
+from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import OrderEventType
 from snapper.core.types import OrderExchange
@@ -166,7 +168,7 @@ class SignalData(StrictDataSchema[Literal["signal"]]):
     @model_validator(mode="after")
     def _paper_requires_strategy_name(self) -> Self:
         """Paper signals require strategy_name for topic derivation."""
-        if self.exchange == "paper" and not self.strategy_name:
+        if self.exchange == ExchangeEnum.PAPER and not self.strategy_name:
             raise ValueError(
                 "Paper signals require strategy_name to be set "
                 "for topic derivation (signals.paper.{instrument}.{strategy_name})"
@@ -249,7 +251,7 @@ class OrderData(StrictDataSchema[Literal["order"]]):
     client_order_id: str
     instrument: str
     exchange: OrderExchange
-    mode: ExecutionMode = "live"
+    mode: ExecutionMode = ExecutionModeEnum.LIVE
     side: TradeSide
     status: str
     order_type: OrderType
@@ -283,7 +285,7 @@ class PositionData(StrictDataSchema[Literal["position"]]):
     type: Literal["position"] = "position"
     instrument: str
     exchange: OrderExchange
-    mode: ExecutionMode = "live"
+    mode: ExecutionMode = ExecutionModeEnum.LIVE
     quantity: float
     average_price: float
     unrealized_pnl: float

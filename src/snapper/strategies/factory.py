@@ -6,6 +6,7 @@ trading strategy instances with output conflict detection.
 
 from typing import Any
 
+from snapper.core.types import ExchangeEnum
 from snapper.messaging.topics.builders import signal_topic
 from snapper.strategies.base import BaseStrategy
 from snapper.strategies.base import StrategyConfig
@@ -163,7 +164,7 @@ class StrategyFactory:
         outputs_seen: dict[str, str] = {}
         for config in configs:
             for instrument in config.outputs:
-                if config.exchange == "paper":
+                if config.exchange == ExchangeEnum.PAPER:
                     topic = signal_topic(config.exchange, instrument, config.name)
                 else:
                     topic = signal_topic(config.exchange, instrument, "live")

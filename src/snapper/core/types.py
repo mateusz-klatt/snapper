@@ -34,7 +34,51 @@ Type Aliases:
     OrderEvent: Order event types for ZMQ topics.
 """
 
+from enum import StrEnum
 from typing import Literal
+
+
+class ExchangeEnum(StrEnum):
+    """All known exchange identifiers across all domains."""
+
+    PAPER = "paper"
+    KRAKEN = "kraken"
+    ZONDA = "zonda"
+    WALUTOMAT = "walutomat"
+    POLYGON = "polygon"
+
+
+class AssetTypeEnum(StrEnum):
+    """Financial asset class category for symbol catalog entries."""
+
+    CRYPTO = "crypto"
+    FOREX = "forex"
+    EQUITY = "equity"
+    INDEX = "index"
+
+
+class ExecutionModeEnum(StrEnum):
+    """Trading mode: live for real money, paper for simulation."""
+
+    LIVE = "live"
+    PAPER = "paper"
+
+
+class MarketDataTypeEnum(StrEnum):
+    """Market data type for ZMQ topic routing."""
+
+    TICKS = "ticks"
+    TRADES = "trades"
+    CANDLES = "candles"
+
+
+class AliasChannelEnum(StrEnum):
+    """Symbol alias channel type: ws for WebSocket, rest for REST API, ccxt for CCXT library."""
+
+    WS = "ws"
+    REST = "rest"
+    CCXT = "ccxt"
+
 
 TradeSide = Literal["buy", "sell"]
 """Direction of a trade: 'buy' for long entry, 'sell' for short/exit."""
@@ -83,19 +127,29 @@ Events:
     replaced: Order was modified/replaced (cancel + new order).
 """
 
-ExecutionMode = Literal["live", "paper"]
+ExecutionMode = Literal[ExecutionModeEnum.LIVE, ExecutionModeEnum.PAPER]
 """Trading mode: 'live' for real money, 'paper' for simulation."""
 
-OrderExchange = Literal["paper", "kraken", "zonda", "walutomat"]
+OrderExchange = Literal[
+    ExchangeEnum.PAPER, ExchangeEnum.KRAKEN, ExchangeEnum.ZONDA, ExchangeEnum.WALUTOMAT
+]
 """Exchanges capable of order execution (paper simulator + live venues)."""
 
-MarketSubscribeExchange = Literal["kraken", "zonda", "walutomat"]
+MarketSubscribeExchange = Literal[ExchangeEnum.KRAKEN, ExchangeEnum.ZONDA, ExchangeEnum.WALUTOMAT]
 """Live market feed exchanges (no paper — paper replays from these)."""
 
-MarketDataExchange = Literal["kraken", "zonda", "walutomat", "polygon"]
-"""Exchanges that produce market data, live or historical (paper excluded — it consumes, not produces)."""
+MarketDataExchange = Literal[
+    ExchangeEnum.KRAKEN, ExchangeEnum.ZONDA, ExchangeEnum.WALUTOMAT, ExchangeEnum.POLYGON
+]
+"""Exchanges that produce market data, live or historical."""
 
-AllExchange = Literal["paper", "kraken", "zonda", "walutomat", "polygon"]
+AllExchange = Literal[
+    ExchangeEnum.PAPER,
+    ExchangeEnum.KRAKEN,
+    ExchangeEnum.ZONDA,
+    ExchangeEnum.WALUTOMAT,
+    ExchangeEnum.POLYGON,
+]
 """All known exchange identifiers across all domains."""
 
 HealthStatus = Literal["healthy", "warning", "error"]
@@ -128,10 +182,14 @@ IndicatorBackend = Literal["talib", "python"]
 UpsertResult = Literal["created", "updated", "unchanged"]
 """Outcome of an upsert operation: row was created, updated, or left unchanged."""
 
-AssetType = Literal["crypto", "forex", "equity", "index"]
+AssetType = Literal[
+    AssetTypeEnum.CRYPTO, AssetTypeEnum.FOREX, AssetTypeEnum.EQUITY, AssetTypeEnum.INDEX
+]
 """Financial asset class category for symbol catalog entries."""
 
-MarketDataType = Literal["ticks", "trades", "candles"]
+MarketDataType = Literal[
+    MarketDataTypeEnum.TICKS, MarketDataTypeEnum.TRADES, MarketDataTypeEnum.CANDLES
+]
 """Market data type for ZMQ topic routing (market.{exchange}.{instrument}.{type})."""
 
 SubscriptionAction = Literal["subscribe", "unsubscribe"]
@@ -143,7 +201,7 @@ SubscriptionStatus = Literal["subscribed", "unsubscribed", "partial", "denied", 
 SpawnerProcessStatus = Literal["not_running", "running", "stopped", "completed", "error"]
 """Subprocess-level process status for spawner-managed processes."""
 
-AliasChannel = Literal["ws", "rest", "ccxt"]
+AliasChannel = Literal[AliasChannelEnum.WS, AliasChannelEnum.REST, AliasChannelEnum.CCXT]
 """Symbol alias channel type: ws for WebSocket, rest for REST API, ccxt for CCXT library."""
 
 OrderCommand = Literal["submit", "cancel", "replace"]
@@ -156,15 +214,20 @@ OrderEvent = Literal[
 
 __all__ = [
     "AliasChannel",
+    "AliasChannelEnum",
     "AllExchange",
     "AssetType",
+    "AssetTypeEnum",
     "ComponentStatus",
+    "ExchangeEnum",
     "ExecutionMode",
+    "ExecutionModeEnum",
     "FillStatus",
     "HealthStatus",
     "IndicatorBackend",
     "MarketDataExchange",
     "MarketDataType",
+    "MarketDataTypeEnum",
     "MarketSubscribeExchange",
     "OrderCommand",
     "OrderEvent",

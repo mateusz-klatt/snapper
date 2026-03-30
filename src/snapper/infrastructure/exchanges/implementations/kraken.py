@@ -42,6 +42,7 @@ from loguru import logger
 from pydantic import ValidationError
 
 from snapper.config.settings import get_settings
+from snapper.core.types import ExchangeEnum
 from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_candle_list
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_execution_list
@@ -137,7 +138,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             enable_rate_limit: Enable automatic rate limiting (default: True).
             repository: Database repository for order/execution logging.
         """
-        super().__init__(repository=repository, exchange_name="kraken")
+        super().__init__(repository=repository, exchange_name=ExchangeEnum.KRAKEN)
         self.settings = get_settings()
         self.api_key = api_key
         self.api_secret = api_secret

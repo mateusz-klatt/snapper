@@ -10,6 +10,7 @@ from dataclasses import field
 from datetime import datetime
 from typing import Any
 
+from snapper.core.types import ExchangeEnum
 from snapper.core.types import OrderExchange
 from snapper.core.types import TradeSide
 from snapper.infrastructure.symbols.functions import get_available_exchanges
@@ -54,7 +55,7 @@ class StrategyConfig:
     strategy_class: str
     inputs: list[str]
     outputs: list[str]
-    exchange: OrderExchange = "paper"
+    exchange: OrderExchange = ExchangeEnum.PAPER
     params: dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
@@ -75,7 +76,7 @@ class StrategyConfig:
         has_paper_input = any(self._is_paper_or_replay(inp) for inp in self.inputs)
         if not has_paper_input:
             return
-        if self.exchange != "paper":
+        if self.exchange != ExchangeEnum.PAPER:
             raise ValueError(
                 f"Strategy {self.name}: Paper/replay input data MUST use exchange='paper'. "
                 f"Found inputs: {self.inputs}, exchange: {self.exchange}"

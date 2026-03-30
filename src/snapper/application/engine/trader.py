@@ -42,6 +42,8 @@ from snapper.config.settings import get_bootstrap_settings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
+from snapper.core.types import ExchangeEnum
+from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import OrderExchange
 from snapper.core.types import OrderType
 from snapper.data.repository import SQLAlchemyRepository
@@ -629,7 +631,11 @@ class TraderCoordinator(RegisterableProcess):
             order_status: Order status data from ZMQ.
             parsed: Parsed topic with exchange, instrument, suffix.
         """
-        mode = "paper" if parsed.exchange == "paper" else "live"
+        mode = (
+            ExecutionModeEnum.PAPER
+            if parsed.exchange == ExchangeEnum.PAPER
+            else ExecutionModeEnum.LIVE
+        )
         shard_key = f"{parsed.exchange}.{parsed.instrument}.{mode}"
         event_type_map = {
             "accepted": "order_accepted",
@@ -679,7 +685,11 @@ class TraderCoordinator(RegisterableProcess):
         """
         if parsed.suffix not in ("cancelled", "expired"):
             return
-        mode = "paper" if parsed.exchange == "paper" else "live"
+        mode = (
+            ExecutionModeEnum.PAPER
+            if parsed.exchange == ExchangeEnum.PAPER
+            else ExecutionModeEnum.LIVE
+        )
         shard_key = f"{parsed.exchange}.{parsed.instrument}.{mode}"
         venue_event: VenueEventRow = {
             "id": int(time.monotonic_ns()),
@@ -902,9 +912,8 @@ class TraderCoordinator(RegisterableProcess):
             cmd: TradeCommandRow dict from the outbox dispatcher.
         """
         assert self.msg_publisher is not None
-        topic = order_command_topic(
-            cast(OrderExchange, cmd["exchange"]), cmd["instrument"], "submit"
-        )
+        exchange = cast(OrderExchange, cmd["exchange"])
+        topic = order_command_topic(exchange, cmd["instrument"], "submit")
         order = OrderRequestData(
             public_id=cmd["client_order_id"],
             timestamp=datetime.now(UTC),
@@ -918,7 +927,7 @@ class TraderCoordinator(RegisterableProcess):
             quantity=cmd["quantity"],
             price=cmd["price"],
             client_order_id=cmd["client_order_id"],
-            exchange=cast(OrderExchange, cmd["exchange"]),
+            exchange=exchange,
         )
         await self.msg_publisher.send(topic, order)
 

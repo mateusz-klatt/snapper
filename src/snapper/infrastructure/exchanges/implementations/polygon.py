@@ -42,6 +42,7 @@ from loguru import logger
 from polygon import RESTClient
 from urllib3.util.retry import Retry
 
+from snapper.core.types import ExchangeEnum
 from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import AccountBalance
@@ -157,7 +158,7 @@ class PolygonExchangeClient(ExchangeClientBase):
             trace: Enable request tracing in Polygon SDK.
             repository: Database repository (not used, for interface compatibility).
         """
-        super().__init__(repository=repository, exchange_name="polygon")
+        super().__init__(repository=repository, exchange_name=ExchangeEnum.POLYGON)
         self.api_key = api_key
         self.rate_limit = rate_limit_per_minute
         self._request_timestamps: list[float] = []

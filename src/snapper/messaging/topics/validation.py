@@ -56,9 +56,8 @@ Validate subscription pattern::
 import logging
 import re
 from collections.abc import Callable
-from typing import get_args
 
-from snapper.core.types import MarketDataType
+from snapper.core.types import MarketDataTypeEnum
 from snapper.infrastructure.symbols.functions import get_available_exchanges
 from snapper.infrastructure.symbols.functions import get_available_symbols
 from snapper.infrastructure.symbols.functions import get_market_data_exchanges
@@ -211,13 +210,13 @@ def _validate_market_data_type(
     Returns:
         Tuple of (is_valid, error_message).
     """
-    valid_types = set(get_args(MarketDataType))
+    valid_types = set(MarketDataTypeEnum)
     if data_type not in valid_types:
         return (
             False,
             f"Invalid market data type '{data_type}'. Must be: {', '.join(sorted(valid_types))}",
         )
-    if data_type == "candles":
+    if data_type == MarketDataTypeEnum.CANDLES:
         if timeframe is None:
             return (
                 False,

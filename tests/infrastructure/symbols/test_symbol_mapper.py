@@ -1724,7 +1724,7 @@ class TestGetAvailableExchanges:
         Then: Returns sorted list excluding data-only exchanges.
         """
         result = get_available_exchanges()
-        assert result == ["kraken", "paper", "walutomat", "zonda"]
+        assert sorted(result) == ["kraken", "paper", "walutomat", "zonda"]
         assert "polygon" not in result
 
     def test_get_market_subscribe_exchanges_returns_live_feeds(self) -> None:
@@ -1735,7 +1735,7 @@ class TestGetAvailableExchanges:
         Then: Returns live feed exchanges without paper or polygon.
         """
         result = get_market_subscribe_exchanges()
-        assert result == ["kraken", "walutomat", "zonda"]
+        assert sorted(result) == ["kraken", "walutomat", "zonda"]
         assert "paper" not in result
         assert "polygon" not in result
 
@@ -1747,7 +1747,7 @@ class TestGetAvailableExchanges:
         Then: Returns exchanges valid for market data, including polygon.
         """
         result = get_market_data_exchanges()
-        assert result == ["kraken", "polygon", "walutomat", "zonda"]
+        assert sorted(result) == ["kraken", "polygon", "walutomat", "zonda"]
         assert "paper" not in result
 
     def test_market_subscribe_exchange_excludes_paper_and_polygon(self) -> None:

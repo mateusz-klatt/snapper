@@ -16,6 +16,7 @@ Architecture:
 import asyncio
 from typing import Any
 from typing import cast
+from typing import get_args
 
 from loguru import logger
 
@@ -25,6 +26,7 @@ from snapper.application.process_manager.process_parameters import PaperPublishe
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
 from snapper.core.types import AllExchange
+from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketDataType
 from snapper.data.repository_types import CandleUpsertRow
@@ -75,7 +77,7 @@ class PerSourcePaperPublisher(MarketDataPublisherService[PaperExchangeClient]):
 
     def _get_exchange_name(self) -> AllExchange:
         """Return 'paper' as the trading exchange identity."""
-        return "paper"
+        return ExchangeEnum.PAPER
 
     def _get_process_name(self) -> str:
         """Return process name including source exchange for log context."""
@@ -94,7 +96,7 @@ class PerSourcePaperPublisher(MarketDataPublisherService[PaperExchangeClient]):
     ) -> str:
         """Build paper topic with source_exchange segment."""
         return market_topic(
-            "paper",
+            ExchangeEnum.PAPER,
             symbol,
             data_type,
             timeframe=timeframe,
@@ -211,21 +213,28 @@ class PaperMarketDataPublisher(RegisterableProcess):
     ) -> dict[MarketDataExchange, list[str]]:
         """Validate and normalize paper instruments configuration.
 
-        Filters out empty exchange names and empty symbol lists.
-        If all entries are filtered, returns empty dict (idle mode).
+        Filters out empty exchange names, empty symbol lists, and
+        exchanges not in MarketDataExchange. If all entries are
+        filtered, returns empty dict (idle mode).
 
         Args:
             paper_instruments: Raw mapping of exchange names to symbol lists.
 
         Returns:
-            Validated mapping with normalized exchange names and deduplicated symbols.
+            Validated mapping with MarketDataExchange keys and deduplicated symbols.
         """
+        valid_exchanges = set(get_args(MarketDataExchange))
         validated: dict[MarketDataExchange, list[str]] = {}
         for source_exchange, symbols in paper_instruments.items():
             if not source_exchange:
                 continue
-            normalized = cast(MarketDataExchange, source_exchange.lower())
+            normalized = source_exchange.lower()
+            if normalized not in valid_exchanges:
+                logger.warning(
+                    f"PaperMarketDataPublisher: skipping unknown exchange '{normalized}'"
+                )
+                continue
             validated_symbols = list(dict.fromkeys(symbols))
             if validated_symbols:
-                validated[normalized] = validated_symbols
+                validated[cast(MarketDataExchange, normalized)] = validated_symbols
         return validated

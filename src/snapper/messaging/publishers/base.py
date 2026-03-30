@@ -28,7 +28,7 @@ from snapper.config.settings import get_settings_with_service
 from snapper.core.types import AllExchange
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketDataType
-from snapper.core.types import OrderExchange
+from snapper.core.types import MarketDataTypeEnum
 from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import CandleUpsertRow
@@ -295,7 +295,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         Returns:
             Fully-qualified ZMQ topic string.
         """
-        exchange = cast(OrderExchange, self._get_exchange_name())
+        exchange = self._get_exchange_name()
         return market_topic(exchange, symbol, data_type, timeframe=timeframe)
 
     def _get_data_exchange(self) -> MarketDataExchange:
@@ -409,7 +409,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 public_id = self._resolve_candle_public_id(
                     instrument_public_id, timeframe, candle.interval_begin
                 )
-                topic = self._build_data_topic(native_symbol, "candles", timeframe=timeframe)
+                topic = self._build_data_topic(
+                    native_symbol, MarketDataTypeEnum.CANDLES, timeframe=timeframe
+                )
                 received_at = datetime.now(UTC)
                 candle_msg = CandleData(
                     public_id=public_id,
@@ -490,7 +492,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 except StopAsyncIteration:
                     break
                 native_symbol = message.symbol
-                topic = self._build_data_topic(native_symbol, "ticks")
+                topic = self._build_data_topic(native_symbol, MarketDataTypeEnum.TICKS)
                 received_at = datetime.now(UTC)
                 tick_msg = TickData(
                     public_id=str(uuid7()),
@@ -564,7 +566,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 except StopAsyncIteration:
                     break
                 native_symbol = trade.symbol
-                topic = self._build_data_topic(native_symbol, "trades")
+                topic = self._build_data_topic(native_symbol, MarketDataTypeEnum.TRADES)
                 received_at = datetime.now(UTC)
                 trade_msg = TradeData(
                     public_id=str(uuid7()),

@@ -14,6 +14,7 @@ from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.process_parameters import StrategyProcessParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
+from snapper.core.types import ExchangeEnum
 from snapper.core.types import OrderExchange
 from snapper.strategies.base import BaseStrategy
 from snapper.strategies.base import StrategyConfig
@@ -60,7 +61,7 @@ def create_strategy_process(
             name: str,
             inputs: list[str],
             outputs: list[str],
-            exchange: OrderExchange = "paper",
+            exchange: OrderExchange = ExchangeEnum.PAPER,
             params: dict[str, Any] | None = None,
         ) -> None:
             self.process_name = process_name

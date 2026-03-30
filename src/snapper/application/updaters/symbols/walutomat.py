@@ -15,6 +15,9 @@ from snapper.application.process_manager.process_parameters import SymbolUpdater
 from snapper.application.process_manager.registry import register_process
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.config.settings import AppSettings
+from snapper.core.types import AliasChannelEnum
+from snapper.core.types import AssetTypeEnum
+from snapper.core.types import ExchangeEnum
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
 
 
@@ -85,7 +88,7 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
                     native_symbol,
                     instrument["base"],
                     instrument["quote"],
-                    "forex",
+                    AssetTypeEnum.FOREX,
                     now,
                     session_id=sid,
                     sequence_id=self._tracker.next_sequence("symbols"),
@@ -94,8 +97,8 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
                 ws_result = self._upsert_alias(
                     session,
                     symbol_public_id,
-                    "walutomat",
-                    "ws",
+                    ExchangeEnum.WALUTOMAT,
+                    AliasChannelEnum.WS,
                     instrument["symbol"],
                     now,
                     session_id=sid,
@@ -108,8 +111,8 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
                 rest_result = self._upsert_alias(
                     session,
                     symbol_public_id,
-                    "walutomat",
-                    "rest",
+                    ExchangeEnum.WALUTOMAT,
+                    AliasChannelEnum.REST,
                     instrument["walutomat_rest_symbol"],
                     now,
                     session_id=sid,
@@ -122,7 +125,7 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
                 self._upsert_capability(
                     session,
                     symbol_public_id,
-                    "walutomat",
+                    ExchangeEnum.WALUTOMAT,
                     True,
                     True,
                     "walutomat_updater",
@@ -134,14 +137,14 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
                 self._ensure_instrument_identity(
                     session,
                     symbol_public_id,
-                    "walutomat",
+                    ExchangeEnum.WALUTOMAT,
                     now,
                     session_id=sid,
                     sequence_id=self._tracker.next_sequence("instruments"),
                 )
             deactivated = self._reconcile_capabilities(
                 session,
-                "walutomat",
+                ExchangeEnum.WALUTOMAT,
                 processed_symbol_public_ids,
                 "walutomat_updater",
                 now,

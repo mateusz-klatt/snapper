@@ -26,6 +26,8 @@ from sqlalchemy.orm import mapped_column
 from sqlalchemy.types import TypeDecorator
 
 from snapper.core.json_types import JsonObject
+from snapper.core.types import AliasChannelEnum
+from snapper.core.types import AssetTypeEnum
 
 KNOWN_TO_MAX = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
 
@@ -498,18 +500,18 @@ class Symbol(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
         CheckConstraint(
-            "asset_type IN ('crypto', 'forex', 'equity', 'index')",
+            f"asset_type IN ({', '.join(repr(v.value) for v in AssetTypeEnum)})",
             name="ck_symbol_asset_type",
         ),
         CheckConstraint(
-            "asset_type IN ('equity', 'index') OR quote IS NOT NULL",
+            f"asset_type IN ({', '.join(repr(v.value) for v in AssetTypeEnum if v in (AssetTypeEnum.EQUITY, AssetTypeEnum.INDEX))}) OR quote IS NOT NULL",
             name="ck_symbol_quote_required",
         ),
     )
     native_symbol: Mapped[str] = mapped_column(String(32))
     base: Mapped[str] = mapped_column(String(16))
     quote: Mapped[str | None] = mapped_column(String(16))
-    asset_type: Mapped[str] = mapped_column(String(16), server_default="crypto")
+    asset_type: Mapped[str] = mapped_column(String(16), server_default=AssetTypeEnum.CRYPTO)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
 
 
@@ -528,7 +530,7 @@ class SymbolAlias(TemporalMixin, Base):
             name="ck_symbol_alias_exchange_lower",
         ),
         CheckConstraint(
-            "channel IN ('ws', 'rest', 'ccxt')",
+            f"channel IN ({', '.join(repr(v.value) for v in AliasChannelEnum)})",
             name="ck_symbol_alias_channel",
         ),
         Index(

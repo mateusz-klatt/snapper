@@ -18,6 +18,8 @@ from datetime import datetime
 from loguru import logger
 
 from snapper.application.trade.trade_service import TradeService
+from snapper.core.types import ExchangeEnum
+from snapper.core.types import ExecutionModeEnum
 from snapper.data.repository import SQLAlchemyRepository
 
 
@@ -109,7 +111,11 @@ class ReconciliationLoop:
             logger.debug(f"ReconciliationLoop[{self._exchange}] cycle completed OK")
         except Exception:
             logger.exception(f"ReconciliationLoop[{self._exchange}] cycle failed")
-            mode = "paper" if self._exchange == "paper" else "live"
+            mode = (
+                ExecutionModeEnum.PAPER
+                if self._exchange == ExchangeEnum.PAPER
+                else ExecutionModeEnum.LIVE
+            )
             fallback_shard = f"{self._exchange}.unknown.{mode}"
             halted = self._trade_service.record_recon_failure(fallback_shard)
             if halted:

@@ -348,6 +348,19 @@ class TestPaperMarketDataPublisher:
         result = PaperMarketDataPublisher._validate_paper_instruments({"kraken": []})
         assert result == {}
 
+    def test_validate_paper_instruments_rejects_unknown_exchange(self) -> None:
+        """Verify validation skips exchanges not in MarketDataExchange.
+
+        Given mapping with an unknown exchange name,
+        When _validate_paper_instruments is called,
+        Then the unknown exchange is filtered out.
+        """
+        result = PaperMarketDataPublisher._validate_paper_instruments(
+            {"kraken": ["BTC-USD"], "binance": ["ETH-USD"]}
+        )
+        assert "binance" not in result
+        assert len(result) == 1
+
     @pytest.mark.asyncio
     async def test_start_creates_publishers(self) -> None:
         """Verify start creates per-source publishers for each exchange.

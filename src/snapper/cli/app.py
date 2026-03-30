@@ -67,6 +67,7 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.user_service import UserService
 from snapper.config.settings import BootstrapSettingsLoader
 from snapper.config.settings import get_settings
+from snapper.core.types import ExchangeEnum
 from snapper.data.archive_symbols import safe_path
 from snapper.data.archiver import EVENT_TABLES
 from snapper.data.archiver import STATE_TABLES
@@ -460,7 +461,7 @@ def executor(
             "-e",
             help="Exchange to run executor for (kraken, zonda, walutomat)",
         ),
-    ] = "kraken",
+    ] = ExchangeEnum.KRAKEN,
 ) -> None:
     """Run the exchange order executor service.
 
@@ -473,9 +474,9 @@ def executor(
             str,
             type[KrakenOrderExecutor] | type[ZondaOrderExecutor] | type[WalutomatOrderExecutor],
         ] = {
-            "kraken": KrakenOrderExecutor,
-            "zonda": ZondaOrderExecutor,
-            "walutomat": WalutomatOrderExecutor,
+            ExchangeEnum.KRAKEN: KrakenOrderExecutor,
+            ExchangeEnum.ZONDA: ZondaOrderExecutor,
+            ExchangeEnum.WALUTOMAT: WalutomatOrderExecutor,
         }
         if exchange.lower() not in service_map:
             typer.echo(f"Error: Unknown exchange '{exchange}'. Choose: kraken, zonda, walutomat")

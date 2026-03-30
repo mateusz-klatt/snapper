@@ -7,6 +7,7 @@ Relative Strength Index (RSI) indicator.
 import pandas as pd
 from loguru import logger
 
+from snapper.core.types import ExchangeEnum
 from snapper.indicators.ta_lib_adapter import rsi
 from snapper.messaging.schemas.data import CandleData
 from snapper.strategies.base import BaseStrategy
@@ -23,7 +24,7 @@ from snapper.strategies.decorators import register_strategy
         "name": "rsi_eth_1h",
         "inputs": ["market.kraken.ETH-USD.candles.1h"],
         "outputs": ["ETH-USD"],
-        "exchange": "paper",
+        "exchange": ExchangeEnum.PAPER,
         "params": {
             "period": 14,
             "upper": 70.0,

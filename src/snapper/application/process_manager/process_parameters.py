@@ -14,6 +14,7 @@ parameters externally, then instantiates via keyword unpacking.
 
 from snapper.api.schemas.base import StrictBody
 from snapper.core.json_types import JsonObject
+from snapper.core.types import ExchangeEnum
 from snapper.core.types import OrderExchange
 
 
@@ -163,5 +164,5 @@ class StrategyProcessParameters(StrictBody):
     name: str
     inputs: list[str]
     outputs: list[str]
-    exchange: OrderExchange = "paper"
+    exchange: OrderExchange = ExchangeEnum.PAPER
     params: JsonObject | None = None

@@ -11,6 +11,7 @@ from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.process_parameters import PublisherSymbolsParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
+from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataExchange
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
 from snapper.infrastructure.symbols.functions import native_to_walutomat_ws
@@ -41,7 +42,7 @@ class WalutomatMarketDataPublisher(MarketDataPublisherService[WalutomatExchangeC
             Dictionary with symbols from Walutomat instruments configuration.
         """
         instruments = settings.instruments
-        walutomat_symbols = instruments.get("walutomat", [])
+        walutomat_symbols = instruments.get(ExchangeEnum.WALUTOMAT, [])
         return {
             "symbols": walutomat_symbols,
         }
@@ -53,7 +54,7 @@ class WalutomatMarketDataPublisher(MarketDataPublisherService[WalutomatExchangeC
         return WalutomatExchangeClient()
 
     def _get_exchange_name(self) -> MarketDataExchange:
-        return "walutomat"
+        return ExchangeEnum.WALUTOMAT
 
     def _validate_symbols(self, symbols: list[str]) -> list[str]:
         native_symbols: list[str] = []

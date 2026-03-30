@@ -17,6 +17,8 @@ from snapper.application.portfolio.models import PortfolioTracker
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
 from snapper.application.trade.outbox import OutboxDispatcher
+from snapper.core.types import ExchangeEnum
+from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import OrderExchange
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.interface.websocket.schemas import ExecutionMode
@@ -78,7 +80,7 @@ class TradingEngineService:
         cfg: EngineConfigModel | None = None,
         *,
         instrument_specs: dict[str, dict[str, float]] | None = None,
-        exchange: OrderExchange = "paper",
+        exchange: OrderExchange = ExchangeEnum.PAPER,
         repository: SQLAlchemyRepository | None = None,
         outbox: OutboxDispatcher | None = None,
     ) -> None:
@@ -197,7 +199,11 @@ class TradingEngineService:
         Returns:
             "paper" for paper trading, "live" for real exchanges.
         """
-        return "paper" if self.exchange == "paper" else "live"
+        return (
+            ExecutionModeEnum.PAPER
+            if self.exchange == ExchangeEnum.PAPER
+            else ExecutionModeEnum.LIVE
+        )
 
     def _mark_to_market(self, last_close: float) -> float:
         """Calculate current equity and update peak equity.

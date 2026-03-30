@@ -15,6 +15,9 @@ from snapper.application.process_manager.process_parameters import SymbolUpdater
 from snapper.application.process_manager.registry import register_process
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.config.settings import AppSettings
+from snapper.core.types import AliasChannelEnum
+from snapper.core.types import AssetTypeEnum
+from snapper.core.types import ExchangeEnum
 from snapper.infrastructure.exchanges.implementations.zonda import ZondaExchangeClient
 from snapper.infrastructure.symbols.mapper import make_native_symbol
 
@@ -145,7 +148,7 @@ class ZondaSymbolUpdaterService(SymbolUpdaterService[ZondaExchangeClient]):
                         native_symbol,
                         symbol_data["base"],
                         symbol_data["quote"],
-                        "crypto",
+                        AssetTypeEnum.CRYPTO,
                         now,
                         session_id=sid,
                         sequence_id=self._tracker.next_sequence("symbols"),
@@ -154,8 +157,8 @@ class ZondaSymbolUpdaterService(SymbolUpdaterService[ZondaExchangeClient]):
                     ws_result = self._upsert_alias(
                         session,
                         symbol_public_id,
-                        "zonda",
-                        "ws",
+                        ExchangeEnum.ZONDA,
+                        AliasChannelEnum.WS,
                         symbol_data["zonda_symbol"],
                         now,
                         session_id=sid,
@@ -170,8 +173,8 @@ class ZondaSymbolUpdaterService(SymbolUpdaterService[ZondaExchangeClient]):
                         self._upsert_alias(
                             session,
                             symbol_public_id,
-                            "zonda",
-                            "ccxt",
+                            ExchangeEnum.ZONDA,
+                            AliasChannelEnum.CCXT,
                             ccxt_symbol,
                             now,
                             session_id=sid,
@@ -180,7 +183,7 @@ class ZondaSymbolUpdaterService(SymbolUpdaterService[ZondaExchangeClient]):
                     self._upsert_capability(
                         session,
                         symbol_public_id,
-                        "zonda",
+                        ExchangeEnum.ZONDA,
                         True,
                         True,
                         "zonda_updater",
@@ -192,14 +195,14 @@ class ZondaSymbolUpdaterService(SymbolUpdaterService[ZondaExchangeClient]):
                     self._ensure_instrument_identity(
                         session,
                         symbol_public_id,
-                        "zonda",
+                        ExchangeEnum.ZONDA,
                         now,
                         session_id=sid,
                         sequence_id=self._tracker.next_sequence("instruments"),
                     )
                 deactivated = self._reconcile_capabilities(
                     session,
-                    "zonda",
+                    ExchangeEnum.ZONDA,
                     processed_symbol_public_ids,
                     "zonda_updater",
                     now,

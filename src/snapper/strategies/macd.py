@@ -7,6 +7,7 @@ MACD (Moving Average Convergence Divergence) indicator.
 import pandas as pd
 from loguru import logger
 
+from snapper.core.types import ExchangeEnum
 from snapper.indicators.ta_lib_adapter import macd
 from snapper.messaging.schemas.data import CandleData
 from snapper.strategies.base import BaseStrategy
@@ -23,7 +24,7 @@ from snapper.strategies.decorators import register_strategy
         "name": "macd_btc_1h",
         "inputs": ["market.kraken.BTC-USD.candles.1h"],
         "outputs": ["BTC-USD"],
-        "exchange": "paper",
+        "exchange": ExchangeEnum.PAPER,
         "params": {
             "fast": 12,
             "slow": 26,

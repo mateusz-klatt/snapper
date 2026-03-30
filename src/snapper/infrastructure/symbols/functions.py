@@ -27,9 +27,11 @@ Example:
 """
 
 from datetime import datetime
+from typing import get_args
 
 from sqlalchemy import select
 
+from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketSubscribeExchange
 from snapper.core.types import OrderExchange
@@ -39,7 +41,6 @@ from snapper.data.repository import where_active
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 
 __all__ = [
-    "OrderExchange",
     "resolve_symbol_public_id",
     "kraken_websocket_to_ccxt",
     "ccxt_to_kraken_websocket",
@@ -537,7 +538,7 @@ def get_available_exchanges() -> list[OrderExchange]:
     Returns:
         List of exchange identifiers for order execution (paper + live venues).
     """
-    return ["kraken", "paper", "walutomat", "zonda"]
+    return list(get_args(OrderExchange))
 
 
 def get_market_subscribe_exchanges() -> list[MarketSubscribeExchange]:
@@ -546,7 +547,7 @@ def get_market_subscribe_exchanges() -> list[MarketSubscribeExchange]:
     Returns:
         List of live feed exchange identifiers (no paper, no polygon).
     """
-    return ["kraken", "walutomat", "zonda"]
+    return list(get_args(MarketSubscribeExchange))
 
 
 def get_market_data_exchanges() -> list[MarketDataExchange]:
@@ -556,7 +557,7 @@ def get_market_data_exchanges() -> list[MarketDataExchange]:
         List of exchange identifiers that can be replayed in paper mode.
         Excludes 'paper' — paper is the consumer, not a source.
     """
-    return ["kraken", "polygon", "walutomat", "zonda"]
+    return list(get_args(MarketDataExchange))
 
 
 def is_tradeable(native_symbol: str, exchange: str) -> bool:
@@ -575,7 +576,7 @@ def is_tradeable(native_symbol: str, exchange: str) -> bool:
     Returns:
         True if the symbol is tradeable on the exchange, False otherwise.
     """
-    if exchange == "paper":
+    if exchange == ExchangeEnum.PAPER:
         mapper = _get_db_mapper()
         return any(native_symbol in fwd_map for fwd_map in mapper.forward.values())
     mapper = _get_db_mapper()
@@ -617,7 +618,7 @@ def get_tradeable_symbols(exchange: str) -> list[str]:
         Sorted list of native symbols tradeable on the exchange.
     """
     mapper = _get_db_mapper()
-    if exchange == "paper":
+    if exchange == ExchangeEnum.PAPER:
         all_symbols: set[str] = set()
         for fwd_map in mapper.forward.values():
             all_symbols.update(fwd_map.keys())

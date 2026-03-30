@@ -33,18 +33,20 @@ Parser Functions:
 from dataclasses import dataclass
 from typing import Any
 from typing import cast
-from typing import get_args
 
 from snapper.api.schemas.base import StrictDataSchema
+from snapper.core.types import AllExchange
+from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketDataType
+from snapper.core.types import MarketDataTypeEnum
 from snapper.core.types import OrderCommand
 from snapper.core.types import OrderEvent
 from snapper.core.types import OrderExchange
 
 
 def market_topic(
-    exchange: OrderExchange,
+    exchange: AllExchange,
     instrument: str,
     data_type: MarketDataType,
     timeframe: str | None = None,
@@ -75,15 +77,15 @@ def market_topic(
         'market.paper.kraken.BTC-USD.ticks'
     """
     exchange_str = exchange
-    if exchange_str == "paper":
+    if exchange_str == ExchangeEnum.PAPER:
         if not source_exchange:
             raise ValueError("source_exchange is required for paper market topics")
-        if data_type == "candles":
+        if data_type == MarketDataTypeEnum.CANDLES:
             if not timeframe:
                 raise ValueError("timeframe is required for candles data type")
             return f"market.paper.{source_exchange}.{instrument}.candles.{timeframe}"
         return f"market.paper.{source_exchange}.{instrument}.{data_type}"
-    if data_type == "candles":
+    if data_type == MarketDataTypeEnum.CANDLES:
         if not timeframe:
             raise ValueError("timeframe is required for candles data type")
         return f"market.{exchange_str}.{instrument}.candles.{timeframe}"
@@ -305,7 +307,7 @@ class ParsedSignalTopic:
     signal_type: str
 
 
-_MARKET_DATA_TYPES: set[str] = set(get_args(MarketDataType))
+_MARKET_DATA_TYPES: set[str] = set(MarketDataTypeEnum)
 
 
 def _build_market_topic_result(
@@ -320,9 +322,9 @@ def _build_market_topic_result(
         return None
     if data_type not in _MARKET_DATA_TYPES:
         return None
-    if data_type == "candles" and not timeframe:
+    if data_type == MarketDataTypeEnum.CANDLES and not timeframe:
         return None
-    if data_type != "candles" and timeframe is not None:
+    if data_type != MarketDataTypeEnum.CANDLES and timeframe is not None:
         return None
     return ParsedMarketTopic(
         exchange=exchange,
@@ -349,7 +351,7 @@ def parse_market_topic(topic: str) -> ParsedMarketTopic | None:
     parts = topic.split(".")
     if len(parts) < 4 or parts[0] != "market":
         return None
-    if parts[1] != "paper":
+    if parts[1] != ExchangeEnum.PAPER:
         if len(parts) not in (4, 5):
             return None
         timeframe = parts[4] if len(parts) == 5 else None
@@ -364,7 +366,7 @@ def parse_market_topic(topic: str) -> ParsedMarketTopic | None:
         return None
     timeframe = parts[5] if len(parts) == 6 else None
     return _build_market_topic_result(
-        exchange="paper",
+        exchange=ExchangeEnum.PAPER,
         instrument=parts[3],
         data_type=parts[4],
         timeframe=timeframe,
@@ -526,13 +528,13 @@ def topic_for_message(data: StrictDataSchema[Any]) -> str:
 
     match data:
         case TickData():
-            return market_topic(cast(OrderExchange, data.exchange), data.instrument, "ticks")
+            return market_topic(data.exchange, data.instrument, MarketDataTypeEnum.TICKS)
         case CandleData():
             return market_topic(
-                cast(OrderExchange, data.exchange), data.instrument, "candles", data.timeframe
+                data.exchange, data.instrument, MarketDataTypeEnum.CANDLES, data.timeframe
             )
         case TradeData():
-            return market_topic(cast(OrderExchange, data.exchange), data.instrument, "trades")
+            return market_topic(data.exchange, data.instrument, MarketDataTypeEnum.TRADES)
         case OrderRequestData():
             return order_command_topic(data.exchange, data.instrument, "submit")
         case OrderCancelData():
@@ -546,7 +548,7 @@ def topic_for_message(data: StrictDataSchema[Any]) -> str:
         case ExecutionData():
             return order_event_topic(data.exchange, data.instrument, "executed")
         case SignalData():
-            if data.exchange == "paper":
+            if data.exchange == ExchangeEnum.PAPER:
                 if not data.strategy_name:
                     raise ValueError("Paper signal requires strategy_name for topic derivation")
                 return signal_topic(data.exchange, data.instrument, data.strategy_name)

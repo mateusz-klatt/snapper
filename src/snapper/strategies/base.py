@@ -24,6 +24,7 @@ import zmq.asyncio
 
 from snapper.application.services.signals.service import signal_service
 from snapper.config.settings import get_bootstrap_settings
+from snapper.core.types import ExchangeEnum
 from snapper.messaging.infrastructure.gap_detector import GapDetector
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -112,7 +113,7 @@ class BaseStrategy(ABC):
         self._running = False
         self.output_topics: list[str] = []
         for instrument in self.outputs:
-            if self.exchange == "paper":
+            if self.exchange == ExchangeEnum.PAPER:
                 self.output_topics.append(signal_topic(self.exchange, instrument, self.name))
             else:
                 self.output_topics.append(signal_topic(self.exchange, instrument, "live"))
@@ -298,7 +299,7 @@ class BaseStrategy(ABC):
             parsed = parse_market_topic(topic)
             if parsed is None:
                 continue
-            if parsed.exchange == "paper" and parsed.source_exchange:
+            if parsed.exchange == ExchangeEnum.PAPER and parsed.source_exchange:
                 heartbeat_topic = f"system.heartbeats.feed.paper.{parsed.source_exchange}"
             else:
                 heartbeat_topic = f"system.heartbeats.feed.{parsed.exchange}"
@@ -492,7 +493,7 @@ class BaseStrategy(ABC):
         if signal.timestamp is None:
             ts = self._last_data_ts or time.time()
             signal.timestamp = datetime.fromtimestamp(ts, tz=UTC)
-        if self.exchange == "paper":
+        if self.exchange == ExchangeEnum.PAPER:
             topic = signal_topic(self.exchange, signal.instrument, self.name)
         else:
             topic = signal_topic(self.exchange, signal.instrument, "live")

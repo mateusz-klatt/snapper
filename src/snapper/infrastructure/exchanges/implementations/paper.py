@@ -39,6 +39,7 @@ from typing import Any
 from loguru import logger
 from sqlalchemy import select
 
+from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataExchange
 from snapper.data.models import Instrument
 from snapper.data.models import Symbol
@@ -114,7 +115,7 @@ class PaperExchangeClient(ExchangeClientBase):
                 When set, subscribe methods query this exchange instead
                 of "paper". Used by per-source paper publishers.
         """
-        super().__init__(repository=repository, exchange_name="paper")
+        super().__init__(repository=repository, exchange_name=ExchangeEnum.PAPER)
         self.fill_delay = fill_delay
         self.initial_balance = initial_balance
         self.start_time = start_time

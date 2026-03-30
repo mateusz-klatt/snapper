@@ -33,6 +33,7 @@ from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.process_parameters import PublisherSymbolsParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
+from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataExchange
 from snapper.infrastructure.exchanges.implementations.zonda import ZondaExchangeClient
 from snapper.infrastructure.symbols.functions import native_to_zonda_ws
@@ -82,7 +83,7 @@ class ZondaMarketDataPublisher(MarketDataPublisherService[ZondaExchangeClient]):
             Dictionary with symbols list for Zonda.
         """
         instruments = settings.instruments
-        zonda_symbols = instruments.get("zonda", [])
+        zonda_symbols = instruments.get(ExchangeEnum.ZONDA, [])
         return {
             "symbols": zonda_symbols,
         }
@@ -101,7 +102,7 @@ class ZondaMarketDataPublisher(MarketDataPublisherService[ZondaExchangeClient]):
         Returns:
             "zonda" exchange name.
         """
-        return "zonda"
+        return ExchangeEnum.ZONDA
 
     def _validate_symbols(self, symbols: list[str]) -> list[str]:
         """Validate and filter symbols for Zonda.
