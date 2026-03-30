@@ -1,7 +1,9 @@
 """Initial database schema migration.
 
 Creates all core tables for the Snapper trading system including
-instruments, candles, trades, orders, users, and market snapshots.
+instruments, candles, trades, orders, users, market snapshots, and
+trade runtime tables (trade_commands, venue_events,
+trade_projection_checkpoints).
 Seeds symbols, aliases, and exchange capabilities.
 """
 
@@ -397,6 +399,7 @@ def upgrade() -> None:
         sa.Column("price", sa.Float(), nullable=True),
         sa.Column("size", sa.Float(), nullable=False),
         sa.Column("filled_size", sa.Float(), nullable=False, server_default="0"),
+        sa.Column("mode", sa.String(8), server_default="live", nullable=False),
         sa.Column("average_price", sa.Float(), nullable=True),
         sa.Column("status", sa.String(16), nullable=False),
         sa.Column("time_in_force", sa.String(16), nullable=True),
@@ -425,7 +428,7 @@ def upgrade() -> None:
     op.create_index(
         "uq_orders_client_oid",
         "orders",
-        ["instrument_public_id", "client_order_id"],
+        ["instrument_public_id", "mode", "client_order_id"],
         unique=True,
         sqlite_where=text("client_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE_SQLITE),
         postgresql_where=text("client_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE_PG),
@@ -433,7 +436,7 @@ def upgrade() -> None:
     op.create_index(
         "uq_orders_exchange_oid",
         "orders",
-        ["instrument_public_id", "exchange_order_id"],
+        ["instrument_public_id", "mode", "exchange_order_id"],
         unique=True,
         sqlite_where=text("exchange_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE_SQLITE),
         postgresql_where=text("exchange_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE_PG),
@@ -488,6 +491,7 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("public_id", sa.String(36), nullable=False),
         sa.Column("instrument_public_id", sa.String(36), nullable=False),
+        sa.Column("mode", sa.String(8), server_default="live", nullable=False),
         sa.Column("quantity", sa.Float(), nullable=False),
         sa.Column("average_price", sa.Float(), nullable=False),
         sa.Column("unrealized_pnl", sa.Float(), nullable=False),
@@ -511,7 +515,7 @@ def upgrade() -> None:
     op.create_index(
         "uq_positions_instrument_public_id",
         "positions",
-        ["instrument_public_id"],
+        ["instrument_public_id", "mode"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
         postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
@@ -815,6 +819,143 @@ def upgrade() -> None:
         sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
         postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
+    op.create_table(
+        "trade_commands",
+        sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer, nullable=False),
+        sa.Column("timestamp", sa.DateTime, nullable=False),
+        sa.Column("known_to", sa.DateTime, nullable=False),
+        sa.Column("command_type", sa.String(16), nullable=False),
+        sa.Column("shard_key", sa.String(64), nullable=False),
+        sa.Column("exchange", sa.String(32), nullable=False),
+        sa.Column("instrument", sa.String(64), nullable=False),
+        sa.Column("mode", sa.String(8), nullable=False),
+        sa.Column("strategy_id", sa.String(64), nullable=False),
+        sa.Column("client_order_id", sa.String(36), nullable=False),
+        sa.Column("venue_client_id", sa.String(64), nullable=False),
+        sa.Column("idempotency_key", sa.String(128), nullable=True),
+        sa.Column("side", sa.String(4), nullable=False),
+        sa.Column("order_type", sa.String(16), nullable=False),
+        sa.Column("quantity", sa.Float, nullable=False),
+        sa.Column("price", sa.Float, nullable=True),
+        sa.Column("status", sa.String(32), nullable=False),
+        sa.Column("attempt_count", sa.Integer, server_default="0", nullable=False),
+        sa.Column("last_error", sa.String(512), nullable=True),
+        sa.Column("created_at", sa.DateTime, nullable=False),
+        sa.Column("dispatched_at", sa.DateTime, nullable=True),
+        sa.Column("acked_at", sa.DateTime, nullable=True),
+        sa.Column("terminal_at", sa.DateTime, nullable=True),
+        sa.Column("exchange_order_id", sa.String(64), nullable=True),
+        sa.Column("supersedes_command_id", sa.String(36), nullable=True),
+        sa.Column("correlation_id", sa.String(36), nullable=False),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_trade_commands_session"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_trade_commands_sequence"),
+    )
+    op.create_index("ix_trade_commands_status", "trade_commands", ["status"])
+    op.create_index("ix_trade_commands_shard_key", "trade_commands", ["shard_key"])
+    op.create_index(
+        "uq_trade_commands_idempotency",
+        "trade_commands",
+        ["idempotency_key"],
+        unique=True,
+        sqlite_where=text("idempotency_key IS NOT NULL AND " + _KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text("idempotency_key IS NOT NULL AND " + _KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_trade_commands_public_id",
+        "trade_commands",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_table(
+        "venue_events",
+        sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer, nullable=False),
+        sa.Column("timestamp", sa.DateTime, nullable=False),
+        sa.Column("known_to", sa.DateTime, nullable=False),
+        sa.Column("event_type", sa.String(32), nullable=False),
+        sa.Column("shard_key", sa.String(64), nullable=False),
+        sa.Column("command_public_id", sa.String(36), nullable=True),
+        sa.Column("exchange", sa.String(32), nullable=False),
+        sa.Column("instrument", sa.String(64), nullable=False),
+        sa.Column("mode", sa.String(8), nullable=False),
+        sa.Column("exchange_order_id", sa.String(64), nullable=True),
+        sa.Column("client_order_id", sa.String(64), nullable=True),
+        sa.Column("venue_client_id", sa.String(64), nullable=True),
+        sa.Column("side", sa.String(4), nullable=True),
+        sa.Column("status", sa.String(32), nullable=True),
+        sa.Column("fill_price", sa.Float, nullable=True),
+        sa.Column("fill_size", sa.Float, nullable=True),
+        sa.Column("cum_fill_size", sa.Float, nullable=True),
+        sa.Column("fee", sa.Float, nullable=True),
+        sa.Column("fee_asset", sa.String(16), nullable=True),
+        sa.Column("exec_id", sa.String(64), nullable=True),
+        sa.Column("trade_id", sa.String(64), nullable=True),
+        sa.Column("error", sa.String(512), nullable=True),
+        sa.Column("venue_timestamp", sa.DateTime, nullable=True),
+        sa.Column("received_at", sa.DateTime, nullable=False),
+        sa.Column("payload_json", sa.Text, nullable=True),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_venue_events_session"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_venue_events_sequence"),
+    )
+    op.create_index("ix_venue_events_shard_id", "venue_events", ["shard_key", "id"])
+    op.create_index(
+        "ix_venue_events_command_public_id",
+        "venue_events",
+        ["command_public_id"],
+    )
+    op.create_index(
+        "ix_venue_events_public_id",
+        "venue_events",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_table(
+        "trade_projection_checkpoints",
+        sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer, nullable=False),
+        sa.Column("timestamp", sa.DateTime, nullable=False),
+        sa.Column("known_to", sa.DateTime, nullable=False),
+        sa.Column("shard_key", sa.String(64), nullable=False),
+        sa.Column("position_qty", sa.Float, server_default="0", nullable=False),
+        sa.Column("entry_price", sa.Float, nullable=True),
+        sa.Column("cash", sa.Float, nullable=False),
+        sa.Column("peak_equity", sa.Float, nullable=False),
+        sa.Column("realized_pnl", sa.Float, server_default="0", nullable=False),
+        sa.Column("turnover", sa.Float, server_default="0", nullable=False),
+        sa.Column("last_venue_event_id", sa.Integer, nullable=True),
+        sa.Column("last_venue_event_at", sa.DateTime, nullable=True),
+        sa.Column("open_command_ids", sa.Text, nullable=True),
+        sa.Column("checkpoint_at", sa.DateTime, nullable=False),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_trade_checkpoints_session"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_trade_checkpoints_sequence"),
+    )
+    op.create_index(
+        "uq_trade_checkpoints_shard_key",
+        "trade_projection_checkpoints",
+        ["shard_key"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_trade_checkpoints_public_id",
+        "trade_projection_checkpoints",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
     conn = op.get_bind()
     now = datetime.now(tz=UTC)
     seed_session_id = str(uuid7())
@@ -900,6 +1041,9 @@ def downgrade() -> None:
     Removes all tables created by the upgrade function, respecting
     foreign key constraints by dropping in reverse dependency order.
     """
+    op.drop_table("trade_projection_checkpoints")
+    op.drop_table("venue_events")
+    op.drop_table("trade_commands")
     op.drop_table("telemetry")
     op.drop_table("control")
     op.drop_table("market_snapshots")

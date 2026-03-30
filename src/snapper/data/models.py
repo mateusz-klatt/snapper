@@ -99,6 +99,9 @@ __all__ = [
     "MarketSnapshot",
     "Control",
     "Telemetry",
+    "TradeCommand",
+    "VenueEvent",
+    "TradeProjectionCheckpoint",
 ]
 
 
@@ -250,10 +253,11 @@ class Order(TemporalMixin, Base):
         Index(
             "uq_orders_client_oid",
             "instrument_public_id",
+            "mode",
             "client_order_id",
             unique=True,
             sqlite_where=text(
-                "client_order_id IS NOT NULL AND known_to = '9999-12-31T23:59:59+00:00'"
+                "client_order_id IS NOT NULL AND known_to = '9999-12-31 23:59:59.000000'"
             ),
             postgresql_where=text(
                 "client_order_id IS NOT NULL AND known_to = '9999-12-31 23:59:59+00'"
@@ -262,10 +266,11 @@ class Order(TemporalMixin, Base):
         Index(
             "uq_orders_exchange_oid",
             "instrument_public_id",
+            "mode",
             "exchange_order_id",
             unique=True,
             sqlite_where=text(
-                "exchange_order_id IS NOT NULL AND known_to = '9999-12-31T23:59:59+00:00'"
+                "exchange_order_id IS NOT NULL AND known_to = '9999-12-31 23:59:59.000000'"
             ),
             postgresql_where=text(
                 "exchange_order_id IS NOT NULL AND known_to = '9999-12-31 23:59:59+00'"
@@ -280,6 +285,7 @@ class Order(TemporalMixin, Base):
         ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    mode: Mapped[str] = mapped_column(String(8), default="live", server_default="live")
     client_order_id: Mapped[str | None] = mapped_column(String(64), index=True)
     exchange_order_id: Mapped[str | None] = mapped_column(String(64), index=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
@@ -342,6 +348,7 @@ class Position(TemporalMixin, Base):
         Index(
             "uq_positions_instrument_public_id",
             "instrument_public_id",
+            "mode",
             unique=True,
             sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
@@ -355,6 +362,7 @@ class Position(TemporalMixin, Base):
         ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    mode: Mapped[str] = mapped_column(String(8), default="live", server_default="live")
     quantity: Mapped[float] = mapped_column(Float)
     average_price: Mapped[float] = mapped_column(Float)
     unrealized_pnl: Mapped[float] = mapped_column(Float)
@@ -777,3 +785,147 @@ class Telemetry(TemporalMixin, Base):
     direction: Mapped[str] = mapped_column(String(10))
     message_type: Mapped[str] = mapped_column(String(128))
     payload: Mapped[str | None] = mapped_column(Text)
+
+
+class TradeCommand(TemporalMixin, Base):
+    """Durable intent log for order commands.
+
+    Written by TradingEngineService BEFORE ZMQ publish. Outbox dispatcher
+    picks up rows with status='created' and publishes to ZMQ. TradeService
+    updates status as venue events arrive. Status transitions use SCD2
+    versioning (close old row, insert new version) like Order.
+    """
+
+    __tablename__ = "trade_commands"
+    __table_args__ = (
+        Index("ix_trade_commands_status", "status"),
+        Index("ix_trade_commands_shard_key", "shard_key"),
+        Index(
+            "uq_trade_commands_idempotency",
+            "idempotency_key",
+            unique=True,
+            sqlite_where=text(
+                "idempotency_key IS NOT NULL AND known_to = '9999-12-31 23:59:59.000000'"
+            ),
+            postgresql_where=text(
+                "idempotency_key IS NOT NULL AND known_to = '9999-12-31T23:59:59+00:00'"
+            ),
+        ),
+        Index(
+            "ix_trade_commands_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+    )
+    command_type: Mapped[str] = mapped_column(String(16))
+    shard_key: Mapped[str] = mapped_column(String(64))
+    exchange: Mapped[str] = mapped_column(String(32))
+    instrument: Mapped[str] = mapped_column(String(64))
+    mode: Mapped[str] = mapped_column(String(8))
+    strategy_id: Mapped[str] = mapped_column(String(64))
+    client_order_id: Mapped[str] = mapped_column(UUIDColumn())
+    venue_client_id: Mapped[str] = mapped_column(String(64))
+    idempotency_key: Mapped[str | None] = mapped_column(String(128))
+    side: Mapped[str] = mapped_column(String(4))
+    order_type: Mapped[str] = mapped_column(String(16))
+    quantity: Mapped[float] = mapped_column(Float)
+    price: Mapped[float | None] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(32))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_error: Mapped[str | None] = mapped_column(String(512))
+    created_at: Mapped[datetime] = mapped_column(TZDateTime())
+    dispatched_at: Mapped[datetime | None] = mapped_column(TZDateTime())
+    acked_at: Mapped[datetime | None] = mapped_column(TZDateTime())
+    terminal_at: Mapped[datetime | None] = mapped_column(TZDateTime())
+    exchange_order_id: Mapped[str | None] = mapped_column(String(64))
+    supersedes_command_id: Mapped[str | None] = mapped_column(UUIDColumn())
+    correlation_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
+
+
+class VenueEvent(TemporalMixin, Base):
+    """Append-only log of raw venue observations.
+
+    Created by ExchangeExecutorService when venue state changes are
+    detected (WS stream for Kraken/Zonda, HTTP polling for Walutomat,
+    in-process for Paper). All exchanges produce the same schema.
+
+    The TemporalMixin id (auto-increment PK) serves as the monotonic
+    watermark for checkpoint recovery. Append-only rows use
+    known_to=KNOWN_TO_MAX and are never closed.
+    """
+
+    __tablename__ = "venue_events"
+    __table_args__ = (
+        Index("ix_venue_events_shard_id", "shard_key", "id"),
+        Index("ix_venue_events_command_public_id", "command_public_id"),
+        Index(
+            "ix_venue_events_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+    )
+    event_type: Mapped[str] = mapped_column(String(32))
+    shard_key: Mapped[str] = mapped_column(String(64))
+    command_public_id: Mapped[str | None] = mapped_column(UUIDColumn())
+    exchange: Mapped[str] = mapped_column(String(32))
+    instrument: Mapped[str] = mapped_column(String(64))
+    mode: Mapped[str] = mapped_column(String(8))
+    exchange_order_id: Mapped[str | None] = mapped_column(String(64))
+    client_order_id: Mapped[str | None] = mapped_column(String(64))
+    venue_client_id: Mapped[str | None] = mapped_column(String(64))
+    side: Mapped[str | None] = mapped_column(String(4))
+    status: Mapped[str | None] = mapped_column(String(32))
+    fill_price: Mapped[float | None] = mapped_column(Float)
+    fill_size: Mapped[float | None] = mapped_column(Float)
+    cum_fill_size: Mapped[float | None] = mapped_column(Float)
+    fee: Mapped[float | None] = mapped_column(Float)
+    fee_asset: Mapped[str | None] = mapped_column(String(16))
+    exec_id: Mapped[str | None] = mapped_column(String(64))
+    trade_id: Mapped[str | None] = mapped_column(String(64))
+    error: Mapped[str | None] = mapped_column(String(512))
+    venue_timestamp: Mapped[datetime | None] = mapped_column(TZDateTime())
+    received_at: Mapped[datetime] = mapped_column(TZDateTime())
+    payload_json: Mapped[str | None] = mapped_column(Text)
+
+
+class TradeProjectionCheckpoint(TemporalMixin, Base):
+    """Materialized projection of trading state per shard.
+
+    Written by TradeService after every confirmed fill. Recovery reads
+    the checkpoint, then replays VenueEvents after the watermark to
+    rebuild current state. One row per shard_key (upsert via SCD2:
+    close old version, insert new).
+    """
+
+    __tablename__ = "trade_projection_checkpoints"
+    __table_args__ = (
+        Index(
+            "uq_trade_checkpoints_shard_key",
+            "shard_key",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_trade_checkpoints_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+    )
+    shard_key: Mapped[str] = mapped_column(String(64))
+    position_qty: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    entry_price: Mapped[float | None] = mapped_column(Float)
+    cash: Mapped[float] = mapped_column(Float)
+    peak_equity: Mapped[float] = mapped_column(Float)
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    turnover: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    last_venue_event_id: Mapped[int | None] = mapped_column(Integer)
+    last_venue_event_at: Mapped[datetime | None] = mapped_column(TZDateTime())
+    open_command_ids: Mapped[str | None] = mapped_column(Text)
+    checkpoint_at: Mapped[datetime] = mapped_column(TZDateTime())

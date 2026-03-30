@@ -615,3 +615,15 @@ class TestServerProxyProperties:
         )
         settings = AppSettings(bootstrap, settings_service=None)
         assert settings.server_forwarded_allow_ips == "127.0.0.1,172.17.0.1"
+
+    def test_use_durable_commands_defaults_false(self) -> None:
+        """Verify use_durable_commands defaults to False.
+
+        Given service without use_durable_commands set,
+        When accessing settings.use_durable_commands,
+        Then False is returned.
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        service = MockSettingsService({})
+        settings = AppSettings(bootstrap, settings_service=service)
+        assert settings.use_durable_commands is False

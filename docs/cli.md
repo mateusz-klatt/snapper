@@ -78,7 +78,14 @@ snapper broker --xsub tcp://127.0.0.1:7500 --xpub tcp://127.0.0.1:7501
 
 ### `trade-zmq`
 
-Starts the central trading coordinator.
+Starts the central trade runtime coordinator.
+
+The process still runs as the `trade-zmq` command, but after the trade
+runtime redesign it also hosts `TradeService`, `BalanceService`, and,
+when durable mode is enabled, the outbox dispatcher and reconciliation loop.
+In dual-write mode the same process still writes `TradeCommand` rows,
+consumes `orders.events.*` to keep projections in sync, and persists
+checkpoints for recovery.
 
 ```bash
 snapper trade-zmq [OPTIONS]
@@ -589,7 +596,7 @@ snapper feed --symbols "BTC-USD,ETH-USD"
 # Terminal 3: Executor
 snapper executor -e kraken
 
-# Terminal 4: Coordinator
+# Terminal 4: Trade runtime
 snapper trade-zmq
 
 # Terminal 5: Server with dashboard

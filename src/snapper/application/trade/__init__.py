@@ -1,0 +1,1 @@
+"""Trade domain application services."""

@@ -674,7 +674,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
         client = self._require_authenticated()
         walutomat_rest_symbol = native_to_walutomat_rest(request.symbol)
         base_currency = request.symbol.split("-")[0]
-        submit_id = str(uuid.uuid4())
+        submit_id = request.client_order_id or str(uuid.uuid4())
         body_params = {
             "currencyPair": walutomat_rest_symbol,
             "buySell": request.side.value.upper(),

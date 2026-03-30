@@ -86,6 +86,9 @@ from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.models import Tick
 from snapper.data.models import Trade
+from snapper.data.models import TradeCommand
+from snapper.data.models import TradeProjectionCheckpoint
+from snapper.data.models import VenueEvent
 from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import ExecutionRow
@@ -97,8 +100,11 @@ from snapper.data.repository_types import SettingRow
 from snapper.data.repository_types import SignalRow
 from snapper.data.repository_types import TickRow
 from snapper.data.repository_types import TickUpsertRow
+from snapper.data.repository_types import TradeCommandRow
+from snapper.data.repository_types import TradeProjectionCheckpointRow
 from snapper.data.repository_types import TradeRow
 from snapper.data.repository_types import TradeUpsertRow
+from snapper.data.repository_types import VenueEventRow
 
 __all__ = [
     "Repository",
@@ -1091,11 +1097,13 @@ class SQLAlchemyRepository(Repository):
         sequence_id: int,
         timestamp: datetime,
         time_in_force: str | None = None,
+        mode: str = "live",
     ) -> tuple[int, str]:
         """Insert new order record and return (id, public_id) tuple."""
         async with self.session() as s:
             order = Order(
                 instrument_public_id=instrument_public_id,
+                mode=mode,
                 client_order_id=client_order_id,
                 exchange_order_id=exchange_order_id,
                 created_at=created_at,
@@ -1142,6 +1150,7 @@ class SQLAlchemyRepository(Repository):
             new_order = Order(
                 public_id=old_order.public_id,
                 instrument_public_id=old_order.instrument_public_id,
+                mode=old_order.mode,
                 client_order_id=old_order.client_order_id,
                 exchange_order_id=exchange_order_id or old_order.exchange_order_id,
                 created_at=old_order.created_at,
@@ -1636,6 +1645,7 @@ class SQLAlchemyRepository(Repository):
                     "sequence_id": order.sequence_id,
                     "instrument": sym.native_symbol,
                     "exchange": inst.exchange,
+                    "mode": order.mode,
                     "client_order_id": order.client_order_id or "",
                     "exchange_order_id": order.exchange_order_id,
                     "created_at": order.created_at,
@@ -1745,6 +1755,7 @@ class SQLAlchemyRepository(Repository):
                     "sequence_id": order.sequence_id,
                     "instrument": sym.native_symbol,
                     "exchange": inst.exchange,
+                    "mode": order.mode,
                     "client_order_id": order.client_order_id or "",
                     "exchange_order_id": order.exchange_order_id,
                     "created_at": order.created_at,
@@ -1856,6 +1867,7 @@ class SQLAlchemyRepository(Repository):
                     "sequence_id": pos.sequence_id,
                     "instrument": sym.native_symbol,
                     "exchange": inst.exchange,
+                    "mode": pos.mode,
                     "quantity": pos.quantity,
                     "average_price": pos.average_price,
                     "unrealized_pnl": pos.unrealized_pnl,
@@ -1915,6 +1927,518 @@ class SQLAlchemyRepository(Repository):
                 select(Setting.category).where(*where_active(Setting, as_of)).distinct()
             )
             return sorted(row[0] for row in result.fetchall())
+
+    async def insert_trade_command(
+        self,
+        command_type: str,
+        shard_key: str,
+        exchange: str,
+        instrument: str,
+        mode: str,
+        strategy_id: str,
+        client_order_id: str,
+        venue_client_id: str,
+        side: str,
+        order_type: str,
+        quantity: float,
+        price: float | None,
+        status: str,
+        created_at: datetime,
+        correlation_id: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+        idempotency_key: str | None = None,
+        supersedes_command_id: str | None = None,
+    ) -> tuple[int, str]:
+        """Insert a new trade command row and return (id, public_id)."""
+        async with self.session() as s:
+            cmd = TradeCommand(
+                command_type=command_type,
+                shard_key=shard_key,
+                exchange=exchange,
+                instrument=instrument,
+                mode=mode,
+                strategy_id=strategy_id,
+                client_order_id=client_order_id,
+                venue_client_id=venue_client_id,
+                idempotency_key=idempotency_key,
+                side=side,
+                order_type=order_type,
+                quantity=quantity,
+                price=price,
+                status=status,
+                created_at=created_at,
+                correlation_id=correlation_id,
+                supersedes_command_id=supersedes_command_id,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=timestamp,
+            )
+            s.add(cmd)
+            await s.commit()
+            await s.refresh(cmd)
+            return (cmd.id, cmd.public_id)
+
+    async def update_trade_command_status(
+        self,
+        public_id: str,
+        new_status: str,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+        exchange_order_id: str | None = None,
+        dispatched_at: datetime | None = None,
+        acked_at: datetime | None = None,
+        terminal_at: datetime | None = None,
+        last_error: str | None = None,
+        attempt_count: int | None = None,
+    ) -> int | None:
+        """SCD2 close-and-insert for trade command status transition.
+
+        Returns the new row id, or None if no active row found.
+        """
+        async with self.session() as s:
+            match_filters = [TradeCommand.public_id == public_id]
+            existing = (
+                (
+                    await s.execute(
+                        select(TradeCommand).where(
+                            *match_filters, *where_active(TradeCommand, bus_time)
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if existing is None:
+                return None
+            await s.execute(
+                update(TradeCommand).where(TradeCommand.id == existing.id).values(known_to=bus_time)
+            )
+            new_cmd = TradeCommand(
+                public_id=existing.public_id,
+                command_type=existing.command_type,
+                shard_key=existing.shard_key,
+                exchange=existing.exchange,
+                instrument=existing.instrument,
+                mode=existing.mode,
+                strategy_id=existing.strategy_id,
+                client_order_id=existing.client_order_id,
+                venue_client_id=existing.venue_client_id,
+                idempotency_key=existing.idempotency_key,
+                side=existing.side,
+                order_type=existing.order_type,
+                quantity=existing.quantity,
+                price=existing.price,
+                status=new_status,
+                attempt_count=(
+                    attempt_count if attempt_count is not None else existing.attempt_count
+                ),
+                last_error=last_error if last_error is not None else existing.last_error,
+                created_at=existing.created_at,
+                dispatched_at=(
+                    dispatched_at if dispatched_at is not None else existing.dispatched_at
+                ),
+                acked_at=acked_at if acked_at is not None else existing.acked_at,
+                terminal_at=terminal_at if terminal_at is not None else existing.terminal_at,
+                exchange_order_id=(
+                    exchange_order_id
+                    if exchange_order_id is not None
+                    else existing.exchange_order_id
+                ),
+                supersedes_command_id=existing.supersedes_command_id,
+                correlation_id=existing.correlation_id,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=bus_time,
+            )
+            s.add(new_cmd)
+            await s.commit()
+            await s.refresh(new_cmd)
+            return new_cmd.id
+
+    async def get_undispatched_commands(
+        self, as_of: datetime, limit: int = 10
+    ) -> list[TradeCommandRow]:
+        """Return trade commands with status='created' for outbox dispatch."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(TradeCommand)
+                .where(TradeCommand.status == "created", *where_active(TradeCommand, as_of))
+                .order_by(TradeCommand.created_at)
+                .limit(limit)
+            )
+            rows: list[TradeCommandRow] = []
+            for cmd in result.scalars().all():
+                rows.append(
+                    {
+                        "public_id": cmd.public_id,
+                        "timestamp": cmd.timestamp,
+                        "session_id": cmd.session_id,
+                        "sequence_id": cmd.sequence_id,
+                        "command_type": cmd.command_type,
+                        "shard_key": cmd.shard_key,
+                        "exchange": cmd.exchange,
+                        "instrument": cmd.instrument,
+                        "mode": cmd.mode,
+                        "strategy_id": cmd.strategy_id,
+                        "client_order_id": cmd.client_order_id,
+                        "venue_client_id": cmd.venue_client_id,
+                        "idempotency_key": cmd.idempotency_key,
+                        "side": cmd.side,
+                        "order_type": cmd.order_type,
+                        "quantity": cmd.quantity,
+                        "price": cmd.price,
+                        "status": cmd.status,
+                        "attempt_count": cmd.attempt_count,
+                        "last_error": cmd.last_error,
+                        "created_at": cmd.created_at,
+                        "dispatched_at": cmd.dispatched_at,
+                        "acked_at": cmd.acked_at,
+                        "terminal_at": cmd.terminal_at,
+                        "exchange_order_id": cmd.exchange_order_id,
+                        "supersedes_command_id": cmd.supersedes_command_id,
+                        "correlation_id": cmd.correlation_id,
+                    }
+                )
+            return rows
+
+    async def get_active_commands_for_shard(
+        self, shard_key: str, as_of: datetime
+    ) -> list[TradeCommandRow]:
+        """Return non-terminal trade commands for a shard."""
+        terminal_statuses = ("filled", "cancelled", "expired", "rejected", "failed")
+        async with self.session() as s:
+            result = await s.execute(
+                select(TradeCommand)
+                .where(
+                    TradeCommand.shard_key == shard_key,
+                    TradeCommand.status.notin_(terminal_statuses),
+                    *where_active(TradeCommand, as_of),
+                )
+                .order_by(TradeCommand.created_at)
+            )
+            rows: list[TradeCommandRow] = []
+            for cmd in result.scalars().all():
+                rows.append(
+                    {
+                        "public_id": cmd.public_id,
+                        "timestamp": cmd.timestamp,
+                        "session_id": cmd.session_id,
+                        "sequence_id": cmd.sequence_id,
+                        "command_type": cmd.command_type,
+                        "shard_key": cmd.shard_key,
+                        "exchange": cmd.exchange,
+                        "instrument": cmd.instrument,
+                        "mode": cmd.mode,
+                        "strategy_id": cmd.strategy_id,
+                        "client_order_id": cmd.client_order_id,
+                        "venue_client_id": cmd.venue_client_id,
+                        "idempotency_key": cmd.idempotency_key,
+                        "side": cmd.side,
+                        "order_type": cmd.order_type,
+                        "quantity": cmd.quantity,
+                        "price": cmd.price,
+                        "status": cmd.status,
+                        "attempt_count": cmd.attempt_count,
+                        "last_error": cmd.last_error,
+                        "created_at": cmd.created_at,
+                        "dispatched_at": cmd.dispatched_at,
+                        "acked_at": cmd.acked_at,
+                        "terminal_at": cmd.terminal_at,
+                        "exchange_order_id": cmd.exchange_order_id,
+                        "supersedes_command_id": cmd.supersedes_command_id,
+                        "correlation_id": cmd.correlation_id,
+                    }
+                )
+            return rows
+
+    async def get_active_commands_for_exchange(
+        self, exchange: str, as_of: datetime
+    ) -> list[TradeCommandRow]:
+        """Return non-terminal trade commands for an exchange.
+
+        Queries all shards for the given exchange name, returning
+        commands that are not in a terminal state.
+
+        Args:
+            exchange: Exchange name to filter by.
+            as_of: Point-in-time for temporal query.
+
+        Returns:
+            List of active TradeCommandRow dicts.
+        """
+        terminal_statuses = ("filled", "cancelled", "expired", "rejected", "failed")
+        async with self.session() as s:
+            result = await s.execute(
+                select(TradeCommand)
+                .where(
+                    TradeCommand.exchange == exchange,
+                    TradeCommand.status.notin_(terminal_statuses),
+                    *where_active(TradeCommand, as_of),
+                )
+                .order_by(TradeCommand.created_at)
+            )
+            rows: list[TradeCommandRow] = []
+            for cmd in result.scalars().all():
+                rows.append(
+                    {
+                        "public_id": cmd.public_id,
+                        "timestamp": cmd.timestamp,
+                        "session_id": cmd.session_id,
+                        "sequence_id": cmd.sequence_id,
+                        "command_type": cmd.command_type,
+                        "shard_key": cmd.shard_key,
+                        "exchange": cmd.exchange,
+                        "instrument": cmd.instrument,
+                        "mode": cmd.mode,
+                        "strategy_id": cmd.strategy_id,
+                        "client_order_id": cmd.client_order_id,
+                        "venue_client_id": cmd.venue_client_id,
+                        "idempotency_key": cmd.idempotency_key,
+                        "side": cmd.side,
+                        "order_type": cmd.order_type,
+                        "quantity": cmd.quantity,
+                        "price": cmd.price,
+                        "status": cmd.status,
+                        "attempt_count": cmd.attempt_count,
+                        "last_error": cmd.last_error,
+                        "created_at": cmd.created_at,
+                        "dispatched_at": cmd.dispatched_at,
+                        "acked_at": cmd.acked_at,
+                        "terminal_at": cmd.terminal_at,
+                        "exchange_order_id": cmd.exchange_order_id,
+                        "supersedes_command_id": cmd.supersedes_command_id,
+                        "correlation_id": cmd.correlation_id,
+                    }
+                )
+            return rows
+
+    async def insert_venue_event(
+        self,
+        event_type: str,
+        shard_key: str,
+        exchange: str,
+        instrument: str,
+        mode: str,
+        received_at: datetime,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+        command_public_id: str | None = None,
+        exchange_order_id: str | None = None,
+        client_order_id: str | None = None,
+        venue_client_id: str | None = None,
+        side: str | None = None,
+        status: str | None = None,
+        fill_price: float | None = None,
+        fill_size: float | None = None,
+        cum_fill_size: float | None = None,
+        fee: float | None = None,
+        fee_asset: str | None = None,
+        exec_id: str | None = None,
+        trade_id: str | None = None,
+        error: str | None = None,
+        venue_timestamp: datetime | None = None,
+        payload_json: str | None = None,
+    ) -> int:
+        """Insert a venue event and return its local_seq."""
+        async with self.session() as s:
+            ve = VenueEvent(
+                event_type=event_type,
+                shard_key=shard_key,
+                command_public_id=command_public_id,
+                exchange=exchange,
+                instrument=instrument,
+                mode=mode,
+                exchange_order_id=exchange_order_id,
+                client_order_id=client_order_id,
+                venue_client_id=venue_client_id,
+                side=side,
+                status=status,
+                fill_price=fill_price,
+                fill_size=fill_size,
+                cum_fill_size=cum_fill_size,
+                fee=fee,
+                fee_asset=fee_asset,
+                exec_id=exec_id,
+                trade_id=trade_id,
+                error=error,
+                venue_timestamp=venue_timestamp,
+                received_at=received_at,
+                payload_json=payload_json,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=timestamp,
+            )
+            s.add(ve)
+            await s.commit()
+            await s.refresh(ve)
+            return ve.id
+
+    async def get_venue_events_after(self, shard_key: str, after_id: int) -> list[VenueEventRow]:
+        """Return venue events for a shard after the given watermark (id)."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(VenueEvent)
+                .where(VenueEvent.shard_key == shard_key, VenueEvent.id > after_id)
+                .order_by(VenueEvent.id)
+            )
+            rows: list[VenueEventRow] = []
+            for ve in result.scalars().all():
+                rows.append(
+                    {
+                        "id": ve.id,
+                        "public_id": ve.public_id,
+                        "timestamp": ve.timestamp,
+                        "session_id": ve.session_id,
+                        "sequence_id": ve.sequence_id,
+                        "event_type": ve.event_type,
+                        "shard_key": ve.shard_key,
+                        "command_public_id": ve.command_public_id,
+                        "exchange": ve.exchange,
+                        "instrument": ve.instrument,
+                        "mode": ve.mode,
+                        "exchange_order_id": ve.exchange_order_id,
+                        "client_order_id": ve.client_order_id,
+                        "venue_client_id": ve.venue_client_id,
+                        "side": ve.side,
+                        "status": ve.status,
+                        "fill_price": ve.fill_price,
+                        "fill_size": ve.fill_size,
+                        "cum_fill_size": ve.cum_fill_size,
+                        "fee": ve.fee,
+                        "fee_asset": ve.fee_asset,
+                        "exec_id": ve.exec_id,
+                        "trade_id": ve.trade_id,
+                        "error": ve.error,
+                        "venue_timestamp": ve.venue_timestamp,
+                        "received_at": ve.received_at,
+                    }
+                )
+            return rows
+
+    async def upsert_checkpoint(
+        self,
+        shard_key: str,
+        position_qty: float,
+        entry_price: float | None,
+        cash: float,
+        peak_equity: float,
+        realized_pnl: float,
+        turnover: float,
+        last_venue_event_id: int | None,
+        last_venue_event_at: datetime | None,
+        open_command_ids: str | None,
+        checkpoint_at: datetime,
+        session_id: str,
+        sequence_id: int,
+        bus_time: datetime,
+    ) -> int:
+        """SCD2 upsert for trade projection checkpoint.
+
+        Returns the new row id.
+        """
+        async with self.session() as s:
+            new_values: dict[str, Any] = {
+                "shard_key": shard_key,
+                "position_qty": position_qty,
+                "entry_price": entry_price,
+                "cash": cash,
+                "peak_equity": peak_equity,
+                "realized_pnl": realized_pnl,
+                "turnover": turnover,
+                "last_venue_event_id": last_venue_event_id,
+                "last_venue_event_at": last_venue_event_at,
+                "open_command_ids": open_command_ids,
+                "checkpoint_at": checkpoint_at,
+                "session_id": session_id,
+                "sequence_id": sequence_id,
+            }
+            row = await close_and_insert(
+                s,
+                TradeProjectionCheckpoint,
+                [TradeProjectionCheckpoint.shard_key == shard_key],
+                new_values,
+                bus_time,
+            )
+            await s.commit()
+            await s.refresh(row)
+            return int(row.id)
+
+    async def get_checkpoint(
+        self, shard_key: str, as_of: datetime
+    ) -> TradeProjectionCheckpointRow | None:
+        """Return the active checkpoint for a shard, or None."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(TradeProjectionCheckpoint).where(
+                    TradeProjectionCheckpoint.shard_key == shard_key,
+                    *where_active(TradeProjectionCheckpoint, as_of),
+                )
+            )
+            cp = result.scalars().first()
+            if cp is None:
+                return None
+            row: TradeProjectionCheckpointRow = {
+                "public_id": cp.public_id,
+                "shard_key": cp.shard_key,
+                "position_qty": cp.position_qty,
+                "entry_price": cp.entry_price,
+                "cash": cp.cash,
+                "peak_equity": cp.peak_equity,
+                "realized_pnl": cp.realized_pnl,
+                "turnover": cp.turnover,
+                "last_venue_event_id": cp.last_venue_event_id,
+                "last_venue_event_at": cp.last_venue_event_at,
+                "open_command_ids": cp.open_command_ids,
+                "checkpoint_at": cp.checkpoint_at,
+                "session_id": cp.session_id,
+            }
+            return row
+
+    async def get_fill_exec_ids_for_shard(self, shard_key: str) -> set[str]:
+        """Return all exec_id and trade_id values from fill events for a shard.
+
+        Used to rebuild the fill dedup set during recovery. Queries all
+        VenueEvent rows with event_type='fill_observed' for the shard.
+
+        Args:
+            shard_key: Shard to query.
+
+        Returns:
+            Set of exec_id and trade_id strings (non-null values only).
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(VenueEvent.exec_id, VenueEvent.trade_id).where(
+                    VenueEvent.shard_key == shard_key,
+                    VenueEvent.event_type == "fill_observed",
+                )
+            )
+            ids: set[str] = set()
+            for row in result.all():
+                if row[0]:
+                    ids.add(row[0])
+                if row[1]:
+                    ids.add(row[1])
+            return ids
+
+    async def get_latest_venue_event_id(self, shard_key: str) -> int | None:
+        """Return the highest VenueEvent.id for a shard, or None if empty.
+
+        Args:
+            shard_key: Shard to query.
+
+        Returns:
+            Highest id value, or None if no events exist.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(func.max(VenueEvent.id)).where(VenueEvent.shard_key == shard_key)
+            )
+            return result.scalar()
 
 
 _repository_cache: dict[str, Repository] = {}

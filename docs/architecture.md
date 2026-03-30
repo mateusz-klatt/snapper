@@ -3,6 +3,10 @@
 Snapper is a trading platform built with a layered architecture
 using asynchronous processing and ZeroMQ messaging.
 
+The trading path is facts-canonical: `Order` and `Execution` are the
+canonical business facts, while `Position`, `Balance`, and equity are
+derived projections that can be rebuilt from facts plus checkpoints.
+
 ## System Layers
 
 ```mermaid
@@ -12,7 +16,7 @@ flowchart TB
     end
 
     subgraph Application["Application Layer"]
-        A1["Strategies, Trader Coordinator, Process Manager"]
+        A1["Strategies, Trade Runtime, Trade Services, Process Manager"]
     end
 
     subgraph Infrastructure["Infrastructure Layer"]
@@ -72,9 +76,12 @@ Persistence layer with SQLAlchemy:
         `symbol_public_id` and `exchange` are resolved via `ensure_instrument()`
     - `Candle` — OHLCV candles
     - `Trade` — Transactions
-    - `Order` — Order history
-    - `Execution` — Order executions
-    - `Position` — Portfolio positions
+    - `Order` — Canonical order lifecycle facts (includes `mode`: `"live"` or `"paper"`)
+    - `Execution` — Canonical confirmed fills
+    - `Position` — Derived position projection (includes `mode`: `"live"` or `"paper"`)
+    - `TradeCommand` — Durable trade intent written by the engine before execution
+    - `VenueEvent` — Durable venue observations and acknowledgements persisted by executors
+    - `TradeProjectionCheckpoint` — Materialized position/balance snapshot for fast recovery
     - `Signal` — Signal events
     - `User` — System users
     - `Setting` — Settings (encrypted)
@@ -183,7 +190,8 @@ Every Data class carries `public_id: str` (UUID7), `type: Literal[...]`, and `ti
 
 Business logic:
 
-- **Engine** (`engine/`) — Trader Coordinator
+- **Engine** (`engine/`) — `TraderCoordinator` is the multi-symbol trade runtime coordinator; `TradingEngineService` is the per-instrument engine that turns signals into `TradeCommand` rows and order requests
+- **Trade** (`trade/`) — Trade-domain services: `trade_service.py` (in-memory command and position read model), `balance_service.py` (cash/equity/exposure projection), `outbox.py` (outbox-driven publishing), `reconciler.py` (stale-command scan and reconciliation failure feedback)
 - **Process Manager** (`process_manager/`) — Process management
 - **Services** (`services/`) — Application services
 - **Updaters** (`updaters/`) — Data updates (symbols, historical)
@@ -263,30 +271,37 @@ Command-line interface (Typer):
 
 ## Data Flow
 
-### Market Data Flow
+### Market Data and Signal Flow
 
 ```mermaid
 flowchart TB
-    Exchange["Exchange WebSocket"] --> Publisher["Market Data Publisher"]
-    Publisher -->|ZMQ XSUB| Broker["ZMQ Broker"]
-    Broker -->|ZMQ XPUB| Strategy
-    Broker -->|ZMQ XPUB| Bridge
-    Broker -->|ZMQ XPUB| Logger
-    Strategy --> Signal
+    Exchange["Exchange WebSocket / REST"] --> Publisher["Market Data Publisher"]
+    Publisher -->|market.*| Broker["ZMQ Broker"]
+    Broker -->|market.*| Strategy
+    Strategy -->|signals.*| Broker
+    Broker -->|signals.*| Runtime["Trade Runtime"]
+    Broker -->|market.*| Bridge
     Bridge --> WebSocket["WebSocket<br/>Dashboard"]
-    Signal --> Executor
-    Executor --> API["Exchange API"]
+    Runtime -->|orders.commands.*| Broker
+    Broker -->|orders.commands.*| Executor
+    Executor --> API["Exchange API / private WS"]
 ```
 
 ### Order Flow
 
 ```mermaid
 flowchart TB
-    Signal["Strategy Signal"] -->|ZMQ| Coordinator["Trader Coordinator"]
-    Coordinator -->|ZMQ| Executor["Order Executor"]
-    Executor --> API["Exchange API"]
-    API --> Confirmation["Execution Confirmation"]
-    Confirmation -->|ZMQ| Position["Position Update"]
+    Signal["Strategy Signal"] -->|ZMQ| Runtime["Trade Runtime"]
+    Runtime --> Engine["TradingEngineService\n(per instrument / shard)"]
+    Engine --> Command["TradeCommand\n(durable DB command log)"]
+    Command --> Dispatch["Command dispatch\n(direct ZMQ or OutboxDispatcher)"]
+    Dispatch -->|orders.commands.*| Executor["Order Executor"]
+    Executor --> Exchange["Exchange API / private WS"]
+    Exchange --> VenueEvent["VenueEvent\n(persisted by executor)"]
+    VenueEvent --> Facts["Order + Execution\nfacts in DB"]
+    Executor -->|orders.events.*| Runtime
+    Runtime --> Trade["TradeService\nshadow read model + checkpoint state"]
+    Trade --> Balance["BalanceService\nprojection"]
 ```
 
 ## Database
@@ -304,10 +319,15 @@ trades              -- Transaction history
 market_snapshots    -- Real-time market data (SCD2 per instrument, one active row each)
 
 -- Trading (joined to instruments via instrument_public_id)
-orders              -- Order history
+orders              -- Order history (mode: live/paper)
 executions          -- Order executions (joined to orders via order_public_id)
-positions           -- Portfolio positions
+positions           -- Portfolio positions (mode: live/paper)
 signals             -- Strategy signals
+
+-- Trade runtime (durable command path)
+trade_commands              -- Durable trade intent (engine writes before execution)
+venue_events                -- Durable venue observations and acknowledgements from executors
+trade_projection_checkpoints -- Materialized position/balance snapshots
 
 -- Symbol management
 symbols             -- Symbol identity + versioned attributes (SCD2)
@@ -334,6 +354,28 @@ Alembic manages migrations:
 snapper db-upgrade    # Apply migrations
 snapper db-downgrade  # Rollback
 ```
+
+## Trade Runtime
+
+The trade runtime supports two deployment modes controlled by the
+`use_durable_commands` database setting (default: `false`):
+
+-   **Dual-write** (default) — `TradingEngineService` writes `TradeCommand` rows and also
+    publishes directly to ZMQ. Durable tables are populated in the background,
+    and `direct_dispatched` prevents the outbox from replaying already sent
+    commands.
+-   **Durable** (outbox-driven) — `TradingEngineService` writes `TradeCommand` rows only.
+    `OutboxDispatcher` publishes from the database, and executor `VenueEvent`
+    writes become fail-closed on the accepted/fill paths.
+
+The `TraderCoordinator` class acts as the trade runtime coordinator and integrates
+`TradeService` (command lifecycle) and `BalanceService` (balance tracking) in both
+modes. When `use_durable_commands=true`, it also starts the outbox dispatcher and
+the reconciliation/circuit-breaker task. In dual-write mode, the runtime still
+writes `TradeCommand` rows, consumes `orders.events.*` to shadow-update trade
+projections, and persists checkpoints for recovery. Canonical `Order` and
+`Execution` rows are persisted on the exchange/executor path. Restart the trade
+runtime and executors after changing `use_durable_commands`.
 
 ## Bitemporal Model
 

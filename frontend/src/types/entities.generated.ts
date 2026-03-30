@@ -17,6 +17,7 @@ export type {
 type MarketDataExchange = 'kraken' | 'zonda' | 'walutomat' | 'polygon'
 type OrderExchange = 'paper' | 'kraken' | 'zonda' | 'walutomat'
 type TradeSide = 'buy' | 'sell'
+type Mode = 'live' | 'paper'
 
 /**
  * Canonical Candle entity.
@@ -109,6 +110,7 @@ export interface Order {
   clientOrderId: string
   instrument: string
   exchange: OrderExchange
+  mode?: Mode
   side: TradeSide
   status: string
   orderType: 'market' | 'limit' | 'stop' | 'stop_limit'
@@ -169,7 +171,7 @@ export interface OrderRequest {
   strategyId: string
   exchange: OrderExchange
   instrument: string
-  mode: 'live' | 'paper'
+  mode: Mode
   side: TradeSide
   orderType: 'market' | 'limit' | 'stop' | 'stop_limit'
   quantity: number
@@ -189,6 +191,7 @@ export interface Position {
   sessionId: string
   instrument: string
   exchange: OrderExchange
+  mode?: Mode
   quantity: number
   averagePrice: number
   unrealizedPnl: number

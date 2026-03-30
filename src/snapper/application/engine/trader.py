@@ -33,17 +33,27 @@ from snapper.application.process_manager.registry import register_process
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
 from snapper.application.services.settings import SettingsService
+from snapper.application.trade.balance_service import BalanceService
+from snapper.application.trade.outbox import OutboxDispatcher
+from snapper.application.trade.reconciler import ReconciliationLoop
+from snapper.application.trade.trade_service import TradeService
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_bootstrap_settings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
 from snapper.core.types import OrderExchange
+from snapper.core.types import OrderType
+from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import ExecutionRow
+from snapper.data.repository_types import TradeCommandRow
+from snapper.data.repository_types import VenueEventRow
 from snapper.infrastructure.symbols.functions import is_tradeable
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
+from snapper.interface.websocket.schemas import ExecutionMode
+from snapper.interface.websocket.schemas import TradeSide
 from snapper.messaging.infrastructure.gap_detector import GapDetector
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -54,10 +64,12 @@ from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import OrderEventData
+from snapper.messaging.schemas.data import OrderRequestData
 from snapper.messaging.schemas.data import SettingChangedData
 from snapper.messaging.schemas.data import SignalData
 from snapper.messaging.schemas.messages import MessageParseError
 from snapper.messaging.schemas.messages import parse_message
+from snapper.messaging.topics.builders import order_command_topic
 from snapper.messaging.topics.builders import parse_order_event_topic
 from snapper.messaging.topics.builders import parse_signal_topic
 
@@ -121,6 +133,9 @@ class TraderCoordinator(RegisterableProcess):
         self._tracker: SequenceTracker = SequenceTracker()
         self._gap_detector: GapDetector = GapDetector("trader")
         self._current_topic: str = ""
+        self.trade_service: TradeService = TradeService()
+        self.balance_service: BalanceService = BalanceService()
+        self.outbox: OutboxDispatcher | None = None
 
     @staticmethod
     def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
@@ -152,6 +167,7 @@ class TraderCoordinator(RegisterableProcess):
         self._setup_external_execution()
         self._setup_trading_components()
         self._setup_signal_subscriber()
+        self._setup_trade_services()
         await self._recover_engine_state()
         await self._run_trading_loop()
 
@@ -290,6 +306,9 @@ class TraderCoordinator(RegisterableProcess):
         specs_map: dict[str, dict[str, float]] = {
             instrument: {"tick_size": 0.01, "lot_size": 0.0001}
         }
+        repo_for_engine = (
+            self.repository if isinstance(self.repository, SQLAlchemyRepository) else None
+        )
         return TradingEngineService(
             instrument,
             execution_socket=self.msg_publisher,
@@ -297,6 +316,8 @@ class TraderCoordinator(RegisterableProcess):
             cfg=EngineConfigModel(),
             instrument_specs=specs_map,
             exchange=exchange,
+            repository=repo_for_engine,
+            outbox=self.outbox,
         )
 
     @staticmethod
@@ -350,7 +371,7 @@ class TraderCoordinator(RegisterableProcess):
         except Exception as e:
             logger.error(f"ZMQTrader: Error handling settings update: {e}")
 
-    def _dispatch_order_event(self, topic: str, payload: bytes) -> None:
+    async def _dispatch_order_event(self, topic: str, payload: bytes) -> None:
         """Dispatch order event to appropriate handler based on message type.
 
         Uses parse_message() to determine message type and routes accordingly:
@@ -368,7 +389,7 @@ class TraderCoordinator(RegisterableProcess):
             logger.error(f"ZMQTrader: Invalid orders.events payload on {topic}: {e}")
             return
         if isinstance(msg, ExecutionData):
-            self._handle_execution_fill(topic, msg)
+            await self._handle_execution_fill(topic, msg)
         elif isinstance(msg, OrderData):
             self._handle_order_status(topic, msg)
         elif isinstance(msg, OrderEventData):
@@ -397,7 +418,7 @@ class TraderCoordinator(RegisterableProcess):
                 return engine
         return None
 
-    def _handle_execution_fill(self, topic: str, fill: ExecutionData) -> None:
+    async def _handle_execution_fill(self, topic: str, fill: ExecutionData) -> None:
         """Handle execution fill event from ZMQ.
 
         Finds the matching engine and applies the fill using delta semantics.
@@ -432,6 +453,7 @@ class TraderCoordinator(RegisterableProcess):
                 f"{fill.instrument} on {parsed.exchange} "
                 f"(pos={engine.position_qty:.6f}, status={fill.status})"
             )
+            await self._sync_fill_to_trade_service(fill, engine)
         else:
             logger.info(
                 f"ZMQTrader: Duplicate fill ignored - {fill.client_order_id} "
@@ -488,6 +510,7 @@ class TraderCoordinator(RegisterableProcess):
                 f"ZMQTrader: Order status - {order_status.client_order_id} {parsed.suffix} "
                 f"{order_status.instrument} on {parsed.exchange}"
             )
+        self._sync_status_to_trade_service(order_status, parsed)
 
     def _handle_order_event(self, topic: str, order_event: OrderEventData) -> None:
         """Handle lightweight order event from ZMQ (cancel/replace confirmations).
@@ -540,6 +563,189 @@ class TraderCoordinator(RegisterableProcess):
                 f"ZMQTrader: Order event - {order_event.client_order_id} {parsed.suffix} "
                 f"{order_event.instrument} on {parsed.exchange}"
             )
+        self._sync_order_event_to_trade_service(order_event, parsed)
+
+    async def _sync_fill_to_trade_service(
+        self, fill: ExecutionData, engine: TradingEngineService
+    ) -> None:
+        """Shadow-write fill to TradeService and persist checkpoint.
+
+        Constructs a VenueEventRow-like dict from the ZMQ ExecutionData,
+        applies it to TradeService, updates BalanceService, and writes
+        a checkpoint to DB for durable recovery.
+
+        Args:
+            fill: Execution fill data from ZMQ.
+            engine: Engine that processed the fill (for shard_key).
+        """
+        shard_key = engine._shard_key
+        venue_event: VenueEventRow = {
+            "id": int(time.monotonic_ns()),
+            "public_id": "",
+            "timestamp": datetime.now(UTC),
+            "session_id": fill.session_id,
+            "sequence_id": fill.sequence_id,
+            "event_type": "fill_observed",
+            "shard_key": shard_key,
+            "command_public_id": None,
+            "exchange": fill.exchange,
+            "instrument": fill.instrument,
+            "mode": engine.mode,
+            "exchange_order_id": fill.exchange_order_id,
+            "client_order_id": fill.client_order_id,
+            "venue_client_id": None,
+            "side": fill.side,
+            "status": fill.status,
+            "fill_price": fill.last_price,
+            "fill_size": fill.last_size,
+            "cum_fill_size": fill.size,
+            "fee": fill.fee,
+            "fee_asset": fill.fee_asset,
+            "exec_id": None,
+            "trade_id": fill.trade_id,
+            "error": None,
+            "venue_timestamp": fill.executed_at,
+            "received_at": datetime.now(UTC),
+        }
+        self.trade_service.apply_venue_event(venue_event)
+        pos = self.trade_service.get_position(shard_key)
+        self.balance_service.on_position_changed(
+            shard_key=shard_key,
+            position_qty=pos.position_qty,
+            entry_price=pos.entry_price,
+            cash=self.trade_service.get_equity(shard_key),
+            peak_equity=self.trade_service.get_peak_equity(shard_key),
+            realized_pnl=pos.realized_pnl,
+        )
+        await self._persist_checkpoint(shard_key)
+
+    def _sync_status_to_trade_service(self, order_status: OrderData, parsed: Any) -> None:
+        """Shadow-write order status to TradeService.
+
+        Maps ZMQ OrderData status events (accepted, rejected) to
+        synthetic VenueEventRow and applies to TradeService.
+
+        Args:
+            order_status: Order status data from ZMQ.
+            parsed: Parsed topic with exchange, instrument, suffix.
+        """
+        mode = "paper" if parsed.exchange == "paper" else "live"
+        shard_key = f"{parsed.exchange}.{parsed.instrument}.{mode}"
+        event_type_map = {
+            "accepted": "order_accepted",
+            "rejected": "order_rejected",
+            "submitted": "order_accepted",
+        }
+        event_type = event_type_map.get(parsed.suffix, "order_accepted")
+        venue_event: VenueEventRow = {
+            "id": int(time.monotonic_ns()),
+            "public_id": "",
+            "timestamp": datetime.now(UTC),
+            "session_id": order_status.session_id,
+            "sequence_id": order_status.sequence_id,
+            "event_type": event_type,
+            "shard_key": shard_key,
+            "command_public_id": None,
+            "exchange": order_status.exchange,
+            "instrument": order_status.instrument,
+            "mode": mode,
+            "exchange_order_id": order_status.exchange_order_id,
+            "client_order_id": order_status.client_order_id,
+            "venue_client_id": None,
+            "side": order_status.side,
+            "status": parsed.suffix,
+            "fill_price": None,
+            "fill_size": None,
+            "cum_fill_size": None,
+            "fee": None,
+            "fee_asset": None,
+            "exec_id": None,
+            "trade_id": None,
+            "error": order_status.error,
+            "venue_timestamp": None,
+            "received_at": datetime.now(UTC),
+        }
+        self.trade_service.apply_venue_event(venue_event)
+
+    def _sync_order_event_to_trade_service(self, order_event: OrderEventData, parsed: Any) -> None:
+        """Shadow-write order event (cancel/expire) to TradeService.
+
+        Maps ZMQ OrderEventData to synthetic VenueEventRow and applies
+        to TradeService for terminal state tracking.
+
+        Args:
+            order_event: Order event data from ZMQ.
+            parsed: Parsed topic with exchange, instrument, suffix.
+        """
+        if parsed.suffix not in ("cancelled", "expired"):
+            return
+        mode = "paper" if parsed.exchange == "paper" else "live"
+        shard_key = f"{parsed.exchange}.{parsed.instrument}.{mode}"
+        venue_event: VenueEventRow = {
+            "id": int(time.monotonic_ns()),
+            "public_id": "",
+            "timestamp": datetime.now(UTC),
+            "session_id": order_event.session_id,
+            "sequence_id": order_event.sequence_id,
+            "event_type": "order_terminal",
+            "shard_key": shard_key,
+            "command_public_id": None,
+            "exchange": order_event.exchange,
+            "instrument": order_event.instrument,
+            "mode": mode,
+            "exchange_order_id": order_event.exchange_order_id,
+            "client_order_id": order_event.client_order_id,
+            "venue_client_id": None,
+            "side": None,
+            "status": parsed.suffix,
+            "fill_price": None,
+            "fill_size": None,
+            "cum_fill_size": None,
+            "fee": None,
+            "fee_asset": None,
+            "exec_id": None,
+            "trade_id": None,
+            "error": None,
+            "venue_timestamp": None,
+            "received_at": datetime.now(UTC),
+        }
+        self.trade_service.apply_venue_event(venue_event)
+
+    async def _persist_checkpoint(self, shard_key: str) -> None:
+        """Write trade projection checkpoint to DB.
+
+        Persists the current shard state for durable recovery. Silent
+        no-op if repository is not SQLAlchemyRepository.
+
+        Args:
+            shard_key: Shard to checkpoint.
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return
+        snap = self.trade_service.snapshot_for_checkpoint(shard_key)
+        now = datetime.now(UTC)
+        ep = snap["entry_price"]
+        oci = snap["open_command_ids"]
+        real_watermark = await self.repository.get_latest_venue_event_id(shard_key)
+        try:
+            await self.repository.upsert_checkpoint(
+                shard_key=shard_key,
+                position_qty=cast(float, snap["position_qty"]),
+                entry_price=cast(float, ep) if ep is not None else None,
+                cash=cast(float, snap["cash"]),
+                peak_equity=cast(float, snap["peak_equity"]),
+                realized_pnl=cast(float, snap["realized_pnl"]),
+                turnover=cast(float, snap["turnover"]),
+                last_venue_event_id=real_watermark,
+                last_venue_event_at=now if real_watermark is not None else None,
+                open_command_ids=cast(str, oci) if oci is not None else None,
+                checkpoint_at=now,
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence(f"checkpoint.{shard_key}"),
+                bus_time=now,
+            )
+        except Exception:
+            logger.exception(f"TraderCoordinator: Failed to persist checkpoint for {shard_key}")
 
     async def stop(self) -> None:
         """Stop the trader coordinator and cleanup resources.
@@ -547,6 +753,8 @@ class TraderCoordinator(RegisterableProcess):
         Closes all ZMQ sockets and terminates contexts.
         """
         logger.info("Stopping ZMQ Signal TraderCoordinator")
+        if self.outbox is not None:
+            self.outbox.stop()
         if self.signal_subscriber:
             self.signal_subscriber.setsockopt(zmq.LINGER, 0)
             self.signal_subscriber.close()
@@ -638,7 +846,81 @@ class TraderCoordinator(RegisterableProcess):
         self.signal_subscriber.subscribe("system.settings")
         logger.info("ZMQTrader: Subscribing to orders.events. (fills and status updates)")
         self.signal_subscriber.subscribe("orders.events.")
-        logger.info("ZMQTrader: Signal subscriber setup complete")
+
+    def _setup_trade_services(self) -> None:
+        """Initialize trade domain services and optional outbox dispatcher.
+
+        TradeService and BalanceService are initialized in __init__.
+        OutboxDispatcher is created when use_durable_commands is enabled
+        in settings. Otherwise, dual-write mode: engine publishes
+        directly to ZMQ while also writing TradeCommand to DB.
+        """
+        use_durable = getattr(self.settings, "use_durable_commands", False)
+        if use_durable and isinstance(self.repository, SQLAlchemyRepository):
+            self.outbox = OutboxDispatcher(
+                repository=self.repository,
+                publish_fn=self._outbox_publish,
+                poll_interval=0.05,
+            )
+            logger.info("TraderCoordinator: durable command mode (outbox active)")
+        else:
+            logger.info("TraderCoordinator: dual-write mode (direct ZMQ + DB audit)")
+
+    def _create_reconciliation_tasks(self) -> list[asyncio.Task[None]]:
+        """Create per-exchange reconciliation loop tasks if durable mode is enabled.
+
+        One ReconciliationLoop per configured exchange, each querying
+        TradeCommand.exchange with exact match. Runs in the coordinator
+        process sharing the TradeService for circuit breaker state.
+
+        Returns:
+            List of asyncio tasks (empty if not in durable mode).
+        """
+        use_durable = getattr(self.settings, "use_durable_commands", False)
+        if not use_durable or not isinstance(self.repository, SQLAlchemyRepository):
+            return []
+        exchanges: list[str] = list(get_args(OrderExchange))
+        tasks: list[asyncio.Task[None]] = []
+        for exchange_name in exchanges:
+            recon = ReconciliationLoop(
+                exchange_name=exchange_name,
+                repository=self.repository,
+                trade_service=self.trade_service,
+                interval_seconds=60.0,
+            )
+            tasks.append(asyncio.create_task(recon.run()))
+        logger.info(f"TraderCoordinator: reconciliation loops enabled for {exchanges}")
+        return tasks
+
+    async def _outbox_publish(self, cmd: TradeCommandRow) -> None:
+        """Publish a trade command from outbox to ZMQ.
+
+        Converts a TradeCommandRow dict to OrderRequestData and publishes
+        to the order command topic.
+
+        Args:
+            cmd: TradeCommandRow dict from the outbox dispatcher.
+        """
+        assert self.msg_publisher is not None
+        topic = order_command_topic(
+            cast(OrderExchange, cmd["exchange"]), cmd["instrument"], "submit"
+        )
+        order = OrderRequestData(
+            public_id=cmd["client_order_id"],
+            timestamp=datetime.now(UTC),
+            session_id=cmd["session_id"],
+            sequence_id=cmd["sequence_id"],
+            strategy_id=cmd["strategy_id"],
+            instrument=cmd["instrument"],
+            mode=cast(ExecutionMode, cmd["mode"]),
+            side=cast(TradeSide, cmd["side"]),
+            order_type=cast(OrderType, cmd["order_type"]),
+            quantity=cmd["quantity"],
+            price=cmd["price"],
+            client_order_id=cmd["client_order_id"],
+            exchange=cast(OrderExchange, cmd["exchange"]),
+        )
+        await self.msg_publisher.send(topic, order)
 
     async def _run_trading_loop(self) -> None:
         """Run the main trading loop.
@@ -650,6 +932,9 @@ class TraderCoordinator(RegisterableProcess):
             asyncio.create_task(self._listen_signals()),
             asyncio.create_task(self._signal_health_monitor()),
         ]
+        if self.outbox is not None:
+            tasks.append(asyncio.create_task(self.outbox.run()))
+        tasks.extend(self._create_reconciliation_tasks())
         try:
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
@@ -685,7 +970,7 @@ class TraderCoordinator(RegisterableProcess):
                     self._handle_settings_update(msg_bytes)
                     continue
                 if topic_str.startswith("orders.events."):
-                    self._dispatch_order_event(topic_str, msg_bytes)
+                    await self._dispatch_order_event(topic_str, msg_bytes)
                     continue
                 signal = SignalData.from_json(msg_bytes.decode())
                 self._gap_detector.check(topic_str, signal.session_id, signal.sequence_id)
@@ -734,6 +1019,10 @@ class TraderCoordinator(RegisterableProcess):
             logger.warning(f"ZMQTrader: Invalid signal (missing or invalid price): {signal}")
             return
         engine_key = f"{instrument}@{exchange}-{mode}"
+        shard_key = f"{exchange}.{instrument}.{mode}"
+        if self.trade_service.is_halted(shard_key):
+            logger.warning(f"ZMQTrader: shard {shard_key} is halted, dropping signal")
+            return
         assert (
             self.execution_publisher is not None
         ), "execution_publisher not initialized - _setup_external_execution must be called first"
@@ -751,6 +1040,10 @@ class TraderCoordinator(RegisterableProcess):
                 instrument: {"tick_size": 0.01, "lot_size": 0.0001}
             }
             assert self.msg_publisher is not None, "MessagePublisher not initialized"
+
+            repo_for_engine = (
+                self.repository if isinstance(self.repository, SQLAlchemyRepository) else None
+            )
             self.engines[engine_key] = TradingEngineService(
                 instrument,
                 execution_socket=self.msg_publisher,
@@ -758,6 +1051,8 @@ class TraderCoordinator(RegisterableProcess):
                 cfg=EngineConfigModel(),
                 instrument_specs=specs_map,
                 exchange=exchange,
+                repository=repo_for_engine,
+                outbox=self.outbox,
             )
             self.last_signal_time[engine_key] = 0.0
         self.last_signal_time[engine_key] = time.time()

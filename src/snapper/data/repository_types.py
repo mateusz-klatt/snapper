@@ -171,6 +171,7 @@ class OrderRow(TypedDict):
     sequence_id: int
     instrument: str
     exchange: str
+    mode: str
     client_order_id: str
     exchange_order_id: str | None
     created_at: datetime
@@ -216,6 +217,7 @@ class PositionRow(TypedDict):
     sequence_id: int
     instrument: str
     exchange: str
+    mode: str
     quantity: float
     average_price: float
     unrealized_pnl: float | None
@@ -234,3 +236,84 @@ class SettingRow(TypedDict):
     category: str
     description: str | None
     updated_by: str | None
+
+
+class TradeCommandRow(TypedDict):
+    """Row dict returned by trade command queries."""
+
+    public_id: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+    command_type: str
+    shard_key: str
+    exchange: str
+    instrument: str
+    mode: str
+    strategy_id: str
+    client_order_id: str
+    venue_client_id: str
+    idempotency_key: str | None
+    side: str
+    order_type: str
+    quantity: float
+    price: float | None
+    status: str
+    attempt_count: int
+    last_error: str | None
+    created_at: datetime
+    dispatched_at: datetime | None
+    acked_at: datetime | None
+    terminal_at: datetime | None
+    exchange_order_id: str | None
+    supersedes_command_id: str | None
+    correlation_id: str
+
+
+class VenueEventRow(TypedDict):
+    """Row dict returned by venue event queries."""
+
+    id: int
+    public_id: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+    event_type: str
+    shard_key: str
+    command_public_id: str | None
+    exchange: str
+    instrument: str
+    mode: str
+    exchange_order_id: str | None
+    client_order_id: str | None
+    venue_client_id: str | None
+    side: str | None
+    status: str | None
+    fill_price: float | None
+    fill_size: float | None
+    cum_fill_size: float | None
+    fee: float | None
+    fee_asset: str | None
+    exec_id: str | None
+    trade_id: str | None
+    error: str | None
+    venue_timestamp: datetime | None
+    received_at: datetime
+
+
+class TradeProjectionCheckpointRow(TypedDict):
+    """Row dict returned by checkpoint queries."""
+
+    public_id: str
+    shard_key: str
+    position_qty: float
+    entry_price: float | None
+    cash: float
+    peak_equity: float
+    realized_pnl: float
+    turnover: float
+    last_venue_event_id: int | None
+    last_venue_event_at: datetime | None
+    open_command_ids: str | None
+    checkpoint_at: datetime
+    session_id: str

@@ -22,6 +22,7 @@ import pytest
 import zmq
 
 import snapper.messaging.executors.base as base_module
+from snapper.data.repository import SQLAlchemyRepository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
@@ -5636,3 +5637,135 @@ class TestExecutorRecovery:
         ex.repository = mock_repo
         await ex._recover_pending_orders("kraken")
         assert len(ex.pending_orders) == 0
+
+
+@pytest.mark.asyncio
+async def test_record_venue_event_writes_to_sqlalchemy_repo() -> None:
+    """Venue event is written to DB when repository is SQLAlchemyRepository.
+
+    Given: an executor with a mocked SQLAlchemyRepository as repository,
+    When: _record_venue_event is called with fill_observed event,
+    Then: insert_venue_event is called on the repository.
+    """
+    ex: Any = MergedDummyExecutor()
+    mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+    mock_repo.insert_venue_event = AsyncMock(return_value=1)
+    ex.repository = mock_repo
+    await ex._record_venue_event(
+        event_type="fill_observed",
+        exchange_name="kraken",
+        instrument="BTC-USD",
+        exchange_order_id="ex-1",
+        client_order_id="cid-1",
+        side="buy",
+        status="filled",
+        fill_price=50000.0,
+        fill_size=0.5,
+    )
+    mock_repo.insert_venue_event.assert_called_once()
+    call_kwargs = mock_repo.insert_venue_event.call_args.kwargs
+    assert call_kwargs["event_type"] == "fill_observed"
+    assert call_kwargs["shard_key"] == "kraken.BTC-USD.live"
+
+
+@pytest.mark.asyncio
+async def test_record_venue_event_handles_db_error() -> None:
+    """Venue event DB write failure is logged but does not propagate.
+
+    Given: an executor with a SQLAlchemyRepository that raises on insert,
+    When: _record_venue_event is called,
+    Then: no exception propagates to the caller.
+    """
+    ex: Any = MergedDummyExecutor()
+    mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+    mock_repo.insert_venue_event = AsyncMock(side_effect=RuntimeError("DB down"))
+    ex.repository = mock_repo
+    await ex._record_venue_event(
+        event_type="fill_observed",
+        exchange_name="kraken",
+        instrument="BTC-USD",
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_cancellation_records_terminal_venue_event() -> None:
+    """Cancellation records an order_terminal venue event.
+
+    Given: an executor with a pending order and SQLAlchemyRepository,
+    When: _handle_cancellation is called with a cancelled execution,
+    Then: _record_venue_event is called with event_type='order_terminal'.
+    """
+    ex: Any = MergedDummyExecutor()
+    mock_client = AsyncMock()
+    mock_client._log_order_update_to_db = AsyncMock()
+    ex.exchange_client = mock_client
+    mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+    mock_repo.insert_venue_event = AsyncMock(return_value=1)
+    ex.repository = mock_repo
+    order_req = SimpleNamespace(instrument="BTC-USD", client_order_id="cid-1")
+    ex.pending_orders["cid-1"] = base_module.PendingOrderState(
+        request=order_req, db_order_id=1, order_public_id="op-1"
+    )
+    ex.client_by_exchange["ex-1"] = "cid-1"
+    execution = SimpleNamespace(exec_type="canceled", symbol="BTC-USD")
+    result = await ex._handle_cancellation(execution, "ex-1", "cid-1", "kraken")
+    assert result is True
+    mock_repo.insert_venue_event.assert_called_once()
+    call_kwargs = mock_repo.insert_venue_event.call_args.kwargs
+    assert call_kwargs["event_type"] == "order_terminal"
+    assert call_kwargs["instrument"] == "BTC-USD"
+
+
+@pytest.mark.asyncio
+async def test_handle_cancellation_without_pending_uses_execution_symbol() -> None:
+    """Cancellation for unknown order uses execution symbol for venue event.
+
+    Given: an executor with no pending order for the client_order_id,
+    When: _handle_cancellation is called with an expired execution,
+    Then: instrument is taken from execution.symbol as fallback.
+    """
+    ex: Any = MergedDummyExecutor()
+    mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+    mock_repo.insert_venue_event = AsyncMock(return_value=1)
+    ex.repository = mock_repo
+    ex.exchange_client = None
+    execution = SimpleNamespace(exec_type="expired", symbol="ETH-USD")
+    result = await ex._handle_cancellation(execution, "ex-99", "cid-99", "kraken")
+    assert result is True
+    call_kwargs = mock_repo.insert_venue_event.call_args.kwargs
+    assert call_kwargs["instrument"] == "ETH-USD"
+    assert call_kwargs["status"] == "expired"
+
+
+@pytest.mark.asyncio
+async def test_record_venue_event_fail_closed_in_durable_mode() -> None:
+    """VenueEvent write failure raises in durable command mode.
+
+    Given: an executor with use_durable_commands=True and a failing repo,
+    When: _record_venue_event is called,
+    Then: RuntimeError propagates (fail-closed).
+    """
+    ex: Any = MergedDummyExecutor()
+    mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+    mock_repo.insert_venue_event = AsyncMock(side_effect=RuntimeError("DB down"))
+    ex.repository = mock_repo
+    ex.settings = SimpleNamespace(use_durable_commands=True)
+    with pytest.raises(RuntimeError, match="DB down"):
+        await ex._record_venue_event(
+            event_type="fill_observed",
+            exchange_name="kraken",
+            instrument="BTC-USD",
+        )
+
+
+def test_create_reconciliation_task_always_none() -> None:
+    """Executor reconciliation always returns None (runs in coordinator).
+
+    Given: an executor with any settings,
+    When: _create_reconciliation_task is called,
+    Then: None is returned because reconciliation runs in coordinator.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.settings = SimpleNamespace(use_durable_commands=True)
+    task = ex._create_reconciliation_task("kraken")
+    assert task is None

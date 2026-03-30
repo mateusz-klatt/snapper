@@ -1,6 +1,6 @@
 # Snapper
 
-Trading platform with market data collection, trading engine, and backtester.
+Trading platform with market data collection, trade runtime, and backtester.
 Supports Kraken, Zonda, Walutomat exchanges and Polygon.io data.
 
 ## Quick Steps
@@ -22,7 +22,9 @@ Open <http://localhost:8000/> and log in:
 
 - **Market data collection** — WebSocket and REST API from Kraken, Zonda,
   Walutomat, Polygon.io
-- **Trading engine** — Order execution in live and paper trading modes
+- **Trade runtime** — Facts-canonical live and paper trading with canonical
+    Order and Execution facts, rebuildable Position and Balance projections,
+    and optional durable command mode
 - **Strategies** — Framework for creating strategies based on RSI, MACD,
   cointegration, and TA-Lib indicators
 - **ZeroMQ messaging** — Pub/sub architecture for market data and signals
@@ -100,6 +102,19 @@ snapper server
 
 Dashboard available at `http://localhost:8000/`.
 
+### Trade Runtime Mode
+
+The trade runtime supports two DB-backed modes controlled by the
+`use_durable_commands` setting:
+
+- `false` (default) — dual-write mode. The engine writes durable command rows
+    and still publishes directly to ZMQ.
+- `true` — outbox-driven durable mode. Commands are published from the
+    database outbox and executor venue-event persistence becomes fail-closed.
+
+Restart `snapper trade-zmq` and the relevant executors after changing this
+setting.
+
 ## System Overview
 
 ```mermaid
@@ -120,14 +135,19 @@ flowchart TB
     subgraph Components["Components"]
         Feed["Feed Publisher"]
         Strategies["ZMQ Strategies"]
-        Executor["Order Executor"]
+        Runtime["Trade Runtime<br/>Coordinator + Per-Symbol Engines + Trade/Balance Services"]
+        Executor["Order Executor<br/>Venue Adapter"]
     end
 
     Dashboard --> FastAPI
     FastAPI --> Bridge
-    Bridge --> Broker
-    Broker --> Feed
+    Feed --> Broker
+    Strategies --> Broker
     Broker --> Strategies
+    Runtime --> Broker
+    Broker --> Bridge
+    Broker --> Runtime
+    Executor --> Broker
     Broker --> Executor
 ```
 
@@ -138,7 +158,7 @@ flowchart TB
 ```bash
 snapper server              # Start FastAPI server
 snapper broker              # Start ZMQ broker
-snapper trade-zmq           # Trading coordinator
+snapper trade-zmq           # Trade runtime / coordinator
 snapper executor            # Order executor
 snapper feed                # Market data publisher
 ```

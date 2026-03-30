@@ -10,7 +10,8 @@ flowchart TB
     subgraph Publishers
         P1["Publisher<br/>Feed"]
         P2["Publisher<br/>Strategy"]
-        P3["Publisher<br/>Executor"]
+        P3["Publisher<br/>Trade Runtime"]
+        P4["Publisher<br/>Executor"]
     end
 
     subgraph Broker["ZMQ Broker"]
@@ -22,16 +23,21 @@ flowchart TB
 
     subgraph Subscribers
         S1["Subscriber<br/>Strategy"]
-        S2["Subscriber<br/>Bridge"]
-        S3["Subscriber<br/>Logger"]
+        S2["Subscriber<br/>Trade Runtime"]
+        S3["Subscriber<br/>Executor"]
+        S4["Subscriber<br/>Bridge"]
+        S5["Subscriber<br/>Logger"]
     end
 
     P1 -->|connect| XSUB
     P2 -->|connect| XSUB
     P3 -->|connect| XSUB
+    P4 -->|connect| XSUB
     XPUB -->|connect| S1
     XPUB -->|connect| S2
     XPUB -->|connect| S3
+    XPUB -->|connect| S4
+    XPUB -->|connect| S5
 ```
 
 ## XPUB/XSUB Broker
@@ -95,6 +101,9 @@ Topic format varies by category (see per-category tables below).
 | `orders.events.kraken.BTC-USD.expired` | Order expired events |
 | `orders.events.kraken.BTC-USD.replaced` | Order replaced events |
 
+`TradeCommand`, `VenueEvent`, and `TradeProjectionCheckpoint` are durable
+database artifacts used by the trade runtime. They are not additional ZMQ topics.
+
 ### System
 
 | Topic | Description |
@@ -124,10 +133,10 @@ Every Data class inherits from `StrictDataSchema` and carries:
 | `session_id` | string | UUID7 of the producer process session (required at construction) |
 | `sequence_id` | int | Monotonic counter per topic within the session (required at construction) |
 
-`session_id` and `sequence_id` are stream-provenance fields stamped automatically by
-`MessagePublisher`. Counters are keyed by destination DB table (not ZMQ topic), so all
-messages landing in the same table share a gap-free sequence. Consumers can use these
-fields to detect message loss and producer restarts.
+`session_id` and `sequence_id` are allocated by producers from a shared
+`SequenceTracker` before the payload is constructed. `MessagePublisher.send()`
+serializes and forwards the already-complete payload without modifying provenance.
+Consumers can use these fields to detect message loss and producer restarts.
 
 The old `messaging.schemas.messages` module still exists but only contains `parse_message()` and `MessageParseError`.
 
@@ -161,7 +170,7 @@ tick = TickData(
 | `volume` | float | Volume |
 | `timestamp` | datetime | Timestamp |
 | `session_id` | string | Producer session (inherited) |
-| `sequence_id` | int | Per-table counter (inherited) |
+| `sequence_id` | int | Monotonic counter per topic or logical stream (inherited) |
 
 ### CandleData
 
@@ -314,14 +323,16 @@ heartbeat = HeartbeatData(
 
 ### MessagePublisher (recommended)
 
-`MessagePublisher` stamps `session_id` and `sequence_id` on each outgoing message and
-derives the ZMQ topic automatically from the message type. It wraps a `ValidatedPublisher`
-and a `SequenceTracker`.
+`MessagePublisher` sends fully constructed payloads to an explicit `stream_key`.
+Producers allocate `session_id` and `sequence_id` from a shared `SequenceTracker`
+before constructing the payload, then pass both the topic and payload to
+`MessagePublisher.send()`.
 
 ```python
 import zmq.asyncio
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher, apply_hwm, HWM_MARKET_DATA
 from snapper.messaging.infrastructure.publisher import MessagePublisher, SequenceTracker
+from snapper.messaging.topics.builders import topic_for_message
 
 ctx = zmq.asyncio.Context()
 raw_socket = ctx.socket(zmq.PUB)
@@ -331,9 +342,14 @@ raw_socket.connect("tcp://127.0.0.1:7500")
 tracker = SequenceTracker()
 publisher = MessagePublisher(ValidatedPublisher(raw_socket), tracker)
 
-await publisher.publish(candle_data)
+topic = topic_for_message(candle_data)
+
+await publisher.send(topic, candle_data)
 publisher.close()
 ```
+
+For brevity, the example assumes `candle_data` was already constructed with
+`session_id` and `sequence_id` allocated from `tracker`.
 
 One `SequenceTracker` per component process; all `MessagePublisher` instances within that
 component share it. Counters survive socket reconnects — only a full component restart
@@ -343,9 +359,9 @@ creates a new session.
 
 `SequenceTracker` maintains monotonic counters keyed by **ZMQ topic** (e.g.
 `market.kraken.BTC-USD.candles.1m`, `orders.events.kraken.BTC-USD.executed`).
-Each topic has its own independent counter. `MessagePublisher.publish()` derives
-the topic via `topic_for_message(data)` and uses it as the counter key
-automatically.
+Each topic has its own independent counter. Producers allocate provenance using
+the final ZMQ topic string and then pass that same topic to
+`MessagePublisher.send()`.
 
 For DB-only writes that do not flow over ZMQ (instruments, users, settings seed
 data), the counter key is the destination table name as a logical identifier.
@@ -357,12 +373,13 @@ For paper market data or other cases where the topic cannot be derived from the
 payload alone, pass an explicit `topic` override:
 
 ```python
-await publisher.publish(tick_data, topic="market.paper.kraken.BTC-USD.ticks")
+topic = "market.paper.kraken.BTC-USD.ticks"
+await publisher.send(topic, tick_data)
 ```
 
 ### ValidatedPublisher (low-level)
 
-Direct access to the socket wrapper without provenance stamping:
+Direct access to the socket wrapper without `StrictDataSchema` serialization helpers:
 
 ```python
 import zmq.asyncio
@@ -470,9 +487,18 @@ snapper executor -e kraken
 Executor:
 
 1.  Subscribes to `orders.commands.{exchange}.*` topics
-2.  Receives OrderRequestData
+2.  Receives `OrderRequestData` from the trade runtime, either from the direct
+    dual-write path or the durable outbox dispatcher
 3.  Executes order via exchange API
-4.  Publishes ExecutionData or OrderData
+4.  Persists `VenueEvent` rows for accepted, fill, and terminal observations
+5.  Publishes `ExecutionData` or `OrderData`
+
+In durable mode, failed `VenueEvent` persistence is treated as fail-closed on
+the accepted/fill paths and aborts downstream publish from the executor.
+
+The trade runtime subscribes to `orders.events.*` to keep `TradeService` and
+`BalanceService` in sync during normal operation. `VenueEvent` rows are used as
+the durable recovery and reconciliation backbone.
 
 ## ZMQ-WebSocket Bridge
 
@@ -525,7 +551,7 @@ Rules:
 processed, `False` when rejected as unstamped.
 
 `GapDetector` is wired into the ZMQ-WebSocket bridge and into subscriber loops inside the
-executor, trader coordinator, and strategy `_listen_loop()`.
+executor, trade runtime coordinator, and strategy `_listen_loop()`.
 
 ## Message Logger
 
@@ -574,7 +600,7 @@ ZMQ sockets use explicit high water marks via `apply_hwm()` from
 
 | Tier | Constant | Value | Used by |
 | ---- | -------- | ----- | ------- |
-| Order flow | `HWM_ORDER_FLOW` | 0 (unlimited) | Executor, trader coordinator |
+| Order flow | `HWM_ORDER_FLOW` | 0 (unlimited) | Executors, trade runtime coordinator |
 | Broker | `HWM_BROKER` | 10 000 | XSUB (rcvhwm), XPUB (sndhwm) |
 | Market data | `HWM_MARKET_DATA` | 5 000 | Publishers, strategies, bridge, settings, symbol updaters |
 | Audit | `HWM_AUDIT` | 10 000 | Message logger |
@@ -593,12 +619,14 @@ Sockets automatically:
 ## Topic Derivation
 
 `topic_for_message()` in `snapper.messaging.topics.builders` derives the canonical ZMQ
-topic from a typed Data class. `MessagePublisher.publish()` calls it automatically.
+topic from a typed Data class. Producers typically call it before
+`MessagePublisher.send()`.
 
 ```python
 from snapper.messaging.topics.builders import topic_for_message
 
 topic = topic_for_message(candle_data)
+await publisher.send(topic, candle_data)
 ```
 
 Paper market data topics include a `source_exchange` segment that is not carried in the

@@ -1,5 +1,7 @@
 """Tests for TradingEngineService and EngineConfigModel."""
 
+import asyncio
+import contextlib
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
@@ -18,7 +20,11 @@ from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.portfolio.models import PositionStateModel
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
+from snapper.application.trade.balance_service import BalanceService
+from snapper.application.trade.trade_service import TradeService
+from snapper.data.repository import SQLAlchemyRepository
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import SignalData
 
 
@@ -885,3 +891,333 @@ async def test_send_order_converts_timestamp_to_datetime() -> None:
     assert socket.sent
     order = socket.sent[0]
     assert order.signaled_at is not None
+
+
+@pytest.mark.asyncio
+async def test_send_order_writes_trade_command_to_db() -> None:
+    """Verify _send_order writes a TradeCommand to DB when repository is configured.
+
+    Given: a TradingEngine with a mocked repository and outbox,
+    When: _send_order is called,
+    Then: insert_trade_command is called and outbox is notified.
+    """
+    socket = _SocketStub()
+    repo_mock = AsyncMock()
+    repo_mock.insert_trade_command = AsyncMock(return_value=(1, "cmd-pub-1"))
+    outbox_mock = MagicMock()
+    engine = TradingEngineService(
+        instrument="BTC-USD",
+        execution_socket=cast(Any, socket),
+        cfg=EngineConfigModel(initial_cash=1_000.0, fee_bps=10.0),
+        exchange="paper",
+        repository=repo_mock,
+        outbox=outbox_mock,
+    )
+    client_id = await engine._send_order(side="buy", size=1.0, price=10.0, reason="unit-test")
+    assert len(client_id) == 36
+    repo_mock.insert_trade_command.assert_called_once()
+    call_kwargs = repo_mock.insert_trade_command.call_args.kwargs
+    assert call_kwargs["command_type"] == "submit"
+    assert call_kwargs["side"] == "buy"
+    assert call_kwargs["status"] == "created"
+    outbox_mock.notify.assert_called_once()
+    assert not socket.sent
+
+
+@pytest.mark.asyncio
+async def test_send_order_writes_trade_command_without_outbox() -> None:
+    """Verify _send_order writes TradeCommand without outbox notification.
+
+    Given: a TradingEngine with repository set but no outbox,
+    When: _send_order is called,
+    Then: insert_trade_command is called and no error occurs.
+    """
+    socket = _SocketStub()
+    repo_mock = AsyncMock()
+    repo_mock.insert_trade_command = AsyncMock(return_value=(1, "cmd-pub-2"))
+    engine = TradingEngineService(
+        instrument="BTC-USD",
+        execution_socket=cast(Any, socket),
+        cfg=EngineConfigModel(initial_cash=1_000.0, fee_bps=10.0),
+        exchange="paper",
+        repository=repo_mock,
+    )
+    await engine._send_order(side="sell", size=0.5, price=20.0, reason="test")
+    repo_mock.insert_trade_command.assert_called_once()
+    assert socket.sent
+
+
+@pytest.mark.asyncio
+async def test_sync_fill_to_trade_service() -> None:
+    """Coordinator sync fills to TradeService and BalanceService on applied fill.
+
+    Given: a TraderCoordinator with trade_service and balance_service,
+    When: _sync_fill_to_trade_service is called with a fill,
+    Then: trade_service projection is updated and balance_service receives position change.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.trade_service = TradeService()
+    coord.balance_service = BalanceService()
+    coord.repository = MagicMock()
+    coord._tracker = MagicMock()
+    coord._tracker.session_id = "s-test"
+    coord._tracker.next_sequence = MagicMock(return_value=1)
+
+    engine, _ = _make_engine()
+    fill = ExecutionData(
+        type="execution",
+        public_id="fill-1",
+        timestamp=datetime.now(UTC),
+        session_id="s1",
+        sequence_id=1,
+        exchange="paper",
+        instrument="BTC-USD",
+        side="buy",
+        size=0.5,
+        price=50000.0,
+        last_size=0.5,
+        last_price=50000.0,
+        fee=0.5,
+        fee_asset="USD",
+        status="filled",
+        client_order_id="cid-1",
+        exchange_order_id="ex-1",
+        trade_id="t-1",
+        executed_at=datetime.now(UTC),
+    )
+    await coord._sync_fill_to_trade_service(fill, engine)
+    pos = coord.trade_service.get_position(engine._shard_key)
+    assert pos.position_qty == 0.5
+    assert coord.balance_service.get_cash(engine._shard_key) != 0.0
+
+
+def test_setup_trade_services_with_sqlalchemy_repo() -> None:
+    """Coordinator setup runs in dual-write mode without outbox.
+
+    Given: a TraderCoordinator with trade services,
+    When: _setup_trade_services is called,
+    Then: outbox remains None (outbox activates at cutover phase).
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.trade_service = TradeService()
+    coord.balance_service = BalanceService()
+    coord.outbox = None
+    coord.repository = MagicMock()
+    coord.settings = MagicMock(use_durable_commands=False)
+    coord._setup_trade_services()
+    assert coord.outbox is None
+
+
+def test_setup_trade_services_durable_mode_creates_outbox() -> None:
+    """Coordinator creates outbox with publish_fn in durable mode.
+
+    Given: a TraderCoordinator with use_durable_commands=True and SQLAlchemyRepository,
+    When: _setup_trade_services is called,
+    Then: outbox is created with a publish function.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.trade_service = TradeService()
+    coord.balance_service = BalanceService()
+    coord.outbox = None
+    coord.repository = MagicMock(spec=SQLAlchemyRepository)
+    coord.settings = MagicMock(use_durable_commands=True)
+    coord._setup_trade_services()
+    assert coord.outbox is not None
+
+
+@pytest.mark.asyncio
+async def test_outbox_publish_sends_to_zmq() -> None:
+    """Outbox publish converts TradeCommandRow to OrderRequestData and sends.
+
+    Given: a TraderCoordinator with a mocked msg_publisher,
+    When: _outbox_publish is called with a command dict,
+    Then: msg_publisher.send is called with OrderRequestData.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.msg_publisher = AsyncMock()
+    cmd: dict[str, Any] = {
+        "public_id": "cmd-1",
+        "client_order_id": "cid-1",
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "strategy_id": "engine-buy",
+        "side": "buy",
+        "order_type": "market",
+        "quantity": 0.5,
+        "price": None,
+        "session_id": "s1",
+        "sequence_id": 1,
+    }
+    await coord._outbox_publish(cmd)
+    coord.msg_publisher.send.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_stop_stops_outbox() -> None:
+    """Coordinator stop calls outbox stop when outbox is set.
+
+    Given: a TraderCoordinator with a mocked outbox and no ZMQ sockets,
+    When: stop is called,
+    Then: outbox stop is called.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.signal_subscriber = None
+    coord.zmq_context = None
+    coord.execution_publisher = None
+    coord.execution_context = None
+    mock_outbox = MagicMock()
+    coord.outbox = mock_outbox
+    await coord.stop()
+    mock_outbox.stop.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_run_trading_loop_includes_outbox_task() -> None:
+    """Trading loop creates an outbox task when outbox is set.
+
+    Given: a TraderCoordinator with a mocked outbox,
+    When: the trading loop is started and immediately cancelled,
+    Then: outbox run was invoked as a task.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    mock_outbox = MagicMock()
+    mock_outbox.run = AsyncMock()
+    coord.outbox = mock_outbox
+    coord.settings = MagicMock(use_durable_commands=False)
+    coord.repository = MagicMock()
+    mock_sub = AsyncMock()
+    mock_sub.recv_multipart = AsyncMock(side_effect=asyncio.CancelledError)
+    coord.signal_subscriber = mock_sub
+    with pytest.raises(asyncio.CancelledError):
+        await coord._run_trading_loop()
+    mock_outbox.run.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_persist_checkpoint_writes_to_db() -> None:
+    """Persist checkpoint writes shard state to SQLAlchemyRepository.
+
+    Given: a TraderCoordinator with SQLAlchemyRepository and a TradeService with state,
+    When: _persist_checkpoint is called,
+    Then: upsert_checkpoint is called on the repository.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.trade_service = TradeService()
+    coord._tracker = MagicMock()
+    coord._tracker.session_id = "s-test"
+    coord._tracker.next_sequence = MagicMock(return_value=1)
+    mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+    mock_repo.upsert_checkpoint = AsyncMock(return_value=1)
+    coord.repository = mock_repo
+
+    coord.trade_service.apply_venue_event(
+        {
+            "id": 1,
+            "public_id": "",
+            "timestamp": datetime.now(UTC),
+            "session_id": "s1",
+            "sequence_id": 1,
+            "event_type": "fill_observed",
+            "shard_key": "kraken.BTC-USD.live",
+            "command_public_id": None,
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "exchange_order_id": None,
+            "client_order_id": None,
+            "venue_client_id": None,
+            "side": "buy",
+            "status": "filled",
+            "fill_price": 50000.0,
+            "fill_size": 0.5,
+            "cum_fill_size": 0.5,
+            "fee": 0.5,
+            "fee_asset": "USD",
+            "exec_id": "exec-1",
+            "trade_id": None,
+            "error": None,
+            "venue_timestamp": datetime.now(UTC),
+            "received_at": datetime.now(UTC),
+        }
+    )
+    await coord._persist_checkpoint("kraken.BTC-USD.live")
+    mock_repo.upsert_checkpoint.assert_called_once()
+    call_kwargs = mock_repo.upsert_checkpoint.call_args.kwargs
+    assert call_kwargs["shard_key"] == "kraken.BTC-USD.live"
+    assert call_kwargs["position_qty"] == 0.5
+
+
+@pytest.mark.asyncio
+async def test_persist_checkpoint_skips_non_sqlalchemy() -> None:
+    """Persist checkpoint is a no-op when repository is not SQLAlchemyRepository.
+
+    Given: a TraderCoordinator with a plain mock repository,
+    When: _persist_checkpoint is called,
+    Then: no checkpoint write occurs.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.trade_service = TradeService()
+    coord.repository = MagicMock()
+    await coord._persist_checkpoint("any.shard")
+
+
+@pytest.mark.asyncio
+async def test_persist_checkpoint_handles_db_error() -> None:
+    """Persist checkpoint handles DB error without propagating.
+
+    Given: a TraderCoordinator with SQLAlchemyRepository that raises on upsert,
+    When: _persist_checkpoint is called,
+    Then: no exception propagates.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.trade_service = TradeService()
+    coord._tracker = MagicMock()
+    coord._tracker.session_id = "s-test"
+    coord._tracker.next_sequence = MagicMock(return_value=1)
+    mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+    mock_repo.upsert_checkpoint = AsyncMock(side_effect=RuntimeError("DB down"))
+    coord.repository = mock_repo
+    await coord._persist_checkpoint("any.shard")
+
+
+@pytest.mark.asyncio
+async def test_create_reconciliation_tasks_durable_mode() -> None:
+    """Coordinator creates per-exchange reconciliation tasks in durable mode.
+
+    Given: a TraderCoordinator with use_durable_commands=True and SQLAlchemyRepository,
+    When: _create_reconciliation_tasks is called,
+    Then: one task per known exchange is returned.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.trade_service = TradeService()
+    mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+    coord.repository = mock_repo
+    coord.settings = MagicMock(use_durable_commands=True)
+    tasks = coord._create_reconciliation_tasks()
+    assert len(tasks) > 0
+    for t in tasks:
+        t.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await t
+
+
+@pytest.mark.asyncio
+async def test_run_trading_loop_with_recon_task() -> None:
+    """Trading loop includes reconciliation task when durable mode is active.
+
+    Given: a TraderCoordinator with durable mode enabled,
+    When: the trading loop starts and immediately cancels,
+    Then: no error occurs (reconciliation task runs alongside signals).
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.outbox = None
+    mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+    coord.repository = mock_repo
+    coord.settings = MagicMock(use_durable_commands=True)
+    coord.trade_service = TradeService()
+    mock_sub = AsyncMock()
+    mock_sub.recv_multipart = AsyncMock(side_effect=asyncio.CancelledError)
+    coord.signal_subscriber = mock_sub
+    with pytest.raises(asyncio.CancelledError):
+        await coord._run_trading_loop()

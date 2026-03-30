@@ -1,0 +1,709 @@
+"""Tests for TradeService — trade domain service."""
+
+from datetime import UTC
+from datetime import datetime
+
+from snapper.application.trade.trade_service import TradeService
+from snapper.data.repository_types import VenueEventRow
+
+_USE_DEFAULT_EXEC_ID = "__default__"
+
+
+def _make_venue_event(
+    event_id: int,
+    event_type: str = "fill_observed",
+    shard_key: str = "kraken.BTC-USD.live",
+    side: str | None = "buy",
+    fill_price: float | None = 50000.0,
+    fill_size: float | None = 0.5,
+    status: str | None = "filled",
+    exec_id: str | None = _USE_DEFAULT_EXEC_ID,
+    trade_id: str | None = None,
+    exchange_order_id: str | None = None,
+) -> VenueEventRow:
+    """Build a minimal VenueEventRow for testing.
+
+    Given: default field values for a fill_observed event,
+    When: caller overrides specific fields,
+    Then: a complete VenueEventRow dict is returned.
+    """
+    now = datetime.now(UTC)
+    return {
+        "id": event_id,
+        "public_id": f"ve-{event_id}",
+        "timestamp": now,
+        "session_id": "s1",
+        "sequence_id": event_id,
+        "event_type": event_type,
+        "shard_key": shard_key,
+        "command_public_id": None,
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "exchange_order_id": exchange_order_id,
+        "client_order_id": None,
+        "venue_client_id": None,
+        "side": side,
+        "status": status,
+        "fill_price": fill_price,
+        "fill_size": fill_size,
+        "cum_fill_size": fill_size,
+        "fee": 0.5,
+        "fee_asset": "USD",
+        "exec_id": f"exec-{event_id}" if exec_id == _USE_DEFAULT_EXEC_ID else exec_id,
+        "trade_id": trade_id,
+        "error": None,
+        "venue_timestamp": now,
+        "received_at": now,
+    }
+
+
+def test_get_position_returns_default() -> None:
+    """Get position returns zero defaults for unknown shard.
+
+    Given: a fresh TradeService with no applied events,
+    When: get_position is called for a non-existent shard key,
+    Then: position_qty is 0.0 and entry_price is None.
+    """
+    svc = TradeService()
+    pos = svc.get_position("nonexistent.shard")
+    assert pos.position_qty == 0.0
+    assert pos.entry_price is None
+
+
+def test_get_command_state_returns_default() -> None:
+    """Get command state returns no in-flight for unknown shard.
+
+    Given: a fresh TradeService with no registered commands,
+    When: get_command_state is called for a non-existent shard key,
+    Then: in_flight is False and command_public_id is None.
+    """
+    svc = TradeService()
+    cmd = svc.get_command_state("nonexistent.shard")
+    assert cmd.in_flight is False
+    assert cmd.command_public_id is None
+
+
+def test_apply_fill_buy() -> None:
+    """Apply venue event processes a buy fill into position state.
+
+    Given: a fresh TradeService with no position,
+    When: a buy fill event for 0.5 BTC at 50000 is applied,
+    Then: position_qty is 0.5 and entry_price is 50000.
+    """
+    svc = TradeService()
+    event = _make_venue_event(
+        event_id=1, side="buy", fill_price=50000.0, fill_size=0.5, status="filled"
+    )
+    svc.apply_venue_event(event)
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == 0.5
+    assert pos.entry_price == 50000.0
+
+
+def test_apply_fill_sell_clears_position() -> None:
+    """Sell fill reduces position to zero and records realized PnL.
+
+    Given: a TradeService with a 1.0 BTC long position at 50000,
+    When: a sell fill for 1.0 BTC at 51000 is applied,
+    Then: position_qty is 0.0, entry_price is None, and realized_pnl is 1000.
+    """
+    svc = TradeService()
+    svc.apply_venue_event(
+        _make_venue_event(event_id=1, side="buy", fill_price=50000.0, fill_size=1.0)
+    )
+    svc.apply_venue_event(
+        _make_venue_event(
+            event_id=2, side="sell", fill_price=51000.0, fill_size=1.0, exec_id="exec-2"
+        )
+    )
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == 0.0
+    assert pos.entry_price is None
+    assert pos.realized_pnl == 1000.0
+
+
+def test_apply_fill_dedup() -> None:
+    """Duplicate fills with the same exec_id are ignored.
+
+    Given: a TradeService that already applied a fill with exec_id "exec-dup",
+    When: a second fill event with the same exec_id is applied,
+    Then: position_qty remains 0.5 (only the first fill counted).
+    """
+    svc = TradeService()
+    event = _make_venue_event(event_id=1, exec_id="exec-dup")
+    svc.apply_venue_event(event)
+    event2 = _make_venue_event(event_id=2, exec_id="exec-dup")
+    svc.apply_venue_event(event2)
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == 0.5
+
+
+def test_apply_order_accepted() -> None:
+    """Order accepted event updates command state with exchange order id.
+
+    Given: a fresh TradeService with no command state,
+    When: an order_accepted venue event with exchange_order_id "ex-123" is applied,
+    Then: command status is "accepted" and exchange_order_id is "ex-123".
+    """
+    svc = TradeService()
+    event = _make_venue_event(
+        event_id=1,
+        event_type="order_accepted",
+        exchange_order_id="ex-123",
+        side=None,
+        fill_price=None,
+        fill_size=None,
+        status=None,
+    )
+    svc.apply_venue_event(event)
+    cmd = svc.get_command_state("kraken.BTC-USD.live")
+    assert cmd.status == "accepted"
+    assert cmd.exchange_order_id == "ex-123"
+
+
+def test_apply_order_rejected_clears_in_flight() -> None:
+    """Order rejected event clears the in-flight flag.
+
+    Given: a TradeService with a registered in-flight command on a shard,
+    When: an order_rejected venue event is applied for that shard,
+    Then: in_flight is False and status is "rejected".
+    """
+    svc = TradeService()
+    svc.register_command(
+        "kraken.BTC-USD.live",
+        {
+            "public_id": "cmd-1",
+            "timestamp": datetime.now(UTC),
+            "session_id": "s1",
+            "sequence_id": 1,
+            "command_type": "submit",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "engine-buy",
+            "client_order_id": "cid-1",
+            "venue_client_id": "vcid-1",
+            "idempotency_key": None,
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.5,
+            "price": None,
+            "status": "created",
+            "attempt_count": 0,
+            "last_error": None,
+            "created_at": datetime.now(UTC),
+            "dispatched_at": None,
+            "acked_at": None,
+            "terminal_at": None,
+            "exchange_order_id": None,
+            "supersedes_command_id": None,
+            "correlation_id": "corr-1",
+        },
+    )
+    assert svc.get_command_state("kraken.BTC-USD.live").in_flight is True
+    event = _make_venue_event(
+        event_id=1,
+        event_type="order_rejected",
+        side=None,
+        fill_price=None,
+        fill_size=None,
+        status=None,
+    )
+    svc.apply_venue_event(event)
+    assert svc.get_command_state("kraken.BTC-USD.live").in_flight is False
+    assert svc.get_command_state("kraken.BTC-USD.live").status == "rejected"
+
+
+def test_watermark_prevents_reprocessing() -> None:
+    """Events with id at or below the watermark are skipped.
+
+    Given: a TradeService that already processed event_id=5,
+    When: an event with event_id=3 is applied,
+    Then: position_qty remains 0.5 (the older event was ignored).
+    """
+    svc = TradeService()
+    svc.apply_venue_event(_make_venue_event(event_id=5))
+    svc.apply_venue_event(_make_venue_event(event_id=3, exec_id="exec-earlier"))
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == 0.5
+
+
+def test_restore_from_checkpoint() -> None:
+    """Checkpoint restoration sets all shard state from persisted snapshot.
+
+    Given: a fresh TradeService with no state,
+    When: restore_from_checkpoint is called with position, cash, equity, and command data,
+    Then: position, command, equity, and peak equity all reflect the restored values.
+    """
+    svc = TradeService()
+    svc.restore_from_checkpoint(
+        shard_key="kraken.BTC-USD.live",
+        position_qty=1.5,
+        entry_price=49000.0,
+        cash=5000.0,
+        peak_equity=12000.0,
+        realized_pnl=500.0,
+        turnover=50000.0,
+        last_venue_event_id=100,
+        open_command_ids=["cmd-42"],
+        seen_exec_ids={"exec-1", "exec-2"},
+    )
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == 1.5
+    assert pos.entry_price == 49000.0
+    cmd = svc.get_command_state("kraken.BTC-USD.live")
+    assert cmd.in_flight is True
+    assert cmd.command_public_id == "cmd-42"
+    assert svc.get_equity("kraken.BTC-USD.live") == 5000.0
+    assert svc.get_peak_equity("kraken.BTC-USD.live") == 12000.0
+
+
+def test_circuit_breaker_halt() -> None:
+    """Circuit breaker halts shard after reaching max reconciliation failures.
+
+    Given: a TradeService with a shard that has recorded 2 reconciliation failures,
+    When: a third failure is recorded with max_failures=3,
+    Then: the shard is halted and record_recon_failure returns True.
+    """
+    svc = TradeService()
+    svc.record_recon_failure("kraken.BTC-USD.live", max_failures=3)
+    assert svc.is_halted("kraken.BTC-USD.live") is False
+    svc.record_recon_failure("kraken.BTC-USD.live", max_failures=3)
+    assert svc.is_halted("kraken.BTC-USD.live") is False
+    halted = svc.record_recon_failure("kraken.BTC-USD.live", max_failures=3)
+    assert halted is True
+    assert svc.is_halted("kraken.BTC-USD.live") is True
+
+
+def test_circuit_breaker_unhalt() -> None:
+    """Operator can un-halt a shard that was halted by the circuit breaker.
+
+    Given: a TradeService with a halted shard (3 consecutive failures),
+    When: unhalt_shard is called for that shard,
+    Then: the shard is no longer halted.
+    """
+    svc = TradeService()
+    for _ in range(3):
+        svc.record_recon_failure("kraken.BTC-USD.live", max_failures=3)
+    assert svc.is_halted("kraken.BTC-USD.live") is True
+    svc.unhalt_shard("kraken.BTC-USD.live")
+    assert svc.is_halted("kraken.BTC-USD.live") is False
+
+
+def test_recon_success_resets_counter() -> None:
+    """Reconciliation success resets the failure counter to zero.
+
+    Given: a TradeService with 2 consecutive reconciliation failures on a shard,
+    When: record_recon_success is called followed by one more failure,
+    Then: the shard is not halted because the counter was reset.
+    """
+    svc = TradeService()
+    svc.record_recon_failure("kraken.BTC-USD.live", max_failures=3)
+    svc.record_recon_failure("kraken.BTC-USD.live", max_failures=3)
+    svc.record_recon_success("kraken.BTC-USD.live")
+    halted = svc.record_recon_failure("kraken.BTC-USD.live", max_failures=3)
+    assert halted is False
+
+
+def test_mark_to_market() -> None:
+    """Mark-to-market updates equity and tracks peak correctly.
+
+    Given: a TradeService with initial_cash=10000 and a 0.1 BTC position at 50000,
+    When: mark_to_market is called with a mark price of 60000,
+    Then: equity exceeds 10000 and peak equity is at least the current equity.
+    """
+    svc = TradeService(initial_cash=10000.0)
+    svc.apply_venue_event(
+        _make_venue_event(event_id=1, side="buy", fill_price=50000.0, fill_size=0.1)
+    )
+    equity = svc.mark_to_market("kraken.BTC-USD.live", 60000.0)
+    assert equity > 10000.0
+    assert svc.get_peak_equity("kraken.BTC-USD.live") >= equity
+
+
+def test_snapshot_for_checkpoint() -> None:
+    """Snapshot for checkpoint returns a serializable dict of shard state.
+
+    Given: a TradeService with one applied fill event,
+    When: snapshot_for_checkpoint is called for that shard,
+    Then: the dict contains position_qty, last_venue_event_id, and checkpoint_at.
+    """
+    svc = TradeService()
+    svc.apply_venue_event(_make_venue_event(event_id=1))
+    snap = svc.snapshot_for_checkpoint("kraken.BTC-USD.live")
+    assert snap["position_qty"] == 0.5
+    assert snap["last_venue_event_id"] == 1
+    assert "checkpoint_at" in snap
+
+
+def test_apply_order_terminal_cancel() -> None:
+    """Order terminal event with cancel status clears in-flight and sets cancelled.
+
+    Given: a TradeService with an in-flight command,
+    When: an order_terminal event with status='cancelled' is applied,
+    Then: command is no longer in-flight and status is 'cancelled'.
+    """
+    svc = TradeService()
+    svc._get_or_create_shard("kraken.BTC-USD.live").command.in_flight = True
+    event = _make_venue_event(
+        event_id=1,
+        event_type="order_terminal",
+        side=None,
+        fill_price=None,
+        fill_size=None,
+        status="cancelled",
+    )
+    svc.apply_venue_event(event)
+    cmd = svc.get_command_state("kraken.BTC-USD.live")
+    assert cmd.in_flight is False
+    assert cmd.status == "cancelled"
+
+
+def test_apply_unknown_event_type() -> None:
+    """Unknown venue event type is logged but does not crash.
+
+    Given: a TradeService with no state,
+    When: a venue event with an unknown event_type is applied,
+    Then: no exception is raised and watermark still advances.
+    """
+    svc = TradeService()
+    event = _make_venue_event(
+        event_id=1,
+        event_type="unknown_type",
+        side=None,
+        fill_price=None,
+        fill_size=None,
+        status=None,
+    )
+    svc.apply_venue_event(event)
+    shard = svc._get_or_create_shard("kraken.BTC-USD.live")
+    assert shard.last_venue_event_id == 1
+
+
+def test_apply_fill_partial() -> None:
+    """Partial fill updates position but keeps command in-flight.
+
+    Given: a TradeService with no prior state,
+    When: a fill_observed event with status='partial' is applied,
+    Then: position is updated and command status is 'partially_filled'.
+    """
+    svc = TradeService()
+    event = _make_venue_event(
+        event_id=1, side="buy", fill_price=50000.0, fill_size=0.3, status="partial"
+    )
+    svc.apply_venue_event(event)
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == 0.3
+    cmd = svc.get_command_state("kraken.BTC-USD.live")
+    assert cmd.status == "partially_filled"
+
+
+def test_apply_fill_averages_entry_price_on_add() -> None:
+    """Adding to an existing position recalculates average entry price.
+
+    Given: a TradeService with a 0.5 BTC position at 50000,
+    When: a second buy fill of 0.5 at 52000 is applied,
+    Then: position is 1.0 BTC and entry price is the volume-weighted average 51000.
+    """
+    svc = TradeService()
+    svc.apply_venue_event(
+        _make_venue_event(event_id=1, side="buy", fill_price=50000.0, fill_size=0.5)
+    )
+    svc.apply_venue_event(
+        _make_venue_event(
+            event_id=2, side="buy", fill_price=52000.0, fill_size=0.5, exec_id="exec-2"
+        )
+    )
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == 1.0
+    assert pos.entry_price is not None
+    assert abs(pos.entry_price - 51000.0) < 0.01
+
+
+def test_snapshot_with_open_command() -> None:
+    """Snapshot includes open command IDs when a command is in-flight.
+
+    Given: a TradeService with an in-flight command registered,
+    When: snapshot_for_checkpoint is called,
+    Then: open_command_ids contains the command public_id.
+    """
+    svc = TradeService()
+    svc.register_command(
+        "kraken.BTC-USD.live",
+        {
+            "public_id": "cmd-99",
+            "timestamp": datetime.now(UTC),
+            "session_id": "s1",
+            "sequence_id": 1,
+            "command_type": "submit",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "engine-buy",
+            "client_order_id": "cid-99",
+            "venue_client_id": "vcid-99",
+            "idempotency_key": None,
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.5,
+            "price": None,
+            "status": "created",
+            "attempt_count": 0,
+            "last_error": None,
+            "created_at": datetime.now(UTC),
+            "dispatched_at": None,
+            "acked_at": None,
+            "terminal_at": None,
+            "exchange_order_id": None,
+            "supersedes_command_id": None,
+            "correlation_id": "corr-99",
+        },
+    )
+    snap = svc.snapshot_for_checkpoint("kraken.BTC-USD.live")
+    assert snap["open_command_ids"] is not None
+    assert "cmd-99" in str(snap["open_command_ids"])
+
+
+def test_apply_fill_sell_partial_position() -> None:
+    """Selling part of a position reduces qty but keeps entry price.
+
+    Given: a TradeService with 1.0 BTC position at 50000,
+    When: a sell fill of 0.3 BTC is applied,
+    Then: position is 0.7 BTC and entry_price is still set.
+    """
+    svc = TradeService()
+    svc.apply_venue_event(
+        _make_venue_event(event_id=1, side="buy", fill_price=50000.0, fill_size=1.0)
+    )
+    svc.apply_venue_event(
+        _make_venue_event(
+            event_id=2, side="sell", fill_price=51000.0, fill_size=0.3, exec_id="exec-2"
+        )
+    )
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert abs(pos.position_qty - 0.7) < 1e-9
+    assert pos.entry_price is not None
+
+
+def test_apply_fill_sell_without_entry_price() -> None:
+    """Sell fill without prior entry price opens a short position.
+
+    Given: a TradeService shard with position_qty=0 and no entry_price,
+    When: a sell fill is applied directly,
+    Then: position goes negative with entry_price set to fill price.
+    """
+    svc = TradeService()
+    svc.apply_venue_event(
+        _make_venue_event(event_id=1, side="sell", fill_price=50000.0, fill_size=0.5)
+    )
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == -0.5
+    assert pos.entry_price == 50000.0
+
+
+def test_apply_fill_short_cover() -> None:
+    """Buying to cover a short position computes positive PnL on price drop.
+
+    Given: a TradeService with a short position of -1.0 BTC at entry 50000,
+    When: a buy fill of 1.0 at 48000 covers the short,
+    Then: position is flat, realized PnL = 1.0 * (50000-48000) = 2000.
+    """
+    svc = TradeService()
+    svc.apply_venue_event(
+        _make_venue_event(event_id=1, side="sell", fill_price=50000.0, fill_size=1.0)
+    )
+    svc.apply_venue_event(
+        _make_venue_event(
+            event_id=2, side="buy", fill_price=48000.0, fill_size=1.0, exec_id="exec-2"
+        )
+    )
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == 0.0
+    assert pos.entry_price is None
+    assert pos.realized_pnl == 2000.0
+
+
+def test_apply_fill_reversal_resets_entry_price() -> None:
+    """Selling more than position reverses through flat and resets entry price.
+
+    Given: a TradeService with a long position of 1.0 BTC at entry 50000,
+    When: a sell fill of 2.0 at 51000 is applied (over-close + open short),
+    Then: position is -1.0, realized PnL is 1000 (on the closed 1.0), entry_price is 51000.
+    """
+    svc = TradeService()
+    svc.apply_venue_event(
+        _make_venue_event(event_id=1, side="buy", fill_price=50000.0, fill_size=1.0)
+    )
+    svc.apply_venue_event(
+        _make_venue_event(
+            event_id=2, side="sell", fill_price=51000.0, fill_size=2.0, exec_id="exec-2"
+        )
+    )
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == -1.0
+    assert pos.entry_price == 51000.0
+    assert pos.realized_pnl == 1000.0
+
+
+def test_apply_fill_dedup_adds_both_ids() -> None:
+    """Fill with both exec_id and trade_id adds both to dedup set.
+
+    Given: a TradeService with no prior state,
+    When: a fill with exec_id="e1" and trade_id="t1" is applied,
+    Then: a second fill with only trade_id="t1" is rejected as duplicate.
+    """
+    svc = TradeService()
+    svc.apply_venue_event(_make_venue_event(event_id=1, exec_id="e1", trade_id="t1"))
+    svc.apply_venue_event(_make_venue_event(event_id=2, exec_id=None, trade_id="t1"))
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == 0.5
+
+
+def test_apply_fill_trade_id_only() -> None:
+    """Fill with only trade_id (no exec_id) is deduplicated by trade_id.
+
+    Given: a fresh TradeService,
+    When: a fill with exec_id=None and trade_id="t1" is applied,
+    Then: position is updated and trade_id is added to dedup set.
+    """
+    svc = TradeService()
+    svc.apply_venue_event(_make_venue_event(event_id=1, exec_id=None, trade_id="t1"))
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == 0.5
+
+
+def test_apply_fill_no_status() -> None:
+    """Fill event with no status field does not change command status.
+
+    Given: a TradeService with no prior state,
+    When: a fill_observed event with status=None is applied,
+    Then: position is updated but command status stays None.
+    """
+    svc = TradeService()
+    event = _make_venue_event(event_id=1, status=None)
+    svc.apply_venue_event(event)
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == 0.5
+    cmd = svc.get_command_state("kraken.BTC-USD.live")
+    assert cmd.status is None
+
+
+def test_snapshot_without_in_flight_command() -> None:
+    """Snapshot without in-flight command sets open_command_ids to None.
+
+    Given: a TradeService with a shard that has no in-flight commands,
+    When: snapshot_for_checkpoint is called,
+    Then: open_command_ids is None.
+    """
+    svc = TradeService()
+    svc.apply_venue_event(_make_venue_event(event_id=1))
+    svc.get_command_state("kraken.BTC-USD.live").in_flight = False
+    snap = svc.snapshot_for_checkpoint("kraken.BTC-USD.live")
+    assert snap["open_command_ids"] is None
+
+
+def test_restore_with_empty_command_ids() -> None:
+    """Restoring with empty open_command_ids leaves command not in-flight.
+
+    Given: a fresh TradeService,
+    When: restore_from_checkpoint is called with empty open_command_ids,
+    Then: command.in_flight is False.
+    """
+    svc = TradeService()
+    svc.restore_from_checkpoint(
+        shard_key="kraken.BTC-USD.live",
+        position_qty=0.0,
+        entry_price=None,
+        cash=10000.0,
+        peak_equity=10000.0,
+        realized_pnl=0.0,
+        turnover=0.0,
+        last_venue_event_id=0,
+        open_command_ids=[],
+        seen_exec_ids=set(),
+    )
+    assert svc.get_command_state("kraken.BTC-USD.live").in_flight is False
+
+
+def test_apply_fill_unknown_side() -> None:
+    """Fill with unknown side still updates watermark but skips position logic.
+
+    Given: a TradeService with no prior state,
+    When: a fill_observed event with side='unknown' is applied,
+    Then: position remains at zero and no error is raised.
+    """
+    svc = TradeService()
+    event = _make_venue_event(event_id=1, side="unknown", fill_price=50000.0, fill_size=0.5)
+    svc.apply_venue_event(event)
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == 0.0
+
+
+def test_snapshot_no_command_registered() -> None:
+    """Snapshot with default command state returns None for open_command_ids.
+
+    Given: a TradeService with a shard created but no command registered,
+    When: snapshot_for_checkpoint is called,
+    Then: open_command_ids is None because command_public_id is None.
+    """
+    svc = TradeService()
+    svc._get_or_create_shard("kraken.BTC-USD.live")
+    snap = svc.snapshot_for_checkpoint("kraken.BTC-USD.live")
+    assert snap["open_command_ids"] is None
+
+
+def test_mark_to_market_below_peak() -> None:
+    """Mark-to-market below peak does not lower peak equity.
+
+    Given: a TradeService with initial_cash=10000 and a 0.1 BTC position at 50000,
+    When: mark_to_market is called with a price of 40000 (below entry),
+    Then: equity is below initial and peak stays at initial_cash.
+    """
+    svc = TradeService(initial_cash=10000.0)
+    svc.apply_venue_event(
+        _make_venue_event(event_id=1, side="buy", fill_price=50000.0, fill_size=0.1)
+    )
+    equity = svc.mark_to_market("kraken.BTC-USD.live", 40000.0)
+    assert equity < 10000.0
+    assert svc.get_peak_equity("kraken.BTC-USD.live") == 10000.0
+
+
+def test_apply_fill_close_without_entry_price() -> None:
+    """Closing a position when entry_price is None skips PnL calculation.
+
+    Given: a TradeService shard with position_qty=1.0 but entry_price=None,
+    When: a sell fill of 0.5 is applied,
+    Then: position reduces to 0.5 and realized_pnl stays 0.
+    """
+    svc = TradeService()
+    shard = svc._get_or_create_shard("kraken.BTC-USD.live")
+    shard.position.position_qty = 1.0
+    shard.position.entry_price = None
+    svc.apply_venue_event(
+        _make_venue_event(event_id=1, side="sell", fill_price=50000.0, fill_size=0.5)
+    )
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert abs(pos.position_qty - 0.5) < 1e-9
+    assert pos.realized_pnl == 0.0
+
+
+def test_apply_fill_buy_into_negative_position() -> None:
+    """Buy fill into a negative position where total_qty <= 0 skips avg price calc.
+
+    Given: a TradeService shard with position_qty=-1.0 at entry_price=50000,
+    When: a buy fill of 0.5 is applied (total_qty = -0.5, still negative),
+    Then: position goes to -0.5 and entry_price is unchanged (guard prevents division).
+    """
+    svc = TradeService()
+    shard = svc._get_or_create_shard("kraken.BTC-USD.live")
+    shard.position.position_qty = -1.0
+    shard.position.entry_price = 50000.0
+    svc.apply_venue_event(
+        _make_venue_event(event_id=1, side="buy", fill_price=51000.0, fill_size=0.5)
+    )
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert abs(pos.position_qty - (-0.5)) < 1e-9
+    assert pos.entry_price == 50000.0

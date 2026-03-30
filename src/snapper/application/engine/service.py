@@ -16,7 +16,9 @@ from snapper.application.engine.config import EngineConfigModel
 from snapper.application.portfolio.models import PortfolioTracker
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
+from snapper.application.trade.outbox import OutboxDispatcher
 from snapper.core.types import OrderExchange
+from snapper.data.repository import SQLAlchemyRepository
 from snapper.interface.websocket.schemas import ExecutionMode
 from snapper.interface.websocket.schemas import TradeSide
 from snapper.messaging.infrastructure.publisher import MessagePublisher
@@ -77,6 +79,8 @@ class TradingEngineService:
         *,
         instrument_specs: dict[str, dict[str, float]] | None = None,
         exchange: OrderExchange = "paper",
+        repository: SQLAlchemyRepository | None = None,
+        outbox: OutboxDispatcher | None = None,
     ) -> None:
         """Initialize trading engine for a specific instrument.
 
@@ -87,6 +91,8 @@ class TradingEngineService:
             cfg: Engine configuration. Defaults to EngineConfigModel defaults.
             instrument_specs: Dict mapping symbol to lot_size/tick_size specs.
             exchange: Target exchange. Defaults to "paper" for simulation.
+            repository: Optional DB repository for writing TradeCommand.
+            outbox: Optional outbox dispatcher to notify after DB write.
         """
         self.instrument = instrument
         self.execution_socket = execution_socket
@@ -103,6 +109,9 @@ class TradingEngineService:
         self._in_flight_since: float | None = None
         self.seen_exec_ids: set[str] = set()
         self.read_only = False
+        self._repository = repository
+        self._outbox = outbox
+        self._shard_key = f"{exchange}.{instrument}.{self.mode}"
 
     def _check_in_flight_timeout(self) -> None:
         """Clear in-flight guard if timeout has elapsed.
@@ -257,8 +266,9 @@ class TradingEngineService:
     ) -> str:
         """Publish order request to ZMQ execution topic.
 
-        Creates and sends an order request to the execution system
-        via ZMQ pub/sub. Orders are published non-blocking.
+        If a repository is configured, writes a durable TradeCommand to DB
+        before publishing to ZMQ (dual-write for migration safety).
+        Notifies the outbox dispatcher after DB commit.
 
         Args:
             side: Order side ("buy" or "sell").
@@ -275,25 +285,65 @@ class TradingEngineService:
             signaled_at_dt = dt.datetime.fromtimestamp(signaled_at, tz=dt.UTC)
         topic = order_command_topic(self.exchange, self.instrument, "submit")
         order_public_id = str(uuid7())
-        order = OrderRequestData(
-            public_id=order_public_id,
-            timestamp=dt.datetime.now(dt.UTC),
-            session_id=self.execution_socket.tracker.session_id,
-            sequence_id=self.execution_socket.tracker.next_sequence(topic),
-            strategy_id=reason,
-            instrument=self.instrument,
-            mode=self.mode,
-            side=side,
-            order_type="market",
-            quantity=size,
-            price=None,
-            client_order_id=order_public_id,
-            exchange=self.exchange,
-            signaled_at=signaled_at_dt,
-        )
-        await self.execution_socket.send(topic, order, flags=zmq.NOBLOCK)
-        logger.debug(f"Published order command: {order.client_order_id}")
-        return order.client_order_id
+        now = dt.datetime.now(dt.UTC)
+        session_id = self.execution_socket.tracker.session_id
+        sequence_id = self.execution_socket.tracker.next_sequence(topic)
+
+        if self._repository is not None:
+            await self._repository.insert_trade_command(
+                command_type="submit",
+                shard_key=self._shard_key,
+                exchange=self.exchange,
+                instrument=self.instrument,
+                mode=self.mode,
+                strategy_id=reason,
+                client_order_id=order_public_id,
+                venue_client_id=order_public_id,
+                side=side,
+                order_type="market",
+                quantity=size,
+                price=None,
+                status="created",
+                created_at=now,
+                correlation_id=order_public_id,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=now,
+            )
+
+        if self._outbox is not None:
+            self._outbox.notify()
+            logger.debug(f"Durable command written, outbox notified: {order_public_id}")
+        else:
+            order = OrderRequestData(
+                public_id=order_public_id,
+                timestamp=now,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                strategy_id=reason,
+                instrument=self.instrument,
+                mode=self.mode,
+                side=side,
+                order_type="market",
+                quantity=size,
+                price=None,
+                client_order_id=order_public_id,
+                exchange=self.exchange,
+                signaled_at=signaled_at_dt,
+            )
+            await self.execution_socket.send(topic, order, flags=zmq.NOBLOCK)
+            if self._repository is not None:
+                await self._repository.update_trade_command_status(
+                    public_id=order_public_id,
+                    new_status="direct_dispatched",
+                    bus_time=now,
+                    session_id=session_id,
+                    sequence_id=sequence_id,
+                    dispatched_at=now,
+                    attempt_count=1,
+                )
+            logger.debug(f"Published order command (direct): {order_public_id}")
+        return order_public_id
 
     async def execute_desired_units(
         self, desired_units: float, current_price: float, signaled_at: float | None = None

@@ -733,6 +733,8 @@ class _EngineStub:
         cfg: Any,
         instrument_specs: dict[str, dict[str, float]],
         exchange: str,
+        repository: Any = None,
+        outbox: Any = None,
     ) -> None:
         self.instrument = instrument
         self.execution_socket = execution_socket
@@ -740,6 +742,8 @@ class _EngineStub:
         self.cfg = cfg
         self.instrument_specs = instrument_specs
         self.exchange = exchange
+        self.repository = repository
+        self.outbox = outbox
         self.execute_calls: list[dict[str, Any]] = []
 
     async def execute_desired_units(
@@ -1324,7 +1328,7 @@ async def test_handle_execution_fill_success(monkeypatch: pytest.MonkeyPatch) ->
         status="filled",
         executed_at=datetime.now(UTC),
     )
-    coord._handle_execution_fill("orders.events.kraken.BTC-USD.executed", fill)
+    await coord._handle_execution_fill("orders.events.kraken.BTC-USD.executed", fill)
 
 
 @pytest.mark.asyncio
@@ -1359,7 +1363,7 @@ async def test_handle_execution_fill_invariant_exchange_mismatch(
         status="filled",
         executed_at=datetime.now(UTC),
     )
-    coord._handle_execution_fill("orders.events.kraken.BTC-USD.executed", fill)
+    await coord._handle_execution_fill("orders.events.kraken.BTC-USD.executed", fill)
 
 
 @pytest.mark.asyncio
@@ -1394,7 +1398,7 @@ async def test_handle_execution_fill_invariant_instrument_mismatch(
         status="filled",
         executed_at=datetime.now(UTC),
     )
-    coord._handle_execution_fill("orders.events.kraken.BTC-USD.executed", fill)
+    await coord._handle_execution_fill("orders.events.kraken.BTC-USD.executed", fill)
 
 
 @pytest.mark.asyncio
@@ -1427,7 +1431,7 @@ async def test_handle_execution_fill_malformed_topic(monkeypatch: pytest.MonkeyP
         status="filled",
         executed_at=datetime.now(UTC),
     )
-    coord._handle_execution_fill("orders.events.kraken", fill)
+    await coord._handle_execution_fill("orders.events.kraken", fill)
 
 
 @pytest.mark.asyncio
@@ -1440,7 +1444,7 @@ async def test_dispatch_order_event_invalid_json(monkeypatch: pytest.MonkeyPatch
     """
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
-    coord._dispatch_order_event("orders.events.kraken.BTC-USD.executed", b"not-json")
+    await coord._dispatch_order_event("orders.events.kraken.BTC-USD.executed", b"not-json")
 
 
 @pytest.mark.asyncio
@@ -1715,7 +1719,7 @@ async def test_dispatch_order_event_routes_order_event_envelope(
             "event": "cancelled",
         }
     ).encode("utf-8")
-    coord._dispatch_order_event("orders.events.kraken.BTC-USD.cancelled", payload)
+    await coord._dispatch_order_event("orders.events.kraken.BTC-USD.cancelled", payload)
 
 
 @pytest.mark.asyncio
@@ -1741,7 +1745,7 @@ async def test_dispatch_order_event_unknown_type(monkeypatch: pytest.MonkeyPatch
             "lag_ms": 0,
         }
     ).encode("utf-8")
-    coord._dispatch_order_event("orders.events.kraken.BTC-USD.accepted", payload)
+    await coord._dispatch_order_event("orders.events.kraken.BTC-USD.accepted", payload)
 
 
 @pytest.mark.asyncio
@@ -2226,6 +2230,47 @@ async def test_on_signal_converts_iso_timestamp(monkeypatch: pytest.MonkeyPatch)
     assert isinstance(engine.calls[0][1], float)
 
 
+@pytest.mark.asyncio
+async def test_on_signal_drops_when_shard_halted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify signal is dropped when shard is halted by circuit breaker.
+
+    Given: a TraderCoordinator with a halted shard,
+    When: a signal arrives for that shard,
+    Then: the signal is dropped and no engine is created.
+    """
+    settings = SimpleNamespace(
+        risk_r_per_trade=0.01,
+        risk_max_leverage=1.0,
+        risk_max_drawdown=0.5,
+        db_url=TEST_DB_URL,
+        zmq_broker_xsub="inproc://broker",
+    )
+    monkeypatch.setattr(trader_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(trader_module, "is_tradeable", lambda _i, _e: True)
+    monkeypatch.setattr(trader_module, "get_repository", lambda _url: MagicMock())
+    coord = TraderCoordinator()
+    coord._current_topic = "signals.kraken.BTC-USD.live"
+    coord.execution_publisher = MagicMock()
+    coord.msg_publisher = MagicMock()
+    coord.trade_service.halt_shard("kraken.BTC-USD.live", "test halt")
+    signal = SignalData(
+        type="signal",
+        public_id="test-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        session_id="",
+        sequence_id=0,
+        instrument="BTC-USD",
+        exchange="kraken",
+        side="buy",
+        strength=1.0,
+        reason="test",
+        price=50000.0,
+        fired_at=datetime.now(UTC),
+    )
+    await coord._on_signal(signal)
+    assert len(coord.engines) == 0
+
+
 def test_gap_detector_initialized_on_coordinator() -> None:
     """Verify TraderCoordinator creates a gap detector at init.
 
@@ -2299,10 +2344,11 @@ def _make_engine_with_inflight(
     return coord, engine
 
 
+@pytest.mark.asyncio
 class TestFillApplication:
     """Tests for Stage B: confirmed-state booking via fill events."""
 
-    def test_fill_applied_to_matching_engine(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_fill_applied_to_matching_engine(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify fill is routed to engine with matching pending order.
 
         Given: Coordinator with engine that has order-123 in flight,
@@ -2311,10 +2357,10 @@ class TestFillApplication:
         """
         coord, engine = _make_engine_with_inflight(monkeypatch)
         fill = _make_fill(client_order_id="order-123")
-        coord._handle_execution_fill("orders.events.kraken.BTC-USD.executed", fill)
+        await coord._handle_execution_fill("orders.events.kraken.BTC-USD.executed", fill)
         engine.apply_fill.assert_called_once_with(fill)
 
-    def test_fill_matched_by_instrument_exchange_fallback(
+    async def test_fill_matched_by_instrument_exchange_fallback(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Verify fill routes to engine by instrument+exchange when no pending match.
@@ -2325,10 +2371,10 @@ class TestFillApplication:
         """
         coord, engine = _make_engine_with_inflight(monkeypatch, client_order_id="new-order-456")
         fill = _make_fill(client_order_id="old-order-123")
-        coord._handle_execution_fill("orders.events.kraken.BTC-USD.executed", fill)
+        await coord._handle_execution_fill("orders.events.kraken.BTC-USD.executed", fill)
         engine.apply_fill.assert_called_once_with(fill)
 
-    def test_fill_no_matching_engine(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_fill_no_matching_engine(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify fill for unknown instrument is logged and dropped.
 
         Given: Coordinator with no engine for ETH-USD,
@@ -2339,10 +2385,10 @@ class TestFillApplication:
             monkeypatch, instrument="BTC-USD", client_order_id="btc-order"
         )
         fill = _make_fill(instrument="ETH-USD", client_order_id="eth-order")
-        coord._handle_execution_fill("orders.events.kraken.ETH-USD.executed", fill)
+        await coord._handle_execution_fill("orders.events.kraken.ETH-USD.executed", fill)
         engine.apply_fill.assert_not_called()
 
-    def test_duplicate_fill_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_duplicate_fill_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify duplicate fills are silently dropped by apply_fill.
 
         Given: Engine whose apply_fill returns False (duplicate),
@@ -2352,7 +2398,7 @@ class TestFillApplication:
         coord, engine = _make_engine_with_inflight(monkeypatch)
         engine.apply_fill.return_value = False
         fill = _make_fill()
-        coord._handle_execution_fill("orders.events.kraken.BTC-USD.executed", fill)
+        await coord._handle_execution_fill("orders.events.kraken.BTC-USD.executed", fill)
         engine.apply_fill.assert_called_once()
 
 

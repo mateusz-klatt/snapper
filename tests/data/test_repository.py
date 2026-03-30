@@ -3144,3 +3144,466 @@ async def test_get_trades_returns_executed_at(
     assert result[0]["executed_at"] == event_time
     assert result[0]["trade_id"] == "exch-123"
     assert result[0]["price"] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_insert_trade_command(tmp_path: Path) -> None:
+    """Insert trade command persists the row and returns id and public_id.
+
+    Given: an empty database with the schema created,
+    When: insert_trade_command is called with valid submit parameters,
+    Then: a positive id and a 36-char UUID public_id are returned.
+    """
+    db_path = tmp_path / "cmd.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    cmd_id, cmd_pid = await r.insert_trade_command(
+        command_type="submit",
+        shard_key="kraken.BTC-USD.live",
+        exchange="kraken",
+        instrument="BTC-USD",
+        mode="live",
+        strategy_id="engine-buy",
+        client_order_id="cid-1",
+        venue_client_id="vcid-1",
+        side="buy",
+        order_type="market",
+        quantity=0.5,
+        price=None,
+        status="created",
+        created_at=now,
+        correlation_id="corr-1",
+        session_id="s1",
+        sequence_id=1,
+        timestamp=now,
+    )
+    assert cmd_id > 0
+    assert len(cmd_pid) == 36
+
+
+@pytest.mark.asyncio
+async def test_get_undispatched_commands(tmp_path: Path) -> None:
+    """Get undispatched commands returns only commands with status created.
+
+    Given: a database with one trade command in "created" status,
+    When: get_undispatched_commands is called,
+    Then: exactly one command is returned with status "created" and exchange "kraken".
+    """
+    db_path = tmp_path / "cmd2.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    await r.insert_trade_command(
+        command_type="submit",
+        shard_key="kraken.BTC-USD.live",
+        exchange="kraken",
+        instrument="BTC-USD",
+        mode="live",
+        strategy_id="engine-buy",
+        client_order_id="cid-1",
+        venue_client_id="vcid-1",
+        side="buy",
+        order_type="market",
+        quantity=0.5,
+        price=None,
+        status="created",
+        created_at=now,
+        correlation_id="corr-1",
+        session_id="s1",
+        sequence_id=1,
+        timestamp=now,
+    )
+    cmds = await r.get_undispatched_commands(as_of=now, limit=10)
+    assert len(cmds) == 1
+    assert cmds[0]["status"] == "created"
+    assert cmds[0]["exchange"] == "kraken"
+
+
+@pytest.mark.asyncio
+async def test_update_trade_command_status_scd2(tmp_path: Path) -> None:
+    """Update trade command status performs SCD2 close-and-insert.
+
+    Given: a database with one trade command in "created" status,
+    When: update_trade_command_status is called to transition to "dispatched",
+    Then: a new row is created, undispatched returns empty, and active shows "dispatched".
+    """
+    db_path = tmp_path / "cmd3.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _, cmd_pid = await r.insert_trade_command(
+        command_type="submit",
+        shard_key="kraken.BTC-USD.live",
+        exchange="kraken",
+        instrument="BTC-USD",
+        mode="live",
+        strategy_id="engine-buy",
+        client_order_id="cid-1",
+        venue_client_id="vcid-1",
+        side="buy",
+        order_type="market",
+        quantity=0.5,
+        price=None,
+        status="created",
+        created_at=now,
+        correlation_id="corr-1",
+        session_id="s1",
+        sequence_id=1,
+        timestamp=now,
+    )
+    later = now + timedelta(seconds=1)
+    new_id = await r.update_trade_command_status(
+        public_id=cmd_pid,
+        new_status="dispatched",
+        bus_time=later,
+        session_id="s1",
+        sequence_id=2,
+        dispatched_at=later,
+    )
+    assert new_id is not None
+    cmds = await r.get_undispatched_commands(as_of=later, limit=10)
+    assert len(cmds) == 0
+    active = await r.get_active_commands_for_shard("kraken.BTC-USD.live", later)
+    assert len(active) == 1
+    assert active[0]["status"] == "dispatched"
+    assert active[0]["public_id"] == cmd_pid
+
+
+@pytest.mark.asyncio
+async def test_insert_venue_event(tmp_path: Path) -> None:
+    """Insert venue event persists the row and returns a monotonic local_seq.
+
+    Given: an empty database with the schema created,
+    When: two venue events are inserted sequentially,
+    Then: both return positive local_seq values with the second greater than the first.
+    """
+    db_path = tmp_path / "ve.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    seq1 = await r.insert_venue_event(
+        event_type="order_accepted",
+        shard_key="kraken.BTC-USD.live",
+        exchange="kraken",
+        instrument="BTC-USD",
+        mode="live",
+        received_at=now,
+        session_id="s1",
+        sequence_id=1,
+        timestamp=now,
+        exchange_order_id="ex-1",
+        client_order_id="cid-1",
+    )
+    seq2 = await r.insert_venue_event(
+        event_type="fill_observed",
+        shard_key="kraken.BTC-USD.live",
+        exchange="kraken",
+        instrument="BTC-USD",
+        mode="live",
+        received_at=now,
+        session_id="s1",
+        sequence_id=2,
+        timestamp=now,
+        fill_price=50000.0,
+        fill_size=0.5,
+    )
+    assert seq2 > seq1 > 0
+
+
+@pytest.mark.asyncio
+async def test_get_venue_events_after(tmp_path: Path) -> None:
+    """Get venue events after watermark returns only newer events.
+
+    Given: a database with two venue events for the same shard,
+    When: get_venue_events_after is called with the first event's seq as watermark,
+    Then: only the second event is returned.
+    """
+    db_path = tmp_path / "ve2.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    seq1 = await r.insert_venue_event(
+        event_type="order_accepted",
+        shard_key="kraken.BTC-USD.live",
+        exchange="kraken",
+        instrument="BTC-USD",
+        mode="live",
+        received_at=now,
+        session_id="s1",
+        sequence_id=1,
+        timestamp=now,
+    )
+    await r.insert_venue_event(
+        event_type="fill_observed",
+        shard_key="kraken.BTC-USD.live",
+        exchange="kraken",
+        instrument="BTC-USD",
+        mode="live",
+        received_at=now,
+        session_id="s1",
+        sequence_id=2,
+        timestamp=now,
+    )
+    events = await r.get_venue_events_after("kraken.BTC-USD.live", seq1)
+    assert len(events) == 1
+    assert events[0]["event_type"] == "fill_observed"
+    events_all = await r.get_venue_events_after("kraken.BTC-USD.live", 0)
+    assert len(events_all) == 2
+
+
+@pytest.mark.asyncio
+async def test_upsert_checkpoint_and_get(tmp_path: Path) -> None:
+    """Upsert checkpoint creates and updates checkpoint rows via SCD2.
+
+    Given: an empty database with the schema created,
+    When: upsert_checkpoint is called twice with updated position and cash values,
+    Then: get_checkpoint returns the latest values and the second row has a different id.
+    """
+    db_path = tmp_path / "cp.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    cp_id = await r.upsert_checkpoint(
+        shard_key="kraken.BTC-USD.live",
+        position_qty=0.5,
+        entry_price=50000.0,
+        cash=9000.0,
+        peak_equity=10000.0,
+        realized_pnl=0.0,
+        turnover=500.0,
+        last_venue_event_id=42,
+        last_venue_event_at=now,
+        open_command_ids='["cmd-1"]',
+        checkpoint_at=now,
+        session_id="s1",
+        sequence_id=1,
+        bus_time=now,
+    )
+    assert cp_id > 0
+    cp = await r.get_checkpoint("kraken.BTC-USD.live", now)
+    assert cp is not None
+    assert cp["position_qty"] == 0.5
+    assert cp["cash"] == 9000.0
+    assert cp["last_venue_event_id"] == 42
+    later = now + timedelta(seconds=1)
+    cp_id2 = await r.upsert_checkpoint(
+        shard_key="kraken.BTC-USD.live",
+        position_qty=1.0,
+        entry_price=50000.0,
+        cash=8500.0,
+        peak_equity=10500.0,
+        realized_pnl=0.0,
+        turnover=1000.0,
+        last_venue_event_id=43,
+        last_venue_event_at=later,
+        open_command_ids=None,
+        checkpoint_at=later,
+        session_id="s1",
+        sequence_id=2,
+        bus_time=later,
+    )
+    assert cp_id2 != cp_id
+    cp2 = await r.get_checkpoint("kraken.BTC-USD.live", later)
+    assert cp2 is not None
+    assert cp2["position_qty"] == 1.0
+    assert cp2["cash"] == 8500.0
+
+
+@pytest.mark.asyncio
+async def test_get_checkpoint_returns_none_when_missing(tmp_path: Path) -> None:
+    """Get checkpoint returns None when no checkpoint exists for the shard.
+
+    Given: an empty database with the schema created,
+    When: get_checkpoint is called for a non-existent shard key,
+    Then: None is returned.
+    """
+    db_path = tmp_path / "cp2.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    result = await r.get_checkpoint("nonexistent.shard", datetime.now(UTC))
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_update_trade_command_returns_none_for_missing(tmp_path: Path) -> None:
+    """Update trade command status returns None for a non-existent public_id.
+
+    Given: an empty database with the schema created,
+    When: update_trade_command_status is called with a non-existent public_id,
+    Then: None is returned.
+    """
+    db_path = tmp_path / "cmd4.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    result = await r.update_trade_command_status(
+        public_id="nonexistent",
+        new_status="dispatched",
+        bus_time=datetime.now(UTC),
+        session_id="s1",
+        sequence_id=1,
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_fill_exec_ids_for_shard(tmp_path: Path) -> None:
+    """Get fill exec IDs returns all exec_id and trade_id for fill events.
+
+    Given: a database with two fill_observed events and one order_accepted event,
+    When: get_fill_exec_ids_for_shard is called,
+    Then: only exec_id and trade_id from fill events are returned.
+    """
+    db_path = tmp_path / "dedup.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    await r.insert_venue_event(
+        event_type="fill_observed",
+        shard_key="kraken.BTC-USD.live",
+        exchange="kraken",
+        instrument="BTC-USD",
+        mode="live",
+        received_at=now,
+        session_id="s1",
+        sequence_id=1,
+        timestamp=now,
+        exec_id="exec-1",
+        trade_id="trade-1",
+    )
+    await r.insert_venue_event(
+        event_type="fill_observed",
+        shard_key="kraken.BTC-USD.live",
+        exchange="kraken",
+        instrument="BTC-USD",
+        mode="live",
+        received_at=now,
+        session_id="s1",
+        sequence_id=2,
+        timestamp=now,
+        exec_id="exec-2",
+    )
+    await r.insert_venue_event(
+        event_type="fill_observed",
+        shard_key="kraken.BTC-USD.live",
+        exchange="kraken",
+        instrument="BTC-USD",
+        mode="live",
+        received_at=now,
+        session_id="s1",
+        sequence_id=3,
+        timestamp=now,
+    )
+    await r.insert_venue_event(
+        event_type="order_accepted",
+        shard_key="kraken.BTC-USD.live",
+        exchange="kraken",
+        instrument="BTC-USD",
+        mode="live",
+        received_at=now,
+        session_id="s1",
+        sequence_id=4,
+        timestamp=now,
+        exec_id="should-not-appear",
+    )
+    ids = await r.get_fill_exec_ids_for_shard("kraken.BTC-USD.live")
+    assert ids == {"exec-1", "trade-1", "exec-2"}
+
+
+@pytest.mark.asyncio
+async def test_get_latest_venue_event_id(tmp_path: Path) -> None:
+    """Get latest venue event ID returns highest id for shard.
+
+    Given: a database with two venue events for the same shard,
+    When: get_latest_venue_event_id is called,
+    Then: the highest id is returned.
+    """
+    db_path = tmp_path / "latest.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    await r.insert_venue_event(
+        event_type="fill_observed",
+        shard_key="kraken.BTC-USD.live",
+        exchange="kraken",
+        instrument="BTC-USD",
+        mode="live",
+        received_at=now,
+        session_id="s1",
+        sequence_id=1,
+        timestamp=now,
+    )
+    await r.insert_venue_event(
+        event_type="fill_observed",
+        shard_key="kraken.BTC-USD.live",
+        exchange="kraken",
+        instrument="BTC-USD",
+        mode="live",
+        received_at=now,
+        session_id="s1",
+        sequence_id=2,
+        timestamp=now,
+    )
+    result = await r.get_latest_venue_event_id("kraken.BTC-USD.live")
+    assert result is not None
+    assert result >= 2
+    empty = await r.get_latest_venue_event_id("nonexistent.shard")
+    assert empty is None
+
+
+@pytest.mark.asyncio
+async def test_get_active_commands_for_exchange(tmp_path: Path) -> None:
+    """Get active commands for exchange returns non-terminal commands.
+
+    Given: a database with one created and one filled command for kraken,
+    When: get_active_commands_for_exchange is called for kraken,
+    Then: only the created (non-terminal) command is returned.
+    """
+    db_path = tmp_path / "exch.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    await r.insert_trade_command(
+        command_type="submit",
+        shard_key="kraken.BTC-USD.live",
+        exchange="kraken",
+        instrument="BTC-USD",
+        mode="live",
+        strategy_id="test",
+        client_order_id="cid-1",
+        venue_client_id="vcid-1",
+        side="buy",
+        order_type="market",
+        quantity=0.5,
+        price=None,
+        status="created",
+        created_at=now,
+        correlation_id="corr-1",
+        session_id="s1",
+        sequence_id=1,
+        timestamp=now,
+    )
+    _, filled_pid = await r.insert_trade_command(
+        command_type="submit",
+        shard_key="kraken.ETH-USD.live",
+        exchange="kraken",
+        instrument="ETH-USD",
+        mode="live",
+        strategy_id="test",
+        client_order_id="cid-2",
+        venue_client_id="vcid-2",
+        side="sell",
+        order_type="market",
+        quantity=1.0,
+        price=None,
+        status="filled",
+        created_at=now,
+        correlation_id="corr-2",
+        session_id="s1",
+        sequence_id=2,
+        timestamp=now,
+    )
+    cmds = await r.get_active_commands_for_exchange("kraken", now)
+    assert len(cmds) == 1
+    assert cmds[0]["status"] == "created"
+    assert cmds[0]["instrument"] == "BTC-USD"

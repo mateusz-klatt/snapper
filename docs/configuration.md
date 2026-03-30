@@ -74,6 +74,18 @@ Sensitive data is stored encrypted in the `settings` table.
 | `timeframes` | `["1m"]` | Candle timeframes (list) |
 | `risk_max_leverage` | `1.0` | Maximum leverage |
 | `risk_r_per_trade` | `0.005` | Risk per trade (0.5%) |
+| `use_durable_commands` | `false` | Enable durable (outbox-driven) trade runtime instead of dual-write |
+
+`use_durable_commands` is read by the trade runtime and executors during
+startup. After changing it, restart `snapper trade-zmq` and the relevant
+`snapper executor` processes.
+
+Mode summary:
+
+- `false` — dual-write mode. The engine writes durable command rows and still
+  publishes directly to ZMQ.
+- `true` — outbox-driven durable mode. Commands are published from the
+  database outbox and executor `VenueEvent` writes become fail-closed.
 
 ### Publisher Micro-Batch
 

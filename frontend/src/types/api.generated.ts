@@ -1749,6 +1749,12 @@ export type Components = {
              */
             exchange: "paper" | "kraken" | "zonda" | "walutomat";
             /**
+             * Mode
+             * @default live
+             * @enum {string}
+             */
+            mode: "live" | "paper";
+            /**
              * Side
              * @enum {string}
              */
@@ -1860,6 +1866,12 @@ export type Components = {
              * @enum {string}
              */
             exchange: "paper" | "kraken" | "zonda" | "walutomat";
+            /**
+             * Mode
+             * @default live
+             * @enum {string}
+             */
+            mode: "live" | "paper";
             /** Quantity */
             quantity: number;
             /** Average Price */

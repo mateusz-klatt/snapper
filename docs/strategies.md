@@ -2,21 +2,25 @@
 
 Snapper provides a framework for creating trading strategies based on
 ZeroMQ messaging. Strategies subscribe to market data and publish signals.
+Strategies produce intent only; the trade runtime owns order lifecycle,
+positions, and balance projections.
 
 ## Strategy Architecture
 
 ```mermaid
 flowchart TB
     MarketData["Market Data<br/>ZMQ"] --> Strategy
+    Broker["ZMQ Broker"]
 
     subgraph Strategy["BaseStrategy"]
         OnBar["on_candle()"]
         OnTick["on_tick()"]
     end
 
-    Strategy -->|StrategySignal| SignalOut["StrategySignal ZMQ"]
-    SignalOut --> Coordinator["Trader Coordinator"]
-    Coordinator --> Executor
+    Strategy -->|signals.*| Broker
+    Broker -->|signals.*| Coordinator["Trade Runtime"]
+    Coordinator -->|orders.commands.*| Broker
+    Broker -->|orders.commands.*| Executor["Order Executor"]
 ```
 
 ## Creating Strategies

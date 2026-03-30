@@ -249,6 +249,7 @@ class OrderData(StrictDataSchema[Literal["order"]]):
     client_order_id: str
     instrument: str
     exchange: OrderExchange
+    mode: ExecutionMode = "live"
     side: TradeSide
     status: str
     order_type: OrderType
@@ -282,6 +283,7 @@ class PositionData(StrictDataSchema[Literal["position"]]):
     type: Literal["position"] = "position"
     instrument: str
     exchange: OrderExchange
+    mode: ExecutionMode = "live"
     quantity: float
     average_price: float
     unrealized_pnl: float

@@ -336,6 +336,7 @@ X-CSRF-Token: <csrf_token>
         "average_price": 42000.0,
         "status": "filled",
         "time_in_force": "GTC",
+        "mode": "live",
         "error": null
     }
 ]
@@ -456,7 +457,8 @@ X-CSRF-Token: <csrf_token>
         "quantity": 0.5,
         "average_price": 41500.0,
         "unrealized_pnl": 250.0,
-        "realized_pnl": 100.0
+        "realized_pnl": 100.0,
+        "mode": "live"
     }
 ]
 ```

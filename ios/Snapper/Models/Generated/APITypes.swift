@@ -68,6 +68,11 @@ enum OrderDataExchange: String, Codable, Sendable {
     case walutomat
 }
 
+enum OrderDataMode: String, Codable, Sendable {
+    case live
+    case paper
+}
+
 enum OrderDataSide: String, Codable, Sendable {
     case buy
     case sell
@@ -85,6 +90,11 @@ enum PositionDataExchange: String, Codable, Sendable {
     case kraken
     case zonda
     case walutomat
+}
+
+enum PositionDataMode: String, Codable, Sendable {
+    case live
+    case paper
 }
 
 enum ProcessRunStatus: String, Codable, Sendable {
@@ -599,6 +609,7 @@ struct OrderData: Codable, Sendable {
     let clientOrderId: String
     let instrument: String
     let exchange: String
+    let mode: String?
     let side: String
     let status: String
     let orderType: String
@@ -622,6 +633,7 @@ struct OrderData: Codable, Sendable {
         case clientOrderId = "client_order_id"
         case instrument
         case exchange
+        case mode
         case side
         case status
         case orderType = "order_type"
@@ -666,6 +678,7 @@ struct PositionData: Codable, Sendable {
     let sessionId: String
     let instrument: String
     let exchange: String
+    let mode: String?
     let quantity: Double
     let averagePrice: Double
     let unrealizedPnl: Double
@@ -679,6 +692,7 @@ struct PositionData: Codable, Sendable {
         case sessionId = "session_id"
         case instrument
         case exchange
+        case mode
         case quantity
         case averagePrice = "average_price"
         case unrealizedPnl = "unrealized_pnl"
