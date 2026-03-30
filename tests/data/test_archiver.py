@@ -241,7 +241,7 @@ def test_resolve_cache_path_minute() -> None:
     Then: Returns daily CSV file path.
     """
     path = _resolve_cache_path(Path("data"), "polygon", "minute", "BTC-USD", date(2024, 3, 15))
-    assert str(path) == "data/polygon/cache/minute/BTC-USD/2024/2024-03-15.csv"
+    assert path.as_posix() == "data/polygon/cache/minute/BTC-USD/2024/2024-03-15.csv"
 
 
 def test_resolve_cache_path_day() -> None:
@@ -252,7 +252,7 @@ def test_resolve_cache_path_day() -> None:
     Then: Returns monthly CSV file path.
     """
     path = _resolve_cache_path(Path("data"), "polygon", "day", "BTC-USD", date(2024, 3, 15))
-    assert str(path) == "data/polygon/cache/day/BTC-USD/2024/2024-03.csv"
+    assert path.as_posix() == "data/polygon/cache/day/BTC-USD/2024/2024-03.csv"
 
 
 def test_timeframe_to_timespan_mapping() -> None:

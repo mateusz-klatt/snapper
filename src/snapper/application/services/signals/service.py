@@ -208,7 +208,7 @@ class SignalReadService:
                     query = query.where(Signal.strategy_name == strategy)
                 if exchange:
                     query = query.where(Instrument.exchange == exchange)
-                query = query.order_by(desc(Signal.fired_at)).limit(limit)
+                query = query.order_by(desc(Signal.fired_at), desc(Signal.public_id)).limit(limit)
                 result = await session.execute(query)
                 signals_with_instruments = result.all()
                 return [

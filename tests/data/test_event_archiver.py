@@ -209,7 +209,7 @@ def test_resolve_event_path_instrument_bound() -> None:
         "polygon",
         "BTC-USD",
     )
-    assert str(path) == "data/archive/ticks/polygon/BTC-USD/2024/2024-03-15.csv"
+    assert path.as_posix() == "data/archive/ticks/polygon/BTC-USD/2024/2024-03-15.csv"
 
 
 def test_resolve_event_path_flat() -> None:
@@ -220,7 +220,7 @@ def test_resolve_event_path_flat() -> None:
     Then: Returns path without partitioning.
     """
     path = _resolve_event_path(Path("data"), "telemetry", date(2024, 3, 15))
-    assert str(path) == "data/archive/telemetry/2024/2024-03-15.csv"
+    assert path.as_posix() == "data/archive/telemetry/2024/2024-03-15.csv"
 
 
 def test_event_table_specs_cover_all_tables() -> None:
