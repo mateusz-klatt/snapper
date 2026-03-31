@@ -14,7 +14,7 @@ export type {
   Status2 as HeartbeatStatus,
 } from './ws.generated'
 
-type MarketDataExchange = 'kraken' | 'zonda' | 'walutomat' | 'polygon'
+type Exchange = 'kraken' | 'kraken_futures' | 'zonda' | 'walutomat' | 'polygon'
 type OrderExchange = 'paper' | 'kraken' | 'zonda' | 'walutomat'
 type TradeSide = 'buy' | 'sell'
 type Mode = 'live' | 'paper'
@@ -29,7 +29,7 @@ export interface Candle {
   timestamp: Date
   sessionId: string
   instrument: string
-  exchange: MarketDataExchange
+  exchange: Exchange
   timeframe: string
   openAt: Date
   open: number
@@ -278,7 +278,7 @@ export interface Tick {
   timestamp: Date
   sessionId: string
   instrument: string
-  exchange: MarketDataExchange
+  exchange: Exchange
   volume: number
   bid?: number | null
   ask?: number | null
@@ -295,7 +295,7 @@ export interface Trade {
   timestamp: Date
   sessionId: string
   instrument: string
-  exchange: MarketDataExchange
+  exchange: Exchange
   executedAt?: Date | null
   price: number
   volume: number
