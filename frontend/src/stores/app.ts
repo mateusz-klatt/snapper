@@ -20,6 +20,8 @@ interface AppStore extends AppState {
   setSubscribedTopics: (topics: string[]) => void
   updateLastUpdate: () => void
   toggleDarkMode: () => void
+  setAsOf: (asOf: string) => void
+  clearAsOf: () => void
 }
 
 export const useAppStore = create<AppStore>()(
@@ -29,6 +31,8 @@ export const useAppStore = create<AppStore>()(
     subscribedTopics: [],
     lastUpdate: new Date().toISOString(),
     isDarkMode: loadDarkModePreference(),
+    asOf: null,
+    isTimeTraveling: false,
     setConnected: connected => set({ isConnected: connected }),
     setConnectionLag: lag => set({ connectionLag: lag }),
     setSubscribedTopics: topics => set({ subscribedTopics: topics }),
@@ -41,5 +45,7 @@ export const useAppStore = create<AppStore>()(
 
         return { isDarkMode: next }
       }),
+    setAsOf: (asOf: string) => set({ asOf, isTimeTraveling: true }),
+    clearAsOf: () => set({ asOf: null, isTimeTraveling: false }),
   }))
 )

@@ -4,6 +4,8 @@ export interface AppState {
   lastUpdate: string | null
   isConnected: boolean
   connectionLag: number
+  asOf: string | null
+  isTimeTraveling: boolean
 }
 export interface MarketDataState {
   selectedExchange: string | null

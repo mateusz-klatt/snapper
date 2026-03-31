@@ -73,7 +73,14 @@ const MUTATING_METHODS = new Set(['POST', 'PUT', 'DELETE', 'PATCH'])
 class APIClient {
   private static instance: APIClient
   private isLoggingOut = false
+  private timeTravelAsOf: string | null = null
   private constructor() {}
+  public setTimeTravelAsOf(asOf: string | null): void {
+    this.timeTravelAsOf = asOf
+  }
+  public getTimeTravelAsOf(): string | null {
+    return this.timeTravelAsOf
+  }
   public static getInstance(): APIClient {
     if (!APIClient.instance) {
       APIClient.instance = new APIClient()
@@ -185,9 +192,19 @@ class APIClient {
     }, 1000)
   }
   public async get(url: string, options: RequestOptions = {}): Promise<Response> {
+    if (this.timeTravelAsOf) {
+      const separator = url.includes('?') ? '&' : '?'
+
+      url = `${url}${separator}as_of=${encodeURIComponent(this.timeTravelAsOf)}`
+    }
+
     return this.request(url, { ...options, method: 'GET' })
   }
   public async post(url: string, body?: unknown, options: RequestOptions = {}): Promise<Response> {
+    if (this.timeTravelAsOf) {
+      throw new Error('Write operations are disabled in time-travel mode')
+    }
+
     return this.request(url, {
       ...options,
       method: 'POST',

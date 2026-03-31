@@ -1721,4 +1721,51 @@ describe('cacheWsTicketFromResponse', () => {
       expect(call[1].body).toBeUndefined()
     })
   })
+  describe('time-travel mode', () => {
+    afterEach(() => {
+      apiClient.setTimeTravelAsOf(null)
+    })
+    it('appends as_of query parameter to GET requests when time-traveling', async () => {
+      apiClient.setTimeTravelAsOf('2026-03-15T10:00:00Z')
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) })
+      await apiClient.get('/api/positions')
+      const url = mockFetch.mock.calls[0][0] as string
+
+      expect(url).toContain('as_of=2026-03-15T10%3A00%3A00Z')
+    })
+    it('appends as_of with & when URL already has query params', async () => {
+      apiClient.setTimeTravelAsOf('2026-03-15T10:00:00Z')
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) })
+      await apiClient.get('/api/candles?instrument=BTC-USD')
+      const url = mockFetch.mock.calls[0][0] as string
+
+      expect(url).toContain('&as_of=')
+    })
+    it('does not append as_of when not time-traveling', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) })
+      await apiClient.get('/api/positions')
+      const url = mockFetch.mock.calls[0][0] as string
+
+      expect(url).not.toContain('as_of')
+    })
+    it('blocks POST requests when time-traveling', async () => {
+      apiClient.setTimeTravelAsOf('2026-03-15T10:00:00Z')
+
+      await expect(apiClient.post('/api/settings/foo/set', { value: 'bar' })).rejects.toThrow(
+        'Write operations are disabled in time-travel mode'
+      )
+      expect(mockFetch).not.toHaveBeenCalled()
+    })
+    it('allows POST requests when not time-traveling', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) })
+      await apiClient.post('/api/settings/foo/set', { value: 'bar' })
+
+      expect(mockFetch).toHaveBeenCalled()
+    })
+    it('exposes current asOf via getter', () => {
+      expect(apiClient.getTimeTravelAsOf()).toBeNull()
+      apiClient.setTimeTravelAsOf('2026-01-01T00:00:00Z')
+      expect(apiClient.getTimeTravelAsOf()).toBe('2026-01-01T00:00:00Z')
+    })
+  })
 })

@@ -9,6 +9,8 @@ describe('useAppStore', () => {
       subscribedTopics: [],
       lastUpdate: new Date().toISOString(),
       isDarkMode: true,
+      asOf: null,
+      isTimeTraveling: false,
     })
     vi.clearAllMocks()
   })
@@ -113,6 +115,32 @@ describe('useAppStore', () => {
       expect(localStorage.getItem('snapper-dark-mode')).toBe('true')
       useAppStore.getState().toggleDarkMode()
       expect(localStorage.getItem('snapper-dark-mode')).toBe('false')
+    })
+  })
+  describe('setAsOf', () => {
+    it('sets asOf and activates time travel mode', () => {
+      useAppStore.getState().setAsOf('2026-03-15T10:00:00Z')
+      expect(useAppStore.getState().asOf).toBe('2026-03-15T10:00:00Z')
+      expect(useAppStore.getState().isTimeTraveling).toBe(true)
+    })
+    it('overwrites previous asOf value', () => {
+      useAppStore.getState().setAsOf('2026-03-15T10:00:00Z')
+      useAppStore.getState().setAsOf('2026-01-01T00:00:00Z')
+      expect(useAppStore.getState().asOf).toBe('2026-01-01T00:00:00Z')
+      expect(useAppStore.getState().isTimeTraveling).toBe(true)
+    })
+  })
+  describe('clearAsOf', () => {
+    it('clears asOf and deactivates time travel mode', () => {
+      useAppStore.getState().setAsOf('2026-03-15T10:00:00Z')
+      useAppStore.getState().clearAsOf()
+      expect(useAppStore.getState().asOf).toBeNull()
+      expect(useAppStore.getState().isTimeTraveling).toBe(false)
+    })
+    it('is a no-op when already in live mode', () => {
+      useAppStore.getState().clearAsOf()
+      expect(useAppStore.getState().asOf).toBeNull()
+      expect(useAppStore.getState().isTimeTraveling).toBe(false)
     })
   })
   describe('loadDarkModePreference', () => {
