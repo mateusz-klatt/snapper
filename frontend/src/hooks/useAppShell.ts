@@ -9,7 +9,9 @@ interface AppShellState {
 }
 
 export function useAppShell(): AppShellState {
-  useWSDispatcher()
+  const isTimeTraveling = useAppStore(s => s.isTimeTraveling)
+
+  useWSDispatcher({ enabled: !isTimeTraveling })
   useWebSocketConnection(undefined, { autoDisconnect: true })
   const { isConnected, connectionLag, subscribedTopics } = useAppStore()
 

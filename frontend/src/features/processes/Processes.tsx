@@ -8,6 +8,7 @@ import {
 } from '../../hooks/queries'
 import { useHeartbeats, type HeartbeatData } from '../../hooks/useHeartbeats'
 import { useConfirmDialog } from '../../hooks/useConfirmDialog'
+import { useIsReadOnly } from '../../hooks/useIsReadOnly'
 import { ProcessControlCard } from './ProcessControlCard'
 import { ExecutionModeModal } from './ExecutionModeModal'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
@@ -23,6 +24,7 @@ const resolveStatusBadge = (process: ConfiguredProcess): string => {
 }
 
 export const Processes: React.FC = () => {
+  const readOnly = useIsReadOnly()
   const { openConfirm, dialogProps: confirmDialogProps } = useConfirmDialog()
   const [executionModeModal, setExecutionModeModal] = useState<{
     open: boolean
@@ -244,6 +246,7 @@ export const Processes: React.FC = () => {
                 }
                 isStarting={startProcess.isPending && startProcess.variables?.name === process.name}
                 isStopping={stopProcess.isPending && stopProcess.variables?.name === process.name}
+                readOnly={readOnly}
               />
             )
           })}
@@ -276,6 +279,7 @@ export const Processes: React.FC = () => {
                   status={status}
                   statusBadge={statusBadge}
                   details={details}
+                  readOnly={readOnly}
                   onStart={() => handleStart(process.name, description)}
                   onStop={() =>
                     handleStop(process.name, `This will stop the ${process.name} process.`)

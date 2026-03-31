@@ -8,8 +8,10 @@ import {
   useUpdateSetting,
   useDeleteSetting,
 } from '../../hooks/queries'
+import { useIsReadOnly } from '../../hooks/useIsReadOnly'
 
 export const Settings = () => {
+  const readOnly = useIsReadOnly()
   const [selectedCategory, setSelectedCategory] = useState<string>('all')
   const [searchTerm, setSearchTerm] = useState('')
   const [showAddModal, setShowAddModal] = useState(false)
@@ -108,7 +110,8 @@ export const Settings = () => {
           </div>
           <button
             onClick={() => setShowAddModal(true)}
-            className='px-3 py-1.5 text-sm bg-brand-600 hover:bg-brand-700 text-white rounded-lg transition-colors flex items-center gap-1.5'
+            disabled={readOnly}
+            className='px-3 py-1.5 text-sm bg-brand-600 hover:bg-brand-700 text-white rounded-lg transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed'
           >
             <svg className='w-4 h-4' fill='none' stroke='currentColor' viewBox='0 0 24 24'>
               <path

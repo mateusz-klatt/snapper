@@ -14,6 +14,7 @@ interface ProcessControlCardProps {
   onRestart?: () => void
   isStarting?: boolean
   isStopping?: boolean
+  readOnly?: boolean
   heartbeat?: HeartbeatData
 }
 
@@ -58,6 +59,7 @@ export const ProcessControlCard: React.FC<Readonly<ProcessControlCardProps>> = (
   onRestart = () => {},
   isStarting = false,
   isStopping = false,
+  readOnly = false,
   heartbeat,
 }) => {
   const isRunning = status === 'running'
@@ -108,10 +110,10 @@ export const ProcessControlCard: React.FC<Readonly<ProcessControlCardProps>> = (
           {isRunning ? (
             <button
               onClick={onStop}
-              disabled={isStopping}
+              disabled={isStopping || readOnly}
               className={clsx(
                 'flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors',
-                isStopping
+                isStopping || readOnly
                   ? 'bg-loss-400/20 text-loss-600 cursor-not-allowed'
                   : 'bg-loss-600 text-white hover:bg-loss-700'
               )}
@@ -128,10 +130,10 @@ export const ProcessControlCard: React.FC<Readonly<ProcessControlCardProps>> = (
           ) : (
             <button
               onClick={onStart}
-              disabled={isStarting}
+              disabled={isStarting || readOnly}
               className={clsx(
                 'flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors',
-                isStarting
+                isStarting || readOnly
                   ? 'bg-accent-400/20 text-accent-300 cursor-not-allowed'
                   : 'bg-accent-600 text-white hover:bg-accent-700'
               )}
