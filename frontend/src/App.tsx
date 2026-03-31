@@ -6,7 +6,8 @@ import { useAppShell } from './hooks/useAppShell'
 import { AppRoutes } from './components/AppRoutes'
 import { ALL_TABS } from './components/tabs'
 import UserProfile from './components/auth/UserProfile'
-import { Menu, Wifi, WifiOff, X, Sun, Moon } from 'lucide-react'
+import { TimeTravelPicker } from './components/TimeTravelPicker'
+import { Menu, Wifi, WifiOff, X, Sun, Moon, Clock } from 'lucide-react'
 
 function App() {
   const [activeTab, navigateToTab] = useTabRouting()
@@ -14,6 +15,7 @@ function App() {
   const { isConnected, connectionLag, subscribedTopicsCount } = useAppShell()
   const isDarkMode = useAppStore(s => s.isDarkMode)
   const toggleDarkMode = useAppStore(s => s.toggleDarkMode)
+  const isTimeTraveling = useAppStore(s => s.isTimeTraveling)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const tabs = ALL_TABS.filter(tab => canAccess(tab.id))
   const lagValue = connectionLag >= 0 ? `${connectionLag} ms` : 'Unknown'
@@ -90,12 +92,15 @@ function App() {
               <Menu size={20} />
             </button>
             <div className='ml-auto flex items-center gap-3'>
-              <span
-                className='hidden text-sm tabular-nums text-muted-600 sm:inline'
-                title='Round-trip latency to the WebSocket server'
-              >
-                Lag: {lagValue}
-              </span>
+              <TimeTravelPicker />
+              {!isTimeTraveling && (
+                <span
+                  className='hidden text-sm tabular-nums text-muted-600 sm:inline'
+                  title='Round-trip latency to the WebSocket server'
+                >
+                  Lag: {lagValue}
+                </span>
+              )}
               <span
                 className='hidden text-sm tabular-nums text-muted-600 sm:inline'
                 title='Number of subscribed WebSocket topics'
@@ -124,6 +129,12 @@ function App() {
             </div>
           </div>
         </header>
+        {isTimeTraveling && (
+          <div className='flex items-center gap-2 border-b border-brand-200 bg-brand-50 px-4 py-2 text-sm font-medium text-brand-800'>
+            <Clock size={14} />
+            <span>Time Travel Mode — viewing historical data (read-only)</span>
+          </div>
+        )}
         <main className='flex-1 overflow-y-auto p-4 sm:p-6'>
           <div className='mx-auto w-full max-w-screen-2xl'>
             <AppRoutes activeTab={activeTab} />
