@@ -303,7 +303,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """Subscribe to real-time ticker updates via WebSocket.
 
         Args:
-            symbols: List of Kraken Futures product IDs to subscribe.
+            symbols: Native symbols (e.g., ``BTC-USD-PERP``) — converted
+                to Kraken Futures product IDs internally.
 
         Returns:
             AsyncIterator yielding TickerUpdate for each price change.
@@ -376,7 +377,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """Subscribe to real-time trade updates via WebSocket.
 
         Args:
-            symbols: List of Kraken Futures product IDs to subscribe.
+            symbols: Native symbols (e.g., ``BTC-USD-PERP``) — converted
+                to Kraken Futures product IDs internally.
 
         Returns:
             AsyncIterator yielding TradeUpdate for each trade.
