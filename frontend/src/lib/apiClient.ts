@@ -200,8 +200,13 @@ class APIClient {
 
     return this.request(url, { ...options, method: 'GET' })
   }
+  private static readonly AUTH_PATHS = new Set([
+    '/api/auth/login',
+    '/api/auth/refresh',
+    '/api/auth/logout',
+  ])
   public async post(url: string, body?: unknown, options: RequestOptions = {}): Promise<Response> {
-    if (this.timeTravelAsOf) {
+    if (this.timeTravelAsOf && !APIClient.AUTH_PATHS.has(url.split('?')[0])) {
       throw new Error('Write operations are disabled in time-travel mode')
     }
 

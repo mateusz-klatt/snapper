@@ -1762,6 +1762,20 @@ describe('cacheWsTicketFromResponse', () => {
 
       expect(mockFetch).toHaveBeenCalled()
     })
+    it('allows auth POST requests when time-traveling', async () => {
+      apiClient.setTimeTravelAsOf('2026-03-15T10:00:00Z')
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) })
+      await apiClient.post('/api/auth/refresh', {})
+
+      expect(mockFetch).toHaveBeenCalled()
+    })
+    it('allows login POST when time-traveling', async () => {
+      apiClient.setTimeTravelAsOf('2026-03-15T10:00:00Z')
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) })
+      await apiClient.post('/api/auth/login', { username: 'u', password: 'p' })
+
+      expect(mockFetch).toHaveBeenCalled()
+    })
     it('exposes current asOf via getter', () => {
       expect(apiClient.getTimeTravelAsOf()).toBeNull()
       apiClient.setTimeTravelAsOf('2026-01-01T00:00:00Z')
