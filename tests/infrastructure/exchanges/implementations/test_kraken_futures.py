@@ -349,6 +349,7 @@ class TestRestMethods:
         """
         result = await client.get_ohlcv("BTC/USD:USD", "1m")
         assert len(result) == 1
+        assert result[0].timestamp == pytest.approx(1640995200.0)
         assert result[0].open == pytest.approx(50000.0)
         assert result[0].close == pytest.approx(50050.0)
 

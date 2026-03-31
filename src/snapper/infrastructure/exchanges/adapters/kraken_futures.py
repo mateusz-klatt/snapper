@@ -40,18 +40,22 @@ def parse_kraken_futures_ticker(data: dict[str, Any]) -> TickerUpdate:
         TickerUpdate with normalized symbol and price data.
     """
     schema = KrakenFuturesTickerSchema.model_validate(data)
+    volume = schema.vol24h or data.get("volume") or 0.0
+    low = schema.low24h or data.get("low") or 0.0
+    high = schema.high24h or data.get("high") or 0.0
+    change = schema.change24h or data.get("change") or 0.0
     return TickerUpdate(
         symbol=kraken_futures_ws_to_native(schema.symbol),
         bid=schema.bid or 0.0,
-        bid_qty=schema.bid_size or 0.0,
+        bid_qty=schema.bid_size or data.get("bid_size") or 0.0,
         ask=schema.ask or 0.0,
-        ask_qty=schema.ask_size or 0.0,
+        ask_qty=schema.ask_size or data.get("ask_size") or 0.0,
         last=schema.last or 0.0,
-        volume=schema.vol24h or 0.0,
+        volume=float(volume),
         vwap=0.0,
-        low=schema.low24h or 0.0,
-        high=schema.high24h or 0.0,
-        change=schema.change24h or 0.0,
+        low=float(low),
+        high=float(high),
+        change=float(change),
         change_pct=0.0,
     )
 

@@ -162,7 +162,7 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
                         session,
                         symbol_public_id,
                         ExchangeEnum.KRAKEN_FUTURES,
-                        schema.tradeable,
+                        True,
                         False,
                         "kraken_futures_updater",
                         None,
@@ -280,6 +280,10 @@ def _extract_expiry(schema: KrakenFuturesInstrumentSchema) -> str | None:
 def _classify_asset_type(schema: KrakenFuturesInstrumentSchema) -> AssetTypeEnum:
     """Classify the asset type from instrument metadata.
 
+    Reference rates (rr_*) and indices (in_*) are classified as INDEX
+    regardless of the tradfi flag. TradFi products (CME contracts) are
+    also INDEX. Everything else is CRYPTO.
+
     Args:
         schema: Validated instrument schema.
 
@@ -287,5 +291,8 @@ def _classify_asset_type(schema: KrakenFuturesInstrumentSchema) -> AssetTypeEnum
         AssetTypeEnum based on product classification.
     """
     if schema.tradfi:
+        return AssetTypeEnum.INDEX
+    symbol_lower = schema.symbol.lower()
+    if symbol_lower.startswith(_RR_PREFIX) or symbol_lower.startswith(_IN_PREFIX):
         return AssetTypeEnum.INDEX
     return AssetTypeEnum.CRYPTO

@@ -219,12 +219,32 @@ class TestClassifyAssetType:
     def test_crypto_default(self) -> None:
         """Classify non-TradFi product as CRYPTO.
 
-        Given: Instrument with tradfi=False,
+        Given: Instrument with tradfi=False and normal symbol,
         When: _classify_asset_type is called,
         Then: Returns AssetTypeEnum.CRYPTO.
         """
         schema = _make_schema(tradfi=False)
         assert _classify_asset_type(schema) == "crypto"
+
+    def test_reference_rate_returns_index(self) -> None:
+        """Classify reference rate as INDEX.
+
+        Given: Instrument with rr_ prefix,
+        When: _classify_asset_type is called,
+        Then: Returns AssetTypeEnum.INDEX.
+        """
+        schema = _make_schema(symbol="rr_xbtusd", tradfi=False)
+        assert _classify_asset_type(schema) == "index"
+
+    def test_index_product_returns_index(self) -> None:
+        """Classify index product as INDEX.
+
+        Given: Instrument with in_ prefix,
+        When: _classify_asset_type is called,
+        Then: Returns AssetTypeEnum.INDEX.
+        """
+        schema = _make_schema(symbol="in_xbtusd", tradfi=False)
+        assert _classify_asset_type(schema) == "index"
 
 
 class TestServiceMethods:

@@ -192,7 +192,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         )
         return [
             OhlcvSnapshot(
-                timestamp=candle[0],
+                timestamp=candle[0] / 1000,
                 open=float(candle[1]),
                 high=float(candle[2]),
                 low=float(candle[3]),
