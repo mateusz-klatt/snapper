@@ -10,8 +10,6 @@ from typing import Any
 from loguru import logger
 from sqlalchemy import select
 
-from snapper.application.process_manager.enums import ProcessLifecycleEnum
-from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.process_parameters import PolygonSymbolUpdaterParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
@@ -19,6 +17,9 @@ from snapper.config.settings import AppSettings
 from snapper.core.types import AliasChannelEnum
 from snapper.core.types import AssetTypeEnum
 from snapper.core.types import ExchangeEnum
+from snapper.core.types import ProcessLifecycleEnum
+from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRoleEnum
 from snapper.data.models import Symbol
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
 
@@ -33,7 +34,7 @@ from snapper.infrastructure.exchanges.implementations.polygon import PolygonExch
     tags=("maintenance", "symbols", "polygon"),
     parameters_model=PolygonSymbolUpdaterParameters,
     enabled=True,
-    mode="thread",
+    mode=ProcessModeEnum.THREAD,
 )
 class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
     """Service for updating Polygon symbol mappings from REST API."""

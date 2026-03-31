@@ -80,7 +80,70 @@ class AliasChannelEnum(StrEnum):
     CCXT = "ccxt"
 
 
-TradeSide = Literal["buy", "sell"]
+class TradeSideEnum(StrEnum):
+    """Direction of a trade: buy for long entry, sell for short/exit."""
+
+    BUY = "buy"
+    SELL = "sell"
+
+
+class OrderCommandEnum(StrEnum):
+    """Order command types for orders.commands.* ZMQ topics."""
+
+    SUBMIT = "submit"
+    CANCEL = "cancel"
+    REPLACE = "replace"
+
+
+class HealthStatusEnum(StrEnum):
+    """Component health state for monitoring and alerting."""
+
+    HEALTHY = "healthy"
+    WARNING = "warning"
+    ERROR = "error"
+
+
+class ProcessModeEnum(StrEnum):
+    """Process execution mode: thread for in-process, process for subprocess."""
+
+    THREAD = "thread"
+    PROCESS = "process"
+
+
+class ProcessLifecycleEnum(StrEnum):
+    """Process lifecycle type.
+
+    Defines whether a process is designed to run continuously
+    or execute once and terminate.
+    """
+
+    LONG_RUNNING = "long_running"
+    ONE_SHOT = "one_shot"
+
+
+class ProcessRoleEnum(StrEnum):
+    """Process role in the system.
+
+    Categorizes processes by their function: core services,
+    maintenance tasks, trading strategies, or backtests.
+    """
+
+    CORE = "core"
+    TASK = "task"
+    STRATEGY = "strategy"
+    BACKTEST = "backtest"
+
+
+class ProcessRunStatusEnum(StrEnum):
+    """Current execution state of a managed process."""
+
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+TradeSide = Literal[TradeSideEnum.BUY, TradeSideEnum.SELL]
 """Direction of a trade: 'buy' for long entry, 'sell' for short/exit."""
 
 OrderType = Literal["market", "limit", "stop", "stop_limit"]
@@ -152,13 +215,13 @@ AllExchange = Literal[
 ]
 """All known exchange identifiers across all domains."""
 
-HealthStatus = Literal["healthy", "warning", "error"]
+HealthStatus = Literal[HealthStatusEnum.HEALTHY, HealthStatusEnum.WARNING, HealthStatusEnum.ERROR]
 """Component health state for monitoring and alerting."""
 
 ComponentStatus = Literal["ok", "error"]
 """Infrastructure component status for ZMQ and WebSocket health checks."""
 
-ProcessMode = Literal["thread", "process"]
+ProcessMode = Literal[ProcessModeEnum.THREAD, ProcessModeEnum.PROCESS]
 """Process execution mode: 'thread' for in-process, 'process' for subprocess."""
 
 StartProcessStatus = Literal["success", "already_running", "error"]
@@ -167,13 +230,20 @@ StartProcessStatus = Literal["success", "already_running", "error"]
 StopProcessStatus = Literal["success", "not_running", "error"]
 """Stop operation outcome: success, not running, or error."""
 
-ProcessLifecycleType = Literal["long_running", "one_shot"]
+ProcessLifecycleType = Literal[ProcessLifecycleEnum.LONG_RUNNING, ProcessLifecycleEnum.ONE_SHOT]
 """Process duration: 'long_running' for services, 'one_shot' for tasks."""
 
-ProcessRoleType = Literal["core", "task", "strategy", "backtest"]
+ProcessRoleType = Literal[
+    ProcessRoleEnum.CORE, ProcessRoleEnum.TASK, ProcessRoleEnum.STRATEGY, ProcessRoleEnum.BACKTEST
+]
 """Process role determining its function in the trading system."""
 
-ProcessRunStatusType = Literal["running", "succeeded", "failed", "cancelled"]
+ProcessRunStatusType = Literal[
+    ProcessRunStatusEnum.RUNNING,
+    ProcessRunStatusEnum.SUCCEEDED,
+    ProcessRunStatusEnum.FAILED,
+    ProcessRunStatusEnum.CANCELLED,
+]
 """Current execution state of a managed process."""
 
 IndicatorBackend = Literal["talib", "python"]
@@ -204,7 +274,7 @@ SpawnerProcessStatus = Literal["not_running", "running", "stopped", "completed",
 AliasChannel = Literal[AliasChannelEnum.WS, AliasChannelEnum.REST, AliasChannelEnum.CCXT]
 """Symbol alias channel type: ws for WebSocket, rest for REST API, ccxt for CCXT library."""
 
-OrderCommand = Literal["submit", "cancel", "replace"]
+OrderCommand = Literal[OrderCommandEnum.SUBMIT, OrderCommandEnum.CANCEL, OrderCommandEnum.REPLACE]
 """Order command types for orders.commands.* ZMQ topics."""
 
 OrderEvent = Literal[
@@ -224,20 +294,26 @@ __all__ = [
     "ExecutionModeEnum",
     "FillStatus",
     "HealthStatus",
+    "HealthStatusEnum",
     "IndicatorBackend",
     "MarketDataExchange",
     "MarketDataType",
     "MarketDataTypeEnum",
     "MarketSubscribeExchange",
     "OrderCommand",
+    "OrderCommandEnum",
     "OrderEvent",
     "OrderEventType",
     "OrderExchange",
     "OrderStatus",
     "OrderType",
+    "ProcessLifecycleEnum",
     "ProcessLifecycleType",
     "ProcessMode",
+    "ProcessModeEnum",
+    "ProcessRoleEnum",
     "ProcessRoleType",
+    "ProcessRunStatusEnum",
     "ProcessRunStatusType",
     "SpawnerProcessStatus",
     "StartProcessStatus",
@@ -245,5 +321,6 @@ __all__ = [
     "SubscriptionAction",
     "SubscriptionStatus",
     "TradeSide",
+    "TradeSideEnum",
     "UpsertResult",
 ]

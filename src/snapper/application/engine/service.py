@@ -19,7 +19,9 @@ from snapper.application.risk.models import RiskEvaluator
 from snapper.application.trade.outbox import OutboxDispatcher
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
+from snapper.core.types import OrderCommandEnum
 from snapper.core.types import OrderExchange
+from snapper.core.types import TradeSideEnum
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.interface.websocket.schemas import ExecutionMode
 from snapper.interface.websocket.schemas import TradeSide
@@ -158,7 +160,7 @@ class TradingEngineService:
         self.portfolio.update_fill(
             self.instrument, fill.side, fill.last_size, fill.last_price, fill.fee
         )
-        if fill.side == "buy":
+        if fill.side == TradeSideEnum.BUY:
             was_flat = self.position_qty <= 0
             self.position_qty += fill.last_size
             if was_flat and self.position_qty > 0:
@@ -251,7 +253,7 @@ class TradingEngineService:
         trigger_fast = prev_close is not None and last_close <= prev_close * (1 - stop_pct)
         if trigger_ref or trigger_fast:
             client_order_id = await self._send_order(
-                side="sell",
+                side=TradeSideEnum.SELL,
                 size=self.position_qty,
                 price=last_close,
                 reason="engine-stop",
@@ -289,7 +291,7 @@ class TradingEngineService:
         signaled_at_dt = None
         if signaled_at is not None:
             signaled_at_dt = dt.datetime.fromtimestamp(signaled_at, tz=dt.UTC)
-        topic = order_command_topic(self.exchange, self.instrument, "submit")
+        topic = order_command_topic(self.exchange, self.instrument, OrderCommandEnum.SUBMIT)
         order_public_id = str(uuid7())
         now = dt.datetime.now(dt.UTC)
         session_id = self.execution_socket.tracker.session_id
@@ -298,7 +300,7 @@ class TradingEngineService:
         if self._repository is not None:
             await self._repository.insert_trade_command(
                 {
-                    "command_type": "submit",
+                    "command_type": OrderCommandEnum.SUBMIT,
                     "shard_key": self._shard_key,
                     "exchange": self.exchange,
                     "instrument": self.instrument,
@@ -401,7 +403,7 @@ class TradingEngineService:
             if desired_units <= 0:
                 return
             client_order_id = await self._send_order(
-                side="buy",
+                side=TradeSideEnum.BUY,
                 size=desired_units,
                 price=current_price,
                 reason="engine-buy",
@@ -417,7 +419,7 @@ class TradingEngineService:
             if qty_to_sell <= 0:
                 return
             client_order_id = await self._send_order(
-                side="sell",
+                side=TradeSideEnum.SELL,
                 size=qty_to_sell,
                 price=current_price,
                 reason="engine-sell",

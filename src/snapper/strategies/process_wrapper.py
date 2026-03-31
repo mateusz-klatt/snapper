@@ -9,13 +9,14 @@ from typing import Any
 
 from loguru import logger
 
-from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.process_parameters import StrategyProcessParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import OrderExchange
+from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRoleEnum
 from snapper.strategies.base import BaseStrategy
 from snapper.strategies.base import StrategyConfig
 from snapper.strategies.factory import StrategyFactory
@@ -49,7 +50,7 @@ def create_strategy_process(
         tags=("strategy", strategy_class.lower()),
         parameters_model=StrategyProcessParameters,
         enabled=False,
-        mode="thread",
+        mode=ProcessModeEnum.THREAD,
     )
     class StrategyProcess(RegisterableProcess):
         @staticmethod

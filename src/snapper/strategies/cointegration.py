@@ -9,6 +9,7 @@ from loguru import logger
 
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import TradeSide
+from snapper.core.types import TradeSideEnum
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.topics.builders import parse_market_topic
 from snapper.strategies.base import BaseStrategy
@@ -187,22 +188,46 @@ class CointegrationPairs(BaseStrategy):
             if z_score > self.entry_threshold:
                 self._position = "short_spread"
                 return self._build_signal(
-                    instrument, price, z_score, "sell", "buy", "Enter short spread", entry_strength
+                    instrument,
+                    price,
+                    z_score,
+                    TradeSideEnum.SELL,
+                    TradeSideEnum.BUY,
+                    "Enter short spread",
+                    entry_strength,
                 )
             if z_score < -self.entry_threshold:
                 self._position = "long_spread"
                 return self._build_signal(
-                    instrument, price, z_score, "buy", "sell", "Enter long spread", entry_strength
+                    instrument,
+                    price,
+                    z_score,
+                    TradeSideEnum.BUY,
+                    TradeSideEnum.SELL,
+                    "Enter long spread",
+                    entry_strength,
                 )
         elif self._position == "short_spread" and z_score < self.exit_threshold:
             self._position = None
             return self._build_signal(
-                instrument, price, z_score, "buy", "sell", "Exit short spread", 0.0
+                instrument,
+                price,
+                z_score,
+                TradeSideEnum.BUY,
+                TradeSideEnum.SELL,
+                "Exit short spread",
+                0.0,
             )
         elif self._position == "long_spread" and z_score > -self.exit_threshold:
             self._position = None
             return self._build_signal(
-                instrument, price, z_score, "sell", "buy", "Exit long spread", 0.0
+                instrument,
+                price,
+                z_score,
+                TradeSideEnum.SELL,
+                TradeSideEnum.BUY,
+                "Exit long spread",
+                0.0,
             )
         return None
 

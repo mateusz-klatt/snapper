@@ -26,7 +26,6 @@ from loguru import logger
 
 from snapper.application.engine.config import EngineConfigModel
 from snapper.application.engine.service import TradingEngineService
-from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.process_parameters import TraderParameters
 from snapper.application.process_manager.registry import register_process
@@ -44,8 +43,12 @@ from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
+from snapper.core.types import OrderCommandEnum
 from snapper.core.types import OrderExchange
 from snapper.core.types import OrderType
+from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRoleEnum
+from snapper.core.types import TradeSideEnum
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import ExecutionRow
@@ -86,7 +89,7 @@ _bootstrap_settings = get_bootstrap_settings()
     tags=("trading", "signals", "risk"),
     parameters_model=TraderParameters,
     enabled=True,
-    mode="thread",
+    mode=ProcessModeEnum.THREAD,
 )
 class TraderCoordinator(RegisterableProcess):
     """Central trading coordinator - ONE instance per system.
@@ -341,7 +344,7 @@ class TraderCoordinator(RegisterableProcess):
         price = fill_row["price"]
         fee = fill_row["fee"]
         engine.portfolio.update_fill(engine.instrument, side, size, price, fee)
-        if side == "buy":
+        if side == TradeSideEnum.BUY:
             was_flat = engine.position_qty <= 0
             engine.position_qty += size
             if was_flat and engine.position_qty > 0:
@@ -915,7 +918,7 @@ class TraderCoordinator(RegisterableProcess):
         """
         assert self.msg_publisher is not None
         exchange = cast(OrderExchange, cmd["exchange"])
-        topic = order_command_topic(exchange, cmd["instrument"], "submit")
+        topic = order_command_topic(exchange, cmd["instrument"], OrderCommandEnum.SUBMIT)
         order = OrderRequestData(
             public_id=cmd["client_order_id"],
             timestamp=datetime.now(UTC),
@@ -1067,7 +1070,7 @@ class TraderCoordinator(RegisterableProcess):
             )
             self.last_signal_time[engine_key] = 0.0
         self.last_signal_time[engine_key] = time.time()
-        desired_units = strength if side == "buy" else 0.0
+        desired_units = strength if side == TradeSideEnum.BUY else 0.0
         logger.info(
             f"ZMQTrader: Processing signal from {strategy_name} - "
             f"{engine_key} {side} (strength={strength:.2f}, price={price:.2f}, "

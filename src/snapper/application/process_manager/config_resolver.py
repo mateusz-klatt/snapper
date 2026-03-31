@@ -14,18 +14,19 @@ from typing import cast
 from loguru import logger
 from sqlalchemy import select
 
-from snapper.application.process_manager.enums import ProcessLifecycleEnum
-from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.config.settings import AppSettings
+from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessMode
+from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRoleEnum
 from snapper.data.models import Setting
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active_now
 
-VALID_PROCESS_MODES: frozenset[str] = frozenset(("thread", "process"))
+VALID_PROCESS_MODES: frozenset[str] = frozenset(m.value for m in ProcessModeEnum)
 """Valid process mode values matching the ProcessMode Literal."""
 
 
@@ -120,7 +121,7 @@ def resolve_mode(
         ValueError: If mode is not a valid ProcessMode.
     """
     if raw is None:
-        return "thread"
+        return ProcessModeEnum.THREAD
     mode_str = str(raw)
     if mode_str not in VALID_PROCESS_MODES:
         raise ValueError(
@@ -176,7 +177,7 @@ def build_process_config_from_dict(
     return ProcessConfigModel(
         name=process_name,
         enabled=config_dict.get("enabled", False),
-        mode=resolve_mode(config_dict.get("mode", "thread"), process_name),
+        mode=resolve_mode(config_dict.get("mode", ProcessModeEnum.THREAD), process_name),
         class_path=config_dict["class"],
         method=config_dict.get("method", "start"),
         parameters=config_dict.get("parameters", {}),

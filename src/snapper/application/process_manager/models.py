@@ -20,12 +20,12 @@ from dataclasses import field
 from datetime import datetime
 from typing import Any
 
-from snapper.application.process_manager.enums import ProcessLifecycleEnum
-from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.config.settings import AppSettings
 from snapper.core.json_types import JsonObject
+from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessLifecycleType
 from snapper.core.types import ProcessMode
+from snapper.core.types import ProcessRoleEnum
 from snapper.core.types import ProcessRoleType
 from snapper.core.types import StartProcessStatus
 from snapper.core.types import StopProcessStatus

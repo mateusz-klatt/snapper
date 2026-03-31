@@ -15,8 +15,6 @@ from sqlalchemy import select
 
 from snapper.api.schemas.process import ProcessCreateBody
 from snapper.api.schemas.process import ProcessCreateRequest
-from snapper.application.process_manager.enums import ProcessLifecycleEnum
-from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.services.settings import SettingsService
 from snapper.application.services.settings import get_settings_service
@@ -24,6 +22,8 @@ from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
+from snapper.core.types import ProcessLifecycleEnum
+from snapper.core.types import ProcessRoleEnum
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Setting
 from snapper.data.repository import get_repository

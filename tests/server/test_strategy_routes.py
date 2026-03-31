@@ -6,8 +6,8 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import Request
 
-from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import ProcessConfigModel
+from snapper.core.types import ProcessRoleEnum
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.strategy_routes import list_strategies
 

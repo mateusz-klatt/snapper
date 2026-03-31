@@ -14,10 +14,10 @@ from sqlalchemy import desc
 from sqlalchemy import select
 from sqlalchemy import update
 
-from snapper.application.process_manager.enums import ProcessRunStatusEnum
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.config.settings import AppSettings
 from snapper.core.json_types import JsonObject
+from snapper.core.types import ProcessRunStatusEnum
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import ProcessRun
 from snapper.data.repository import get_repository

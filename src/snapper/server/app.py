@@ -109,6 +109,7 @@ from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
 from snapper.config.settings_routes import router as settings_router
 from snapper.core.types import HealthStatus
+from snapper.core.types import HealthStatusEnum
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import OrderExchange
 from snapper.core.types import SpawnerProcessStatus
@@ -1028,7 +1029,9 @@ def _create_monitoring_endpoints_router(
             error_messages.append(f"ZMQ context error: {exc}")
             available_topics = zmq_bridge.get_available_topics()
         stats = manager.get_stats()
-        status: HealthStatus = "healthy" if not error_messages else "error"
+        status: HealthStatus = (
+            HealthStatusEnum.HEALTHY if not error_messages else HealthStatusEnum.ERROR
+        )
         tracker: SequenceTracker = request.app.state.rest_tracker
         sid = tracker.session_id
         seq = tracker.next_sequence(_REST_HEALTH_STREAM)

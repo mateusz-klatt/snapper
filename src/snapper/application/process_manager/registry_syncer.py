@@ -16,14 +16,14 @@ from typing import cast
 from loguru import logger
 from sqlalchemy import select
 
-from snapper.application.process_manager.enums import ProcessLifecycleEnum
-from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.config.settings import AppSettings
 from snapper.core.json_types import JsonObject
+from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessMode
+from snapper.core.types import ProcessRoleEnum
 from snapper.data.models import Setting
 from snapper.data.repository import Repository
 from snapper.data.repository import close_and_insert

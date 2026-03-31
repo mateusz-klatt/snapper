@@ -17,9 +17,6 @@ from uuid import uuid4
 import pytest
 
 from snapper.application.process_manager.config_resolver import resolve_mode
-from snapper.application.process_manager.enums import ProcessLifecycleEnum
-from snapper.application.process_manager.enums import ProcessRoleEnum
-from snapper.application.process_manager.enums import ProcessRunStatusEnum
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import ProcessInstanceInfo
@@ -28,6 +25,9 @@ from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.models import SpawnerStatusSnapshot
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
+from snapper.core.types import ProcessLifecycleEnum
+from snapper.core.types import ProcessRoleEnum
+from snapper.core.types import ProcessRunStatusEnum
 
 
 class DummySettings(SimpleNamespace):

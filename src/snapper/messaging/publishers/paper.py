@@ -20,7 +20,6 @@ from typing import get_args
 
 from loguru import logger
 
-from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.process_parameters import PaperPublisherParameters
 from snapper.application.process_manager.registry import register_process
@@ -29,6 +28,8 @@ from snapper.core.types import AllExchange
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketDataType
+from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRoleEnum
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.infrastructure.exchanges.implementations.paper import PaperExchangeClient
 from snapper.messaging.publishers.base import MarketDataPublisherService
@@ -120,7 +121,7 @@ class PerSourcePaperPublisher(MarketDataPublisherService[PaperExchangeClient]):
     tags=("market-data", "publisher", "paper"),
     parameters_model=PaperPublisherParameters,
     enabled=True,
-    mode="thread",
+    mode=ProcessModeEnum.THREAD,
 )
 class PaperMarketDataPublisher(RegisterableProcess):
     """Orchestrator that manages per-source paper publishers.

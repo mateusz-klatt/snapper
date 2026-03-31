@@ -19,6 +19,7 @@ from typing import Final
 
 from loguru import logger
 
+from snapper.core.types import TradeSideEnum
 from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import VenueEventRow
 
@@ -222,8 +223,8 @@ class TradeService:
         notional = fill_size * fill_price
         side_lower = side.lower()
 
-        if side_lower in ("buy", "sell"):
-            signed_qty = fill_size if side_lower == "buy" else -fill_size
+        if side_lower in (TradeSideEnum.BUY, TradeSideEnum.SELL):
+            signed_qty = fill_size if side_lower == TradeSideEnum.BUY else -fill_size
             self._update_position(shard.position, signed_qty, fill_size, fill_price)
             self._update_cash(shard, side_lower, notional, fee)
 
@@ -293,7 +294,7 @@ class TradeService:
     @staticmethod
     def _update_cash(shard: ShardState, side: str, notional: float, fee: float) -> None:
         """Adjust cash balance for a buy or sell fill."""
-        if side == "buy":
+        if side == TradeSideEnum.BUY:
             shard.cash -= notional + fee
         else:
             shard.cash += notional - fee

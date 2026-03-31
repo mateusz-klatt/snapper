@@ -43,6 +43,7 @@ from pydantic import ValidationError
 
 from snapper.config.settings import get_settings
 from snapper.core.types import ExchangeEnum
+from snapper.core.types import TradeSideEnum
 from snapper.data.repository import Repository
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_candle_list
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_execution_list
@@ -91,8 +92,8 @@ _CCXT_STATUS_MAP: Final[dict[str, OrderStatusEnum]] = {
 }
 
 _CCXT_SIDE_MAP: Final[dict[str, OrderSideEnum]] = {
-    "buy": OrderSideEnum.BUY,
-    "sell": OrderSideEnum.SELL,
+    TradeSideEnum.BUY: OrderSideEnum.BUY,
+    TradeSideEnum.SELL: OrderSideEnum.SELL,
 }
 
 _CCXT_TYPE_MAP: Final[dict[str, OrderTypeEnum]] = {

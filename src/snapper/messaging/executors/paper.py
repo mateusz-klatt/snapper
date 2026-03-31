@@ -26,10 +26,11 @@ Register and run via process manager::
     await executor.start()
 """
 
-from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.registry import register_process
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import OrderExchange
+from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRoleEnum
 from snapper.data.repository import get_repository
 from snapper.infrastructure.exchanges.implementations.paper import PaperExchangeClient
 from snapper.messaging.executors.base import ExchangeExecutorService
@@ -42,7 +43,7 @@ from snapper.messaging.executors.base import ExchangeExecutorService
     role=ProcessRoleEnum.CORE,
     tags=("execution", "orders", "paper", "simulation"),
     enabled=True,
-    mode="thread",
+    mode=ProcessModeEnum.THREAD,
 )
 class PaperOrderExecutor(ExchangeExecutorService[PaperExchangeClient]):
     """Paper trading order execution service.

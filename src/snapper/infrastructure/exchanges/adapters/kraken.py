@@ -24,6 +24,7 @@ from typing import cast
 
 from loguru import logger
 
+from snapper.core.types import TradeSideEnum
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExecType
 from snapper.infrastructure.exchanges.contracts import ExecutionFeeBreakdown
@@ -202,9 +203,9 @@ def _parse_order_side(side: str | None) -> OrderSideEnum:
     Raises:
         ValueError: If side is unknown.
     """
-    if side == "buy":
+    if side == TradeSideEnum.BUY:
         return OrderSideEnum.BUY
-    if side == "sell":
+    if side == TradeSideEnum.SELL:
         return OrderSideEnum.SELL
     raise ValueError(f"Unknown order side: {side}")
 

@@ -9,8 +9,6 @@ from typing import Any
 
 from loguru import logger
 
-from snapper.application.process_manager.enums import ProcessLifecycleEnum
-from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.process_parameters import SymbolUpdaterParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
@@ -18,6 +16,9 @@ from snapper.config.settings import AppSettings
 from snapper.core.types import AliasChannelEnum
 from snapper.core.types import AssetTypeEnum
 from snapper.core.types import ExchangeEnum
+from snapper.core.types import ProcessLifecycleEnum
+from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRoleEnum
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
 
 
@@ -31,7 +32,7 @@ from snapper.infrastructure.exchanges.implementations.walutomat import Walutomat
     tags=("maintenance", "symbols", "walutomat"),
     parameters_model=SymbolUpdaterParameters,
     enabled=True,
-    mode="thread",
+    mode=ProcessModeEnum.THREAD,
 )
 class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient]):
     """Service for updating Walutomat symbol mappings from REST API."""

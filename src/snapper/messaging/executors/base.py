@@ -30,6 +30,8 @@ from snapper.config.settings import get_settings_with_service
 from snapper.core.types import CancelEventType
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
+from snapper.core.types import HealthStatusEnum
+from snapper.core.types import OrderCommandEnum
 from snapper.core.types import OrderEventType
 from snapper.core.types import OrderExchange
 from snapper.core.types import ReplaceEventType
@@ -416,9 +418,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             instrument: Instrument from topic.
         """
         handler_map = {
-            "submit": self._handle_submit_command,
-            "cancel": self._handle_cancel_command,
-            "replace": self._handle_replace_command,
+            OrderCommandEnum.SUBMIT.value: self._handle_submit_command,
+            OrderCommandEnum.CANCEL.value: self._handle_cancel_command,
+            OrderCommandEnum.REPLACE.value: self._handle_replace_command,
         }
         handler = handler_map.get(parsed_suffix)
         if handler:
@@ -1295,7 +1297,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     sequence_id=self._tracker.next_sequence(hb_topic),
                     component=component,
                     sequence=self.heartbeat_seq,
-                    status="healthy",
+                    status=HealthStatusEnum.HEALTHY,
                     lag_ms=lag_ms,
                     meta={
                         "running": self.running,

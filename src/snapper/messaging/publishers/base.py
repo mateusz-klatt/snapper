@@ -29,9 +29,11 @@ from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
 from snapper.core.types import AllExchange
+from snapper.core.types import HealthStatusEnum
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketDataType
 from snapper.core.types import MarketDataTypeEnum
+from snapper.core.types import TradeSideEnum
 from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import CandleUpsertRow
@@ -670,7 +672,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             executed_at=trade.timestamp,
             price=trade.price,
             volume=trade.quantity,
-            side=trade.side if trade.side in ["buy", "sell"] else None,
+            side=trade.side if trade.side in (TradeSideEnum.BUY, TradeSideEnum.SELL) else None,
             trade_id=trade.trade_id,
         )
         await self._publish_message(topic, trade_msg)
@@ -725,7 +727,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     sequence_id=self._tracker.next_sequence(hb_topic),
                     component=component_name,
                     sequence=self.heartbeat_seq,
-                    status="warning" if any(self._flush_errors.values()) else "healthy",
+                    status=(
+                        HealthStatusEnum.WARNING
+                        if any(self._flush_errors.values())
+                        else HealthStatusEnum.HEALTHY
+                    ),
                     lag_ms=max_lag_ms,
                     meta={
                         "symbols": list(self.symbols),

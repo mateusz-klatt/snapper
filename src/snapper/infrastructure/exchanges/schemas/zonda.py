@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import Field
 from pydantic import field_validator
 
+from snapper.core.types import TradeSideEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
@@ -328,7 +329,11 @@ class ZondaExecutionData(ExchangeResponse):
         Returns:
             OrderSideEnum.BUY for buy orders, OrderSideEnum.SELL otherwise.
         """
-        return OrderSideEnum.BUY if self.user_action.lower() == "buy" else OrderSideEnum.SELL
+        return (
+            OrderSideEnum.BUY
+            if self.user_action.lower() == TradeSideEnum.BUY
+            else OrderSideEnum.SELL
+        )
 
     def to_execution_update(self) -> ExecutionUpdate:
         """Convert execution data to an ExecutionUpdate object.

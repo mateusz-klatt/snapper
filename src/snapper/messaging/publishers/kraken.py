@@ -31,12 +31,13 @@ from typing import Any
 
 from loguru import logger
 
-from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.process_parameters import PublisherSymbolsParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataExchange
+from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRoleEnum
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
 from snapper.messaging.publishers.base import MarketDataPublisherService
@@ -50,7 +51,7 @@ from snapper.messaging.publishers.base import MarketDataPublisherService
     tags=("market-data", "publisher", "kraken"),
     parameters_model=PublisherSymbolsParameters,
     enabled=True,
-    mode="thread",
+    mode=ProcessModeEnum.THREAD,
 )
 class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]):
     """Kraken exchange market data publisher.

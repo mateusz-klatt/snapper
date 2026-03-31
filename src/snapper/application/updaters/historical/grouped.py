@@ -14,8 +14,6 @@ from typing import Any
 
 from loguru import logger
 
-from snapper.application.process_manager.enums import ProcessLifecycleEnum
-from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.process_parameters import GroupedDailyBackfillParameters
 from snapper.application.process_manager.registry import register_process
@@ -23,6 +21,9 @@ from snapper.application.services.settings import get_settings_service
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
+from snapper.core.types import ProcessLifecycleEnum
+from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRoleEnum
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
 from snapper.infrastructure.historical.polygon.loader import PolygonHistoricalLoader
 from snapper.utils.logging import set_log_context
@@ -41,7 +42,7 @@ _CACHE_ROOT = Path("data/polygon/cache")
     tags=("polygon", "grouped", "historical"),
     parameters_model=GroupedDailyBackfillParameters,
     enabled=False,
-    mode="thread",
+    mode=ProcessModeEnum.THREAD,
 )
 class PolygonGroupedDailyBackfillService(RegisterableProcess):
     """Service for downloading Polygon grouped daily data.

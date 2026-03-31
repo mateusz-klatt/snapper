@@ -7,12 +7,13 @@ from typing import Any
 
 from loguru import logger
 
-from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.process_parameters import PublisherSymbolsParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataExchange
+from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRoleEnum
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
 from snapper.infrastructure.symbols.functions import native_to_walutomat_ws
 from snapper.messaging.publishers.base import MarketDataPublisherService
@@ -26,7 +27,7 @@ from snapper.messaging.publishers.base import MarketDataPublisherService
     tags=("market-data", "publisher", "walutomat"),
     parameters_model=PublisherSymbolsParameters,
     enabled=True,
-    mode="thread",
+    mode=ProcessModeEnum.THREAD,
 )
 class WalutomatMarketDataPublisher(MarketDataPublisherService[WalutomatExchangeClient]):
     """Market data publisher for Walutomat exchange."""

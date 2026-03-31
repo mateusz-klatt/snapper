@@ -13,6 +13,7 @@ from typing import Any
 from uuid import uuid7
 
 from snapper.core.json_types import JsonObject
+from snapper.core.types import HealthStatusEnum
 from snapper.interface.websocket.schemas import HealthStatus
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.topics.builders import heartbeat_topic_from_component
@@ -49,10 +50,10 @@ class StrategyHealthMonitor:
             Health status string.
         """
         if lag_ms < 2000:
-            return "healthy"
+            return HealthStatusEnum.HEALTHY
         if lag_ms < 10000:
-            return "warning"
-        return "error"
+            return HealthStatusEnum.WARNING
+        return HealthStatusEnum.ERROR
 
     def build_feed_health(self) -> JsonObject | None:
         """Build feed health summary from cached heartbeats.

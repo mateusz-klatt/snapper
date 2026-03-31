@@ -58,6 +58,7 @@ import re
 from collections.abc import Callable
 
 from snapper.core.types import MarketDataTypeEnum
+from snapper.core.types import OrderCommandEnum
 from snapper.infrastructure.symbols.functions import get_available_exchanges
 from snapper.infrastructure.symbols.functions import get_available_symbols
 from snapper.infrastructure.symbols.functions import get_market_data_exchanges
@@ -363,7 +364,11 @@ def _validate_orders_topic_base(
     return True, ""
 
 
-_ORDER_COMMANDS: set[str] = {"submit", "cancel", "replace"}
+_ORDER_COMMANDS: set[str] = {
+    OrderCommandEnum.SUBMIT,
+    OrderCommandEnum.CANCEL,
+    OrderCommandEnum.REPLACE,
+}
 _ORDER_EVENTS: set[str] = {
     "submitted",
     "accepted",

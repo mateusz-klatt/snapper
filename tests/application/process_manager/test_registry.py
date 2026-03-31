@@ -1,13 +1,13 @@
 """Tests for process registration and discovery system."""
 
 from snapper.api.schemas.base import StrictBody
-from snapper.application.process_manager.enums import ProcessLifecycleEnum
-from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import discover_processes
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.application.process_manager.registry import register_process
+from snapper.core.types import ProcessLifecycleEnum
+from snapper.core.types import ProcessRoleEnum
 
 
 class _CustomParams(StrictBody):

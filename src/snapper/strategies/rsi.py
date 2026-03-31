@@ -8,6 +8,7 @@ import pandas as pd
 from loguru import logger
 
 from snapper.core.types import ExchangeEnum
+from snapper.core.types import TradeSideEnum
 from snapper.indicators.ta_lib_adapter import rsi
 from snapper.messaging.schemas.data import CandleData
 from snapper.strategies.base import BaseStrategy
@@ -88,7 +89,7 @@ class RSIReversion(BaseStrategy):
             self._cool[instrument] = self.cooldown
             return StrategySignal(
                 instrument=instrument,
-                side="buy",
+                side=TradeSideEnum.BUY,
                 strength=1.0,
                 price=current_price,
                 reason=f"RSI {r:.2f} <= {self.lower} (period={self.period}, prev={r_prev:.2f})",
@@ -97,7 +98,7 @@ class RSIReversion(BaseStrategy):
             self._cool[instrument] = self.cooldown
             return StrategySignal(
                 instrument=instrument,
-                side="sell",
+                side=TradeSideEnum.SELL,
                 strength=1.0,
                 price=current_price,
                 reason=f"RSI {r:.2f} >= {self.upper} (period={self.period}, prev={r_prev:.2f})",

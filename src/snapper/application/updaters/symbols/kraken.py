@@ -13,8 +13,6 @@ from typing import Any
 
 from loguru import logger
 
-from snapper.application.process_manager.enums import ProcessLifecycleEnum
-from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.process_parameters import SymbolUpdaterParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
@@ -22,6 +20,9 @@ from snapper.config.settings import AppSettings
 from snapper.core.types import AliasChannelEnum
 from snapper.core.types import AssetTypeEnum
 from snapper.core.types import ExchangeEnum
+from snapper.core.types import ProcessLifecycleEnum
+from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRoleEnum
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.symbols.mapper import make_native_symbol
 
@@ -38,7 +39,7 @@ _SEQ_KEY_CAPABILITIES = "capabilities"
     tags=("maintenance", "symbols", "kraken"),
     parameters_model=SymbolUpdaterParameters,
     enabled=True,
-    mode="thread",
+    mode=ProcessModeEnum.THREAD,
 )
 class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
     """Symbol updater for Kraken exchange.

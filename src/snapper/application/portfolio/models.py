@@ -7,6 +7,8 @@ It maintains cash balances, position states, and calculates realized PnL.
 from dataclasses import dataclass
 from typing import Final
 
+from snapper.core.types import TradeSideEnum
+
 EPSILON_MICRO: Final[float] = 1e-6
 """Tolerance for clamping very small positive cash values."""
 
@@ -136,7 +138,7 @@ class PortfolioTracker:
         notional = size * price
         self.turnover += notional
         cost = size * price + fee
-        if side == "buy":
+        if side == TradeSideEnum.BUY:
             new_qty = pos.quantity + size
             pos.average_price = (pos.average_price * pos.quantity + size * price) / max(
                 new_qty, EPSILON_NANO

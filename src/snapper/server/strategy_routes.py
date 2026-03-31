@@ -20,11 +20,11 @@ from fastapi import Request
 
 from snapper.api.schemas.process import StrategyListResponse
 from snapper.api.schemas.process import StrategyProcess
-from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.auth.dependencies import require_permission
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.core.types import ProcessRoleEnum
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])

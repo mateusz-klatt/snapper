@@ -8,6 +8,7 @@ import pandas as pd
 from loguru import logger
 
 from snapper.core.types import ExchangeEnum
+from snapper.core.types import TradeSideEnum
 from snapper.indicators.ta_lib_adapter import macd
 from snapper.messaging.schemas.data import CandleData
 from snapper.strategies.base import BaseStrategy
@@ -80,7 +81,7 @@ class MACDCrossover(BaseStrategy):
         if last_hist <= 0 and hist > 0:
             return StrategySignal(
                 instrument=instrument,
-                side="buy",
+                side=TradeSideEnum.BUY,
                 strength=min(abs(hist) * 10, 1.0),
                 price=current_price,
                 reason=f"MACD bull cross (hist={hist:.4f}, fast={self.fast}, slow={self.slow}, signal={self.signal_period})",
@@ -88,7 +89,7 @@ class MACDCrossover(BaseStrategy):
         if last_hist >= 0 and hist < 0:
             return StrategySignal(
                 instrument=instrument,
-                side="sell",
+                side=TradeSideEnum.SELL,
                 strength=min(abs(hist) * 10, 1.0),
                 price=current_price,
                 reason=f"MACD bear cross (hist={hist:.4f}, fast={self.fast}, slow={self.slow}, signal={self.signal_period})",

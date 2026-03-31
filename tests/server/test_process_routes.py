@@ -14,12 +14,12 @@ from snapper.api.schemas.process import ProcessCreateBody
 from snapper.api.schemas.process import ProcessCreateRequest
 from snapper.api.schemas.process import ProcessStartBody
 from snapper.api.schemas.process import ProcessStartRequest
-from snapper.application.process_manager.enums import ProcessLifecycleEnum
-from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.models import ProcessStartResult
 from snapper.application.process_manager.models import ProcessStopResult
+from snapper.core.types import ProcessLifecycleEnum
+from snapper.core.types import ProcessRoleEnum
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.process_routes import create_process_configuration
 from snapper.server.process_routes import get_process_factory

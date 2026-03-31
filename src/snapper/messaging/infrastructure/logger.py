@@ -57,12 +57,13 @@ import zmq
 import zmq.asyncio
 from loguru import logger
 
-from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.process_parameters import LoggerParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_bootstrap_settings
+from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRoleEnum
 from snapper.messaging.infrastructure.validated_socket import HWM_AUDIT
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
 
@@ -96,7 +97,7 @@ class LoggerStatistics:
     tags=("zmq", "logging", "audit", "debugging"),
     parameters_model=LoggerParameters,
     enabled=False,
-    mode="thread",
+    mode=ProcessModeEnum.THREAD,
 )
 class ZmqMessageLogger(RegisterableProcess):
     """ZMQ message logger that subscribes to all broker traffic.

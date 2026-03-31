@@ -21,9 +21,6 @@ from uuid import UUID
 import pytest
 from pydantic import BaseModel
 
-from snapper.application.process_manager.enums import ProcessLifecycleEnum
-from snapper.application.process_manager.enums import ProcessRoleEnum
-from snapper.application.process_manager.enums import ProcessRunStatusEnum
 from snapper.application.process_manager.launcher import CoreProcessStartupError
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.models import ProcessConfigModel
@@ -35,6 +32,9 @@ from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.config.settings import get_settings
 from snapper.core.json_types import JsonObject
+from snapper.core.types import ProcessLifecycleEnum
+from snapper.core.types import ProcessRoleEnum
+from snapper.core.types import ProcessRunStatusEnum
 from snapper.data.models import ProcessRun
 from snapper.data.models import Setting
 

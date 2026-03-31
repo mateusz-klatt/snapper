@@ -59,8 +59,6 @@ from snapper.api.schemas.process import ProcessStopResponse
 from snapper.api.schemas.process import ProcessSummaryData
 from snapper.api.schemas.process import ProcessSummaryResponse
 from snapper.application.process_manager.config_resolver import resolve_mode
-from snapper.application.process_manager.enums import ProcessLifecycleEnum
-from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import get_registered_processes
@@ -70,6 +68,8 @@ from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
+from snapper.core.types import ProcessLifecycleEnum
+from snapper.core.types import ProcessRoleEnum
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.json_body import json_body
 from snapper.server.json_body import openapi_schema
@@ -135,8 +135,8 @@ async def list_available_processes(
                 class_path=entry.class_path,
                 method=entry.method,
                 description=entry.description,
-                lifecycle=entry.lifecycle.value,
-                role=entry.role.value,
+                lifecycle=entry.lifecycle,
+                role=entry.role,
                 tags=list(entry.tags),
                 parameters_schema=entry.parameters_schema,
             )
@@ -172,8 +172,8 @@ async def list_configured_processes(
             method=config.method,
             parameters=config.parameters,
             note=config.note,
-            lifecycle=config.lifecycle.value,
-            role=config.role.value,
+            lifecycle=config.lifecycle,
+            role=config.role,
             tags=list(config.tags),
             parameters_schema=config.parameters_schema,
             running=config.name in factory.started_processes,
@@ -401,7 +401,7 @@ async def get_process_schema(
         default_enabled=entry.enabled,
         default_mode=resolve_mode(entry.mode, name),
         default_parameters=default_parameters,
-        lifecycle=entry.lifecycle.value,
+        lifecycle=entry.lifecycle,
     )
     return ProcessSchemaResponse(
         session_id=sid,

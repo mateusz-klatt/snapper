@@ -30,9 +30,6 @@ from snapper.application.process_manager.config_resolver import resolve_mode
 from snapper.application.process_manager.config_resolver import resolve_parameters_schema
 from snapper.application.process_manager.config_resolver import resolve_role
 from snapper.application.process_manager.config_resolver import resolve_tags
-from snapper.application.process_manager.enums import ProcessLifecycleEnum
-from snapper.application.process_manager.enums import ProcessRoleEnum
-from snapper.application.process_manager.enums import ProcessRunStatusEnum
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import ProcessInstanceInfo
 from snapper.application.process_manager.models import ProcessRegistryEntry
@@ -47,7 +44,12 @@ from snapper.application.process_manager.spawner import ProcessSpawnerService
 from snapper.config.settings import AppSettings
 from snapper.core.json_types import JsonObject
 from snapper.core.types import HealthStatus
+from snapper.core.types import HealthStatusEnum
+from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessMode
+from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRoleEnum
+from snapper.core.types import ProcessRunStatusEnum
 from snapper.data.models import Setting
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active_now
@@ -305,7 +307,7 @@ class ProcessLauncherService:
         return (
             config.lifecycle is ProcessLifecycleEnum.ONE_SHOT
             and config.name not in self.process_tasks
-            and config.mode != "process"
+            and config.mode != ProcessModeEnum.PROCESS
         )
 
     async def _try_create_run_record(self, config: ProcessConfigModel) -> str | None:
@@ -388,9 +390,9 @@ class ProcessLauncherService:
                 f"Starting process '{config.name}' in {config.mode} mode "
                 f"(class: {config.class_path}, method: {config.method})"
             )
-            if config.mode == "process":
+            if config.mode == ProcessModeEnum.PROCESS:
                 self._start_as_subprocess(config)
-            elif config.mode == "thread":
+            elif config.mode == ProcessModeEnum.THREAD:
                 await self._start_in_process(config)
             else:
                 raise ValueError(
@@ -761,7 +763,7 @@ class ProcessLauncherService:
         autostart_enabled = bool(config_dict.get("enabled", False))
         if mode is not None:
             config_dict["mode"] = mode
-        config_dict.setdefault("mode", "thread")
+        config_dict.setdefault("mode", ProcessModeEnum.THREAD)
         if parameters is not None:
             config_dict["parameters"] = parameters
         config_dict.setdefault("parameters", {})
@@ -805,7 +807,7 @@ class ProcessLauncherService:
         return ProcessConfigModel(
             name=name,
             enabled=autostart_enabled,
-            mode=resolve_mode(config_dict.get("mode", "thread"), name),
+            mode=resolve_mode(config_dict.get("mode", ProcessModeEnum.THREAD), name),
             class_path=config_dict["class"],
             method=config_dict.get("method", "start"),
             parameters=config_dict.get("parameters", {}),
@@ -954,8 +956,8 @@ class ProcessLauncherService:
         return ProcessStatusResult(
             name=name,
             running=is_running,
-            role=(self.process_roles.get(name) or ProcessRoleEnum.CORE).value,
-            lifecycle=self.process_lifecycles.get(name, ProcessLifecycleEnum.LONG_RUNNING).value,
+            role=(self.process_roles.get(name) or ProcessRoleEnum.CORE),
+            lifecycle=self.process_lifecycles.get(name, ProcessLifecycleEnum.LONG_RUNNING),
             active_public_id=self.active_runs.get(name),
             details=details,
         )
@@ -991,7 +993,7 @@ class ProcessLauncherService:
             "healthy" or "error" as HealthStatus string.
         """
         if self.settings.server_api_only:
-            return "healthy"
+            return HealthStatusEnum.HEALTHY
         configs = await self.get_process_configs()
         for config in configs:
             if (
@@ -1000,8 +1002,8 @@ class ProcessLauncherService:
                 and config.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
                 and config.name not in self.started_processes
             ):
-                return "error"
-        return "healthy"
+                return HealthStatusEnum.ERROR
+        return HealthStatusEnum.HEALTHY
 
     async def sync_registry_to_database(self) -> None:
         """Delegate to registry_syncer.sync_registry_to_database."""

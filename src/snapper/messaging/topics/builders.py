@@ -41,6 +41,7 @@ from snapper.core.types import MarketDataExchange
 from snapper.core.types import MarketDataType
 from snapper.core.types import MarketDataTypeEnum
 from snapper.core.types import OrderCommand
+from snapper.core.types import OrderCommandEnum
 from snapper.core.types import OrderEvent
 from snapper.core.types import OrderExchange
 
@@ -540,11 +541,11 @@ def topic_for_message(data: StrictDataSchema[Any]) -> str:
         case TradeData():
             return market_topic(data.exchange, data.instrument, MarketDataTypeEnum.TRADES)
         case OrderRequestData():
-            return order_command_topic(data.exchange, data.instrument, "submit")
+            return order_command_topic(data.exchange, data.instrument, OrderCommandEnum.SUBMIT)
         case OrderCancelData():
-            return order_command_topic(data.exchange, data.instrument, "cancel")
+            return order_command_topic(data.exchange, data.instrument, OrderCommandEnum.CANCEL)
         case OrderReplaceData():
-            return order_command_topic(data.exchange, data.instrument, "replace")
+            return order_command_topic(data.exchange, data.instrument, OrderCommandEnum.REPLACE)
         case OrderData():
             return order_event_topic(data.exchange, data.instrument, cast(OrderEvent, data.status))
         case OrderEventData():

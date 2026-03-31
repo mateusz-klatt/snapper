@@ -22,8 +22,6 @@ from typing import Any
 from loguru import logger
 from sqlalchemy import select
 
-from snapper.application.process_manager.enums import ProcessLifecycleEnum
-from snapper.application.process_manager.enums import ProcessRoleEnum
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.process_parameters import AggregatesBackfillParameters
 from snapper.application.process_manager.registry import register_process
@@ -33,6 +31,9 @@ from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
 from snapper.core.types import AliasChannelEnum
 from snapper.core.types import ExchangeEnum
+from snapper.core.types import ProcessLifecycleEnum
+from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRoleEnum
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.repository import DatabaseRepository
@@ -105,7 +106,7 @@ def _timeframe_label(multiplier: int, timespan: str) -> str:
     tags=("polygon", "backfill", "historical"),
     parameters_model=AggregatesBackfillParameters,
     enabled=False,
-    mode="thread",
+    mode=ProcessModeEnum.THREAD,
 )
 class PolygonAggregatesBackfillService(RegisterableProcess):
     """Service for backfilling Polygon aggregate (OHLCV) data.
