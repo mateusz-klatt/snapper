@@ -1,6 +1,7 @@
 import React, { useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiClient } from '../lib/apiClient'
+import { useAppStore } from '../stores/app'
 import { useAuth } from '../stores/auth'
 import {
   safeOrderFromAPI,
@@ -36,28 +37,36 @@ const queryKeys = {
   processSchema: (name: string) => ['processes', 'schema', name] as const,
   processRuns: (name?: string, limit?: number) =>
     ['processes', 'runs', name ?? 'all', limit ?? 50] as const,
-  candles: (instrument: string, exchange: string, timeframe: string) =>
-    ['candles', instrument, exchange, timeframe] as const,
-  exchanges: ['exchanges'] as const,
-  exchangeInstruments: (exchange: string) => ['exchanges', exchange, 'instruments'] as const,
-  orders: (filters?: { symbol?: string; limit?: number; offset?: number }) =>
-    ['orders', filters] as const,
-  executions: (filters?: { limit?: number }) => ['executions', filters] as const,
-  positions: ['positions'] as const,
-  signals: (strategyId?: string, limit?: number, instrument?: string, hours?: number) =>
-    ['signals', strategyId, limit, instrument, hours] as const,
-  settings: (category?: string) => ['settings', category] as const,
-  settingCategories: ['settings', 'categories'] as const,
+  candles: (instrument: string, exchange: string, timeframe: string, asOf: string | null) =>
+    ['candles', instrument, exchange, timeframe, asOf] as const,
+  exchanges: (asOf: string | null) => ['exchanges', asOf] as const,
+  exchangeInstruments: (exchange: string, asOf: string | null) =>
+    ['exchanges', exchange, 'instruments', asOf] as const,
+  orders: (filters?: { symbol?: string; limit?: number; offset?: number }, asOf?: string | null) =>
+    ['orders', filters, asOf] as const,
+  executions: (filters?: { limit?: number }, asOf?: string | null) =>
+    ['executions', filters, asOf] as const,
+  positions: (asOf: string | null) => ['positions', asOf] as const,
+  signals: (
+    strategyId?: string,
+    limit?: number,
+    instrument?: string,
+    hours?: number,
+    asOf?: string | null
+  ) => ['signals', strategyId, limit, instrument, hours, asOf] as const,
+  settings: (category?: string, asOf?: string | null) => ['settings', category, asOf] as const,
+  settingCategories: (asOf: string | null) => ['settings', 'categories', asOf] as const,
   users: (includeInactive: boolean) => ['users', includeInactive] as const,
 }
 
 export const useSystemStatus = () => {
   const { isAuthenticated } = useAuth()
+  const isTimeTraveling = useAppStore(s => s.isTimeTraveling)
 
   return useQuery({
     queryKey: queryKeys.systemStatus,
     queryFn: () => apiClient.getSystemStatus(),
-    refetchInterval: isAuthenticated ? 30000 : false,
+    refetchInterval: isAuthenticated && !isTimeTraveling ? 30000 : false,
     enabled: isAuthenticated,
     throwOnError: false,
   })
@@ -71,9 +80,10 @@ export const useCandles = (
   enabled: boolean = true
 ) => {
   const { isAuthenticated } = useAuth()
+  const asOf = useAppStore(s => s.asOf)
 
   return useQuery({
-    queryKey: queryKeys.candles(instrument, exchange, timeframe),
+    queryKey: queryKeys.candles(instrument, exchange, timeframe, asOf),
     queryFn: () => apiClient.getCandles(instrument, exchange, timeframe, limit),
     enabled: enabled && !!instrument && !!exchange && isAuthenticated,
     staleTime: 2000,
@@ -84,9 +94,10 @@ export const useCandles = (
 
 export const useExchanges = () => {
   const { isAuthenticated } = useAuth()
+  const asOf = useAppStore(s => s.asOf)
 
   return useQuery({
-    queryKey: queryKeys.exchanges,
+    queryKey: queryKeys.exchanges(asOf),
     queryFn: () => apiClient.getExchanges(),
     enabled: isAuthenticated,
     staleTime: 5 * 60 * 1000,
@@ -96,10 +107,11 @@ export const useExchanges = () => {
 
 export const useExchangeInstruments = (exchange: string | null) => {
   const { isAuthenticated } = useAuth()
+  const asOf = useAppStore(s => s.asOf)
   const exchangeKey = exchange ?? ''
 
   return useQuery({
-    queryKey: queryKeys.exchangeInstruments(exchangeKey),
+    queryKey: queryKeys.exchangeInstruments(exchangeKey, asOf),
     queryFn: () => apiClient.getExchangeInstruments(exchangeKey),
     enabled: isAuthenticated && !!exchange,
     staleTime: 5 * 60 * 1000,
@@ -109,6 +121,7 @@ export const useExchangeInstruments = (exchange: string | null) => {
 
 export const useOrders = (filters?: { symbol?: string; limit?: number; offset?: number }) => {
   const { isAuthenticated } = useAuth()
+  const asOf = useAppStore(s => s.asOf)
   const selectOrders = useCallback(
     (data: Awaited<ReturnType<typeof apiClient.getOrders>>) =>
       data.payload.map(safeOrderFromAPI).filter((o): o is NonNullable<typeof o> => o !== null),
@@ -116,7 +129,7 @@ export const useOrders = (filters?: { symbol?: string; limit?: number; offset?: 
   )
 
   return useQuery({
-    queryKey: queryKeys.orders(filters),
+    queryKey: queryKeys.orders(filters, asOf),
     queryFn: () => apiClient.getOrders(filters?.symbol, filters?.limit, filters?.offset),
     select: selectOrders,
     enabled: isAuthenticated,
@@ -126,6 +139,7 @@ export const useOrders = (filters?: { symbol?: string; limit?: number; offset?: 
 
 export const useExecutions = (filters?: { limit?: number }) => {
   const { isAuthenticated } = useAuth()
+  const asOf = useAppStore(s => s.asOf)
   const selectExecutions = useCallback(
     (data: Awaited<ReturnType<typeof apiClient.getExecutions>>) =>
       data.payload.map(safeExecutionFromAPI).filter((e): e is NonNullable<typeof e> => e !== null),
@@ -133,7 +147,7 @@ export const useExecutions = (filters?: { limit?: number }) => {
   )
 
   return useQuery({
-    queryKey: queryKeys.executions(filters),
+    queryKey: queryKeys.executions(filters, asOf),
     queryFn: () => apiClient.getExecutions(filters?.limit),
     select: selectExecutions,
     enabled: isAuthenticated,
@@ -143,15 +157,16 @@ export const useExecutions = (filters?: { limit?: number }) => {
 
 const usePositions = () => {
   const { isAuthenticated } = useAuth()
+  const asOf = useAppStore(s => s.asOf)
 
   return useQuery({
-    queryKey: queryKeys.positions,
+    queryKey: queryKeys.positions(asOf),
     queryFn: async () => {
       const data = await apiClient.getPositions()
 
       return data.payload.map(positionFromAPI)
     },
-    refetchInterval: isAuthenticated ? 10000 : false,
+    refetchInterval: isAuthenticated && !asOf ? 10000 : false,
     enabled: isAuthenticated,
     throwOnError: false,
   })
@@ -164,6 +179,7 @@ export const useSignals = (
   hours = 24
 ) => {
   const { isAuthenticated } = useAuth()
+  const asOf = useAppStore(s => s.asOf)
   const selectSignals = useCallback(
     (data: Awaited<ReturnType<typeof apiClient.getSignals>>) =>
       data.payload.map(safeSignalFromAPI).filter((s): s is NonNullable<typeof s> => s !== null),
@@ -171,7 +187,7 @@ export const useSignals = (
   )
 
   return useQuery({
-    queryKey: queryKeys.signals(strategyId, limit, instrument, hours),
+    queryKey: queryKeys.signals(strategyId, limit, instrument, hours, asOf),
     queryFn: () => apiClient.getSignals(strategyId, limit, instrument, hours),
     select: selectSignals,
     enabled: isAuthenticated,
@@ -294,26 +310,32 @@ export const useStopProcessByName = () => {
 }
 
 export const useConfiguredProcesses = () => {
+  const isTimeTraveling = useAppStore(s => s.isTimeTraveling)
+
   return useQuery<ConfiguredProcessesResponse>({
     queryKey: queryKeys.configuredProcesses,
     queryFn: () => apiClient.getConfiguredProcesses(),
-    refetchInterval: 5000,
+    refetchInterval: isTimeTraveling ? false : 5000,
   })
 }
 
 export const useProcessSummary = () => {
+  const isTimeTraveling = useAppStore(s => s.isTimeTraveling)
+
   return useQuery<ProcessSummaryResponse>({
     queryKey: queryKeys.processSummary,
     queryFn: () => apiClient.getProcessSummary(),
-    refetchInterval: 5000,
+    refetchInterval: isTimeTraveling ? false : 5000,
   })
 }
 
 export const useStrategies = () => {
+  const isTimeTraveling = useAppStore(s => s.isTimeTraveling)
+
   return useQuery<StrategyListResponse>({
     queryKey: queryKeys.strategies,
     queryFn: () => apiClient.getStrategies(),
-    refetchInterval: 5000,
+    refetchInterval: isTimeTraveling ? false : 5000,
   })
 }
 
@@ -326,10 +348,12 @@ export const useAvailableProcesses = () => {
 }
 
 export const useProcessRuns = (options?: { name?: string; limit?: number; enabled?: boolean }) => {
+  const isTimeTraveling = useAppStore(s => s.isTimeTraveling)
+
   return useQuery<ProcessRunsResponse>({
     queryKey: queryKeys.processRuns(options?.name, options?.limit),
     queryFn: () => apiClient.getProcessRuns({ name: options?.name, limit: options?.limit }),
-    refetchInterval: 5000,
+    refetchInterval: isTimeTraveling ? false : 5000,
     enabled: options?.enabled ?? true,
   })
 }
@@ -360,9 +384,10 @@ export const useCreateProcessConfig = () => {
 
 export const useSettings = (category?: string) => {
   const { isAuthenticated } = useAuth()
+  const asOf = useAppStore(s => s.asOf)
 
   return useQuery({
-    queryKey: queryKeys.settings(category),
+    queryKey: queryKeys.settings(category, asOf),
     queryFn: () => apiClient.getSettings(category),
     select: data => data.payload,
     enabled: isAuthenticated,
@@ -372,9 +397,10 @@ export const useSettings = (category?: string) => {
 
 export const useSettingCategories = () => {
   const { isAuthenticated } = useAuth()
+  const asOf = useAppStore(s => s.asOf)
 
   return useQuery<string[]>({
-    queryKey: queryKeys.settingCategories,
+    queryKey: queryKeys.settingCategories(asOf),
     queryFn: () => apiClient.getSettingCategories(),
     enabled: isAuthenticated,
     throwOnError: false,
