@@ -97,6 +97,7 @@ def make_native_symbol(base: str, quote: str) -> str:
 _SHORTCUT_FORWARD: tuple[tuple[str, str, str], ...] = (
     (ExchangeEnum.KRAKEN, AliasChannelEnum.WS, "native_to_kraken_ws"),
     (ExchangeEnum.KRAKEN, AliasChannelEnum.REST, "native_to_kraken_rest"),
+    (ExchangeEnum.KRAKEN_FUTURES, AliasChannelEnum.WS, "native_to_kraken_futures_ws"),
     (ExchangeEnum.ZONDA, AliasChannelEnum.WS, "native_to_zonda_ws"),
     (ExchangeEnum.WALUTOMAT, AliasChannelEnum.WS, "native_to_walutomat_ws"),
     (ExchangeEnum.WALUTOMAT, AliasChannelEnum.REST, "native_to_walutomat_rest"),
@@ -106,6 +107,7 @@ _SHORTCUT_FORWARD: tuple[tuple[str, str, str], ...] = (
 _SHORTCUT_REVERSE: tuple[tuple[str, str, str], ...] = (
     (ExchangeEnum.KRAKEN, AliasChannelEnum.WS, "kraken_ws_to_native"),
     (ExchangeEnum.KRAKEN, AliasChannelEnum.REST, "kraken_rest_to_native"),
+    (ExchangeEnum.KRAKEN_FUTURES, AliasChannelEnum.WS, "kraken_futures_ws_to_native"),
     (ExchangeEnum.ZONDA, AliasChannelEnum.WS, "zonda_ws_to_native"),
     (ExchangeEnum.WALUTOMAT, AliasChannelEnum.WS, "walutomat_ws_to_native"),
     (ExchangeEnum.WALUTOMAT, AliasChannelEnum.REST, "walutomat_rest_to_native"),
@@ -135,6 +137,7 @@ class SymbolMapperService:
         reverse: Exchange-to-native maps keyed by ``(exchange, channel)``.
         native_to_kraken_ws: Alias for ``forward[("kraken", "ws")]``.
         native_to_kraken_rest: Alias for ``forward[("kraken", "rest")]``.
+        native_to_kraken_futures_ws: Alias for ``forward[("kraken_futures", "ws")]``.
         native_to_ccxt: Union of all ``forward[(*, "ccxt")]`` across exchanges.
         native_to_zonda_ws: Alias for ``forward[("zonda", "ws")]``.
         native_to_walutomat_ws: Alias for ``forward[("walutomat", "ws")]``.
@@ -142,6 +145,7 @@ class SymbolMapperService:
         native_to_polygon_rest: Alias for ``forward[("polygon", "rest")]``.
         kraken_ws_to_native: Alias for ``reverse[("kraken", "ws")]``.
         kraken_rest_to_native: Alias for ``reverse[("kraken", "rest")]``.
+        kraken_futures_ws_to_native: Alias for ``reverse[("kraken_futures", "ws")]``.
         ccxt_to_native: Union of all ``reverse[(*, "ccxt")]`` across exchanges.
         zonda_ws_to_native: Alias for ``reverse[("zonda", "ws")]``.
         walutomat_ws_to_native: Alias for ``reverse[("walutomat", "ws")]``.
@@ -188,9 +192,11 @@ class SymbolMapperService:
         self.reverse: dict[tuple[str, str], dict[str, str]] = {}
         self.native_to_kraken_ws: dict[str, str] = {}
         self.native_to_kraken_rest: dict[str, str] = {}
+        self.native_to_kraken_futures_ws: dict[str, str] = {}
         self.native_to_ccxt: dict[str, str] = {}
         self.kraken_ws_to_native: dict[str, str] = {}
         self.kraken_rest_to_native: dict[str, str] = {}
+        self.kraken_futures_ws_to_native: dict[str, str] = {}
         self.ccxt_to_native: dict[str, str] = {}
         self.native_to_zonda_ws: dict[str, str] = {}
         self.zonda_ws_to_native: dict[str, str] = {}

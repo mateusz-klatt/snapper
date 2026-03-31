@@ -299,6 +299,7 @@ class AppSettings:
                     "ETH-USD",
                     "SPY",
                 ],
+                ExchangeEnum.KRAKEN_FUTURES: [],
                 ExchangeEnum.ZONDA: ["BTC-PLN", "USDC-PLN", "ETH-PLN", "SOL-USDC", "BTC-EUR"],
                 ExchangeEnum.WALUTOMAT: ["EUR-PLN", "USD-PLN", "EUR-USD"],
                 ExchangeEnum.POLYGON: ["BTC-USD", "BTC-EUR", "EUR-USD", "EUR-PLN", "USD-PLN"],
@@ -316,6 +317,7 @@ class AppSettings:
             "paper_instruments",
             {
                 ExchangeEnum.KRAKEN: ["BTC-USD", "EUR-USD"],
+                ExchangeEnum.KRAKEN_FUTURES: [],
                 ExchangeEnum.ZONDA: ["BTC-PLN"],
                 ExchangeEnum.WALUTOMAT: ["EUR-PLN", "USD-PLN"],
             },

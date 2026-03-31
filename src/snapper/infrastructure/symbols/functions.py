@@ -58,6 +58,9 @@ __all__ = [
     "walutomat_rest_to_native",
     "native_to_polygon_rest",
     "polygon_rest_to_native",
+    "native_to_kraken_futures_ws",
+    "kraken_futures_ws_to_native",
+    "get_available_kraken_futures_symbols",
     "get_available_zonda_symbols",
     "get_available_walutomat_symbols",
     "get_available_polygon_symbols",
@@ -433,6 +436,54 @@ def get_available_polygon_rest_symbols() -> list[str]:
     return sorted(mapper.polygon_rest_to_native.keys())
 
 
+def native_to_kraken_futures_ws(native_symbol: str) -> str:
+    """Convert native symbol to Kraken Futures WebSocket format.
+
+    Args:
+        native_symbol: Native symbol (e.g., ``BTC-USD-PERP``).
+
+    Returns:
+        Kraken Futures WS symbol (e.g., ``PF_XBTUSD``).
+
+    Raises:
+        ValueError: If native symbol is not mapped to Kraken Futures.
+    """
+    mapper = _get_db_mapper()
+    try:
+        return mapper.native_to_kraken_futures_ws[native_symbol]
+    except KeyError as exc:
+        raise ValueError(f"Unknown native symbol: {native_symbol}") from exc
+
+
+def kraken_futures_ws_to_native(symbol: str) -> str:
+    """Convert Kraken Futures WebSocket symbol to native format.
+
+    Args:
+        symbol: Kraken Futures WS symbol (e.g., ``PF_XBTUSD``).
+
+    Returns:
+        Native symbol (e.g., ``BTC-USD-PERP``).
+
+    Raises:
+        ValueError: If Kraken Futures symbol is not recognized.
+    """
+    mapper = _get_db_mapper()
+    try:
+        return mapper.kraken_futures_ws_to_native[symbol]
+    except KeyError as exc:
+        raise ValueError(f"Unknown Kraken Futures WS symbol: {symbol}") from exc
+
+
+def get_available_kraken_futures_symbols() -> list[str]:
+    """Get all available native symbols that have Kraken Futures mappings.
+
+    Returns:
+        Sorted list of native symbols with Kraken Futures support.
+    """
+    mapper = _get_db_mapper()
+    return sorted(mapper.native_to_kraken_futures_ws.keys())
+
+
 def validate_symbol(symbol: str) -> bool:
     """Check if a native symbol is valid (has Kraken WebSocket mapping).
 
@@ -526,6 +577,7 @@ def get_available_symbols() -> list[str]:
     """
     all_symbols: set[str] = set()
     all_symbols.update(get_available_kraken_symbols())
+    all_symbols.update(get_available_kraken_futures_symbols())
     all_symbols.update(get_available_zonda_symbols())
     all_symbols.update(get_available_walutomat_symbols())
     all_symbols.update(get_available_polygon_symbols())

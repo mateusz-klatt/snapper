@@ -23,6 +23,7 @@ from snapper.data.models import SymbolAlias
 from snapper.infrastructure.symbols.functions import ccxt_to_kraken_websocket
 from snapper.infrastructure.symbols.functions import ccxt_to_native
 from snapper.infrastructure.symbols.functions import get_available_exchanges
+from snapper.infrastructure.symbols.functions import get_available_kraken_futures_symbols
 from snapper.infrastructure.symbols.functions import get_available_kraken_rest_symbols
 from snapper.infrastructure.symbols.functions import get_available_kraken_symbols
 from snapper.infrastructure.symbols.functions import get_available_polygon_rest_symbols
@@ -38,10 +39,12 @@ from snapper.infrastructure.symbols.functions import get_market_subscribe_exchan
 from snapper.infrastructure.symbols.functions import get_tradeable_symbols
 from snapper.infrastructure.symbols.functions import is_market_data_available
 from snapper.infrastructure.symbols.functions import is_tradeable
+from snapper.infrastructure.symbols.functions import kraken_futures_ws_to_native
 from snapper.infrastructure.symbols.functions import kraken_rest_to_native
 from snapper.infrastructure.symbols.functions import kraken_websocket_to_ccxt
 from snapper.infrastructure.symbols.functions import kraken_websocket_to_native
 from snapper.infrastructure.symbols.functions import native_to_ccxt
+from snapper.infrastructure.symbols.functions import native_to_kraken_futures_ws
 from snapper.infrastructure.symbols.functions import native_to_kraken_rest
 from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
 from snapper.infrastructure.symbols.functions import native_to_polygon_rest
@@ -1358,6 +1361,8 @@ def mock_mapper() -> MagicMock:
     mapper.polygon_rest_to_native = {"X:BTCUSD": "BTC-USD", "C:EURUSD": "EUR-USD"}
     mapper.native_to_kraken_ws = {"BTC-USD": "BTC/USD", "ETH-USD": "ETH/USD"}
     mapper.kraken_ws_to_native = {"BTC/USD": "BTC-USD", "ETH/USD": "ETH-USD"}
+    mapper.native_to_kraken_futures_ws = {"BTC-USD-PERP": "PF_XBTUSD"}
+    mapper.kraken_futures_ws_to_native = {"PF_XBTUSD": "BTC-USD-PERP"}
     mapper.native_to_ccxt = {"BTC-USD": "BTC/USD", "ETH-USD": "ETH/USD"}
     mapper.ccxt_to_native = {"BTC/USD": "BTC-USD", "ETH/USD": "ETH-USD"}
     return mapper
@@ -1681,6 +1686,78 @@ class TestPolygonHelpers:
             assert result == ["C:EURUSD", "X:BTCUSD"]
 
 
+class TestKrakenFuturesHelpers:
+    """Tests for Kraken Futures symbol conversion helpers."""
+
+    def test_native_to_kraken_futures_ws_success(self, mock_mapper: MagicMock) -> None:
+        """Convert native symbol to Kraken Futures WS format.
+
+        Given: Native symbol in Kraken Futures mapping,
+        When: native_to_kraken_futures_ws is called,
+        Then: Returns Kraken Futures WS format symbol.
+        """
+        with patch(
+            "snapper.infrastructure.symbols.functions._get_db_mapper",
+            return_value=mock_mapper,
+        ):
+            result = native_to_kraken_futures_ws("BTC-USD-PERP")
+            assert result == "PF_XBTUSD"
+
+    def test_native_to_kraken_futures_ws_unknown_raises(self, mock_mapper: MagicMock) -> None:
+        """Reject unknown native symbol for Kraken Futures.
+
+        Given: Native symbol not in Kraken Futures mapping,
+        When: native_to_kraken_futures_ws is called,
+        Then: Raises ValueError.
+        """
+        with patch(
+            "snapper.infrastructure.symbols.functions._get_db_mapper",
+            return_value=mock_mapper,
+        ), pytest.raises(ValueError, match=r"Unknown native symbol: INVALID"):
+            native_to_kraken_futures_ws("INVALID")
+
+    def test_kraken_futures_ws_to_native_success(self, mock_mapper: MagicMock) -> None:
+        """Convert Kraken Futures WS symbol to native format.
+
+        Given: Kraken Futures WS symbol in mapping cache,
+        When: kraken_futures_ws_to_native is called,
+        Then: Returns native format symbol.
+        """
+        with patch(
+            "snapper.infrastructure.symbols.functions._get_db_mapper",
+            return_value=mock_mapper,
+        ):
+            result = kraken_futures_ws_to_native("PF_XBTUSD")
+            assert result == "BTC-USD-PERP"
+
+    def test_kraken_futures_ws_to_native_unknown_raises(self, mock_mapper: MagicMock) -> None:
+        """Reject unknown Kraken Futures WS symbol.
+
+        Given: Kraken Futures WS symbol not in mapping cache,
+        When: kraken_futures_ws_to_native is called,
+        Then: Raises ValueError.
+        """
+        with patch(
+            "snapper.infrastructure.symbols.functions._get_db_mapper",
+            return_value=mock_mapper,
+        ), pytest.raises(ValueError, match=r"Unknown Kraken Futures WS symbol: INVALID"):
+            kraken_futures_ws_to_native("INVALID")
+
+    def test_get_available_kraken_futures_symbols(self, mock_mapper: MagicMock) -> None:
+        """Get sorted list of native symbols with Kraken Futures mappings.
+
+        Given: Mapper with Kraken Futures symbol mappings,
+        When: get_available_kraken_futures_symbols is called,
+        Then: Returns sorted list of native symbols.
+        """
+        with patch(
+            "snapper.infrastructure.symbols.functions._get_db_mapper",
+            return_value=mock_mapper,
+        ):
+            result = get_available_kraken_futures_symbols()
+            assert result == ["BTC-USD-PERP"]
+
+
 class TestCompositeHelpers:
     """Tests for composite symbol conversion helpers."""
 
@@ -1735,7 +1812,7 @@ class TestGetAvailableExchanges:
         Then: Returns live feed exchanges without paper or polygon.
         """
         result = get_market_subscribe_exchanges()
-        assert sorted(result) == ["kraken", "walutomat", "zonda"]
+        assert sorted(result) == ["kraken", "kraken_futures", "walutomat", "zonda"]
         assert "paper" not in result
         assert "polygon" not in result
 
@@ -1747,7 +1824,7 @@ class TestGetAvailableExchanges:
         Then: Returns exchanges valid for market data, including polygon.
         """
         result = get_market_data_exchanges()
-        assert sorted(result) == ["kraken", "polygon", "walutomat", "zonda"]
+        assert sorted(result) == ["kraken", "kraken_futures", "polygon", "walutomat", "zonda"]
         assert "paper" not in result
 
     def test_market_subscribe_exchange_excludes_paper_and_polygon(self) -> None:
