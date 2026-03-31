@@ -2,6 +2,7 @@ import { useMemo, useState, useRef, useEffect } from 'react'
 import { Card, LoadingSpinner } from '../../components/ui'
 import { LightweightChart } from '../../components/LightweightChart'
 import { useCandles, useExchanges, useExchangeInstruments } from '../../hooks/queries'
+import { useAppStore } from '../../stores/app'
 import { useMarketStore } from '../../stores/market'
 import { useMarketSubscription } from '../../hooks/useMarketSubscription'
 import { useWebSocketStore } from '../../stores/websocket'
@@ -38,7 +39,8 @@ export function MarketData() {
   } = useMarketStore()
 
   const { isConnected } = useWebSocketStore()
-  const dispatcher = useWSDispatcher()
+  const isTimeTraveling = useAppStore(s => s.isTimeTraveling)
+  const dispatcher = useWSDispatcher({ enabled: !isTimeTraveling })
   const subscribed = useMarketSubscription({
     instrument: selectedInstrument,
     exchange: selectedExchange,

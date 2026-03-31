@@ -1,17 +1,12 @@
-import { useCallback, useEffect } from 'react'
+import { useCallback } from 'react'
 import { Clock, X } from 'lucide-react'
 import { useAppStore } from '../stores/app'
-import { apiClient } from '../lib/apiClient'
 
 export const TimeTravelPicker: React.FC = () => {
   const asOf = useAppStore(s => s.asOf)
   const isTimeTraveling = useAppStore(s => s.isTimeTraveling)
   const setAsOf = useAppStore(s => s.setAsOf)
   const clearAsOf = useAppStore(s => s.clearAsOf)
-
-  useEffect(() => {
-    apiClient.setTimeTravelAsOf(asOf)
-  }, [asOf])
 
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -30,7 +25,14 @@ export const TimeTravelPicker: React.FC = () => {
     clearAsOf()
   }, [clearAsOf])
 
-  const inputValue = asOf ? new Date(asOf).toISOString().slice(0, 16) : ''
+  const toLocalDatetime = (iso: string): string => {
+    const d = new Date(iso)
+    const pad = (n: number) => String(n).padStart(2, '0')
+
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  }
+
+  const inputValue = asOf ? toLocalDatetime(asOf) : ''
 
   return (
     <div className='flex items-center gap-2'>

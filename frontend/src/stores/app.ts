@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { subscribeWithSelector } from 'zustand/middleware'
+import { apiClient } from '../lib/apiClient'
 import { AppState } from '../types/ui'
 
 const DARK_MODE_KEY = 'snapper-dark-mode'
@@ -45,7 +46,13 @@ export const useAppStore = create<AppStore>()(
 
         return { isDarkMode: next }
       }),
-    setAsOf: (asOf: string) => set({ asOf, isTimeTraveling: true }),
-    clearAsOf: () => set({ asOf: null, isTimeTraveling: false }),
+    setAsOf: (asOf: string) => {
+      apiClient.setTimeTravelAsOf(asOf)
+      set({ asOf, isTimeTraveling: true })
+    },
+    clearAsOf: () => {
+      apiClient.setTimeTravelAsOf(null)
+      set({ asOf: null, isTimeTraveling: false })
+    },
   }))
 )

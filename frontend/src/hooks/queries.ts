@@ -31,12 +31,12 @@ const queryKeys = {
   systemStatus: ['system', 'status'] as const,
   processStatus: ['process', 'status'] as const,
   availableProcesses: ['processes', 'available'] as const,
-  configuredProcesses: ['processes', 'configured'] as const,
-  processSummary: ['processes', 'summary'] as const,
-  strategies: ['strategies'] as const,
+  configuredProcesses: (asOf: string | null) => ['processes', 'configured', asOf] as const,
+  processSummary: (asOf: string | null) => ['processes', 'summary', asOf] as const,
+  strategies: (asOf: string | null) => ['strategies', asOf] as const,
   processSchema: (name: string) => ['processes', 'schema', name] as const,
-  processRuns: (name?: string, limit?: number) =>
-    ['processes', 'runs', name ?? 'all', limit ?? 50] as const,
+  processRuns: (name?: string, limit?: number, asOf?: string | null) =>
+    ['processes', 'runs', name ?? 'all', limit ?? 50, asOf] as const,
   candles: (instrument: string, exchange: string, timeframe: string, asOf: string | null) =>
     ['candles', instrument, exchange, timeframe, asOf] as const,
   exchanges: (asOf: string | null) => ['exchanges', asOf] as const,
@@ -281,9 +281,9 @@ export const useStartProcessByName = () => {
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.processStatus })
       queryClient.invalidateQueries({ queryKey: ['process', 'runtime', variables.name] })
-      queryClient.invalidateQueries({ queryKey: queryKeys.configuredProcesses })
-      queryClient.invalidateQueries({ queryKey: queryKeys.processSummary })
-      queryClient.invalidateQueries({ queryKey: queryKeys.strategies })
+      queryClient.invalidateQueries({ queryKey: ['processes', 'configured'] })
+      queryClient.invalidateQueries({ queryKey: ['processes', 'summary'] })
+      queryClient.invalidateQueries({ queryKey: ['strategies'] })
       queryClient.invalidateQueries({ queryKey: queryKeys.availableProcesses })
       queryClient.invalidateQueries({ queryKey: queryKeys.processRuns() })
     },
@@ -300,9 +300,9 @@ export const useStopProcessByName = () => {
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.processStatus })
       queryClient.invalidateQueries({ queryKey: ['process', 'runtime', variables.name] })
-      queryClient.invalidateQueries({ queryKey: queryKeys.configuredProcesses })
-      queryClient.invalidateQueries({ queryKey: queryKeys.processSummary })
-      queryClient.invalidateQueries({ queryKey: queryKeys.strategies })
+      queryClient.invalidateQueries({ queryKey: ['processes', 'configured'] })
+      queryClient.invalidateQueries({ queryKey: ['processes', 'summary'] })
+      queryClient.invalidateQueries({ queryKey: ['strategies'] })
       queryClient.invalidateQueries({ queryKey: queryKeys.availableProcesses })
       queryClient.invalidateQueries({ queryKey: queryKeys.processRuns() })
     },
@@ -311,9 +311,10 @@ export const useStopProcessByName = () => {
 
 export const useConfiguredProcesses = () => {
   const isTimeTraveling = useAppStore(s => s.isTimeTraveling)
+  const asOf = useAppStore(s => s.asOf)
 
   return useQuery<ConfiguredProcessesResponse>({
-    queryKey: queryKeys.configuredProcesses,
+    queryKey: queryKeys.configuredProcesses(asOf),
     queryFn: () => apiClient.getConfiguredProcesses(),
     refetchInterval: isTimeTraveling ? false : 5000,
   })
@@ -321,9 +322,10 @@ export const useConfiguredProcesses = () => {
 
 export const useProcessSummary = () => {
   const isTimeTraveling = useAppStore(s => s.isTimeTraveling)
+  const asOf = useAppStore(s => s.asOf)
 
   return useQuery<ProcessSummaryResponse>({
-    queryKey: queryKeys.processSummary,
+    queryKey: queryKeys.processSummary(asOf),
     queryFn: () => apiClient.getProcessSummary(),
     refetchInterval: isTimeTraveling ? false : 5000,
   })
@@ -331,9 +333,10 @@ export const useProcessSummary = () => {
 
 export const useStrategies = () => {
   const isTimeTraveling = useAppStore(s => s.isTimeTraveling)
+  const asOf = useAppStore(s => s.asOf)
 
   return useQuery<StrategyListResponse>({
-    queryKey: queryKeys.strategies,
+    queryKey: queryKeys.strategies(asOf),
     queryFn: () => apiClient.getStrategies(),
     refetchInterval: isTimeTraveling ? false : 5000,
   })
@@ -349,9 +352,10 @@ export const useAvailableProcesses = () => {
 
 export const useProcessRuns = (options?: { name?: string; limit?: number; enabled?: boolean }) => {
   const isTimeTraveling = useAppStore(s => s.isTimeTraveling)
+  const asOf = useAppStore(s => s.asOf)
 
   return useQuery<ProcessRunsResponse>({
-    queryKey: queryKeys.processRuns(options?.name, options?.limit),
+    queryKey: queryKeys.processRuns(options?.name, options?.limit, asOf),
     queryFn: () => apiClient.getProcessRuns({ name: options?.name, limit: options?.limit }),
     refetchInterval: isTimeTraveling ? false : 5000,
     enabled: options?.enabled ?? true,
@@ -373,9 +377,9 @@ export const useCreateProcessConfig = () => {
   return useMutation<ProcessCreateResponse, Error, ProcessCreateBody>({
     mutationFn: body => apiClient.createProcessConfig(body),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.configuredProcesses })
-      queryClient.invalidateQueries({ queryKey: queryKeys.processSummary })
-      queryClient.invalidateQueries({ queryKey: queryKeys.strategies })
+      queryClient.invalidateQueries({ queryKey: ['processes', 'configured'] })
+      queryClient.invalidateQueries({ queryKey: ['processes', 'summary'] })
+      queryClient.invalidateQueries({ queryKey: ['strategies'] })
       queryClient.invalidateQueries({ queryKey: queryKeys.availableProcesses })
       queryClient.invalidateQueries({ queryKey: queryKeys.processRuns() })
     },
