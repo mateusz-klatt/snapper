@@ -317,3 +317,114 @@ class TradeProjectionCheckpointRow(TypedDict):
     open_command_ids: str | None
     checkpoint_at: datetime
     session_id: str
+
+
+class RecordVenueEventParams(TypedDict, total=False):
+    """Caller-facing params for _record_venue_event.
+
+    Required keys identify the event. Optional keys carry event-type-specific
+    data (fills, errors, etc.). The executor fills envelope fields (shard_key,
+    mode, timestamps, session tracking) before persisting.
+    """
+
+    event_type: str
+    exchange_name: str
+    instrument: str
+    exchange_order_id: str | None
+    client_order_id: str | None
+    side: str | None
+    status: str | None
+    fill_price: float | None
+    fill_size: float | None
+    cum_fill_size: float | None
+    fee: float | None
+    fee_asset: str | None
+    exec_id: str | None
+    trade_id: str | None
+    error: str | None
+    venue_timestamp: datetime | None
+
+
+class TradeCommandInsertRow(TypedDict, total=False):
+    """Insert params for insert_trade_command.
+
+    Required keys match the ORM model's NOT NULL columns.
+    Optional keys have server-side defaults or are nullable.
+    """
+
+    command_type: str
+    shard_key: str
+    exchange: str
+    instrument: str
+    mode: str
+    strategy_id: str
+    client_order_id: str
+    venue_client_id: str
+    side: str
+    order_type: str
+    quantity: float
+    price: float | None
+    status: str
+    created_at: datetime
+    correlation_id: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+    idempotency_key: str | None
+    supersedes_command_id: str | None
+
+
+class VenueEventInsertRow(TypedDict, total=False):
+    """Insert params for insert_venue_event.
+
+    Required keys are the mandatory event envelope fields.
+    Optional keys correspond to nullable columns or event-type-specific data.
+    """
+
+    event_type: str
+    shard_key: str
+    exchange: str
+    instrument: str
+    mode: str
+    received_at: datetime
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+    command_public_id: str | None
+    exchange_order_id: str | None
+    client_order_id: str | None
+    venue_client_id: str | None
+    side: str | None
+    status: str | None
+    fill_price: float | None
+    fill_size: float | None
+    cum_fill_size: float | None
+    fee: float | None
+    fee_asset: str | None
+    exec_id: str | None
+    trade_id: str | None
+    error: str | None
+    venue_timestamp: datetime | None
+    payload_json: str | None
+
+
+class CheckpointUpsertRow(TypedDict):
+    """Upsert params for upsert_checkpoint.
+
+    All fields are required since checkpoints are full-state snapshots.
+    """
+
+    shard_key: str
+    position_qty: float
+    entry_price: float | None
+    cash: float
+    peak_equity: float
+    realized_pnl: float
+    turnover: float
+    last_venue_event_id: int | None
+    last_venue_event_at: datetime | None
+    open_command_ids: str | None
+    checkpoint_at: datetime
+    session_id: str
+    sequence_id: int
+    bus_time: datetime

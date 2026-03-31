@@ -3159,24 +3159,26 @@ async def test_insert_trade_command(tmp_path: Path) -> None:
     await r.create_all()
     now = datetime.now(UTC)
     cmd_id, cmd_pid = await r.insert_trade_command(
-        command_type="submit",
-        shard_key="kraken.BTC-USD.live",
-        exchange="kraken",
-        instrument="BTC-USD",
-        mode="live",
-        strategy_id="engine-buy",
-        client_order_id="cid-1",
-        venue_client_id="vcid-1",
-        side="buy",
-        order_type="market",
-        quantity=0.5,
-        price=None,
-        status="created",
-        created_at=now,
-        correlation_id="corr-1",
-        session_id="s1",
-        sequence_id=1,
-        timestamp=now,
+        {
+            "command_type": "submit",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "engine-buy",
+            "client_order_id": "cid-1",
+            "venue_client_id": "vcid-1",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.5,
+            "price": None,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-1",
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+        }
     )
     assert cmd_id > 0
     assert len(cmd_pid) == 36
@@ -3195,24 +3197,26 @@ async def test_get_undispatched_commands(tmp_path: Path) -> None:
     await r.create_all()
     now = datetime.now(UTC)
     await r.insert_trade_command(
-        command_type="submit",
-        shard_key="kraken.BTC-USD.live",
-        exchange="kraken",
-        instrument="BTC-USD",
-        mode="live",
-        strategy_id="engine-buy",
-        client_order_id="cid-1",
-        venue_client_id="vcid-1",
-        side="buy",
-        order_type="market",
-        quantity=0.5,
-        price=None,
-        status="created",
-        created_at=now,
-        correlation_id="corr-1",
-        session_id="s1",
-        sequence_id=1,
-        timestamp=now,
+        {
+            "command_type": "submit",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "engine-buy",
+            "client_order_id": "cid-1",
+            "venue_client_id": "vcid-1",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.5,
+            "price": None,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-1",
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+        }
     )
     cmds = await r.get_undispatched_commands(as_of=now, limit=10)
     assert len(cmds) == 1
@@ -3233,24 +3237,26 @@ async def test_update_trade_command_status_scd2(tmp_path: Path) -> None:
     await r.create_all()
     now = datetime.now(UTC)
     _, cmd_pid = await r.insert_trade_command(
-        command_type="submit",
-        shard_key="kraken.BTC-USD.live",
-        exchange="kraken",
-        instrument="BTC-USD",
-        mode="live",
-        strategy_id="engine-buy",
-        client_order_id="cid-1",
-        venue_client_id="vcid-1",
-        side="buy",
-        order_type="market",
-        quantity=0.5,
-        price=None,
-        status="created",
-        created_at=now,
-        correlation_id="corr-1",
-        session_id="s1",
-        sequence_id=1,
-        timestamp=now,
+        {
+            "command_type": "submit",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "engine-buy",
+            "client_order_id": "cid-1",
+            "venue_client_id": "vcid-1",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.5,
+            "price": None,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-1",
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+        }
     )
     later = now + timedelta(seconds=1)
     new_id = await r.update_trade_command_status(
@@ -3283,30 +3289,34 @@ async def test_insert_venue_event(tmp_path: Path) -> None:
     await r.create_all()
     now = datetime.now(UTC)
     seq1 = await r.insert_venue_event(
-        event_type="order_accepted",
-        shard_key="kraken.BTC-USD.live",
-        exchange="kraken",
-        instrument="BTC-USD",
-        mode="live",
-        received_at=now,
-        session_id="s1",
-        sequence_id=1,
-        timestamp=now,
-        exchange_order_id="ex-1",
-        client_order_id="cid-1",
+        {
+            "event_type": "order_accepted",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "received_at": now,
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+            "exchange_order_id": "ex-1",
+            "client_order_id": "cid-1",
+        }
     )
     seq2 = await r.insert_venue_event(
-        event_type="fill_observed",
-        shard_key="kraken.BTC-USD.live",
-        exchange="kraken",
-        instrument="BTC-USD",
-        mode="live",
-        received_at=now,
-        session_id="s1",
-        sequence_id=2,
-        timestamp=now,
-        fill_price=50000.0,
-        fill_size=0.5,
+        {
+            "event_type": "fill_observed",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "received_at": now,
+            "session_id": "s1",
+            "sequence_id": 2,
+            "timestamp": now,
+            "fill_price": 50000.0,
+            "fill_size": 0.5,
+        }
     )
     assert seq2 > seq1 > 0
 
@@ -3324,26 +3334,30 @@ async def test_get_venue_events_after(tmp_path: Path) -> None:
     await r.create_all()
     now = datetime.now(UTC)
     seq1 = await r.insert_venue_event(
-        event_type="order_accepted",
-        shard_key="kraken.BTC-USD.live",
-        exchange="kraken",
-        instrument="BTC-USD",
-        mode="live",
-        received_at=now,
-        session_id="s1",
-        sequence_id=1,
-        timestamp=now,
+        {
+            "event_type": "order_accepted",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "received_at": now,
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+        }
     )
     await r.insert_venue_event(
-        event_type="fill_observed",
-        shard_key="kraken.BTC-USD.live",
-        exchange="kraken",
-        instrument="BTC-USD",
-        mode="live",
-        received_at=now,
-        session_id="s1",
-        sequence_id=2,
-        timestamp=now,
+        {
+            "event_type": "fill_observed",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "received_at": now,
+            "session_id": "s1",
+            "sequence_id": 2,
+            "timestamp": now,
+        }
     )
     events = await r.get_venue_events_after("kraken.BTC-USD.live", seq1)
     assert len(events) == 1
@@ -3365,20 +3379,22 @@ async def test_upsert_checkpoint_and_get(tmp_path: Path) -> None:
     await r.create_all()
     now = datetime.now(UTC)
     cp_id = await r.upsert_checkpoint(
-        shard_key="kraken.BTC-USD.live",
-        position_qty=0.5,
-        entry_price=50000.0,
-        cash=9000.0,
-        peak_equity=10000.0,
-        realized_pnl=0.0,
-        turnover=500.0,
-        last_venue_event_id=42,
-        last_venue_event_at=now,
-        open_command_ids='["cmd-1"]',
-        checkpoint_at=now,
-        session_id="s1",
-        sequence_id=1,
-        bus_time=now,
+        {
+            "shard_key": "kraken.BTC-USD.live",
+            "position_qty": 0.5,
+            "entry_price": 50000.0,
+            "cash": 9000.0,
+            "peak_equity": 10000.0,
+            "realized_pnl": 0.0,
+            "turnover": 500.0,
+            "last_venue_event_id": 42,
+            "last_venue_event_at": now,
+            "open_command_ids": '["cmd-1"]',
+            "checkpoint_at": now,
+            "session_id": "s1",
+            "sequence_id": 1,
+            "bus_time": now,
+        }
     )
     assert cp_id > 0
     cp = await r.get_checkpoint("kraken.BTC-USD.live", now)
@@ -3388,20 +3404,22 @@ async def test_upsert_checkpoint_and_get(tmp_path: Path) -> None:
     assert cp["last_venue_event_id"] == 42
     later = now + timedelta(seconds=1)
     cp_id2 = await r.upsert_checkpoint(
-        shard_key="kraken.BTC-USD.live",
-        position_qty=1.0,
-        entry_price=50000.0,
-        cash=8500.0,
-        peak_equity=10500.0,
-        realized_pnl=0.0,
-        turnover=1000.0,
-        last_venue_event_id=43,
-        last_venue_event_at=later,
-        open_command_ids=None,
-        checkpoint_at=later,
-        session_id="s1",
-        sequence_id=2,
-        bus_time=later,
+        {
+            "shard_key": "kraken.BTC-USD.live",
+            "position_qty": 1.0,
+            "entry_price": 50000.0,
+            "cash": 8500.0,
+            "peak_equity": 10500.0,
+            "realized_pnl": 0.0,
+            "turnover": 1000.0,
+            "last_venue_event_id": 43,
+            "last_venue_event_at": later,
+            "open_command_ids": None,
+            "checkpoint_at": later,
+            "session_id": "s1",
+            "sequence_id": 2,
+            "bus_time": later,
+        }
     )
     assert cp_id2 != cp_id
     cp2 = await r.get_checkpoint("kraken.BTC-USD.live", later)
@@ -3459,52 +3477,60 @@ async def test_get_fill_exec_ids_for_shard(tmp_path: Path) -> None:
     await r.create_all()
     now = datetime.now(UTC)
     await r.insert_venue_event(
-        event_type="fill_observed",
-        shard_key="kraken.BTC-USD.live",
-        exchange="kraken",
-        instrument="BTC-USD",
-        mode="live",
-        received_at=now,
-        session_id="s1",
-        sequence_id=1,
-        timestamp=now,
-        exec_id="exec-1",
-        trade_id="trade-1",
+        {
+            "event_type": "fill_observed",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "received_at": now,
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+            "exec_id": "exec-1",
+            "trade_id": "trade-1",
+        }
     )
     await r.insert_venue_event(
-        event_type="fill_observed",
-        shard_key="kraken.BTC-USD.live",
-        exchange="kraken",
-        instrument="BTC-USD",
-        mode="live",
-        received_at=now,
-        session_id="s1",
-        sequence_id=2,
-        timestamp=now,
-        exec_id="exec-2",
+        {
+            "event_type": "fill_observed",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "received_at": now,
+            "session_id": "s1",
+            "sequence_id": 2,
+            "timestamp": now,
+            "exec_id": "exec-2",
+        }
     )
     await r.insert_venue_event(
-        event_type="fill_observed",
-        shard_key="kraken.BTC-USD.live",
-        exchange="kraken",
-        instrument="BTC-USD",
-        mode="live",
-        received_at=now,
-        session_id="s1",
-        sequence_id=3,
-        timestamp=now,
+        {
+            "event_type": "fill_observed",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "received_at": now,
+            "session_id": "s1",
+            "sequence_id": 3,
+            "timestamp": now,
+        }
     )
     await r.insert_venue_event(
-        event_type="order_accepted",
-        shard_key="kraken.BTC-USD.live",
-        exchange="kraken",
-        instrument="BTC-USD",
-        mode="live",
-        received_at=now,
-        session_id="s1",
-        sequence_id=4,
-        timestamp=now,
-        exec_id="should-not-appear",
+        {
+            "event_type": "order_accepted",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "received_at": now,
+            "session_id": "s1",
+            "sequence_id": 4,
+            "timestamp": now,
+            "exec_id": "should-not-appear",
+        }
     )
     ids = await r.get_fill_exec_ids_for_shard("kraken.BTC-USD.live")
     assert ids == {"exec-1", "trade-1", "exec-2"}
@@ -3523,26 +3549,30 @@ async def test_get_latest_venue_event_id(tmp_path: Path) -> None:
     await r.create_all()
     now = datetime.now(UTC)
     await r.insert_venue_event(
-        event_type="fill_observed",
-        shard_key="kraken.BTC-USD.live",
-        exchange="kraken",
-        instrument="BTC-USD",
-        mode="live",
-        received_at=now,
-        session_id="s1",
-        sequence_id=1,
-        timestamp=now,
+        {
+            "event_type": "fill_observed",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "received_at": now,
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+        }
     )
     await r.insert_venue_event(
-        event_type="fill_observed",
-        shard_key="kraken.BTC-USD.live",
-        exchange="kraken",
-        instrument="BTC-USD",
-        mode="live",
-        received_at=now,
-        session_id="s1",
-        sequence_id=2,
-        timestamp=now,
+        {
+            "event_type": "fill_observed",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "received_at": now,
+            "session_id": "s1",
+            "sequence_id": 2,
+            "timestamp": now,
+        }
     )
     result = await r.get_latest_venue_event_id("kraken.BTC-USD.live")
     assert result is not None
@@ -3564,44 +3594,48 @@ async def test_get_active_commands_for_exchange(tmp_path: Path) -> None:
     await r.create_all()
     now = datetime.now(UTC)
     await r.insert_trade_command(
-        command_type="submit",
-        shard_key="kraken.BTC-USD.live",
-        exchange="kraken",
-        instrument="BTC-USD",
-        mode="live",
-        strategy_id="test",
-        client_order_id="cid-1",
-        venue_client_id="vcid-1",
-        side="buy",
-        order_type="market",
-        quantity=0.5,
-        price=None,
-        status="created",
-        created_at=now,
-        correlation_id="corr-1",
-        session_id="s1",
-        sequence_id=1,
-        timestamp=now,
+        {
+            "command_type": "submit",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "test",
+            "client_order_id": "cid-1",
+            "venue_client_id": "vcid-1",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.5,
+            "price": None,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-1",
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+        }
     )
     _, filled_pid = await r.insert_trade_command(
-        command_type="submit",
-        shard_key="kraken.ETH-USD.live",
-        exchange="kraken",
-        instrument="ETH-USD",
-        mode="live",
-        strategy_id="test",
-        client_order_id="cid-2",
-        venue_client_id="vcid-2",
-        side="sell",
-        order_type="market",
-        quantity=1.0,
-        price=None,
-        status="filled",
-        created_at=now,
-        correlation_id="corr-2",
-        session_id="s1",
-        sequence_id=2,
-        timestamp=now,
+        {
+            "command_type": "submit",
+            "shard_key": "kraken.ETH-USD.live",
+            "exchange": "kraken",
+            "instrument": "ETH-USD",
+            "mode": "live",
+            "strategy_id": "test",
+            "client_order_id": "cid-2",
+            "venue_client_id": "vcid-2",
+            "side": "sell",
+            "order_type": "market",
+            "quantity": 1.0,
+            "price": None,
+            "status": "filled",
+            "created_at": now,
+            "correlation_id": "corr-2",
+            "session_id": "s1",
+            "sequence_id": 2,
+            "timestamp": now,
+        }
     )
     cmds = await r.get_active_commands_for_exchange("kraken", now)
     assert len(cmds) == 1

@@ -5652,20 +5652,22 @@ async def test_record_venue_event_writes_to_sqlalchemy_repo() -> None:
     mock_repo.insert_venue_event = AsyncMock(return_value=1)
     ex.repository = mock_repo
     await ex._record_venue_event(
-        event_type="fill_observed",
-        exchange_name="kraken",
-        instrument="BTC-USD",
-        exchange_order_id="ex-1",
-        client_order_id="cid-1",
-        side="buy",
-        status="filled",
-        fill_price=50000.0,
-        fill_size=0.5,
+        {
+            "event_type": "fill_observed",
+            "exchange_name": "kraken",
+            "instrument": "BTC-USD",
+            "exchange_order_id": "ex-1",
+            "client_order_id": "cid-1",
+            "side": "buy",
+            "status": "filled",
+            "fill_price": 50000.0,
+            "fill_size": 0.5,
+        }
     )
     mock_repo.insert_venue_event.assert_called_once()
-    call_kwargs = mock_repo.insert_venue_event.call_args.kwargs
-    assert call_kwargs["event_type"] == "fill_observed"
-    assert call_kwargs["shard_key"] == "kraken.BTC-USD.live"
+    call_dict = mock_repo.insert_venue_event.call_args.args[0]
+    assert call_dict["event_type"] == "fill_observed"
+    assert call_dict["shard_key"] == "kraken.BTC-USD.live"
 
 
 @pytest.mark.asyncio
@@ -5681,9 +5683,11 @@ async def test_record_venue_event_handles_db_error() -> None:
     mock_repo.insert_venue_event = AsyncMock(side_effect=RuntimeError("DB down"))
     ex.repository = mock_repo
     await ex._record_venue_event(
-        event_type="fill_observed",
-        exchange_name="kraken",
-        instrument="BTC-USD",
+        {
+            "event_type": "fill_observed",
+            "exchange_name": "kraken",
+            "instrument": "BTC-USD",
+        }
     )
 
 
@@ -5711,9 +5715,9 @@ async def test_handle_cancellation_records_terminal_venue_event() -> None:
     result = await ex._handle_cancellation(execution, "ex-1", "cid-1", "kraken")
     assert result is True
     mock_repo.insert_venue_event.assert_called_once()
-    call_kwargs = mock_repo.insert_venue_event.call_args.kwargs
-    assert call_kwargs["event_type"] == "order_terminal"
-    assert call_kwargs["instrument"] == "BTC-USD"
+    call_dict = mock_repo.insert_venue_event.call_args.args[0]
+    assert call_dict["event_type"] == "order_terminal"
+    assert call_dict["instrument"] == "BTC-USD"
 
 
 @pytest.mark.asyncio
@@ -5732,9 +5736,9 @@ async def test_handle_cancellation_without_pending_uses_execution_symbol() -> No
     execution = SimpleNamespace(exec_type="expired", symbol="ETH-USD")
     result = await ex._handle_cancellation(execution, "ex-99", "cid-99", "kraken")
     assert result is True
-    call_kwargs = mock_repo.insert_venue_event.call_args.kwargs
-    assert call_kwargs["instrument"] == "ETH-USD"
-    assert call_kwargs["status"] == "expired"
+    call_dict = mock_repo.insert_venue_event.call_args.args[0]
+    assert call_dict["instrument"] == "ETH-USD"
+    assert call_dict["status"] == "expired"
 
 
 @pytest.mark.asyncio
@@ -5752,9 +5756,11 @@ async def test_record_venue_event_fail_closed_in_durable_mode() -> None:
     ex.settings = SimpleNamespace(use_durable_commands=True)
     with pytest.raises(RuntimeError, match="DB down"):
         await ex._record_venue_event(
-            event_type="fill_observed",
-            exchange_name="kraken",
-            instrument="BTC-USD",
+            {
+                "event_type": "fill_observed",
+                "exchange_name": "kraken",
+                "instrument": "BTC-USD",
+            }
         )
 
 

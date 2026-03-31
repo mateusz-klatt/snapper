@@ -91,6 +91,7 @@ from snapper.data.models import TradeProjectionCheckpoint
 from snapper.data.models import VenueEvent
 from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
+from snapper.data.repository_types import CheckpointUpsertRow
 from snapper.data.repository_types import ExecutionRow
 from snapper.data.repository_types import MarketSnapshotRow
 from snapper.data.repository_types import MarketSnapshotUpsertRow
@@ -100,10 +101,12 @@ from snapper.data.repository_types import SettingRow
 from snapper.data.repository_types import SignalRow
 from snapper.data.repository_types import TickRow
 from snapper.data.repository_types import TickUpsertRow
+from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import TradeProjectionCheckpointRow
 from snapper.data.repository_types import TradeRow
 from snapper.data.repository_types import TradeUpsertRow
+from snapper.data.repository_types import VenueEventInsertRow
 from snapper.data.repository_types import VenueEventRow
 
 __all__ = [
@@ -1928,53 +1931,10 @@ class SQLAlchemyRepository(Repository):
             )
             return sorted(row[0] for row in result.fetchall())
 
-    async def insert_trade_command(
-        self,
-        command_type: str,
-        shard_key: str,
-        exchange: str,
-        instrument: str,
-        mode: str,
-        strategy_id: str,
-        client_order_id: str,
-        venue_client_id: str,
-        side: str,
-        order_type: str,
-        quantity: float,
-        price: float | None,
-        status: str,
-        created_at: datetime,
-        correlation_id: str,
-        session_id: str,
-        sequence_id: int,
-        timestamp: datetime,
-        idempotency_key: str | None = None,
-        supersedes_command_id: str | None = None,
-    ) -> tuple[int, str]:
+    async def insert_trade_command(self, row: TradeCommandInsertRow) -> tuple[int, str]:
         """Insert a new trade command row and return (id, public_id)."""
         async with self.session() as s:
-            cmd = TradeCommand(
-                command_type=command_type,
-                shard_key=shard_key,
-                exchange=exchange,
-                instrument=instrument,
-                mode=mode,
-                strategy_id=strategy_id,
-                client_order_id=client_order_id,
-                venue_client_id=venue_client_id,
-                idempotency_key=idempotency_key,
-                side=side,
-                order_type=order_type,
-                quantity=quantity,
-                price=price,
-                status=status,
-                created_at=created_at,
-                correlation_id=correlation_id,
-                supersedes_command_id=supersedes_command_id,
-                session_id=session_id,
-                sequence_id=sequence_id,
-                timestamp=timestamp,
-            )
+            cmd = TradeCommand(**row)
             s.add(cmd)
             await s.commit()
             await s.refresh(cmd)
@@ -2215,63 +2175,10 @@ class SQLAlchemyRepository(Repository):
                 )
             return rows
 
-    async def insert_venue_event(
-        self,
-        event_type: str,
-        shard_key: str,
-        exchange: str,
-        instrument: str,
-        mode: str,
-        received_at: datetime,
-        session_id: str,
-        sequence_id: int,
-        timestamp: datetime,
-        command_public_id: str | None = None,
-        exchange_order_id: str | None = None,
-        client_order_id: str | None = None,
-        venue_client_id: str | None = None,
-        side: str | None = None,
-        status: str | None = None,
-        fill_price: float | None = None,
-        fill_size: float | None = None,
-        cum_fill_size: float | None = None,
-        fee: float | None = None,
-        fee_asset: str | None = None,
-        exec_id: str | None = None,
-        trade_id: str | None = None,
-        error: str | None = None,
-        venue_timestamp: datetime | None = None,
-        payload_json: str | None = None,
-    ) -> int:
+    async def insert_venue_event(self, row: VenueEventInsertRow) -> int:
         """Insert a venue event and return its local_seq."""
         async with self.session() as s:
-            ve = VenueEvent(
-                event_type=event_type,
-                shard_key=shard_key,
-                command_public_id=command_public_id,
-                exchange=exchange,
-                instrument=instrument,
-                mode=mode,
-                exchange_order_id=exchange_order_id,
-                client_order_id=client_order_id,
-                venue_client_id=venue_client_id,
-                side=side,
-                status=status,
-                fill_price=fill_price,
-                fill_size=fill_size,
-                cum_fill_size=cum_fill_size,
-                fee=fee,
-                fee_asset=fee_asset,
-                exec_id=exec_id,
-                trade_id=trade_id,
-                error=error,
-                venue_timestamp=venue_timestamp,
-                received_at=received_at,
-                payload_json=payload_json,
-                session_id=session_id,
-                sequence_id=sequence_id,
-                timestamp=timestamp,
-            )
+            ve = VenueEvent(**row)
             s.add(ve)
             await s.commit()
             await s.refresh(ve)
@@ -2319,53 +2226,23 @@ class SQLAlchemyRepository(Repository):
                 )
             return rows
 
-    async def upsert_checkpoint(
-        self,
-        shard_key: str,
-        position_qty: float,
-        entry_price: float | None,
-        cash: float,
-        peak_equity: float,
-        realized_pnl: float,
-        turnover: float,
-        last_venue_event_id: int | None,
-        last_venue_event_at: datetime | None,
-        open_command_ids: str | None,
-        checkpoint_at: datetime,
-        session_id: str,
-        sequence_id: int,
-        bus_time: datetime,
-    ) -> int:
+    async def upsert_checkpoint(self, row: CheckpointUpsertRow) -> int:
         """SCD2 upsert for trade projection checkpoint.
 
         Returns the new row id.
         """
         async with self.session() as s:
-            new_values: dict[str, Any] = {
-                "shard_key": shard_key,
-                "position_qty": position_qty,
-                "entry_price": entry_price,
-                "cash": cash,
-                "peak_equity": peak_equity,
-                "realized_pnl": realized_pnl,
-                "turnover": turnover,
-                "last_venue_event_id": last_venue_event_id,
-                "last_venue_event_at": last_venue_event_at,
-                "open_command_ids": open_command_ids,
-                "checkpoint_at": checkpoint_at,
-                "session_id": session_id,
-                "sequence_id": sequence_id,
-            }
-            row = await close_and_insert(
+            new_values: dict[str, Any] = {k: v for k, v in row.items() if k != "bus_time"}
+            obj = await close_and_insert(
                 s,
                 TradeProjectionCheckpoint,
-                [TradeProjectionCheckpoint.shard_key == shard_key],
+                [TradeProjectionCheckpoint.shard_key == row["shard_key"]],
                 new_values,
-                bus_time,
+                row["bus_time"],
             )
             await s.commit()
-            await s.refresh(row)
-            return int(row.id)
+            await s.refresh(obj)
+            return int(obj.id)
 
     async def get_checkpoint(
         self, shard_key: str, as_of: datetime

@@ -916,10 +916,10 @@ async def test_send_order_writes_trade_command_to_db() -> None:
     client_id = await engine._send_order(side="buy", size=1.0, price=10.0, reason="unit-test")
     assert len(client_id) == 36
     repo_mock.insert_trade_command.assert_called_once()
-    call_kwargs = repo_mock.insert_trade_command.call_args.kwargs
-    assert call_kwargs["command_type"] == "submit"
-    assert call_kwargs["side"] == "buy"
-    assert call_kwargs["status"] == "created"
+    call_row = repo_mock.insert_trade_command.call_args.args[0]
+    assert call_row["command_type"] == "submit"
+    assert call_row["side"] == "buy"
+    assert call_row["status"] == "created"
     outbox_mock.notify.assert_called_once()
     assert not socket.sent
 
@@ -1143,9 +1143,9 @@ async def test_persist_checkpoint_writes_to_db() -> None:
     )
     await coord._persist_checkpoint("kraken.BTC-USD.live")
     mock_repo.upsert_checkpoint.assert_called_once()
-    call_kwargs = mock_repo.upsert_checkpoint.call_args.kwargs
-    assert call_kwargs["shard_key"] == "kraken.BTC-USD.live"
-    assert call_kwargs["position_qty"] == 0.5
+    call_row = mock_repo.upsert_checkpoint.call_args.args[0]
+    assert call_row["shard_key"] == "kraken.BTC-USD.live"
+    assert call_row["position_qty"] == 0.5
 
 
 @pytest.mark.asyncio

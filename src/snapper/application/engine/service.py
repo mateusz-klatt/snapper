@@ -297,24 +297,26 @@ class TradingEngineService:
 
         if self._repository is not None:
             await self._repository.insert_trade_command(
-                command_type="submit",
-                shard_key=self._shard_key,
-                exchange=self.exchange,
-                instrument=self.instrument,
-                mode=self.mode,
-                strategy_id=reason,
-                client_order_id=order_public_id,
-                venue_client_id=order_public_id,
-                side=side,
-                order_type="market",
-                quantity=size,
-                price=None,
-                status="created",
-                created_at=now,
-                correlation_id=order_public_id,
-                session_id=session_id,
-                sequence_id=sequence_id,
-                timestamp=now,
+                {
+                    "command_type": "submit",
+                    "shard_key": self._shard_key,
+                    "exchange": self.exchange,
+                    "instrument": self.instrument,
+                    "mode": self.mode,
+                    "strategy_id": reason,
+                    "client_order_id": order_public_id,
+                    "venue_client_id": order_public_id,
+                    "side": side,
+                    "order_type": "market",
+                    "quantity": size,
+                    "price": None,
+                    "status": "created",
+                    "created_at": now,
+                    "correlation_id": order_public_id,
+                    "session_id": session_id,
+                    "sequence_id": sequence_id,
+                    "timestamp": now,
+                }
             )
 
         if self._outbox is not None:

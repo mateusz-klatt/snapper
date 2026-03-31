@@ -37,6 +37,7 @@ from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import OrderRow
+from snapper.data.repository_types import RecordVenueEventParams
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
@@ -610,12 +611,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 self.client_by_exchange[exchange_order_id] = order.client_order_id
                 self._try_process_orphaned(exchange_order_id, order.client_order_id)
                 await self._record_venue_event(
-                    event_type="order_accepted",
-                    exchange_name=exchange_name,
-                    instrument=order.instrument,
-                    exchange_order_id=exchange_order_id,
-                    client_order_id=order.client_order_id,
-                    side=order.side,
+                    {
+                        "event_type": "order_accepted",
+                        "exchange_name": exchange_name,
+                        "instrument": order.instrument,
+                        "exchange_order_id": exchange_order_id,
+                        "client_order_id": order.client_order_id,
+                        "side": order.side,
+                    }
                 )
                 await self._publish_order_status(order, "accepted", exchange_order_id)
                 logger.info(
@@ -629,24 +632,28 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 self.pending_orders.pop(order.client_order_id, None)
                 await self._publish_order_status(order, "rejected")
                 await self._record_venue_event(
-                    event_type="order_rejected",
-                    exchange_name=exchange_name,
-                    instrument=order.instrument,
-                    client_order_id=order.client_order_id,
-                    side=order.side,
-                    error="rejected by exchange",
+                    {
+                        "event_type": "order_rejected",
+                        "exchange_name": exchange_name,
+                        "instrument": order.instrument,
+                        "client_order_id": order.client_order_id,
+                        "side": order.side,
+                        "error": "rejected by exchange",
+                    }
                 )
         except Exception as e:
             logger.error(f"[{exchange_name}] Error processing order {order.client_order_id}: {e}")
             self.pending_orders.pop(order.client_order_id, None)
             await self._publish_order_status(order, "rejected")
             await self._record_venue_event(
-                event_type="order_rejected",
-                exchange_name=exchange_name,
-                instrument=order.instrument,
-                client_order_id=order.client_order_id,
-                side=order.side,
-                error=str(e),
+                {
+                    "event_type": "order_rejected",
+                    "exchange_name": exchange_name,
+                    "instrument": order.instrument,
+                    "client_order_id": order.client_order_id,
+                    "side": order.side,
+                    "error": str(e),
+                }
             )
 
     async def _process_cancel(self, cancel: OrderCancelData) -> None:
@@ -831,50 +838,20 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         except Exception as e:
             logger.error(f"[{exchange_name}] Error publishing fill: {e}")
 
-    async def _record_venue_event(
-        self,
-        event_type: str,
-        exchange_name: OrderExchange,
-        instrument: str,
-        exchange_order_id: str | None = None,
-        client_order_id: str | None = None,
-        side: str | None = None,
-        status: str | None = None,
-        fill_price: float | None = None,
-        fill_size: float | None = None,
-        cum_fill_size: float | None = None,
-        fee: float | None = None,
-        fee_asset: str | None = None,
-        exec_id: str | None = None,
-        trade_id: str | None = None,
-        error: str | None = None,
-        venue_timestamp: datetime | None = None,
-    ) -> None:
+    async def _record_venue_event(self, params: RecordVenueEventParams) -> None:
         """Write a VenueEvent row to DB if repository supports it.
 
         Silent no-op if repository is not an SQLAlchemyRepository
         or is not set. Errors are logged but do not propagate.
 
         Args:
-            event_type: Type of venue event (order_accepted, fill_observed, etc.).
-            exchange_name: Exchange that produced the event.
-            instrument: Trading pair symbol.
-            exchange_order_id: Exchange-assigned order ID.
-            client_order_id: Client-side order ID.
-            side: Order side.
-            status: Fill or order status.
-            fill_price: Fill price (for fill events).
-            fill_size: Fill size (for fill events).
-            cum_fill_size: Cumulative fill size.
-            fee: Transaction fee.
-            fee_asset: Fee currency.
-            exec_id: Exchange execution ID.
-            trade_id: Exchange trade ID.
-            error: Error message (for rejected events).
-            venue_timestamp: Exchange-provided timestamp.
+            params: Event data including event_type, exchange_name, instrument,
+                and optional fill/error fields.
         """
         if not isinstance(self.repository, SQLAlchemyRepository):
             return
+        exchange_name = params["exchange_name"]
+        instrument = params["instrument"]
         mode = (
             ExecutionModeEnum.PAPER
             if exchange_name == ExchangeEnum.PAPER
@@ -884,30 +861,33 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         now = datetime.now(UTC)
         try:
             await self.repository.insert_venue_event(
-                event_type=event_type,
-                shard_key=shard_key,
-                exchange=exchange_name,
-                instrument=instrument,
-                mode=mode,
-                received_at=now,
-                session_id=self._tracker.session_id,
-                sequence_id=self._tracker.next_sequence(f"venue.{shard_key}"),
-                timestamp=now,
-                exchange_order_id=exchange_order_id,
-                client_order_id=client_order_id,
-                side=side,
-                status=status,
-                fill_price=fill_price,
-                fill_size=fill_size,
-                cum_fill_size=cum_fill_size,
-                fee=fee,
-                fee_asset=fee_asset,
-                exec_id=exec_id,
-                trade_id=trade_id,
-                error=error,
-                venue_timestamp=venue_timestamp,
+                {
+                    "event_type": params["event_type"],
+                    "shard_key": shard_key,
+                    "exchange": exchange_name,
+                    "instrument": instrument,
+                    "mode": mode,
+                    "received_at": now,
+                    "session_id": self._tracker.session_id,
+                    "sequence_id": self._tracker.next_sequence(f"venue.{shard_key}"),
+                    "timestamp": now,
+                    "exchange_order_id": params.get("exchange_order_id"),
+                    "client_order_id": params.get("client_order_id"),
+                    "side": params.get("side"),
+                    "status": params.get("status"),
+                    "fill_price": params.get("fill_price"),
+                    "fill_size": params.get("fill_size"),
+                    "cum_fill_size": params.get("cum_fill_size"),
+                    "fee": params.get("fee"),
+                    "fee_asset": params.get("fee_asset"),
+                    "exec_id": params.get("exec_id"),
+                    "trade_id": params.get("trade_id"),
+                    "error": params.get("error"),
+                    "venue_timestamp": params.get("venue_timestamp"),
+                }
             )
         except Exception:
+            event_type = params["event_type"]
             use_durable = getattr(self.settings, "use_durable_commands", False)
             if use_durable:
                 logger.error(
@@ -1054,12 +1034,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if pending and pending.request:
             instrument = pending.request.instrument
         await self._record_venue_event(
-            event_type="order_terminal",
-            exchange_name=exchange_name,
-            instrument=instrument,
-            exchange_order_id=exchange_order_id,
-            client_order_id=client_order_id,
-            status=execution.exec_type or "cancelled",
+            {
+                "event_type": "order_terminal",
+                "exchange_name": exchange_name,
+                "instrument": instrument,
+                "exchange_order_id": exchange_order_id,
+                "client_order_id": client_order_id,
+                "status": execution.exec_type or "cancelled",
+            }
         )
         logger.info(
             f"[{exchange_name}] Order {client_order_id} {execution.exec_type}, "
@@ -1204,21 +1186,23 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             )
             raw_tid = getattr(execution, "trade_id", None)
             await self._record_venue_event(
-                event_type="fill_observed",
-                exchange_name=exchange_name,
-                instrument=fill.instrument,
-                exchange_order_id=exchange_order_id,
-                client_order_id=client_order_id,
-                side=fill.side,
-                status=fill.status,
-                fill_price=fill.last_price,
-                fill_size=fill.last_size,
-                cum_fill_size=fill.size,
-                fee=fill.fee,
-                fee_asset=fill.fee_asset,
-                exec_id=getattr(execution, "exec_id", None),
-                trade_id=str(raw_tid) if raw_tid else None,
-                venue_timestamp=getattr(execution, "timestamp", None),
+                {
+                    "event_type": "fill_observed",
+                    "exchange_name": exchange_name,
+                    "instrument": fill.instrument,
+                    "exchange_order_id": exchange_order_id,
+                    "client_order_id": client_order_id,
+                    "side": fill.side,
+                    "status": fill.status,
+                    "fill_price": fill.last_price,
+                    "fill_size": fill.last_size,
+                    "cum_fill_size": fill.size,
+                    "fee": fill.fee,
+                    "fee_asset": fill.fee_asset,
+                    "exec_id": getattr(execution, "exec_id", None),
+                    "trade_id": str(raw_tid) if raw_tid else None,
+                    "venue_timestamp": getattr(execution, "timestamp", None),
+                }
             )
             await self._publish_execution(topic, fill)
             pending = self.pending_orders.get(client_order_id)

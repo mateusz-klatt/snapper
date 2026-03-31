@@ -739,20 +739,22 @@ class TraderCoordinator(RegisterableProcess):
         real_watermark = await self.repository.get_latest_venue_event_id(shard_key)
         try:
             await self.repository.upsert_checkpoint(
-                shard_key=shard_key,
-                position_qty=cast(float, snap["position_qty"]),
-                entry_price=cast(float, ep) if ep is not None else None,
-                cash=cast(float, snap["cash"]),
-                peak_equity=cast(float, snap["peak_equity"]),
-                realized_pnl=cast(float, snap["realized_pnl"]),
-                turnover=cast(float, snap["turnover"]),
-                last_venue_event_id=real_watermark,
-                last_venue_event_at=now if real_watermark is not None else None,
-                open_command_ids=cast(str, oci) if oci is not None else None,
-                checkpoint_at=now,
-                session_id=self._tracker.session_id,
-                sequence_id=self._tracker.next_sequence(f"checkpoint.{shard_key}"),
-                bus_time=now,
+                {
+                    "shard_key": shard_key,
+                    "position_qty": cast(float, snap["position_qty"]),
+                    "entry_price": cast(float, ep) if ep is not None else None,
+                    "cash": cast(float, snap["cash"]),
+                    "peak_equity": cast(float, snap["peak_equity"]),
+                    "realized_pnl": cast(float, snap["realized_pnl"]),
+                    "turnover": cast(float, snap["turnover"]),
+                    "last_venue_event_id": real_watermark,
+                    "last_venue_event_at": now if real_watermark is not None else None,
+                    "open_command_ids": cast(str, oci) if oci is not None else None,
+                    "checkpoint_at": now,
+                    "session_id": self._tracker.session_id,
+                    "sequence_id": self._tracker.next_sequence(f"checkpoint.{shard_key}"),
+                    "bus_time": now,
+                }
             )
         except Exception:
             logger.exception(f"TraderCoordinator: Failed to persist checkpoint for {shard_key}")
