@@ -212,6 +212,41 @@ class TestOnWsMessage:
         assert not client._tick_queue.empty()
 
     @pytest.mark.asyncio
+    async def test_ticker_message_with_symbol_routed(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Route ticker WS message without product_id backfill.
+
+        Given: WS ticker message that already includes symbol,
+        When: _on_ws_message is called,
+        Then: Parsed TickerUpdate is placed in _tick_queue without rewriting symbol.
+        """
+        expected_update = TickerUpdate(
+            symbol="BTC-USD-PERP",
+            bid=66500.0,
+            bid_qty=50.0,
+            ask=66510.0,
+            ask_qty=30.0,
+            last=66505.0,
+            volume=1234.0,
+            vwap=0.0,
+            low=65500.0,
+            high=67000.0,
+            change=0.94,
+            change_pct=0.0,
+        )
+        msg = {"feed": "ticker", "symbol": "BTC-USD-PERP", "bid": 66500.0}
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.parse_kraken_futures_ticker",
+            return_value=expected_update,
+        ) as mock_parse:
+            await client._on_ws_message(msg)
+        mock_parse.assert_called_once_with(msg)
+        assert not client._tick_queue.empty()
+        update = client._tick_queue.get_nowait()
+        assert update == expected_update
+
+    @pytest.mark.asyncio
     async def test_trade_message_routed_to_queue(self, client: KrakenFuturesExchangeClient) -> None:
         """Route trade WS message to trade_queue.
 
@@ -498,6 +533,19 @@ class TestEnsureWsConnected:
             mock_cls.assert_not_called()
 
 
+_SYMBOL_MAP = {"BTC-USD-PERP": "PF_XBTUSD", "BTC-USD-PERP-INV": "PI_XBTUSD"}
+
+
+@pytest.fixture(autouse=True, scope="class")
+def _patch_symbol_conversion() -> Generator[None]:
+    """Patch native_to_kraken_futures_ws for subscribe tests."""
+    with patch(
+        "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+        side_effect=lambda s: _SYMBOL_MAP.get(s, s),
+    ):
+        yield
+
+
 class TestSubscribeTicks:
     """Tests for subscribe_ticks async iterator."""
 
@@ -530,7 +578,7 @@ class TestSubscribeTicks:
         client._tick_queue.put_nowait(ticker)
 
         items = []
-        async for item in client.subscribe_ticks(["PF_XBTUSD"]):
+        async for item in client.subscribe_ticks(["BTC-USD-PERP"]):
             items.append(item)
             break
         assert len(items) == 1
@@ -570,7 +618,7 @@ class TestSubscribeTicks:
 
         asyncio.create_task(delayed_put())
         items = []
-        async for item in client.subscribe_ticks(["PF_XBTUSD"]):
+        async for item in client.subscribe_ticks(["BTC-USD-PERP"]):
             items.append(item)
             break
         assert len(items) == 1
@@ -589,7 +637,7 @@ class TestSubscribeTicks:
         mock_ws.exception_occur = True
         client._ws_client = mock_ws
         with pytest.raises(ConnectionError, match="connection lost"):
-            async for _tick in client.subscribe_ticks(["PF_XBTUSD"]):
+            async for _tick in client.subscribe_ticks(["BTC-USD-PERP"]):
                 pytest.fail("Should not yield")
         mock_ws.unsubscribe.assert_awaited_once()
 
@@ -621,7 +669,7 @@ class TestSubscribeTicks:
             change_pct=0.0,
         )
         client._tick_queue.put_nowait(ticker)
-        gen = client.subscribe_ticks(["PF_XBTUSD"])
+        gen = client.subscribe_ticks(["BTC-USD-PERP"])
         async for _ in gen:
             break
         await gen.aclose()
@@ -655,7 +703,7 @@ class TestSubscribeTicks:
             change_pct=0.0,
         )
         client._tick_queue.put_nowait(ticker)
-        gen = client.subscribe_ticks(["PF_XBTUSD"])
+        gen = client.subscribe_ticks(["BTC-USD-PERP"])
         async for _ in gen:
             break
         await gen.aclose()
@@ -688,7 +736,7 @@ class TestSubscribeTrades:
         client._trade_queue.put_nowait(trade)
 
         items = []
-        async for item in client.subscribe_trades(["PI_XBTUSD"]):
+        async for item in client.subscribe_trades(["BTC-USD-PERP-INV"]):
             items.append(item)
             break
         assert len(items) == 1
@@ -723,7 +771,7 @@ class TestSubscribeTrades:
 
         asyncio.create_task(delayed_put())
         items = []
-        async for item in client.subscribe_trades(["PI_XBTUSD"]):
+        async for item in client.subscribe_trades(["BTC-USD-PERP-INV"]):
             items.append(item)
             break
         assert len(items) == 1
@@ -742,7 +790,7 @@ class TestSubscribeTrades:
         mock_ws.exception_occur = True
         client._ws_client = mock_ws
         with pytest.raises(ConnectionError, match="connection lost"):
-            async for _trade in client.subscribe_trades(["PI_XBTUSD"]):
+            async for _trade in client.subscribe_trades(["BTC-USD-PERP-INV"]):
                 pytest.fail("Should not yield")
         mock_ws.unsubscribe.assert_awaited_once()
 
@@ -769,7 +817,7 @@ class TestSubscribeTrades:
             trade_id="abc-123",
         )
         client._trade_queue.put_nowait(trade)
-        gen = client.subscribe_trades(["PI_XBTUSD"])
+        gen = client.subscribe_trades(["BTC-USD-PERP-INV"])
         async for _ in gen:
             break
         await gen.aclose()
@@ -798,7 +846,7 @@ class TestSubscribeTrades:
             trade_id="abc-123",
         )
         client._trade_queue.put_nowait(trade)
-        gen = client.subscribe_trades(["PI_XBTUSD"])
+        gen = client.subscribe_trades(["BTC-USD-PERP-INV"])
         async for _ in gen:
             break
         await gen.aclose()

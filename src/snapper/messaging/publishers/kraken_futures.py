@@ -124,3 +124,18 @@ class KrakenFuturesMarketDataPublisher(MarketDataPublisherService[KrakenFuturesE
             0 (unlimited) — Kraken Futures WS does not document a per-connection limit.
         """
         return 0
+
+    async def _candle_loop(self, symbols: list[str], timeframe: str) -> None:
+        """No-op candle loop.
+
+        Kraken Futures has no WebSocket candle feed. Candle data should
+        be fetched via REST get_ohlcv() if needed.
+
+        Args:
+            symbols: Product symbols (unused).
+            timeframe: Candle interval (unused).
+        """
+        logger.info(
+            f"KrakenFuturesMarketDataPublisher: Candle loop disabled "
+            f"(no WS candle feed for kraken_futures, timeframe={timeframe})"
+        )

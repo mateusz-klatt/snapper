@@ -39,7 +39,6 @@ from snapper.infrastructure.exchanges.schemas.kraken_futures import KrakenFuture
 _SEQ_KEY_CAPABILITIES = "capabilities"
 
 _INVERSE_TYPES = frozenset({"futures_inverse"})
-_PERPETUAL_TYPES = frozenset({"futures_inverse", "futures_vanilla"})
 _RR_PREFIX = "rr_"
 _IN_PREFIX = "in_"
 

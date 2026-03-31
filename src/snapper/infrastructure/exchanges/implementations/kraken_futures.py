@@ -49,6 +49,7 @@ from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.symbols.functions import native_to_kraken_futures_ws
 
 _NOT_IMPLEMENTED_MSG = "Order execution not available in Phase 1 (market data only)"
 _QUEUE_DRAIN_TIMEOUT = 0.1
@@ -126,6 +127,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         feed = message.get("feed", "")
         if feed in ("ticker", "ticker_lite"):
             try:
+                if "symbol" not in message and "product_id" in message:
+                    message["symbol"] = message["product_id"]
                 tick = parse_kraken_futures_ticker(message)
                 self._tick_queue.put_nowait(tick)
             except (ValueError, KeyError) as exc:
@@ -292,8 +295,11 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
     async def _subscribe_ticks_impl(self, symbols: list[str]) -> AsyncIterator[TickerUpdate]:
         """Implement ticker subscription via callback-to-queue bridge.
 
+        Converts native symbols (e.g., ``BTC-USD-PERP``) to Kraken Futures
+        product IDs (e.g., ``PF_XBTUSD``) before subscribing.
+
         Args:
-            symbols: Product IDs (e.g., ``["PF_XBTUSD"]``).
+            symbols: Native symbols to subscribe.
 
         Yields:
             TickerUpdate for each price change.
@@ -303,8 +309,9 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         await self._ensure_ws_connected()
         assert self._ws_client is not None
-        await self._ws_client.subscribe(feed="ticker", products=symbols)
-        logger.info(f"Subscribed to Kraken Futures tickers: {symbols}")
+        ws_symbols = [native_to_kraken_futures_ws(s) for s in symbols]
+        await self._ws_client.subscribe(feed="ticker", products=ws_symbols)
+        logger.info(f"Subscribed to Kraken Futures tickers: {symbols} -> {ws_symbols}")
         try:
             while True:
                 if self._ws_client and getattr(self._ws_client, "exception_occur", False):
@@ -319,7 +326,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         finally:
             if self._ws_client:
                 try:
-                    await self._ws_client.unsubscribe(feed="ticker", products=symbols)
+                    await self._ws_client.unsubscribe(feed="ticker", products=ws_symbols)
                 except Exception:
                     logger.debug("Failed to unsubscribe from tickers on cleanup")
 
@@ -358,8 +365,10 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
     async def _subscribe_trades_impl(self, symbols: list[str]) -> AsyncIterator[TradeUpdate]:
         """Implement trade subscription via callback-to-queue bridge.
 
+        Converts native symbols to Kraken Futures product IDs before subscribing.
+
         Args:
-            symbols: Product IDs (e.g., ``["PI_XBTUSD"]``).
+            symbols: Native symbols to subscribe.
 
         Yields:
             TradeUpdate for each execution.
@@ -369,8 +378,9 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         await self._ensure_ws_connected()
         assert self._ws_client is not None
-        await self._ws_client.subscribe(feed="trade", products=symbols)
-        logger.info(f"Subscribed to Kraken Futures trades: {symbols}")
+        ws_symbols = [native_to_kraken_futures_ws(s) for s in symbols]
+        await self._ws_client.subscribe(feed="trade", products=ws_symbols)
+        logger.info(f"Subscribed to Kraken Futures trades: {symbols} -> {ws_symbols}")
         try:
             while True:
                 if self._ws_client and getattr(self._ws_client, "exception_occur", False):
@@ -385,7 +395,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         finally:
             if self._ws_client:
                 try:
-                    await self._ws_client.unsubscribe(feed="trade", products=symbols)
+                    await self._ws_client.unsubscribe(feed="trade", products=ws_symbols)
                 except Exception:
                     logger.debug("Failed to unsubscribe from trades on cleanup")
 

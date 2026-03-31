@@ -3,6 +3,8 @@
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
+import pytest
+
 from snapper.config.app import AppSettings
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
@@ -120,3 +122,14 @@ class TestKrakenFuturesMarketDataPublisher:
         mock_settings.instruments = {"kraken": ["BTC-USD"]}
         params = KrakenFuturesMarketDataPublisher.get_default_parameters(mock_settings)
         assert params == {"symbols": []}
+
+    @pytest.mark.asyncio
+    async def test_candle_loop_is_noop(self) -> None:
+        """Candle loop does nothing since Kraken Futures has no WS candle feed.
+
+        Given: A KrakenFuturesMarketDataPublisher instance,
+        When: _candle_loop is called,
+        Then: Returns immediately without error.
+        """
+        publisher = KrakenFuturesMarketDataPublisher(symbols=["BTC-USD-PERP"])
+        await publisher._candle_loop(["BTC-USD-PERP"], "1m")
