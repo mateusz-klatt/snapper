@@ -1,5 +1,5 @@
 import { createElement, type ReactNode } from 'react'
-import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest'
 import { renderHook, waitFor, act } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
@@ -775,6 +775,46 @@ describe('queries', () => {
       })
       expect(mockedApiClient.getPositions).not.toHaveBeenCalled()
       vi.mocked(useAuth).mockReturnValue({ isAuthenticated: true } as ReturnType<typeof useAuth>)
+    })
+  })
+  describe('time-travel polling suppression', () => {
+    let appStoreModule: typeof import('../stores/app')
+
+    beforeEach(async () => {
+      appStoreModule = await import('../stores/app')
+      appStoreModule.useAppStore.setState({ asOf: null, isTimeTraveling: false })
+    })
+    afterEach(() => {
+      appStoreModule.useAppStore.setState({ asOf: null, isTimeTraveling: false })
+    })
+    it('useConfiguredProcesses has refetchInterval when live', async () => {
+      const { result } = renderHook(() => useConfiguredProcesses(), { wrapper: createWrapper() })
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false))
+    })
+    it('useConfiguredProcesses disables refetchInterval when time-traveling', async () => {
+      appStoreModule.useAppStore.setState({ asOf: '2026-01-01T00:00:00Z', isTimeTraveling: true })
+      const { result } = renderHook(() => useConfiguredProcesses(), { wrapper: createWrapper() })
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false))
+    })
+    it('useProcessSummary disables refetchInterval when time-traveling', async () => {
+      appStoreModule.useAppStore.setState({ asOf: '2026-01-01T00:00:00Z', isTimeTraveling: true })
+      const { result } = renderHook(() => useProcessSummary(), { wrapper: createWrapper() })
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false))
+    })
+    it('useStrategies disables refetchInterval when time-traveling', async () => {
+      appStoreModule.useAppStore.setState({ asOf: '2026-01-01T00:00:00Z', isTimeTraveling: true })
+      const { result } = renderHook(() => useStrategies(), { wrapper: createWrapper() })
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false))
+    })
+    it('useProcessRuns disables refetchInterval when time-traveling', async () => {
+      appStoreModule.useAppStore.setState({ asOf: '2026-01-01T00:00:00Z', isTimeTraveling: true })
+      const { result } = renderHook(() => useProcessRuns(), { wrapper: createWrapper() })
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false))
     })
   })
 })

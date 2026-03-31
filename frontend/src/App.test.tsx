@@ -64,6 +64,10 @@ const defaultAppState = {
   updateLastUpdate: vi.fn(),
   isDarkMode: false,
   toggleDarkMode: vi.fn(),
+  asOf: null as string | null,
+  isTimeTraveling: false,
+  setAsOf: vi.fn(),
+  clearAsOf: vi.fn(),
 }
 
 type AppState = typeof defaultAppState
@@ -251,6 +255,20 @@ describe('App', () => {
     renderWithProviders(<App />)
     await waitFor(() => {
       expect(screen.getByLabelText('Switch to dark mode')).toBeInTheDocument()
+    })
+  })
+  it('shows time travel banner when isTimeTraveling is true', async () => {
+    mockAppStore({ isTimeTraveling: true, asOf: '2026-03-15T10:00:00Z' })
+    renderWithProviders(<App />)
+    await waitFor(() => {
+      expect(screen.getByText(/Time Travel Mode/)).toBeInTheDocument()
+    })
+  })
+  it('does not show time travel banner in live mode', async () => {
+    mockAppStore({ isTimeTraveling: false })
+    renderWithProviders(<App />)
+    await waitFor(() => {
+      expect(screen.queryByText(/Time Travel Mode/)).not.toBeInTheDocument()
     })
   })
 })

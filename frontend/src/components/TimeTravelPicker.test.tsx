@@ -44,6 +44,17 @@ describe('TimeTravelPicker', () => {
     expect(state.asOf).toBeTruthy()
   })
 
+  it('clears asOf when input is emptied', () => {
+    useAppStore.setState({ asOf: '2026-03-15T10:00:00Z', isTimeTraveling: true })
+    render(<TimeTravelPicker />)
+    const input = screen.getByTitle(/time travel/i)
+
+    fireEvent.change(input, { target: { value: '' } })
+
+    expect(useAppStore.getState().isTimeTraveling).toBe(false)
+    expect(useAppStore.getState().asOf).toBeNull()
+  })
+
   it('clears asOf when clear button is clicked', () => {
     useAppStore.setState({ asOf: '2026-03-15T10:00:00Z', isTimeTraveling: true })
     render(<TimeTravelPicker />)
