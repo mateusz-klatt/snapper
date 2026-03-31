@@ -10,6 +10,7 @@ executor/exchange-client path.
 """
 
 import json
+import math
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import UTC
@@ -211,65 +212,91 @@ class TradeService:
 
     def _apply_fill(self, shard: ShardState, event: VenueEventRow) -> None:
         """Apply a fill to position and cash projection."""
-        exec_id = event.get("exec_id")
-        trade_id = event.get("trade_id")
-        dedup_key = exec_id or trade_id or f"fallback-{event['id']}"
-        if dedup_key in shard.seen_exec_ids:
+        if not self._dedup_fill(shard, event):
             return
-        if exec_id:
-            shard.seen_exec_ids.add(exec_id)
-        if trade_id:
-            shard.seen_exec_ids.add(trade_id)
 
         fill_size = event.get("fill_size") or 0.0
         fill_price = event.get("fill_price") or 0.0
         side = event.get("side") or ""
         fee = event.get("fee") or 0.0
-
-        pos = shard.position
         notional = fill_size * fill_price
         side_lower = side.lower()
 
-        if side_lower not in ("buy", "sell"):
-            shard.turnover += notional
-            self._update_command_fill_status(shard, event)
-            return
+        if side_lower in ("buy", "sell"):
+            signed_qty = fill_size if side_lower == "buy" else -fill_size
+            self._update_position(shard.position, signed_qty, fill_size, fill_price)
+            self._update_cash(shard, side_lower, notional, fee)
 
-        signed_qty = fill_size if side_lower == "buy" else -fill_size
+        shard.turnover += notional
+        self._update_command_fill_status(shard, event)
+
+    def _dedup_fill(self, shard: ShardState, event: VenueEventRow) -> bool:
+        """Return True if the fill is new and should be applied.
+
+        Adds exec_id and trade_id to the seen set for future dedup.
+        """
+        exec_id = event.get("exec_id")
+        trade_id = event.get("trade_id")
+        dedup_key = exec_id or trade_id or f"fallback-{event['id']}"
+        if dedup_key in shard.seen_exec_ids:
+            return False
+        if exec_id:
+            shard.seen_exec_ids.add(exec_id)
+        if trade_id:
+            shard.seen_exec_ids.add(trade_id)
+        return True
+
+    def _update_position(
+        self,
+        pos: PositionProjection,
+        signed_qty: float,
+        fill_size: float,
+        fill_price: float,
+    ) -> None:
+        """Update position quantity and entry price for a fill."""
         is_increasing = (pos.position_qty >= 0 and signed_qty > 0) or (
             pos.position_qty <= 0 and signed_qty < 0
         )
-
         if is_increasing:
-            old_qty = abs(pos.position_qty)
-            new_qty = old_qty + fill_size
-            if pos.entry_price is not None and old_qty > 0 and new_qty > 0:
-                pos.entry_price = (old_qty * pos.entry_price + fill_size * fill_price) / new_qty
-            else:
-                pos.entry_price = fill_price
+            self._increase_position(pos, fill_size, fill_price)
         else:
-            close_qty = min(fill_size, abs(pos.position_qty))
-            overshoot = fill_size - close_qty
-            if pos.entry_price is not None and close_qty > 0:
-                pnl_per_unit = fill_price - pos.entry_price
-                if pos.position_qty < 0:
-                    pnl_per_unit = pos.entry_price - fill_price
-                pos.realized_pnl += close_qty * pnl_per_unit
-            if overshoot > 1e-12:
-                pos.entry_price = fill_price
+            self._decrease_position(pos, fill_size, fill_price)
 
         pos.position_qty += signed_qty
         if abs(pos.position_qty) < 1e-12:
             pos.position_qty = 0.0
             pos.entry_price = None
 
-        if side_lower == "buy":
+    @staticmethod
+    def _increase_position(pos: PositionProjection, fill_size: float, fill_price: float) -> None:
+        """Recalculate weighted-average entry price for a position-increasing fill."""
+        old_qty = abs(pos.position_qty)
+        new_qty = old_qty + fill_size
+        if pos.entry_price is not None and old_qty > 0 and new_qty > 0:
+            pos.entry_price = (old_qty * pos.entry_price + fill_size * fill_price) / new_qty
+        else:
+            pos.entry_price = fill_price
+
+    @staticmethod
+    def _decrease_position(pos: PositionProjection, fill_size: float, fill_price: float) -> None:
+        """Realize PnL and handle overshoot for a position-decreasing fill."""
+        close_qty = min(fill_size, abs(pos.position_qty))
+        overshoot = fill_size - close_qty
+        if pos.entry_price is not None and close_qty > 0:
+            pnl_per_unit = fill_price - pos.entry_price
+            if pos.position_qty < 0:
+                pnl_per_unit = pos.entry_price - fill_price
+            pos.realized_pnl += close_qty * pnl_per_unit
+        if overshoot > 1e-12:
+            pos.entry_price = fill_price
+
+    @staticmethod
+    def _update_cash(shard: ShardState, side: str, notional: float, fee: float) -> None:
+        """Adjust cash balance for a buy or sell fill."""
+        if side == "buy":
             shard.cash -= notional + fee
         else:
             shard.cash += notional - fee
-
-        shard.turnover += notional
-        self._update_command_fill_status(shard, event)
 
     def _update_command_fill_status(self, shard: ShardState, event: VenueEventRow) -> None:
         """Update command FSM based on fill status field."""
@@ -345,7 +372,11 @@ class TradeService:
         """
         shard = self._get_or_create_shard(shard_key)
         pos = shard.position
-        unrealized = pos.position_qty * price if pos.position_qty != 0.0 else 0.0
+        unrealized = (
+            pos.position_qty * price
+            if not math.isclose(pos.position_qty, 0.0, abs_tol=1e-12)
+            else 0.0
+        )
         equity = shard.cash + unrealized
         if equity > shard.peak_equity:
             shard.peak_equity = equity

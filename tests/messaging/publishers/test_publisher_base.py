@@ -2988,11 +2988,11 @@ async def test_candle_loop_batch_size_threshold_flush() -> None:
 
 @pytest.mark.asyncio
 async def test_candle_loop_cancelled_error_during_publish() -> None:
-    """Verify candle loop appends row and flushes on CancelledError during publish.
+    """Verify candle loop flushes and re-raises CancelledError during publish.
 
     Given: A publisher whose _publish_message raises CancelledError,
     When: _candle_loop processes a candle,
-    Then: The row is still appended and flushed in finally block.
+    Then: The row is appended, flushed in finally, and CancelledError propagates.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
@@ -3020,7 +3020,8 @@ async def test_candle_loop_cancelled_error_during_publish() -> None:
         )
 
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
-    await pub._candle_loop(["BTC-USD"], "1m")
+    with pytest.raises(asyncio.CancelledError):
+        await pub._candle_loop(["BTC-USD"], "1m")
     pub.repository.upsert_candles.assert_awaited_once()
 
 
@@ -3111,11 +3112,11 @@ async def test_tick_loop_skips_db_when_instrument_is_none() -> None:
 
 @pytest.mark.asyncio
 async def test_tick_loop_cancelled_error() -> None:
-    """Verify tick loop handles CancelledError gracefully.
+    """Verify tick loop flushes and re-raises CancelledError.
 
-    Given: A publisher whose tick generator raises CancelledError,
+    Given: A publisher whose publish raises CancelledError on second tick,
     When: _tick_loop is running,
-    Then: The exception is caught and any pending batch flushed.
+    Then: Pending batch is flushed in finally and CancelledError propagates.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
@@ -3140,7 +3141,8 @@ async def test_tick_loop_cancelled_error() -> None:
         yield SimpleNamespace(symbol="BTC-USD", last=11.0, volume=6.0, bid=1.1, ask=2.1)
 
     pub._exchange_client.subscribe_ticks = lambda symbols: gen()
-    await pub._tick_loop(["BTC-USD"])
+    with pytest.raises(asyncio.CancelledError):
+        await pub._tick_loop(["BTC-USD"])
     pub.repository.upsert_ticks.assert_awaited_once()
 
 
@@ -3252,11 +3254,11 @@ async def test_trade_loop_skips_db_when_instrument_is_none() -> None:
 
 @pytest.mark.asyncio
 async def test_trade_loop_cancelled_error() -> None:
-    """Verify trade loop handles CancelledError gracefully.
+    """Verify trade loop flushes and re-raises CancelledError.
 
-    Given: A publisher whose trade processing raises CancelledError,
+    Given: A publisher whose publish raises CancelledError on second trade,
     When: _trade_loop is running,
-    Then: The exception is caught and pending batch flushed.
+    Then: Pending batch is flushed in finally and CancelledError propagates.
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
@@ -3295,7 +3297,8 @@ async def test_trade_loop_cancelled_error() -> None:
         )
 
     pub._exchange_client.subscribe_trades = lambda symbols: gen()
-    await pub._trade_loop(["BTC-USD"])
+    with pytest.raises(asyncio.CancelledError):
+        await pub._trade_loop(["BTC-USD"])
     pub.repository.upsert_trades.assert_awaited_once()
 
 

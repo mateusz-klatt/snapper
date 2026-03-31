@@ -9,9 +9,12 @@ import contextlib
 import math
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import Callable
+from collections.abc import Coroutine
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from typing import Final
 from typing import cast
 from uuid import uuid7
 
@@ -58,6 +61,7 @@ from snapper.utils.logging import set_log_context
 
 _EXCHANGE_NOT_INIT_MSG = "Exchange client not initialized"
 _REPO_NOT_INIT_MSG = "Repository not initialized"
+_STREAM_END: Final = object()
 
 
 def _cleanup_pending_future(fut: asyncio.Future[Any] | None) -> None:
@@ -363,6 +367,37 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._candle_id_cache[cache_key] = (open_at, public_id)
         return public_id
 
+    def _batch_age_remaining(
+        self, batch_start: float | None, ev_loop: asyncio.AbstractEventLoop
+    ) -> float:
+        """Return seconds until the current batch should be flushed by age.
+
+        Args:
+            batch_start: Monotonic timestamp when the first row entered the
+                batch, or None if the batch is empty.
+            ev_loop: Running event loop (for monotonic clock).
+        """
+        if batch_start is None:
+            return self._batch_max_age_s
+        return max(0.0, self._batch_max_age_s - (ev_loop.time() - batch_start))
+
+    @staticmethod
+    async def _flush_on_age(
+        batch: list[Any],
+        flush_fn: Callable[[list[Any]], Coroutine[Any, Any, None]],
+    ) -> None:
+        """Flush batch if non-empty (age-trigger path).
+
+        Clears the batch in-place after flushing.
+
+        Args:
+            batch: Accumulated rows to flush.
+            flush_fn: Async function that persists the batch.
+        """
+        if batch:
+            await flush_fn(batch)
+            batch.clear()
+
     async def _candle_loop(self, symbols: list[str], timeframe: str) -> None:
         """Subscribe to candle data, publish to ZMQ, and batch DB writes.
 
@@ -380,79 +415,89 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         exchange = self._get_data_exchange()
         batch: list[CandleUpsertRow] = []
         batch_start: float | None = None
-        loop = asyncio.get_event_loop()
+        ev_loop = asyncio.get_event_loop()
         iterator = self._exchange_client.subscribe_candles(symbols, timeframe).__aiter__()
-        next_fut: asyncio.Future[CandleUpdate] | None = None
+        next_fut: asyncio.Future[CandleUpdate | object] | None = None
         try:
             while self.running:
-                if next_fut is None:
-                    next_fut = asyncio.ensure_future(anext(iterator))
-                remaining = self._batch_max_age_s
-                if batch_start is not None:
-                    remaining = max(0.0, self._batch_max_age_s - (loop.time() - batch_start))
-                done, _ = await asyncio.wait({next_fut}, timeout=remaining)
+                next_fut = next_fut or asyncio.ensure_future(anext(iterator, _STREAM_END))
+                done, _ = await asyncio.wait(
+                    {next_fut}, timeout=self._batch_age_remaining(batch_start, ev_loop)
+                )
                 if not done:
-                    if batch:
-                        await self._flush_candle_batch(batch)
-                        batch.clear()
-                        batch_start = None
+                    await self._flush_on_age(batch, self._flush_candle_batch)
+                    batch_start = None
                     continue
                 next_fut = None
-                try:
-                    candle = done.pop().result()
-                except StopAsyncIteration:
+                candle = done.pop().result()
+                if candle is _STREAM_END:
                     break
-                native_symbol = candle.symbol
-                instrument_public_id = await self._ensure_instrument(native_symbol)
-                if instrument_public_id is None:
-                    continue
-                public_id = self._resolve_candle_public_id(
-                    instrument_public_id, timeframe, candle.interval_begin
-                )
-                topic = self._build_data_topic(
-                    native_symbol, MarketDataTypeEnum.CANDLES, timeframe=timeframe
-                )
-                received_at = datetime.now(UTC)
-                candle_msg = CandleData(
-                    public_id=public_id,
-                    timestamp=received_at,
-                    session_id=self._tracker.session_id,
-                    sequence_id=self._tracker.next_sequence(topic),
-                    exchange=exchange,
-                    instrument=native_symbol,
-                    volume=candle.volume,
-                    timeframe=timeframe,
-                    open_at=candle.interval_begin,
-                    open=candle.open,
-                    high=candle.high,
-                    low=candle.low,
-                    close=candle.close,
-                    vwap=candle.vwap,
-                    trades=candle.trades,
-                )
-                try:
-                    await self._publish_message(topic, candle_msg)
-                    self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
-                    row = self._build_candle_row(candle_msg, instrument_public_id)
-                    batch.append(row)
-                    if batch_start is None:
-                        batch_start = loop.time()
-                except asyncio.CancelledError:
-                    row = self._build_candle_row(candle_msg, instrument_public_id)
-                    batch.append(row)
-                    raise
+                if await self._process_candle(candle, exchange, timeframe, batch):
+                    batch_start = batch_start or ev_loop.time()
                 if len(batch) >= self._candle_batch_max_rows:
                     await self._flush_candle_batch(batch)
                     batch.clear()
                     batch_start = None
         except asyncio.CancelledError:
-            pass
+            raise
         except Exception as e:
             logger.error(f"Candle loop error for {symbols}: {e}")
         finally:
             _cleanup_pending_future(next_fut)
             if batch:
                 await self._flush_candle_batch(batch)
+
+    async def _process_candle(
+        self,
+        candle: CandleUpdate,
+        exchange: str,
+        timeframe: str,
+        batch: list[CandleUpsertRow],
+    ) -> bool:
+        """Build candle message, append DB row to batch, and publish to ZMQ.
+
+        The row is appended before publish so it is always persisted even
+        if the publish is cancelled.  Returns True when a row was appended,
+        False when instrument resolution fails (unknown symbol).
+
+        Args:
+            candle: Raw candle update from exchange client.
+            exchange: Exchange name for message provenance.
+            timeframe: Candle timeframe interval.
+            batch: Mutable batch list; a row is appended in-place.
+        """
+        native_symbol = candle.symbol
+        instrument_public_id = await self._ensure_instrument(native_symbol)
+        if instrument_public_id is None:
+            return False
+        public_id = self._resolve_candle_public_id(
+            instrument_public_id, timeframe, candle.interval_begin
+        )
+        topic = self._build_data_topic(
+            native_symbol, MarketDataTypeEnum.CANDLES, timeframe=timeframe
+        )
+        received_at = datetime.now(UTC)
+        candle_msg = CandleData(
+            public_id=public_id,
+            timestamp=received_at,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence(topic),
+            exchange=exchange,
+            instrument=native_symbol,
+            volume=candle.volume,
+            timeframe=timeframe,
+            open_at=candle.interval_begin,
+            open=candle.open,
+            high=candle.high,
+            low=candle.low,
+            close=candle.close,
+            vwap=candle.vwap,
+            trades=candle.trades,
+        )
+        batch.append(self._build_candle_row(candle_msg, instrument_public_id))
+        await self._publish_message(topic, candle_msg)
+        self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
+        return True
 
     async def _tick_loop(self, symbols: list[str]) -> None:
         """Subscribe to tick data, publish to ZMQ, and batch DB writes.
@@ -469,64 +514,71 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         exchange = self._get_data_exchange()
         batch: list[TickUpsertRow] = []
         batch_start: float | None = None
-        loop = asyncio.get_event_loop()
+        ev_loop = asyncio.get_event_loop()
         iterator = self._exchange_client.subscribe_ticks(symbols).__aiter__()
-        next_fut: asyncio.Future[TickerUpdate] | None = None
+        next_fut: asyncio.Future[TickerUpdate | object] | None = None
         try:
             while self.running:
-                if next_fut is None:
-                    next_fut = asyncio.ensure_future(anext(iterator))
-                remaining = self._batch_max_age_s
-                if batch_start is not None:
-                    remaining = max(0.0, self._batch_max_age_s - (loop.time() - batch_start))
-                done, _ = await asyncio.wait({next_fut}, timeout=remaining)
+                next_fut = next_fut or asyncio.ensure_future(anext(iterator, _STREAM_END))
+                done, _ = await asyncio.wait(
+                    {next_fut}, timeout=self._batch_age_remaining(batch_start, ev_loop)
+                )
                 if not done:
-                    if batch:
-                        await self._flush_tick_batch(batch)
-                        batch.clear()
-                        batch_start = None
+                    await self._flush_on_age(batch, self._flush_tick_batch)
+                    batch_start = None
                     continue
                 next_fut = None
-                try:
-                    message = done.pop().result()
-                except StopAsyncIteration:
+                message = done.pop().result()
+                if message is _STREAM_END:
                     break
-                native_symbol = message.symbol
-                topic = self._build_data_topic(native_symbol, MarketDataTypeEnum.TICKS)
-                received_at = datetime.now(UTC)
-                tick_msg = TickData(
-                    public_id=str(uuid7()),
-                    timestamp=received_at,
-                    session_id=self._tracker.session_id,
-                    sequence_id=self._tracker.next_sequence(topic),
-                    exchange=exchange,
-                    instrument=native_symbol,
-                    volume=message.volume,
-                    bid=message.bid if not math.isclose(message.bid, 0.0) else None,
-                    ask=message.ask if not math.isclose(message.ask, 0.0) else None,
-                    last=message.last,
-                )
-                await self._publish_message(topic, tick_msg)
-                self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
-                instrument_public_id = await self._ensure_instrument(native_symbol)
-                if instrument_public_id is None:
-                    continue
-                row = self._build_tick_row(tick_msg, instrument_public_id)
-                batch.append(row)
-                if batch_start is None:
-                    batch_start = loop.time()
+                row = await self._process_tick(message, exchange)
+                if row is not None:
+                    batch.append(row)
+                    batch_start = batch_start or ev_loop.time()
                 if len(batch) >= self._tick_batch_max_rows:
                     await self._flush_tick_batch(batch)
                     batch.clear()
                     batch_start = None
         except asyncio.CancelledError:
-            pass
+            raise
         except Exception as e:
             logger.error(f"Tick loop error for {symbols}: {e}")
         finally:
             _cleanup_pending_future(next_fut)
             if batch:
                 await self._flush_tick_batch(batch)
+
+    async def _process_tick(self, message: TickerUpdate, exchange: str) -> TickUpsertRow | None:
+        """Build tick message, publish to ZMQ, and return a DB row.
+
+        Publish-first: ZMQ delivery happens before instrument resolution.
+        Returns None when instrument is unknown (ZMQ still delivered).
+
+        Args:
+            message: Raw ticker update from exchange client.
+            exchange: Exchange name for message provenance.
+        """
+        native_symbol = message.symbol
+        topic = self._build_data_topic(native_symbol, MarketDataTypeEnum.TICKS)
+        received_at = datetime.now(UTC)
+        tick_msg = TickData(
+            public_id=str(uuid7()),
+            timestamp=received_at,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence(topic),
+            exchange=exchange,
+            instrument=native_symbol,
+            volume=message.volume,
+            bid=message.bid if not math.isclose(message.bid, 0.0) else None,
+            ask=message.ask if not math.isclose(message.ask, 0.0) else None,
+            last=message.last,
+        )
+        await self._publish_message(topic, tick_msg)
+        self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
+        instrument_public_id = await self._ensure_instrument(native_symbol)
+        if instrument_public_id is None:
+            return None
+        return self._build_tick_row(tick_msg, instrument_public_id)
 
     async def _trade_loop(self, symbols: list[str]) -> None:
         """Subscribe to trade data, publish to ZMQ, and batch DB writes.
@@ -543,65 +595,72 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         exchange = self._get_data_exchange()
         batch: list[TradeUpsertRow] = []
         batch_start: float | None = None
-        loop = asyncio.get_event_loop()
+        ev_loop = asyncio.get_event_loop()
         iterator = self._exchange_client.subscribe_trades(symbols).__aiter__()
-        next_fut: asyncio.Future[TradeUpdate] | None = None
+        next_fut: asyncio.Future[TradeUpdate | object] | None = None
         try:
             while self.running:
-                if next_fut is None:
-                    next_fut = asyncio.ensure_future(anext(iterator))
-                remaining = self._batch_max_age_s
-                if batch_start is not None:
-                    remaining = max(0.0, self._batch_max_age_s - (loop.time() - batch_start))
-                done, _ = await asyncio.wait({next_fut}, timeout=remaining)
+                next_fut = next_fut or asyncio.ensure_future(anext(iterator, _STREAM_END))
+                done, _ = await asyncio.wait(
+                    {next_fut}, timeout=self._batch_age_remaining(batch_start, ev_loop)
+                )
                 if not done:
-                    if batch:
-                        await self._flush_trade_batch(batch)
-                        batch.clear()
-                        batch_start = None
+                    await self._flush_on_age(batch, self._flush_trade_batch)
+                    batch_start = None
                     continue
                 next_fut = None
-                try:
-                    trade = done.pop().result()
-                except StopAsyncIteration:
+                trade = done.pop().result()
+                if trade is _STREAM_END:
                     break
-                native_symbol = trade.symbol
-                topic = self._build_data_topic(native_symbol, MarketDataTypeEnum.TRADES)
-                received_at = datetime.now(UTC)
-                trade_msg = TradeData(
-                    public_id=str(uuid7()),
-                    timestamp=received_at,
-                    session_id=self._tracker.session_id,
-                    sequence_id=self._tracker.next_sequence(topic),
-                    exchange=exchange,
-                    instrument=native_symbol,
-                    executed_at=trade.timestamp,
-                    price=trade.price,
-                    volume=trade.quantity,
-                    side=trade.side if trade.side in ["buy", "sell"] else None,
-                    trade_id=trade.trade_id,
-                )
-                await self._publish_message(topic, trade_msg)
-                self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
-                instrument_public_id = await self._ensure_instrument(native_symbol)
-                if instrument_public_id is None:
-                    continue
-                row = self._build_trade_row(trade_msg, instrument_public_id)
-                batch.append(row)
-                if batch_start is None:
-                    batch_start = loop.time()
+                row = await self._process_trade(trade, exchange)
+                if row is not None:
+                    batch.append(row)
+                    batch_start = batch_start or ev_loop.time()
                 if len(batch) >= self._trade_batch_max_rows:
                     await self._flush_trade_batch(batch)
                     batch.clear()
                     batch_start = None
         except asyncio.CancelledError:
-            pass
+            raise
         except Exception as e:
             logger.error(f"Trade loop error for {symbols}: {e}")
         finally:
             _cleanup_pending_future(next_fut)
             if batch:
                 await self._flush_trade_batch(batch)
+
+    async def _process_trade(self, trade: TradeUpdate, exchange: str) -> TradeUpsertRow | None:
+        """Build trade message, publish to ZMQ, and return a DB row.
+
+        Publish-first: ZMQ delivery happens before instrument resolution.
+        Returns None when instrument is unknown (ZMQ still delivered).
+
+        Args:
+            trade: Raw trade update from exchange client.
+            exchange: Exchange name for message provenance.
+        """
+        native_symbol = trade.symbol
+        topic = self._build_data_topic(native_symbol, MarketDataTypeEnum.TRADES)
+        received_at = datetime.now(UTC)
+        trade_msg = TradeData(
+            public_id=str(uuid7()),
+            timestamp=received_at,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence(topic),
+            exchange=exchange,
+            instrument=native_symbol,
+            executed_at=trade.timestamp,
+            price=trade.price,
+            volume=trade.quantity,
+            side=trade.side if trade.side in ["buy", "sell"] else None,
+            trade_id=trade.trade_id,
+        )
+        await self._publish_message(topic, trade_msg)
+        self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000
+        instrument_public_id = await self._ensure_instrument(native_symbol)
+        if instrument_public_id is None:
+            return None
+        return self._build_trade_row(trade_msg, instrument_public_id)
 
     async def _publish_message(
         self, topic: str, message: MarketDataMessage

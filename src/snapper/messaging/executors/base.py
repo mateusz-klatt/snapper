@@ -1202,6 +1202,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             topic, fill = self._build_execution_data(
                 execution, exchange_order_id, original_order, exchange_name
             )
+            raw_tid = getattr(execution, "trade_id", None)
             await self._record_venue_event(
                 event_type="fill_observed",
                 exchange_name=exchange_name,
@@ -1216,7 +1217,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 fee=fill.fee,
                 fee_asset=fill.fee_asset,
                 exec_id=getattr(execution, "exec_id", None),
-                trade_id=str(tid) if (tid := getattr(execution, "trade_id", None)) else None,
+                trade_id=str(raw_tid) if raw_tid else None,
                 venue_timestamp=getattr(execution, "timestamp", None),
             )
             await self._publish_execution(topic, fill)

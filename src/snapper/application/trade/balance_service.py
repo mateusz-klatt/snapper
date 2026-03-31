@@ -9,9 +9,12 @@ Phase 1b: service class + in-memory projection.
 Phase 1c: wired to TradeService events + mark prices.
 """
 
+import math
 from dataclasses import dataclass
 
 from loguru import logger
+
+_ZERO_TOL = 1e-12
 
 
 @dataclass
@@ -36,7 +39,11 @@ class BalanceProjection:
             Unrealized PnL based on position quantity and mark-to-entry
             price difference, or 0.0 if no position or missing prices.
         """
-        if self.mark_price is None or self.entry_price is None or self.position_qty == 0.0:
+        if (
+            self.mark_price is None
+            or self.entry_price is None
+            or math.isclose(self.position_qty, 0.0, abs_tol=_ZERO_TOL)
+        ):
             return 0.0
         return self.position_qty * (self.mark_price - self.entry_price)
 
@@ -51,7 +58,7 @@ class BalanceProjection:
             Cash plus position value at mark price, or just cash if
             mark price is unavailable.
         """
-        if self.mark_price is None or self.position_qty == 0.0:
+        if self.mark_price is None or math.isclose(self.position_qty, 0.0, abs_tol=_ZERO_TOL):
             return self.cash
         return self.cash + self.position_qty * self.mark_price
 
