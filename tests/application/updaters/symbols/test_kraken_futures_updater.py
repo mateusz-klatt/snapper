@@ -6,11 +6,13 @@ from unittest.mock import patch
 import pytest
 
 from snapper.application.updaters.symbols.kraken_futures import KrakenFuturesSymbolUpdaterService
+from snapper.application.updaters.symbols.kraken_futures import _build_ccxt_symbol
 from snapper.application.updaters.symbols.kraken_futures import _build_native_symbol
 from snapper.application.updaters.symbols.kraken_futures import _classify_asset_type
 from snapper.application.updaters.symbols.kraken_futures import _extract_expiry
 from snapper.application.updaters.symbols.kraken_futures import _normalize_currency
 from snapper.config.app import AppSettings
+from snapper.core.types import AliasChannelEnum
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
@@ -385,3 +387,159 @@ class TestUpdateDatabase:
 
         with pytest.raises(RuntimeError, match="DB down"):
             await updater._update_database([])
+
+    @pytest.mark.asyncio
+    async def test_update_database_raises_when_repository_none(self) -> None:
+        """Raise RuntimeError when repository is not initialized.
+
+        Given: Updater with repository=None,
+        When: _update_database is called,
+        Then: Raises RuntimeError.
+        """
+        updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
+        assert updater.repository is None
+        with pytest.raises(RuntimeError, match="Repository not initialized"):
+            await updater._update_database([])
+
+    @pytest.mark.asyncio
+    async def test_update_database_upserts_ccxt_alias_when_available(self) -> None:
+        """Upsert CCXT alias when _build_ccxt_symbol returns non-None.
+
+        Given: Valid perpetual instrument (linear, has CCXT symbol),
+        When: _update_database is called,
+        Then: _upsert_alias is called with CCXT channel.
+        """
+        updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
+        mock_repo = MagicMock()
+        mock_session = MagicMock()
+        mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
+        mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
+        updater.repository = mock_repo
+
+        with (
+            patch.object(updater, "_upsert_symbol", return_value="pub-id-1"),
+            patch.object(updater, "_upsert_alias", return_value="created") as mock_alias,
+            patch.object(updater, "_upsert_capability", return_value="created"),
+            patch.object(updater, "_ensure_instrument_identity"),
+            patch.object(updater, "_reconcile_capabilities", return_value=0),
+        ):
+            symbols = [
+                {
+                    "symbol": "PF_XBTUSD",
+                    "type": "futures_vanilla",
+                    "tickSize": 0.5,
+                    "contractSize": 1,
+                    "tradeable": True,
+                    "base": "XBT",
+                    "quote": "USD",
+                }
+            ]
+            await updater._update_database(symbols)
+            ccxt_calls = [
+                c for c in mock_alias.call_args_list if c.args[3] == AliasChannelEnum.CCXT
+            ]
+            assert len(ccxt_calls) == 1
+            assert ccxt_calls[0].args[4] == "BTC/USD:USD"
+
+    @pytest.mark.asyncio
+    async def test_update_database_skips_ccxt_alias_for_reference_rate(self) -> None:
+        """Skip CCXT alias when _build_ccxt_symbol returns None.
+
+        Given: Reference rate instrument (rr_ prefix, no CCXT representation),
+        When: _update_database is called,
+        Then: _upsert_alias is called only for WS channel, not CCXT.
+        """
+        updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
+        mock_repo = MagicMock()
+        mock_session = MagicMock()
+        mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
+        mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
+        updater.repository = mock_repo
+
+        with (
+            patch.object(updater, "_upsert_symbol", return_value="pub-id-rr"),
+            patch.object(updater, "_upsert_alias", return_value="created") as mock_alias,
+            patch.object(updater, "_upsert_capability", return_value="created"),
+            patch.object(updater, "_ensure_instrument_identity"),
+            patch.object(updater, "_reconcile_capabilities", return_value=0),
+        ):
+            symbols = [
+                {
+                    "symbol": "rr_xbtusd",
+                    "type": "futures_vanilla",
+                    "tickSize": 0.01,
+                    "contractSize": 1,
+                    "tradeable": True,
+                    "base": "XBT",
+                    "quote": "USD",
+                }
+            ]
+            await updater._update_database(symbols)
+            ccxt_calls = [
+                c for c in mock_alias.call_args_list if c.args[3] == AliasChannelEnum.CCXT
+            ]
+            assert len(ccxt_calls) == 0
+
+
+class TestBuildCcxtSymbol:
+    """Tests for _build_ccxt_symbol helper."""
+
+    def test_perpetual_linear(self) -> None:
+        """Build CCXT symbol for linear perpetual.
+
+        Given: Instrument with base=XBT, quote=USD, type=futures_vanilla,
+        When: _build_ccxt_symbol is called,
+        Then: Returns 'BTC/USD:USD'.
+        """
+        schema = _make_schema(base="XBT", quote="USD", type="futures_vanilla")
+        assert _build_ccxt_symbol(schema) == "BTC/USD:USD"
+
+    def test_perpetual_inverse(self) -> None:
+        """Build CCXT symbol for inverse perpetual.
+
+        Given: Instrument with base=XBT, quote=USD, type=futures_inverse,
+        When: _build_ccxt_symbol is called,
+        Then: Returns 'BTC/USD:BTC'.
+        """
+        schema = _make_schema(base="XBT", quote="USD", type="futures_inverse")
+        assert _build_ccxt_symbol(schema) == "BTC/USD:BTC"
+
+    def test_reference_rate_returns_none(self) -> None:
+        """Return None for reference rate instruments.
+
+        Given: Instrument with rr_ prefix symbol,
+        When: _build_ccxt_symbol is called,
+        Then: Returns None.
+        """
+        schema = _make_schema(symbol="rr_xbtusd")
+        assert _build_ccxt_symbol(schema) is None
+
+    def test_index_returns_none(self) -> None:
+        """Return None for index instruments.
+
+        Given: Instrument with in_ prefix symbol,
+        When: _build_ccxt_symbol is called,
+        Then: Returns None.
+        """
+        schema = _make_schema(symbol="in_xbtusd")
+        assert _build_ccxt_symbol(schema) is None
+
+    def test_missing_base_returns_none(self) -> None:
+        """Return None when base currency is missing.
+
+        Given: Instrument without base field,
+        When: _build_ccxt_symbol is called,
+        Then: Returns None.
+        """
+        schema = _make_schema(base=None)
+        assert _build_ccxt_symbol(schema) is None
+
+    def test_missing_quote_returns_none(self) -> None:
+        """Return None when quote currency is missing.
+
+        Given: Instrument without quote field,
+        When: _build_ccxt_symbol is called,
+        Then: Returns None.
+        """
+        schema = _make_schema(quote=None)
+        assert _build_ccxt_symbol(schema) is None

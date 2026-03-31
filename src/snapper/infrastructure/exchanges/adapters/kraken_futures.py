@@ -17,6 +17,7 @@ unparseable item does not discard the entire batch.
 
 from datetime import UTC
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from loguru import logger
@@ -40,22 +41,18 @@ def parse_kraken_futures_ticker(data: dict[str, Any]) -> TickerUpdate:
         TickerUpdate with normalized symbol and price data.
     """
     schema = KrakenFuturesTickerSchema.model_validate(data)
-    volume = schema.vol24h or data.get("volume") or 0.0
-    low = schema.low24h or data.get("low") or 0.0
-    high = schema.high24h or data.get("high") or 0.0
-    change = schema.change24h or data.get("change") or 0.0
     return TickerUpdate(
         symbol=kraken_futures_ws_to_native(schema.symbol),
-        bid=schema.bid or 0.0,
-        bid_qty=schema.bid_size or data.get("bid_size") or 0.0,
-        ask=schema.ask or 0.0,
-        ask_qty=schema.ask_size or data.get("ask_size") or 0.0,
-        last=schema.last or 0.0,
-        volume=float(volume),
+        bid=schema.bid if schema.bid is not None else 0.0,
+        bid_qty=schema.bid_size if schema.bid_size is not None else 0.0,
+        ask=schema.ask if schema.ask is not None else 0.0,
+        ask_qty=schema.ask_size if schema.ask_size is not None else 0.0,
+        last=schema.last if schema.last is not None else 0.0,
+        volume=schema.vol24h if schema.vol24h is not None else 0.0,
         vwap=0.0,
-        low=float(low),
-        high=float(high),
-        change=float(change),
+        low=schema.low24h if schema.low24h is not None else 0.0,
+        high=schema.high24h if schema.high24h is not None else 0.0,
+        change=schema.change24h if schema.change24h is not None else 0.0,
         change_pct=0.0,
     )
 
@@ -99,9 +96,11 @@ def parse_kraken_futures_trade(data: dict[str, Any]) -> TradeUpdate:
         ts = datetime.fromtimestamp(schema.time / 1000, tz=UTC)
     else:
         ts = datetime.fromisoformat(str(schema.time).replace("Z", "+00:00"))
-    product_id = data.get("product_id", data.get("symbol", ""))
+    product_id = data.get("product_id") or data.get("symbol") or ""
+    if not product_id:
+        raise ValueError("Trade missing both product_id and symbol")
     return TradeUpdate(
-        symbol=kraken_futures_ws_to_native(product_id) if product_id else "",
+        symbol=kraken_futures_ws_to_native(product_id),
         side=schema.side,
         quantity=schema.size,
         price=schema.price,
@@ -190,11 +189,15 @@ def parse_kraken_futures_instrument_list(
 def _tick_size_to_precision(tick_size: float) -> int:
     """Convert tick size to decimal precision.
 
+    Uses Decimal for exact representation to avoid float formatting
+    artifacts (e.g., 0.1 → 0.10000000000000001).
+
     Args:
         tick_size: Minimum price increment (e.g., 0.5, 0.05, 1.0).
 
     Returns:
         Number of decimal places (e.g., 0.5 -> 1, 0.05 -> 2, 1.0 -> 0).
     """
-    s = f"{tick_size:.10f}".rstrip("0")
-    return len(s.split(".")[1]) if "." in s else 0
+    d = Decimal(str(tick_size)).normalize()
+    exp = d.as_tuple().exponent
+    return max(0, -int(exp))

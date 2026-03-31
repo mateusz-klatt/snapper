@@ -108,7 +108,8 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
         Args:
             symbols: List of raw instrument dicts from Kraken Futures API.
         """
-        assert self.repository is not None, "Repository not initialized"
+        if self.repository is None:
+            raise RuntimeError("Repository not initialized")
         created_count = 0
         skipped_count = 0
         try:
@@ -157,6 +158,19 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
                         self._tracker.session_id,
                         self._tracker.next_sequence("aliases"),
                     )
+
+                    ccxt_symbol = _build_ccxt_symbol(schema)
+                    if ccxt_symbol:
+                        self._upsert_alias(
+                            session,
+                            symbol_public_id,
+                            ExchangeEnum.KRAKEN_FUTURES,
+                            AliasChannelEnum.CCXT,
+                            ccxt_symbol,
+                            now,
+                            self._tracker.session_id,
+                            self._tracker.next_sequence("aliases"),
+                        )
 
                     self._upsert_capability(
                         session,
@@ -296,3 +310,27 @@ def _classify_asset_type(schema: KrakenFuturesInstrumentSchema) -> AssetTypeEnum
     if symbol_lower.startswith(_RR_PREFIX) or symbol_lower.startswith(_IN_PREFIX):
         return AssetTypeEnum.INDEX
     return AssetTypeEnum.CRYPTO
+
+
+def _build_ccxt_symbol(schema: KrakenFuturesInstrumentSchema) -> str | None:
+    """Build CCXT symbol from instrument metadata.
+
+    Linear perpetual/futures: BASE/QUOTE:QUOTE (e.g., BTC/USD:USD).
+    Inverse perpetual/futures: BASE/QUOTE:BASE (e.g., BTC/USD:BTC).
+    Reference rates and indices have no CCXT representation.
+
+    Args:
+        schema: Validated instrument schema.
+
+    Returns:
+        CCXT symbol string, or None for non-tradeable products.
+    """
+    if not schema.base or not schema.quote:
+        return None
+    symbol_lower = schema.symbol.lower()
+    if symbol_lower.startswith(_RR_PREFIX) or symbol_lower.startswith(_IN_PREFIX):
+        return None
+    base = _normalize_currency(schema.base)
+    quote = _normalize_currency(schema.quote)
+    settle = base if schema.type in _INVERSE_TYPES else quote
+    return f"{base}/{quote}:{settle}"

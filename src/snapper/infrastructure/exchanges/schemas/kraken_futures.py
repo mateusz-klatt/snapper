@@ -26,9 +26,14 @@ from snapper.infrastructure.exchanges.schemas.base import ExchangeResponse
 
 
 class KrakenFuturesMarginLevelSchema(ExchangeResponse):
-    """Margin tier for a futures instrument."""
+    """Margin tier for a futures instrument.
 
-    contracts: int
+    Flexible futures (PF_*, FF_*) use numNonContractUnits instead of
+    contracts, so both fields are optional.
+    """
+
+    contracts: int | None = None
+    num_non_contract_units: float | None = Field(default=None, alias="numNonContractUnits")
     initial_margin: float = Field(alias="initialMargin")
     maintenance_margin: float = Field(alias="maintenanceMargin")
 

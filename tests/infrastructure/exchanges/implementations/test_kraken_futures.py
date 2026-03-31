@@ -14,6 +14,7 @@ from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
+from snapper.infrastructure.exchanges.implementations.kraken_futures import _enqueue_or_drop_oldest
 
 
 @pytest.fixture()
@@ -74,6 +75,35 @@ class TestClientInit:
         assert c.sandbox is True
 
 
+class TestEnqueueOrDropOldest:
+    """Tests for _enqueue_or_drop_oldest module-level helper."""
+
+    def test_enqueue_when_space_available(self) -> None:
+        """Enqueue item normally when queue has capacity.
+
+        Given: Queue with maxsize=2 and one existing item,
+        When: _enqueue_or_drop_oldest is called with a new item,
+        Then: New item is added, queue has two items total.
+        """
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=2)
+        queue.put_nowait("first")
+        _enqueue_or_drop_oldest(queue, "second", "test")
+        assert queue.qsize() == 2
+
+    def test_drops_oldest_when_full(self) -> None:
+        """Drop oldest item and enqueue newest when queue is full.
+
+        Given: Queue with maxsize=1 already containing 'old',
+        When: _enqueue_or_drop_oldest is called with 'new',
+        Then: Queue contains only 'new'.
+        """
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
+        queue.put_nowait("old")
+        _enqueue_or_drop_oldest(queue, "new", "test")
+        assert queue.qsize() == 1
+        assert queue.get_nowait() == "new"
+
+
 class TestConnect:
     """Tests for connect/disconnect lifecycle."""
 
@@ -126,19 +156,19 @@ class TestConnect:
         mock_ws = AsyncMock()
         client._ws_client = mock_ws
         await client.disconnect()
-        mock_ws.async_close.assert_awaited_once()
+        mock_ws.close.assert_awaited_once()
         assert client._ws_client is None
 
     @pytest.mark.asyncio
     async def test_disconnect_ws_error_handled(self, client: KrakenFuturesExchangeClient) -> None:
         """Disconnect handles WS close error gracefully.
 
-        Given: WS client raises on async_close,
+        Given: WS client raises on close(),
         When: disconnect() is called,
         Then: No exception propagated, WS client set to None.
         """
         mock_ws = AsyncMock()
-        mock_ws.async_close.side_effect = RuntimeError("close failed")
+        mock_ws.close.side_effect = RuntimeError("close failed")
         client._ws_client = mock_ws
         await client.disconnect()
         assert client._ws_client is None
@@ -641,6 +671,7 @@ class TestSubscribeTicks:
             async for _tick in client.subscribe_ticks(["BTC-USD-PERP"]):
                 pytest.fail("Should not yield")
         mock_ws.unsubscribe.assert_awaited_once()
+        assert client._ws_client is None
 
     @pytest.mark.asyncio
     async def test_subscribe_ticks_unsubscribes_on_break(
@@ -708,6 +739,20 @@ class TestSubscribeTicks:
         async for _ in gen:
             break
         await gen.aclose()
+
+    @pytest.mark.asyncio
+    async def test_subscribe_ticks_raises_when_ws_none_after_connect(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Raise RuntimeError if _ws_client is None after _ensure_ws_connected.
+
+        Given: _ensure_ws_connected is a no-op that does not set _ws_client,
+        When: subscribe_ticks is called,
+        Then: RuntimeError is raised.
+        """
+        client._ensure_ws_connected = AsyncMock()
+        with pytest.raises(RuntimeError, match="WebSocket client not connected"):
+            await anext(aiter(client.subscribe_ticks(["BTC-USD-PERP"])))
 
 
 class TestSubscribeTrades:
@@ -794,6 +839,7 @@ class TestSubscribeTrades:
             async for _trade in client.subscribe_trades(["BTC-USD-PERP-INV"]):
                 pytest.fail("Should not yield")
         mock_ws.unsubscribe.assert_awaited_once()
+        assert client._ws_client is None
 
     @pytest.mark.asyncio
     async def test_subscribe_trades_unsubscribes_on_break(
@@ -851,6 +897,20 @@ class TestSubscribeTrades:
         async for _ in gen:
             break
         await gen.aclose()
+
+    @pytest.mark.asyncio
+    async def test_subscribe_trades_raises_when_ws_none_after_connect(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Raise RuntimeError if _ws_client is None after _ensure_ws_connected.
+
+        Given: _ensure_ws_connected is a no-op that does not set _ws_client,
+        When: subscribe_trades is called,
+        Then: RuntimeError is raised.
+        """
+        client._ensure_ws_connected = AsyncMock()
+        with pytest.raises(RuntimeError, match="WebSocket client not connected"):
+            await anext(aiter(client.subscribe_trades(["BTC-USD-PERP"])))
 
 
 class TestSubscribeInstrumentsInit:

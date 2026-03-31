@@ -174,6 +174,22 @@ class TestParseKrakenFuturesTrade:
         assert result.quantity == pytest.approx(0.5)
         assert result.timestamp.year == 2022
 
+    def test_raises_when_both_product_id_and_symbol_missing(self) -> None:
+        """Raise ValueError when trade has neither product_id nor symbol.
+
+        Given: Trade dict without product_id or symbol keys,
+        When: parse_kraken_futures_trade is called,
+        Then: Raises ValueError indicating missing identifier.
+        """
+        raw = {
+            "time": 1640995200000,
+            "price": 100.0,
+            "qty": 5.0,
+            "side": "buy",
+        }
+        with pytest.raises(ValueError, match="missing both product_id and symbol"):
+            parse_kraken_futures_trade(raw)
+
 
 class TestParseKrakenFuturesTradeList:
     """Tests for parse_kraken_futures_trade_list."""

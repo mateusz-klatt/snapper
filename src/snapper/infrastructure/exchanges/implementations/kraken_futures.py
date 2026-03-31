@@ -53,6 +53,23 @@ from snapper.infrastructure.symbols.functions import native_to_kraken_futures_ws
 
 _NOT_IMPLEMENTED_MSG = "Order execution not available in Phase 1 (market data only)"
 _QUEUE_DRAIN_TIMEOUT = 0.1
+_QUEUE_MAX_SIZE = 10000
+
+
+def _enqueue_or_drop_oldest(queue: asyncio.Queue[Any], item: Any, label: str) -> None:
+    """Put item on queue, dropping the oldest if full.
+
+    Args:
+        queue: Bounded asyncio queue.
+        item: Item to enqueue.
+        label: Human-readable label for the warning log.
+    """
+    try:
+        queue.put_nowait(item)
+    except asyncio.QueueFull:
+        logger.warning(f"{label} queue full, dropping oldest message")
+        queue.get_nowait()
+        queue.put_nowait(item)
 
 
 class KrakenFuturesExchangeClient(ExchangeClientBase):
@@ -83,9 +100,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         self._ccxt_client = cast(Any, ccxt.krakenfutures)({"sandbox": sandbox, "timeout": 30000})
         self._market_client: Market | None = None
         self._ws_client: FuturesWSClient | None = None
-        self._tick_queue: asyncio.Queue[TickerUpdate] = asyncio.Queue()
-        self._trade_queue: asyncio.Queue[TradeUpdate] = asyncio.Queue()
-        self._instrument_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._tick_queue: asyncio.Queue[TickerUpdate] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
+        self._trade_queue: asyncio.Queue[TradeUpdate] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
 
     async def connect(self) -> None:
         """Establish REST connection to Kraken Futures.
@@ -107,7 +123,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """Close all Kraken Futures connections."""
         if self._ws_client:
             try:
-                await self._ws_client.async_close()
+                await self._ws_client.close()
             except Exception as e:
                 logger.warning(f"Error closing Kraken Futures WS: {e}")
             self._ws_client = None
@@ -127,19 +143,21 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         feed = message.get("feed", "")
         if feed in ("ticker", "ticker_lite"):
             try:
-                if "symbol" not in message and "product_id" in message:
-                    message["symbol"] = message["product_id"]
-                tick = parse_kraken_futures_ticker(message)
-                self._tick_queue.put_nowait(tick)
+                ticker_data = (
+                    message
+                    if "symbol" in message
+                    else {**message, "symbol": message.get("product_id", "")}
+                )
+                tick = parse_kraken_futures_ticker(ticker_data)
+                _enqueue_or_drop_oldest(self._tick_queue, tick, "Tick")
             except (ValueError, KeyError) as exc:
                 logger.debug(f"Skipping unparseable ticker WS message: {exc}")
         elif feed == "trade":
             product_id = message.get("product_id", "")
             for raw_trade in message.get("trades", []):
                 try:
-                    raw_trade["product_id"] = product_id
-                    trade = parse_kraken_futures_trade(raw_trade)
-                    self._trade_queue.put_nowait(trade)
+                    trade = parse_kraken_futures_trade({**raw_trade, "product_id": product_id})
+                    _enqueue_or_drop_oldest(self._trade_queue, trade, "Trade")
                 except (ValueError, KeyError) as exc:
                     logger.debug(f"Skipping unparseable trade WS message: {exc}")
 
@@ -308,7 +326,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             ConnectionError: If the WebSocket connection is lost.
         """
         await self._ensure_ws_connected()
-        assert self._ws_client is not None
+        if self._ws_client is None:
+            raise RuntimeError("WebSocket client not connected")
         ws_symbols = [native_to_kraken_futures_ws(s) for s in symbols]
         await self._ws_client.subscribe(feed="ticker", products=ws_symbols)
         logger.info(f"Subscribed to Kraken Futures tickers: {symbols} -> {ws_symbols}")
@@ -329,6 +348,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                     await self._ws_client.unsubscribe(feed="ticker", products=ws_symbols)
                 except Exception:
                     logger.debug("Failed to unsubscribe from tickers on cleanup")
+                if getattr(self._ws_client, "exception_occur", False):
+                    self._ws_client = None
 
     def subscribe_candles(
         self,
@@ -377,7 +398,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             ConnectionError: If the WebSocket connection is lost.
         """
         await self._ensure_ws_connected()
-        assert self._ws_client is not None
+        if self._ws_client is None:
+            raise RuntimeError("WebSocket client not connected")
         ws_symbols = [native_to_kraken_futures_ws(s) for s in symbols]
         await self._ws_client.subscribe(feed="trade", products=ws_symbols)
         logger.info(f"Subscribed to Kraken Futures trades: {symbols} -> {ws_symbols}")
@@ -398,6 +420,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                     await self._ws_client.unsubscribe(feed="trade", products=ws_symbols)
                 except Exception:
                     logger.debug("Failed to unsubscribe from trades on cleanup")
+                if getattr(self._ws_client, "exception_occur", False):
+                    self._ws_client = None
 
     def subscribe_executions(self) -> AsyncIterator[ExecutionUpdate]:
         """Subscribe to execution updates (not available in Phase 1).
