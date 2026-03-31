@@ -444,7 +444,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 candle = done.pop().result()
                 if candle is _STREAM_END:
                     break
-                if await self._process_candle(candle, exchange, timeframe, batch):
+                if await self._process_candle(
+                    cast(CandleUpdate, candle), exchange, timeframe, batch
+                ):
                     batch_start = self._track_batch_start(batch_start, ev_loop)
                 if len(batch) >= self._candle_batch_max_rows:
                     await self._flush_candle_batch(batch)
@@ -462,7 +464,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
     async def _process_candle(
         self,
         candle: CandleUpdate,
-        exchange: str,
+        exchange: MarketDataExchange,
         timeframe: str,
         batch: list[CandleUpsertRow],
     ) -> bool:
@@ -543,7 +545,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 message = done.pop().result()
                 if message is _STREAM_END:
                     break
-                row = await self._process_tick(message, exchange)
+                row = await self._process_tick(cast(TickerUpdate, message), exchange)
                 if row is not None:
                     batch.append(row)
                     batch_start = self._track_batch_start(batch_start, ev_loop)
@@ -560,7 +562,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             if batch:
                 await self._flush_tick_batch(batch)
 
-    async def _process_tick(self, message: TickerUpdate, exchange: str) -> TickUpsertRow | None:
+    async def _process_tick(
+        self, message: TickerUpdate, exchange: MarketDataExchange
+    ) -> TickUpsertRow | None:
         """Build tick message, publish to ZMQ, and return a DB row.
 
         Publish-first: ZMQ delivery happens before instrument resolution.
@@ -624,7 +628,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 trade = done.pop().result()
                 if trade is _STREAM_END:
                     break
-                row = await self._process_trade(trade, exchange)
+                row = await self._process_trade(cast(TradeUpdate, trade), exchange)
                 if row is not None:
                     batch.append(row)
                     batch_start = self._track_batch_start(batch_start, ev_loop)
@@ -641,7 +645,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             if batch:
                 await self._flush_trade_batch(batch)
 
-    async def _process_trade(self, trade: TradeUpdate, exchange: str) -> TradeUpsertRow | None:
+    async def _process_trade(
+        self, trade: TradeUpdate, exchange: MarketDataExchange
+    ) -> TradeUpsertRow | None:
         """Build trade message, publish to ZMQ, and return a DB row.
 
         Publish-first: ZMQ delivery happens before instrument resolution.
