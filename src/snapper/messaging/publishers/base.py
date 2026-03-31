@@ -382,6 +382,18 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         return max(0.0, self._batch_max_age_s - (ev_loop.time() - batch_start))
 
     @staticmethod
+    def _track_batch_start(batch_start: float | None, ev_loop: asyncio.AbstractEventLoop) -> float:
+        """Return existing batch_start or current loop time for a new batch.
+
+        Args:
+            batch_start: Current batch start timestamp, or None if empty.
+            ev_loop: Running event loop (for monotonic clock).
+        """
+        if batch_start is None:
+            return ev_loop.time()
+        return batch_start
+
+    @staticmethod
     async def _flush_on_age(
         batch: list[Any],
         flush_fn: Callable[[list[Any]], Coroutine[Any, Any, None]],
@@ -433,7 +445,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 if candle is _STREAM_END:
                     break
                 if await self._process_candle(candle, exchange, timeframe, batch):
-                    batch_start = batch_start or ev_loop.time()
+                    batch_start = self._track_batch_start(batch_start, ev_loop)
                 if len(batch) >= self._candle_batch_max_rows:
                     await self._flush_candle_batch(batch)
                     batch.clear()
@@ -534,7 +546,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 row = await self._process_tick(message, exchange)
                 if row is not None:
                     batch.append(row)
-                    batch_start = batch_start or ev_loop.time()
+                    batch_start = self._track_batch_start(batch_start, ev_loop)
                 if len(batch) >= self._tick_batch_max_rows:
                     await self._flush_tick_batch(batch)
                     batch.clear()
@@ -615,7 +627,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 row = await self._process_trade(trade, exchange)
                 if row is not None:
                     batch.append(row)
-                    batch_start = batch_start or ev_loop.time()
+                    batch_start = self._track_batch_start(batch_start, ev_loop)
                 if len(batch) >= self._trade_batch_max_rows:
                     await self._flush_trade_batch(batch)
                     batch.clear()
