@@ -14,6 +14,7 @@ import { useWebSocketStore } from '../../stores/websocket'
 import { useAppStore } from '../../stores/app'
 import { useAuth } from '../../stores/auth'
 import { useIsReadOnly } from '../../hooks/useIsReadOnly'
+import { LiveOnlyNotice } from '../../components/LiveOnlyNotice'
 import { Permission } from '../../types/permissions.generated'
 import { StrategyLaunchModal, type StrategyLaunchData } from './StrategyLaunchModal'
 import { StrategyCard, type FeedHealth, type HealthStatus } from './StrategyCard'
@@ -257,6 +258,7 @@ export const Strategies: React.FC = () => {
 
   return (
     <div className='space-y-6'>
+      <LiveOnlyNotice />
       <div className='space-y-2'>
         <div className='flex flex-wrap items-center justify-between gap-2'>
           <h2 className='text-xl font-bold text-alpine-900'>Strategy Management</h2>

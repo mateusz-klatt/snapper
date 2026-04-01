@@ -1,6 +1,7 @@
 import React from 'react'
 import { useSystemStatus } from '../../hooks/queries'
 import { HealthSkeleton } from '../../components/Skeleton'
+import { LiveOnlyNotice } from '../../components/LiveOnlyNotice'
 import clsx from 'clsx'
 import type { ProcessStatus } from '../../types/api'
 
@@ -209,6 +210,7 @@ export const Health: React.FC = () => {
 
   return (
     <div className='space-y-6'>
+      <LiveOnlyNotice />
       <div className='flex items-center justify-between'>
         <h2 className='text-xl font-semibold text-alpine-900'>System Health</h2>
         <StatusIndicator status={overallHealth} showLabel />

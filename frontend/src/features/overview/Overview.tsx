@@ -1,6 +1,7 @@
 import React from 'react'
 import { Card, MetricCard, StatusBadge } from '../../components/ui'
 import { CardSkeleton } from '../../components/Skeleton'
+import { LiveOnlyNotice } from '../../components/LiveOnlyNotice'
 import {
   usePositionsSummary,
   useLatestSignals,
@@ -179,6 +180,7 @@ export const Overview: React.FC = () => {
 
   return (
     <div className='space-y-6'>
+      <LiveOnlyNotice />
       <h2 className='text-xl font-semibold text-alpine-900'>Overview</h2>
       {}
       <div className='grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4'>

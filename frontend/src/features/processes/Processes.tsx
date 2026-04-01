@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import { LiveOnlyNotice } from '../../components/LiveOnlyNotice'
 import {
   useStartProcessByName,
   useStopProcessByName,
@@ -213,6 +214,7 @@ export const Processes: React.FC = () => {
 
   return (
     <div className='space-y-6'>
+      <LiveOnlyNotice />
       <div className='flex items-center justify-between'>
         <h1 className='text-2xl font-bold text-alpine-900'>Process Control</h1>
         <div className='text-sm text-muted-600'>Real-time process monitoring and control</div>
