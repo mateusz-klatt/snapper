@@ -223,7 +223,7 @@ const DisplayView: React.FC<DisplayViewProps> = ({
               await onDelete(setting.key)
               setShowDeleteConfirm(false)
             }}
-            disabled={isSaving}
+            disabled={isSaving || readOnly}
             className='px-2 py-1 text-xs bg-loss-600 hover:bg-loss-700 disabled:bg-loss-800 disabled:cursor-not-allowed text-white rounded transition-colors'
           >
             {isSaving ? 'Deleting...' : 'Yes, Delete'}

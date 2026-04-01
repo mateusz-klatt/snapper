@@ -1,5 +1,4 @@
 import React from 'react'
-import toast from 'react-hot-toast'
 import { Modal } from './Modal'
 import { useIsReadOnly } from '../../hooks/useIsReadOnly'
 
@@ -25,17 +24,6 @@ export const ConfirmDialog: React.FC<Readonly<ConfirmDialogProps>> = ({
   variant = 'default',
 }) => {
   const readOnly = useIsReadOnly()
-
-  const handleConfirm = () => {
-    if (readOnly) {
-      toast.error('Action blocked — time-travel mode is read-only')
-
-      return
-    }
-
-    onConfirm()
-  }
-
   const confirmButtonClasses =
     variant === 'danger'
       ? 'bg-loss-600 hover:bg-loss-700 focus:ring-loss-500'
@@ -55,8 +43,9 @@ export const ConfirmDialog: React.FC<Readonly<ConfirmDialogProps>> = ({
             {cancelText}
           </button>
           <button
-            onClick={handleConfirm}
-            className={`flex-1 px-4 py-2 text-sm font-medium text-white border border-transparent rounded-md focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-offset-dark-800 transition-colors ${confirmButtonClasses}`}
+            onClick={onConfirm}
+            disabled={readOnly}
+            className={`flex-1 px-4 py-2 text-sm font-medium text-white border border-transparent rounded-md focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-offset-dark-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${confirmButtonClasses}`}
           >
             {confirmText}
           </button>
