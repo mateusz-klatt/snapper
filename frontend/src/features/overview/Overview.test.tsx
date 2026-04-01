@@ -3,6 +3,12 @@ import { render, screen } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { Overview } from './Overview'
 
+vi.mock('../../stores/app', () => ({
+  useAppStore: vi.fn((selector: (s: Record<string, unknown>) => unknown) =>
+    selector({ asOf: null, isTimeTraveling: false })
+  ),
+}))
+
 vi.mock('../../hooks/queries', () => ({
   usePositionsSummary: vi.fn(() => ({ data: null, isLoading: false })),
   useLatestSignals: vi.fn(() => ({ data: [], isLoading: false })),
@@ -395,5 +401,32 @@ describe('Overview', () => {
     renderWithMocks(<Overview />)
     expect(screen.getByText('DOT/USD')).toBeInTheDocument()
     expect(screen.getByText('N/A')).toBeInTheDocument()
+  })
+  it('shows date-specific execution label when time traveling', async () => {
+    const { useAppStore } = await import('../../stores/app')
+    const { useExecutions } = await import('../../hooks/queries')
+
+    vi.mocked(useAppStore).mockImplementation(((
+      selector: (s: Record<string, unknown>) => unknown
+    ) => selector({ asOf: '2024-06-15T12:00:00Z', isTimeTraveling: true })) as never)
+    vi.mocked(useExecutions).mockReturnValue({
+      data: [
+        {
+          instrument: 'BTC/USD',
+          exchange: 'kraken',
+          side: 'buy',
+          size: 1,
+          price: 50000,
+          executedAt: new Date('2024-06-15T10:00:00Z'),
+        },
+      ],
+      isLoading: false,
+    } as never)
+    renderWithMocks(<Overview />)
+
+    expect(screen.getByText(/Executions \(/)).toBeInTheDocument()
+    vi.mocked(useAppStore).mockImplementation(((
+      selector: (s: Record<string, unknown>) => unknown
+    ) => selector({ asOf: null, isTimeTraveling: false })) as never)
   })
 })

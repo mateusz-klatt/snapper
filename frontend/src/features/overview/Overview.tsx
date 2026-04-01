@@ -1,6 +1,7 @@
 import React from 'react'
 import { Card, MetricCard, StatusBadge } from '../../components/ui'
 import { CardSkeleton } from '../../components/Skeleton'
+import { useAppStore } from '../../stores/app'
 import {
   usePositionsSummary,
   useLatestSignals,
@@ -161,6 +162,7 @@ const SignalsCardContent: React.FC<
 const zeroCounts = { running: 0, total: 0 }
 
 export const Overview: React.FC = () => {
+  const asOf = useAppStore(s => s.asOf)
   const { data: processSummary, isLoading: processLoading } = useProcessSummary()
   const { data: positionsSummary, isLoading: positionsLoading } = usePositionsSummary()
   const { data: latestSignals, isLoading: signalsLoading } = useLatestSignals(5)
@@ -172,9 +174,10 @@ export const Overview: React.FC = () => {
   const brokers = processSummary?.payload?.brokers ?? zeroCounts
   const recentExecutions = executions.slice(0, 5)
   const openOrdersCount = ordersGrouped?.open?.length || 0
-  const todayStr = new Date().toDateString()
+  const referenceDate = asOf ? new Date(asOf) : new Date()
+  const referenceDayStr = referenceDate.toDateString()
   const todayExecutionsCount = executions.filter(
-    e => e.executedAt?.toDateString() === todayStr
+    e => e.executedAt?.toDateString() === referenceDayStr
   ).length
 
   return (
@@ -193,7 +196,11 @@ export const Overview: React.FC = () => {
           changeType={countChangeType(strategies.running)}
         />
         <MetricCard label='Open Orders' value={openOrdersCount} changeType='neutral' />
-        <MetricCard label="Today's Executions" value={todayExecutionsCount} changeType='positive' />
+        <MetricCard
+          label={asOf ? `Executions (${referenceDate.toLocaleDateString()})` : "Today's Executions"}
+          value={todayExecutionsCount}
+          changeType='positive'
+        />
       </div>
       <div className='grid grid-cols-1 lg:grid-cols-2 gap-6'>
         {}

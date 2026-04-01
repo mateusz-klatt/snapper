@@ -47,6 +47,11 @@ vi.mock('../../stores/auth', () => ({
     isAuthenticated: true,
   })),
 }))
+vi.mock('../../stores/app', () => ({
+  useAppStore: vi.fn((selector: (s: Record<string, unknown>) => unknown) =>
+    selector({ asOf: null, isTimeTraveling: false })
+  ),
+}))
 vi.mock('../../lib/apiClient', () => ({
   apiClient: {
     getSignals: vi.fn(async () => ({
@@ -829,5 +834,48 @@ describe('Signals', () => {
       ['instrument', 'exchange', 'side', 'strength', 'strategy', 'price', 'reason', 'fired_at'],
       [['BTC-USD', 'kraken', 'buy', '0.85', '', '', null, '2024-01-01T00:00:00.000Z']]
     )
+  })
+  it('shows relative time based on asOf when time traveling', async () => {
+    const { useAppStore } = await import('../../stores/app')
+    const { apiClient } = await import('../../lib/apiClient')
+    const asOfDate = '2024-06-15T12:00:00Z'
+    const firedAt = '2024-06-15T11:30:00Z'
+
+    vi.mocked(useAppStore).mockImplementation(((
+      selector: (s: Record<string, unknown>) => unknown
+    ) => selector({ asOf: asOfDate, isTimeTraveling: true })) as never)
+    vi.mocked(apiClient.getSignals).mockResolvedValueOnce({
+      type: 'signal_list',
+      session_id: '',
+      sequence_id: 0,
+      public_id: 'test-pid',
+      timestamp: asOfDate,
+      payload: [
+        {
+          type: 'signal',
+          instrument: 'BTC-USD',
+          exchange: 'kraken',
+          timestamp: asOfDate,
+          fired_at: firedAt,
+          side: 'buy',
+          strength: 0.85,
+          reason: 'Test signal',
+          strategy_name: 'macd',
+          price: 42000,
+        },
+      ],
+      count: 1,
+    } as never)
+    const qc = createTestQueryClient()
+
+    render(
+      <QueryClientProvider client={qc}>
+        <Signals />
+      </QueryClientProvider>
+    )
+    await screen.findByText('30m ago')
+    vi.mocked(useAppStore).mockImplementation(((
+      selector: (s: Record<string, unknown>) => unknown
+    ) => selector({ asOf: null, isTimeTraveling: false })) as never)
   })
 })

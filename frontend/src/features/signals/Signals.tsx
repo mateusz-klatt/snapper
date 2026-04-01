@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { Download } from 'lucide-react'
+import { useAppStore } from '../../stores/app'
 import { SignalCardSkeleton } from '../../components/Skeleton'
 import { ThemeSelect } from '../../components/ThemeSelect'
 import { exportToCSV } from '../../lib/csvExport'
@@ -14,6 +15,8 @@ import {
 } from '../../lib/constants'
 
 const SignalCard: React.FC<{ signal: Signal }> = ({ signal }) => {
+  const asOf = useAppStore(s => s.asOf)
+
   const getSideColor = (side: string) => {
     return side === 'buy' ? 'text-gain-400 bg-gain-900/20' : 'text-loss-400 bg-loss-900/20'
   }
@@ -35,7 +38,7 @@ const SignalCard: React.FC<{ signal: Signal }> = ({ signal }) => {
   }
 
   const formatTime = (date: Date) => {
-    const now = new Date()
+    const now = asOf ? new Date(asOf) : new Date()
     const diffMs = now.getTime() - date.getTime()
     const diffMins = Math.floor(diffMs / 60000)
 
