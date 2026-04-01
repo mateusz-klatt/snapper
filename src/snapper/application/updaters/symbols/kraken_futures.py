@@ -324,17 +324,22 @@ def _classify_asset_type(schema: KrakenFuturesInstrumentSchema) -> AssetTypeEnum
 def _build_ccxt_symbol(schema: KrakenFuturesInstrumentSchema) -> str | None:
     """Build CCXT symbol from instrument metadata.
 
-    Linear perpetual/futures: BASE/QUOTE:QUOTE (e.g., BTC/USD:USD).
-    Inverse perpetual/futures: BASE/QUOTE:BASE (e.g., BTC/USD:BTC).
-    Reference rates and indices have no CCXT representation.
+    Only perpetual futures get a CCXT alias because dated futures
+    share the same ``BASE/QUOTE:SETTLE`` format and would collide
+    on the unique alias constraint.
+
+    Linear perpetual: BASE/QUOTE:QUOTE (e.g., BTC/USD:USD).
+    Inverse perpetual: BASE/QUOTE:BASE (e.g., BTC/USD:BTC).
 
     Args:
         schema: Validated instrument schema.
 
     Returns:
-        CCXT symbol string, or None for non-tradeable products.
+        CCXT symbol string, or None for dated futures and non-tradeable products.
     """
     if not schema.base or not schema.quote:
+        return None
+    if schema.last_trading_time:
         return None
     symbol_lower = schema.symbol.lower()
     if symbol_lower.startswith(_RR_PREFIX) or symbol_lower.startswith(_IN_PREFIX):

@@ -504,7 +504,7 @@ class Symbol(TemporalMixin, Base):
             name="ck_symbol_asset_type",
         ),
         CheckConstraint(
-            f"asset_type IN ({', '.join(repr(v.value) for v in AssetTypeEnum if v in (AssetTypeEnum.EQUITY, AssetTypeEnum.INDEX))}) OR quote IS NOT NULL",
+            f"asset_type IN ({', '.join(repr(v.value) for v in AssetTypeEnum if v in (AssetTypeEnum.EQUITY, AssetTypeEnum.INDEX, AssetTypeEnum.COMMODITY, AssetTypeEnum.YIELD))}) OR quote IS NOT NULL",
             name="ck_symbol_quote_required",
         ),
     )

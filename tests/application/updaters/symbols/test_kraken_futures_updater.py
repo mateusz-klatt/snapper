@@ -543,3 +543,13 @@ class TestBuildCcxtSymbol:
         """
         schema = _make_schema(quote=None)
         assert _build_ccxt_symbol(schema) is None
+
+    def test_dated_futures_returns_none(self) -> None:
+        """Return None for dated (non-perpetual) futures.
+
+        Given: Instrument with last_trading_time set (dated future),
+        When: _build_ccxt_symbol is called,
+        Then: Returns None (CCXT alias only for perpetuals).
+        """
+        schema = _make_schema(last_trading_time="2026-06-26T16:00:00Z")
+        assert _build_ccxt_symbol(schema) is None

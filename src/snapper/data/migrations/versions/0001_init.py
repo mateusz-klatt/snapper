@@ -122,11 +122,11 @@ def upgrade() -> None:
         sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id"),
         sa.CheckConstraint(
-            "asset_type IN ('crypto', 'forex', 'equity', 'index')",
+            "asset_type IN ('crypto', 'forex', 'equity', 'index', 'commodity', 'yield')",
             name="ck_symbol_asset_type",
         ),
         sa.CheckConstraint(
-            "asset_type IN ('equity', 'index') OR quote IS NOT NULL",
+            "asset_type IN ('equity', 'index', 'commodity', 'yield') OR quote IS NOT NULL",
             name="ck_symbol_quote_required",
         ),
         sa.CheckConstraint(_CK_SESSION_ID, name="ck_symbols_session_id"),
