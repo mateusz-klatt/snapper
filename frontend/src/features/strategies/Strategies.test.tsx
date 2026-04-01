@@ -69,6 +69,11 @@ vi.mock('../../stores/websocket', () => ({
     wsClient: mockWsClient,
   })),
 }))
+vi.mock('../../stores/app', () => ({
+  useAppStore: vi.fn((selector: (s: Record<string, unknown>) => unknown) =>
+    selector({ asOf: null, isTimeTraveling: false })
+  ),
+}))
 vi.mock('../../stores/auth', () => ({
   useAuth: vi.fn(() => ({
     hasPermission: () => true,
@@ -1526,5 +1531,27 @@ describe('Strategies', () => {
     vi.mocked(useAuth).mockReturnValue({
       hasPermission: () => true,
     } as never)
+  })
+  it('does not subscribe to heartbeats when time traveling', async () => {
+    const { useAppStore } = await import('../../stores/app')
+    const { useStrategies } = await import('../../hooks/queries')
+
+    vi.mocked(useAppStore).mockImplementation(((
+      selector: (s: Record<string, unknown>) => unknown
+    ) => selector({ asOf: '2024-01-01T00:00:00Z', isTimeTraveling: true })) as never)
+    vi.mocked(useStrategies).mockReturnValue({
+      data: makeListEnvelope('strategy_list', [makeStrategyProcess({ name: 'test' })]),
+      isLoading: false,
+    } as never)
+    mockWsClient.subscribe.mockClear()
+    renderWithProviders(<Strategies />)
+    await waitFor(() => {
+      expect(screen.getByText('Strategy Management')).toBeTruthy()
+    })
+
+    expect(mockWsClient.subscribe).not.toHaveBeenCalled()
+    vi.mocked(useAppStore).mockImplementation(((
+      selector: (s: Record<string, unknown>) => unknown
+    ) => selector({ asOf: null, isTimeTraveling: false })) as never)
   })
 })

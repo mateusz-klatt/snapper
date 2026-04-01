@@ -47,7 +47,7 @@ export function MarketData() {
     timeframe: selectedTimeframe,
     dispatcher,
   })
-  const snapshotEnabled = subscribed || !isConnected
+  const snapshotEnabled = subscribed || !isConnected || isTimeTraveling
   const { data: exchanges } = useExchanges()
   const { data: instruments } = useExchangeInstruments(selectedExchange)
   const {

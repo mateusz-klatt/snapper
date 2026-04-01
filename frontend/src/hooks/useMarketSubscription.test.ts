@@ -35,8 +35,14 @@ vi.mock('../stores/websocket', () => ({
     isConnected: false,
   })),
 }))
+vi.mock('../stores/app', () => ({
+  useAppStore: vi.fn((selector: (s: Record<string, unknown>) => unknown) =>
+    selector({ isTimeTraveling: false })
+  ),
+}))
 
 import { useWebSocketStore } from '../stores/websocket'
+import { useAppStore } from '../stores/app'
 
 describe('useMarketSubscription', () => {
   beforeEach(() => {
@@ -301,5 +307,26 @@ describe('useMarketSubscription', () => {
     unmount()
 
     expect(mockDispatcher.stopBuffering).toHaveBeenCalledWith('BTC-USD', 'kraken', '1m')
+  })
+  it('does not subscribe when time traveling', () => {
+    vi.mocked(useAppStore).mockImplementation(((
+      selector: (s: Record<string, unknown>) => unknown
+    ) => selector({ isTimeTraveling: true })) as never)
+    vi.mocked(useWebSocketStore).mockReturnValue({
+      wsClient: createMockWsClient(),
+      isConnected: true,
+    } as never)
+    renderHook(() =>
+      useMarketSubscription({
+        instrument: 'BTC-USD',
+        exchange: 'kraken',
+        timeframe: '1m',
+      })
+    )
+
+    expect(mockSubscribe).not.toHaveBeenCalled()
+    vi.mocked(useAppStore).mockImplementation(((
+      selector: (s: Record<string, unknown>) => unknown
+    ) => selector({ isTimeTraveling: false })) as never)
   })
 })

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useWebSocketStore } from '../stores/websocket'
+import { useAppStore } from '../stores/app'
 import { buildMarketTopic } from '../lib/websocket/topics'
 import type { WSDispatcher } from '../stores/wsDispatcher'
 
@@ -13,10 +14,11 @@ interface MarketSubscriptionOptions {
 export function useMarketSubscription(options: MarketSubscriptionOptions): boolean {
   const { instrument, exchange, timeframe, dispatcher } = options
   const { wsClient, isConnected } = useWebSocketStore()
+  const isTimeTraveling = useAppStore(s => s.isTimeTraveling)
   const [subscribed, setSubscribed] = useState(false)
 
   useEffect(() => {
-    if (!isConnected || !wsClient || !instrument || !exchange) {
+    if (isTimeTraveling || !isConnected || !wsClient || !instrument || !exchange) {
       setSubscribed(false)
 
       return
@@ -44,7 +46,7 @@ export function useMarketSubscription(options: MarketSubscriptionOptions): boole
 
       setSubscribed(false)
     }
-  }, [instrument, exchange, timeframe, isConnected, wsClient, dispatcher])
+  }, [instrument, exchange, timeframe, isConnected, wsClient, dispatcher, isTimeTraveling])
 
   return subscribed
 }

@@ -37,6 +37,11 @@ vi.mock('../../stores/market', () => ({
     setSelectedTimeframe: mockSetSelectedTimeframe,
   })),
 }))
+vi.mock('../../stores/app', () => ({
+  useAppStore: vi.fn((selector: (s: Record<string, unknown>) => unknown) =>
+    selector({ asOf: null, isTimeTraveling: false })
+  ),
+}))
 vi.mock('../../hooks/useMarketSubscription', () => ({
   useMarketSubscription: vi.fn(() => true),
 }))
@@ -491,5 +496,47 @@ describe('MarketData', () => {
     const input = screen.getByLabelText('Instrument:')
 
     expect(input).toBeDisabled()
+  })
+  it('disables candle fetch when not subscribed and connected in live mode', async () => {
+    const { useMarketSubscription } = await import('../../hooks/useMarketSubscription')
+    const { useCandles } = await import('../../hooks/queries')
+    const { useWebSocketStore } = await import('../../stores/websocket')
+
+    vi.mocked(useMarketSubscription).mockReturnValue(false)
+    vi.mocked(useWebSocketStore).mockReturnValue({ isConnected: true } as never)
+    renderWithProviders(<MarketData />)
+
+    expect(vi.mocked(useCandles)).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+      expect.any(Number),
+      false
+    )
+  })
+  it('enables candle fetch in time travel even without subscription', async () => {
+    const { useAppStore } = await import('../../stores/app')
+    const { useMarketSubscription } = await import('../../hooks/useMarketSubscription')
+
+    vi.mocked(useAppStore).mockImplementation(((
+      selector: (s: Record<string, unknown>) => unknown
+    ) => selector({ asOf: '2024-01-01T00:00:00Z', isTimeTraveling: true })) as never)
+    vi.mocked(useMarketSubscription).mockReturnValue(false)
+    const { useCandles } = await import('../../hooks/queries')
+
+    renderWithProviders(<MarketData />)
+    await waitFor(() => {
+      expect(vi.mocked(useCandles)).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(String),
+        expect.any(String),
+        expect.any(Number),
+        true
+      )
+    })
+    vi.mocked(useAppStore).mockImplementation(((
+      selector: (s: Record<string, unknown>) => unknown
+    ) => selector({ asOf: null, isTimeTraveling: false })) as never)
+    vi.mocked(useMarketSubscription).mockReturnValue(true)
   })
 })

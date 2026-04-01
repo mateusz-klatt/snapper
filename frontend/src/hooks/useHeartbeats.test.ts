@@ -27,8 +27,14 @@ vi.mock('../stores/websocket', () => ({
     wsClient: mockWsClient,
   })),
 }))
+vi.mock('../stores/app', () => ({
+  useAppStore: vi.fn((selector: (s: Record<string, unknown>) => unknown) =>
+    selector({ isTimeTraveling: false })
+  ),
+}))
 
 import { useWebSocketStore } from '../stores/websocket'
+import { useAppStore } from '../stores/app'
 import { useHeartbeats } from './useHeartbeats'
 
 describe('useHeartbeats', () => {
@@ -199,5 +205,16 @@ describe('useHeartbeats', () => {
     expect(mockUnsubscribeConnection).toHaveBeenCalled()
     expect(mockUnsubscribeHeartbeat).toHaveBeenCalled()
     expect(mockWsClient.unsubscribe).toHaveBeenCalledWith(['system.heartbeats.feed.'])
+  })
+  it('does not subscribe when time traveling', () => {
+    vi.mocked(useAppStore).mockImplementation(((
+      selector: (s: Record<string, unknown>) => unknown
+    ) => selector({ isTimeTraveling: true })) as never)
+    renderHook(() => useHeartbeats(['system.heartbeats.feed.']))
+
+    expect(mockWsClient.subscribe).not.toHaveBeenCalled()
+    vi.mocked(useAppStore).mockImplementation(((
+      selector: (s: Record<string, unknown>) => unknown
+    ) => selector({ isTimeTraveling: false })) as never)
   })
 })

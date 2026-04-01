@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useWebSocketStore } from '../stores/websocket'
+import { useAppStore } from '../stores/app'
 import { HEARTBEAT_STALE_THRESHOLD_MS, HEARTBEAT_PRUNE_INTERVAL_MS } from '../lib/constants'
 
 export interface HeartbeatData {
@@ -12,9 +13,10 @@ export interface HeartbeatData {
 export function useHeartbeats(topics: string[]): Record<string, HeartbeatData> {
   const [allHeartbeats, setAllHeartbeats] = useState<Record<string, HeartbeatData>>({})
   const { wsClient } = useWebSocketStore()
+  const isTimeTraveling = useAppStore(s => s.isTimeTraveling)
 
   useEffect(() => {
-    if (!wsClient) {
+    if (isTimeTraveling || !wsClient) {
       return
     }
 
@@ -40,7 +42,7 @@ export function useHeartbeats(topics: string[]): Record<string, HeartbeatData> {
       unsubscribeHeartbeat()
       wsClient.unsubscribe(topics)
     }
-  }, [wsClient, topics])
+  }, [wsClient, topics, isTimeTraveling])
 
   const pruneStaleHeartbeats = useCallback(() => {
     const now = Date.now()

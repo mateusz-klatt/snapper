@@ -11,6 +11,7 @@ import {
   useCreateProcessConfig,
 } from '../../hooks/queries'
 import { useWebSocketStore } from '../../stores/websocket'
+import { useAppStore } from '../../stores/app'
 import { useAuth } from '../../stores/auth'
 import { Permission } from '../../types/permissions.generated'
 import { StrategyLaunchModal, type StrategyLaunchData } from './StrategyLaunchModal'
@@ -30,6 +31,7 @@ export const Strategies: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState<'all' | 'running' | 'stopped'>('all')
   const queryClient = useQueryClient()
   const { wsClient } = useWebSocketStore()
+  const isTimeTraveling = useAppStore(s => s.isTimeTraveling)
   const startProcess = useStartProcessByName()
   const stopProcess = useStopProcessByName()
   const createProcessConfig = useCreateProcessConfig()
@@ -41,7 +43,7 @@ export const Strategies: React.FC = () => {
   const strategies = useMemo(() => strategiesData?.payload ?? [], [strategiesData?.payload])
 
   useEffect(() => {
-    if (!wsClient) {
+    if (isTimeTraveling || !wsClient) {
       return
     }
 
@@ -100,7 +102,7 @@ export const Strategies: React.FC = () => {
       unsubscribeHeartbeat()
       activeClient.unsubscribe(heartbeatTopics)
     }
-  }, [strategies, wsClient])
+  }, [strategies, wsClient, isTimeTraveling])
 
   const handleStrategyLaunch = async (data: StrategyLaunchData) => {
     try {
