@@ -397,6 +397,7 @@ async def get_users(
     request: Request,
     current_user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_USERS))],
     include_inactive: bool = False,
+    as_of: datetime | None = None,
 ) -> UserListResponse:
     """List all users in the system.
 
@@ -404,12 +405,13 @@ async def get_users(
         request: FastAPI request (provides REST tracker for provenance).
         current_user: Authenticated user with MANAGE_USERS permission.
         include_inactive: Whether to include deactivated users.
+        as_of: Optional point-in-time query timestamp (UTC).
 
     Returns:
         List of user profiles with total count.
     """
     user_service = get_user_service()
-    users = await user_service.get_all_users(include_inactive=include_inactive)
+    users = await user_service.get_all_users(include_inactive=include_inactive, as_of=as_of)
     sid, seq, pid, ts = _mint_provenance(request)
     return UserListResponse(
         session_id=sid,

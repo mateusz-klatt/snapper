@@ -1854,7 +1854,10 @@ class TestAdminCommands:
         with patch("snapper.cli.app.UserService") as mock_service_class:
             mock_service = MagicMock()
 
-            async def mock_get_all_users(include_inactive: bool = False) -> list[Any]:
+            async def mock_get_all_users(
+                include_inactive: bool = False,
+                as_of: datetime | None = None,
+            ) -> list[Any]:
                 return []
 
             mock_service.get_all_users = mock_get_all_users

@@ -173,17 +173,23 @@ class UserService:
                 return None
             return self._db_user_to_auth_user(db_user)
 
-    async def get_all_users(self, include_inactive: bool = False) -> list[UserProfile]:
+    async def get_all_users(
+        self,
+        include_inactive: bool = False,
+        as_of: datetime | None = None,
+    ) -> list[UserProfile]:
         """Get all users.
 
         Args:
             include_inactive: If True, includes inactive users.
+            as_of: Optional point-in-time query (UTC). Defaults to now.
 
         Returns:
             List of UserProfile instances.
         """
+        processing_date = as_of or datetime.now(UTC)
         async with self.repository.session() as session:
-            base = select(User).where(*where_active_now(User))
+            base = select(User).where(*where_active(User, processing_date))
             stmt = base if include_inactive else base.where(User.is_active)
             result = await session.execute(stmt)
             db_users = result.scalars().all()

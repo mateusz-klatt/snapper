@@ -143,6 +143,7 @@ export type Paths = {
          *         request: FastAPI request (provides REST tracker for provenance).
          *         current_user: Authenticated user with MANAGE_USERS permission.
          *         include_inactive: Whether to include deactivated users.
+         *         as_of: Optional point-in-time query timestamp (UTC).
          *
          *     Returns:
          *         List of user profiles with total count.
@@ -4154,6 +4155,7 @@ export interface Operations {
         parameters: {
             query?: {
                 include_inactive?: boolean;
+                as_of?: string | null;
             };
             header?: never;
             path?: never;

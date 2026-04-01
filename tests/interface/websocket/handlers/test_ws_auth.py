@@ -3131,7 +3131,11 @@ class StubUserService:
         """Get user by ID."""
         return self.user_by_id
 
-    async def get_all_users(self, include_inactive: bool = False) -> list[UserProfile]:
+    async def get_all_users(
+        self,
+        include_inactive: bool = False,
+        as_of: datetime | None = None,
+    ) -> list[UserProfile]:
         """Get all users."""
         return self.all_users
 

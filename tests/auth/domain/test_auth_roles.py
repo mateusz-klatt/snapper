@@ -435,6 +435,28 @@ class TestUserService:
         assert len(users) == 1
 
     @pytest.mark.asyncio
+    async def test_get_all_users_with_as_of(
+        self, user_service: UserService, mock_db_user: User
+    ) -> None:
+        """Test get_all_users accepts as_of for point-in-time query.
+
+        Given: Users exist in the database.
+        When: get_all_users is called with an explicit as_of timestamp.
+        Then: A list of user profiles is returned using temporal filtering.
+        """
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [mock_db_user]
+        mock_session.execute.return_value = mock_result
+        user_service.repository.session = MagicMock()
+        user_service.repository.session.return_value = AsyncMock()
+        user_service.repository.session.return_value.__aenter__.return_value = mock_session
+        historical_date = datetime(2024, 6, 1, 12, 0, 0, tzinfo=UTC)
+        users = await user_service.get_all_users(as_of=historical_date)
+        assert len(users) == 1
+        assert users[0].username == "testuser"
+
+    @pytest.mark.asyncio
     async def test_create_user_success(self, user_service: UserService) -> None:
         """Test successful user creation with full parameters.
 
