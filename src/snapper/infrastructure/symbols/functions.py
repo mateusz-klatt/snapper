@@ -484,6 +484,60 @@ def get_available_kraken_futures_symbols() -> list[str]:
     return sorted(mapper.native_to_kraken_futures_ws.keys())
 
 
+def native_to_kraken_equities_ws(native_symbol: str) -> str:
+    """Convert native symbol to Kraken Equities WebSocket format.
+
+    Converts dash-separated native format to dot-separated exchange format.
+    Falls back to direct dash→dot replacement for unmapped symbols.
+
+    Args:
+        native_symbol: Native symbol (e.g., ``CLM6-NYMEX``).
+
+    Returns:
+        Kraken Equities WS symbol (e.g., ``CLM6.NYMEX``).
+
+    Raises:
+        ValueError: If native symbol is not mapped to Kraken Equities.
+    """
+    mapper = _get_db_mapper()
+    try:
+        return mapper.native_to_kraken_equities_ws[native_symbol]
+    except KeyError as exc:
+        raise ValueError(f"Unknown native symbol: {native_symbol}") from exc
+
+
+def kraken_equities_ws_to_native(symbol: str) -> str:
+    """Convert Kraken Equities WebSocket symbol to native format.
+
+    Converts dot-separated exchange format to dash-separated native format.
+    Falls back to direct dot→dash replacement for unmapped symbols.
+
+    Args:
+        symbol: Kraken Equities WS symbol (e.g., ``CLM6.NYMEX``).
+
+    Returns:
+        Native symbol (e.g., ``CLM6-NYMEX``).
+
+    Raises:
+        ValueError: If Kraken Equities symbol is not recognized.
+    """
+    mapper = _get_db_mapper()
+    try:
+        return mapper.kraken_equities_ws_to_native[symbol]
+    except KeyError as exc:
+        raise ValueError(f"Unknown Kraken Equities WS symbol: {symbol}") from exc
+
+
+def get_available_kraken_equities_symbols() -> list[str]:
+    """Get all available native symbols that have Kraken Equities mappings.
+
+    Returns:
+        Sorted list of native symbols with Kraken Equities support.
+    """
+    mapper = _get_db_mapper()
+    return sorted(mapper.native_to_kraken_equities_ws.keys())
+
+
 def validate_symbol(symbol: str) -> bool:
     """Check if a native symbol is valid (has Kraken WebSocket mapping).
 
@@ -570,7 +624,7 @@ def get_available_polygon_symbols() -> list[str]:
 def get_available_symbols() -> list[str]:
     """Get all available native symbols across all exchanges.
 
-    Combines symbols from Kraken, Zonda, Walutomat, and Polygon.
+    Combines symbols from Kraken, Kraken Futures, Kraken Equities, Zonda, Walutomat, and Polygon.
 
     Returns:
         Sorted list of unique native symbols from all exchanges.
@@ -578,6 +632,7 @@ def get_available_symbols() -> list[str]:
     all_symbols: set[str] = set()
     all_symbols.update(get_available_kraken_symbols())
     all_symbols.update(get_available_kraken_futures_symbols())
+    all_symbols.update(get_available_kraken_equities_symbols())
     all_symbols.update(get_available_zonda_symbols())
     all_symbols.update(get_available_walutomat_symbols())
     all_symbols.update(get_available_polygon_symbols())

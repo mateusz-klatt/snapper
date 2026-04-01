@@ -207,6 +207,24 @@ class AppSettings:
         return self._get_db_setting("kraken_api_secret", "")
 
     @property
+    def kraken_futures_api_key(self) -> str:
+        """Return Kraken Futures API key from database settings.
+
+        Returns:
+            Kraken Futures API key string, empty if not configured.
+        """
+        return self._get_db_setting("kraken_futures_api_key", "")
+
+    @property
+    def kraken_futures_api_secret(self) -> str:
+        """Return Kraken Futures API secret from database settings.
+
+        Returns:
+            Kraken Futures API secret string, empty if not configured.
+        """
+        return self._get_db_setting("kraken_futures_api_secret", "")
+
+    @property
     def polygon_api_key(self) -> str:
         """Return Polygon.io API key from database settings.
 

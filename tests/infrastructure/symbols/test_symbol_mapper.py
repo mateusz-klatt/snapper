@@ -23,6 +23,7 @@ from snapper.data.models import SymbolAlias
 from snapper.infrastructure.symbols.functions import ccxt_to_kraken_websocket
 from snapper.infrastructure.symbols.functions import ccxt_to_native
 from snapper.infrastructure.symbols.functions import get_available_exchanges
+from snapper.infrastructure.symbols.functions import get_available_kraken_equities_symbols
 from snapper.infrastructure.symbols.functions import get_available_kraken_futures_symbols
 from snapper.infrastructure.symbols.functions import get_available_kraken_rest_symbols
 from snapper.infrastructure.symbols.functions import get_available_kraken_symbols
@@ -39,11 +40,13 @@ from snapper.infrastructure.symbols.functions import get_market_subscribe_exchan
 from snapper.infrastructure.symbols.functions import get_tradeable_symbols
 from snapper.infrastructure.symbols.functions import is_market_data_available
 from snapper.infrastructure.symbols.functions import is_tradeable
+from snapper.infrastructure.symbols.functions import kraken_equities_ws_to_native
 from snapper.infrastructure.symbols.functions import kraken_futures_ws_to_native
 from snapper.infrastructure.symbols.functions import kraken_rest_to_native
 from snapper.infrastructure.symbols.functions import kraken_websocket_to_ccxt
 from snapper.infrastructure.symbols.functions import kraken_websocket_to_native
 from snapper.infrastructure.symbols.functions import native_to_ccxt
+from snapper.infrastructure.symbols.functions import native_to_kraken_equities_ws
 from snapper.infrastructure.symbols.functions import native_to_kraken_futures_ws
 from snapper.infrastructure.symbols.functions import native_to_kraken_rest
 from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
@@ -1224,6 +1227,76 @@ class TestDatabaseSymbolMapperFunctions:
             assert result == expected
             assert result == expected
 
+    def test_get_available_kraken_equities_symbols(self, mock_global_mapper: MagicMock) -> None:
+        """Get sorted list of Kraken Equities native symbols.
+
+        Given: Mapper with Kraken Equities WS symbol mappings,
+        When: get_available_kraken_equities_symbols is called,
+        Then: Returns sorted list of native symbols.
+        """
+        mock_mapper = mock_global_mapper.return_value
+        mock_mapper.native_to_kraken_equities_ws = {
+            "CLM6-NYMEX": "CLM6.NYMEX",
+            "ESM6-CME": "ESM6.CME",
+        }
+        with patch("snapper.infrastructure.symbols.functions._get_db_mapper", mock_global_mapper):
+            result = get_available_kraken_equities_symbols()
+            assert result == ["CLM6-NYMEX", "ESM6-CME"]
+
+    def test_native_to_kraken_equities_ws(self, mock_global_mapper: MagicMock) -> None:
+        """Convert native symbol to Kraken Equities WS format.
+
+        Given: Mapper with equities WS forward mapping,
+        When: native_to_kraken_equities_ws is called,
+        Then: Returns exchange format symbol.
+        """
+        mock_mapper = mock_global_mapper.return_value
+        mock_mapper.native_to_kraken_equities_ws = {"CLM6-NYMEX": "CLM6.NYMEX"}
+        with patch("snapper.infrastructure.symbols.functions._get_db_mapper", mock_global_mapper):
+            assert native_to_kraken_equities_ws("CLM6-NYMEX") == "CLM6.NYMEX"
+
+    def test_native_to_kraken_equities_ws_unknown(self, mock_global_mapper: MagicMock) -> None:
+        """Raise ValueError for unknown native symbol.
+
+        Given: Mapper with no mapping for requested symbol,
+        When: native_to_kraken_equities_ws is called,
+        Then: Raises ValueError.
+        """
+        mock_mapper = mock_global_mapper.return_value
+        mock_mapper.native_to_kraken_equities_ws = {}
+        with (
+            patch("snapper.infrastructure.symbols.functions._get_db_mapper", mock_global_mapper),
+            pytest.raises(ValueError, match="Unknown native symbol"),
+        ):
+            native_to_kraken_equities_ws("INVALID")
+
+    def test_kraken_equities_ws_to_native(self, mock_global_mapper: MagicMock) -> None:
+        """Convert Kraken Equities WS symbol to native format.
+
+        Given: Mapper with equities WS reverse mapping,
+        When: kraken_equities_ws_to_native is called,
+        Then: Returns native format symbol.
+        """
+        mock_mapper = mock_global_mapper.return_value
+        mock_mapper.kraken_equities_ws_to_native = {"CLM6.NYMEX": "CLM6-NYMEX"}
+        with patch("snapper.infrastructure.symbols.functions._get_db_mapper", mock_global_mapper):
+            assert kraken_equities_ws_to_native("CLM6.NYMEX") == "CLM6-NYMEX"
+
+    def test_kraken_equities_ws_to_native_unknown(self, mock_global_mapper: MagicMock) -> None:
+        """Raise ValueError for unknown equities WS symbol.
+
+        Given: Mapper with no mapping for requested symbol,
+        When: kraken_equities_ws_to_native is called,
+        Then: Raises ValueError.
+        """
+        mock_mapper = mock_global_mapper.return_value
+        mock_mapper.kraken_equities_ws_to_native = {}
+        with (
+            patch("snapper.infrastructure.symbols.functions._get_db_mapper", mock_global_mapper),
+            pytest.raises(ValueError, match="Unknown Kraken Equities WS symbol"),
+        ):
+            kraken_equities_ws_to_native("INVALID")
+
     def test_get_available_symbols(self, mock_global_mapper: MagicMock) -> None:
         """Get combined sorted list of all symbols.
 
@@ -1245,12 +1318,25 @@ class TestDatabaseSymbolMapperFunctions:
                 return_value=["EUR-PLN", "USD-PLN"],
             ),
             patch(
+                "snapper.infrastructure.symbols.functions.get_available_kraken_equities_symbols",
+                return_value=["CLM6-NYMEX"],
+            ),
+            patch(
                 "snapper.infrastructure.symbols.functions.get_available_polygon_symbols",
                 return_value=["BTC-USD", "EUR-USD"],
             ),
         ):
             result = get_available_symbols()
-            expected = ["BTC-PLN", "BTC-USD", "ETH-PLN", "ETH-USD", "EUR-PLN", "EUR-USD", "USD-PLN"]
+            expected = [
+                "BTC-PLN",
+                "BTC-USD",
+                "CLM6-NYMEX",
+                "ETH-PLN",
+                "ETH-USD",
+                "EUR-PLN",
+                "EUR-USD",
+                "USD-PLN",
+            ]
             assert result == expected
 
 
@@ -1812,7 +1898,13 @@ class TestGetAvailableExchanges:
         Then: Returns live feed exchanges without paper or polygon.
         """
         result = get_market_subscribe_exchanges()
-        assert sorted(result) == ["kraken", "kraken_futures", "walutomat", "zonda"]
+        assert sorted(result) == [
+            "kraken",
+            "kraken_equities",
+            "kraken_futures",
+            "walutomat",
+            "zonda",
+        ]
         assert "paper" not in result
         assert "polygon" not in result
 
@@ -1824,7 +1916,14 @@ class TestGetAvailableExchanges:
         Then: Returns exchanges valid for market data, including polygon.
         """
         result = get_market_data_exchanges()
-        assert sorted(result) == ["kraken", "kraken_futures", "polygon", "walutomat", "zonda"]
+        assert sorted(result) == [
+            "kraken",
+            "kraken_equities",
+            "kraken_futures",
+            "polygon",
+            "walutomat",
+            "zonda",
+        ]
         assert "paper" not in result
 
     def test_market_subscribe_exchange_excludes_paper_and_polygon(self) -> None:

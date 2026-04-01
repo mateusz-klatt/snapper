@@ -44,6 +44,7 @@ class ExchangeEnum(StrEnum):
     PAPER = "paper"
     KRAKEN = "kraken"
     KRAKEN_FUTURES = "kraken_futures"
+    KRAKEN_EQUITIES = "kraken_equities"
     ZONDA = "zonda"
     WALUTOMAT = "walutomat"
     POLYGON = "polygon"
@@ -56,6 +57,8 @@ class AssetTypeEnum(StrEnum):
     FOREX = "forex"
     EQUITY = "equity"
     INDEX = "index"
+    COMMODITY = "commodity"
+    YIELD = "yield"
 
 
 class ExecutionModeEnum(StrEnum):
@@ -200,13 +203,18 @@ OrderExchange = Literal[
 """Exchanges capable of order execution (paper simulator + live venues)."""
 
 MarketSubscribeExchange = Literal[
-    ExchangeEnum.KRAKEN, ExchangeEnum.KRAKEN_FUTURES, ExchangeEnum.ZONDA, ExchangeEnum.WALUTOMAT
+    ExchangeEnum.KRAKEN,
+    ExchangeEnum.KRAKEN_FUTURES,
+    ExchangeEnum.KRAKEN_EQUITIES,
+    ExchangeEnum.ZONDA,
+    ExchangeEnum.WALUTOMAT,
 ]
 """Live market feed exchanges (no paper — paper replays from these)."""
 
 MarketDataExchange = Literal[
     ExchangeEnum.KRAKEN,
     ExchangeEnum.KRAKEN_FUTURES,
+    ExchangeEnum.KRAKEN_EQUITIES,
     ExchangeEnum.ZONDA,
     ExchangeEnum.WALUTOMAT,
     ExchangeEnum.POLYGON,
@@ -217,6 +225,7 @@ AllExchange = Literal[
     ExchangeEnum.PAPER,
     ExchangeEnum.KRAKEN,
     ExchangeEnum.KRAKEN_FUTURES,
+    ExchangeEnum.KRAKEN_EQUITIES,
     ExchangeEnum.ZONDA,
     ExchangeEnum.WALUTOMAT,
     ExchangeEnum.POLYGON,
@@ -261,7 +270,12 @@ UpsertResult = Literal["created", "updated", "unchanged"]
 """Outcome of an upsert operation: row was created, updated, or left unchanged."""
 
 AssetType = Literal[
-    AssetTypeEnum.CRYPTO, AssetTypeEnum.FOREX, AssetTypeEnum.EQUITY, AssetTypeEnum.INDEX
+    AssetTypeEnum.CRYPTO,
+    AssetTypeEnum.FOREX,
+    AssetTypeEnum.EQUITY,
+    AssetTypeEnum.INDEX,
+    AssetTypeEnum.COMMODITY,
+    AssetTypeEnum.YIELD,
 ]
 """Financial asset class category for symbol catalog entries."""
 

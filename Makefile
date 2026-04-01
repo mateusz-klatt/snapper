@@ -296,6 +296,8 @@ dev-frontend:
 
 run-static:
 	$(PYRUN) snapper update-kraken-symbols --force
+	$(PYRUN) snapper update-kraken-futures-symbols --force
+	$(PYRUN) snapper update-kraken-equities-symbols --force
 	$(PYRUN) snapper update-zonda-symbols --force
 	$(PYRUN) snapper update-walutomat-symbols --force
 	$(PYRUN) snapper update-polygon-symbols --force || true

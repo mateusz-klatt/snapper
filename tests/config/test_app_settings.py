@@ -87,6 +87,30 @@ class TestAppSettingsCredentialProperties:
         settings = AppSettings(bootstrap, settings_service=service)
         assert settings.kraken_api_secret == "test-secret"
 
+    def test_kraken_futures_api_key_returns_value(self) -> None:
+        """Verify kraken_futures_api_key returns configured value.
+
+        Given service with kraken_futures_api_key set,
+        When accessing settings.kraken_futures_api_key,
+        Then configured value is returned.
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        service = MockSettingsService({"kraken_futures_api_key": "futures-key"})
+        settings = AppSettings(bootstrap, settings_service=service)
+        assert settings.kraken_futures_api_key == "futures-key"
+
+    def test_kraken_futures_api_secret_returns_value(self) -> None:
+        """Verify kraken_futures_api_secret returns configured value.
+
+        Given service with kraken_futures_api_secret set,
+        When accessing settings.kraken_futures_api_secret,
+        Then configured value is returned.
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        service = MockSettingsService({"kraken_futures_api_secret": "futures-secret"})
+        settings = AppSettings(bootstrap, settings_service=service)
+        assert settings.kraken_futures_api_secret == "futures-secret"
+
     def test_polygon_api_key_returns_value(self) -> None:
         """Verify polygon_api_key returns configured value.
 

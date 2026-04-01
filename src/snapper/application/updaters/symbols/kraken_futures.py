@@ -67,6 +67,15 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
     Registered as one-shot task process with 6-hour update threshold.
     """
 
+    def __init__(self, update_threshold_hours: int = 6, force: bool = False) -> None:
+        """Initialize the instance.
+
+        Args:
+            update_threshold_hours: Hours between updates. Defaults to 6.
+            force: If True, bypass the update threshold check.
+        """
+        super().__init__(update_threshold_hours=update_threshold_hours, force=force)
+
     @staticmethod
     def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
         """Get default parameters.

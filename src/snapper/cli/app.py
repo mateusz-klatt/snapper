@@ -60,6 +60,8 @@ from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.updaters.historical.aggregates import PolygonAggregatesBackfillService
 from snapper.application.updaters.historical.grouped import PolygonGroupedDailyBackfillService
 from snapper.application.updaters.symbols.kraken import KrakenSymbolUpdaterService
+from snapper.application.updaters.symbols.kraken_equities import KrakenEquitiesSymbolUpdaterService
+from snapper.application.updaters.symbols.kraken_futures import KrakenFuturesSymbolUpdaterService
 from snapper.application.updaters.symbols.polygon import PolygonSymbolUpdaterService
 from snapper.application.updaters.symbols.walutomat import WalutomatSymbolUpdaterService
 from snapper.application.updaters.symbols.zonda import ZondaSymbolUpdaterService
@@ -612,6 +614,52 @@ def update_kraken_market_snapshot() -> None:
     except Exception as e:
         typer.echo(f"Error updating Kraken market snapshots: {e}")
         raise typer.Exit(code=1) from e
+
+
+@app.command(name="update-kraken-futures-symbols")
+def update_kraken_futures_symbols(
+    force: bool = typer.Option(False, "--force", "-f", help=_FORCE_UPDATE_HELP),
+) -> None:
+    """Sync Kraken Futures (crypto) symbol mappings from exchange API.
+
+    Args:
+        force: Force update even if recently updated.
+    """
+
+    async def run_futures_update() -> None:
+        updater = KrakenFuturesSymbolUpdaterService(force=force)
+        try:
+            typer.echo("Starting Kraken Futures symbol mapping update...")
+            await updater.start()
+            typer.echo("Kraken Futures symbol mappings updated successfully")
+        except Exception as e:
+            typer.echo(f"Error updating Kraken Futures symbol mappings: {e}")
+            raise typer.Exit(code=1) from e
+
+    asyncio.run(run_futures_update())
+
+
+@app.command(name="update-kraken-equities-symbols")
+def update_kraken_equities_symbols(
+    force: bool = typer.Option(False, "--force", "-f", help=_FORCE_UPDATE_HELP),
+) -> None:
+    """Sync Kraken Equities (FCM Futures) symbol mappings from API.
+
+    Args:
+        force: Force update even if recently updated.
+    """
+
+    async def run_equities_update() -> None:
+        updater = KrakenEquitiesSymbolUpdaterService(force=force)
+        try:
+            typer.echo("Starting Kraken Equities symbol mapping update...")
+            await updater.start()
+            typer.echo("Kraken Equities symbol mappings updated successfully")
+        except Exception as e:
+            typer.echo(f"Error updating Kraken Equities symbol mappings: {e}")
+            raise typer.Exit(code=1) from e
+
+    asyncio.run(run_equities_update())
 
 
 @app.command(name="update-zonda-symbols")

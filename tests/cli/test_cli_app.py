@@ -2781,6 +2781,98 @@ def test_update_kraken_market_snapshot_handles_exception(
     assert "Error updating Kraken market snapshots" in result.stdout
 
 
+def test_update_kraken_futures_symbols_runs_updater(
+    cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Test update-kraken-futures-symbols runs symbol updater.
+
+    Given: Mocked KrakenFuturesSymbolUpdaterService,
+    When: update-kraken-futures-symbols is invoked with --force,
+    Then: Updater is created with force=True and started.
+    """
+    started: list[bool] = []
+
+    class DummyUpdater:
+        def __init__(self, force: bool) -> None:
+            self.force = force
+
+        async def start(self) -> None:
+            started.append(self.force)
+
+    monkeypatch.setattr(app_module, "KrakenFuturesSymbolUpdaterService", DummyUpdater)
+    result = cli_runner.invoke(app, ["update-kraken-futures-symbols", "--force"])
+    assert result.exit_code == 0
+    assert started == [True]
+
+
+def test_update_kraken_futures_symbols_handles_exception(
+    cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Test update-kraken-futures-symbols handles updater errors.
+
+    Given: KrakenFuturesSymbolUpdaterService that raises,
+    When: update-kraken-futures-symbols is invoked,
+    Then: Returns exit code 1.
+    """
+
+    class DummyUpdater:
+        def __init__(self, force: bool) -> None:
+            self.force = force
+
+        async def start(self) -> None:
+            raise RuntimeError("futures error")
+
+    monkeypatch.setattr(app_module, "KrakenFuturesSymbolUpdaterService", DummyUpdater)
+    result = cli_runner.invoke(app, ["update-kraken-futures-symbols"])
+    assert result.exit_code == 1
+
+
+def test_update_kraken_equities_symbols_runs_updater(
+    cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Test update-kraken-equities-symbols runs symbol updater.
+
+    Given: Mocked KrakenEquitiesSymbolUpdaterService,
+    When: update-kraken-equities-symbols is invoked with --force,
+    Then: Updater is created with force=True and started.
+    """
+    started: list[bool] = []
+
+    class DummyUpdater:
+        def __init__(self, force: bool) -> None:
+            self.force = force
+
+        async def start(self) -> None:
+            started.append(self.force)
+
+    monkeypatch.setattr(app_module, "KrakenEquitiesSymbolUpdaterService", DummyUpdater)
+    result = cli_runner.invoke(app, ["update-kraken-equities-symbols", "--force"])
+    assert result.exit_code == 0
+    assert started == [True]
+
+
+def test_update_kraken_equities_symbols_handles_exception(
+    cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Test update-kraken-equities-symbols handles updater errors.
+
+    Given: KrakenEquitiesSymbolUpdaterService that raises,
+    When: update-kraken-equities-symbols is invoked,
+    Then: Returns exit code 1.
+    """
+
+    class DummyUpdater:
+        def __init__(self, force: bool) -> None:
+            self.force = force
+
+        async def start(self) -> None:
+            raise RuntimeError("equities error")
+
+    monkeypatch.setattr(app_module, "KrakenEquitiesSymbolUpdaterService", DummyUpdater)
+    result = cli_runner.invoke(app, ["update-kraken-equities-symbols"])
+    assert result.exit_code == 1
+
+
 def test_update_zonda_symbols_runs_updater(
     cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
