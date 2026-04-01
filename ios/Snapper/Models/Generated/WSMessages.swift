@@ -6,6 +6,7 @@ import Foundation
 enum CandleDataExchange: String, Codable, Sendable {
     case kraken
     case krakenFutures = "kraken_futures"
+    case krakenEquities = "kraken_equities"
     case zonda
     case walutomat
     case polygon
@@ -74,6 +75,7 @@ enum OrderRequestDataOrderType: String, Codable, Sendable {
 enum TickDataExchange: String, Codable, Sendable {
     case kraken
     case krakenFutures = "kraken_futures"
+    case krakenEquities = "kraken_equities"
     case zonda
     case walutomat
     case polygon
@@ -82,6 +84,7 @@ enum TickDataExchange: String, Codable, Sendable {
 enum TradeDataExchange: String, Codable, Sendable {
     case kraken
     case krakenFutures = "kraken_futures"
+    case krakenEquities = "kraken_equities"
     case zonda
     case walutomat
     case polygon

@@ -4754,7 +4754,7 @@ export interface Operations {
                 /** @description Instrument symbol */
                 instrument: string;
                 /** @description Exchange name */
-                exchange: "kraken" | "kraken_futures" | "zonda" | "walutomat" | "polygon";
+                exchange: "kraken" | "kraken_futures" | "kraken_equities" | "zonda" | "walutomat" | "polygon";
                 /** @description Timeframe */
                 timeframe: string;
                 /** @description Number of candles to return */

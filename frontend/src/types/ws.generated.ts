@@ -43,7 +43,7 @@ export type WebSocketMessages =
   | WSSubscriptionsListResponse
   | WSUnsubscribeRequest;
 export type Type = "candle";
-export type Exchange = "kraken" | "kraken_futures" | "zonda" | "walutomat" | "polygon";
+export type Exchange = "kraken" | "kraken_futures" | "kraken_equities" | "zonda" | "walutomat" | "polygon";
 export type Vwap = number | null;
 export type Trades = number | null;
 export type Type1 = "execution";
@@ -107,12 +107,12 @@ export type Type13 = "symbol_alias_update";
 export type Event1 = "symbol_aliases_updated";
 export type Action = "clear_cache";
 export type Type14 = "tick";
-export type Exchange9 = "kraken" | "kraken_futures" | "zonda" | "walutomat" | "polygon";
+export type Exchange9 = "kraken" | "kraken_futures" | "kraken_equities" | "zonda" | "walutomat" | "polygon";
 export type Bid = number | null;
 export type Ask = number | null;
 export type Last = number | null;
 export type Type15 = "trade";
-export type Exchange10 = "kraken" | "kraken_futures" | "zonda" | "walutomat" | "polygon";
+export type Exchange10 = "kraken" | "kraken_futures" | "kraken_equities" | "zonda" | "walutomat" | "polygon";
 export type ExecutedAt = string | null;
 export type Side4 = string | null;
 export type TradeId1 = string | null;
