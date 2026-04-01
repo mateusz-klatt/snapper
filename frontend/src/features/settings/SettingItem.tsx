@@ -116,6 +116,7 @@ const EditingView: React.FC<EditingViewProps> = ({
         <JsonEditor
           value={jsonValue}
           onChange={setJsonValue}
+          readOnly={readOnly}
           className='border border-dark-600 rounded-lg p-3 bg-dark-700'
         />
         <SaveCancelButtons
@@ -133,6 +134,7 @@ const EditingView: React.FC<EditingViewProps> = ({
       <textarea
         value={localValue}
         onChange={e => setLocalValue(e.target.value)}
+        readOnly={readOnly}
         className='w-full px-2 py-1.5 text-sm bg-alpine-50 border border-dark-600 rounded text-alpine-900 focus:outline-none focus:border-brand-500 resize-vertical min-h-[60px]'
         placeholder='Enter setting value...'
       />
