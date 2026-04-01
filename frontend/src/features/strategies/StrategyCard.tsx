@@ -113,6 +113,7 @@ interface StrategyCardProps {
   onStop?: () => void
   isStarting?: boolean
   isStopping?: boolean
+  readOnly?: boolean
 }
 
 export const StrategyCard: React.FC<Readonly<StrategyCardProps>> = React.memo(
@@ -126,6 +127,7 @@ export const StrategyCard: React.FC<Readonly<StrategyCardProps>> = React.memo(
     onStop,
     isStarting = false,
     isStopping = false,
+    readOnly = false,
   }) => {
     const [expanded, setExpanded] = useState(false)
     const isRunning = running || isStarting
@@ -297,11 +299,11 @@ export const StrategyCard: React.FC<Readonly<StrategyCardProps>> = React.memo(
             {showStopButton ? (
               <button
                 onClick={onStop}
-                disabled={isStopping || isStarting}
+                disabled={isStopping || isStarting || readOnly}
                 aria-label={`Stop ${displayName} strategy`}
                 className={clsx(
                   'flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors',
-                  isStopping || isStarting
+                  isStopping || isStarting || readOnly
                     ? 'bg-loss-400/20 text-loss-600 cursor-not-allowed'
                     : 'bg-loss-600 text-white hover:bg-loss-700 focus:outline-none focus:ring-2 focus:ring-loss-500'
                 )}
@@ -318,11 +320,11 @@ export const StrategyCard: React.FC<Readonly<StrategyCardProps>> = React.memo(
             ) : (
               <button
                 onClick={onStart}
-                disabled={isStarting || isStopping}
+                disabled={isStarting || isStopping || readOnly}
                 aria-label={`Start ${displayName} strategy`}
                 className={clsx(
                   'flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors',
-                  isStarting || isStopping
+                  isStarting || isStopping || readOnly
                     ? 'bg-accent-400/20 text-accent-300 cursor-not-allowed'
                     : 'bg-accent-600 text-white hover:bg-accent-700 focus:outline-none focus:ring-2 focus:ring-accent-500'
                 )}

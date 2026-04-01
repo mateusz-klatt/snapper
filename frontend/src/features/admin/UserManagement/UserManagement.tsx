@@ -5,7 +5,11 @@ import UserForm from './UserForm'
 import { useAuthStore } from '../../../stores/auth'
 import type { UserProfile } from '../../../types/api'
 
-const UserManagement: React.FC = () => {
+interface UserManagementProps {
+  readOnly?: boolean
+}
+
+const UserManagement: React.FC<UserManagementProps> = ({ readOnly }) => {
   const [showUserForm, setShowUserForm] = useState(false)
   const [editingUser, setEditingUser] = useState<UserProfile | undefined>(undefined)
   const { hasPermission } = useAuthStore()
@@ -39,12 +43,13 @@ const UserManagement: React.FC = () => {
 
   return (
     <div className='space-y-6'>
-      <UserList onCreateUser={handleCreateUser} onEditUser={handleEditUser} />
+      <UserList onCreateUser={handleCreateUser} onEditUser={handleEditUser} readOnly={readOnly} />
       <UserForm
         key={editingUser?.username ?? 'new'}
         user={editingUser}
         open={showUserForm}
         onClose={handleCloseForm}
+        readOnly={readOnly}
       />
     </div>
   )

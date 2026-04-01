@@ -9,9 +9,10 @@ import type { UserProfile } from '../../../types/api'
 interface UserListProps {
   onCreateUser: () => void
   onEditUser: (user: UserProfile) => void
+  readOnly?: boolean
 }
 
-const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser }) => {
+const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser, readOnly }) => {
   const [includeInactive, setIncludeInactive] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
   const [userToDelete, setUserToDelete] = useState<UserProfile | null>(null)
@@ -117,7 +118,11 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
             {includeInactive ? <EyeOff className='w-4 h-4' /> : <Eye className='w-4 h-4' />}
             <span>{includeInactive ? 'Hide inactive' : 'Show inactive'}</span>
           </Button>
-          <Button onClick={onCreateUser} className='flex items-center space-x-2'>
+          <Button
+            onClick={onCreateUser}
+            disabled={readOnly}
+            className='flex items-center space-x-2'
+          >
             <UserPlus className='w-4 h-4' />
             <span>Add User</span>
           </Button>
@@ -147,6 +152,7 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
                   variant='secondary'
                   size='sm'
                   onClick={() => onEditUser(user)}
+                  disabled={readOnly}
                   className='text-brand-600 hover:text-brand-900'
                 >
                   <Edit className='w-4 h-4' />
@@ -155,7 +161,7 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
                   variant='danger'
                   size='sm'
                   onClick={() => handleDeleteUser(user)}
-                  disabled={deleteUserMutation.isPending}
+                  disabled={deleteUserMutation.isPending || readOnly}
                   className='text-loss-600 hover:text-loss-900'
                 >
                   <Trash2 className='w-4 h-4' />
@@ -241,6 +247,7 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
                       variant='secondary'
                       size='sm'
                       onClick={() => onEditUser(user)}
+                      disabled={readOnly}
                       className='text-brand-600 hover:text-brand-900'
                     >
                       <Edit className='w-4 h-4' />
@@ -249,7 +256,7 @@ const UserList: React.FC<Readonly<UserListProps>> = ({ onCreateUser, onEditUser 
                       variant='danger'
                       size='sm'
                       onClick={() => handleDeleteUser(user)}
-                      disabled={deleteUserMutation.isPending}
+                      disabled={deleteUserMutation.isPending || readOnly}
                       className='text-loss-600 hover:text-loss-900'
                     >
                       <Trash2 className='w-4 h-4' />

@@ -2,6 +2,16 @@ import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { ConfirmDialog } from './ConfirmDialog'
 
+vi.mock('../../hooks/useIsReadOnly', () => ({
+  useIsReadOnly: vi.fn(() => false),
+}))
+vi.mock('react-hot-toast', () => ({
+  default: { error: vi.fn(), success: vi.fn() },
+}))
+
+import { useIsReadOnly } from '../../hooks/useIsReadOnly'
+import toast from 'react-hot-toast'
+
 describe('ConfirmDialog', () => {
   const defaultProps = {
     open: true,
@@ -81,5 +91,16 @@ describe('ConfirmDialog', () => {
     const confirmButton = screen.getByText('Delete')
 
     expect(confirmButton.className).toContain('bg-loss-600')
+  })
+  it('blocks confirm action in read-only mode and shows toast', () => {
+    vi.mocked(useIsReadOnly).mockReturnValue(true)
+    const onConfirm = vi.fn()
+
+    render(<ConfirmDialog {...defaultProps} onConfirm={onConfirm} />)
+    fireEvent.click(screen.getByText('Confirm'))
+
+    expect(onConfirm).not.toHaveBeenCalled()
+    expect(toast.error).toHaveBeenCalledWith('Action blocked — time-travel mode is read-only')
+    vi.mocked(useIsReadOnly).mockReturnValue(false)
   })
 })

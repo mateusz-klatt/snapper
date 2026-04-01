@@ -170,6 +170,7 @@ export const Settings = () => {
                 onUpdate={updateSetting}
                 onDelete={deleteSetting}
                 isSaving={savingKey === setting.key}
+                readOnly={readOnly}
               />
             ))
           )}

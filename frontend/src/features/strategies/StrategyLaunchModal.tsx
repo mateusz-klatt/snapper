@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { Modal } from '../../components/ui/Modal'
 import type { AvailableProcess } from '../../types/api'
 import { useProcessSchema } from '../../hooks/queries'
+import { useIsReadOnly } from '../../hooks/useIsReadOnly'
 
 export interface StrategyLaunchData {
   template: string
@@ -33,6 +34,7 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
   onSubmit,
   isSubmitting = false,
 }) => {
+  const readOnly = useIsReadOnly()
   const sortedTemplates = useMemo(
     () => [...templates].sort((a, b) => a.name.localeCompare(b.name)),
     [templates]
@@ -309,6 +311,7 @@ export const StrategyLaunchModal: React.FC<Readonly<StrategyLaunchModalProps>> =
             <button
               type='submit'
               disabled={
+                readOnly ||
                 isSubmitting ||
                 processSchema.isLoading ||
                 !!processSchema.error ||

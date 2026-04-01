@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Modal } from '../../components/ui/Modal'
 import { ThemeSelect } from '../../components/ThemeSelect'
+import { useIsReadOnly } from '../../hooks/useIsReadOnly'
 
 interface AddSettingModalProps {
   open: boolean
@@ -15,6 +16,7 @@ export const AddSettingModal = ({
   onSave,
   existingCategories,
 }: AddSettingModalProps) => {
+  const readOnly = useIsReadOnly()
   const [key, setKey] = useState('')
   const [value, setValue] = useState('')
   const [category, setCategory] = useState('')
@@ -165,7 +167,7 @@ export const AddSettingModal = ({
           </button>
           <button
             onClick={handleSave}
-            disabled={saving}
+            disabled={saving || readOnly}
             className='px-4 py-2 text-sm bg-brand-600 hover:bg-brand-700 disabled:bg-brand-800 disabled:cursor-not-allowed text-white rounded-lg transition-colors'
           >
             {saving ? 'Creating...' : 'Create Setting'}

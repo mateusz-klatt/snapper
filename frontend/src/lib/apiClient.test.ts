@@ -1801,5 +1801,21 @@ describe('cacheWsTicketFromResponse', () => {
       apiClient.setTimeTravelAsOf('2026-01-01T00:00:00Z')
       expect(apiClient.getTimeTravelAsOf()).toBe('2026-01-01T00:00:00Z')
     })
+    it('blocks DELETE requests when time-traveling via request()', async () => {
+      apiClient.setTimeTravelAsOf('2026-03-15T10:00:00Z')
+
+      await expect(apiClient.request('/api/settings/foo', { method: 'DELETE' })).rejects.toThrow(
+        'Write operations are disabled in time-travel mode'
+      )
+      expect(mockFetch).not.toHaveBeenCalled()
+    })
+    it('blocks PUT requests when time-traveling via request()', async () => {
+      apiClient.setTimeTravelAsOf('2026-03-15T10:00:00Z')
+
+      await expect(
+        apiClient.request('/api/settings/foo', { method: 'PUT', body: '{}' })
+      ).rejects.toThrow('Write operations are disabled in time-travel mode')
+      expect(mockFetch).not.toHaveBeenCalled()
+    })
   })
 })

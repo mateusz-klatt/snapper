@@ -152,7 +152,8 @@ export const ProcessControlCard: React.FC<Readonly<ProcessControlCardProps>> = (
           {isRunning && (
             <button
               onClick={onRestart}
-              className='flex-1 px-4 py-2 rounded-md text-sm font-medium bg-info-600 text-white hover:bg-info-700 transition-colors'
+              disabled={readOnly}
+              className='flex-1 px-4 py-2 rounded-md text-sm font-medium bg-info-600 text-white hover:bg-info-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed'
             >
               Restart
             </button>

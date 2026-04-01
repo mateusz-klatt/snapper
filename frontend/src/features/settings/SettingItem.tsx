@@ -135,6 +135,7 @@ interface DisplayViewProps {
   readonly setIsEditing: (v: boolean) => void
   readonly onDelete: (key: string) => Promise<void>
   readonly isSaving: boolean
+  readonly readOnly?: boolean
 }
 
 const DisplayView: React.FC<DisplayViewProps> = ({
@@ -144,6 +145,7 @@ const DisplayView: React.FC<DisplayViewProps> = ({
   setIsEditing,
   onDelete,
   isSaving,
+  readOnly,
 }) => {
   const [isCollapsed, setIsCollapsed] = useState(true)
   const isJson = isJsonString(setting.value) && !isSensitive(setting.key)
@@ -219,13 +221,15 @@ const DisplayView: React.FC<DisplayViewProps> = ({
           <div className='flex gap-2'>
             <button
               onClick={() => setIsEditing(true)}
-              className='px-3 py-1 text-xs border border-dark-600 bg-alpine-50 hover:bg-muted-200 text-alpine-900 rounded transition-colors'
+              disabled={readOnly}
+              className='px-3 py-1 text-xs border border-dark-600 bg-alpine-50 hover:bg-muted-200 text-alpine-900 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed'
             >
               Edit
             </button>
             <button
               onClick={() => setShowDeleteConfirm(true)}
-              className='px-3 py-1 text-xs bg-loss-50 hover:bg-loss-800 text-loss-700 hover:text-white rounded transition-colors'
+              disabled={readOnly}
+              className='px-3 py-1 text-xs bg-loss-50 hover:bg-loss-800 text-loss-700 hover:text-white rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed'
             >
               Delete
             </button>
@@ -250,9 +254,16 @@ interface SettingItemProps {
   ) => Promise<void>
   onDelete: (key: string) => Promise<void>
   isSaving: boolean
+  readOnly?: boolean
 }
 
-export const SettingItem = ({ setting, onUpdate, onDelete, isSaving }: SettingItemProps) => {
+export const SettingItem = ({
+  setting,
+  onUpdate,
+  onDelete,
+  isSaving,
+  readOnly,
+}: SettingItemProps) => {
   const [localValue, setLocalValue] = useState(setting.value)
   const [isEditing, setIsEditing] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
@@ -349,6 +360,7 @@ export const SettingItem = ({ setting, onUpdate, onDelete, isSaving }: SettingIt
             setIsEditing={setIsEditing}
             onDelete={onDelete}
             isSaving={isSaving}
+            readOnly={readOnly}
           />
         )}
       </div>

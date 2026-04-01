@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 import { ChevronDown, ChevronUp, Shield, Users, Eye } from 'lucide-react'
 import { RESOURCE_ACCESS } from '../../types/permissions.generated'
+import { useIsReadOnly } from '../../hooks/useIsReadOnly'
 import UserManagement from './UserManagement/UserManagement'
 
 const TAB_DISPLAY_NAMES: Record<string, string> = {
@@ -23,6 +24,7 @@ const ROLE_PERMISSIONS = Object.entries(TAB_DISPLAY_NAMES).map(([tabId, label]) 
 }))
 
 export const Admin: React.FC = () => {
+  const readOnly = useIsReadOnly()
   const [showRoleInfo, setShowRoleInfo] = useState(false)
 
   return (
@@ -125,7 +127,7 @@ export const Admin: React.FC = () => {
           </div>
         )}
       </div>
-      <UserManagement />
+      <UserManagement readOnly={readOnly} />
     </div>
   )
 }

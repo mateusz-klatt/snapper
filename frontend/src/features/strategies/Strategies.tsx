@@ -13,6 +13,7 @@ import {
 import { useWebSocketStore } from '../../stores/websocket'
 import { useAppStore } from '../../stores/app'
 import { useAuth } from '../../stores/auth'
+import { useIsReadOnly } from '../../hooks/useIsReadOnly'
 import { Permission } from '../../types/permissions.generated'
 import { StrategyLaunchModal, type StrategyLaunchData } from './StrategyLaunchModal'
 import { StrategyCard, type FeedHealth, type HealthStatus } from './StrategyCard'
@@ -22,6 +23,7 @@ import { useConfirmDialog } from '../../hooks/useConfirmDialog'
 
 export const Strategies: React.FC = () => {
   const { hasPermission } = useAuth()
+  const readOnly = useIsReadOnly()
   const canManage = hasPermission(Permission.MANAGE_PROCESSES)
   const [strategyModalOpen, setStrategyModalOpen] = useState(false)
   const [activeStrategyProcess, setActiveStrategyProcess] = useState<string | null>(null)
@@ -261,7 +263,7 @@ export const Strategies: React.FC = () => {
           {canManage && (
             <button
               onClick={() => setStrategyModalOpen(true)}
-              disabled={createProcessConfig.isPending || startProcess.isPending}
+              disabled={createProcessConfig.isPending || startProcess.isPending || readOnly}
               className='px-4 py-2 bg-brand-600 text-white text-sm font-medium rounded-md hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed'
             >
               {createProcessConfig.isPending ? 'Saving…' : 'Register Strategy'}
@@ -315,6 +317,7 @@ export const Strategies: React.FC = () => {
                 onStop={canManage ? () => requestStopStrategy(strategy.name) : undefined}
                 isStarting={startProcess.isPending && activeStrategyProcess === strategy.name}
                 isStopping={stopProcess.isPending && activeStrategyProcess === strategy.name}
+                readOnly={readOnly}
               />
             ))}
           </div>
@@ -347,7 +350,8 @@ export const Strategies: React.FC = () => {
             {canManage && (
               <button
                 onClick={() => setStrategyModalOpen(true)}
-                className='mt-3 px-4 py-2 bg-brand-600 text-white text-sm font-medium rounded-md hover:bg-brand-700'
+                disabled={readOnly}
+                className='mt-3 px-4 py-2 bg-brand-600 text-white text-sm font-medium rounded-md hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed'
               >
                 Register Strategy
               </button>

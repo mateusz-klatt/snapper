@@ -148,6 +148,16 @@ class APIClient {
     throw new Error('Access denied')
   }
   public async request(url: string, options: RequestOptions = {}): Promise<Response> {
+    const method = (options.method ?? 'GET').toUpperCase()
+
+    if (
+      this.timeTravelAsOf &&
+      MUTATING_METHODS.has(method) &&
+      !APIClient.AUTH_PATHS.has(url.split('?')[0])
+    ) {
+      throw new Error('Write operations are disabled in time-travel mode')
+    }
+
     const { skipCSRF = false, skipRetry = false, ...fetchOptions } = options
     const headers = new Headers(fetchOptions.headers)
 
@@ -206,10 +216,6 @@ class APIClient {
     '/api/auth/logout',
   ])
   public async post(url: string, body?: unknown, options: RequestOptions = {}): Promise<Response> {
-    if (this.timeTravelAsOf && !APIClient.AUTH_PATHS.has(url.split('?')[0])) {
-      throw new Error('Write operations are disabled in time-travel mode')
-    }
-
     return this.request(url, {
       ...options,
       method: 'POST',

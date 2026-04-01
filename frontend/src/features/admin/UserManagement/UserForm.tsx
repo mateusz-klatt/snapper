@@ -11,9 +11,10 @@ interface UserFormProps {
   user?: UserProfile
   open: boolean
   onClose: () => void
+  readOnly?: boolean
 }
 
-const UserForm: React.FC<Readonly<UserFormProps>> = ({ user, open, onClose }) => {
+const UserForm: React.FC<Readonly<UserFormProps>> = ({ user, open, onClose, readOnly }) => {
   const [formData, setFormData] = useState<{
     username: string
     password: string
@@ -335,7 +336,7 @@ const UserForm: React.FC<Readonly<UserFormProps>> = ({ user, open, onClose }) =>
             <X className='w-3.5 h-3.5' />
             Cancel
           </Button>
-          <Button type='submit' variant='primary' size='sm' loading={isPending}>
+          <Button type='submit' variant='primary' size='sm' loading={isPending} disabled={readOnly}>
             <Save className='w-3.5 h-3.5' />
             {isEditing ? 'Save Changes' : 'Create User'}
           </Button>

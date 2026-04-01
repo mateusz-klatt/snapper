@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { Modal } from '../../components/ui/Modal'
+import { useIsReadOnly } from '../../hooks/useIsReadOnly'
 
 interface ExecutionModeModalProps {
   open: boolean
@@ -16,6 +17,7 @@ export const ExecutionModeModal: React.FC<Readonly<ExecutionModeModalProps>> = (
   componentName,
   description,
 }) => {
+  const readOnly = useIsReadOnly()
   const [executionMode, setExecutionMode] = useState<'thread' | 'process'>('thread')
 
   useEffect(() => {
@@ -91,7 +93,8 @@ export const ExecutionModeModal: React.FC<Readonly<ExecutionModeModalProps>> = (
           </button>
           <button
             onClick={handleStart}
-            className='px-4 py-2 bg-primary-600 text-white rounded hover:bg-primary-700 transition-colors'
+            disabled={readOnly}
+            className='px-4 py-2 bg-primary-600 text-white rounded hover:bg-primary-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed'
           >
             Start {componentName}
           </button>
