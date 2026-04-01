@@ -187,8 +187,10 @@ setup-full: system-deps setup
 py-refresh:
 	$(info Clearing Poetry cache...)
 	-$(PYRUN) poetry cache clear --all -n .
-	$(info Refreshing Python dependencies...)
-	$(PYRUN) poetry up --latest || $(PYRUN) poetry update
+	$(info Bumping Python dependency constraints to latest available versions...)
+	-$(PYRUN) poetry up --latest
+	$(info Refreshing Python lock file within the current constraints...)
+	$(PYRUN) poetry update
 	$(info Python dependencies refreshed!)
 
 refresh: py-refresh ui-refresh pre-refresh
