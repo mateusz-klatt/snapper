@@ -797,6 +797,44 @@ def test_update_kraken_market_snapshot_error(
     assert "Error updating Kraken market snapshots" in result.stdout
 
 
+def test_update_kraken_futures_market_snapshot_error(
+    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+) -> None:
+    """Test update-kraken-futures-market-snapshot handles errors gracefully.
+
+    Given a run_kraken_futures_snapshot_update function that raises an error,
+    When the update-kraken-futures-market-snapshot command is invoked,
+    Then it returns exit code 1 with an error message.
+    """
+
+    def _raise_snap() -> None:
+        raise RuntimeError("futures_snap")
+
+    monkeypatch.setattr(app_module, "run_kraken_futures_snapshot_update", _raise_snap)
+    result = cli_runner.invoke(app, ["update-kraken-futures-market-snapshot"])
+    assert result.exit_code == 1
+    assert "Error updating Kraken Futures market snapshots" in result.stdout
+
+
+def test_update_kraken_equities_market_snapshot_error(
+    monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+) -> None:
+    """Test update-kraken-equities-market-snapshot handles errors gracefully.
+
+    Given a run_kraken_equities_snapshot_update function that raises an error,
+    When the update-kraken-equities-market-snapshot command is invoked,
+    Then it returns exit code 1 with an error message.
+    """
+
+    def _raise_snap() -> None:
+        raise RuntimeError("equities_snap")
+
+    monkeypatch.setattr(app_module, "run_kraken_equities_snapshot_update", _raise_snap)
+    result = cli_runner.invoke(app, ["update-kraken-equities-market-snapshot"])
+    assert result.exit_code == 1
+    assert "Error updating Kraken Equities market snapshots" in result.stdout
+
+
 def test_update_zonda_market_snapshot_error(
     monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
 ) -> None:
@@ -2920,6 +2958,50 @@ def test_update_zonda_market_snapshot_runs_service(
     assert result.exit_code == 0
     assert "Updating Zonda market snapshots" in result.stdout
     assert "Zonda market snapshot update complete" in result.stdout
+    assert captured["run"] is True
+
+
+def test_update_kraken_futures_market_snapshot_runs_service(
+    cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Test update-kraken-futures-market-snapshot runs service.
+
+    Given: Mocked run_kraken_futures_snapshot_update function,
+    When: update-kraken-futures-market-snapshot is invoked,
+    Then: Service runs and completes.
+    """
+    captured: dict[str, bool] = {}
+
+    def mock_run() -> None:
+        captured["run"] = True
+
+    monkeypatch.setattr(app_module, "run_kraken_futures_snapshot_update", mock_run)
+    result = cli_runner.invoke(app, ["update-kraken-futures-market-snapshot"])
+    assert result.exit_code == 0
+    assert "Updating Kraken Futures market snapshots" in result.stdout
+    assert "Kraken Futures market snapshot update complete" in result.stdout
+    assert captured["run"] is True
+
+
+def test_update_kraken_equities_market_snapshot_runs_service(
+    cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Test update-kraken-equities-market-snapshot runs service.
+
+    Given: Mocked run_kraken_equities_snapshot_update function,
+    When: update-kraken-equities-market-snapshot is invoked,
+    Then: Service runs and completes.
+    """
+    captured: dict[str, bool] = {}
+
+    def mock_run() -> None:
+        captured["run"] = True
+
+    monkeypatch.setattr(app_module, "run_kraken_equities_snapshot_update", mock_run)
+    result = cli_runner.invoke(app, ["update-kraken-equities-market-snapshot"])
+    assert result.exit_code == 0
+    assert "Updating Kraken Equities market snapshots" in result.stdout
+    assert "Kraken Equities market snapshot update complete" in result.stdout
     assert captured["run"] is True
 
 

@@ -85,6 +85,8 @@ from snapper.data.repository import close_and_insert
 from snapper.data.repository import where_active_now
 from snapper.data.seed.loader import run_seed
 from snapper.infrastructure.market_data.kraken import run_snapshot_update
+from snapper.infrastructure.market_data.kraken_equities import run_kraken_equities_snapshot_update
+from snapper.infrastructure.market_data.kraken_futures import run_kraken_futures_snapshot_update
 from snapper.infrastructure.market_data.walutomat import run_walutomat_snapshot_update
 from snapper.infrastructure.market_data.zonda import run_zonda_snapshot_update
 from snapper.infrastructure.security.encryption import SettingsEncryptionService
@@ -613,6 +615,30 @@ def update_kraken_market_snapshot() -> None:
         typer.echo("Kraken market snapshot update complete!")
     except Exception as e:
         typer.echo(f"Error updating Kraken market snapshots: {e}")
+        raise typer.Exit(code=1) from e
+
+
+@app.command(name="update-kraken-futures-market-snapshot")
+def update_kraken_futures_market_snapshot() -> None:
+    """Update Kraken Futures market snapshots with current prices."""
+    typer.echo("Updating Kraken Futures market snapshots...")
+    try:
+        run_kraken_futures_snapshot_update()
+        typer.echo("Kraken Futures market snapshot update complete!")
+    except Exception as e:
+        typer.echo(f"Error updating Kraken Futures market snapshots: {e}")
+        raise typer.Exit(code=1) from e
+
+
+@app.command(name="update-kraken-equities-market-snapshot")
+def update_kraken_equities_market_snapshot() -> None:
+    """Update Kraken Equities market snapshots with current prices."""
+    typer.echo("Updating Kraken Equities market snapshots...")
+    try:
+        run_kraken_equities_snapshot_update()
+        typer.echo("Kraken Equities market snapshot update complete!")
+    except Exception as e:
+        typer.echo(f"Error updating Kraken Equities market snapshots: {e}")
         raise typer.Exit(code=1) from e
 
 

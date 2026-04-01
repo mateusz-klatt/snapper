@@ -302,6 +302,8 @@ run-static:
 	$(PYRUN) snapper update-walutomat-symbols --force
 	$(PYRUN) snapper update-polygon-symbols --force || true
 	$(PYRUN) snapper update-kraken-market-snapshot
+	$(PYRUN) snapper update-kraken-futures-market-snapshot
+	$(PYRUN) snapper update-kraken-equities-market-snapshot
 	$(PYRUN) snapper update-zonda-market-snapshot
 	$(PYRUN) snapper update-walutomat-market-snapshot
 
