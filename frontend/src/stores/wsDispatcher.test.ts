@@ -206,7 +206,7 @@ describe('WSDispatcher', () => {
         },
       ]
 
-      queryClient.setQueryData(['candles', 'BTC-USD', 'kraken', '1m'], existingCandles)
+      queryClient.setQueryData(['candles', 'BTC-USD', 'kraken', '1m', null], existingCandles)
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
@@ -229,7 +229,13 @@ describe('WSDispatcher', () => {
       const candleHandler = messageHandlers.get('candle')
 
       candleHandler?.(candleMessage)
-      const cached = queryClient.getQueryData<unknown[]>(['candles', 'BTC-USD', 'kraken', '1m'])
+      const cached = queryClient.getQueryData<unknown[]>([
+        'candles',
+        'BTC-USD',
+        'kraken',
+        '1m',
+        null,
+      ])
 
       expect(cached).toHaveLength(1)
       expect(cached?.[0]).toMatchObject({ close: 50500, volume: 100 })
@@ -250,7 +256,7 @@ describe('WSDispatcher', () => {
         },
       ]
 
-      queryClient.setQueryData(['orders', undefined], existingOrders)
+      queryClient.setQueryData(['orders', undefined, null], existingOrders)
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
@@ -275,7 +281,11 @@ describe('WSDispatcher', () => {
       const orderHandler = messageHandlers.get('order')
 
       orderHandler?.(orderMessage)
-      const cached = queryClient.getQueryData<{ client_order_id: string }[]>(['orders', undefined])
+      const cached = queryClient.getQueryData<{ client_order_id: string }[]>([
+        'orders',
+        undefined,
+        null,
+      ])
 
       expect(cached).toHaveLength(2)
       expect(cached?.[0]?.client_order_id).toBe('client-1')
@@ -296,7 +306,7 @@ describe('WSDispatcher', () => {
         },
       ]
 
-      queryClient.setQueryData(['orders', undefined], existingOrders)
+      queryClient.setQueryData(['orders', undefined, null], existingOrders)
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
@@ -324,6 +334,7 @@ describe('WSDispatcher', () => {
       const cached = queryClient.getQueryData<{ client_order_id: string; status: string }[]>([
         'orders',
         undefined,
+        null,
       ])
 
       expect(cached).toHaveLength(1)
@@ -346,7 +357,7 @@ describe('WSDispatcher', () => {
         },
       ]
 
-      queryClient.setQueryData(['executions', undefined], existingExecs)
+      queryClient.setQueryData(['executions', undefined, null], existingExecs)
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
@@ -375,6 +386,7 @@ describe('WSDispatcher', () => {
       const cached = queryClient.getQueryData<{ client_order_id: string }[]>([
         'executions',
         undefined,
+        null,
       ])
 
       expect(cached).toHaveLength(2)
@@ -398,7 +410,7 @@ describe('WSDispatcher', () => {
         },
       ]
 
-      queryClient.setQueryData(['executions', undefined], existingExecs)
+      queryClient.setQueryData(['executions', undefined, null], existingExecs)
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
@@ -424,7 +436,7 @@ describe('WSDispatcher', () => {
       const execHandler = messageHandlers.get('execution')
 
       execHandler?.(execMessage)
-      const cached = queryClient.getQueryData<unknown[]>(['executions', undefined])
+      const cached = queryClient.getQueryData<unknown[]>(['executions', undefined, null])
 
       expect(cached).toHaveLength(1)
     })
@@ -442,7 +454,7 @@ describe('WSDispatcher', () => {
         },
       ]
 
-      queryClient.setQueryData(['signals', undefined, 50, undefined, 24], existingSignals)
+      queryClient.setQueryData(['signals', undefined, 50, undefined, 24, null], existingSignals)
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
@@ -470,6 +482,7 @@ describe('WSDispatcher', () => {
         50,
         undefined,
         24,
+        null,
       ])
 
       expect(cached).toHaveLength(2)
@@ -490,7 +503,7 @@ describe('WSDispatcher', () => {
         },
       ]
 
-      queryClient.setQueryData(['signals', undefined, 50, undefined, 24], existingSignals)
+      queryClient.setQueryData(['signals', undefined, 50, undefined, 24, null], existingSignals)
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
@@ -512,7 +525,14 @@ describe('WSDispatcher', () => {
       const signalHandler = messageHandlers.get('signal')
 
       signalHandler?.(signalMessage)
-      const cached = queryClient.getQueryData<unknown[]>(['signals', undefined, 50, undefined, 24])
+      const cached = queryClient.getQueryData<unknown[]>([
+        'signals',
+        undefined,
+        50,
+        undefined,
+        24,
+        null,
+      ])
 
       expect(cached).toHaveLength(1)
     })
@@ -535,7 +555,7 @@ describe('WSDispatcher', () => {
         },
       ]
 
-      queryClient.setQueryData(['candles', 'BTC-USD', 'kraken', '1m'], existingCandles)
+      queryClient.setQueryData(['candles', 'BTC-USD', 'kraken', '1m', null], existingCandles)
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
@@ -558,7 +578,13 @@ describe('WSDispatcher', () => {
       const candleHandler = messageHandlers.get('candle')
 
       candleHandler?.(candleMessage)
-      const cached = queryClient.getQueryData<unknown[]>(['candles', 'BTC-USD', 'kraken', '1m'])
+      const cached = queryClient.getQueryData<unknown[]>([
+        'candles',
+        'BTC-USD',
+        'kraken',
+        '1m',
+        null,
+      ])
 
       expect(cached).toHaveLength(2)
     })
@@ -577,7 +603,7 @@ describe('WSDispatcher', () => {
         trades: null,
       }))
 
-      queryClient.setQueryData(['candles', 'BTC-USD', 'kraken', '1m'], existingCandles)
+      queryClient.setQueryData(['candles', 'BTC-USD', 'kraken', '1m', null], existingCandles)
       const dispatcher = new WSDispatcher({ queryClient, maxCandles: 5 })
 
       dispatcher.attach(mockWsClient)
@@ -605,6 +631,7 @@ describe('WSDispatcher', () => {
         'BTC-USD',
         'kraken',
         '1m',
+        null,
       ])
 
       expect(cached).toHaveLength(5)
@@ -686,7 +713,7 @@ describe('WSDispatcher', () => {
         },
       ]
 
-      queryClient.setQueryData(['candles', 'BTC-USD', 'kraken', '1m'], existingCandles)
+      queryClient.setQueryData(['candles', 'BTC-USD', 'kraken', '1m', null], existingCandles)
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
@@ -709,7 +736,13 @@ describe('WSDispatcher', () => {
       const candleHandler = messageHandlers.get('candle')
 
       candleHandler?.(candleMessage)
-      const cached = queryClient.getQueryData<unknown[]>(['candles', 'BTC-USD', 'kraken', '1m'])
+      const cached = queryClient.getQueryData<unknown[]>([
+        'candles',
+        'BTC-USD',
+        'kraken',
+        '1m',
+        null,
+      ])
 
       expect(cached).toHaveLength(1)
       expect(cached?.[0]).toMatchObject({ close: 49500 })
@@ -731,7 +764,7 @@ describe('WSDispatcher', () => {
         },
       ]
 
-      queryClient.setQueryData(['candles', 'BTC-USD', 'kraken', '1m'], existingCandles)
+      queryClient.setQueryData(['candles', 'BTC-USD', 'kraken', '1m', null], existingCandles)
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
@@ -759,13 +792,14 @@ describe('WSDispatcher', () => {
         'BTC-USD',
         'kraken',
         '1m',
+        null,
       ])
 
       expect(cached).toHaveLength(2)
       expect(cached?.[1]?.open_at).toBeDefined()
     })
     it('candle message handles empty existing cache array', () => {
-      queryClient.setQueryData(['candles', 'BTC-USD', 'kraken', '1m'], [])
+      queryClient.setQueryData(['candles', 'BTC-USD', 'kraken', '1m', null], [])
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
@@ -788,7 +822,13 @@ describe('WSDispatcher', () => {
       const candleHandler = messageHandlers.get('candle')
 
       candleHandler?.(candleMessage)
-      const cached = queryClient.getQueryData<unknown[]>(['candles', 'BTC-USD', 'kraken', '1m'])
+      const cached = queryClient.getQueryData<unknown[]>([
+        'candles',
+        'BTC-USD',
+        'kraken',
+        '1m',
+        null,
+      ])
 
       expect(cached).toHaveLength(1)
     })
@@ -862,7 +902,7 @@ describe('WSDispatcher', () => {
       candleHandler?.(candle1)
       candleHandler?.(candle2)
       queryClient.setQueryData(
-        ['candles', 'BTC-USD', 'kraken', '1m'],
+        ['candles', 'BTC-USD', 'kraken', '1m', null],
         [
           {
             instrument: 'BTC-USD',
@@ -880,7 +920,13 @@ describe('WSDispatcher', () => {
         ]
       )
       dispatcher.flushBuffer('BTC-USD', 'kraken', '1m')
-      const cached = queryClient.getQueryData<unknown[]>(['candles', 'BTC-USD', 'kraken', '1m'])
+      const cached = queryClient.getQueryData<unknown[]>([
+        'candles',
+        'BTC-USD',
+        'kraken',
+        '1m',
+        null,
+      ])
 
       expect(cached).toHaveLength(1)
       expect((cached as { close: number }[])[0].close).toBe(51000)
@@ -926,9 +972,15 @@ describe('WSDispatcher', () => {
         open_at: '2026-01-15T10:00:00Z',
       })
       dispatcher.stopBuffering('BTC-USD', 'kraken', '1m')
-      queryClient.setQueryData(['candles', 'BTC-USD', 'kraken', '1m'], [])
+      queryClient.setQueryData(['candles', 'BTC-USD', 'kraken', '1m', null], [])
       dispatcher.flushBuffer('BTC-USD', 'kraken', '1m')
-      const cached = queryClient.getQueryData<unknown[]>(['candles', 'BTC-USD', 'kraken', '1m'])
+      const cached = queryClient.getQueryData<unknown[]>([
+        'candles',
+        'BTC-USD',
+        'kraken',
+        '1m',
+        null,
+      ])
 
       expect(cached).toHaveLength(0)
     })
@@ -1179,7 +1231,7 @@ describe('WSDispatcher', () => {
     })
     describe('type guard branches', () => {
       it('order handler ignores non-order messages', () => {
-        queryClient.setQueryData(['orders', undefined], [])
+        queryClient.setQueryData(['orders', undefined, null], [])
         const setQueryDataSpy = vi.spyOn(queryClient, 'setQueryData')
         const dispatcher = new WSDispatcher({ queryClient })
 
@@ -1191,7 +1243,7 @@ describe('WSDispatcher', () => {
         setQueryDataSpy.mockRestore()
       })
       it('execution handler ignores non-execution messages', () => {
-        queryClient.setQueryData(['executions', undefined], [])
+        queryClient.setQueryData(['executions', undefined, null], [])
         const setQueryDataSpy = vi.spyOn(queryClient, 'setQueryData')
         const dispatcher = new WSDispatcher({ queryClient })
 
@@ -1203,7 +1255,7 @@ describe('WSDispatcher', () => {
         setQueryDataSpy.mockRestore()
       })
       it('signal handler ignores non-signal messages', () => {
-        queryClient.setQueryData(['signals', undefined, 50, undefined, 24], [])
+        queryClient.setQueryData(['signals', undefined, 50, undefined, 24, null], [])
         const setQueryDataSpy = vi.spyOn(queryClient, 'setQueryData')
         const dispatcher = new WSDispatcher({ queryClient })
 
@@ -1420,9 +1472,13 @@ describe('WSDispatcher', () => {
         created_at: new Date().toISOString(),
         updated_at: null,
       })
-      queryClient.setQueryData(['orders', undefined], [])
+      queryClient.setQueryData(['orders', undefined, null], [])
       dispatcher.flushTradeBuffer()
-      const cached = queryClient.getQueryData<{ client_order_id: string }[]>(['orders', undefined])
+      const cached = queryClient.getQueryData<{ client_order_id: string }[]>([
+        'orders',
+        undefined,
+        null,
+      ])
 
       expect(cached).toHaveLength(1)
       expect(cached?.[0]?.client_order_id).toBe('buffered-1')
@@ -1451,11 +1507,12 @@ describe('WSDispatcher', () => {
         status: 'filled',
         executed_at: new Date().toISOString(),
       })
-      queryClient.setQueryData(['executions', undefined], [])
+      queryClient.setQueryData(['executions', undefined, null], [])
       dispatcher.flushTradeBuffer()
       const cached = queryClient.getQueryData<{ client_order_id: string }[]>([
         'executions',
         undefined,
+        null,
       ])
 
       expect(cached).toHaveLength(1)
@@ -1483,7 +1540,7 @@ describe('WSDispatcher', () => {
         strategy_name: 'test_strategy',
         price: 50000,
       })
-      queryClient.setQueryData(['signals', undefined, 50, undefined, 24], [])
+      queryClient.setQueryData(['signals', undefined, 50, undefined, 24, null], [])
       dispatcher.flushTradeBuffer()
       const cached = queryClient.getQueryData<{ reason: string }[]>([
         'signals',
@@ -1491,6 +1548,7 @@ describe('WSDispatcher', () => {
         50,
         undefined,
         24,
+        null,
       ])
 
       expect(cached).toHaveLength(1)
@@ -1530,9 +1588,9 @@ describe('WSDispatcher', () => {
         updated_at: null,
       })
       dispatcher.stopTradeBuffering()
-      queryClient.setQueryData(['orders', undefined], [])
+      queryClient.setQueryData(['orders', undefined, null], [])
       dispatcher.flushTradeBuffer()
-      const cached = queryClient.getQueryData<unknown[]>(['orders', undefined])
+      const cached = queryClient.getQueryData<unknown[]>(['orders', undefined, null])
 
       expect(cached).toHaveLength(0)
     })
@@ -1564,8 +1622,8 @@ describe('WSDispatcher', () => {
       ).not.toThrow()
     })
     it('order merge skips query cache entries with undefined data', () => {
-      queryClient.setQueryData(['orders', undefined], [])
-      queryClient.getQueryCache().build(queryClient, { queryKey: ['orders', 'stale'] })
+      queryClient.setQueryData(['orders', undefined, null], [])
+      queryClient.getQueryCache().build(queryClient, { queryKey: ['orders', 'other-filter', null] })
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
@@ -1589,14 +1647,20 @@ describe('WSDispatcher', () => {
         created_at: new Date().toISOString(),
         updated_at: null,
       })
-      const cached = queryClient.getQueryData<{ client_order_id: string }[]>(['orders', undefined])
+      const cached = queryClient.getQueryData<{ client_order_id: string }[]>([
+        'orders',
+        undefined,
+        null,
+      ])
 
       expect(cached).toHaveLength(1)
       expect(cached?.[0]?.client_order_id).toBe('skip-undef-1')
     })
     it('execution merge skips query cache entries with undefined data', () => {
-      queryClient.setQueryData(['executions', undefined], [])
-      queryClient.getQueryCache().build(queryClient, { queryKey: ['executions', 'stale'] })
+      queryClient.setQueryData(['executions', undefined, null], [])
+      queryClient.getQueryCache().build(queryClient, {
+        queryKey: ['executions', 'other-filter', null],
+      })
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
@@ -1622,14 +1686,17 @@ describe('WSDispatcher', () => {
       const cached = queryClient.getQueryData<{ client_order_id: string }[]>([
         'executions',
         undefined,
+        null,
       ])
 
       expect(cached).toHaveLength(1)
       expect(cached?.[0]?.client_order_id).toBe('skip-undef-exec')
     })
     it('signal merge skips query cache entries with undefined data', () => {
-      queryClient.setQueryData(['signals', undefined, 50, undefined, 24], [])
-      queryClient.getQueryCache().build(queryClient, { queryKey: ['signals', 'stale'] })
+      queryClient.setQueryData(['signals', undefined, 50, undefined, 24, null], [])
+      queryClient.getQueryCache().build(queryClient, {
+        queryKey: ['signals', 'other-strategy', 50, undefined, 24, null],
+      })
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
@@ -1656,14 +1723,15 @@ describe('WSDispatcher', () => {
         50,
         undefined,
         24,
+        null,
       ])
 
       expect(cached).toHaveLength(1)
       expect(cached?.[0]?.reason).toBe('Skip undef signal')
     })
-    it('order message merges into multiple query caches', () => {
-      queryClient.setQueryData(['orders', undefined], [])
-      queryClient.setQueryData(['orders', { symbol: 'BTC/USD' }], [])
+    it('order message merges into multiple live query caches', () => {
+      queryClient.setQueryData(['orders', undefined, null], [])
+      queryClient.setQueryData(['orders', { symbol: 'BTC/USD' }, null], [])
       const dispatcher = new WSDispatcher({ queryClient })
 
       dispatcher.attach(mockWsClient)
@@ -1687,11 +1755,47 @@ describe('WSDispatcher', () => {
         created_at: new Date().toISOString(),
         updated_at: null,
       })
-      const cached1 = queryClient.getQueryData<unknown[]>(['orders', undefined])
-      const cached2 = queryClient.getQueryData<unknown[]>(['orders', { symbol: 'BTC/USD' }])
+      const cached1 = queryClient.getQueryData<unknown[]>(['orders', undefined, null])
+      const cached2 = queryClient.getQueryData<unknown[]>(['orders', { symbol: 'BTC/USD' }, null])
 
       expect(cached1).toHaveLength(1)
       expect(cached2).toHaveLength(1)
+    })
+    it('order message does not merge into historical query caches', () => {
+      queryClient.setQueryData(['orders', undefined, null], [])
+      queryClient.setQueryData(['orders', undefined, '2024-01-01T00:00:00Z'], [])
+      const dispatcher = new WSDispatcher({ queryClient })
+
+      dispatcher.attach(mockWsClient)
+      const orderHandler = messageHandlers.get('order')
+
+      orderHandler?.({
+        type: 'order',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
+        client_order_id: 'hist-skip-1',
+        instrument: 'BTC/USD',
+        exchange: 'kraken',
+        side: 'buy',
+        order_type: 'limit',
+        size: 1,
+        price: 50000,
+        status: 'new',
+        filled_size: 0,
+        created_at: new Date().toISOString(),
+        updated_at: null,
+      })
+      const liveCached = queryClient.getQueryData<unknown[]>(['orders', undefined, null])
+      const histCached = queryClient.getQueryData<unknown[]>([
+        'orders',
+        undefined,
+        '2024-01-01T00:00:00Z',
+      ])
+
+      expect(liveCached).toHaveLength(1)
+      expect(histCached).toHaveLength(0)
     })
   })
 })

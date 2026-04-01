@@ -56,7 +56,8 @@ const queryKeys = {
   ) => ['signals', strategyId, limit, instrument, hours, asOf] as const,
   settings: (category?: string, asOf?: string | null) => ['settings', category, asOf] as const,
   settingCategories: (asOf: string | null) => ['settings', 'categories', asOf] as const,
-  users: (includeInactive: boolean) => ['users', includeInactive] as const,
+  users: (includeInactive: boolean, asOf: string | null) =>
+    ['users', includeInactive, asOf] as const,
 }
 
 export const useSystemStatus = () => {
@@ -285,7 +286,7 @@ export const useStartProcessByName = () => {
       queryClient.invalidateQueries({ queryKey: ['processes', 'summary'] })
       queryClient.invalidateQueries({ queryKey: ['strategies'] })
       queryClient.invalidateQueries({ queryKey: queryKeys.availableProcesses })
-      queryClient.invalidateQueries({ queryKey: queryKeys.processRuns() })
+      queryClient.invalidateQueries({ queryKey: ['processes', 'runs'] })
     },
   })
 }
@@ -304,7 +305,7 @@ export const useStopProcessByName = () => {
       queryClient.invalidateQueries({ queryKey: ['processes', 'summary'] })
       queryClient.invalidateQueries({ queryKey: ['strategies'] })
       queryClient.invalidateQueries({ queryKey: queryKeys.availableProcesses })
-      queryClient.invalidateQueries({ queryKey: queryKeys.processRuns() })
+      queryClient.invalidateQueries({ queryKey: ['processes', 'runs'] })
     },
   })
 }
@@ -381,7 +382,7 @@ export const useCreateProcessConfig = () => {
       queryClient.invalidateQueries({ queryKey: ['processes', 'summary'] })
       queryClient.invalidateQueries({ queryKey: ['strategies'] })
       queryClient.invalidateQueries({ queryKey: queryKeys.availableProcesses })
-      queryClient.invalidateQueries({ queryKey: queryKeys.processRuns() })
+      queryClient.invalidateQueries({ queryKey: ['processes', 'runs'] })
     },
   })
 }
@@ -435,10 +436,11 @@ export const useDeleteSetting = () => {
 
 export const useUsers = (includeInactive: boolean) => {
   const { isAuthenticated } = useAuth()
+  const asOf = useAppStore(s => s.asOf)
 
   return useQuery<UserListResponse>({
-    queryKey: queryKeys.users(includeInactive),
-    queryFn: () => apiClient.listUsers(includeInactive),
+    queryKey: queryKeys.users(includeInactive, asOf),
+    queryFn: () => apiClient.listUsers(includeInactive, asOf),
     enabled: isAuthenticated,
     throwOnError: false,
   })

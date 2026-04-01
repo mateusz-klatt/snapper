@@ -182,7 +182,7 @@ export class WSDispatcher {
     this.signalBuffer = null
   }
   private mergeCandleIntoCache(envelope: CandleData): void {
-    const queryKey = ['candles', envelope.instrument, envelope.exchange, envelope.timeframe]
+    const queryKey = ['candles', envelope.instrument, envelope.exchange, envelope.timeframe, null]
     const existing = this.queryClient.getQueryData<CandleData[]>(queryKey)
 
     if (!existing) {
@@ -214,7 +214,9 @@ export class WSDispatcher {
     }
   }
   private mergeOrderIntoCache(envelope: OrderData): void {
-    const queries = this.queryClient.getQueriesData<OrderData[]>({ queryKey: ['orders'] })
+    const queries = this.queryClient
+      .getQueriesData<OrderData[]>({ queryKey: ['orders'] })
+      .filter(([key]) => key[key.length - 1] === null)
 
     if (queries.every(([, data]) => !data)) {
       if (this.orderBuffer) {
@@ -242,9 +244,9 @@ export class WSDispatcher {
     }
   }
   private mergeExecutionIntoCache(envelope: ExecutionData): void {
-    const queries = this.queryClient.getQueriesData<ExecutionData[]>({
-      queryKey: ['executions'],
-    })
+    const queries = this.queryClient
+      .getQueriesData<ExecutionData[]>({ queryKey: ['executions'] })
+      .filter(([key]) => key[key.length - 1] === null)
 
     if (queries.every(([, data]) => !data)) {
       if (this.executionBuffer) {
@@ -267,7 +269,9 @@ export class WSDispatcher {
     }
   }
   private mergeSignalIntoCache(envelope: SignalData): void {
-    const queries = this.queryClient.getQueriesData<SignalData[]>({ queryKey: ['signals'] })
+    const queries = this.queryClient
+      .getQueriesData<SignalData[]>({ queryKey: ['signals'] })
+      .filter(([key]) => key[key.length - 1] === null)
 
     if (queries.every(([, data]) => !data)) {
       if (this.signalBuffer) {

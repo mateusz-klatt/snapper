@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { subscribeWithSelector } from 'zustand/middleware'
 import { apiClient } from '../lib/apiClient'
+import { queryClient } from '../lib/queryClient'
 import { AppState } from '../types/ui'
 
 const DARK_MODE_KEY = 'snapper-dark-mode'
@@ -53,6 +54,7 @@ export const useAppStore = create<AppStore>()(
     clearAsOf: () => {
       apiClient.setTimeTravelAsOf(null)
       set({ asOf: null, isTimeTraveling: false })
+      queryClient.invalidateQueries()
     },
   }))
 )

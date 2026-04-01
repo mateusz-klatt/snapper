@@ -1441,6 +1441,26 @@ describe('user management API methods', () => {
       expect.objectContaining({ method: 'GET' })
     )
   })
+  it('listUsers passes as_of when provided', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        type: 'user_list',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2024-01-01T00:00:00Z',
+        session_id: 'test-sid',
+        payload: [],
+        count: 0,
+      }),
+    })
+    await apiClient.listUsers(false, '2024-06-01T12:00:00Z')
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      '/api/auth/users?include_inactive=false&as_of=2024-06-01T12%3A00%3A00Z',
+      expect.objectContaining({ method: 'GET' })
+    )
+  })
   it('createUser posts new user', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
