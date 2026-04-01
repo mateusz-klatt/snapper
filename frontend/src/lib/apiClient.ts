@@ -473,11 +473,8 @@ class APIClient {
 
     return validateResponse(data, MessageResponseSchema, '/auth/users/:id/change-password')
   }
-  async listUsers(includeInactive: boolean, asOf?: string | null): Promise<UserListResponse> {
-    const params = new URLSearchParams({ include_inactive: String(includeInactive) })
-
-    if (asOf) params.set('as_of', asOf)
-    const data = await this.getJSON(`/api/auth/users?${params.toString()}`)
+  async listUsers(includeInactive: boolean): Promise<UserListResponse> {
+    const data = await this.getJSON(`/api/auth/users?include_inactive=${includeInactive}`)
 
     return validateResponse(data, UserListResponseSchema, '/auth/users')
   }

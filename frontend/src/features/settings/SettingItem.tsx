@@ -58,13 +58,19 @@ interface SaveCancelButtonsProps {
   readonly onSave: () => Promise<void>
   readonly onCancel: () => void
   readonly isSaving: boolean
+  readonly readOnly?: boolean
 }
 
-const SaveCancelButtons: React.FC<SaveCancelButtonsProps> = ({ onSave, onCancel, isSaving }) => (
+const SaveCancelButtons: React.FC<SaveCancelButtonsProps> = ({
+  onSave,
+  onCancel,
+  isSaving,
+  readOnly,
+}) => (
   <div className='flex gap-2'>
     <button
       onClick={onSave}
-      disabled={isSaving}
+      disabled={isSaving || readOnly}
       className='px-3 py-1 text-xs bg-brand-600 hover:bg-brand-700 disabled:bg-brand-800 disabled:cursor-not-allowed text-white rounded transition-colors'
     >
       {isSaving ? 'Saving...' : 'Save'}
@@ -89,6 +95,7 @@ interface EditingViewProps {
   readonly onSave: () => Promise<void>
   readonly onCancel: () => void
   readonly isSaving: boolean
+  readonly readOnly?: boolean
 }
 
 const EditingView: React.FC<EditingViewProps> = ({
@@ -101,6 +108,7 @@ const EditingView: React.FC<EditingViewProps> = ({
   onSave,
   onCancel,
   isSaving,
+  readOnly,
 }) => {
   if (isJson && jsonValue !== null) {
     return (
@@ -110,7 +118,12 @@ const EditingView: React.FC<EditingViewProps> = ({
           onChange={setJsonValue}
           className='border border-dark-600 rounded-lg p-3 bg-dark-700'
         />
-        <SaveCancelButtons onSave={onJsonSave} onCancel={onCancel} isSaving={isSaving} />
+        <SaveCancelButtons
+          onSave={onJsonSave}
+          onCancel={onCancel}
+          isSaving={isSaving}
+          readOnly={readOnly}
+        />
       </div>
     )
   }
@@ -123,7 +136,12 @@ const EditingView: React.FC<EditingViewProps> = ({
         className='w-full px-2 py-1.5 text-sm bg-alpine-50 border border-dark-600 rounded text-alpine-900 focus:outline-none focus:border-brand-500 resize-vertical min-h-[60px]'
         placeholder='Enter setting value...'
       />
-      <SaveCancelButtons onSave={onSave} onCancel={onCancel} isSaving={isSaving} />
+      <SaveCancelButtons
+        onSave={onSave}
+        onCancel={onCancel}
+        isSaving={isSaving}
+        readOnly={readOnly}
+      />
     </div>
   )
 }
@@ -351,6 +369,7 @@ export const SettingItem = ({
             onSave={handleSave}
             onCancel={handleCancel}
             isSaving={isSaving}
+            readOnly={readOnly}
           />
         ) : (
           <DisplayView

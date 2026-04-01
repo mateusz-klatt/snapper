@@ -1441,7 +1441,8 @@ describe('user management API methods', () => {
       expect.objectContaining({ method: 'GET' })
     )
   })
-  it('listUsers passes as_of when provided', async () => {
+  it('listUsers appends as_of via get() when time-traveling', async () => {
+    apiClient.setTimeTravelAsOf('2024-06-01T12:00:00Z')
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -1454,12 +1455,13 @@ describe('user management API methods', () => {
         count: 0,
       }),
     })
-    await apiClient.listUsers(false, '2024-06-01T12:00:00Z')
+    await apiClient.listUsers(false)
 
     expect(mockFetch).toHaveBeenCalledWith(
       '/api/auth/users?include_inactive=false&as_of=2024-06-01T12%3A00%3A00Z',
       expect.objectContaining({ method: 'GET' })
     )
+    apiClient.setTimeTravelAsOf(null)
   })
   it('createUser posts new user', async () => {
     mockFetch.mockResolvedValueOnce({

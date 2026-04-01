@@ -440,7 +440,7 @@ export const useUsers = (includeInactive: boolean) => {
 
   return useQuery<UserListResponse>({
     queryKey: queryKeys.users(includeInactive, asOf),
-    queryFn: () => apiClient.listUsers(includeInactive, asOf),
+    queryFn: () => apiClient.listUsers(includeInactive),
     enabled: isAuthenticated,
     throwOnError: false,
   })
