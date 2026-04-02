@@ -22,6 +22,9 @@ Open <http://localhost:8000/> and log in:
 
 - **Market data collection** — WebSocket and REST API from Kraken, Zonda,
   Walutomat, Polygon.io
+- **Symbol correlation** — Underlying asset model linking instruments across
+    exchanges (e.g., SPY, ESM6-CME, SPYX-USD-PERP all map to S&P 500).
+    YAML-driven pattern matching, front-month rollover, contract ladder API
 - **Trade runtime** — Facts-canonical live and paper trading with canonical
     Order and Execution facts, rebuildable Position and Balance projections,
     and optional durable command mode
@@ -184,6 +187,7 @@ snapper reset-password      # Reset password
 ```bash
 snapper update-kraken-symbols        # Sync Kraken symbols
 snapper update-polygon-symbols       # Sync Polygon symbols
+snapper update-underlyings           # Sync underlying asset mappings from YAML
 snapper polygon-backfill-aggregates  # Backfill historical data
 snapper archive --day 2024-01-15     # Export candle cache to CSV
 snapper archive --from 2024-01-01 --to 2024-01-31 --exchange polygon

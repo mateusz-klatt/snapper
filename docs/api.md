@@ -1011,6 +1011,68 @@ X-CSRF-Token: <csrf_token>
 }
 ```
 
+## Underlying Assets
+
+### GET /api/underlyings
+
+List all underlying assets with instrument counts.
+
+```
+GET /api/underlyings?as_of=2026-06-20T12:00:00Z
+```
+
+Returns `PayloadListResponse` with `UnderlyingAssetData` items (ticker, name,
+asset_class, sector, instrument_count).
+
+### GET /api/underlyings/{ticker}/instruments
+
+List instruments mapped to an underlying asset.
+
+```
+GET /api/underlyings/SPX/instruments?relationship_type=derivative
+```
+
+Query parameters:
+
+- `relationship_type` (optional): Filter by `exact`, `derivative`, or `proxy`
+- `as_of` (optional): Point-in-time query timestamp
+
+### GET /api/underlyings/{ticker}/front-month
+
+Return the front-month (nearest non-expired) futures contract for an underlying.
+
+```
+GET /api/underlyings/SPX/front-month?exchange=kraken_equities&contract_family=ES
+```
+
+Query parameters:
+
+- `exchange` (optional): Filter by exchange
+- `contract_family` (optional): Filter by product root (e.g., `ES` vs `MES`)
+- `as_of` (optional): Point-in-time query timestamp
+
+Returns `PayloadResponse` with `FrontMonthData` (instrument_public_id,
+native_symbol, exchange, expiry_at, relationship_type, contract_family).
+Returns 404 if no active futures contracts exist.
+
+### GET /api/underlyings/{ticker}/contracts
+
+List all futures contracts for an underlying asset.
+
+```
+GET /api/underlyings/SPX/contracts?include_expired=true&contract_family=ES
+```
+
+Query parameters:
+
+- `exchange` (optional): Filter by exchange
+- `contract_family` (optional): Filter by product root
+- `include_expired` (optional, default false): Include expired contracts
+- `as_of` (optional): Point-in-time query timestamp
+
+Returns `PayloadListResponse` with `ContractData` items. Each item includes
+`is_front_month` (true for nearest non-expired within same contract family).
+
 ## WebSocket
 
 ### Connection and Authentication

@@ -90,7 +90,9 @@ Persistence layer with SQLAlchemy:
     - `SymbolAlias` — Exchange-specific symbol aliases (one row per native/exchange/channel)
     - `SymbolExchangeCapability` — Exchange-specific symbol capabilities
     - `ProcessRun` — Background process execution records
-    - `InstrumentSpec` — Instrument trading specifications
+    - `InstrumentSpec` — Instrument trading specifications (tick_size, margins, expiry_at, instrument_kind)
+    - `UnderlyingAsset` — Canonical asset identity (e.g., S&P 500, Gold) linking instruments across exchanges
+    - `InstrumentUnderlyingMapping` — Temporal link from instrument to underlying (exact/derivative/proxy)
     - `MarketSnapshot` — Real-time market data snapshots
     - `UserLoginEvent` — Authentication event log
     - `Control` — Always-on audit for commands, auth events, subscribe/unsubscribe,

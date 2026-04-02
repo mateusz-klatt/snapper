@@ -359,6 +359,21 @@ snapper update-polygon-symbols [OPTIONS]
 
 **Note:** This operation may take 10-15 minutes (44k+ symbols).
 
+### `update-underlyings`
+
+Syncs underlying asset definitions from YAML to the database. Matches
+active instruments to underlyings via pattern rules, upserts mappings,
+and applies YAML-fallback instrument_type/expiry_override to InstrumentSpec
+when API-sourced values are NULL.
+
+```bash
+snapper update-underlyings [OPTIONS]
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `--force` | bool | `false` | Bypass safety guard for stale cleanup |
+
 ## Market Snapshots
 
 ### `update-kraken-market-snapshot`
