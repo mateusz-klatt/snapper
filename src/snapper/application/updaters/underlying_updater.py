@@ -35,7 +35,13 @@ _SAFETY_THRESHOLD = 0.25
 
 
 class PatternRule(BaseModel):
-    """Single pattern rule matching instruments to an underlying asset."""
+    """Single pattern rule matching instruments to an underlying asset.
+
+    Fields ``instrument_type`` and ``expiry_override`` are accepted from YAML
+    for Phase 2 (front-month rollover) but do not participate in Phase 1
+    pattern matching. They are only used to detect intra-underlying metadata
+    conflicts when multiple rules match the same instrument.
+    """
 
     exchange: ExchangeEnum
     match_type: Literal["exact", "regex"]
@@ -79,22 +85,23 @@ class UnderlyingMappingConfig(BaseModel):
     underlyings: list[UnderlyingDefinition]
 
     @model_validator(mode="after")
-    def unique_tickers(self) -> Self:
-        """Reject duplicate tickers in the mapping file.
+    def unique_tickers_and_names(self) -> Self:
+        """Reject duplicate tickers or names in the mapping file.
 
         Returns:
             Validated config instance.
         """
-        tickers = [u.ticker for u in self.underlyings]
-        if len(tickers) != len(set(tickers)):
-            seen: set[str] = set()
-            dupes: list[str] = []
-            for t in tickers:
-                if t in seen:
-                    dupes.append(t)
-                seen.add(t)
-            msg = f"Duplicate tickers in mapping file: {dupes}"
-            raise ValueError(msg)
+        for attr in ("ticker", "name"):
+            values = [getattr(u, attr) for u in self.underlyings]
+            if len(values) != len(set(values)):
+                seen: set[str] = set()
+                dupes: list[str] = []
+                for v in values:
+                    if v in seen:
+                        dupes.append(v)
+                    seen.add(v)
+                msg = f"Duplicate {attr}s in mapping file: {dupes}"
+                raise ValueError(msg)
         return self
 
 

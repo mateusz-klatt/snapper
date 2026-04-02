@@ -420,6 +420,7 @@ class UnderlyingAssetRow(TypedDict):
     timestamp: datetime
     session_id: str
     sequence_id: int
+    instrument_count: int
 
 
 class InstrumentUnderlyingRow(TypedDict):

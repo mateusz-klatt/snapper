@@ -1138,22 +1138,20 @@ def _create_underlying_router() -> APIRouter:
             now = as_of or datetime.now(UTC)
             assets = await repo.get_underlying_assets(as_of=now)
             tracker: SequenceTracker = request.app.state.rest_tracker
-            items: list[UnderlyingAssetData] = []
-            for a in assets:
-                instruments = await repo.get_instruments_by_underlying(a["public_id"], now)
-                items.append(
-                    UnderlyingAssetData(
-                        public_id=a["public_id"],
-                        session_id=a["session_id"],
-                        sequence_id=a["sequence_id"],
-                        timestamp=a["timestamp"],
-                        ticker=a["ticker"],
-                        name=a["name"],
-                        asset_class=a["asset_class"],
-                        sector=a["sector"],
-                        instrument_count=len(instruments),
-                    )
+            items: list[UnderlyingAssetData] = [
+                UnderlyingAssetData(
+                    public_id=a["public_id"],
+                    session_id=a["session_id"],
+                    sequence_id=a["sequence_id"],
+                    timestamp=a["timestamp"],
+                    ticker=a["ticker"],
+                    name=a["name"],
+                    asset_class=a["asset_class"],
+                    sector=a["sector"],
+                    instrument_count=a["instrument_count"],
                 )
+                for a in assets
+            ]
             sid = tracker.session_id
             seq = tracker.next_sequence(_REST_DATA_STREAM)
             ts = dt.datetime.now(dt.UTC)

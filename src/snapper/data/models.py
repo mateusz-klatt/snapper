@@ -1019,7 +1019,7 @@ class InstrumentUnderlyingMapping(TemporalMixin, Base):
             name="ck_ium_relationship_type",
         ),
     )
-    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
-    underlying_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    underlying_public_id: Mapped[str] = mapped_column(UUIDColumn())
     relationship_type: Mapped[str] = mapped_column(String(16))
     contract_family: Mapped[str | None] = mapped_column(String(16))

@@ -155,6 +155,28 @@ class TestUnderlyingMappingConfig:
                 }
             )
 
+    def test_duplicate_names_rejected(self) -> None:
+        """Given duplicate names with different tickers, When validating, Then raises."""
+        with pytest.raises(ValueError, match="Duplicate names"):
+            UnderlyingMappingConfig.model_validate(
+                {
+                    "underlyings": [
+                        {
+                            "ticker": "BTC",
+                            "name": "Bitcoin",
+                            "asset_class": "crypto",
+                            "patterns": [],
+                        },
+                        {
+                            "ticker": "ETH",
+                            "name": "Bitcoin",
+                            "asset_class": "crypto",
+                            "patterns": [],
+                        },
+                    ]
+                }
+            )
+
     def test_loads_real_yaml(self) -> None:
         """Given the actual mapping file, When loading, Then validates ok."""
         yaml_path = (

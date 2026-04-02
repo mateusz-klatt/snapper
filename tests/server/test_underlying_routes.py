@@ -39,6 +39,7 @@ def _make_underlying(ticker: str = "SPX", name: str = "S&P 500") -> UnderlyingAs
         timestamp=_ts(),
         session_id="s1",
         sequence_id=1,
+        instrument_count=1,
     )
 
 

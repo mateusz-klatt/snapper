@@ -2474,9 +2474,18 @@ class SQLAlchemyRepository(Repository):
         self,
         as_of: datetime,
     ) -> list[UnderlyingAssetRow]:
-        """All active underlying assets at as_of."""
+        """All active underlying assets at as_of with instrument counts."""
         async with self.session() as s:
-            result = await s.execute(
+            mapping_count = (
+                select(
+                    InstrumentUnderlyingMapping.underlying_public_id,
+                    func.count().label("cnt"),
+                )
+                .where(*where_active(InstrumentUnderlyingMapping, as_of))
+                .group_by(InstrumentUnderlyingMapping.underlying_public_id)
+                .subquery()
+            )
+            stmt = (
                 select(
                     UnderlyingAsset.public_id,
                     UnderlyingAsset.ticker,
@@ -2487,10 +2496,16 @@ class SQLAlchemyRepository(Repository):
                     UnderlyingAsset.timestamp,
                     UnderlyingAsset.session_id,
                     UnderlyingAsset.sequence_id,
+                    func.coalesce(mapping_count.c.cnt, 0).label("instrument_count"),
+                )
+                .outerjoin(
+                    mapping_count,
+                    mapping_count.c.underlying_public_id == UnderlyingAsset.public_id,
                 )
                 .where(*where_active(UnderlyingAsset, as_of))
                 .order_by(UnderlyingAsset.ticker)
             )
+            result = await s.execute(stmt)
             return [
                 UnderlyingAssetRow(
                     public_id=r.public_id,
@@ -2502,6 +2517,7 @@ class SQLAlchemyRepository(Repository):
                     timestamp=r.timestamp,
                     session_id=r.session_id,
                     sequence_id=r.sequence_id,
+                    instrument_count=r.instrument_count,
                 )
                 for r in result.all()
             ]
@@ -2542,6 +2558,7 @@ class SQLAlchemyRepository(Repository):
                 timestamp=r.timestamp,
                 session_id=r.session_id,
                 sequence_id=r.sequence_id,
+                instrument_count=0,
             )
 
     async def get_instruments_by_underlying(
@@ -2646,6 +2663,7 @@ class SQLAlchemyRepository(Repository):
                 timestamp=r.timestamp,
                 session_id=r.session_id,
                 sequence_id=r.sequence_id,
+                instrument_count=0,
             )
 
     async def upsert_underlying_asset(
@@ -2664,10 +2682,12 @@ class SQLAlchemyRepository(Repository):
             existing = (
                 (
                     await s.execute(
-                        select(UnderlyingAsset).where(
+                        select(UnderlyingAsset)
+                        .where(
                             UnderlyingAsset.ticker == ticker,
                             *where_active(UnderlyingAsset, timestamp),
                         )
+                        .with_for_update()
                     )
                 )
                 .scalars()
@@ -2735,11 +2755,13 @@ class SQLAlchemyRepository(Repository):
             existing = (
                 (
                     await s.execute(
-                        select(InstrumentUnderlyingMapping).where(
+                        select(InstrumentUnderlyingMapping)
+                        .where(
                             InstrumentUnderlyingMapping.instrument_public_id
                             == instrument_public_id,
                             *where_active(InstrumentUnderlyingMapping, timestamp),
                         )
+                        .with_for_update()
                     )
                 )
                 .scalars()
