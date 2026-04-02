@@ -408,6 +408,36 @@ class VenueEventInsertRow(TypedDict, total=False):
     payload_json: str | None
 
 
+class UnderlyingAssetRow(TypedDict):
+    """Row dict returned by underlying asset queries."""
+
+    public_id: str
+    ticker: str
+    name: str
+    asset_class: str
+    sector: str | None
+    description: str | None
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+
+
+class InstrumentUnderlyingRow(TypedDict):
+    """Row dict returned by instrument-underlying mapping queries."""
+
+    public_id: str
+    instrument_public_id: str
+    underlying_public_id: str
+    relationship_type: str
+    contract_family: str | None
+    native_symbol: str
+    exchange: str
+    asset_type: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+
+
 class CheckpointUpsertRow(TypedDict):
     """Upsert params for upsert_checkpoint.
 

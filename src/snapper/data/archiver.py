@@ -38,6 +38,7 @@ from snapper.data.models import Control
 from snapper.data.models import Execution
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentSpec
+from snapper.data.models import InstrumentUnderlyingMapping
 from snapper.data.models import MarketSnapshot
 from snapper.data.models import Order
 from snapper.data.models import Position
@@ -50,6 +51,7 @@ from snapper.data.models import SymbolExchangeCapability
 from snapper.data.models import Telemetry
 from snapper.data.models import Tick
 from snapper.data.models import Trade
+from snapper.data.models import UnderlyingAsset
 from snapper.data.models import User
 from snapper.data.models import UserLoginEvent
 from snapper.data.repository import DatabaseRepository
@@ -1108,6 +1110,11 @@ STATE_TABLES: dict[str, StateTableSpec] = {
     "user_login_events": StateTableSpec(model=UserLoginEvent, group_column=None),
     "market_snapshots": StateTableSpec(model=MarketSnapshot, group_column="instrument_public_id"),
     "process_runs": StateTableSpec(model=ProcessRun, group_column=None),
+    "underlying_assets": StateTableSpec(model=UnderlyingAsset, group_column=None),
+    "instrument_underlying_mappings": StateTableSpec(
+        model=InstrumentUnderlyingMapping,
+        group_column=None,
+    ),
 }
 
 

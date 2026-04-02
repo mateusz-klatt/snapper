@@ -301,6 +301,7 @@ run-static:
 	$(PYRUN) snapper update-zonda-symbols --force
 	$(PYRUN) snapper update-walutomat-symbols --force
 	$(PYRUN) snapper update-polygon-symbols --force || true
+	$(PYRUN) snapper update-underlyings --force
 	$(PYRUN) snapper update-kraken-market-snapshot
 	$(PYRUN) snapper update-kraken-futures-market-snapshot
 	$(PYRUN) snapper update-kraken-equities-market-snapshot

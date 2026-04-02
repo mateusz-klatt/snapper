@@ -65,6 +65,7 @@ from snapper.application.updaters.symbols.kraken_futures import KrakenFuturesSym
 from snapper.application.updaters.symbols.polygon import PolygonSymbolUpdaterService
 from snapper.application.updaters.symbols.walutomat import WalutomatSymbolUpdaterService
 from snapper.application.updaters.symbols.zonda import ZondaSymbolUpdaterService
+from snapper.application.updaters.underlying_updater import UnderlyingUpdater
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.user_service import UserService
 from snapper.config.settings import BootstrapSettingsLoader
@@ -1287,3 +1288,23 @@ def restore_data(
         f"({result.files_processed} files)"
     )
     repo.dispose()
+
+
+@app.command(name="update-underlyings")
+def update_underlyings(
+    force: Annotated[bool, typer.Option("--force", "-f")] = False,
+) -> None:
+    """Sync underlying asset mappings from YAML definition file.
+
+    Args:
+        force: Bypass safety guard for stale cleanup (>25% removal).
+    """
+
+    async def run_update() -> None:
+        bootstrap = BootstrapSettingsLoader()
+        updater = UnderlyingUpdater(db_url=bootstrap.db_url, force=force)
+        typer.echo("Updating underlying asset mappings...")
+        await updater.run()
+        typer.echo("Underlying asset mappings updated successfully")
+
+    asyncio.run(run_update())

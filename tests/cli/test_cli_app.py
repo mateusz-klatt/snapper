@@ -3568,3 +3568,53 @@ def test_rotate_encryption_verification_failure(
         )
     assert result.exit_code == 0
     assert "Failed to rotate encryption" in result.stdout
+
+
+def test_update_underlyings_success(cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test update-underlyings runs updater.
+
+    Given: Mocked UnderlyingUpdater,
+    When: update-underlyings is invoked with --force,
+    Then: Service runs and completes.
+    """
+    captured: dict[str, object] = {}
+
+    class MockUpdater:
+        def __init__(self, db_url: str, force: bool = False) -> None:
+            captured["db_url"] = db_url
+            captured["force"] = force
+
+        async def run(self) -> None:
+            captured["ran"] = True
+
+    monkeypatch.setattr(app_module, "UnderlyingUpdater", MockUpdater)
+    result = cli_runner.invoke(app, ["update-underlyings", "--force"])
+    assert result.exit_code == 0
+    assert "Updating underlying asset mappings" in result.stdout
+    assert "updated successfully" in result.stdout
+    assert captured["force"] is True
+    assert captured["ran"] is True
+
+
+def test_update_underlyings_no_force(
+    cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Test update-underlyings default (no --force).
+
+    Given: Mocked UnderlyingUpdater,
+    When: update-underlyings is invoked without flags,
+    Then: force is False.
+    """
+    captured: dict[str, object] = {}
+
+    class MockUpdater:
+        def __init__(self, db_url: str, force: bool = False) -> None:
+            captured["force"] = force
+
+        async def run(self) -> None:
+            pass
+
+    monkeypatch.setattr(app_module, "UnderlyingUpdater", MockUpdater)
+    result = cli_runner.invoke(app, ["update-underlyings"])
+    assert result.exit_code == 0
+    assert captured["force"] is False

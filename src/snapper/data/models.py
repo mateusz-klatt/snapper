@@ -28,6 +28,7 @@ from sqlalchemy.types import TypeDecorator
 from snapper.core.json_types import JsonObject
 from snapper.core.types import AliasChannelEnum
 from snapper.core.types import AssetTypeEnum
+from snapper.core.types import RelationshipTypeEnum
 
 KNOWN_TO_MAX = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
 
@@ -98,6 +99,8 @@ __all__ = [
     "SymbolExchangeCapability",
     "ProcessRun",
     "InstrumentSpec",
+    "UnderlyingAsset",
+    "InstrumentUnderlyingMapping",
     "MarketSnapshot",
     "Control",
     "Telemetry",
@@ -931,3 +934,92 @@ class TradeProjectionCheckpoint(TemporalMixin, Base):
     last_venue_event_at: Mapped[datetime | None] = mapped_column(TZDateTime())
     open_command_ids: Mapped[str | None] = mapped_column(Text)
     checkpoint_at: Mapped[datetime] = mapped_column(TZDateTime())
+
+
+class UnderlyingAsset(TemporalMixin, Base):
+    """Canonical underlying asset linking related instruments across exchanges.
+
+    Examples: S&P 500 (SPX), Gold (GOLD), Bitcoin (BTC). Each underlying
+    can have multiple instruments on different venues (ETFs, futures,
+    perpetuals, tokenized stocks) linked via InstrumentUnderlyingMapping.
+    """
+
+    __tablename__ = "underlying_assets"
+    __table_args__ = (
+        Index(
+            "uq_underlying_assets_active_ticker",
+            "ticker",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "uq_underlying_assets_active_name",
+            "name",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_underlying_assets_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        CheckConstraint(
+            f"asset_class IN ({', '.join(repr(v.value) for v in AssetTypeEnum)})",
+            name="ck_underlying_asset_class",
+        ),
+    )
+    name: Mapped[str] = mapped_column(String(64))
+    ticker: Mapped[str] = mapped_column(String(16))
+    asset_class: Mapped[str] = mapped_column(String(16))
+    sector: Mapped[str | None] = mapped_column(String(32))
+    description: Mapped[str | None] = mapped_column(String(256))
+
+
+class InstrumentUnderlyingMapping(TemporalMixin, Base):
+    """Temporal mapping between an instrument and its underlying asset.
+
+    Separate table (not a column on Instrument) so lifespans are decoupled:
+    Instrument can be SCD2-revised without affecting the mapping, because
+    the mapping references instrument_public_id (stable across revisions).
+
+    Relationship types:
+        exact — direct price feed for the underlying
+        derivative — futures, options (price derived from underlying)
+        proxy — ETFs, tokenized stocks (tracks underlying with basis/fees)
+    """
+
+    __tablename__ = "instrument_underlying_mappings"
+    __table_args__ = (
+        Index(
+            "uq_ium_active_instrument",
+            "instrument_public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_ium_underlying",
+            "underlying_public_id",
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_ium_family",
+            "underlying_public_id",
+            "contract_family",
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        CheckConstraint(
+            f"relationship_type IN ({', '.join(repr(v.value) for v in RelationshipTypeEnum)})",
+            name="ck_ium_relationship_type",
+        ),
+    )
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    underlying_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    relationship_type: Mapped[str] = mapped_column(String(16))
+    contract_family: Mapped[str | None] = mapped_column(String(16))

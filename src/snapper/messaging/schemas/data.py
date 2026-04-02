@@ -478,3 +478,48 @@ class ReplayEndData(StrictDataSchema[Literal["replay_end"]]):
     """
 
     type: Literal["replay_end"] = "replay_end"
+
+
+class UnderlyingAssetData(StrictDataSchema[Literal["underlying_asset"]]):
+    """Underlying asset with instrument count.
+
+    Provenance fields (public_id, session_id, sequence_id, timestamp)
+    come from the DB row via UnderlyingAssetRow.
+
+    Attributes:
+        ticker: Short code (e.g. 'SPX', 'GOLD').
+        name: Canonical name (e.g. 'S&P 500').
+        asset_class: Asset type category.
+        sector: Optional sector classification.
+        instrument_count: Number of instruments mapped to this underlying.
+    """
+
+    type: Literal["underlying_asset"] = "underlying_asset"
+    ticker: str
+    name: str
+    asset_class: str
+    sector: str | None
+    instrument_count: int
+
+
+class UnderlyingInstrumentData(StrictDataSchema[Literal["underlying_instrument"]]):
+    """Instrument mapped to an underlying asset.
+
+    Provenance comes from the InstrumentUnderlyingMapping DB row.
+
+    Attributes:
+        instrument_public_id: Public ID of the instrument.
+        native_symbol: Symbol as known on the exchange.
+        exchange: Exchange identifier.
+        asset_type: Asset type of the symbol.
+        relationship_type: How instrument relates to underlying.
+        contract_family: Futures product root (nullable).
+    """
+
+    type: Literal["underlying_instrument"] = "underlying_instrument"
+    instrument_public_id: str
+    native_symbol: str
+    exchange: str
+    asset_type: str
+    relationship_type: str
+    contract_family: str | None

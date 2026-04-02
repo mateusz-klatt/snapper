@@ -14,6 +14,8 @@ from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import PositionData
 from snapper.messaging.schemas.data import SignalData
+from snapper.messaging.schemas.data import UnderlyingAssetData
+from snapper.messaging.schemas.data import UnderlyingInstrumentData
 
 
 class CandleListResponse(PayloadListResponse[Literal["candle_list"], CandleData]):
@@ -114,6 +116,34 @@ class InstrumentListResponse(PayloadListResponse[Literal["instrument_list"], str
     type: Literal["instrument_list"] = "instrument_list"
 
 
+class UnderlyingAssetListResponse(
+    PayloadListResponse[Literal["underlying_asset_list"], UnderlyingAssetData],
+):
+    """Underlying asset list response wrapper.
+
+    Attributes:
+        type: Payload item type discriminator.
+        payload: List of underlying asset data items.
+        count: Total number of underlying assets in the response.
+    """
+
+    type: Literal["underlying_asset_list"] = "underlying_asset_list"
+
+
+class UnderlyingInstrumentListResponse(
+    PayloadListResponse[Literal["underlying_instrument_list"], UnderlyingInstrumentData],
+):
+    """Underlying instrument list response wrapper.
+
+    Attributes:
+        type: Payload item type discriminator.
+        payload: List of underlying instrument data items.
+        count: Total number of instruments in the response.
+    """
+
+    type: Literal["underlying_instrument_list"] = "underlying_instrument_list"
+
+
 __all__ = [
     "CandleListResponse",
     "SignalListResponse",
@@ -122,4 +152,6 @@ __all__ = [
     "PositionListResponse",
     "ExchangeListResponse",
     "InstrumentListResponse",
+    "UnderlyingAssetListResponse",
+    "UnderlyingInstrumentListResponse",
 ]

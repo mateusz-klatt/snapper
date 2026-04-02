@@ -72,6 +72,8 @@ from snapper.api.schemas.data_responses import InstrumentListResponse
 from snapper.api.schemas.data_responses import OrderListResponse
 from snapper.api.schemas.data_responses import PositionListResponse
 from snapper.api.schemas.data_responses import SignalListResponse
+from snapper.api.schemas.data_responses import UnderlyingAssetListResponse
+from snapper.api.schemas.data_responses import UnderlyingInstrumentListResponse
 from snapper.api.schemas.health import ConnectionStats
 from snapper.api.schemas.health import GapDetectionStats
 from snapper.api.schemas.health import GapStats
@@ -125,6 +127,8 @@ from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import PositionData
 from snapper.messaging.schemas.data import SignalData
+from snapper.messaging.schemas.data import UnderlyingAssetData
+from snapper.messaging.schemas.data import UnderlyingInstrumentData
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
 from snapper.server.json_body import patch_openapi
 from snapper.server.process_routes import router as process_router
@@ -1102,6 +1106,158 @@ def _create_monitoring_endpoints_router(
     return router
 
 
+def _create_underlying_router() -> APIRouter:
+    """Create router for underlying asset discovery endpoints.
+
+    Returns:
+        APIRouter with underlyings list and instruments-per-underlying endpoints.
+    """
+    router = APIRouter()
+
+    @router.get("/underlyings", responses={500: {"description": "Internal server error"}})
+    async def get_underlyings(
+        request: Request,
+        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
+        _csrf: Annotated[None, Depends(validate_csrf_token)],
+        repo: Annotated[Repository, Depends(get_repository_dependency)],
+        as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
+    ) -> UnderlyingAssetListResponse:
+        """Return all underlying assets with instrument counts.
+
+        Args:
+            request: FastAPI request (provides REST tracker for provenance).
+            _auth: Authenticated user with READ_MARKET_DATA permission.
+            _csrf: CSRF token validation.
+            repo: Database repository.
+            as_of: Optional point-in-time query timestamp.
+
+        Returns:
+            UnderlyingAssetListResponse wrapping underlying asset list.
+        """
+        try:
+            now = as_of or datetime.now(UTC)
+            assets = await repo.get_underlying_assets(as_of=now)
+            tracker: SequenceTracker = request.app.state.rest_tracker
+            items: list[UnderlyingAssetData] = []
+            for a in assets:
+                instruments = await repo.get_instruments_by_underlying(a["public_id"], now)
+                items.append(
+                    UnderlyingAssetData(
+                        public_id=a["public_id"],
+                        session_id=a["session_id"],
+                        sequence_id=a["sequence_id"],
+                        timestamp=a["timestamp"],
+                        ticker=a["ticker"],
+                        name=a["name"],
+                        asset_class=a["asset_class"],
+                        sector=a["sector"],
+                        instrument_count=len(instruments),
+                    )
+                )
+            sid = tracker.session_id
+            seq = tracker.next_sequence(_REST_DATA_STREAM)
+            ts = dt.datetime.now(dt.UTC)
+            pid = str(uuid7())
+            return UnderlyingAssetListResponse(
+                session_id=sid,
+                sequence_id=seq,
+                public_id=pid,
+                timestamp=ts,
+                payload=items,
+                count=len(items),
+            )
+        except Exception as exc:
+            logger.error(f"Failed to fetch underlyings: {exc}")
+            raise HTTPException(status_code=500, detail="Failed to fetch underlyings") from exc
+
+    @router.get(
+        "/underlyings/{ticker}/instruments",
+        responses={
+            404: {"description": "Underlying not found"},
+            500: {"description": "Internal server error"},
+        },
+    )
+    async def get_underlying_instruments(
+        request: Request,
+        ticker: str,
+        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
+        _csrf: Annotated[None, Depends(validate_csrf_token)],
+        repo: Annotated[Repository, Depends(get_repository_dependency)],
+        as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
+        relationship_type: Annotated[
+            str | None, Query(description="Filter by relationship type")
+        ] = None,
+    ) -> UnderlyingInstrumentListResponse:
+        """Return instruments mapped to an underlying asset.
+
+        Args:
+            request: FastAPI request (provides REST tracker for provenance).
+            ticker: Underlying asset ticker (e.g. 'SPX', 'GOLD').
+            _auth: Authenticated user with READ_MARKET_DATA permission.
+            _csrf: CSRF token validation.
+            repo: Database repository.
+            as_of: Optional point-in-time query timestamp.
+            relationship_type: Optional filter (exact/derivative/proxy).
+
+        Returns:
+            UnderlyingInstrumentListResponse wrapping instrument list.
+
+        Raises:
+            HTTPException: 404 if ticker not found.
+        """
+        try:
+            now = as_of or datetime.now(UTC)
+            underlying = await repo.get_underlying_by_ticker(ticker, now)
+            if underlying is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Underlying not found: {ticker}",
+                )
+            rel_filter = [relationship_type] if relationship_type else None
+            rows = await repo.get_instruments_by_underlying(
+                underlying["public_id"],
+                now,
+                relationship_types=rel_filter,
+            )
+            tracker: SequenceTracker = request.app.state.rest_tracker
+            items = [
+                UnderlyingInstrumentData(
+                    public_id=r["public_id"],
+                    session_id=r["session_id"],
+                    sequence_id=r["sequence_id"],
+                    timestamp=r["timestamp"],
+                    instrument_public_id=r["instrument_public_id"],
+                    native_symbol=r["native_symbol"],
+                    exchange=r["exchange"],
+                    asset_type=r["asset_type"],
+                    relationship_type=r["relationship_type"],
+                    contract_family=r["contract_family"],
+                )
+                for r in rows
+            ]
+            sid = tracker.session_id
+            seq = tracker.next_sequence(_REST_DATA_STREAM)
+            ts = dt.datetime.now(dt.UTC)
+            pid = str(uuid7())
+            return UnderlyingInstrumentListResponse(
+                session_id=sid,
+                sequence_id=seq,
+                public_id=pid,
+                timestamp=ts,
+                payload=items,
+                count=len(items),
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error(f"Failed to fetch instruments for {ticker}: {exc}")
+            raise HTTPException(
+                status_code=500, detail="Failed to fetch underlying instruments"
+            ) from exc
+
+    return router
+
+
 def create_api_router(
     manager: WebSocketConnectionManager,
 ) -> APIRouter:
@@ -1119,6 +1275,7 @@ def create_api_router(
     router = APIRouter()
     router.include_router(_create_candles_signals_router())
     router.include_router(_create_exchange_router())
+    router.include_router(_create_underlying_router())
     router.include_router(_create_orders_executions_router())
     router.include_router(_create_monitoring_endpoints_router(manager))
     return router

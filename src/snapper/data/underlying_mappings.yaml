@@ -1,0 +1,371 @@
+underlyings:
+
+  - ticker: BTC
+    name: Bitcoin
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "BTC-USD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "BTC-EUR"
+      - exchange: zonda
+        match_type: exact
+        pattern: "BTC-USD"
+      - exchange: zonda
+        match_type: exact
+        pattern: "BTC-EUR"
+      - exchange: polygon
+        match_type: exact
+        pattern: "BTC-USD"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "BTC-USD-PERP"
+        relationship_type: derivative
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "BTC-USD-PERP-INV"
+        relationship_type: derivative
+      - exchange: kraken_futures
+        match_type: regex
+        pattern: '^BTC-USD-\d{6}$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: BTC
+      - exchange: kraken_futures
+        match_type: regex
+        pattern: '^BTC-USD-\d{6}-INV$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: BTC-INV
+
+  - ticker: ETH
+    name: Ethereum
+    asset_class: crypto
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "ETH-USD"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ETH-EUR"
+      - exchange: kraken
+        match_type: exact
+        pattern: "ETH-BTC"
+      - exchange: zonda
+        match_type: exact
+        pattern: "ETH-USD"
+      - exchange: zonda
+        match_type: exact
+        pattern: "ETH-EUR"
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "ETH-USD-PERP"
+        relationship_type: derivative
+      - exchange: kraken_futures
+        match_type: regex
+        pattern: '^ETH-USD-\d{6}$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: ETH
+
+  - ticker: SPX
+    name: "S&P 500"
+    asset_class: index
+    sector: "US Large Cap"
+    patterns:
+      - exchange: polygon
+        match_type: exact
+        pattern: "SPY"
+        relationship_type: proxy
+        instrument_type: etf
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "SPYX-USD-PERP"
+        relationship_type: derivative
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^ES[FGHJKMNQUVXZ]\d{1,2}-CME$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: ES
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^MES[FGHJKMNQUVXZ]\d{1,2}-CME$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: MES
+
+  - ticker: NDX
+    name: "Nasdaq 100"
+    asset_class: index
+    sector: "US Tech"
+    patterns:
+      - exchange: polygon
+        match_type: exact
+        pattern: "QQQ"
+        relationship_type: proxy
+        instrument_type: etf
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^NQ[FGHJKMNQUVXZ]\d{1,2}-CME$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: NQ
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^MNQ[FGHJKMNQUVXZ]\d{1,2}-CME$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: MNQ
+
+  - ticker: DJI
+    name: "Dow Jones Industrial Average"
+    asset_class: index
+    sector: "US Large Cap"
+    patterns:
+      - exchange: polygon
+        match_type: exact
+        pattern: "DIA"
+        relationship_type: proxy
+        instrument_type: etf
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^YM[FGHJKMNQUVXZ]\d{1,2}-CBOT$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: YM
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^MYM[FGHJKMNQUVXZ]\d{1,2}-CBOT$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: MYM
+
+  - ticker: RUT
+    name: "Russell 2000"
+    asset_class: index
+    sector: "US Small Cap"
+    patterns:
+      - exchange: polygon
+        match_type: exact
+        pattern: "IWM"
+        relationship_type: proxy
+        instrument_type: etf
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^RTY[FGHJKMNQUVXZ]\d{1,2}-CME$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: RTY
+
+  - ticker: GOLD
+    name: Gold
+    asset_class: commodity
+    sector: "Precious Metals"
+    patterns:
+      - exchange: polygon
+        match_type: exact
+        pattern: "GLD"
+        relationship_type: proxy
+        instrument_type: etf
+      - exchange: polygon
+        match_type: exact
+        pattern: "IAU"
+        relationship_type: proxy
+        instrument_type: etf
+      - exchange: kraken
+        match_type: exact
+        pattern: "PAXG-USD"
+        relationship_type: proxy
+      - exchange: kraken_futures
+        match_type: exact
+        pattern: "PAXG-USD-PERP"
+        relationship_type: proxy
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^GC[FGHJKMNQUVXZ]\d{1,2}-COMEX$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: GC
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^1OZ[FGHJKMNQUVXZ]\d{1,2}-COMEX$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: 1OZ
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^MGC[FGHJKMNQUVXZ]\d{1,2}-COMEX$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: MGC
+
+  - ticker: SILVER
+    name: Silver
+    asset_class: commodity
+    sector: "Precious Metals"
+    patterns:
+      - exchange: polygon
+        match_type: exact
+        pattern: "SLV"
+        relationship_type: proxy
+        instrument_type: etf
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^SI[FGHJKMNQUVXZ]\d{1,2}-COMEX$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: SI
+
+  - ticker: WTI
+    name: "WTI Crude Oil"
+    asset_class: commodity
+    sector: "Energy"
+    patterns:
+      - exchange: polygon
+        match_type: exact
+        pattern: "USO"
+        relationship_type: proxy
+        instrument_type: etf
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^CL[FGHJKMNQUVXZ]\d{1,2}-NYMEX$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: CL
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^MCL[FGHJKMNQUVXZ]\d{1,2}-NYMEX$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: MCL
+
+  - ticker: NATGAS
+    name: Natural Gas
+    asset_class: commodity
+    sector: "Energy"
+    patterns:
+      - exchange: polygon
+        match_type: exact
+        pattern: "UNG"
+        relationship_type: proxy
+        instrument_type: etf
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^NG[FGHJKMNQUVXZ]\d{1,2}-NYMEX$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: NG
+
+  - ticker: EURUSD
+    name: "Euro / US Dollar"
+    asset_class: forex
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "EUR-USD"
+      - exchange: walutomat
+        match_type: exact
+        pattern: "EUR-USD"
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^6E[FGHJKMNQUVXZ]\d{1,2}-CME$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: 6E
+
+  - ticker: USDPLN
+    name: "US Dollar / Polish Zloty"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "USD-PLN"
+
+  - ticker: EURPLN
+    name: "Euro / Polish Zloty"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "EUR-PLN"
+
+  - ticker: GBPPLN
+    name: "British Pound / Polish Zloty"
+    asset_class: forex
+    patterns:
+      - exchange: walutomat
+        match_type: exact
+        pattern: "GBP-PLN"
+
+  - ticker: GBPUSD
+    name: "British Pound / US Dollar"
+    asset_class: forex
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "GBP-USD"
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^6B[FGHJKMNQUVXZ]\d{1,2}-CME$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: 6B
+
+  - ticker: EURGBP
+    name: "Euro / British Pound"
+    asset_class: forex
+    patterns:
+      - exchange: kraken
+        match_type: exact
+        pattern: "EUR-GBP"
+
+  - ticker: US10Y
+    name: "US 10-Year Treasury Note"
+    asset_class: yield
+    sector: "US Government"
+    patterns:
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^ZN[FGHJKMNQUVXZ]\d{1,2}-CBOT$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: ZN
+
+  - ticker: US30Y
+    name: "US 30-Year Treasury Bond"
+    asset_class: yield
+    sector: "US Government"
+    patterns:
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^ZB[FGHJKMNQUVXZ]\d{1,2}-CBOT$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: ZB
+
+  - ticker: US2Y
+    name: "US 2-Year Treasury Note"
+    asset_class: yield
+    sector: "US Government"
+    patterns:
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^ZT[FGHJKMNQUVXZ]\d{1,2}-CBOT$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: ZT
+
+  - ticker: US5Y
+    name: "US 5-Year Treasury Note"
+    asset_class: yield
+    sector: "US Government"
+    patterns:
+      - exchange: kraken_equities
+        match_type: regex
+        pattern: '^ZF[FGHJKMNQUVXZ]\d{1,2}-CBOT$'
+        relationship_type: derivative
+        instrument_type: future
+        contract_family: ZF

@@ -29,12 +29,12 @@ from snapper.data.models import Symbol
 from snapper.data.repository import DatabaseRepository
 
 
-def test_state_tables_cover_all_12() -> None:
-    """STATE_TABLES dict contains all 12 state-SCD2 tables.
+def test_state_tables_cover_all_14() -> None:
+    """STATE_TABLES dict contains all 14 state-SCD2 tables.
 
     Given: STATE_TABLES configuration,
     When: Keys are inspected,
-    Then: All 12 tables present.
+    Then: All 14 tables present.
     """
     expected = {
         "orders",
@@ -49,6 +49,8 @@ def test_state_tables_cover_all_12() -> None:
         "user_login_events",
         "market_snapshots",
         "process_runs",
+        "underlying_assets",
+        "instrument_underlying_mappings",
     }
     assert set(STATE_TABLES.keys()) == expected
 

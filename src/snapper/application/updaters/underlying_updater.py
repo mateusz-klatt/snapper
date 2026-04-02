@@ -1,0 +1,390 @@
+"""Underlying asset updater — syncs YAML definitions to the database.
+
+Reads underlying_mappings.yaml, matches patterns against active instruments,
+and upserts UnderlyingAsset + InstrumentUnderlyingMapping rows via SCD2.
+"""
+
+import re
+from datetime import UTC
+from datetime import datetime
+from pathlib import Path
+from typing import Literal
+from typing import Self
+
+import yaml
+from loguru import logger
+from pydantic import BaseModel
+from pydantic import ValidationInfo
+from pydantic import field_validator
+from pydantic import model_validator
+from sqlalchemy import select
+
+from snapper.core.types import AssetTypeEnum
+from snapper.core.types import ExchangeEnum
+from snapper.core.types import RelationshipTypeEnum
+from snapper.data.models import Instrument
+from snapper.data.models import InstrumentUnderlyingMapping
+from snapper.data.models import Symbol
+from snapper.data.repository import Repository
+from snapper.data.repository import get_repository
+from snapper.data.repository import where_active
+
+_DEFAULT_YAML = Path(__file__).resolve().parents[2] / "data" / "underlying_mappings.yaml"
+
+_SAFETY_THRESHOLD = 0.25
+
+
+class PatternRule(BaseModel):
+    """Single pattern rule matching instruments to an underlying asset."""
+
+    exchange: ExchangeEnum
+    match_type: Literal["exact", "regex"]
+    pattern: str
+    relationship_type: RelationshipTypeEnum = RelationshipTypeEnum.EXACT
+    instrument_type: str | None = None
+    contract_family: str | None = None
+    expiry_override: datetime | None = None
+
+    @field_validator("pattern")
+    @classmethod
+    def validate_regex(cls, v: str, info: ValidationInfo) -> str:
+        """Compile regex patterns at validation time for fail-fast behaviour.
+
+        Args:
+            v: Pattern string to validate.
+            info: Pydantic validation context with sibling field values.
+
+        Returns:
+            The validated pattern string.
+        """
+        if info.data.get("match_type") == "regex":
+            re.compile(v)
+        return v
+
+
+class UnderlyingDefinition(BaseModel):
+    """Definition of an underlying asset with its matching patterns."""
+
+    ticker: str
+    name: str
+    asset_class: AssetTypeEnum
+    sector: str | None = None
+    description: str | None = None
+    patterns: list[PatternRule]
+
+
+class UnderlyingMappingConfig(BaseModel):
+    """Root schema for the underlying_mappings.yaml file."""
+
+    underlyings: list[UnderlyingDefinition]
+
+    @model_validator(mode="after")
+    def unique_tickers(self) -> Self:
+        """Reject duplicate tickers in the mapping file.
+
+        Returns:
+            Validated config instance.
+        """
+        tickers = [u.ticker for u in self.underlyings]
+        if len(tickers) != len(set(tickers)):
+            seen: set[str] = set()
+            dupes: list[str] = []
+            for t in tickers:
+                if t in seen:
+                    dupes.append(t)
+                seen.add(t)
+            msg = f"Duplicate tickers in mapping file: {dupes}"
+            raise ValueError(msg)
+        return self
+
+
+def rule_matches(rule: PatternRule, native_symbol: str) -> bool:
+    """Test whether a pattern rule matches a native symbol string.
+
+    Args:
+        rule: Pattern rule with match_type and pattern.
+        native_symbol: Symbol string to test against.
+
+    Returns:
+        True if the rule matches the symbol.
+    """
+    if rule.match_type == "exact":
+        return native_symbol == rule.pattern
+    return re.fullmatch(rule.pattern, native_symbol) is not None
+
+
+class _InstrumentInfo:
+    """Lightweight struct for an active instrument during matching."""
+
+    __slots__ = ("instrument_public_id", "exchange", "native_symbol")
+
+    def __init__(self, instrument_public_id: str, exchange: str, native_symbol: str) -> None:
+        self.instrument_public_id = instrument_public_id
+        self.exchange = exchange
+        self.native_symbol = native_symbol
+
+
+class _MatchResult:
+    """Accumulated match for one instrument across all underlyings."""
+
+    __slots__ = ("underlying_ticker", "relationship_type", "contract_family")
+
+    def __init__(
+        self, underlying_ticker: str, relationship_type: str, contract_family: str | None
+    ) -> None:
+        self.underlying_ticker = underlying_ticker
+        self.relationship_type = relationship_type
+        self.contract_family = contract_family
+
+
+class UnderlyingUpdater:
+    """Syncs underlying asset definitions from YAML into the database."""
+
+    def __init__(
+        self,
+        db_url: str,
+        force: bool = False,
+        yaml_path: Path | None = None,
+    ) -> None:
+        """Initialize the underlying updater.
+
+        Args:
+            db_url: Database connection URL.
+            force: Bypass safety guard for stale cleanup.
+            yaml_path: Path to YAML mapping file (defaults to built-in).
+        """
+        self._db_url = db_url
+        self._force = force
+        self._yaml_path = yaml_path or _DEFAULT_YAML
+        self._repo: Repository | None = None
+
+    async def run(self) -> None:
+        """Execute the full update cycle."""
+        self._repo = get_repository(self._db_url)
+        now = datetime.now(UTC)
+
+        config = self._load_config()
+        underlying_ids = await self._upsert_underlyings(config, now)
+        instruments = await self._load_instruments(now)
+        await self._match_and_upsert(config, underlying_ids, instruments, now)
+
+    def _load_config(self) -> UnderlyingMappingConfig:
+        """Load and validate the YAML mapping file."""
+        logger.info(f"Loading mapping config from {self._yaml_path}")
+        with open(self._yaml_path) as f:
+            raw = yaml.safe_load(f)
+        return UnderlyingMappingConfig.model_validate(raw)
+
+    async def _upsert_underlyings(
+        self,
+        config: UnderlyingMappingConfig,
+        now: datetime,
+    ) -> dict[str, str]:
+        """Upsert all underlying asset definitions. Returns {ticker: public_id}."""
+        assert self._repo is not None
+        result: dict[str, str] = {}
+        counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0}
+        session_id = f"underlying-updater-{now:%Y%m%d%H%M%S}"
+
+        for seq, defn in enumerate(config.underlyings, start=1):
+            public_id, status = await self._repo.upsert_underlying_asset(
+                ticker=defn.ticker,
+                name=defn.name,
+                asset_class=defn.asset_class.value,
+                session_id=session_id,
+                sequence_id=seq,
+                timestamp=now,
+                sector=defn.sector,
+                description=defn.description,
+            )
+            result[defn.ticker] = public_id
+            counts[status] += 1
+
+        logger.info(
+            f"Underlyings: {counts['created']} created, "
+            f"{counts['updated']} updated, {counts['unchanged']} unchanged"
+        )
+        return result
+
+    async def _load_instruments(self, now: datetime) -> list[_InstrumentInfo]:
+        """Load all active instruments with their native symbols."""
+        assert self._repo is not None
+        async with self._repo.session() as s:
+            stmt = (
+                select(
+                    Instrument.public_id.label("instrument_public_id"),
+                    Instrument.exchange,
+                    Symbol.native_symbol,
+                )
+                .join(Symbol, Symbol.public_id == Instrument.symbol_public_id)
+                .where(*where_active(Instrument, now), *where_active(Symbol, now))
+            )
+            rows = (await s.execute(stmt)).all()
+        return [
+            _InstrumentInfo(
+                instrument_public_id=r.instrument_public_id,
+                exchange=r.exchange,
+                native_symbol=r.native_symbol,
+            )
+            for r in rows
+        ]
+
+    async def _match_and_upsert(
+        self,
+        config: UnderlyingMappingConfig,
+        underlying_ids: dict[str, str],
+        instruments: list[_InstrumentInfo],
+        now: datetime,
+    ) -> None:
+        """Match instruments to underlyings and upsert/close mappings."""
+        assert self._repo is not None
+        session_id = f"underlying-updater-{now:%Y%m%d%H%M%S}"
+
+        desired: dict[str, _MatchResult] = {}
+        conflicted: set[str] = set()
+        unmapped: list[tuple[str, str]] = []
+
+        for inst in instruments:
+            matches = self._find_matches(config, inst)
+
+            if len(matches) == 0:
+                unmapped.append((inst.native_symbol, inst.exchange))
+                continue
+
+            if len(matches) > 1:
+                tickers = [m.underlying_ticker for m in matches]
+                logger.error(
+                    f"Conflict: {inst.native_symbol} ({inst.exchange}) matches "
+                    f"multiple underlyings: {tickers} — skipping"
+                )
+                conflicted.add(inst.instrument_public_id)
+                continue
+
+            match = matches[0]
+            desired[inst.instrument_public_id] = match
+
+        counts: dict[str, int] = {"created": 0, "updated": 0, "unchanged": 0}
+        for seq, (ipid, match) in enumerate(desired.items(), start=1):
+            status = await self._repo.upsert_instrument_underlying_mapping(
+                instrument_public_id=ipid,
+                underlying_public_id=underlying_ids[match.underlying_ticker],
+                relationship_type=match.relationship_type,
+                session_id=session_id,
+                sequence_id=seq,
+                timestamp=now,
+                contract_family=match.contract_family,
+            )
+            counts[status] += 1
+
+        closed = await self._cleanup_stale(desired, conflicted, session_id, now)
+
+        logger.info(
+            f"Mappings: {counts['created']} created, {counts['updated']} updated, "
+            f"{counts['unchanged']} unchanged, {closed} closed"
+        )
+        if unmapped:
+            logger.info(f"Unmapped instruments ({len(unmapped)}): {unmapped[:20]}")
+        if conflicted:
+            logger.warning(f"Conflicted instruments: {len(conflicted)}")
+
+    def _find_matches(
+        self,
+        config: UnderlyingMappingConfig,
+        inst: _InstrumentInfo,
+    ) -> list[_MatchResult]:
+        """Find all underlying matches for a single instrument.
+
+        Returns one _MatchResult per distinct underlying that matched.
+        Within one underlying, multiple rules must agree on metadata or
+        the instrument is treated as conflicted.
+        """
+        per_underlying: dict[str, list[PatternRule]] = {}
+
+        for defn in config.underlyings:
+            matching_rules: list[PatternRule] = []
+            for rule in defn.patterns:
+                if rule.exchange.value != inst.exchange:
+                    continue
+                if rule_matches(rule, inst.native_symbol):
+                    matching_rules.append(rule)
+            if matching_rules:
+                per_underlying[defn.ticker] = matching_rules
+
+        results: list[_MatchResult] = []
+        for ticker, rules in per_underlying.items():
+            first = rules[0]
+            conflict = False
+            for r in rules[1:]:
+                if (
+                    r.relationship_type != first.relationship_type
+                    or r.contract_family != first.contract_family
+                    or r.instrument_type != first.instrument_type
+                    or r.expiry_override != first.expiry_override
+                ):
+                    logger.error(
+                        f"Intra-underlying conflict for {inst.native_symbol} "
+                        f"({inst.exchange}) in {ticker}: rules disagree on metadata"
+                    )
+                    conflict = True
+                    break
+            if not conflict:
+                results.append(
+                    _MatchResult(
+                        underlying_ticker=ticker,
+                        relationship_type=first.relationship_type.value,
+                        contract_family=first.contract_family,
+                    )
+                )
+
+        return results
+
+    async def _cleanup_stale(
+        self,
+        desired: dict[str, _MatchResult],
+        conflicted: set[str],
+        session_id: str,
+        now: datetime,
+    ) -> int:
+        """Close mappings that are no longer in the desired set.
+
+        Conflicted instruments are excluded from cleanup — they retain
+        their existing mapping until the YAML conflict is resolved.
+        """
+        assert self._repo is not None
+        async with self._repo.session() as s:
+            existing_rows = (
+                (
+                    await s.execute(
+                        select(InstrumentUnderlyingMapping.instrument_public_id).where(
+                            *where_active(InstrumentUnderlyingMapping, now)
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        existing = set(existing_rows)
+        to_close = existing - set(desired.keys()) - conflicted
+
+        if not to_close:
+            return 0
+
+        if len(existing) > 0 and len(to_close) / len(existing) > _SAFETY_THRESHOLD:
+            if not self._force:
+                logger.warning(
+                    f"Safety guard: {len(to_close)}/{len(existing)} mappings "
+                    f"({len(to_close)/len(existing):.0%}) would be closed. "
+                    f"Use --force to proceed."
+                )
+                return 0
+
+        closed = 0
+        for seq, ipid in enumerate(to_close, start=1):
+            if await self._repo.close_instrument_underlying_mapping(
+                instrument_public_id=ipid,
+                session_id=session_id,
+                sequence_id=seq,
+                timestamp=now,
+            ):
+                closed += 1
+        return closed

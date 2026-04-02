@@ -76,6 +76,14 @@ class MarketDataTypeEnum(StrEnum):
     CANDLES = "candles"
 
 
+class RelationshipTypeEnum(StrEnum):
+    """Relationship between an instrument and its underlying asset."""
+
+    EXACT = "exact"
+    DERIVATIVE = "derivative"
+    PROXY = "proxy"
+
+
 class AliasChannelEnum(StrEnum):
     """Symbol alias channel type: ws for WebSocket, rest for REST API, ccxt for CCXT library."""
 
@@ -337,6 +345,7 @@ __all__ = [
     "ProcessRoleType",
     "ProcessRunStatusEnum",
     "ProcessRunStatusType",
+    "RelationshipTypeEnum",
     "SpawnerProcessStatus",
     "StartProcessStatus",
     "StopProcessStatus",

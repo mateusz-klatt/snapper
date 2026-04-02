@@ -77,6 +77,7 @@ from snapper.data.models import Candle
 from snapper.data.models import Execution
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentSpec
+from snapper.data.models import InstrumentUnderlyingMapping
 from snapper.data.models import MarketSnapshot
 from snapper.data.models import Order
 from snapper.data.models import Position
@@ -88,11 +89,13 @@ from snapper.data.models import Tick
 from snapper.data.models import Trade
 from snapper.data.models import TradeCommand
 from snapper.data.models import TradeProjectionCheckpoint
+from snapper.data.models import UnderlyingAsset
 from snapper.data.models import VenueEvent
 from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import CheckpointUpsertRow
 from snapper.data.repository_types import ExecutionRow
+from snapper.data.repository_types import InstrumentUnderlyingRow
 from snapper.data.repository_types import MarketSnapshotRow
 from snapper.data.repository_types import MarketSnapshotUpsertRow
 from snapper.data.repository_types import OrderRow
@@ -106,6 +109,7 @@ from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import TradeProjectionCheckpointRow
 from snapper.data.repository_types import TradeRow
 from snapper.data.repository_types import TradeUpsertRow
+from snapper.data.repository_types import UnderlyingAssetRow
 from snapper.data.repository_types import VenueEventInsertRow
 from snapper.data.repository_types import VenueEventRow
 
@@ -692,6 +696,155 @@ class Repository(ABC):
 
         Returns:
             Sorted list of category name strings.
+        """
+        ...
+
+    @abstractmethod
+    async def get_underlying_assets(
+        self,
+        as_of: datetime,
+    ) -> list[UnderlyingAssetRow]:
+        """All active underlying assets at as_of.
+
+        Args:
+            as_of: Point-in-time for temporal query.
+
+        Returns:
+            List of underlying asset dicts.
+        """
+        ...
+
+    @abstractmethod
+    async def get_underlying_by_ticker(
+        self,
+        ticker: str,
+        as_of: datetime,
+    ) -> UnderlyingAssetRow | None:
+        """Lookup underlying by ticker (e.g. 'SPX', 'GOLD').
+
+        Args:
+            ticker: Short code for the underlying asset.
+            as_of: Point-in-time for temporal query.
+
+        Returns:
+            Underlying asset dict or None if not found.
+        """
+        ...
+
+    @abstractmethod
+    async def get_instruments_by_underlying(
+        self,
+        underlying_public_id: str,
+        as_of: datetime,
+        relationship_types: list[str] | None = None,
+    ) -> list[InstrumentUnderlyingRow]:
+        """Instruments mapped to an underlying asset.
+
+        Args:
+            underlying_public_id: Public ID of the underlying asset.
+            as_of: Point-in-time for temporal query.
+            relationship_types: Optional filter (e.g. ['derivative']).
+
+        Returns:
+            List of instrument-underlying mapping dicts with symbol info.
+        """
+        ...
+
+    @abstractmethod
+    async def get_underlying_for_instrument(
+        self,
+        instrument_public_id: str,
+        as_of: datetime,
+    ) -> UnderlyingAssetRow | None:
+        """Reverse lookup: which underlying does this instrument belong to?
+
+        Args:
+            instrument_public_id: Public ID of the instrument.
+            as_of: Point-in-time for temporal query.
+
+        Returns:
+            Underlying asset dict or None if unmapped.
+        """
+        ...
+
+    @abstractmethod
+    async def upsert_underlying_asset(
+        self,
+        ticker: str,
+        name: str,
+        asset_class: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+        sector: str | None = None,
+        description: str | None = None,
+    ) -> tuple[str, str]:
+        """SCD2 upsert for an underlying asset.
+
+        Args:
+            ticker: Short code (e.g. 'SPX').
+            name: Canonical name (e.g. 'S&P 500').
+            asset_class: Asset type from AssetTypeEnum.
+            session_id: Provenance session ID.
+            sequence_id: Provenance sequence number.
+            timestamp: Bus time.
+            sector: Optional sector (e.g. 'Precious Metals').
+            description: Optional human-readable description.
+
+        Returns:
+            Tuple of (underlying_public_id, status) where status is
+            'created', 'updated', or 'unchanged'.
+        """
+        ...
+
+    @abstractmethod
+    async def upsert_instrument_underlying_mapping(
+        self,
+        instrument_public_id: str,
+        underlying_public_id: str,
+        relationship_type: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+        contract_family: str | None = None,
+    ) -> str:
+        """SCD2 upsert for an instrument-underlying mapping.
+
+        Compares (underlying_public_id, relationship_type, contract_family).
+        'updated' when any of the three fields changed (close+insert).
+
+        Args:
+            instrument_public_id: Public ID of the instrument.
+            underlying_public_id: Public ID of the underlying asset.
+            relationship_type: One of 'exact', 'derivative', 'proxy'.
+            session_id: Provenance session ID.
+            sequence_id: Provenance sequence number.
+            timestamp: Bus time.
+            contract_family: Optional futures product root (e.g. 'ES').
+
+        Returns:
+            Status: 'created', 'updated', or 'unchanged'.
+        """
+        ...
+
+    @abstractmethod
+    async def close_instrument_underlying_mapping(
+        self,
+        instrument_public_id: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+    ) -> bool:
+        """Close active mapping for instrument.
+
+        Args:
+            instrument_public_id: Public ID of the instrument.
+            session_id: Provenance session ID.
+            sequence_id: Provenance sequence number.
+            timestamp: Bus time.
+
+        Returns:
+            True if a row was closed, False if no active mapping.
         """
         ...
 
@@ -2316,6 +2469,357 @@ class SQLAlchemyRepository(Repository):
                 select(func.max(VenueEvent.id)).where(VenueEvent.shard_key == shard_key)
             )
             return result.scalar()
+
+    async def get_underlying_assets(
+        self,
+        as_of: datetime,
+    ) -> list[UnderlyingAssetRow]:
+        """All active underlying assets at as_of."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(
+                    UnderlyingAsset.public_id,
+                    UnderlyingAsset.ticker,
+                    UnderlyingAsset.name,
+                    UnderlyingAsset.asset_class,
+                    UnderlyingAsset.sector,
+                    UnderlyingAsset.description,
+                    UnderlyingAsset.timestamp,
+                    UnderlyingAsset.session_id,
+                    UnderlyingAsset.sequence_id,
+                )
+                .where(*where_active(UnderlyingAsset, as_of))
+                .order_by(UnderlyingAsset.ticker)
+            )
+            return [
+                UnderlyingAssetRow(
+                    public_id=r.public_id,
+                    ticker=r.ticker,
+                    name=r.name,
+                    asset_class=r.asset_class,
+                    sector=r.sector,
+                    description=r.description,
+                    timestamp=r.timestamp,
+                    session_id=r.session_id,
+                    sequence_id=r.sequence_id,
+                )
+                for r in result.all()
+            ]
+
+    async def get_underlying_by_ticker(
+        self,
+        ticker: str,
+        as_of: datetime,
+    ) -> UnderlyingAssetRow | None:
+        """Lookup underlying by ticker."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(
+                    UnderlyingAsset.public_id,
+                    UnderlyingAsset.ticker,
+                    UnderlyingAsset.name,
+                    UnderlyingAsset.asset_class,
+                    UnderlyingAsset.sector,
+                    UnderlyingAsset.description,
+                    UnderlyingAsset.timestamp,
+                    UnderlyingAsset.session_id,
+                    UnderlyingAsset.sequence_id,
+                ).where(
+                    UnderlyingAsset.ticker == ticker,
+                    *where_active(UnderlyingAsset, as_of),
+                )
+            )
+            r = result.first()
+            if r is None:
+                return None
+            return UnderlyingAssetRow(
+                public_id=r.public_id,
+                ticker=r.ticker,
+                name=r.name,
+                asset_class=r.asset_class,
+                sector=r.sector,
+                description=r.description,
+                timestamp=r.timestamp,
+                session_id=r.session_id,
+                sequence_id=r.sequence_id,
+            )
+
+    async def get_instruments_by_underlying(
+        self,
+        underlying_public_id: str,
+        as_of: datetime,
+        relationship_types: list[str] | None = None,
+    ) -> list[InstrumentUnderlyingRow]:
+        """Instruments mapped to an underlying asset."""
+        async with self.session() as s:
+            stmt = (
+                select(
+                    InstrumentUnderlyingMapping.public_id,
+                    InstrumentUnderlyingMapping.instrument_public_id,
+                    InstrumentUnderlyingMapping.underlying_public_id,
+                    InstrumentUnderlyingMapping.relationship_type,
+                    InstrumentUnderlyingMapping.contract_family,
+                    Symbol.native_symbol.label("native_symbol"),
+                    Instrument.exchange,
+                    Symbol.asset_type,
+                    InstrumentUnderlyingMapping.timestamp,
+                    InstrumentUnderlyingMapping.session_id,
+                    InstrumentUnderlyingMapping.sequence_id,
+                )
+                .join(
+                    Instrument,
+                    Instrument.public_id == InstrumentUnderlyingMapping.instrument_public_id,
+                )
+                .join(
+                    Symbol,
+                    Symbol.public_id == Instrument.symbol_public_id,
+                )
+                .where(
+                    InstrumentUnderlyingMapping.underlying_public_id == underlying_public_id,
+                    *where_active(InstrumentUnderlyingMapping, as_of),
+                    *where_active(Instrument, as_of),
+                    *where_active(Symbol, as_of),
+                )
+                .order_by(Instrument.exchange, Symbol.native_symbol)
+            )
+            if relationship_types:
+                stmt = stmt.where(
+                    InstrumentUnderlyingMapping.relationship_type.in_(relationship_types)
+                )
+            result = await s.execute(stmt)
+            return [
+                InstrumentUnderlyingRow(
+                    public_id=r.public_id,
+                    instrument_public_id=r.instrument_public_id,
+                    underlying_public_id=r.underlying_public_id,
+                    relationship_type=r.relationship_type,
+                    contract_family=r.contract_family,
+                    native_symbol=r.native_symbol,
+                    exchange=r.exchange,
+                    asset_type=r.asset_type,
+                    timestamp=r.timestamp,
+                    session_id=r.session_id,
+                    sequence_id=r.sequence_id,
+                )
+                for r in result.all()
+            ]
+
+    async def get_underlying_for_instrument(
+        self,
+        instrument_public_id: str,
+        as_of: datetime,
+    ) -> UnderlyingAssetRow | None:
+        """Reverse lookup: which underlying does this instrument belong to?"""
+        async with self.session() as s:
+            result = await s.execute(
+                select(
+                    UnderlyingAsset.public_id,
+                    UnderlyingAsset.ticker,
+                    UnderlyingAsset.name,
+                    UnderlyingAsset.asset_class,
+                    UnderlyingAsset.sector,
+                    UnderlyingAsset.description,
+                    UnderlyingAsset.timestamp,
+                    UnderlyingAsset.session_id,
+                    UnderlyingAsset.sequence_id,
+                )
+                .join(
+                    InstrumentUnderlyingMapping,
+                    InstrumentUnderlyingMapping.underlying_public_id == UnderlyingAsset.public_id,
+                )
+                .where(
+                    InstrumentUnderlyingMapping.instrument_public_id == instrument_public_id,
+                    *where_active(InstrumentUnderlyingMapping, as_of),
+                    *where_active(UnderlyingAsset, as_of),
+                )
+            )
+            r = result.first()
+            if r is None:
+                return None
+            return UnderlyingAssetRow(
+                public_id=r.public_id,
+                ticker=r.ticker,
+                name=r.name,
+                asset_class=r.asset_class,
+                sector=r.sector,
+                description=r.description,
+                timestamp=r.timestamp,
+                session_id=r.session_id,
+                sequence_id=r.sequence_id,
+            )
+
+    async def upsert_underlying_asset(
+        self,
+        ticker: str,
+        name: str,
+        asset_class: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+        sector: str | None = None,
+        description: str | None = None,
+    ) -> tuple[str, str]:
+        """SCD2 upsert for an underlying asset."""
+        async with self.session() as s:
+            existing = (
+                (
+                    await s.execute(
+                        select(UnderlyingAsset).where(
+                            UnderlyingAsset.ticker == ticker,
+                            *where_active(UnderlyingAsset, timestamp),
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+
+            if existing is not None:
+                changed = (
+                    existing.name != name
+                    or existing.asset_class != asset_class
+                    or existing.sector != sector
+                    or existing.description != description
+                )
+                if not changed:
+                    return existing.public_id, "unchanged"
+
+                await s.execute(
+                    update(UnderlyingAsset)
+                    .where(UnderlyingAsset.id == existing.id)
+                    .values(known_to=timestamp)
+                )
+                new_row = UnderlyingAsset(
+                    public_id=existing.public_id,
+                    ticker=ticker,
+                    name=name,
+                    asset_class=asset_class,
+                    sector=sector,
+                    description=description,
+                    session_id=session_id,
+                    sequence_id=sequence_id,
+                    timestamp=timestamp,
+                    known_to=KNOWN_TO_MAX,
+                )
+                s.add(new_row)
+                await s.commit()
+                return existing.public_id, "updated"
+
+            new_row = UnderlyingAsset(
+                ticker=ticker,
+                name=name,
+                asset_class=asset_class,
+                sector=sector,
+                description=description,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=timestamp,
+                known_to=KNOWN_TO_MAX,
+            )
+            s.add(new_row)
+            await s.commit()
+            return new_row.public_id, "created"
+
+    async def upsert_instrument_underlying_mapping(
+        self,
+        instrument_public_id: str,
+        underlying_public_id: str,
+        relationship_type: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+        contract_family: str | None = None,
+    ) -> str:
+        """SCD2 upsert for an instrument-underlying mapping."""
+        async with self.session() as s:
+            existing = (
+                (
+                    await s.execute(
+                        select(InstrumentUnderlyingMapping).where(
+                            InstrumentUnderlyingMapping.instrument_public_id
+                            == instrument_public_id,
+                            *where_active(InstrumentUnderlyingMapping, timestamp),
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+
+            if existing is not None:
+                changed = (
+                    existing.underlying_public_id != underlying_public_id
+                    or existing.relationship_type != relationship_type
+                    or existing.contract_family != contract_family
+                )
+                if not changed:
+                    return "unchanged"
+
+                await s.execute(
+                    update(InstrumentUnderlyingMapping)
+                    .where(InstrumentUnderlyingMapping.id == existing.id)
+                    .values(known_to=timestamp)
+                )
+                new_row = InstrumentUnderlyingMapping(
+                    public_id=existing.public_id,
+                    instrument_public_id=instrument_public_id,
+                    underlying_public_id=underlying_public_id,
+                    relationship_type=relationship_type,
+                    contract_family=contract_family,
+                    session_id=session_id,
+                    sequence_id=sequence_id,
+                    timestamp=timestamp,
+                    known_to=KNOWN_TO_MAX,
+                )
+                s.add(new_row)
+                await s.commit()
+                return "updated"
+
+            new_row = InstrumentUnderlyingMapping(
+                instrument_public_id=instrument_public_id,
+                underlying_public_id=underlying_public_id,
+                relationship_type=relationship_type,
+                contract_family=contract_family,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=timestamp,
+                known_to=KNOWN_TO_MAX,
+            )
+            s.add(new_row)
+            await s.commit()
+            return "created"
+
+    async def close_instrument_underlying_mapping(
+        self,
+        instrument_public_id: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+    ) -> bool:
+        """Close active mapping for instrument."""
+        async with self.session() as s:
+            existing = (
+                (
+                    await s.execute(
+                        select(InstrumentUnderlyingMapping).where(
+                            InstrumentUnderlyingMapping.instrument_public_id
+                            == instrument_public_id,
+                            *where_active(InstrumentUnderlyingMapping, timestamp),
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if existing is None:
+                return False
+            await s.execute(
+                update(InstrumentUnderlyingMapping)
+                .where(InstrumentUnderlyingMapping.id == existing.id)
+                .values(known_to=timestamp)
+            )
+            await s.commit()
+            return True
 
 
 _repository_cache: dict[str, Repository] = {}
