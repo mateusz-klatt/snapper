@@ -63,6 +63,8 @@ def _mock_repo(
 
     repo.upsert_instrument_underlying_mapping = AsyncMock(return_value=upsert_mapping_rv)
     repo.close_instrument_underlying_mapping = AsyncMock(return_value=True)
+    repo.close_underlying_asset = AsyncMock(return_value=True)
+    repo.get_underlying_assets = AsyncMock(return_value=[])
 
     mock_s = _mock_session(instrument_rows or [], stale_ids or [])
     repo.session = MagicMock(return_value=mock_s)
@@ -614,3 +616,100 @@ class TestUnderlyingUpdater:
             await updater.run()
 
         assert repo.close_instrument_underlying_mapping.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_stale_underlyings_closed_on_yaml_removal(self, tmp_path: Path) -> None:
+        """Given underlying removed from YAML, When running, Then closed in DB."""
+        yaml_content = {
+            "underlyings": [
+                {
+                    "ticker": "BTC",
+                    "name": "Bitcoin",
+                    "asset_class": "crypto",
+                    "patterns": [],
+                }
+            ]
+        }
+        yaml_file = tmp_path / "mappings.yaml"
+        yaml_file.write_text(yaml.dump(yaml_content))
+
+        repo = _mock_repo()
+        repo.get_underlying_assets = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "ua-btc",
+                    "ticker": "BTC",
+                    "name": "Bitcoin",
+                    "asset_class": "crypto",
+                    "sector": None,
+                    "description": None,
+                    "timestamp": _ts(),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                    "instrument_count": 0,
+                },
+                {
+                    "public_id": "ua-old",
+                    "ticker": "REMOVED",
+                    "name": "Removed Asset",
+                    "asset_class": "crypto",
+                    "sector": None,
+                    "description": None,
+                    "timestamp": _ts(),
+                    "session_id": "s1",
+                    "sequence_id": 2,
+                    "instrument_count": 0,
+                },
+            ]
+        )
+
+        with patch(_REPO_PATCH, return_value=repo):
+            updater = UnderlyingUpdater(db_url="test://", yaml_path=yaml_file)
+            await updater.run()
+
+        repo.close_underlying_asset.assert_called_once_with(
+            public_id="ua-old",
+            session_id=repo.close_underlying_asset.call_args.kwargs["session_id"],
+            sequence_id=repo.close_underlying_asset.call_args.kwargs["sequence_id"],
+            timestamp=repo.close_underlying_asset.call_args.kwargs["timestamp"],
+        )
+
+    @pytest.mark.asyncio
+    async def test_stale_underlyings_not_closed_when_all_present(self, tmp_path: Path) -> None:
+        """Given all underlyings in YAML, When running, Then none closed."""
+        yaml_content = {
+            "underlyings": [
+                {
+                    "ticker": "BTC",
+                    "name": "Bitcoin",
+                    "asset_class": "crypto",
+                    "patterns": [],
+                }
+            ]
+        }
+        yaml_file = tmp_path / "mappings.yaml"
+        yaml_file.write_text(yaml.dump(yaml_content))
+
+        repo = _mock_repo()
+        repo.get_underlying_assets = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "ua-btc",
+                    "ticker": "BTC",
+                    "name": "Bitcoin",
+                    "asset_class": "crypto",
+                    "sector": None,
+                    "description": None,
+                    "timestamp": _ts(),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                    "instrument_count": 0,
+                },
+            ]
+        )
+
+        with patch(_REPO_PATCH, return_value=repo):
+            updater = UnderlyingUpdater(db_url="test://", yaml_path=yaml_file)
+            await updater.run()
+
+        repo.close_underlying_asset.assert_not_called()

@@ -172,6 +172,7 @@ class UnderlyingUpdater:
 
         config = self._load_config()
         underlying_ids = await self._upsert_underlyings(config, now)
+        await self._cleanup_stale_underlyings(config, now)
         instruments = await self._load_instruments(now)
         await self._match_and_upsert(config, underlying_ids, instruments, now)
 
@@ -212,6 +213,27 @@ class UnderlyingUpdater:
             f"{counts['updated']} updated, {counts['unchanged']} unchanged"
         )
         return result
+
+    async def _cleanup_stale_underlyings(
+        self,
+        config: UnderlyingMappingConfig,
+        now: datetime,
+    ) -> None:
+        """Close underlying assets that are no longer defined in YAML."""
+        assert self._repo is not None
+        yaml_tickers = {defn.ticker for defn in config.underlyings}
+        active = await self._repo.get_underlying_assets(now)
+        session_id = f"underlying-updater-{now:%Y%m%d%H%M%S}"
+        stale = [row for row in active if row["ticker"] not in yaml_tickers]
+        for seq, row in enumerate(stale, start=1):
+            await self._repo.close_underlying_asset(
+                public_id=row["public_id"],
+                session_id=session_id,
+                sequence_id=seq,
+                timestamp=now,
+            )
+        if stale:
+            logger.info(f"Closed {len(stale)} stale underlying(s) removed from YAML")
 
     async def _load_instruments(self, now: datetime) -> list[_InstrumentInfo]:
         """Load all active instruments with their native symbols."""

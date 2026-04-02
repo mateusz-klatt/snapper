@@ -848,6 +848,27 @@ class Repository(ABC):
         """
         ...
 
+    @abstractmethod
+    async def close_underlying_asset(
+        self,
+        public_id: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+    ) -> bool:
+        """Close active underlying asset by public_id.
+
+        Args:
+            public_id: Public ID of the underlying to close.
+            session_id: Provenance session ID.
+            sequence_id: Provenance sequence number.
+            timestamp: Bus time.
+
+        Returns:
+            True if a row was closed, False if no active row.
+        """
+        ...
+
 
 def _register_sqlite_fk_pragma(engine: Any) -> None:
     """Register PRAGMA foreign_keys=ON for every new SQLite connection.
@@ -2887,6 +2908,39 @@ class SQLAlchemyRepository(Repository):
             await s.execute(
                 update(InstrumentUnderlyingMapping)
                 .where(InstrumentUnderlyingMapping.id == existing.id)
+                .values(known_to=timestamp)
+            )
+            await s.commit()
+            return True
+
+    async def close_underlying_asset(
+        self,
+        public_id: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+    ) -> bool:
+        """Close active underlying asset by public_id."""
+        async with self.session() as s:
+            existing = (
+                (
+                    await s.execute(
+                        select(UnderlyingAsset)
+                        .where(
+                            UnderlyingAsset.public_id == public_id,
+                            *where_active(UnderlyingAsset, timestamp),
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if existing is None:
+                return False
+            await s.execute(
+                update(UnderlyingAsset)
+                .where(UnderlyingAsset.id == existing.id)
                 .values(known_to=timestamp)
             )
             await s.commit()

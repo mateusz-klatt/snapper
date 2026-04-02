@@ -457,3 +457,40 @@ class TestGetUnderlyingForInstrument:
         """Given unmapped instrument, When looking up, Then returns None."""
         row = await repo.get_underlying_for_instrument("unmapped", _ts())
         assert row is None
+
+
+class TestCloseUnderlyingAsset:
+    """Tests for close_underlying_asset."""
+
+    @pytest.mark.asyncio
+    async def test_close_existing(self, repo: SQLAlchemyRepository) -> None:
+        """Given active underlying, When closing, Then returns True."""
+        ts = _ts()
+        pid, _ = await repo.upsert_underlying_asset(
+            ticker="OLD",
+            name="Old Asset",
+            asset_class="crypto",
+            session_id="s1",
+            sequence_id=1,
+            timestamp=ts,
+        )
+        result = await repo.close_underlying_asset(
+            public_id=pid,
+            session_id="s1",
+            sequence_id=2,
+            timestamp=ts + timedelta(seconds=1),
+        )
+        assert result is True
+        row = await repo.get_underlying_by_ticker("OLD", ts + timedelta(seconds=2))
+        assert row is None
+
+    @pytest.mark.asyncio
+    async def test_close_nonexistent(self, repo: SQLAlchemyRepository) -> None:
+        """Given no active underlying, When closing, Then returns False."""
+        result = await repo.close_underlying_asset(
+            public_id="nonexistent",
+            session_id="s1",
+            sequence_id=1,
+            timestamp=_ts(),
+        )
+        assert result is False
