@@ -675,6 +675,17 @@ class InstrumentSpec(TemporalMixin, Base):
             sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
+        Index(
+            "ix_instrument_specs_expiry",
+            "expiry_at",
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        CheckConstraint(
+            "instrument_kind IN ('spot', 'perpetual', 'future', 'etf', 'option') "
+            "OR instrument_kind IS NULL",
+            name="ck_instrument_specs_kind",
+        ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     tick_size: Mapped[float | None] = mapped_column(Float, comment="Minimum price increment")

@@ -21,6 +21,7 @@ from sqlalchemy import select
 
 from snapper.core.types import AssetTypeEnum
 from snapper.core.types import ExchangeEnum
+from snapper.core.types import InstrumentKindEnum
 from snapper.core.types import RelationshipTypeEnum
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentUnderlyingMapping
@@ -49,7 +50,7 @@ class PatternRule(BaseModel):
     match_type: Literal["exact", "regex"]
     pattern: str
     relationship_type: RelationshipTypeEnum = RelationshipTypeEnum.EXACT
-    instrument_type: str | None = None
+    instrument_type: InstrumentKindEnum | None = None
     contract_family: str | None = None
     expiry_override: datetime | None = None
 

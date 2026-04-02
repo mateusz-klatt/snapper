@@ -480,6 +480,47 @@ class TestUpdateDatabase:
             ]
             assert len(ccxt_calls) == 0
 
+    @pytest.mark.asyncio
+    async def test_update_database_sets_future_kind_for_dated_contract(self) -> None:
+        """Set instrument_kind='future' for dated contracts with valid expiry.
+
+        Given: A dated futures instrument with lastTradingTime,
+        When: _update_database is called,
+        Then: _revise_instrument_spec is called with kind='future' and parsed expiry.
+        """
+        updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
+        mock_repo = MagicMock()
+        mock_session = MagicMock()
+        mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
+        mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
+        updater.repository = mock_repo
+
+        with (
+            patch.object(updater, "_upsert_symbol", return_value="pub-id-1"),
+            patch.object(updater, "_upsert_alias", return_value="created"),
+            patch.object(updater, "_upsert_capability", return_value="created"),
+            patch.object(updater, "_ensure_instrument_identity", return_value="inst-1"),
+            patch.object(updater, "_revise_instrument_spec") as mock_spec,
+            patch.object(updater, "_reconcile_capabilities", return_value=0),
+        ):
+            symbols = [
+                {
+                    "symbol": "FI_XBTUSD_260620",
+                    "type": "futures_vanilla",
+                    "tickSize": 0.5,
+                    "contractSize": 1,
+                    "tradeable": True,
+                    "base": "XBT",
+                    "quote": "USD",
+                    "lastTradingTime": "2026-06-20T16:30:00.000Z",
+                }
+            ]
+            await updater._update_database(symbols)
+            mock_spec.assert_called_once()
+            call_kwargs = mock_spec.call_args
+            assert call_kwargs.kwargs["instrument_kind"] == "future"
+            assert call_kwargs.kwargs["expiry_at"] is not None
+
 
 class TestBuildCcxtSymbol:
     """Tests for _build_ccxt_symbol helper."""

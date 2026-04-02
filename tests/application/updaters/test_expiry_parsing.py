@@ -93,19 +93,45 @@ class TestKrakenEquitiesMaturityConversion:
         assert result is None
 
 
+def _classify_kind(
+    last_trading_time: str | None,
+    expiry_dt: datetime | None,
+) -> str | None:
+    """Reproduce the kind classification logic from kraken_futures _update_database.
+
+    Args:
+        last_trading_time: Raw last_trading_time from schema.
+        expiry_dt: Parsed expiry datetime (may be None on parse failure).
+
+    Returns:
+        Instrument kind string or None.
+    """
+    if last_trading_time and expiry_dt is None:
+        return None
+    if not last_trading_time:
+        return "perpetual"
+    return "future"
+
+
 class TestInstrumentKindClassification:
     """Tests for instrument_kind determination logic used by each updater."""
 
     @pytest.mark.parametrize(
-        ("last_trading_time", "expected_kind"),
+        ("last_trading_time", "expiry_dt", "expected_kind"),
         [
-            (None, "perpetual"),
-            ("2026-06-20T16:30:00.000Z", "future"),
+            (None, None, "perpetual"),
+            ("2026-06-20T16:30:00.000Z", datetime(2026, 6, 20, 16, 30, tzinfo=UTC), "future"),
+            ("not-a-date", None, None),
         ],
     )
-    def test_kraken_futures_kind(self, last_trading_time: str | None, expected_kind: str) -> None:
-        """Given last_trading_time presence, When classifying, Then correct kind."""
-        kind = "perpetual" if not last_trading_time else "future"
+    def test_kraken_futures_kind(
+        self,
+        last_trading_time: str | None,
+        expiry_dt: datetime | None,
+        expected_kind: str | None,
+    ) -> None:
+        """Given last_trading_time and parsed expiry, When classifying, Then correct kind."""
+        kind = _classify_kind(last_trading_time, expiry_dt)
         assert kind == expected_kind
 
     def test_spot_exchanges_always_spot(self) -> None:

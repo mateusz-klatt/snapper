@@ -251,6 +251,7 @@ def _parse_expiry_datetime(schema: KrakenFuturesInstrumentSchema) -> datetime | 
     try:
         return datetime.fromisoformat(ltt.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
+        logger.warning(f"Failed to parse last_trading_time '{ltt}' for {schema.symbol}")
         return None
 
 

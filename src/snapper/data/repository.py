@@ -241,11 +241,13 @@ def close_and_insert_sync(
     """
     existing = (
         session.execute(
-            select(model).where(
+            select(model)
+            .where(
                 model.timestamp <= bus_time,
                 model.known_to > bus_time,
                 *match_filters,
             )
+            .with_for_update()
         )
         .scalars()
         .first()
@@ -3111,6 +3113,8 @@ class SQLAlchemyRepository(Repository):
                 .order_by(
                     InstrumentSpec.expiry_at.asc(),
                     InstrumentUnderlyingMapping.contract_family.asc(),
+                    Instrument.exchange.asc(),
+                    Symbol.native_symbol.asc(),
                 )
                 .limit(1)
             )
@@ -3186,10 +3190,13 @@ class SQLAlchemyRepository(Repository):
                     inst_kt,
                     InstrumentUnderlyingMapping.underlying_public_id == underlying_public_id,
                     InstrumentUnderlyingMapping.relationship_type == "derivative",
+                    InstrumentSpec.instrument_kind == "future",
                 )
                 .order_by(
                     InstrumentUnderlyingMapping.contract_family.asc(),
                     InstrumentSpec.expiry_at.asc(),
+                    Instrument.exchange.asc(),
+                    Symbol.native_symbol.asc(),
                 )
             )
 
@@ -3205,7 +3212,12 @@ class SQLAlchemyRepository(Repository):
             front_months: dict[str | None, str] = {}
             for r in rows:
                 family = r.contract_family
-                if family not in front_months and r.expiry_at is not None and r.expiry_at > as_of:
+                if (
+                    family not in front_months
+                    and r.instrument_kind == "future"
+                    and r.expiry_at is not None
+                    and r.expiry_at > as_of
+                ):
                     front_months[family] = r.instrument_public_id
 
             return [
