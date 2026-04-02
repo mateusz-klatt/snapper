@@ -2481,6 +2481,20 @@ class SQLAlchemyRepository(Repository):
                     InstrumentUnderlyingMapping.underlying_public_id,
                     func.count().label("cnt"),
                 )
+                .join(
+                    Instrument,
+                    and_(
+                        Instrument.public_id == InstrumentUnderlyingMapping.instrument_public_id,
+                        *where_active(Instrument, as_of),
+                    ),
+                )
+                .join(
+                    Symbol,
+                    and_(
+                        Symbol.public_id == Instrument.symbol_public_id,
+                        *where_active(Symbol, as_of),
+                    ),
+                )
                 .where(*where_active(InstrumentUnderlyingMapping, as_of))
                 .group_by(InstrumentUnderlyingMapping.underlying_public_id)
                 .subquery()
@@ -2529,6 +2543,31 @@ class SQLAlchemyRepository(Repository):
     ) -> UnderlyingAssetRow | None:
         """Lookup underlying by ticker."""
         async with self.session() as s:
+            count_sq = (
+                select(func.count())
+                .select_from(InstrumentUnderlyingMapping)
+                .join(
+                    Instrument,
+                    and_(
+                        Instrument.public_id == InstrumentUnderlyingMapping.instrument_public_id,
+                        *where_active(Instrument, as_of),
+                    ),
+                )
+                .join(
+                    Symbol,
+                    and_(
+                        Symbol.public_id == Instrument.symbol_public_id,
+                        *where_active(Symbol, as_of),
+                    ),
+                )
+                .where(
+                    InstrumentUnderlyingMapping.underlying_public_id == UnderlyingAsset.public_id,
+                    *where_active(InstrumentUnderlyingMapping, as_of),
+                )
+                .correlate(UnderlyingAsset)
+                .scalar_subquery()
+                .label("instrument_count")
+            )
             result = await s.execute(
                 select(
                     UnderlyingAsset.public_id,
@@ -2540,6 +2579,7 @@ class SQLAlchemyRepository(Repository):
                     UnderlyingAsset.timestamp,
                     UnderlyingAsset.session_id,
                     UnderlyingAsset.sequence_id,
+                    count_sq,
                 ).where(
                     UnderlyingAsset.ticker == ticker,
                     *where_active(UnderlyingAsset, as_of),
@@ -2558,7 +2598,7 @@ class SQLAlchemyRepository(Repository):
                 timestamp=r.timestamp,
                 session_id=r.session_id,
                 sequence_id=r.sequence_id,
-                instrument_count=0,
+                instrument_count=r.instrument_count,
             )
 
     async def get_instruments_by_underlying(
@@ -2585,17 +2625,21 @@ class SQLAlchemyRepository(Repository):
                 )
                 .join(
                     Instrument,
-                    Instrument.public_id == InstrumentUnderlyingMapping.instrument_public_id,
+                    and_(
+                        Instrument.public_id == InstrumentUnderlyingMapping.instrument_public_id,
+                        *where_active(Instrument, as_of),
+                    ),
                 )
                 .join(
                     Symbol,
-                    Symbol.public_id == Instrument.symbol_public_id,
+                    and_(
+                        Symbol.public_id == Instrument.symbol_public_id,
+                        *where_active(Symbol, as_of),
+                    ),
                 )
                 .where(
                     InstrumentUnderlyingMapping.underlying_public_id == underlying_public_id,
                     *where_active(InstrumentUnderlyingMapping, as_of),
-                    *where_active(Instrument, as_of),
-                    *where_active(Symbol, as_of),
                 )
                 .order_by(Instrument.exchange, Symbol.native_symbol)
             )
@@ -2642,11 +2686,14 @@ class SQLAlchemyRepository(Repository):
                 )
                 .join(
                     InstrumentUnderlyingMapping,
-                    InstrumentUnderlyingMapping.underlying_public_id == UnderlyingAsset.public_id,
+                    and_(
+                        InstrumentUnderlyingMapping.underlying_public_id
+                        == UnderlyingAsset.public_id,
+                        *where_active(InstrumentUnderlyingMapping, as_of),
+                    ),
                 )
                 .where(
                     InstrumentUnderlyingMapping.instrument_public_id == instrument_public_id,
-                    *where_active(InstrumentUnderlyingMapping, as_of),
                     *where_active(UnderlyingAsset, as_of),
                 )
             )
@@ -2823,11 +2870,13 @@ class SQLAlchemyRepository(Repository):
             existing = (
                 (
                     await s.execute(
-                        select(InstrumentUnderlyingMapping).where(
+                        select(InstrumentUnderlyingMapping)
+                        .where(
                             InstrumentUnderlyingMapping.instrument_public_id
                             == instrument_public_id,
                             *where_active(InstrumentUnderlyingMapping, timestamp),
                         )
+                        .with_for_update()
                     )
                 )
                 .scalars()

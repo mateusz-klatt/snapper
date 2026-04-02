@@ -252,7 +252,11 @@ class UnderlyingUpdater:
         unmapped: list[tuple[str, str]] = []
 
         for inst in instruments:
-            matches = self._find_matches(config, inst)
+            matches, has_intra_conflict = self._find_matches(config, inst)
+
+            if has_intra_conflict:
+                conflicted.add(inst.instrument_public_id)
+                continue
 
             if len(matches) == 0:
                 unmapped.append((inst.native_symbol, inst.exchange))
@@ -298,12 +302,18 @@ class UnderlyingUpdater:
         self,
         config: UnderlyingMappingConfig,
         inst: _InstrumentInfo,
-    ) -> list[_MatchResult]:
+    ) -> tuple[list[_MatchResult], bool]:
         """Find all underlying matches for a single instrument.
 
-        Returns one _MatchResult per distinct underlying that matched.
-        Within one underlying, multiple rules must agree on metadata or
-        the instrument is treated as conflicted.
+        Args:
+            config: Validated mapping configuration.
+            inst: Instrument to match against.
+
+        Returns:
+            Tuple of (matches, has_intra_conflict). When has_intra_conflict
+            is True the instrument should be treated as conflicted even if
+            matches is empty, to prevent stale cleanup from removing its
+            existing mapping.
         """
         per_underlying: dict[str, list[PatternRule]] = {}
 
@@ -318,6 +328,7 @@ class UnderlyingUpdater:
                 per_underlying[defn.ticker] = matching_rules
 
         results: list[_MatchResult] = []
+        has_intra_conflict = False
         for ticker, rules in per_underlying.items():
             first = rules[0]
             conflict = False
@@ -333,6 +344,7 @@ class UnderlyingUpdater:
                         f"({inst.exchange}) in {ticker}: rules disagree on metadata"
                     )
                     conflict = True
+                    has_intra_conflict = True
                     break
             if not conflict:
                 results.append(
@@ -343,7 +355,7 @@ class UnderlyingUpdater:
                     )
                 )
 
-        return results
+        return results, has_intra_conflict
 
     async def _cleanup_stale(
         self,

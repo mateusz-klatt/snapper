@@ -114,6 +114,7 @@ from snapper.core.types import HealthStatus
 from snapper.core.types import HealthStatusEnum
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import OrderExchange
+from snapper.core.types import RelationshipTypeEnum
 from snapper.core.types import SpawnerProcessStatus
 from snapper.data.repository import Repository
 from snapper.data.repository import dispose_repositories
@@ -1183,7 +1184,7 @@ def _create_underlying_router() -> APIRouter:
         repo: Annotated[Repository, Depends(get_repository_dependency)],
         as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
         relationship_type: Annotated[
-            str | None, Query(description="Filter by relationship type")
+            RelationshipTypeEnum | None, Query(description="Filter by relationship type")
         ] = None,
     ) -> UnderlyingInstrumentListResponse:
         """Return instruments mapped to an underlying asset.
@@ -1211,7 +1212,7 @@ def _create_underlying_router() -> APIRouter:
                     status_code=404,
                     detail=f"Underlying not found: {ticker}",
                 )
-            rel_filter = [relationship_type] if relationship_type else None
+            rel_filter = [relationship_type.value] if relationship_type else None
             rows = await repo.get_instruments_by_underlying(
                 underlying["public_id"],
                 now,

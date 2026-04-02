@@ -86,7 +86,6 @@ class TestGetUnderlyings:
         """Given underlyings in DB, When requesting, Then 200 with payload."""
         repo = AsyncMock()
         repo.get_underlying_assets = AsyncMock(return_value=[_make_underlying()])
-        repo.get_instruments_by_underlying = AsyncMock(return_value=[_make_instrument_row()])
         client = _create_client(repo)
         response = client.get("/api/underlyings")
         assert response.status_code == 200

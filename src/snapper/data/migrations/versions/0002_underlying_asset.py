@@ -113,16 +113,6 @@ def upgrade() -> None:
         sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
         postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
-    op.create_index(
-        "ix_ium_instrument_public_id",
-        "instrument_underlying_mappings",
-        ["instrument_public_id"],
-    )
-    op.create_index(
-        "ix_ium_underlying_public_id",
-        "instrument_underlying_mappings",
-        ["underlying_public_id"],
-    )
 
 
 def downgrade() -> None:
