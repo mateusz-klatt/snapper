@@ -84,6 +84,16 @@ class RelationshipTypeEnum(StrEnum):
     PROXY = "proxy"
 
 
+class InstrumentKindEnum(StrEnum):
+    """Instrument product type for front-month rollover and continuous contracts."""
+
+    SPOT = "spot"
+    PERPETUAL = "perpetual"
+    FUTURE = "future"
+    ETF = "etf"
+    OPTION = "option"
+
+
 class AliasChannelEnum(StrEnum):
     """Symbol alias channel type: ws for WebSocket, rest for REST API, ccxt for CCXT library."""
 
@@ -304,6 +314,15 @@ SpawnerProcessStatus = Literal["not_running", "running", "stopped", "completed",
 AliasChannel = Literal[AliasChannelEnum.WS, AliasChannelEnum.REST, AliasChannelEnum.CCXT]
 """Symbol alias channel type: ws for WebSocket, rest for REST API, ccxt for CCXT library."""
 
+InstrumentKind = Literal[
+    InstrumentKindEnum.SPOT,
+    InstrumentKindEnum.PERPETUAL,
+    InstrumentKindEnum.FUTURE,
+    InstrumentKindEnum.ETF,
+    InstrumentKindEnum.OPTION,
+]
+"""Instrument product type: spot, perpetual, future, etf, or option."""
+
 OrderCommand = Literal[OrderCommandEnum.SUBMIT, OrderCommandEnum.CANCEL, OrderCommandEnum.REPLACE]
 """Order command types for orders.commands.* ZMQ topics."""
 
@@ -326,6 +345,8 @@ __all__ = [
     "HealthStatus",
     "HealthStatusEnum",
     "IndicatorBackend",
+    "InstrumentKind",
+    "InstrumentKindEnum",
     "MarketDataExchange",
     "MarketDataType",
     "MarketDataTypeEnum",

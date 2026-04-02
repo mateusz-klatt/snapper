@@ -461,7 +461,7 @@ async def test_update_database_creates_and_updates(monkeypatch: pytest.MonkeyPat
         execute=Mock(
             return_value=SimpleNamespace(
                 scalar_one_or_none=lambda: None,
-                scalars=lambda: SimpleNamespace(all=lambda: []),
+                scalars=lambda: SimpleNamespace(all=lambda: [], first=lambda: None),
             )
         ),
         add=Mock(),
@@ -495,7 +495,7 @@ async def test_update_database_creates_and_updates(monkeypatch: pytest.MonkeyPat
         }
     ]
     await svc._update_database(symbols)
-    assert fake_session.add.call_count == 5
+    assert fake_session.add.call_count == 6
 
 
 def test_get_default_parameters_and_setting_key() -> None:
@@ -683,7 +683,7 @@ async def test_update_database_handles_commit_error(monkeypatch: pytest.MonkeyPa
             """Return stub supporting both scalar_one_or_none and scalars().all()."""
             return SimpleNamespace(
                 scalar_one_or_none=lambda: None,
-                scalars=lambda: SimpleNamespace(all=lambda: []),
+                scalars=lambda: SimpleNamespace(all=lambda: [], first=lambda: None),
             )
 
         def add(self, _obj: Any) -> None:

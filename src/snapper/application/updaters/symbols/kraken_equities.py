@@ -171,13 +171,28 @@ class KrakenEquitiesSymbolUpdaterService(SymbolUpdaterService[KrakenEquitiesExch
                         self._tracker.next_sequence(_SEQ_KEY_CAPABILITIES),
                     )
 
-                    self._ensure_instrument_identity(
+                    instrument_public_id = self._ensure_instrument_identity(
                         session,
                         symbol_public_id,
                         ExchangeEnum.KRAKEN_EQUITIES,
                         now,
                         session_id=self._tracker.session_id,
                         sequence_id=self._tracker.next_sequence("instruments"),
+                    )
+
+                    expiry_dt = (
+                        datetime.fromtimestamp(schema.maturity, tz=UTC)
+                        if schema.maturity is not None
+                        else None
+                    )
+                    self._revise_instrument_spec(
+                        session,
+                        instrument_public_id,
+                        now,
+                        session_id=self._tracker.session_id,
+                        sequence_id=self._tracker.next_sequence("specs"),
+                        expiry_at=expiry_dt,
+                        instrument_kind="future",
                     )
                     created_count += 1
 

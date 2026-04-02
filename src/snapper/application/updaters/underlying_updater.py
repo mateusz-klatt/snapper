@@ -25,9 +25,11 @@ from snapper.core.types import RelationshipTypeEnum
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentUnderlyingMapping
 from snapper.data.models import Symbol
+from snapper.data.repository import InstrumentSpecInput
 from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
+from snapper.data.repository_types import InstrumentSpecRow
 
 _DEFAULT_YAML = Path(__file__).resolve().parents[2] / "data" / "underlying_mappings.yaml"
 
@@ -134,14 +136,27 @@ class _InstrumentInfo:
 class _MatchResult:
     """Accumulated match for one instrument across all underlyings."""
 
-    __slots__ = ("underlying_ticker", "relationship_type", "contract_family")
+    __slots__ = (
+        "underlying_ticker",
+        "relationship_type",
+        "contract_family",
+        "instrument_type",
+        "expiry_override",
+    )
 
     def __init__(
-        self, underlying_ticker: str, relationship_type: str, contract_family: str | None
+        self,
+        underlying_ticker: str,
+        relationship_type: str,
+        contract_family: str | None,
+        instrument_type: str | None = None,
+        expiry_override: datetime | None = None,
     ) -> None:
         self.underlying_ticker = underlying_ticker
         self.relationship_type = relationship_type
         self.contract_family = contract_family
+        self.instrument_type = instrument_type
+        self.expiry_override = expiry_override
 
 
 class UnderlyingUpdater:
@@ -309,12 +324,15 @@ class UnderlyingUpdater:
             )
             counts[status] += 1
 
+        spec_applied = await self._apply_yaml_spec_fallbacks(desired, session_id, now)
         closed = await self._cleanup_stale(desired, conflicted, session_id, now)
 
         logger.info(
             f"Mappings: {counts['created']} created, {counts['updated']} updated, "
             f"{counts['unchanged']} unchanged, {closed} closed"
         )
+        if spec_applied:
+            logger.info(f"YAML spec fallbacks applied: {spec_applied}")
         if unmapped:
             logger.info(f"Unmapped instruments ({len(unmapped)}): {unmapped[:20]}")
         if conflicted:
@@ -374,10 +392,77 @@ class UnderlyingUpdater:
                         underlying_ticker=ticker,
                         relationship_type=first.relationship_type.value,
                         contract_family=first.contract_family,
+                        instrument_type=first.instrument_type,
+                        expiry_override=first.expiry_override,
                     )
                 )
 
         return results, has_intra_conflict
+
+    async def _apply_yaml_spec_fallbacks(
+        self,
+        desired: dict[str, _MatchResult],
+        session_id: str,
+        now: datetime,
+    ) -> int:
+        """Apply YAML instrument_type and expiry_override as fallbacks.
+
+        Only writes to InstrumentSpec when the current value is NULL,
+        preserving API-sourced data as authoritative.
+        """
+        assert self._repo is not None
+        applied = 0
+        for seq, (ipid, match) in enumerate(desired.items(), start=1):
+            if not match.instrument_type and not match.expiry_override:
+                continue
+            existing = await self._repo.get_instrument_spec(ipid, now)
+            spec = self._build_fallback_spec(match, existing)
+            if spec is None:
+                continue
+            await self._repo.revise_instrument_spec(
+                instrument_public_id=ipid,
+                session_id=session_id,
+                sequence_id=seq,
+                timestamp=now,
+                spec=spec,
+            )
+            applied += 1
+        return applied
+
+    @staticmethod
+    def _build_fallback_spec(
+        match: _MatchResult,
+        existing: InstrumentSpecRow | None,
+    ) -> InstrumentSpecInput | None:
+        """Build an InstrumentSpecInput applying YAML fallbacks only where NULL.
+
+        Args:
+            match: Match result with optional instrument_type and expiry_override.
+            existing: Current spec row, or None.
+
+        Returns:
+            InstrumentSpecInput with fallbacks applied, or None if nothing to change.
+        """
+        current_kind = existing["instrument_kind"] if existing else None
+        current_expiry = existing["expiry_at"] if existing else None
+        needs_kind = match.instrument_type is not None and current_kind is None
+        needs_expiry = match.expiry_override is not None and current_expiry is None
+        if not needs_kind and not needs_expiry:
+            return None
+        return InstrumentSpecInput(
+            tick_size=existing["tick_size"] if existing else None,
+            lot_size=existing["lot_size"] if existing else None,
+            min_order_size=existing["min_order_size"] if existing else None,
+            max_order_size=existing["max_order_size"] if existing else None,
+            cost_decimals=existing["cost_decimals"] if existing else None,
+            qty_decimals=existing["qty_decimals"] if existing else None,
+            margin_initial=existing["margin_initial"] if existing else None,
+            position_limit_long=existing["position_limit_long"] if existing else None,
+            position_limit_short=existing["position_limit_short"] if existing else None,
+            status=existing["status"] if existing else None,
+            expiry_at=match.expiry_override if needs_expiry else current_expiry,
+            instrument_kind=match.instrument_type if needs_kind else current_kind,
+        )
 
     async def _cleanup_stale(
         self,

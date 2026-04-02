@@ -662,13 +662,21 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             session_id=sid,
             sequence_id=self._tracker.next_sequence(_SEQ_KEY_CAPABILITIES),
         )
-        self._ensure_instrument_identity(
+        instrument_public_id = self._ensure_instrument_identity(
             session,
             symbol_public_id,
             ExchangeEnum.KRAKEN,
             now,
             session_id=sid,
             sequence_id=self._tracker.next_sequence("instruments"),
+        )
+        self._revise_instrument_spec(
+            session,
+            instrument_public_id,
+            now,
+            session_id=sid,
+            sequence_id=self._tracker.next_sequence("specs"),
+            instrument_kind="spot",
         )
         return created, updated
 
@@ -724,13 +732,21 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             session_id=sid,
             sequence_id=self._tracker.next_sequence(_SEQ_KEY_CAPABILITIES),
         )
-        self._ensure_instrument_identity(
+        instrument_public_id = self._ensure_instrument_identity(
             session,
             symbol_public_id,
             ExchangeEnum.KRAKEN,
             now,
             session_id=sid,
             sequence_id=self._tracker.next_sequence("instruments"),
+        )
+        self._revise_instrument_spec(
+            session,
+            instrument_public_id,
+            now,
+            session_id=sid,
+            sequence_id=self._tracker.next_sequence("specs"),
+            instrument_kind="spot",
         )
         return created, updated
 

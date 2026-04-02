@@ -66,8 +66,10 @@ from slowapi.middleware import SlowAPIMiddleware
 
 from snapper.api.auth.services.ws_token_service import get_ws_token_service
 from snapper.api.schemas.data_responses import CandleListResponse
+from snapper.api.schemas.data_responses import ContractListResponse
 from snapper.api.schemas.data_responses import ExchangeListResponse
 from snapper.api.schemas.data_responses import ExecutionListResponse
+from snapper.api.schemas.data_responses import FrontMonthResponse
 from snapper.api.schemas.data_responses import InstrumentListResponse
 from snapper.api.schemas.data_responses import OrderListResponse
 from snapper.api.schemas.data_responses import PositionListResponse
@@ -124,7 +126,9 @@ from snapper.interface.websocket.helpers import build_allowed_origins
 from snapper.messaging.infrastructure.gap_detector import GapDetectorStats
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import CandleData
+from snapper.messaging.schemas.data import ContractData
 from snapper.messaging.schemas.data import ExecutionData
+from snapper.messaging.schemas.data import FrontMonthData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import PositionData
 from snapper.messaging.schemas.data import SignalData
@@ -1253,6 +1257,177 @@ def _create_underlying_router() -> APIRouter:
             raise HTTPException(
                 status_code=500, detail="Failed to fetch underlying instruments"
             ) from exc
+
+    @router.get(
+        "/underlyings/{ticker}/front-month",
+        responses={
+            404: {"description": "No active futures contracts or underlying not found"},
+            500: {"description": "Internal server error"},
+        },
+    )
+    async def get_front_month(
+        request: Request,
+        ticker: str,
+        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
+        _csrf: Annotated[None, Depends(validate_csrf_token)],
+        repo: Annotated[Repository, Depends(get_repository_dependency)],
+        as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
+        exchange: Annotated[str | None, Query(description="Filter by exchange")] = None,
+        contract_family: Annotated[
+            str | None, Query(description="Filter by product root (e.g. ES, MES)")
+        ] = None,
+    ) -> FrontMonthResponse:
+        """Return the front-month (nearest non-expired) futures contract.
+
+        Args:
+            request: FastAPI request (provides REST tracker for provenance).
+            ticker: Underlying asset ticker (e.g. 'SPX', 'GOLD').
+            _auth: Authenticated user with READ_MARKET_DATA permission.
+            _csrf: CSRF token validation.
+            repo: Database repository.
+            as_of: Optional point-in-time query timestamp.
+            exchange: Optional exchange filter.
+            contract_family: Optional futures product root filter.
+
+        Returns:
+            FrontMonthResponse wrapping the front-month instrument.
+
+        Raises:
+            HTTPException: 404 if ticker not found or no active futures.
+        """
+        try:
+            now = as_of or datetime.now(UTC)
+            underlying = await repo.get_underlying_by_ticker(ticker, now)
+            if underlying is None:
+                raise HTTPException(status_code=404, detail=f"Underlying not found: {ticker}")
+            row = await repo.get_front_month_instrument(
+                underlying["public_id"],
+                now,
+                exchange=exchange,
+                contract_family=contract_family,
+            )
+            if row is None:
+                raise HTTPException(
+                    status_code=404, detail=f"No active futures contracts for {ticker}"
+                )
+            tracker: SequenceTracker = request.app.state.rest_tracker
+            sid = tracker.session_id
+            seq = tracker.next_sequence(_REST_DATA_STREAM)
+            ts = dt.datetime.now(dt.UTC)
+            pid = str(uuid7())
+            item = FrontMonthData(
+                public_id=pid,
+                session_id=sid,
+                sequence_id=seq,
+                timestamp=ts,
+                instrument_public_id=row["instrument_public_id"],
+                native_symbol=row["native_symbol"],
+                exchange=row["exchange"],
+                expiry_at=row["expiry_at"],
+                relationship_type=row["relationship_type"],
+                contract_family=row["contract_family"],
+            )
+            return FrontMonthResponse(
+                session_id=sid,
+                sequence_id=seq,
+                public_id=pid,
+                timestamp=ts,
+                payload=item,
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error(f"Failed to fetch front-month for {ticker}: {exc}")
+            raise HTTPException(
+                status_code=500, detail="Failed to fetch front-month instrument"
+            ) from exc
+
+    @router.get(
+        "/underlyings/{ticker}/contracts",
+        responses={
+            404: {"description": "Underlying not found"},
+            500: {"description": "Internal server error"},
+        },
+    )
+    async def get_contracts(
+        request: Request,
+        ticker: str,
+        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
+        _csrf: Annotated[None, Depends(validate_csrf_token)],
+        repo: Annotated[Repository, Depends(get_repository_dependency)],
+        as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
+        exchange: Annotated[str | None, Query(description="Filter by exchange")] = None,
+        contract_family: Annotated[
+            str | None, Query(description="Filter by product root (e.g. ES, MES)")
+        ] = None,
+        include_expired: Annotated[bool, Query(description="Include expired contracts")] = False,
+    ) -> ContractListResponse:
+        """Return all futures contracts for an underlying asset.
+
+        Args:
+            request: FastAPI request (provides REST tracker for provenance).
+            ticker: Underlying asset ticker (e.g. 'SPX', 'GOLD').
+            _auth: Authenticated user with READ_MARKET_DATA permission.
+            _csrf: CSRF token validation.
+            repo: Database repository.
+            as_of: Optional point-in-time query timestamp.
+            exchange: Optional exchange filter.
+            contract_family: Optional futures product root filter.
+            include_expired: Whether to include expired contracts.
+
+        Returns:
+            ContractListResponse wrapping the contracts list.
+
+        Raises:
+            HTTPException: 404 if ticker not found.
+        """
+        try:
+            now = as_of or datetime.now(UTC)
+            underlying = await repo.get_underlying_by_ticker(ticker, now)
+            if underlying is None:
+                raise HTTPException(status_code=404, detail=f"Underlying not found: {ticker}")
+            rows = await repo.get_contracts_for_underlying(
+                underlying["public_id"],
+                now,
+                exchange=exchange,
+                contract_family=contract_family,
+                include_expired=include_expired,
+            )
+            tracker: SequenceTracker = request.app.state.rest_tracker
+            sid = tracker.session_id
+            items = [
+                ContractData(
+                    public_id=str(uuid7()),
+                    session_id=sid,
+                    sequence_id=tracker.next_sequence(_REST_DATA_STREAM),
+                    timestamp=dt.datetime.now(dt.UTC),
+                    instrument_public_id=r["instrument_public_id"],
+                    native_symbol=r["native_symbol"],
+                    exchange=r["exchange"],
+                    expiry_at=r["expiry_at"],
+                    instrument_kind=r["instrument_kind"],
+                    relationship_type=r["relationship_type"],
+                    contract_family=r["contract_family"],
+                    is_front_month=r["is_front_month"],
+                )
+                for r in rows
+            ]
+            seq = tracker.next_sequence(_REST_DATA_STREAM)
+            ts = dt.datetime.now(dt.UTC)
+            pid = str(uuid7())
+            return ContractListResponse(
+                session_id=sid,
+                sequence_id=seq,
+                public_id=pid,
+                timestamp=ts,
+                payload=items,
+                count=len(items),
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error(f"Failed to fetch contracts for {ticker}: {exc}")
+            raise HTTPException(status_code=500, detail="Failed to fetch contracts") from exc
 
     return router
 

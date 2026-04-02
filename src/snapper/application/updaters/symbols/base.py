@@ -33,6 +33,7 @@ from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
 from snapper.data.repository import DatabaseRepository
+from snapper.data.repository import InstrumentSpecInput
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import close_and_insert_sync
 from snapper.data.repository import get_repository
@@ -407,6 +408,59 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         session.add(inst)
         session.flush()
         return str(inst.public_id)
+
+    @staticmethod
+    def _revise_instrument_spec(
+        session: Any,
+        instrument_public_id: str,
+        now: datetime,
+        session_id: str,
+        sequence_id: int,
+        expiry_at: datetime | None = None,
+        instrument_kind: str | None = None,
+    ) -> None:
+        """Merge expiry_at and instrument_kind into InstrumentSpec (sync).
+
+        Reads the existing spec (if any) and carries forward all fields,
+        overriding only the provided expiry_at/instrument_kind. Creates a
+        fresh spec row when none exists yet.
+
+        Args:
+            session: SQLAlchemy sync session.
+            instrument_public_id: Public ID of the instrument.
+            now: Current UTC timestamp.
+            session_id: Producer session identifier.
+            sequence_id: Per-topic monotonic counter.
+            expiry_at: Contract expiry timestamp (UTC), or None.
+            instrument_kind: Product type string, or None.
+        """
+        existing = DatabaseRepository.get_instrument_spec_sync(
+            session,
+            instrument_public_id,
+            now,
+        )
+        spec = InstrumentSpecInput(
+            tick_size=existing.tick_size if existing else None,
+            lot_size=existing.lot_size if existing else None,
+            min_order_size=existing.min_order_size if existing else None,
+            max_order_size=existing.max_order_size if existing else None,
+            cost_decimals=existing.cost_decimals if existing else None,
+            qty_decimals=existing.qty_decimals if existing else None,
+            margin_initial=existing.margin_initial if existing else None,
+            position_limit_long=existing.position_limit_long if existing else None,
+            position_limit_short=existing.position_limit_short if existing else None,
+            status=existing.status if existing else None,
+            expiry_at=expiry_at,
+            instrument_kind=instrument_kind,
+        )
+        DatabaseRepository.revise_instrument_spec_sync(
+            session=session,
+            instrument_public_id=instrument_public_id,
+            session_id=session_id,
+            sequence_id=sequence_id,
+            timestamp=now,
+            spec=spec,
+        )
 
     @staticmethod
     def _deactivate_stale_capabilities(

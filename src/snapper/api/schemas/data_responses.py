@@ -9,8 +9,11 @@ and carries provenance fields plus a count for client convenience.
 from typing import Literal
 
 from snapper.api.schemas.base import PayloadListResponse
+from snapper.api.schemas.base import PayloadResponse
 from snapper.messaging.schemas.data import CandleData
+from snapper.messaging.schemas.data import ContractData
 from snapper.messaging.schemas.data import ExecutionData
+from snapper.messaging.schemas.data import FrontMonthData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import PositionData
 from snapper.messaging.schemas.data import SignalData
@@ -144,14 +147,43 @@ class UnderlyingInstrumentListResponse(
     type: Literal["underlying_instrument_list"] = "underlying_instrument_list"
 
 
+class FrontMonthResponse(
+    PayloadResponse[Literal["front_month"], FrontMonthData],
+):
+    """Front-month instrument response wrapper.
+
+    Attributes:
+        type: Payload type discriminator.
+        payload: Front-month instrument data.
+    """
+
+    type: Literal["front_month"] = "front_month"
+
+
+class ContractListResponse(
+    PayloadListResponse[Literal["contract_list"], ContractData],
+):
+    """Contract ladder list response wrapper.
+
+    Attributes:
+        type: Payload item type discriminator.
+        payload: List of contract data items.
+        count: Total number of contracts in the response.
+    """
+
+    type: Literal["contract_list"] = "contract_list"
+
+
 __all__ = [
     "CandleListResponse",
-    "SignalListResponse",
-    "OrderListResponse",
+    "ContractListResponse",
     "ExecutionListResponse",
-    "PositionListResponse",
     "ExchangeListResponse",
+    "FrontMonthResponse",
     "InstrumentListResponse",
+    "OrderListResponse",
+    "PositionListResponse",
+    "SignalListResponse",
     "UnderlyingAssetListResponse",
     "UnderlyingInstrumentListResponse",
 ]

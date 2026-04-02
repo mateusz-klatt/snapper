@@ -14,7 +14,9 @@ import yaml
 from snapper.application.updaters.underlying_updater import PatternRule
 from snapper.application.updaters.underlying_updater import UnderlyingMappingConfig
 from snapper.application.updaters.underlying_updater import UnderlyingUpdater
+from snapper.application.updaters.underlying_updater import _MatchResult
 from snapper.application.updaters.underlying_updater import rule_matches
+from snapper.data.repository_types import InstrumentSpecRow
 
 _REPO_PATCH = "snapper.application.updaters.underlying_updater.get_repository"
 
@@ -713,3 +715,199 @@ class TestUnderlyingUpdater:
             await updater.run()
 
         repo.close_underlying_asset.assert_not_called()
+
+
+class TestBuildFallbackSpec:
+    """Tests for _build_fallback_spec static method."""
+
+    def test_returns_none_when_nothing_to_apply(self) -> None:
+        """Given match with no instrument_type or expiry_override, When building, Then None."""
+        match = _MatchResult(
+            underlying_ticker="SPX",
+            relationship_type="exact",
+            contract_family=None,
+        )
+        result = UnderlyingUpdater._build_fallback_spec(match, None)
+        assert result is None
+
+    def test_applies_instrument_type_when_null(self) -> None:
+        """Given match with instrument_type and no existing spec, When building, Then sets kind."""
+        match = _MatchResult(
+            underlying_ticker="SPX",
+            relationship_type="derivative",
+            contract_family="ES",
+            instrument_type="future",
+        )
+        result = UnderlyingUpdater._build_fallback_spec(match, None)
+        assert result is not None
+        assert result.instrument_kind == "future"
+        assert result.expiry_at is None
+
+    def test_skips_instrument_type_when_already_set(self) -> None:
+        """Given existing spec with instrument_kind set, When building, Then None (no change)."""
+        match = _MatchResult(
+            underlying_ticker="SPX",
+            relationship_type="derivative",
+            contract_family="ES",
+            instrument_type="future",
+        )
+        existing = InstrumentSpecRow(
+            instrument_public_id="inst-1",
+            tick_size=None,
+            lot_size=None,
+            min_order_size=None,
+            max_order_size=None,
+            cost_decimals=None,
+            qty_decimals=None,
+            margin_initial=None,
+            position_limit_long=None,
+            position_limit_short=None,
+            status=None,
+            expiry_at=None,
+            instrument_kind="spot",
+        )
+        result = UnderlyingUpdater._build_fallback_spec(match, existing)
+        assert result is None
+
+    def test_applies_expiry_override_when_null(self) -> None:
+        """Given match with expiry_override and no existing expiry, When building, Then sets."""
+        expiry = datetime(2026, 6, 20, 16, 30, tzinfo=UTC)
+        match = _MatchResult(
+            underlying_ticker="SPX",
+            relationship_type="derivative",
+            contract_family="ES",
+            expiry_override=expiry,
+        )
+        result = UnderlyingUpdater._build_fallback_spec(match, None)
+        assert result is not None
+        assert result.expiry_at == expiry
+
+    def test_preserves_existing_fields(self) -> None:
+        """Given existing spec with fields, When building, Then carries forward."""
+        match = _MatchResult(
+            underlying_ticker="SPX",
+            relationship_type="derivative",
+            contract_family="ES",
+            instrument_type="etf",
+        )
+        existing = InstrumentSpecRow(
+            instrument_public_id="inst-1",
+            tick_size=0.01,
+            lot_size=1.0,
+            min_order_size=None,
+            max_order_size=None,
+            cost_decimals=2,
+            qty_decimals=0,
+            margin_initial=None,
+            position_limit_long=None,
+            position_limit_short=None,
+            status="online",
+            expiry_at=None,
+            instrument_kind=None,
+        )
+        result = UnderlyingUpdater._build_fallback_spec(match, existing)
+        assert result is not None
+        assert result.tick_size == 0.01
+        assert result.lot_size == 1.0
+        assert result.cost_decimals == 2
+        assert result.status == "online"
+        assert result.instrument_kind == "etf"
+
+
+class TestYamlSpecFallbackIntegration:
+    """Tests for _apply_yaml_spec_fallbacks through the run() flow."""
+
+    @pytest.mark.asyncio
+    async def test_applies_instrument_type_fallback(self, tmp_path: Path) -> None:
+        """Given YAML with instrument_type, When running, Then spec fallback applied."""
+        yaml_content = {
+            "underlyings": [
+                {
+                    "ticker": "SPX",
+                    "name": "S&P 500",
+                    "asset_class": "index",
+                    "patterns": [
+                        {
+                            "exchange": "polygon",
+                            "match_type": "exact",
+                            "pattern": "SPY",
+                            "instrument_type": "etf",
+                        }
+                    ],
+                }
+            ]
+        }
+        yaml_file = tmp_path / "mappings.yaml"
+        yaml_file.write_text(yaml.dump(yaml_content))
+
+        inst_row = MagicMock()
+        inst_row.instrument_public_id = "inst-spy"
+        inst_row.exchange = "polygon"
+        inst_row.native_symbol = "SPY"
+
+        repo = _mock_repo(instrument_rows=[inst_row])
+        repo.get_instrument_spec = AsyncMock(return_value=None)
+        repo.revise_instrument_spec = AsyncMock(return_value=1)
+        repo.get_underlying_assets = AsyncMock(return_value=[])
+
+        with patch(_REPO_PATCH, return_value=repo):
+            updater = UnderlyingUpdater(db_url="test://", yaml_path=yaml_file)
+            await updater.run()
+
+        repo.revise_instrument_spec.assert_called_once()
+        call_kwargs = repo.revise_instrument_spec.call_args.kwargs
+        assert call_kwargs["spec"].instrument_kind == "etf"
+
+    @pytest.mark.asyncio
+    async def test_skips_fallback_when_already_set(self, tmp_path: Path) -> None:
+        """Given existing instrument_kind, When running, Then fallback skipped."""
+        yaml_content = {
+            "underlyings": [
+                {
+                    "ticker": "SPX",
+                    "name": "S&P 500",
+                    "asset_class": "index",
+                    "patterns": [
+                        {
+                            "exchange": "polygon",
+                            "match_type": "exact",
+                            "pattern": "SPY",
+                            "instrument_type": "etf",
+                        }
+                    ],
+                }
+            ]
+        }
+        yaml_file = tmp_path / "mappings.yaml"
+        yaml_file.write_text(yaml.dump(yaml_content))
+
+        inst_row = MagicMock()
+        inst_row.instrument_public_id = "inst-spy"
+        inst_row.exchange = "polygon"
+        inst_row.native_symbol = "SPY"
+
+        repo = _mock_repo(instrument_rows=[inst_row])
+        repo.get_instrument_spec = AsyncMock(
+            return_value=InstrumentSpecRow(
+                instrument_public_id="inst-spy",
+                tick_size=None,
+                lot_size=None,
+                min_order_size=None,
+                max_order_size=None,
+                cost_decimals=None,
+                qty_decimals=None,
+                margin_initial=None,
+                position_limit_long=None,
+                position_limit_short=None,
+                status=None,
+                expiry_at=None,
+                instrument_kind="spot",
+            )
+        )
+        repo.get_underlying_assets = AsyncMock(return_value=[])
+
+        with patch(_REPO_PATCH, return_value=repo):
+            updater = UnderlyingUpdater(db_url="test://", yaml_path=yaml_file)
+            await updater.run()
+
+        repo.revise_instrument_spec.assert_not_called()

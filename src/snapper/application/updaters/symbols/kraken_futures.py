@@ -194,13 +194,25 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
                         self._tracker.next_sequence(_SEQ_KEY_CAPABILITIES),
                     )
 
-                    self._ensure_instrument_identity(
+                    instrument_public_id = self._ensure_instrument_identity(
                         session,
                         symbol_public_id,
                         ExchangeEnum.KRAKEN_FUTURES,
                         now,
                         session_id=self._tracker.session_id,
                         sequence_id=self._tracker.next_sequence("instruments"),
+                    )
+
+                    expiry_dt = _parse_expiry_datetime(schema)
+                    kind = "perpetual" if not schema.last_trading_time else "future"
+                    self._revise_instrument_spec(
+                        session,
+                        instrument_public_id,
+                        now,
+                        session_id=self._tracker.session_id,
+                        sequence_id=self._tracker.next_sequence("specs"),
+                        expiry_at=expiry_dt,
+                        instrument_kind=kind,
                     )
                     created_count += 1
 
@@ -222,6 +234,24 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
         except Exception as e:
             logger.error(f"Error updating Kraken Futures database: {e}")
             raise
+
+
+def _parse_expiry_datetime(schema: KrakenFuturesInstrumentSchema) -> datetime | None:
+    """Parse expiry as full datetime from last_trading_time field.
+
+    Args:
+        schema: Validated instrument schema.
+
+    Returns:
+        Expiry datetime in UTC, or None for perpetuals.
+    """
+    ltt = schema.last_trading_time
+    if not ltt:
+        return None
+    try:
+        return datetime.fromisoformat(ltt.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
 
 
 def _normalize_currency(raw: str) -> str:

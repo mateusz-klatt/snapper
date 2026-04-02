@@ -408,6 +408,54 @@ class VenueEventInsertRow(TypedDict, total=False):
     payload_json: str | None
 
 
+class InstrumentSpecRow(TypedDict):
+    """Row dict returned by get_instrument_spec."""
+
+    instrument_public_id: str
+    tick_size: float | None
+    lot_size: float | None
+    min_order_size: float | None
+    max_order_size: float | None
+    cost_decimals: int | None
+    qty_decimals: int | None
+    margin_initial: float | None
+    position_limit_long: int | None
+    position_limit_short: int | None
+    status: str | None
+    expiry_at: datetime | None
+    instrument_kind: str | None
+
+
+class InstrumentFrontMonthRow(TypedDict):
+    """Repository projection for front-month instrument.
+
+    Joined across multiple temporal tables; API handler mints provenance.
+    """
+
+    instrument_public_id: str
+    native_symbol: str
+    exchange: str
+    expiry_at: datetime
+    relationship_type: str
+    contract_family: str | None
+
+
+class InstrumentContractRow(TypedDict):
+    """Repository projection for futures contract listing.
+
+    Same minted-provenance pattern as InstrumentFrontMonthRow.
+    """
+
+    instrument_public_id: str
+    native_symbol: str
+    exchange: str
+    expiry_at: datetime | None
+    instrument_kind: str | None
+    relationship_type: str
+    contract_family: str | None
+    is_front_month: bool
+
+
 class UnderlyingAssetRow(TypedDict):
     """Row dict returned by underlying asset queries."""
 

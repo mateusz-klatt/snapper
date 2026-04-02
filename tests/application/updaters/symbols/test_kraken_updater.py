@@ -307,7 +307,7 @@ class TestKrakenSymbolUpdater:
         mock_repo.get_session.return_value = mock_session
         with patch.object(updater, "repository", mock_repo):
             await updater._update_database(symbols)
-        assert mock_session.add.call_count == 6
+        assert mock_session.add.call_count == 7
         mock_session.commit.assert_called_once()
 
 
@@ -618,7 +618,7 @@ async def test_update_database_handles_error(monkeypatch: pytest.MonkeyPatch) ->
             """Return stub supporting both scalar_one_or_none and scalars().all()."""
             return SimpleNamespace(
                 scalar_one_or_none=lambda: None,
-                scalars=lambda: SimpleNamespace(all=lambda: []),
+                scalars=lambda: SimpleNamespace(all=lambda: [], first=lambda: None),
             )
 
         def add(self, _obj: Any) -> None:

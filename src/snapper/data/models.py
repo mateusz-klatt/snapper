@@ -693,6 +693,12 @@ class InstrumentSpec(TemporalMixin, Base):
     status: Mapped[str | None] = mapped_column(
         String(20), comment="Trading status (e.g., online, offline)"
     )
+    expiry_at: Mapped[datetime | None] = mapped_column(
+        TZDateTime(), comment="Contract expiry timestamp (UTC); NULL for spots/perpetuals"
+    )
+    instrument_kind: Mapped[str | None] = mapped_column(
+        String(16), comment="Product type: spot, perpetual, future, etf, option"
+    )
 
 
 class MarketSnapshot(TemporalMixin, Base):

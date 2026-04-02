@@ -211,7 +211,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
             session_id=sid,
             sequence_id=self._tracker.next_sequence("capabilities"),
         )
-        self._ensure_instrument_identity(
+        instrument_public_id = self._ensure_instrument_identity(
             session,
             symbol_public_id,
             ExchangeEnum.POLYGON,
@@ -219,6 +219,16 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
             session_id=sid,
             sequence_id=self._tracker.next_sequence("instruments"),
         )
+        kind = "spot" if asset_type in (AssetTypeEnum.CRYPTO, AssetTypeEnum.FOREX) else None
+        if kind is not None:
+            self._revise_instrument_spec(
+                session,
+                instrument_public_id,
+                now,
+                session_id=sid,
+                sequence_id=self._tracker.next_sequence("specs"),
+                instrument_kind=kind,
+            )
         if alias_result == "created":
             stats["inserted"] += 1
         elif alias_result == "updated":

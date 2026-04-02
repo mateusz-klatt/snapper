@@ -523,3 +523,54 @@ class UnderlyingInstrumentData(StrictDataSchema[Literal["underlying_instrument"]
     asset_type: str
     relationship_type: str
     contract_family: str | None
+
+
+class FrontMonthData(StrictDataSchema[Literal["front_month"]]):
+    """Front-month futures contract for an underlying.
+
+    Provenance is minted by the API handler (projection across
+    multiple temporal tables, not a single DB row).
+
+    Attributes:
+        instrument_public_id: Public ID of the front-month instrument.
+        native_symbol: Symbol as known on the exchange.
+        exchange: Exchange identifier.
+        expiry_at: Contract expiry timestamp (UTC).
+        relationship_type: How instrument relates to underlying.
+        contract_family: Futures product root (nullable).
+    """
+
+    type: Literal["front_month"] = "front_month"
+    instrument_public_id: str
+    native_symbol: str
+    exchange: str
+    expiry_at: datetime
+    relationship_type: str
+    contract_family: str | None
+
+
+class ContractData(StrictDataSchema[Literal["contract"]]):
+    """Futures contract in a contract ladder listing.
+
+    Provenance is minted per item (same pattern as FrontMonthData).
+
+    Attributes:
+        instrument_public_id: Public ID of the instrument.
+        native_symbol: Symbol as known on the exchange.
+        exchange: Exchange identifier.
+        expiry_at: Contract expiry timestamp (nullable for perpetuals).
+        instrument_kind: Product type (future, perpetual, etc.).
+        relationship_type: How instrument relates to underlying.
+        contract_family: Futures product root (nullable).
+        is_front_month: True if this is the nearest non-expired contract.
+    """
+
+    type: Literal["contract"] = "contract"
+    instrument_public_id: str
+    native_symbol: str
+    exchange: str
+    expiry_at: datetime | None
+    instrument_kind: str | None
+    relationship_type: str
+    contract_family: str | None
+    is_front_month: bool

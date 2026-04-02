@@ -95,6 +95,9 @@ from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import CheckpointUpsertRow
 from snapper.data.repository_types import ExecutionRow
+from snapper.data.repository_types import InstrumentContractRow
+from snapper.data.repository_types import InstrumentFrontMonthRow
+from snapper.data.repository_types import InstrumentSpecRow
 from snapper.data.repository_types import InstrumentUnderlyingRow
 from snapper.data.repository_types import MarketSnapshotRow
 from snapper.data.repository_types import MarketSnapshotUpsertRow
@@ -271,6 +274,8 @@ class InstrumentSpecInput:
     position_limit_long: int | None = None
     position_limit_short: int | None = None
     status: str | None = None
+    expiry_at: datetime | None = None
+    instrument_kind: str | None = None
 
 
 class Repository(ABC):
@@ -359,6 +364,23 @@ class Repository(ABC):
 
         Insert if absent, no-op if payload identical, close+insert if
         changed.  Returns id of the active or newly inserted row.
+        """
+        ...
+
+    @abstractmethod
+    async def get_instrument_spec(
+        self,
+        instrument_public_id: str,
+        as_of: datetime,
+    ) -> InstrumentSpecRow | None:
+        """Return the active InstrumentSpec for an instrument, or None.
+
+        Args:
+            instrument_public_id: Public ID of the instrument.
+            as_of: Point-in-time for temporal query.
+
+        Returns:
+            InstrumentSpecRow dict or None if no spec exists.
         """
         ...
 
@@ -869,6 +891,57 @@ class Repository(ABC):
         """
         ...
 
+    @abstractmethod
+    async def get_front_month_instrument(
+        self,
+        underlying_public_id: str,
+        as_of: datetime,
+        exchange: str | None = None,
+        contract_family: str | None = None,
+    ) -> InstrumentFrontMonthRow | None:
+        """Return the nearest non-expired futures contract for an underlying.
+
+        Joins InstrumentUnderlyingMapping -> Instrument -> InstrumentSpec.
+        Filters: relationship_type='derivative', instrument_kind='future',
+        expiry_at > as_of. Ordered by expiry_at ASC, contract_family ASC.
+
+        Args:
+            underlying_public_id: Public ID of the underlying asset.
+            as_of: Point-in-time for temporal + expiry filtering.
+            exchange: Optional exchange filter.
+            contract_family: Optional product root filter (e.g., 'ES' vs 'MES').
+
+        Returns:
+            Front-month row or None if no active futures found.
+        """
+        ...
+
+    @abstractmethod
+    async def get_contracts_for_underlying(
+        self,
+        underlying_public_id: str,
+        as_of: datetime,
+        exchange: str | None = None,
+        contract_family: str | None = None,
+        include_expired: bool = False,
+    ) -> list[InstrumentContractRow]:
+        """Return all futures contracts for an underlying.
+
+        Each row includes is_front_month (True for nearest non-expired
+        within same contract_family). Sorted by (contract_family, expiry_at).
+
+        Args:
+            underlying_public_id: Public ID of the underlying asset.
+            as_of: Point-in-time for temporal filtering.
+            exchange: Optional exchange filter.
+            contract_family: Optional product root filter.
+            include_expired: If True, include contracts with expiry_at <= as_of.
+
+        Returns:
+            List of contract rows.
+        """
+        ...
+
 
 def _register_sqlite_fk_pragma(engine: Any) -> None:
     """Register PRAGMA foreign_keys=ON for every new SQLite connection.
@@ -1144,6 +1217,40 @@ class SQLAlchemyRepository(Repository):
             await s.commit()
             await s.refresh(new_row)
             return int(new_row.id)
+
+    async def get_instrument_spec(
+        self,
+        instrument_public_id: str,
+        as_of: datetime,
+    ) -> InstrumentSpecRow | None:
+        """Return the active InstrumentSpec for an instrument, or None."""
+        async with self.session() as s:
+            ts_filter, kt_filter = where_active(InstrumentSpec, as_of)
+            q = await s.execute(
+                select(InstrumentSpec).where(
+                    InstrumentSpec.instrument_public_id == instrument_public_id,
+                    ts_filter,
+                    kt_filter,
+                )
+            )
+            row = q.scalar_one_or_none()
+            if row is None:
+                return None
+            return InstrumentSpecRow(
+                instrument_public_id=row.instrument_public_id,
+                tick_size=row.tick_size,
+                lot_size=row.lot_size,
+                min_order_size=row.min_order_size,
+                max_order_size=row.max_order_size,
+                cost_decimals=row.cost_decimals,
+                qty_decimals=row.qty_decimals,
+                margin_initial=row.margin_initial,
+                position_limit_long=row.position_limit_long,
+                position_limit_short=row.position_limit_short,
+                status=row.status,
+                expiry_at=row.expiry_at,
+                instrument_kind=row.instrument_kind,
+            )
 
     async def _upsert_batch(
         self, model: type[Base], rows: list[Any], index_elements: list[str]
@@ -2946,6 +3053,175 @@ class SQLAlchemyRepository(Repository):
             await s.commit()
             return True
 
+    async def get_front_month_instrument(
+        self,
+        underlying_public_id: str,
+        as_of: datetime,
+        exchange: str | None = None,
+        contract_family: str | None = None,
+    ) -> InstrumentFrontMonthRow | None:
+        """Return the nearest non-expired futures contract for an underlying."""
+        async with self.session() as s:
+            mapping_ts, mapping_kt = where_active(InstrumentUnderlyingMapping, as_of)
+            inst_ts, inst_kt = where_active(Instrument, as_of)
+            spec_ts, spec_kt = where_active(InstrumentSpec, as_of)
+            sym_ts, sym_kt = where_active(Symbol, as_of)
+
+            stmt = (
+                select(
+                    Instrument.public_id.label("instrument_public_id"),
+                    Symbol.native_symbol,
+                    Instrument.exchange,
+                    InstrumentSpec.expiry_at,
+                    InstrumentUnderlyingMapping.relationship_type,
+                    InstrumentUnderlyingMapping.contract_family,
+                )
+                .join(
+                    InstrumentUnderlyingMapping,
+                    and_(
+                        InstrumentUnderlyingMapping.instrument_public_id == Instrument.public_id,
+                        mapping_ts,
+                        mapping_kt,
+                    ),
+                )
+                .join(
+                    Symbol,
+                    and_(
+                        Symbol.public_id == Instrument.symbol_public_id,
+                        sym_ts,
+                        sym_kt,
+                    ),
+                )
+                .join(
+                    InstrumentSpec,
+                    and_(
+                        InstrumentSpec.instrument_public_id == Instrument.public_id,
+                        spec_ts,
+                        spec_kt,
+                    ),
+                )
+                .where(
+                    inst_ts,
+                    inst_kt,
+                    InstrumentUnderlyingMapping.underlying_public_id == underlying_public_id,
+                    InstrumentUnderlyingMapping.relationship_type == "derivative",
+                    InstrumentSpec.instrument_kind == "future",
+                    InstrumentSpec.expiry_at > as_of,
+                )
+                .order_by(
+                    InstrumentSpec.expiry_at.asc(),
+                    InstrumentUnderlyingMapping.contract_family.asc(),
+                )
+                .limit(1)
+            )
+
+            if exchange is not None:
+                stmt = stmt.where(Instrument.exchange == exchange)
+            if contract_family is not None:
+                stmt = stmt.where(InstrumentUnderlyingMapping.contract_family == contract_family)
+
+            row = (await s.execute(stmt)).first()
+            if row is None:
+                return None
+            return InstrumentFrontMonthRow(
+                instrument_public_id=row.instrument_public_id,
+                native_symbol=row.native_symbol,
+                exchange=row.exchange,
+                expiry_at=row.expiry_at,
+                relationship_type=row.relationship_type,
+                contract_family=row.contract_family,
+            )
+
+    async def get_contracts_for_underlying(
+        self,
+        underlying_public_id: str,
+        as_of: datetime,
+        exchange: str | None = None,
+        contract_family: str | None = None,
+        include_expired: bool = False,
+    ) -> list[InstrumentContractRow]:
+        """Return all futures contracts for an underlying."""
+        async with self.session() as s:
+            mapping_ts, mapping_kt = where_active(InstrumentUnderlyingMapping, as_of)
+            inst_ts, inst_kt = where_active(Instrument, as_of)
+            spec_ts, spec_kt = where_active(InstrumentSpec, as_of)
+            sym_ts, sym_kt = where_active(Symbol, as_of)
+
+            stmt = (
+                select(
+                    Instrument.public_id.label("instrument_public_id"),
+                    Symbol.native_symbol,
+                    Instrument.exchange,
+                    InstrumentSpec.expiry_at,
+                    InstrumentSpec.instrument_kind,
+                    InstrumentUnderlyingMapping.relationship_type,
+                    InstrumentUnderlyingMapping.contract_family,
+                )
+                .join(
+                    InstrumentUnderlyingMapping,
+                    and_(
+                        InstrumentUnderlyingMapping.instrument_public_id == Instrument.public_id,
+                        mapping_ts,
+                        mapping_kt,
+                    ),
+                )
+                .join(
+                    Symbol,
+                    and_(
+                        Symbol.public_id == Instrument.symbol_public_id,
+                        sym_ts,
+                        sym_kt,
+                    ),
+                )
+                .join(
+                    InstrumentSpec,
+                    and_(
+                        InstrumentSpec.instrument_public_id == Instrument.public_id,
+                        spec_ts,
+                        spec_kt,
+                    ),
+                )
+                .where(
+                    inst_ts,
+                    inst_kt,
+                    InstrumentUnderlyingMapping.underlying_public_id == underlying_public_id,
+                    InstrumentUnderlyingMapping.relationship_type == "derivative",
+                )
+                .order_by(
+                    InstrumentUnderlyingMapping.contract_family.asc(),
+                    InstrumentSpec.expiry_at.asc(),
+                )
+            )
+
+            if not include_expired:
+                stmt = stmt.where(InstrumentSpec.expiry_at > as_of)
+            if exchange is not None:
+                stmt = stmt.where(Instrument.exchange == exchange)
+            if contract_family is not None:
+                stmt = stmt.where(InstrumentUnderlyingMapping.contract_family == contract_family)
+
+            rows = (await s.execute(stmt)).all()
+
+            front_months: dict[str | None, str] = {}
+            for r in rows:
+                family = r.contract_family
+                if family not in front_months and r.expiry_at is not None and r.expiry_at > as_of:
+                    front_months[family] = r.instrument_public_id
+
+            return [
+                InstrumentContractRow(
+                    instrument_public_id=r.instrument_public_id,
+                    native_symbol=r.native_symbol,
+                    exchange=r.exchange,
+                    expiry_at=r.expiry_at,
+                    instrument_kind=r.instrument_kind,
+                    relationship_type=r.relationship_type,
+                    contract_family=r.contract_family,
+                    is_front_month=front_months.get(r.contract_family) == r.instrument_public_id,
+                )
+                for r in rows
+            ]
+
 
 _repository_cache: dict[str, Repository] = {}
 
@@ -3034,6 +3310,85 @@ class DatabaseRepository:
     def create_all(self) -> None:
         """Create all database tables from model metadata."""
         Base.metadata.create_all(self.engine)
+
+    @staticmethod
+    def get_instrument_spec_sync(
+        session: SyncSession,
+        instrument_public_id: str,
+        timestamp: datetime,
+    ) -> InstrumentSpec | None:
+        """Synchronous read of active InstrumentSpec.
+
+        Used by symbol updaters operating inside sync transactions.
+
+        Args:
+            session: SQLAlchemy sync session.
+            instrument_public_id: Public ID of the instrument.
+            timestamp: Point-in-time for temporal query.
+
+        Returns:
+            Active InstrumentSpec ORM instance or None.
+        """
+        return session.execute(
+            select(InstrumentSpec).where(
+                InstrumentSpec.instrument_public_id == instrument_public_id,
+                InstrumentSpec.timestamp <= timestamp,
+                InstrumentSpec.known_to > timestamp,
+            )
+        ).scalar_one_or_none()
+
+    @staticmethod
+    def revise_instrument_spec_sync(
+        session: SyncSession,
+        instrument_public_id: str,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+        spec: InstrumentSpecInput,
+    ) -> str:
+        """Synchronous SCD2 close+insert for instrument specs.
+
+        Used by symbol updaters operating inside sync transactions.
+
+        Args:
+            session: SQLAlchemy sync session.
+            instrument_public_id: Public ID of the instrument.
+            session_id: Producer session identifier.
+            sequence_id: Per-topic monotonic counter.
+            timestamp: Current UTC timestamp.
+            spec: Spec payload with all fields.
+
+        Returns:
+            One of ``created``, ``updated``, or ``unchanged``.
+        """
+        payload = asdict(spec)
+        existing = session.execute(
+            select(InstrumentSpec).where(
+                InstrumentSpec.instrument_public_id == instrument_public_id,
+                InstrumentSpec.timestamp <= timestamp,
+                InstrumentSpec.known_to > timestamp,
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            same = all(getattr(existing, k) == v for k, v in payload.items())
+            if same:
+                return "unchanged"
+        new_values = {
+            "instrument_public_id": instrument_public_id,
+            "session_id": session_id,
+            "sequence_id": sequence_id,
+            **payload,
+        }
+        close_and_insert_sync(
+            session=session,
+            model=InstrumentSpec,
+            match_filters=[InstrumentSpec.instrument_public_id == instrument_public_id],
+            new_values=new_values,
+            bus_time=timestamp,
+        )
+        if existing is None:
+            return "created"
+        return "updated"
 
     def get_archive_symbols(self) -> dict[str, str]:
         """Resolve stable archive symbols for all Symbol entities.
