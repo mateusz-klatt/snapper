@@ -15,6 +15,24 @@ export const ConnectionStatsSchema = z
   })
   .strict()
 
+export const ContractDataSchema = z
+  .object({
+    type: z.literal('contract'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    instrument_public_id: z.string(),
+    native_symbol: z.string(),
+    exchange: z.string(),
+    expiry_at: z.iso.datetime().nullable(),
+    instrument_kind: z.string().nullable(),
+    relationship_type: z.string(),
+    contract_family: z.string().nullable(),
+    is_front_month: z.boolean(),
+  })
+  .strict()
+
 export const ExchangeListResponseSchema = z
   .object({
     type: z.literal('exchange_list'),
@@ -48,6 +66,22 @@ export const ExecutionDataSchema = z
     fee_asset: z.string(),
     status: z.enum(['filled', 'partial']),
     executed_at: z.iso.datetime(),
+  })
+  .strict()
+
+export const FrontMonthDataSchema = z
+  .object({
+    type: z.literal('front_month'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    instrument_public_id: z.string(),
+    native_symbol: z.string(),
+    exchange: z.string(),
+    expiry_at: z.iso.datetime(),
+    relationship_type: z.string(),
+    contract_family: z.string().nullable(),
   })
   .strict()
 
@@ -188,6 +222,8 @@ export const ProcessStopDataSchema = z
   })
   .strict()
 
+export const RelationshipTypeEnumSchema = z.enum(['exact', 'derivative', 'proxy'])
+
 export const SettingCategoriesResponseSchema = z
   .object({
     type: z.literal('setting_categories'),
@@ -268,6 +304,37 @@ export const TopicMetricSnapshotSchema = z
     last_message_ts: z.number(),
     throttle_ms: z.number().int().nullable().optional(),
     pattern: z.string().nullable().optional(),
+  })
+  .strict()
+
+export const UnderlyingAssetDataSchema = z
+  .object({
+    type: z.literal('underlying_asset'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    ticker: z.string(),
+    name: z.string(),
+    asset_class: z.string(),
+    sector: z.string().nullable(),
+    instrument_count: z.number().int(),
+  })
+  .strict()
+
+export const UnderlyingInstrumentDataSchema = z
+  .object({
+    type: z.literal('underlying_instrument'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    instrument_public_id: z.string(),
+    native_symbol: z.string(),
+    exchange: z.string(),
+    asset_type: z.string(),
+    relationship_type: z.string(),
+    contract_family: z.string().nullable(),
   })
   .strict()
 
@@ -353,6 +420,18 @@ export const SettingUpdateBodySchema = z
 
 export const RemoveSettingBodySchema = z.object({}).strict()
 
+export const ContractListResponseSchema = z
+  .object({
+    type: z.literal('contract_list'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: z.array(ContractDataSchema),
+    count: z.number().int(),
+  })
+  .strict()
+
 export const ExecutionListResponseSchema = z
   .object({
     type: z.literal('execution_list'),
@@ -362,6 +441,17 @@ export const ExecutionListResponseSchema = z
     session_id: z.string(),
     payload: z.array(ExecutionDataSchema),
     count: z.number().int(),
+  })
+  .strict()
+
+export const FrontMonthResponseSchema = z
+  .object({
+    type: z.literal('front_month'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: FrontMonthDataSchema,
   })
   .strict()
 
@@ -489,6 +579,30 @@ export const StrategyListResponseSchema = z
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     payload: z.array(StrategyProcessSchema),
+    count: z.number().int(),
+  })
+  .strict()
+
+export const UnderlyingAssetListResponseSchema = z
+  .object({
+    type: z.literal('underlying_asset_list'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: z.array(UnderlyingAssetDataSchema),
+    count: z.number().int(),
+  })
+  .strict()
+
+export const UnderlyingInstrumentListResponseSchema = z
+  .object({
+    type: z.literal('underlying_instrument_list'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: z.array(UnderlyingInstrumentDataSchema),
     count: z.number().int(),
   })
   .strict()
@@ -1005,8 +1119,10 @@ export const SystemStatusResponseSchema = z
 
 // Type exports
 export type ConnectionStats = z.infer<typeof ConnectionStatsSchema>
+export type ContractData = z.infer<typeof ContractDataSchema>
 export type ExchangeListResponse = z.infer<typeof ExchangeListResponseSchema>
 export type ExecutionData = z.infer<typeof ExecutionDataSchema>
+export type FrontMonthData = z.infer<typeof FrontMonthDataSchema>
 export type GapStats = z.infer<typeof GapStatsSchema>
 export type HealthTopics = z.infer<typeof HealthTopicsSchema>
 export type InstrumentListResponse = z.infer<typeof InstrumentListResponseSchema>
@@ -1019,12 +1135,15 @@ export type ProcessCreatedInfo = z.infer<typeof ProcessCreatedInfoSchema>
 export type ProcessStartData = z.infer<typeof ProcessStartDataSchema>
 export type ProcessStatus = z.infer<typeof ProcessStatusSchema>
 export type ProcessStopData = z.infer<typeof ProcessStopDataSchema>
+export type RelationshipTypeEnum = z.infer<typeof RelationshipTypeEnumSchema>
 export type SettingCategoriesResponse = z.infer<typeof SettingCategoriesResponseSchema>
 export type SettingRead = z.infer<typeof SettingReadSchema>
 export type SignalData = z.infer<typeof SignalDataSchema>
 export type StrategyProcess = z.infer<typeof StrategyProcessSchema>
 export type SubscriptionsStats = z.infer<typeof SubscriptionsStatsSchema>
 export type TopicMetricSnapshot = z.infer<typeof TopicMetricSnapshotSchema>
+export type UnderlyingAssetData = z.infer<typeof UnderlyingAssetDataSchema>
+export type UnderlyingInstrumentData = z.infer<typeof UnderlyingInstrumentDataSchema>
 export type UserRole = z.infer<typeof UserRoleSchema>
 export type ValidationError = z.infer<typeof ValidationErrorSchema>
 export type WebSocketStats = z.infer<typeof WebSocketStatsSchema>
@@ -1038,7 +1157,9 @@ export type ChangePasswordBody = z.infer<typeof ChangePasswordBodySchema>
 export type AdminResetPasswordBody = z.infer<typeof AdminResetPasswordBodySchema>
 export type SettingUpdateBody = z.infer<typeof SettingUpdateBodySchema>
 export type RemoveSettingBody = z.infer<typeof RemoveSettingBodySchema>
+export type ContractListResponse = z.infer<typeof ContractListResponseSchema>
 export type ExecutionListResponse = z.infer<typeof ExecutionListResponseSchema>
+export type FrontMonthResponse = z.infer<typeof FrontMonthResponseSchema>
 export type GapDetectionStats = z.infer<typeof GapDetectionStatsSchema>
 export type JsonValue = z.infer<typeof JsonValueSchema>
 export type OrderListResponse = z.infer<typeof OrderListResponseSchema>
@@ -1051,6 +1172,10 @@ export type SettingListResponse = z.infer<typeof SettingListResponseSchema>
 export type SettingResponse = z.infer<typeof SettingResponseSchema>
 export type SignalListResponse = z.infer<typeof SignalListResponseSchema>
 export type StrategyListResponse = z.infer<typeof StrategyListResponseSchema>
+export type UnderlyingAssetListResponse = z.infer<typeof UnderlyingAssetListResponseSchema>
+export type UnderlyingInstrumentListResponse = z.infer<
+  typeof UnderlyingInstrumentListResponseSchema
+>
 export type UserProfile = z.infer<typeof UserProfileSchema>
 export type CreateUserBody = z.infer<typeof CreateUserBodySchema>
 export type UpdateUserBody = z.infer<typeof UpdateUserBodySchema>

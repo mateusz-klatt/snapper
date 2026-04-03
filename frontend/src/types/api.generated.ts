@@ -767,6 +767,144 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
+    "/api/underlyings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Underlyings
+         * @description Return all underlying assets with instrument counts.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         _auth: Authenticated user with READ_MARKET_DATA permission.
+         *         _csrf: CSRF token validation.
+         *         repo: Database repository.
+         *         as_of: Optional point-in-time query timestamp.
+         *
+         *     Returns:
+         *         UnderlyingAssetListResponse wrapping underlying asset list.
+         */
+        get: Operations["get_underlyings_api_underlyings_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/underlyings/{ticker}/instruments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Underlying Instruments
+         * @description Return instruments mapped to an underlying asset.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         ticker: Underlying asset ticker (e.g. 'SPX', 'GOLD').
+         *         _auth: Authenticated user with READ_MARKET_DATA permission.
+         *         _csrf: CSRF token validation.
+         *         repo: Database repository.
+         *         as_of: Optional point-in-time query timestamp.
+         *         relationship_type: Optional filter (exact/derivative/proxy).
+         *
+         *     Returns:
+         *         UnderlyingInstrumentListResponse wrapping instrument list.
+         *
+         *     Raises:
+         *         HTTPException: 404 if ticker not found.
+         */
+        get: Operations["get_underlying_instruments_api_underlyings__ticker__instruments_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/underlyings/{ticker}/front-month": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Front Month
+         * @description Return the front-month (nearest non-expired) futures contract.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         ticker: Underlying asset ticker (e.g. 'SPX', 'GOLD').
+         *         _auth: Authenticated user with READ_MARKET_DATA permission.
+         *         _csrf: CSRF token validation.
+         *         repo: Database repository.
+         *         as_of: Optional point-in-time query timestamp.
+         *         exchange: Optional exchange filter.
+         *         contract_family: Optional futures product root filter.
+         *
+         *     Returns:
+         *         FrontMonthResponse wrapping the front-month instrument.
+         *
+         *     Raises:
+         *         HTTPException: 404 if ticker not found or no active futures.
+         */
+        get: Operations["get_front_month_api_underlyings__ticker__front_month_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/underlyings/{ticker}/contracts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Contracts
+         * @description Return all futures contracts for an underlying asset.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         ticker: Underlying asset ticker (e.g. 'SPX', 'GOLD').
+         *         _auth: Authenticated user with READ_MARKET_DATA permission.
+         *         _csrf: CSRF token validation.
+         *         repo: Database repository.
+         *         as_of: Optional point-in-time query timestamp.
+         *         exchange: Optional exchange filter.
+         *         contract_family: Optional futures product root filter.
+         *         include_expired: Whether to include expired contracts.
+         *
+         *     Returns:
+         *         ContractListResponse wrapping the contracts list.
+         *
+         *     Raises:
+         *         HTTPException: 404 if ticker not found.
+         */
+        get: Operations["get_contracts_api_underlyings__ticker__contracts_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/orders": {
         parameters: {
             query?: never;
@@ -1239,6 +1377,92 @@ export type Components = {
             active_clients: number;
         };
         /**
+         * ContractData
+         * @description Futures contract in a contract ladder listing.
+         *
+         *     Provenance is minted per item (same pattern as FrontMonthData).
+         *
+         *     Attributes:
+         *         instrument_public_id: Public ID of the instrument.
+         *         native_symbol: Symbol as known on the exchange.
+         *         exchange: Exchange identifier.
+         *         expiry_at: Contract expiry timestamp (nullable for perpetuals).
+         *         instrument_kind: Product type (future, perpetual, etc.).
+         *         relationship_type: How instrument relates to underlying.
+         *         contract_family: Futures product root (nullable).
+         *         is_front_month: True if this is the nearest non-expired contract.
+         */
+        ContractData: {
+            /**
+             * Type
+             * @default contract
+             * @constant
+             */
+            type: "contract";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Instrument Public Id */
+            instrument_public_id: string;
+            /** Native Symbol */
+            native_symbol: string;
+            /** Exchange */
+            exchange: string;
+            /** Expiry At */
+            expiry_at: string | null;
+            /** Instrument Kind */
+            instrument_kind: string | null;
+            /** Relationship Type */
+            relationship_type: string;
+            /** Contract Family */
+            contract_family: string | null;
+            /** Is Front Month */
+            is_front_month: boolean;
+        };
+        /**
+         * ContractListResponse
+         * @description Contract ladder list response wrapper.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         *         payload: List of contract data items.
+         *         count: Total number of contracts in the response.
+         */
+        ContractListResponse: {
+            /**
+             * Type
+             * @default contract_list
+             * @constant
+             */
+            type: "contract_list";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Payload */
+            payload: Components["schemas"]["ContractData"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
+            count: number;
+        };
+        /**
          * ExchangeListResponse
          * @description Exchange list response wrapper.
          *
@@ -1395,6 +1619,83 @@ export type Components = {
              * @description Number of items in payload
              */
             count: number;
+        };
+        /**
+         * FrontMonthData
+         * @description Front-month futures contract for an underlying.
+         *
+         *     Provenance is minted by the API handler (projection across
+         *     multiple temporal tables, not a single DB row).
+         *
+         *     Attributes:
+         *         instrument_public_id: Public ID of the front-month instrument.
+         *         native_symbol: Symbol as known on the exchange.
+         *         exchange: Exchange identifier.
+         *         expiry_at: Contract expiry timestamp (UTC).
+         *         relationship_type: How instrument relates to underlying.
+         *         contract_family: Futures product root (nullable).
+         */
+        FrontMonthData: {
+            /**
+             * Type
+             * @default front_month
+             * @constant
+             */
+            type: "front_month";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Instrument Public Id */
+            instrument_public_id: string;
+            /** Native Symbol */
+            native_symbol: string;
+            /** Exchange */
+            exchange: string;
+            /**
+             * Expiry At
+             * Format: date-time
+             */
+            expiry_at: string;
+            /** Relationship Type */
+            relationship_type: string;
+            /** Contract Family */
+            contract_family: string | null;
+        };
+        /**
+         * FrontMonthResponse
+         * @description Front-month instrument response wrapper.
+         *
+         *     Attributes:
+         *         type: Payload type discriminator.
+         *         payload: Front-month instrument data.
+         */
+        FrontMonthResponse: {
+            /**
+             * Type
+             * @default front_month
+             * @constant
+             */
+            type: "front_month";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["FrontMonthData"];
         };
         /**
          * GapDetectionStats
@@ -2591,6 +2892,12 @@ export type Components = {
             payload: Components["schemas"]["RefreshData"];
         };
         /**
+         * RelationshipTypeEnum
+         * @description Relationship between an instrument and its underlying asset.
+         * @enum {string}
+         */
+        RelationshipTypeEnum: "exact" | "derivative" | "proxy";
+        /**
          * SettingCategoriesResponse
          * @description Setting categories list response.
          *
@@ -3171,6 +3478,164 @@ export type Components = {
              * @description ZMQ subscription pattern
              */
             pattern?: string | null;
+        };
+        /**
+         * UnderlyingAssetData
+         * @description Underlying asset with instrument count.
+         *
+         *     Provenance fields (public_id, session_id, sequence_id, timestamp)
+         *     come from the DB row via UnderlyingAssetRow.
+         *
+         *     Attributes:
+         *         ticker: Short code (e.g. 'SPX', 'GOLD').
+         *         name: Canonical name (e.g. 'S&P 500').
+         *         asset_class: Asset type category.
+         *         sector: Optional sector classification.
+         *         instrument_count: Number of instruments mapped to this underlying.
+         */
+        UnderlyingAssetData: {
+            /**
+             * Type
+             * @default underlying_asset
+             * @constant
+             */
+            type: "underlying_asset";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Ticker */
+            ticker: string;
+            /** Name */
+            name: string;
+            /** Asset Class */
+            asset_class: string;
+            /** Sector */
+            sector: string | null;
+            /** Instrument Count */
+            instrument_count: number;
+        };
+        /**
+         * UnderlyingAssetListResponse
+         * @description Underlying asset list response wrapper.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         *         payload: List of underlying asset data items.
+         *         count: Total number of underlying assets in the response.
+         */
+        UnderlyingAssetListResponse: {
+            /**
+             * Type
+             * @default underlying_asset_list
+             * @constant
+             */
+            type: "underlying_asset_list";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Payload */
+            payload: Components["schemas"]["UnderlyingAssetData"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
+            count: number;
+        };
+        /**
+         * UnderlyingInstrumentData
+         * @description Instrument mapped to an underlying asset.
+         *
+         *     Provenance comes from the InstrumentUnderlyingMapping DB row.
+         *
+         *     Attributes:
+         *         instrument_public_id: Public ID of the instrument.
+         *         native_symbol: Symbol as known on the exchange.
+         *         exchange: Exchange identifier.
+         *         asset_type: Asset type of the symbol.
+         *         relationship_type: How instrument relates to underlying.
+         *         contract_family: Futures product root (nullable).
+         */
+        UnderlyingInstrumentData: {
+            /**
+             * Type
+             * @default underlying_instrument
+             * @constant
+             */
+            type: "underlying_instrument";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Instrument Public Id */
+            instrument_public_id: string;
+            /** Native Symbol */
+            native_symbol: string;
+            /** Exchange */
+            exchange: string;
+            /** Asset Type */
+            asset_type: string;
+            /** Relationship Type */
+            relationship_type: string;
+            /** Contract Family */
+            contract_family: string | null;
+        };
+        /**
+         * UnderlyingInstrumentListResponse
+         * @description Underlying instrument list response wrapper.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         *         payload: List of underlying instrument data items.
+         *         count: Total number of instruments in the response.
+         */
+        UnderlyingInstrumentListResponse: {
+            /**
+             * Type
+             * @default underlying_instrument_list
+             * @constant
+             */
+            type: "underlying_instrument_list";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Payload */
+            payload: Components["schemas"]["UnderlyingInstrumentData"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
+            count: number;
         };
         /**
          * UserListResponse
@@ -4905,6 +5370,201 @@ export interface Operations {
                 content: {
                     "application/json": Components["schemas"]["InstrumentListResponse"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_underlyings_api_underlyings_get: {
+        parameters: {
+            query?: {
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["UnderlyingAssetListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_underlying_instruments_api_underlyings__ticker__instruments_get: {
+        parameters: {
+            query?: {
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
+                /** @description Filter by relationship type */
+                relationship_type?: Components["schemas"]["RelationshipTypeEnum"] | null;
+            };
+            header?: never;
+            path: {
+                ticker: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["UnderlyingInstrumentListResponse"];
+                };
+            };
+            /** @description Underlying not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_front_month_api_underlyings__ticker__front_month_get: {
+        parameters: {
+            query?: {
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
+                /** @description Filter by exchange */
+                exchange?: string | null;
+                /** @description Filter by product root (e.g. ES, MES) */
+                contract_family?: string | null;
+            };
+            header?: never;
+            path: {
+                ticker: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["FrontMonthResponse"];
+                };
+            };
+            /** @description No active futures contracts or underlying not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_contracts_api_underlyings__ticker__contracts_get: {
+        parameters: {
+            query?: {
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
+                /** @description Filter by exchange */
+                exchange?: string | null;
+                /** @description Filter by product root (e.g. ES, MES) */
+                contract_family?: string | null;
+                /** @description Include expired contracts */
+                include_expired?: boolean;
+            };
+            header?: never;
+            path: {
+                ticker: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["ContractListResponse"];
+                };
+            };
+            /** @description Underlying not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

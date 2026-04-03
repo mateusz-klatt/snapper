@@ -3,6 +3,12 @@
 
 import Foundation
 
+enum RelationshipTypeEnum: String, Codable, Sendable {
+    case exact
+    case derivative
+    case proxy
+}
+
 enum UserRole: String, Codable, Sendable {
     case viewer
     case operatorRole = "operator"
@@ -340,6 +346,59 @@ struct ConnectionStats: Codable, Sendable {
     }
 }
 
+struct ContractData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let instrumentPublicId: String
+    let nativeSymbol: String
+    let exchange: String
+    let expiryAt: Date?
+    let instrumentKind: String?
+    let relationshipType: String
+    let contractFamily: String?
+    let isFrontMonth: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case instrumentPublicId = "instrument_public_id"
+        case nativeSymbol = "native_symbol"
+        case exchange
+        case expiryAt = "expiry_at"
+        case instrumentKind = "instrument_kind"
+        case relationshipType = "relationship_type"
+        case contractFamily = "contract_family"
+        case isFrontMonth = "is_front_month"
+    }
+}
+
+struct ContractListResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: [ContractData]
+    /// Number of items in payload
+    let count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+        case count
+    }
+}
+
 struct ExchangeListResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
@@ -423,6 +482,52 @@ struct ExecutionListResponse: Codable, Sendable {
         case sessionId = "session_id"
         case payload
         case count
+    }
+}
+
+struct FrontMonthData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let instrumentPublicId: String
+    let nativeSymbol: String
+    let exchange: String
+    let expiryAt: Date
+    let relationshipType: String
+    let contractFamily: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case instrumentPublicId = "instrument_public_id"
+        case nativeSymbol = "native_symbol"
+        case exchange
+        case expiryAt = "expiry_at"
+        case relationshipType = "relationship_type"
+        case contractFamily = "contract_family"
+    }
+}
+
+struct FrontMonthResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: FrontMonthData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
     }
 }
 
@@ -1419,6 +1524,102 @@ struct TopicMetricSnapshot: Codable, Sendable {
         case lastMessageTs = "last_message_ts"
         case throttleMs = "throttle_ms"
         case pattern
+    }
+}
+
+struct UnderlyingAssetData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let ticker: String
+    let name: String
+    let assetClass: String
+    let sector: String?
+    let instrumentCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case ticker
+        case name
+        case assetClass = "asset_class"
+        case sector
+        case instrumentCount = "instrument_count"
+    }
+}
+
+struct UnderlyingAssetListResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: [UnderlyingAssetData]
+    /// Number of items in payload
+    let count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+        case count
+    }
+}
+
+struct UnderlyingInstrumentData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let instrumentPublicId: String
+    let nativeSymbol: String
+    let exchange: String
+    let assetType: String
+    let relationshipType: String
+    let contractFamily: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case instrumentPublicId = "instrument_public_id"
+        case nativeSymbol = "native_symbol"
+        case exchange
+        case assetType = "asset_type"
+        case relationshipType = "relationship_type"
+        case contractFamily = "contract_family"
+    }
+}
+
+struct UnderlyingInstrumentListResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: [UnderlyingInstrumentData]
+    /// Number of items in payload
+    let count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+        case count
     }
 }
 

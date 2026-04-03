@@ -42,6 +42,25 @@ export interface Candle {
 }
 
 /**
+ * Canonical Contract entity.
+ * From WebSocket ContractData.
+ */
+export interface Contract {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  instrumentPublicId: string
+  nativeSymbol: string
+  exchange: string
+  expiryAt: Date | null
+  instrumentKind: string | null
+  relationshipType: string
+  contractFamily: string | null
+  isFrontMonth: boolean
+}
+
+/**
  * Canonical Execution entity.
  * From WebSocket ExecutionData.
  */
@@ -64,6 +83,23 @@ export interface Execution {
   feeAsset: string
   status: 'filled' | 'partial'
   executedAt: Date
+}
+
+/**
+ * Canonical FrontMonth entity.
+ * From WebSocket FrontMonthData.
+ */
+export interface FrontMonth {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  instrumentPublicId: string
+  nativeSymbol: string
+  exchange: string
+  expiryAt: Date
+  relationshipType: string
+  contractFamily: string | null
 }
 
 /**
@@ -301,6 +337,39 @@ export interface Trade {
   volume: number
   side?: string | null
   tradeId?: string | null
+}
+
+/**
+ * Canonical UnderlyingAsset entity.
+ * From WebSocket UnderlyingAssetData.
+ */
+export interface UnderlyingAsset {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  ticker: string
+  name: string
+  assetClass: string
+  sector: string | null
+  instrumentCount: number
+}
+
+/**
+ * Canonical UnderlyingInstrument entity.
+ * From WebSocket UnderlyingInstrumentData.
+ */
+export interface UnderlyingInstrument {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  instrumentPublicId: string
+  nativeSymbol: string
+  exchange: string
+  assetType: string
+  relationshipType: string
+  contractFamily: string | null
 }
 
 /**

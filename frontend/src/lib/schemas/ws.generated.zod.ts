@@ -43,6 +43,24 @@ export const CandleDataSchema = z
   })
   .strict()
 
+export const ContractDataSchema = z
+  .object({
+    type: z.literal('contract'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    instrument_public_id: z.string(),
+    native_symbol: z.string(),
+    exchange: z.string(),
+    expiry_at: z.iso.datetime().nullable(),
+    instrument_kind: z.string().nullable(),
+    relationship_type: z.string(),
+    contract_family: z.string().nullable(),
+    is_front_month: z.boolean(),
+  })
+  .strict()
+
 export const ExecutionDataSchema = z
   .object({
     type: z.literal('execution'),
@@ -64,6 +82,22 @@ export const ExecutionDataSchema = z
     fee_asset: z.string(),
     status: z.enum(['filled', 'partial']),
     executed_at: z.iso.datetime(),
+  })
+  .strict()
+
+export const FrontMonthDataSchema = z
+  .object({
+    type: z.literal('front_month'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    instrument_public_id: z.string(),
+    native_symbol: z.string(),
+    exchange: z.string(),
+    expiry_at: z.iso.datetime(),
+    relationship_type: z.string(),
+    contract_family: z.string().nullable(),
   })
   .strict()
 
@@ -288,6 +322,37 @@ export const TradeDataSchema = z
     volume: z.number(),
     side: z.string().nullable(),
     trade_id: z.string().nullable(),
+  })
+  .strict()
+
+export const UnderlyingAssetDataSchema = z
+  .object({
+    type: z.literal('underlying_asset'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    ticker: z.string(),
+    name: z.string(),
+    asset_class: z.string(),
+    sector: z.string().nullable(),
+    instrument_count: z.number().int(),
+  })
+  .strict()
+
+export const UnderlyingInstrumentDataSchema = z
+  .object({
+    type: z.literal('underlying_instrument'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    instrument_public_id: z.string(),
+    native_symbol: z.string(),
+    exchange: z.string(),
+    asset_type: z.string(),
+    relationship_type: z.string(),
+    contract_family: z.string().nullable(),
   })
   .strict()
 
