@@ -129,12 +129,15 @@ function App() {
             </div>
           </div>
         </header>
-        {isTimeTraveling && (
-          <div className='flex items-center gap-2 border-b border-brand-200 bg-brand-50 px-4 py-2 text-sm font-medium text-brand-800'>
-            <Clock size={14} />
-            <span>Time Travel Mode — viewing historical data (read-only)</span>
-          </div>
-        )}
+        {isTimeTraveling &&
+          activeTab !== 'processes' &&
+          activeTab !== 'strategies' &&
+          activeTab !== 'health' && (
+            <div className='flex items-center gap-2 border-b border-brand-200 bg-brand-50 px-4 py-2 text-sm font-medium text-brand-800'>
+              <Clock size={14} />
+              <span>Time Travel Mode — viewing historical data (read-only)</span>
+            </div>
+          )}
         <main className='flex-1 overflow-y-auto p-4 sm:p-6'>
           <div className='mx-auto w-full max-w-screen-2xl'>
             <AppRoutes activeTab={activeTab} />
