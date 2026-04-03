@@ -715,6 +715,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
                             cl_ord_id=order.client_order_id or "",
                             order_qty=order.amount,
                             limit_price=order.price,
+                            average_price=order.price,
                         )
 
                 if not first_poll:
@@ -736,6 +737,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
                             cl_ord_id=t.cl_ord_id,
                             order_qty=t.amount,
                             limit_price=t.price,
+                            average_price=t.price if t.price else None,
                         )
                         if not is_filled and t.filled > 0:
                             logger.warning(

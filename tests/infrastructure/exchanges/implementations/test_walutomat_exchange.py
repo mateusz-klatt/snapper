@@ -1270,6 +1270,7 @@ async def test_subscribe_executions_uses_correct_field_names() -> None:
     assert update.cum_qty == 25.0
     assert update.order_qty == 100.0
     assert update.limit_price == 4.50
+    assert update.average_price == 4.50
 
 
 @pytest.mark.asyncio()
