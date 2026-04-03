@@ -6,6 +6,8 @@ REST messages into internal Snapper data structures. It handles:
 - Ticker updates (bid/ask/last/mark price, funding rate, open interest)
 - Trade execution events
 - Instrument/product specifications
+- Private fill events (authenticated ``fills`` WS channel)
+- Private order status updates (authenticated ``open_orders`` WS channel)
 
 All parsing functions validate data using Pydantic schemas before
 converting to internal contract types. Symbol conversion from Kraken
@@ -15,6 +17,7 @@ Each ``_list`` function catches per-item errors so that a single
 unparseable item does not discard the entire batch.
 """
 
+from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
 from decimal import Decimal
@@ -22,13 +25,23 @@ from typing import Any
 
 from loguru import logger
 
+from snapper.infrastructure.exchanges.contracts import ExecType
+from snapper.infrastructure.exchanges.contracts import ExecutionFeeBreakdown
+from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
+from snapper.infrastructure.exchanges.contracts import OrderSideEnum
+from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.exchanges.schemas.kraken_futures import KrakenFuturesFillSchema
 from snapper.infrastructure.exchanges.schemas.kraken_futures import KrakenFuturesInstrumentSchema
+from snapper.infrastructure.exchanges.schemas.kraken_futures import KrakenFuturesOpenOrderSchema
 from snapper.infrastructure.exchanges.schemas.kraken_futures import KrakenFuturesTickerSchema
 from snapper.infrastructure.exchanges.schemas.kraken_futures import KrakenFuturesTradeSchema
 from snapper.infrastructure.symbols.functions import kraken_futures_ws_to_native
+
+_UTC_SUFFIX = "+00:00"
 
 
 def parse_kraken_futures_ticker(data: dict[str, Any]) -> TickerUpdate:
@@ -95,7 +108,7 @@ def parse_kraken_futures_trade(data: dict[str, Any]) -> TradeUpdate:
     if isinstance(schema.time, int):
         ts = datetime.fromtimestamp(schema.time / 1000, tz=UTC)
     else:
-        ts = datetime.fromisoformat(str(schema.time).replace("Z", "+00:00"))
+        ts = datetime.fromisoformat(str(schema.time).replace("Z", _UTC_SUFFIX))
     product_id = data.get("product_id") or data.get("symbol") or ""
     if not product_id:
         raise ValueError("Trade missing both product_id and symbol")
@@ -201,3 +214,112 @@ def _tick_size_to_precision(tick_size: float) -> int:
     d = Decimal(str(tick_size)).normalize()
     exp = d.as_tuple().exponent
     return max(0, -int(exp))
+
+
+_SIDE_MAP: dict[str, OrderSideEnum] = {"buy": OrderSideEnum.BUY, "sell": OrderSideEnum.SELL}
+_STATUS_MAP: dict[str, OrderStatusEnum] = {
+    "placed": OrderStatusEnum.OPEN,
+    "partiallyFilled": OrderStatusEnum.OPEN,
+    "filled": OrderStatusEnum.CLOSED,
+    "cancelled": OrderStatusEnum.CANCELED,
+    "canceled": OrderStatusEnum.CANCELED,
+    "untouched": OrderStatusEnum.OPEN,
+}
+_ORDER_TYPE_MAP: dict[str, OrderTypeEnum] = {
+    "lmt": OrderTypeEnum.LIMIT,
+    "post": OrderTypeEnum.LIMIT,
+    "ioc": OrderTypeEnum.LIMIT,
+    "mkt": OrderTypeEnum.MARKET,
+    "stp": OrderTypeEnum.STOP_LOSS,
+    "take_profit": OrderTypeEnum.TAKE_PROFIT,
+    "trailing_stop": OrderTypeEnum.TRAILING_STOP,
+}
+
+
+_DIRECTION_MAP: dict[int, OrderSideEnum] = {0: OrderSideEnum.BUY, 1: OrderSideEnum.SELL}
+_WS_ORDER_TYPE_MAP: dict[str, OrderTypeEnum] = {
+    "limit": OrderTypeEnum.LIMIT,
+    "stop": OrderTypeEnum.STOP_LOSS,
+    "take_profit": OrderTypeEnum.TAKE_PROFIT,
+}
+
+
+def parse_kraken_futures_fill(
+    data: dict[str, Any],
+    symbol_mapper: Callable[[str], str],
+) -> ExecutionUpdate:
+    """Parse a Kraken Futures WS fill event to ExecutionUpdate.
+
+    The WS payload uses ``instrument`` (not ``symbol``), ``buy: bool``
+    (not ``side``), ``qty`` (not ``size``), and ``time: int`` (ms epoch).
+
+    Args:
+        data: Raw fill data dictionary from the ``fills``/``fills_snapshot`` WS channel.
+        symbol_mapper: Function to convert Kraken instrument to native format.
+
+    Returns:
+        ExecutionUpdate with fill details.
+    """
+    schema = KrakenFuturesFillSchema.model_validate(data)
+    native_symbol = symbol_mapper(schema.instrument)
+    ts = datetime.fromtimestamp(schema.time / 1000, tz=UTC)
+    side = OrderSideEnum.BUY if schema.buy else OrderSideEnum.SELL
+    order_type = _ORDER_TYPE_MAP.get(schema.order_type or "", OrderTypeEnum.LIMIT)
+    fee_currency = schema.fee_currency or "USD"
+    fee_usd: float | None = schema.fee_paid if fee_currency == "USD" else None
+    fees: list[ExecutionFeeBreakdown] | None = None
+    if schema.fee_paid and fee_currency != "USD":
+        fees = [ExecutionFeeBreakdown(asset=fee_currency, quantity=schema.fee_paid)]
+    return ExecutionUpdate(
+        order_id=schema.order_id,
+        exec_type="trade",
+        symbol=native_symbol,
+        side=side,
+        order_type=order_type,
+        order_status=OrderStatusEnum.OPEN,
+        timestamp=ts,
+        last_qty=schema.qty,
+        last_price=schema.price,
+        exec_id=schema.fill_id,
+        cl_ord_id=schema.cli_ord_id,
+        fee_usd_equiv=fee_usd,
+        fees=fees,
+    )
+
+
+def parse_kraken_futures_order_status(
+    data: dict[str, Any],
+    symbol_mapper: Callable[[str], str],
+) -> ExecutionUpdate:
+    """Parse a Kraken Futures WS open_orders event to ExecutionUpdate.
+
+    The WS payload uses ``instrument`` (not ``symbol``), ``direction: int``
+    (0=buy, 1=sell), ``type`` (not ``orderType``), and ``time: int`` (ms epoch).
+
+    Args:
+        data: Raw order data from ``open_orders``/``open_orders_snapshot`` WS channel.
+        symbol_mapper: Function to convert Kraken instrument to native format.
+
+    Returns:
+        ExecutionUpdate with order status details.
+    """
+    schema = KrakenFuturesOpenOrderSchema.model_validate(data)
+    native_symbol = symbol_mapper(schema.instrument)
+    ts_ms = schema.last_update_time if schema.last_update_time is not None else schema.time
+    ts = datetime.fromtimestamp(ts_ms / 1000, tz=UTC)
+    is_fully_filled = schema.filled >= schema.qty and schema.qty > 0
+    status = OrderStatusEnum.CLOSED if is_fully_filled else OrderStatusEnum.OPEN
+    exec_type: ExecType = "status"
+    return ExecutionUpdate(
+        order_id=schema.order_id,
+        exec_type=exec_type,
+        symbol=native_symbol,
+        side=_DIRECTION_MAP.get(schema.direction, OrderSideEnum.BUY),
+        order_type=_WS_ORDER_TYPE_MAP.get(schema.type, OrderTypeEnum.LIMIT),
+        order_status=status,
+        timestamp=ts,
+        cum_qty=schema.filled,
+        order_qty=schema.qty,
+        limit_price=schema.limit_price if schema.limit_price else None,
+        cl_ord_id=schema.cli_ord_id,
+    )

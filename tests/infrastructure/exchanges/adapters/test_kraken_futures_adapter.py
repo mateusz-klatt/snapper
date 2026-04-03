@@ -6,9 +6,13 @@ from unittest.mock import patch
 import pytest
 
 from snapper.infrastructure.exchanges.adapters.kraken_futures import _tick_size_to_precision
+from snapper.infrastructure.exchanges.adapters.kraken_futures import parse_kraken_futures_fill
 from snapper.infrastructure.exchanges.adapters.kraken_futures import parse_kraken_futures_instrument
 from snapper.infrastructure.exchanges.adapters.kraken_futures import (
     parse_kraken_futures_instrument_list,
+)
+from snapper.infrastructure.exchanges.adapters.kraken_futures import (
+    parse_kraken_futures_order_status,
 )
 from snapper.infrastructure.exchanges.adapters.kraken_futures import parse_kraken_futures_ticker
 from snapper.infrastructure.exchanges.adapters.kraken_futures import (
@@ -16,6 +20,10 @@ from snapper.infrastructure.exchanges.adapters.kraken_futures import (
 )
 from snapper.infrastructure.exchanges.adapters.kraken_futures import parse_kraken_futures_trade
 from snapper.infrastructure.exchanges.adapters.kraken_futures import parse_kraken_futures_trade_list
+from snapper.infrastructure.exchanges.contracts import ExecutionFeeBreakdown
+from snapper.infrastructure.exchanges.contracts import OrderSideEnum
+from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 
 
 @pytest.fixture(autouse=True)
@@ -385,3 +393,291 @@ class TestTickSizeToPrecision:
         Then: Returns 1 (not 0).
         """
         assert _tick_size_to_precision(2.5) == 1
+
+
+class TestParseKrakenFuturesFill:
+    """Tests for parse_kraken_futures_fill."""
+
+    def test_parse_fill_to_execution_update(self) -> None:
+        """Parse a fill event into an ExecutionUpdate.
+
+        Given: Fill dict from the fills WS channel with buy=True,
+        When: parse_kraken_futures_fill is called with a symbol mapper,
+        Then: Returns ExecutionUpdate with correct fields mapped.
+        """
+        data = {
+            "fill_id": "fill-001",
+            "order_id": "order-001",
+            "instrument": "PF_XBTUSD",
+            "buy": True,
+            "qty": 5.0,
+            "price": 66500.0,
+            "time": 1743676200000,
+            "fill_type": "taker",
+            "order_type": "lmt",
+            "fee_paid": 1.25,
+            "cli_ord_id": "my-order-1",
+        }
+        mapper = {"PF_XBTUSD": "BTC-USD-PERP"}
+        result = parse_kraken_futures_fill(data, lambda s: mapper[s])
+        assert result.order_id == "order-001"
+        assert result.exec_type == "trade"
+        assert result.symbol == "BTC-USD-PERP"
+        assert result.side == OrderSideEnum.BUY
+        assert result.order_type == OrderTypeEnum.LIMIT
+        assert result.last_qty == pytest.approx(5.0)
+        assert result.last_price == pytest.approx(66500.0)
+        assert result.exec_id == "fill-001"
+        assert result.cl_ord_id == "my-order-1"
+        assert result.fee_usd_equiv == pytest.approx(1.25)
+        assert result.timestamp.year == 2025
+
+    def test_parse_sell_fill(self) -> None:
+        """Parse a sell-side fill.
+
+        Given: Fill dict with buy=False,
+        When: parse_kraken_futures_fill is called,
+        Then: Returns ExecutionUpdate with SELL side.
+        """
+        data = {
+            "fill_id": "fill-002",
+            "order_id": "order-002",
+            "instrument": "PF_ETHUSD",
+            "buy": False,
+            "qty": 10.0,
+            "price": 3500.0,
+            "time": 1743678000000,
+        }
+        mapper = {"PF_ETHUSD": "ETH-USD-PERP"}
+        result = parse_kraken_futures_fill(data, lambda s: mapper[s])
+        assert result.side == OrderSideEnum.SELL
+        assert result.symbol == "ETH-USD-PERP"
+
+    def test_usd_fee_maps_to_fee_usd_equiv(self) -> None:
+        """Map USD fee to fee_usd_equiv.
+
+        Given: Fill with fee_currency=USD,
+        When: parse_kraken_futures_fill is called,
+        Then: fee_usd_equiv is populated and fees is None.
+        """
+        data = {
+            "fill_id": "fill-usd",
+            "order_id": "order-usd",
+            "instrument": "PF_XBTUSD",
+            "buy": True,
+            "qty": 1.0,
+            "price": 66000.0,
+            "time": 1743676200000,
+            "fee_paid": 2.50,
+            "fee_currency": "USD",
+        }
+        mapper = {"PF_XBTUSD": "BTC-USD-PERP"}
+        result = parse_kraken_futures_fill(data, lambda s: mapper[s])
+        assert result.fee_usd_equiv == pytest.approx(2.50)
+        assert result.fees is None
+
+    def test_non_usd_fee_maps_to_fees_breakdown(self) -> None:
+        """Map non-USD fee to fees breakdown list.
+
+        Given: Fill with fee_currency=ETH (not USD),
+        When: parse_kraken_futures_fill is called,
+        Then: fee_usd_equiv is None and fees contains breakdown.
+        """
+        data = {
+            "fill_id": "fill-eth",
+            "order_id": "order-eth",
+            "instrument": "PF_ETHUSD",
+            "buy": True,
+            "qty": 5.0,
+            "price": 3500.0,
+            "time": 1743676200000,
+            "fee_paid": 0.001,
+            "fee_currency": "ETH",
+        }
+        mapper = {"PF_ETHUSD": "ETH-USD-PERP"}
+        result = parse_kraken_futures_fill(data, lambda s: mapper[s])
+        assert result.fee_usd_equiv is None
+        assert result.fees is not None
+        assert len(result.fees) == 1
+        assert result.fees[0] == ExecutionFeeBreakdown(asset="ETH", quantity=0.001)
+
+    def test_no_fee_currency_defaults_to_usd(self) -> None:
+        """Default to USD when fee_currency is absent.
+
+        Given: Fill with fee_paid but no fee_currency,
+        When: parse_kraken_futures_fill is called,
+        Then: fee_usd_equiv is populated (assumes USD).
+        """
+        data = {
+            "fill_id": "fill-noc",
+            "order_id": "order-noc",
+            "instrument": "PF_XBTUSD",
+            "buy": True,
+            "qty": 1.0,
+            "price": 66000.0,
+            "time": 1743676200000,
+            "fee_paid": 1.0,
+        }
+        mapper = {"PF_XBTUSD": "BTC-USD-PERP"}
+        result = parse_kraken_futures_fill(data, lambda s: mapper[s])
+        assert result.fee_usd_equiv == pytest.approx(1.0)
+        assert result.fees is None
+
+
+class TestParseKrakenFuturesOrderStatus:
+    """Tests for parse_kraken_futures_order_status."""
+
+    def test_parse_partially_filled_order(self) -> None:
+        """Parse a partially filled order status update.
+
+        Given: Order dict with filled < qty (partially filled),
+        When: parse_kraken_futures_order_status is called,
+        Then: Returns ExecutionUpdate with OPEN status and cum_qty.
+        """
+        data = {
+            "order_id": "order-001",
+            "instrument": "PF_XBTUSD",
+            "direction": 0,
+            "type": "limit",
+            "qty": 10.0,
+            "filled": 3.0,
+            "limit_price": 66000.0,
+            "time": 1743676200000,
+            "cli_ord_id": "my-order-1",
+        }
+        mapper = {"PF_XBTUSD": "BTC-USD-PERP"}
+        result = parse_kraken_futures_order_status(data, lambda s: mapper[s])
+        assert result.order_id == "order-001"
+        assert result.exec_type == "status"
+        assert result.symbol == "BTC-USD-PERP"
+        assert result.side == OrderSideEnum.BUY
+        assert result.order_type == OrderTypeEnum.LIMIT
+        assert result.order_status == OrderStatusEnum.OPEN
+        assert result.cum_qty == pytest.approx(3.0)
+        assert result.order_qty == pytest.approx(10.0)
+        assert result.limit_price == pytest.approx(66000.0)
+        assert result.cl_ord_id == "my-order-1"
+
+    def test_parse_fully_filled_order(self) -> None:
+        """Parse a fully filled order status update.
+
+        Given: Order dict with filled >= qty,
+        When: parse_kraken_futures_order_status is called,
+        Then: Returns ExecutionUpdate with CLOSED status.
+        """
+        data = {
+            "order_id": "order-002",
+            "instrument": "PF_ETHUSD",
+            "direction": 1,
+            "type": "limit",
+            "qty": 5.0,
+            "filled": 5.0,
+            "time": 1743678000000,
+        }
+        mapper = {"PF_ETHUSD": "ETH-USD-PERP"}
+        result = parse_kraken_futures_order_status(data, lambda s: mapper[s])
+        assert result.order_status == OrderStatusEnum.CLOSED
+        assert result.exec_type == "status"
+        assert result.side == OrderSideEnum.SELL
+
+    def test_parse_stop_order_type(self) -> None:
+        """Parse an order with stop type.
+
+        Given: Order dict with type=stop,
+        When: parse_kraken_futures_order_status is called,
+        Then: Returns ExecutionUpdate with STOP_LOSS order type.
+        """
+        data = {
+            "order_id": "order-003",
+            "instrument": "PF_XBTUSD",
+            "direction": 0,
+            "type": "stop",
+            "qty": 1.0,
+            "time": 1743676200000,
+        }
+        mapper = {"PF_XBTUSD": "BTC-USD-PERP"}
+        result = parse_kraken_futures_order_status(data, lambda s: mapper[s])
+        assert result.order_type == OrderTypeEnum.STOP_LOSS
+        assert result.order_status == OrderStatusEnum.OPEN
+
+    def test_parse_take_profit_order_type(self) -> None:
+        """Parse an order with take_profit type.
+
+        Given: Order dict with type=take_profit,
+        When: parse_kraken_futures_order_status is called,
+        Then: Returns ExecutionUpdate with TAKE_PROFIT order type.
+        """
+        data = {
+            "order_id": "order-004",
+            "instrument": "PF_XBTUSD",
+            "direction": 1,
+            "type": "take_profit",
+            "qty": 2.0,
+            "time": 1743676200000,
+        }
+        mapper = {"PF_XBTUSD": "BTC-USD-PERP"}
+        result = parse_kraken_futures_order_status(data, lambda s: mapper[s])
+        assert result.order_type == OrderTypeEnum.TAKE_PROFIT
+        assert result.side == OrderSideEnum.SELL
+
+    def test_zero_limit_price_becomes_none(self) -> None:
+        """Parse order with zero limit_price maps to None.
+
+        Given: Order dict with limit_price=0.0,
+        When: parse_kraken_futures_order_status is called,
+        Then: Returns ExecutionUpdate with limit_price=None.
+        """
+        data = {
+            "order_id": "order-005",
+            "instrument": "PF_XBTUSD",
+            "direction": 0,
+            "type": "limit",
+            "qty": 1.0,
+            "limit_price": 0.0,
+            "time": 1743676200000,
+        }
+        mapper = {"PF_XBTUSD": "BTC-USD-PERP"}
+        result = parse_kraken_futures_order_status(data, lambda s: mapper[s])
+        assert result.limit_price is None
+
+    def test_last_update_time_preferred_over_time(self) -> None:
+        """Prefer last_update_time over creation time for timestamp.
+
+        Given: Order dict with both time and last_update_time,
+        When: parse_kraken_futures_order_status is called,
+        Then: Timestamp uses last_update_time (the more recent value).
+        """
+        data = {
+            "order_id": "order-ts",
+            "instrument": "PF_XBTUSD",
+            "direction": 0,
+            "type": "limit",
+            "qty": 1.0,
+            "time": 1743676200000,
+            "last_update_time": 1743680000000,
+        }
+        mapper = {"PF_XBTUSD": "BTC-USD-PERP"}
+        result = parse_kraken_futures_order_status(data, lambda s: mapper[s])
+        assert result.timestamp.year == 2025
+        expected_ts = 1743680000000 / 1000
+        assert result.timestamp.timestamp() == pytest.approx(expected_ts)
+
+    def test_fallback_to_time_when_no_last_update_time(self) -> None:
+        """Fall back to creation time when last_update_time is absent.
+
+        Given: Order dict with only time (no last_update_time),
+        When: parse_kraken_futures_order_status is called,
+        Then: Timestamp uses time field.
+        """
+        data = {
+            "order_id": "order-ft",
+            "instrument": "PF_XBTUSD",
+            "direction": 0,
+            "type": "limit",
+            "qty": 1.0,
+            "time": 1743676200000,
+        }
+        mapper = {"PF_XBTUSD": "BTC-USD-PERP"}
+        result = parse_kraken_futures_order_status(data, lambda s: mapper[s])
+        expected_ts = 1743676200000 / 1000
+        assert result.timestamp.timestamp() == pytest.approx(expected_ts)

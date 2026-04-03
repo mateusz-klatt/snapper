@@ -3,8 +3,10 @@
 import pytest
 from pydantic import ValidationError
 
+from snapper.infrastructure.exchanges.schemas.kraken_futures import KrakenFuturesFillSchema
 from snapper.infrastructure.exchanges.schemas.kraken_futures import KrakenFuturesInstrumentSchema
 from snapper.infrastructure.exchanges.schemas.kraken_futures import KrakenFuturesMarginLevelSchema
+from snapper.infrastructure.exchanges.schemas.kraken_futures import KrakenFuturesOpenOrderSchema
 from snapper.infrastructure.exchanges.schemas.kraken_futures import KrakenFuturesTickerEventSchema
 from snapper.infrastructure.exchanges.schemas.kraken_futures import KrakenFuturesTickerSchema
 from snapper.infrastructure.exchanges.schemas.kraken_futures import KrakenFuturesTradeEventSchema
@@ -362,3 +364,174 @@ class TestKrakenFuturesTickerEventSchema:
         assert schema.bid is None
         assert schema.ask is None
         assert schema.volume is None
+
+
+class TestKrakenFuturesFillSchema:
+    """Tests for private fill event schema."""
+
+    def test_parse_full_fill(self) -> None:
+        """Parse a complete fill event from the fills WS channel.
+
+        Given: Full fill dict with all fields from WS payload,
+        When: Parsed via KrakenFuturesFillSchema,
+        Then: All fields correctly extracted.
+        """
+        raw = {
+            "fill_id": "fill-001",
+            "order_id": "order-001",
+            "instrument": "PF_XBTUSD",
+            "buy": True,
+            "qty": 5.0,
+            "price": 66500.0,
+            "time": 1743676200000,
+            "seq": 42,
+            "remaining_order_qty": 5.0,
+            "fill_type": "taker",
+            "taker_order_type": "lmt",
+            "order_type": "lmt",
+            "fee_paid": 1.25,
+            "fee_currency": "USD",
+            "cli_ord_id": "my-order-1",
+        }
+        schema = KrakenFuturesFillSchema.model_validate(raw)
+        assert schema.fill_id == "fill-001"
+        assert schema.order_id == "order-001"
+        assert schema.instrument == "PF_XBTUSD"
+        assert schema.buy is True
+        assert schema.qty == pytest.approx(5.0)
+        assert schema.price == pytest.approx(66500.0)
+        assert schema.time == 1743676200000
+        assert schema.seq == 42
+        assert schema.remaining_order_qty == pytest.approx(5.0)
+        assert schema.fill_type == "taker"
+        assert schema.taker_order_type == "lmt"
+        assert schema.order_type == "lmt"
+        assert schema.fee_paid == pytest.approx(1.25)
+        assert schema.fee_currency == "USD"
+        assert schema.cli_ord_id == "my-order-1"
+
+    def test_parse_minimal_fill(self) -> None:
+        """Parse fill with only required fields.
+
+        Given: Fill dict with only required fields,
+        When: Parsed via KrakenFuturesFillSchema,
+        Then: Optional fields default to None.
+        """
+        raw = {
+            "fill_id": "fill-002",
+            "order_id": "order-002",
+            "instrument": "PF_ETHUSD",
+            "buy": False,
+            "qty": 10.0,
+            "price": 3500.0,
+            "time": 1743678000000,
+        }
+        schema = KrakenFuturesFillSchema.model_validate(raw)
+        assert schema.buy is False
+        assert schema.seq is None
+        assert schema.remaining_order_qty is None
+        assert schema.fill_type is None
+        assert schema.fee_paid is None
+        assert schema.fee_currency is None
+        assert schema.taker_order_type is None
+        assert schema.order_type is None
+        assert schema.cli_ord_id is None
+
+    def test_missing_required_instrument_rejected(self) -> None:
+        """Reject fill with missing required instrument field.
+
+        Given: Fill dict without instrument key,
+        When: Parsed via KrakenFuturesFillSchema,
+        Then: Raises ValidationError.
+        """
+        raw = {
+            "fill_id": "fill-003",
+            "order_id": "order-003",
+            "buy": True,
+            "qty": 5.0,
+            "price": 66500.0,
+            "time": 1743676200000,
+        }
+        with pytest.raises(ValidationError):
+            KrakenFuturesFillSchema.model_validate(raw)
+
+
+class TestKrakenFuturesOpenOrderSchema:
+    """Tests for private open order event schema."""
+
+    def test_parse_full_order(self) -> None:
+        """Parse a complete order update from open_orders WS channel.
+
+        Given: Full order dict with WS payload fields,
+        When: Parsed via KrakenFuturesOpenOrderSchema,
+        Then: All fields correctly mapped.
+        """
+        raw = {
+            "order_id": "order-001",
+            "instrument": "PF_XBTUSD",
+            "direction": 0,
+            "type": "limit",
+            "qty": 10.0,
+            "filled": 3.0,
+            "limit_price": 66000.0,
+            "stop_price": 0.0,
+            "time": 1743676200000,
+            "last_update_time": 1743676500000,
+            "reduce_only": False,
+            "cli_ord_id": "my-order-1",
+        }
+        schema = KrakenFuturesOpenOrderSchema.model_validate(raw)
+        assert schema.order_id == "order-001"
+        assert schema.instrument == "PF_XBTUSD"
+        assert schema.direction == 0
+        assert schema.type == "limit"
+        assert schema.qty == pytest.approx(10.0)
+        assert schema.filled == pytest.approx(3.0)
+        assert schema.limit_price == pytest.approx(66000.0)
+        assert schema.stop_price == pytest.approx(0.0)
+        assert schema.time == 1743676200000
+        assert schema.last_update_time == 1743676500000
+        assert schema.reduce_only is False
+        assert schema.cli_ord_id == "my-order-1"
+
+    def test_parse_minimal_order(self) -> None:
+        """Parse order with only required fields.
+
+        Given: Order dict with minimal fields,
+        When: Parsed via KrakenFuturesOpenOrderSchema,
+        Then: Optional fields default to their defaults.
+        """
+        raw = {
+            "order_id": "order-002",
+            "instrument": "PF_ETHUSD",
+            "qty": 5.0,
+            "time": 1743678000000,
+        }
+        schema = KrakenFuturesOpenOrderSchema.model_validate(raw)
+        assert schema.filled == pytest.approx(0.0)
+        assert schema.limit_price == pytest.approx(0.0)
+        assert schema.stop_price == pytest.approx(0.0)
+        assert schema.type == "limit"
+        assert schema.direction == 0
+        assert schema.reduce_only is False
+        assert schema.last_update_time is None
+        assert schema.cli_ord_id is None
+
+    def test_sell_direction(self) -> None:
+        """Parse order with sell direction.
+
+        Given: Order dict with direction=1 (sell),
+        When: Parsed via KrakenFuturesOpenOrderSchema,
+        Then: Direction field is 1.
+        """
+        raw = {
+            "order_id": "order-003",
+            "instrument": "PF_XBTUSD",
+            "direction": 1,
+            "type": "stop",
+            "qty": 10.0,
+            "time": 1743676200000,
+        }
+        schema = KrakenFuturesOpenOrderSchema.model_validate(raw)
+        assert schema.direction == 1
+        assert schema.type == "stop"

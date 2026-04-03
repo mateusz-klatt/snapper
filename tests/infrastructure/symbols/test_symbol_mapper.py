@@ -1887,7 +1887,7 @@ class TestGetAvailableExchanges:
         Then: Returns sorted list excluding data-only exchanges.
         """
         result = get_available_exchanges()
-        assert sorted(result) == ["kraken", "paper", "walutomat", "zonda"]
+        assert sorted(result) == ["kraken", "kraken_futures", "paper", "walutomat", "zonda"]
         assert "polygon" not in result
 
     def test_get_market_subscribe_exchanges_returns_live_feeds(self) -> None:

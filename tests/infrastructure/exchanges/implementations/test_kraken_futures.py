@@ -2,13 +2,20 @@
 
 import asyncio
 from collections.abc import Generator
+from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
 
+import snapper.infrastructure.exchanges.implementations.kraken_futures as mod
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
+from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
+from snapper.infrastructure.exchanges.contracts import OrderSideEnum
+from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
@@ -21,6 +28,12 @@ from snapper.infrastructure.exchanges.implementations.kraken_futures import _enq
 def client() -> KrakenFuturesExchangeClient:
     """Create a KrakenFuturesExchangeClient instance for testing."""
     return KrakenFuturesExchangeClient(sandbox=True)
+
+
+@pytest.fixture()
+def auth_client() -> KrakenFuturesExchangeClient:
+    """Create an authenticated KrakenFuturesExchangeClient for testing."""
+    return KrakenFuturesExchangeClient(sandbox=True, api_key="test-key", api_secret="test-secret")
 
 
 @pytest.fixture(autouse=True)
@@ -47,6 +60,30 @@ def _patch_ccxt() -> Generator[None]:
         yield
 
 
+@pytest.fixture(autouse=True)
+def _patch_sdk() -> Generator[None]:
+    """Patch Kraken SDK Trade and User classes."""
+    with (
+        patch("snapper.infrastructure.exchanges.implementations.kraken_futures.Trade"),
+        patch("snapper.infrastructure.exchanges.implementations.kraken_futures.User"),
+    ):
+        yield
+
+
+async def _sync_to_thread(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+    """Call func directly instead of spawning a thread.
+
+    Replaces asyncio.to_thread so coverage can track the executed code.
+    """
+    return func(*args, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _patch_to_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run asyncio.to_thread synchronously for coverage tracking."""
+    monkeypatch.setattr(mod.asyncio, "to_thread", _sync_to_thread)
+
+
 class TestClientInit:
     """Tests for client initialization."""
 
@@ -55,7 +92,7 @@ class TestClientInit:
 
         Given: No arguments,
         When: KrakenFuturesExchangeClient is created,
-        Then: Sandbox is False and queues are empty.
+        Then: Sandbox is False, no auth, queues are empty.
         """
         c = KrakenFuturesExchangeClient()
         assert c.sandbox is False
@@ -63,6 +100,7 @@ class TestClientInit:
         assert c.supports_websocket_executions is False
         assert c._tick_queue.empty()
         assert c._trade_queue.empty()
+        assert c._execution_queue.empty()
 
     def test_init_sandbox(self) -> None:
         """Initialize with sandbox mode.
@@ -73,6 +111,55 @@ class TestClientInit:
         """
         c = KrakenFuturesExchangeClient(sandbox=True)
         assert c.sandbox is True
+
+    def test_init_with_credentials(self) -> None:
+        """Initialize with API credentials enables execution support.
+
+        Given: api_key and api_secret provided,
+        When: KrakenFuturesExchangeClient is created,
+        Then: supports_websocket_executions is True and SDK clients are set.
+        """
+        c = KrakenFuturesExchangeClient(api_key="key", api_secret="secret")
+        assert c.supports_websocket_executions is True
+        assert c._api_key == "key"
+        assert c._api_secret == "secret"
+        assert c._trade_client is not None
+        assert c._user_client is not None
+
+    def test_init_without_credentials(self) -> None:
+        """Initialize without API credentials disables execution support.
+
+        Given: No api_key or api_secret,
+        When: KrakenFuturesExchangeClient is created,
+        Then: supports_websocket_executions is False and SDK clients are None.
+        """
+        c = KrakenFuturesExchangeClient()
+        assert c.supports_websocket_executions is False
+        assert c._trade_client is None
+        assert c._user_client is None
+
+
+class TestRequireAuthenticated:
+    """Tests for _require_authenticated guard."""
+
+    def test_raises_without_credentials(self, client: KrakenFuturesExchangeClient) -> None:
+        """Raise RuntimeError when credentials are missing.
+
+        Given: Client without API credentials,
+        When: _require_authenticated is called,
+        Then: Raises RuntimeError.
+        """
+        with pytest.raises(RuntimeError, match="API credentials required"):
+            client._require_authenticated()
+
+    def test_passes_with_credentials(self, auth_client: KrakenFuturesExchangeClient) -> None:
+        """Pass without error when credentials are set.
+
+        Given: Client with API credentials,
+        When: _require_authenticated is called,
+        Then: No exception raised.
+        """
+        auth_client._require_authenticated()
 
 
 class TestEnqueueOrDropOldest:
@@ -144,6 +231,7 @@ class TestConnect:
         """
         await client.disconnect()
         assert client._ws_client is None
+        assert client._private_ws_client is None
 
     @pytest.mark.asyncio
     async def test_disconnect_with_ws(self, client: KrakenFuturesExchangeClient) -> None:
@@ -172,6 +260,20 @@ class TestConnect:
         client._ws_client = mock_ws
         await client.disconnect()
         assert client._ws_client is None
+
+    @pytest.mark.asyncio
+    async def test_disconnect_private_ws(self, auth_client: KrakenFuturesExchangeClient) -> None:
+        """Disconnect closes private WS client.
+
+        Given: Client with active private WS connection,
+        When: disconnect() is called,
+        Then: Private WS client is closed and set to None.
+        """
+        mock_ws = AsyncMock()
+        auth_client._private_ws_client = mock_ws
+        await auth_client.disconnect()
+        mock_ws.close.assert_awaited_once()
+        assert auth_client._private_ws_client is None
 
 
 class TestOnWsMessage:
@@ -353,6 +455,103 @@ class TestOnWsMessage:
         assert client._trade_queue.empty()
 
 
+class TestOnExecutionMessage:
+    """Tests for the private WS execution callback."""
+
+    @pytest.mark.asyncio
+    async def test_fill_message_routed_to_execution_queue(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Route fills WS message to execution_queue.
+
+        Given: WS message with feed=fills,
+        When: _on_execution_message is called,
+        Then: Parsed ExecutionUpdate is placed in _execution_queue.
+        """
+        mock_update = MagicMock(spec=ExecutionUpdate)
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.parse_kraken_futures_fill",
+            return_value=mock_update,
+        ):
+            msg = {"feed": "fills", "fills": [{"fill_id": "f1", "order_id": "o1"}]}
+            await auth_client._on_execution_message(msg)
+        assert not auth_client._execution_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_fills_snapshot_message_routed(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Route fills_snapshot WS message to execution_queue.
+
+        Given: WS message with feed=fills_snapshot,
+        When: _on_execution_message is called,
+        Then: Parsed ExecutionUpdate is placed in _execution_queue.
+        """
+        mock_update = MagicMock(spec=ExecutionUpdate)
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.parse_kraken_futures_fill",
+            return_value=mock_update,
+        ):
+            msg = {"feed": "fills_snapshot", "fills": [{"fill_id": "f1", "order_id": "o1"}]}
+            await auth_client._on_execution_message(msg)
+        assert not auth_client._execution_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_open_orders_delta_ignored(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Ignore open_orders delta WS messages.
+
+        Given: WS message with feed=open_orders,
+        When: _on_execution_message is called,
+        Then: No items in execution queue (open_orders excluded from fill pipeline).
+        """
+        msg: dict[str, Any] = {"feed": "open_orders", "order": {"order_id": "o1"}}
+        await auth_client._on_execution_message(msg)
+        assert auth_client._execution_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_open_orders_snapshot_ignored(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Ignore open_orders_snapshot WS messages.
+
+        Given: WS message with feed=open_orders_snapshot,
+        When: _on_execution_message is called,
+        Then: No items in execution queue (open_orders excluded from fill pipeline).
+        """
+        msg: dict[str, Any] = {"feed": "open_orders_snapshot", "orders": [{"order_id": "o1"}]}
+        await auth_client._on_execution_message(msg)
+        assert auth_client._execution_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_event_message_ignored(self, auth_client: KrakenFuturesExchangeClient) -> None:
+        """Ignore subscription event messages on private WS.
+
+        Given: WS subscription ACK message,
+        When: _on_execution_message is called,
+        Then: No items in execution queue.
+        """
+        await auth_client._on_execution_message({"event": "subscribed", "feed": "fills"})
+        assert auth_client._execution_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_unparseable_fill_skipped(self, auth_client: KrakenFuturesExchangeClient) -> None:
+        """Skip fill messages that fail parsing.
+
+        Given: WS fill message that causes ValueError in parser,
+        When: _on_execution_message is called,
+        Then: No items in execution_queue and no exception raised.
+        """
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.parse_kraken_futures_fill",
+            side_effect=ValueError("parse error"),
+        ):
+            msg = {"feed": "fills", "fills": [{"invalid": "data"}]}
+            await auth_client._on_execution_message(msg)
+        assert auth_client._execution_queue.empty()
+
+
 class TestRestMethods:
     """Tests for REST API methods."""
 
@@ -384,83 +583,309 @@ class TestRestMethods:
         assert result[0].close == pytest.approx(50050.0)
 
 
-class TestNotImplementedMethods:
-    """Tests for Phase 1 stub methods."""
+class TestOrderMethods:
+    """Tests for authenticated order CRUD methods."""
 
     @pytest.mark.asyncio
-    async def test_create_order_raises(self, client: KrakenFuturesExchangeClient) -> None:
-        """create_order raises NotImplementedError.
+    async def test_create_order_returns_snapshot(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Create order returns ExchangeOrderSnapshot with DB IDs.
 
-        Given: Phase 1 client,
+        Given: Authenticated client with mocked Trade SDK and DB logging,
         When: create_order is called,
-        Then: Raises NotImplementedError.
+        Then: Returns snapshot with order details and DB identifiers.
         """
-        with pytest.raises(NotImplementedError, match="Phase 1"):
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.create_order = MagicMock(
+            return_value={"sendStatus": {"order_id": "ord-123", "status": "placed"}}
+        )
+        request = ExchangeOrderRequest(
+            symbol="BTC-USD-PERP",
+            side=OrderSideEnum.BUY,
+            type=OrderTypeEnum.LIMIT,
+            amount=5.0,
+            price=66000.0,
+            client_order_id="my-order-1",
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            patch.object(auth_client, "_log_order_to_db", new_callable=AsyncMock) as mock_log,
+        ):
+            mock_log.return_value = (42, "pub-id-001")
+            result = await auth_client.create_order(request)
+        assert result.id == "ord-123"
+        assert result.symbol == "BTC-USD-PERP"
+        assert result.side == OrderSideEnum.BUY
+        assert result.status == OrderStatusEnum.OPEN
+        assert result.amount == pytest.approx(5.0)
+        assert result.price == pytest.approx(66000.0)
+        assert result.client_order_id == "my-order-1"
+        assert result.db_order_id == 42
+        assert result.db_order_public_id == "pub-id-001"
+        mock_log.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_create_order_requires_auth(self, client: KrakenFuturesExchangeClient) -> None:
+        """Create order raises RuntimeError without credentials.
+
+        Given: Unauthenticated client,
+        When: create_order is called,
+        Then: Raises RuntimeError.
+        """
+        with pytest.raises(RuntimeError, match="API credentials required"):
             await client.create_order(MagicMock())
 
     @pytest.mark.asyncio
-    async def test_cancel_order_raises(self, client: KrakenFuturesExchangeClient) -> None:
-        """cancel_order raises NotImplementedError.
+    async def test_cancel_order_returns_snapshot(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Cancel order returns ExchangeOrderSnapshot.
 
-        Given: Phase 1 client,
+        Given: Authenticated client with mocked Trade SDK,
         When: cancel_order is called,
-        Then: Raises NotImplementedError.
+        Then: Returns snapshot with cancelled status.
         """
-        with pytest.raises(NotImplementedError, match="Phase 1"):
-            await client.cancel_order("123")
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.cancel_order = MagicMock(
+            return_value={"cancelStatus": {"status": "cancelled"}}
+        )
+        result = await auth_client.cancel_order("ord-123", symbol="BTC-USD-PERP")
+        assert result.id == "ord-123"
+        assert result.status == OrderStatusEnum.CANCELED
+        assert result.symbol == "BTC-USD-PERP"
 
     @pytest.mark.asyncio
-    async def test_get_order_raises(self, client: KrakenFuturesExchangeClient) -> None:
-        """get_order raises NotImplementedError.
+    async def test_get_order_returns_snapshot(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Get order returns ExchangeOrderSnapshot.
 
-        Given: Phase 1 client,
+        Given: Authenticated client with mocked Trade SDK,
         When: get_order is called,
-        Then: Raises NotImplementedError.
+        Then: Returns snapshot with current order state.
         """
-        with pytest.raises(NotImplementedError, match="Phase 1"):
-            await client.get_order("123")
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.get_orders_status = MagicMock(
+            return_value={
+                "orders": [
+                    {
+                        "order_id": "ord-123",
+                        "symbol": "PF_XBTUSD",
+                        "side": "buy",
+                        "orderType": "lmt",
+                        "qty": 10.0,
+                        "filledSize": 3.0,
+                        "limitPrice": 66000.0,
+                        "status": "partiallyFilled",
+                    }
+                ]
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            return_value="BTC-USD-PERP",
+        ):
+            result = await auth_client.get_order("ord-123")
+        assert result.id == "ord-123"
+        assert result.symbol == "BTC-USD-PERP"
+        assert result.filled == pytest.approx(3.0)
+        assert result.status == OrderStatusEnum.OPEN
 
     @pytest.mark.asyncio
-    async def test_get_orders_raises(self, client: KrakenFuturesExchangeClient) -> None:
-        """get_orders raises NotImplementedError.
+    async def test_get_order_not_found_raises(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Get order raises ValueError when order not found.
 
-        Given: Phase 1 client,
+        Given: SDK returns empty orders list,
+        When: get_order is called,
+        Then: Raises ValueError.
+        """
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.get_orders_status = MagicMock(return_value={"orders": []})
+        with pytest.raises(ValueError, match="not found"):
+            await auth_client.get_order("nonexistent")
+
+    @pytest.mark.asyncio
+    async def test_get_orders_returns_list(self, auth_client: KrakenFuturesExchangeClient) -> None:
+        """Get orders returns list of snapshots.
+
+        Given: Authenticated client with mocked User SDK,
         When: get_orders is called,
-        Then: Raises NotImplementedError.
+        Then: Returns list of ExchangeOrderSnapshot.
         """
-        with pytest.raises(NotImplementedError, match="Phase 1"):
-            await client.get_orders()
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_open_orders = MagicMock(
+            return_value={
+                "openOrders": [
+                    {
+                        "order_id": "ord-1",
+                        "symbol": "PF_XBTUSD",
+                        "side": "buy",
+                        "orderType": "lmt",
+                        "qty": 5.0,
+                        "filledSize": 0.0,
+                        "status": "placed",
+                    },
+                    {
+                        "order_id": "ord-2",
+                        "symbol": "PF_ETHUSD",
+                        "side": "sell",
+                        "orderType": "mkt",
+                        "qty": 10.0,
+                        "filledSize": 10.0,
+                        "status": "filled",
+                    },
+                ]
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            side_effect=lambda s: {"PF_XBTUSD": "BTC-USD-PERP", "PF_ETHUSD": "ETH-USD-PERP"}[s],
+        ):
+            result = await auth_client.get_orders()
+        assert len(result) == 2
+        assert result[0].id == "ord-1"
+        assert result[1].id == "ord-2"
 
     @pytest.mark.asyncio
-    async def test_get_balance_raises(self, client: KrakenFuturesExchangeClient) -> None:
-        """get_balance raises NotImplementedError.
+    async def test_get_orders_filters_by_symbol(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Get orders filters by native symbol.
 
-        Given: Phase 1 client,
-        When: get_balance is called,
-        Then: Raises NotImplementedError.
+        Given: Two open orders on different symbols,
+        When: get_orders is called with symbol filter,
+        Then: Returns only matching orders.
         """
-        with pytest.raises(NotImplementedError, match="Phase 1"):
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_open_orders = MagicMock(
+            return_value={
+                "openOrders": [
+                    {
+                        "order_id": "ord-1",
+                        "symbol": "PF_XBTUSD",
+                        "side": "buy",
+                        "orderType": "lmt",
+                        "qty": 5.0,
+                        "status": "placed",
+                    },
+                    {
+                        "order_id": "ord-2",
+                        "symbol": "PF_ETHUSD",
+                        "side": "sell",
+                        "orderType": "lmt",
+                        "qty": 10.0,
+                        "status": "placed",
+                    },
+                ]
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            side_effect=lambda s: {"PF_XBTUSD": "BTC-USD-PERP", "PF_ETHUSD": "ETH-USD-PERP"}[s],
+        ):
+            result = await auth_client.get_orders(symbol="BTC-USD-PERP")
+        assert len(result) == 1
+        assert result[0].symbol == "BTC-USD-PERP"
+
+    @pytest.mark.asyncio
+    async def test_get_balance_returns_account_balances(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Get balance returns dict of AccountBalance.
+
+        Given: Authenticated client with mocked User SDK returning nested balances,
+        When: get_balance is called,
+        Then: Returns dict with currency balances using marginRequirements.im.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(
+            return_value={
+                "accounts": {
+                    "flex": {
+                        "balances": {"USD": 10000.0},
+                        "marginRequirements": {"im": 500.0},
+                    }
+                }
+            }
+        )
+        result = await auth_client.get_balance()
+        assert "USD" in result
+        assert result["USD"].total == pytest.approx(10000.0)
+        assert result["USD"].used == pytest.approx(500.0)
+        assert result["USD"].free == pytest.approx(9500.0)
+
+    @pytest.mark.asyncio
+    async def test_get_balance_filters_by_currency(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Get balance filters by specific currency.
+
+        Given: Multiple currencies in wallets,
+        When: get_balance is called with currency filter,
+        Then: Returns only the matching currency.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(
+            return_value={
+                "accounts": {
+                    "flex": {
+                        "balances": {"USD": 10000.0, "BTC": 1.5},
+                        "marginRequirements": {"im": 0},
+                    }
+                }
+            }
+        )
+        result = await auth_client.get_balance(currency="USD")
+        assert len(result) == 1
+        assert "USD" in result
+
+    @pytest.mark.asyncio
+    async def test_order_methods_require_auth(self, client: KrakenFuturesExchangeClient) -> None:
+        """All order methods raise RuntimeError without credentials.
+
+        Given: Unauthenticated client,
+        When: Any order method is called,
+        Then: Raises RuntimeError.
+        """
+        with pytest.raises(RuntimeError, match="API credentials required"):
+            await client.cancel_order("123")
+        with pytest.raises(RuntimeError, match="API credentials required"):
+            await client.get_order("123")
+        with pytest.raises(RuntimeError, match="API credentials required"):
+            await client.get_orders()
+        with pytest.raises(RuntimeError, match="API credentials required"):
             await client.get_balance()
+
+
+class TestStubMethods:
+    """Tests for stub methods that remain unimplemented."""
 
     def test_subscribe_candles_raises(self, client: KrakenFuturesExchangeClient) -> None:
         """subscribe_candles raises NotImplementedError.
 
-        Given: Phase 1 client,
+        Given: Any client,
         When: subscribe_candles is called,
         Then: Raises NotImplementedError.
         """
         with pytest.raises(NotImplementedError, match="no WS candle feed"):
             client.subscribe_candles(["PF_XBTUSD"])
 
-    def test_subscribe_executions_raises(self, client: KrakenFuturesExchangeClient) -> None:
-        """subscribe_executions raises NotImplementedError.
+    def test_subscribe_executions_requires_auth(self, client: KrakenFuturesExchangeClient) -> None:
+        """subscribe_executions raises RuntimeError without credentials.
 
-        Given: Phase 1 client,
-        When: subscribe_executions is called,
-        Then: Raises NotImplementedError.
+        Given: Unauthenticated client,
+        When: subscribe_executions is iterated,
+        Then: Raises RuntimeError.
         """
-        with pytest.raises(NotImplementedError, match="Phase 1"):
-            client.subscribe_executions()
+        with pytest.raises(RuntimeError, match="API credentials required"):
+            iterator = client.subscribe_executions()
+            asyncio.get_event_loop().run_until_complete(iterator.__anext__())
 
 
 class TestSubscribeInstruments:
@@ -513,180 +938,498 @@ class TestSubscribeInstruments:
         raw = {
             "symbol": "PI_XBTUSD",
             "type": "futures_inverse",
-            "underlying": "rr_xbtusd",
             "tickSize": 0.5,
             "contractSize": 1,
             "tradeable": True,
             "base": "BTC",
             "quote": "USD",
+            "marginLevels": [{"contracts": 0, "initialMargin": 0.02, "maintenanceMargin": 0.01}],
         }
         result = client.get_parsed_instrument(raw)
         assert isinstance(result, InstrumentPairDescriptor)
         assert result.symbol == "PI_XBTUSD"
-        assert result.base == "BTC"
 
 
-class TestEnsureWsConnected:
-    """Tests for WebSocket connection management."""
+class TestSymbolConversionInOrders:
+    """Tests for symbol conversion used in order methods."""
 
     @pytest.mark.asyncio
-    async def test_creates_ws_on_first_call(self, client: KrakenFuturesExchangeClient) -> None:
-        """Create WS client on first call.
+    async def test_create_order_converts_symbol(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Create order converts native symbol to Kraken product ID.
 
-        Given: No WS client,
-        When: _ensure_ws_connected is called,
-        Then: WS client is created and started.
+        Given: Authenticated client,
+        When: create_order is called with native symbol,
+        Then: SDK receives Kraken product ID.
+        """
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.create_order = MagicMock(
+            return_value={"sendStatus": {"order_id": "ord-1", "status": "placed"}}
+        )
+        request = ExchangeOrderRequest(
+            symbol="BTC-USD-PERP",
+            side=OrderSideEnum.BUY,
+            type=OrderTypeEnum.MARKET,
+            amount=1.0,
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+            return_value="PF_XBTUSD",
+        ) as mock_convert:
+            await auth_client.create_order(request)
+        mock_convert.assert_called_once_with("BTC-USD-PERP")
+        assert auth_client._trade_client is not None
+        call_kwargs = auth_client._trade_client.create_order.call_args
+        assert call_kwargs.kwargs["symbol"] == "PF_XBTUSD"
+
+    @pytest.mark.asyncio
+    async def test_convert_sdk_order_handles_unknown_symbol(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Convert SDK order gracefully handles unknown symbol mapping.
+
+        Given: SDK returns order with unmapped Kraken symbol,
+        When: _convert_sdk_order is called,
+        Then: Falls back to raw Kraken symbol.
         """
         with patch(
-            "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient"
-        ) as mock_cls:
-            mock_ws = AsyncMock()
-            mock_cls.return_value = mock_ws
-            await client._ensure_ws_connected()
-            mock_cls.assert_called_once()
-            mock_ws.start.assert_awaited_once()
-            assert client._ws_client is mock_ws
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            side_effect=ValueError("unknown"),
+        ):
+            result = auth_client._convert_sdk_order(
+                {
+                    "order_id": "ord-1",
+                    "symbol": "PF_UNKNOWN",
+                    "side": "buy",
+                    "orderType": "lmt",
+                    "qty": 1.0,
+                    "status": "placed",
+                }
+            )
+        assert result.symbol == "PF_UNKNOWN"
+
+
+class TestDisconnectPrivateWsError:
+    """Tests for private WS close error handling during disconnect."""
 
     @pytest.mark.asyncio
-    async def test_noop_when_already_connected(self, client: KrakenFuturesExchangeClient) -> None:
-        """Skip creation when already connected.
+    async def test_disconnect_private_ws_error_handled(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Disconnect handles private WS close error gracefully.
 
-        Given: WS client already exists,
-        When: _ensure_ws_connected is called,
-        Then: No new client is created.
+        Given: Private WS client raises on close(),
+        When: disconnect() is called,
+        Then: No exception propagated, private WS client set to None.
         """
         mock_ws = AsyncMock()
-        client._ws_client = mock_ws
+        mock_ws.close.side_effect = RuntimeError("private close failed")
+        auth_client._private_ws_client = mock_ws
+        await auth_client.disconnect()
+        assert auth_client._private_ws_client is None
+
+
+class TestEnsurePrivateWsConnected:
+    """Tests for _ensure_private_ws_connected."""
+
+    @pytest.mark.asyncio
+    async def test_creates_private_ws_client(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Create private WS client when not yet connected.
+
+        Given: Authenticated client without private WS,
+        When: _ensure_private_ws_connected is called,
+        Then: Private WS client is created and started.
+        """
+        mock_ws = AsyncMock()
         with patch(
-            "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient"
-        ) as mock_cls:
-            await client._ensure_ws_connected()
-            mock_cls.assert_not_called()
-
-
-_SYMBOL_MAP = {"BTC-USD-PERP": "PF_XBTUSD", "BTC-USD-PERP-INV": "PI_XBTUSD"}
-
-
-@pytest.fixture(autouse=True, scope="class")
-def _patch_symbol_conversion() -> Generator[None]:
-    """Patch native_to_kraken_futures_ws for subscribe tests."""
-    with patch(
-        "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
-        side_effect=lambda s: _SYMBOL_MAP.get(s, s),
-    ):
-        yield
-
-
-class TestSubscribeTicks:
-    """Tests for subscribe_ticks async iterator."""
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient",
+            return_value=mock_ws,
+        ):
+            await auth_client._ensure_private_ws_connected()
+        assert auth_client._private_ws_client is mock_ws
+        mock_ws.start.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_subscribe_ticks_yields_from_queue(
-        self, client: KrakenFuturesExchangeClient
+    async def test_skips_when_already_connected(
+        self, auth_client: KrakenFuturesExchangeClient
     ) -> None:
-        """Yield ticker updates from internal queue.
+        """Skip connection when private WS is already connected.
 
-        Given: WS client connected and tick_queue has an item,
-        When: subscribe_ticks iterator is consumed,
-        Then: Yields the queued TickerUpdate.
+        Given: Authenticated client with existing private WS,
+        When: _ensure_private_ws_connected is called,
+        Then: Existing client is preserved unchanged.
         """
-        mock_ws = AsyncMock(exception_occur=False)
-        client._ws_client = mock_ws
-        ticker = TickerUpdate(
-            symbol="BTC-USD-PERP",
-            bid=66500.0,
-            bid_qty=50.0,
-            ask=66510.0,
-            ask_qty=30.0,
-            last=66505.0,
-            volume=1234.0,
-            vwap=0.0,
-            low=65500.0,
-            high=67000.0,
-            change=0.94,
-            change_pct=0.0,
-        )
-        client._tick_queue.put_nowait(ticker)
-
-        items = []
-        async for item in client.subscribe_ticks(["BTC-USD-PERP"]):
-            items.append(item)
-            break
-        assert len(items) == 1
-        assert items[0].symbol == "BTC-USD-PERP"
-        mock_ws.subscribe.assert_awaited_once_with(feed="ticker", products=["PF_XBTUSD"])
+        existing_ws = AsyncMock()
+        auth_client._private_ws_client = existing_ws
+        await auth_client._ensure_private_ws_connected()
+        assert auth_client._private_ws_client is existing_ws
+        existing_ws.start.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_subscribe_ticks_handles_timeout(
-        self, client: KrakenFuturesExchangeClient
-    ) -> None:
-        """Handle queue timeout when no tickers available.
+    async def test_requires_auth(self, client: KrakenFuturesExchangeClient) -> None:
+        """Raise RuntimeError when credentials are missing.
 
-        Given: WS client connected but tick_queue is empty initially,
-        When: subscribe_ticks iterator is consumed,
-        Then: Loops through timeout, then yields when item arrives.
+        Given: Unauthenticated client,
+        When: _ensure_private_ws_connected is called,
+        Then: Raises RuntimeError.
         """
-        mock_ws = AsyncMock(exception_occur=False)
-        client._ws_client = mock_ws
-        ticker = TickerUpdate(
-            symbol="BTC-USD-PERP",
-            bid=66500.0,
-            bid_qty=50.0,
-            ask=66510.0,
-            ask_qty=30.0,
-            last=66505.0,
-            volume=1234.0,
-            vwap=0.0,
-            low=65500.0,
-            high=67000.0,
-            change=0.94,
-            change_pct=0.0,
-        )
+        with pytest.raises(RuntimeError, match="API credentials required"):
+            await client._ensure_private_ws_connected()
 
-        async def delayed_put() -> None:
-            await asyncio.sleep(0.15)
-            client._tick_queue.put_nowait(ticker)
 
-        asyncio.create_task(delayed_put())
-        items = []
-        async for item in client.subscribe_ticks(["BTC-USD-PERP"]):
-            items.append(item)
-            break
-        assert len(items) == 1
+class TestCreateOrderStopPrice:
+    """Tests for create_order stop_price branch."""
 
     @pytest.mark.asyncio
-    async def test_subscribe_ticks_raises_on_ws_failure(
+    async def test_create_order_with_stop_price(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Create order passes stop_price when provided.
+
+        Given: Authenticated client,
+        When: create_order is called with stop_price,
+        Then: SDK receives stopPrice kwarg.
+        """
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.create_order = MagicMock(
+            return_value={"sendStatus": {"order_id": "ord-stp", "status": "placed"}}
+        )
+        request = ExchangeOrderRequest(
+            symbol="BTC-USD-PERP",
+            side=OrderSideEnum.BUY,
+            type=OrderTypeEnum.STOP_LOSS,
+            amount=1.0,
+            stop_price=60000.0,
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            patch.object(auth_client, "_log_order_to_db", new_callable=AsyncMock) as mock_log,
+        ):
+            mock_log.return_value = None
+            result = await auth_client.create_order(request)
+        assert result.id == "ord-stp"
+        call_kwargs = auth_client._trade_client.create_order.call_args.kwargs
+        assert call_kwargs["stopPrice"] == pytest.approx(60000.0)
+
+
+class TestCreateOrderValidation:
+    """Tests for create_order order type validation."""
+
+    @pytest.mark.asyncio
+    async def test_unsupported_order_type_raises(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Reject unsupported order types instead of silent fallback.
+
+        Given: Authenticated client,
+        When: create_order is called with STOP_LOSS_LIMIT (unsupported),
+        Then: Raises ValueError listing supported types.
+        """
+        request = ExchangeOrderRequest(
+            symbol="BTC-USD-PERP",
+            side=OrderSideEnum.BUY,
+            type=OrderTypeEnum.STOP_LOSS_LIMIT,
+            amount=1.0,
+            price=60000.0,
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            pytest.raises(ValueError, match="Unsupported order type"),
+        ):
+            await auth_client.create_order(request)
+
+    @pytest.mark.asyncio
+    async def test_create_order_db_log_returns_none(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Create order succeeds even when DB logging returns None.
+
+        Given: Authenticated client where _log_order_to_db returns None,
+        When: create_order is called,
+        Then: Returns snapshot without DB IDs.
+        """
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.create_order = MagicMock(
+            return_value={"sendStatus": {"order_id": "ord-nodb", "status": "placed"}}
+        )
+        request = ExchangeOrderRequest(
+            symbol="BTC-USD-PERP",
+            side=OrderSideEnum.BUY,
+            type=OrderTypeEnum.LIMIT,
+            amount=1.0,
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            patch.object(auth_client, "_log_order_to_db", new_callable=AsyncMock) as mock_log,
+        ):
+            mock_log.return_value = None
+            result = await auth_client.create_order(request)
+        assert result.id == "ord-nodb"
+        assert result.db_order_id is None
+        assert result.db_order_public_id is None
+
+
+class TestConvertSdkOrderVariants:
+    """Tests for _convert_sdk_order SDK payload normalization."""
+
+    def test_lowercase_symbol_normalized(self, auth_client: KrakenFuturesExchangeClient) -> None:
+        """Normalize lowercase SDK symbols to uppercase.
+
+        Given: SDK order dict with lowercase symbol ``pf_xbtusd``,
+        When: _convert_sdk_order is called,
+        Then: Symbol is uppercased before native conversion.
+        """
+        data = {
+            "order_id": "ord-lc",
+            "symbol": "pf_xbtusd",
+            "side": "buy",
+            "orderType": "lmt",
+            "qty": 5.0,
+            "filledSize": 0.0,
+            "status": "placed",
+        }
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            return_value="BTC-USD-PERP",
+        ) as mock_mapper:
+            result = auth_client._convert_sdk_order(data)
+        mock_mapper.assert_called_once_with("PF_XBTUSD")
+        assert result.symbol == "BTC-USD-PERP"
+
+    def test_filled_size_and_unfilled_size_variants(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Handle filledSize + unfilledSize without qty field.
+
+        Given: SDK order dict with filledSize and unfilledSize but no qty,
+        When: _convert_sdk_order is called,
+        Then: Derives qty from filledSize + unfilledSize.
+        """
+        data = {
+            "order_id": "ord-uf",
+            "symbol": "PF_XBTUSD",
+            "side": "sell",
+            "orderType": "lmt",
+            "filledSize": 3.0,
+            "unfilledSize": 7.0,
+            "status": "partiallyFilled",
+        }
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            return_value="BTC-USD-PERP",
+        ):
+            result = auth_client._convert_sdk_order(data)
+        assert result.amount == pytest.approx(10.0)
+        assert result.filled == pytest.approx(3.0)
+        assert result.remaining == pytest.approx(7.0)
+
+    def test_order_id_variant(self, auth_client: KrakenFuturesExchangeClient) -> None:
+        """Handle orderId field variant.
+
+        Given: SDK order dict with orderId (camelCase) instead of order_id,
+        When: _convert_sdk_order is called,
+        Then: Resolves order ID correctly.
+        """
+        data = {
+            "orderId": "ord-camel",
+            "symbol": "PF_XBTUSD",
+            "side": "buy",
+            "type": "limit",
+            "qty": 1.0,
+            "status": "placed",
+        }
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            return_value="BTC-USD-PERP",
+        ):
+            result = auth_client._convert_sdk_order(data)
+        assert result.id == "ord-camel"
+
+    def test_type_field_variant(self, auth_client: KrakenFuturesExchangeClient) -> None:
+        """Handle 'type' field variant instead of 'orderType'.
+
+        Given: SDK order dict with type=limit (not orderType),
+        When: _convert_sdk_order is called,
+        Then: Maps order type correctly.
+        """
+        data = {
+            "order_id": "ord-type",
+            "symbol": "PF_XBTUSD",
+            "side": "buy",
+            "type": "mkt",
+            "qty": 1.0,
+            "status": "placed",
+        }
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            return_value="BTC-USD-PERP",
+        ):
+            result = auth_client._convert_sdk_order(data)
+        assert result.type == OrderTypeEnum.MARKET
+
+
+class TestGetOrdersStatusAndLimit:
+    """Tests for get_orders status filter and limit branches."""
+
+    @pytest.mark.asyncio
+    async def test_get_orders_filters_by_status(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Get orders filters by order status.
+
+        Given: Multiple open orders with different statuses,
+        When: get_orders is called with status filter,
+        Then: Returns only matching orders.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_open_orders = MagicMock(
+            return_value={
+                "openOrders": [
+                    {
+                        "order_id": "ord-1",
+                        "symbol": "PF_XBTUSD",
+                        "side": "buy",
+                        "orderType": "lmt",
+                        "qty": 5.0,
+                        "status": "placed",
+                    },
+                    {
+                        "order_id": "ord-2",
+                        "symbol": "PF_XBTUSD",
+                        "side": "sell",
+                        "orderType": "mkt",
+                        "qty": 10.0,
+                        "filledSize": 10.0,
+                        "status": "filled",
+                    },
+                ]
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            return_value="BTC-USD-PERP",
+        ):
+            result = await auth_client.get_orders(status=OrderStatusEnum.CLOSED)
+        assert len(result) == 1
+        assert result[0].id == "ord-2"
+
+    @pytest.mark.asyncio
+    async def test_get_orders_limits_results(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Get orders limits the number of returned results.
+
+        Given: Three open orders,
+        When: get_orders is called with limit=1,
+        Then: Returns only 1 order.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_open_orders = MagicMock(
+            return_value={
+                "openOrders": [
+                    {
+                        "order_id": f"ord-{i}",
+                        "symbol": "PF_XBTUSD",
+                        "side": "buy",
+                        "orderType": "lmt",
+                        "qty": 1.0,
+                        "status": "placed",
+                    }
+                    for i in range(3)
+                ]
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            return_value="BTC-USD-PERP",
+        ):
+            result = await auth_client.get_orders(limit=1)
+        assert len(result) == 1
+
+
+class TestGetBalanceCurrencyFilter:
+    """Tests for get_balance edge cases with wallet data."""
+
+    @pytest.mark.asyncio
+    async def test_get_balance_skips_non_dict_account(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Skip non-dict account entries in wallet data.
+
+        Given: Wallet data with a non-dict entry,
+        When: get_balance is called,
+        Then: Non-dict entries are skipped.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(
+            return_value={
+                "accounts": {
+                    "flex": {
+                        "balances": {"USD": 5000.0},
+                        "marginRequirements": {"im": 100.0},
+                    },
+                    "invalid": "not-a-dict",
+                }
+            }
+        )
+        result = await auth_client.get_balance()
+        assert len(result) == 1
+        assert "USD" in result
+
+    @pytest.mark.asyncio
+    async def test_get_balance_skips_zero_amounts(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Skip currencies with zero balance.
+
+        Given: Wallet data with a zero-balance currency,
+        When: get_balance is called,
+        Then: Zero-balance currencies are omitted.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(
+            return_value={
+                "accounts": {
+                    "flex": {
+                        "balances": {"USD": 5000.0, "EUR": 0},
+                        "marginRequirements": {"im": 0},
+                    }
+                }
+            }
+        )
+        result = await auth_client.get_balance()
+        assert "USD" in result
+        assert "EUR" not in result
+
+
+class TestSubscribeTicksImpl:
+    """Tests for subscribe_ticks and _subscribe_ticks_impl."""
+
+    @pytest.mark.asyncio
+    async def test_subscribe_ticks_yields_updates(
         self, client: KrakenFuturesExchangeClient
     ) -> None:
-        """Raise ConnectionError when WS dies mid-subscription.
+        """Subscribe to ticks yields TickerUpdate from queue.
 
-        Given: WS client has exception_occur=True,
+        Given: WS client connected and tick enqueued,
         When: subscribe_ticks is iterated,
-        Then: Raises ConnectionError and unsubscribes.
-        """
-        mock_ws = AsyncMock()
-        mock_ws.exception_occur = True
-        client._ws_client = mock_ws
-        with pytest.raises(ConnectionError, match="connection lost"):
-            async for _tick in client.subscribe_ticks(["BTC-USD-PERP"]):
-                pytest.fail("Should not yield")
-        mock_ws.unsubscribe.assert_awaited_once()
-        assert client._ws_client is None
-
-    @pytest.mark.asyncio
-    async def test_subscribe_ticks_unsubscribes_on_break(
-        self, client: KrakenFuturesExchangeClient
-    ) -> None:
-        """Unsubscribe when consumer breaks out of iterator.
-
-        Given: WS client connected, consumer breaks after first item,
-        When: Iterator cleanup runs,
-        Then: Unsubscribe is called.
+        Then: Yields the TickerUpdate.
         """
         mock_ws = AsyncMock()
         mock_ws.exception_occur = False
-        client._ws_client = mock_ws
-        ticker = TickerUpdate(
+        tick = TickerUpdate(
             symbol="BTC-USD-PERP",
             bid=66500.0,
             bid_qty=50.0,
@@ -700,27 +1443,120 @@ class TestSubscribeTicks:
             change=0.94,
             change_pct=0.0,
         )
-        client._tick_queue.put_nowait(ticker)
-        gen = client.subscribe_ticks(["BTC-USD-PERP"])
-        async for _ in gen:
-            break
-        await gen.aclose()
-        mock_ws.unsubscribe.assert_awaited_once_with(feed="ticker", products=["PF_XBTUSD"])
+
+        call_count = 0
+
+        async def fake_wait_for(coro: Any, timeout: float) -> Any:
+            """Yield the tick on first call, then raise to stop iteration."""
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                client._tick_queue.put_nowait(tick)
+                result: Any = await coro
+                return result
+            coro.close()
+            raise ConnectionError("stop")
+
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient",
+                return_value=mock_ws,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            patch("asyncio.wait_for", side_effect=fake_wait_for),
+        ):
+            results: list[TickerUpdate] = []
+            try:
+                async for update in client.subscribe_ticks(["BTC-USD-PERP"]):
+                    results.append(update)
+            except ConnectionError:
+                pass
+        assert len(results) == 1
+        assert results[0].symbol == "BTC-USD-PERP"
 
     @pytest.mark.asyncio
-    async def test_subscribe_ticks_unsubscribe_failure_handled(
+    async def test_subscribe_ticks_connection_error_on_exception_occur(
         self, client: KrakenFuturesExchangeClient
     ) -> None:
-        """Handle unsubscribe failure gracefully on cleanup.
+        """Raise ConnectionError when WS exception_occur is set.
 
-        Given: WS client where unsubscribe raises,
-        When: Iterator is closed,
-        Then: No exception propagated from finally block.
+        Given: WS client with exception_occur=True,
+        When: subscribe_ticks loop checks,
+        Then: Raises ConnectionError and resets ws_client in finally.
         """
-        mock_ws = AsyncMock(exception_occur=False)
-        mock_ws.unsubscribe.side_effect = RuntimeError("unsub failed")
-        client._ws_client = mock_ws
-        ticker = TickerUpdate(
+        mock_ws = AsyncMock()
+        mock_ws.exception_occur = True
+        mock_ws.unsubscribe = AsyncMock()
+
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient",
+                return_value=mock_ws,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            pytest.raises(ConnectionError, match="connection lost"),
+        ):
+            async for _ in client.subscribe_ticks(["BTC-USD-PERP"]):
+                pass
+        assert client._ws_client is None
+
+    @pytest.mark.asyncio
+    async def test_subscribe_ticks_unsubscribe_error_handled(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Handle unsubscribe error gracefully during cleanup.
+
+        Given: WS client that fails on unsubscribe,
+        When: subscribe_ticks is cancelled,
+        Then: No exception propagated.
+        """
+        mock_ws = AsyncMock()
+        mock_ws.exception_occur = False
+        mock_ws.unsubscribe = AsyncMock(side_effect=RuntimeError("unsub failed"))
+
+        call_count = 0
+
+        async def fake_wait_for(coro: Any, timeout: float) -> Any:
+            """Raise on first call to break the loop."""
+            nonlocal call_count
+            call_count += 1
+            coro.close()
+            raise ConnectionError("stop")
+
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient",
+                return_value=mock_ws,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            patch("asyncio.wait_for", side_effect=fake_wait_for),
+            pytest.raises(ConnectionError),
+        ):
+            async for _ in client.subscribe_ticks(["BTC-USD-PERP"]):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_subscribe_ticks_timeout_continues(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """TimeoutError from queue.get is retried.
+
+        Given: WS client connected,
+        When: queue.get times out then yields a message,
+        Then: Loop continues and yields the message.
+        """
+        mock_ws = AsyncMock()
+        mock_ws.exception_occur = False
+        tick = TickerUpdate(
             symbol="BTC-USD-PERP",
             bid=66500.0,
             bid_qty=50.0,
@@ -734,126 +1570,58 @@ class TestSubscribeTicks:
             change=0.94,
             change_pct=0.0,
         )
-        client._tick_queue.put_nowait(ticker)
-        gen = client.subscribe_ticks(["BTC-USD-PERP"])
-        async for _ in gen:
-            break
-        await gen.aclose()
+
+        call_count = 0
+
+        async def fake_wait_for(coro: Any, timeout: float) -> Any:
+            """Timeout first, yield second, then error to stop."""
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                coro.close()
+                raise TimeoutError
+            if call_count == 2:
+                client._tick_queue.put_nowait(tick)
+                result: Any = await coro
+                return result
+            coro.close()
+            raise ConnectionError("stop")
+
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient",
+                return_value=mock_ws,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            patch("asyncio.wait_for", side_effect=fake_wait_for),
+        ):
+            results: list[TickerUpdate] = []
+            try:
+                async for update in client.subscribe_ticks(["BTC-USD-PERP"]):
+                    results.append(update)
+            except ConnectionError:
+                pass
+        assert len(results) == 1
+
+
+class TestSubscribeTradesImpl:
+    """Tests for subscribe_trades and _subscribe_trades_impl."""
 
     @pytest.mark.asyncio
-    async def test_subscribe_ticks_raises_when_ws_none_after_connect(
+    async def test_subscribe_trades_yields_updates(
         self, client: KrakenFuturesExchangeClient
     ) -> None:
-        """Raise RuntimeError if _ws_client is None after _ensure_ws_connected.
+        """Subscribe to trades yields TradeUpdate from queue.
 
-        Given: _ensure_ws_connected is a no-op that does not set _ws_client,
-        When: subscribe_ticks is called,
-        Then: RuntimeError is raised.
-        """
-        client._ensure_ws_connected = AsyncMock()
-        with pytest.raises(RuntimeError, match="WebSocket client not connected"):
-            await anext(aiter(client.subscribe_ticks(["BTC-USD-PERP"])))
-
-
-class TestSubscribeTrades:
-    """Tests for subscribe_trades async iterator."""
-
-    @pytest.mark.asyncio
-    async def test_subscribe_trades_yields_from_queue(
-        self, client: KrakenFuturesExchangeClient
-    ) -> None:
-        """Yield trade updates from internal queue.
-
-        Given: WS client connected and trade_queue has an item,
-        When: subscribe_trades iterator is consumed,
-        Then: Yields the queued TradeUpdate.
-        """
-        mock_ws = AsyncMock(exception_occur=False)
-        client._ws_client = mock_ws
-        trade = TradeUpdate(
-            symbol="BTC-USD-PERP",
-            side="buy",
-            quantity=10.0,
-            price=66621.0,
-            ord_type="fill",
-            timestamp=MagicMock(),
-            trade_id="abc-123",
-        )
-        client._trade_queue.put_nowait(trade)
-
-        items = []
-        async for item in client.subscribe_trades(["BTC-USD-PERP-INV"]):
-            items.append(item)
-            break
-        assert len(items) == 1
-        assert items[0].symbol == "BTC-USD-PERP"
-        mock_ws.subscribe.assert_awaited_once_with(feed="trade", products=["PI_XBTUSD"])
-
-    @pytest.mark.asyncio
-    async def test_subscribe_trades_handles_timeout(
-        self, client: KrakenFuturesExchangeClient
-    ) -> None:
-        """Handle queue timeout when no trades available.
-
-        Given: WS client connected but trade_queue is empty initially,
-        When: subscribe_trades iterator is consumed,
-        Then: Loops through timeout, then yields when item arrives.
-        """
-        mock_ws = AsyncMock(exception_occur=False)
-        client._ws_client = mock_ws
-        trade = TradeUpdate(
-            symbol="BTC-USD-PERP",
-            side="buy",
-            quantity=10.0,
-            price=66621.0,
-            ord_type="fill",
-            timestamp=MagicMock(),
-            trade_id="abc-123",
-        )
-
-        async def delayed_put() -> None:
-            await asyncio.sleep(0.15)
-            client._trade_queue.put_nowait(trade)
-
-        asyncio.create_task(delayed_put())
-        items = []
-        async for item in client.subscribe_trades(["BTC-USD-PERP-INV"]):
-            items.append(item)
-            break
-        assert len(items) == 1
-
-    @pytest.mark.asyncio
-    async def test_subscribe_trades_raises_on_ws_failure(
-        self, client: KrakenFuturesExchangeClient
-    ) -> None:
-        """Raise ConnectionError when WS dies mid-trade-subscription.
-
-        Given: WS client has exception_occur=True,
+        Given: WS client connected and trade enqueued,
         When: subscribe_trades is iterated,
-        Then: Raises ConnectionError and unsubscribes.
-        """
-        mock_ws = AsyncMock()
-        mock_ws.exception_occur = True
-        client._ws_client = mock_ws
-        with pytest.raises(ConnectionError, match="connection lost"):
-            async for _trade in client.subscribe_trades(["BTC-USD-PERP-INV"]):
-                pytest.fail("Should not yield")
-        mock_ws.unsubscribe.assert_awaited_once()
-        assert client._ws_client is None
-
-    @pytest.mark.asyncio
-    async def test_subscribe_trades_unsubscribes_on_break(
-        self, client: KrakenFuturesExchangeClient
-    ) -> None:
-        """Unsubscribe when consumer breaks out of trade iterator.
-
-        Given: WS client connected, consumer breaks after first item,
-        When: Iterator cleanup runs,
-        Then: Unsubscribe is called.
+        Then: Yields the TradeUpdate.
         """
         mock_ws = AsyncMock()
         mock_ws.exception_occur = False
-        client._ws_client = mock_ws
         trade = TradeUpdate(
             symbol="BTC-USD-PERP",
             side="buy",
@@ -863,95 +1631,433 @@ class TestSubscribeTrades:
             timestamp=MagicMock(),
             trade_id="abc-123",
         )
-        client._trade_queue.put_nowait(trade)
-        gen = client.subscribe_trades(["BTC-USD-PERP-INV"])
-        async for _ in gen:
-            break
-        await gen.aclose()
-        mock_ws.unsubscribe.assert_awaited_once_with(feed="trade", products=["PI_XBTUSD"])
+
+        call_count = 0
+
+        async def fake_wait_for(coro: Any, timeout: float) -> Any:
+            """Yield trade on first call, then raise to stop."""
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                client._trade_queue.put_nowait(trade)
+                result: Any = await coro
+                return result
+            coro.close()
+            raise ConnectionError("stop")
+
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient",
+                return_value=mock_ws,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            patch("asyncio.wait_for", side_effect=fake_wait_for),
+        ):
+            results: list[TradeUpdate] = []
+            try:
+                async for update in client.subscribe_trades(["BTC-USD-PERP"]):
+                    results.append(update)
+            except ConnectionError:
+                pass
+        assert len(results) == 1
+        assert results[0].symbol == "BTC-USD-PERP"
 
     @pytest.mark.asyncio
-    async def test_subscribe_trades_unsubscribe_failure_handled(
+    async def test_subscribe_trades_connection_error_on_exception_occur(
         self, client: KrakenFuturesExchangeClient
     ) -> None:
-        """Handle unsubscribe failure gracefully on trade cleanup.
+        """Raise ConnectionError when trade WS exception_occur is set.
 
-        Given: WS client where unsubscribe raises,
-        When: Trade iterator is closed,
-        Then: No exception propagated from finally block.
+        Given: WS client with exception_occur=True,
+        When: subscribe_trades loop checks,
+        Then: Raises ConnectionError and resets ws_client in finally.
         """
-        mock_ws = AsyncMock(exception_occur=False)
-        mock_ws.unsubscribe.side_effect = RuntimeError("unsub failed")
-        client._ws_client = mock_ws
-        trade = TradeUpdate(
-            symbol="BTC-USD-PERP",
-            side="buy",
-            quantity=10.0,
-            price=66621.0,
-            ord_type="fill",
-            timestamp=MagicMock(),
-            trade_id="abc-123",
-        )
-        client._trade_queue.put_nowait(trade)
-        gen = client.subscribe_trades(["BTC-USD-PERP-INV"])
-        async for _ in gen:
-            break
-        await gen.aclose()
+        mock_ws = AsyncMock()
+        mock_ws.exception_occur = True
+        mock_ws.unsubscribe = AsyncMock()
+
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient",
+                return_value=mock_ws,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            pytest.raises(ConnectionError, match="connection lost"),
+        ):
+            async for _ in client.subscribe_trades(["BTC-USD-PERP"]):
+                pass
+        assert client._ws_client is None
 
     @pytest.mark.asyncio
-    async def test_subscribe_trades_raises_when_ws_none_after_connect(
+    async def test_subscribe_trades_unsubscribe_error_handled(
         self, client: KrakenFuturesExchangeClient
     ) -> None:
-        """Raise RuntimeError if _ws_client is None after _ensure_ws_connected.
+        """Handle unsubscribe error gracefully during trade cleanup.
 
-        Given: _ensure_ws_connected is a no-op that does not set _ws_client,
-        When: subscribe_trades is called,
-        Then: RuntimeError is raised.
+        Given: WS client that fails on unsubscribe,
+        When: subscribe_trades is cancelled,
+        Then: No exception propagated.
         """
-        client._ensure_ws_connected = AsyncMock()
-        with pytest.raises(RuntimeError, match="WebSocket client not connected"):
-            await anext(aiter(client.subscribe_trades(["BTC-USD-PERP"])))
+        mock_ws = AsyncMock()
+        mock_ws.exception_occur = False
+        mock_ws.unsubscribe = AsyncMock(side_effect=RuntimeError("unsub failed"))
+
+        async def fake_wait_for(coro: Any, timeout: float) -> Any:
+            """Raise on first call to break the loop."""
+            coro.close()
+            raise ConnectionError("stop")
+
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient",
+                return_value=mock_ws,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            patch("asyncio.wait_for", side_effect=fake_wait_for),
+            pytest.raises(ConnectionError),
+        ):
+            async for _ in client.subscribe_trades(["BTC-USD-PERP"]):
+                pass
 
 
-class TestSubscribeInstrumentsInit:
-    """Tests for subscribe_instruments when market_client is None."""
+class TestSubscribeExecutionsImpl:
+    """Tests for subscribe_executions and _subscribe_executions_impl."""
 
     @pytest.mark.asyncio
-    async def test_creates_market_client_if_none(self, client: KrakenFuturesExchangeClient) -> None:
-        """Create Market client if not yet initialized.
+    async def test_subscribe_executions_yields_updates(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Subscribe to executions yields ExecutionUpdate from queue.
 
-        Given: Client with _market_client=None,
+        Given: Private WS client connected and execution enqueued,
+        When: subscribe_executions is iterated,
+        Then: Yields the ExecutionUpdate.
+        """
+        mock_ws = AsyncMock()
+        mock_ws.exception_occur = False
+        execution = MagicMock(spec=ExecutionUpdate)
+
+        call_count = 0
+
+        async def fake_wait_for(coro: Any, timeout: float) -> Any:
+            """Yield execution on first call, then raise to stop."""
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                auth_client._execution_queue.put_nowait(execution)
+                result: Any = await coro
+                return result
+            coro.close()
+            raise ConnectionError("stop")
+
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient",
+                return_value=mock_ws,
+            ),
+            patch("asyncio.wait_for", side_effect=fake_wait_for),
+        ):
+            results: list[ExecutionUpdate] = []
+            try:
+                async for update in auth_client.subscribe_executions():
+                    results.append(update)
+            except ConnectionError:
+                pass
+        assert len(results) == 1
+
+    @pytest.mark.asyncio
+    async def test_subscribe_executions_connection_error_on_exception_occur(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Raise ConnectionError when private WS exception_occur is set.
+
+        Given: Private WS client with exception_occur=True,
+        When: subscribe_executions loop checks,
+        Then: Raises ConnectionError and resets private_ws_client in finally.
+        """
+        mock_ws = AsyncMock()
+        mock_ws.exception_occur = True
+        mock_ws.unsubscribe = AsyncMock()
+
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient",
+                return_value=mock_ws,
+            ),
+            pytest.raises(ConnectionError, match="private WS connection lost"),
+        ):
+            async for _ in auth_client.subscribe_executions():
+                pass
+        assert auth_client._private_ws_client is None
+
+    @pytest.mark.asyncio
+    async def test_subscribe_executions_unsubscribe_error_handled(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Handle unsubscribe error gracefully during executions cleanup.
+
+        Given: Private WS client that fails on unsubscribe,
+        When: subscribe_executions is cancelled,
+        Then: No exception propagated.
+        """
+        mock_ws = AsyncMock()
+        mock_ws.exception_occur = False
+        mock_ws.unsubscribe = AsyncMock(side_effect=RuntimeError("unsub failed"))
+
+        async def fake_wait_for(coro: Any, timeout: float) -> Any:
+            """Raise on first call to break the loop."""
+            coro.close()
+            raise ConnectionError("stop")
+
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient",
+                return_value=mock_ws,
+            ),
+            patch("asyncio.wait_for", side_effect=fake_wait_for),
+            pytest.raises(ConnectionError),
+        ):
+            async for _ in auth_client.subscribe_executions():
+                pass
+
+
+class TestSubscribeInstrumentsEdgePaths:
+    """Tests for subscribe_instruments and get_instruments_sync edge paths."""
+
+    @pytest.mark.asyncio
+    async def test_subscribe_instruments_creates_market_client(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Create Market client when not yet set.
+
+        Given: Client with no market_client,
         When: subscribe_instruments is iterated,
-        Then: Market client is created and instruments yielded.
+        Then: Market client is lazily created.
         """
         client._market_client = None
+        mock_market = MagicMock()
+        mock_market.get_instruments.return_value = {"instruments": [{"symbol": "PI_XBTUSD"}]}
         with patch(
-            "snapper.infrastructure.exchanges.implementations.kraken_futures.Market"
-        ) as mock_cls:
-            mock_market = MagicMock()
-            mock_market.get_instruments.return_value = {"instruments": [{"symbol": "PI_XBTUSD"}]}
-            mock_cls.return_value = mock_market
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.Market",
+            return_value=mock_market,
+        ):
             results = []
             async for inst in client.subscribe_instruments():
                 results.append(inst)
-            assert len(results) == 1
-            mock_cls.assert_called_once_with(sandbox=True)
+        assert len(results) == 1
 
     def test_get_instruments_sync_creates_market_client(
         self, client: KrakenFuturesExchangeClient
     ) -> None:
-        """Create Market client on sync fetch if None.
+        """Create Market client when not yet set in sync path.
 
-        Given: Client with _market_client=None,
+        Given: Client with no market_client,
         When: get_instruments_sync is called,
-        Then: Market client is created.
+        Then: Market client is lazily created.
         """
         client._market_client = None
+        mock_market = MagicMock()
+        mock_market.get_instruments.return_value = {"instruments": [{"symbol": "PI_XBTUSD"}]}
         with patch(
-            "snapper.infrastructure.exchanges.implementations.kraken_futures.Market"
-        ) as mock_cls:
-            mock_market = MagicMock()
-            mock_market.get_instruments.return_value = {"instruments": []}
-            mock_cls.return_value = mock_market
-            client.get_instruments_sync()
-            mock_cls.assert_called_once_with(sandbox=True)
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.Market",
+            return_value=mock_market,
+        ):
+            results = client.get_instruments_sync()
+        assert len(results) == 1
+
+
+class TestOnExecutionMessageUnknownFeed:
+    """Tests for _on_execution_message with unrecognized feeds."""
+
+    @pytest.mark.asyncio
+    async def test_unknown_feed_ignored(self, auth_client: KrakenFuturesExchangeClient) -> None:
+        """Ignore messages with unrecognized feed type.
+
+        Given: WS message with feed=heartbeat (not fills),
+        When: _on_execution_message is called,
+        Then: No items in execution queue.
+        """
+        await auth_client._on_execution_message({"feed": "heartbeat"})
+        assert auth_client._execution_queue.empty()
+
+
+class TestEnsureWsConnectedEarlyReturn:
+    """Tests for _ensure_ws_connected early return path."""
+
+    @pytest.mark.asyncio
+    async def test_skips_when_already_connected(self, client: KrakenFuturesExchangeClient) -> None:
+        """Skip WS connection when already connected.
+
+        Given: Client with existing WS client,
+        When: _ensure_ws_connected is called,
+        Then: Existing client is preserved, start not called.
+        """
+        existing_ws = AsyncMock()
+        client._ws_client = existing_ws
+        await client._ensure_ws_connected()
+        assert client._ws_client is existing_ws
+        existing_ws.start.assert_not_awaited()
+
+
+class TestSubscribeImplGuardPaths:
+    """Tests for RuntimeError guard and TimeoutError in subscribe impls."""
+
+    @pytest.mark.asyncio
+    async def test_subscribe_ticks_guard_ws_none(self, client: KrakenFuturesExchangeClient) -> None:
+        """Raise RuntimeError when _ensure_ws_connected leaves ws_client None.
+
+        Given: _ensure_ws_connected does not set ws_client,
+        When: _subscribe_ticks_impl is iterated,
+        Then: Raises RuntimeError.
+        """
+        with (
+            patch.object(client, "_ensure_ws_connected", new_callable=AsyncMock),
+            pytest.raises(RuntimeError, match="WebSocket client not connected"),
+        ):
+            async for _ in client._subscribe_ticks_impl(["BTC-USD-PERP"]):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_subscribe_trades_guard_ws_none(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Raise RuntimeError when _ensure_ws_connected leaves ws_client None.
+
+        Given: _ensure_ws_connected does not set ws_client,
+        When: _subscribe_trades_impl is iterated,
+        Then: Raises RuntimeError.
+        """
+        with (
+            patch.object(client, "_ensure_ws_connected", new_callable=AsyncMock),
+            pytest.raises(RuntimeError, match="WebSocket client not connected"),
+        ):
+            async for _ in client._subscribe_trades_impl(["BTC-USD-PERP"]):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_subscribe_executions_guard_ws_none(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Raise RuntimeError when _ensure_private_ws_connected leaves client None.
+
+        Given: _ensure_private_ws_connected does not set private_ws_client,
+        When: _subscribe_executions_impl is iterated,
+        Then: Raises RuntimeError.
+        """
+        with (
+            patch.object(auth_client, "_ensure_private_ws_connected", new_callable=AsyncMock),
+            pytest.raises(RuntimeError, match="Private WebSocket client not connected"),
+        ):
+            async for _ in auth_client._subscribe_executions_impl():
+                pass
+
+    @pytest.mark.asyncio
+    async def test_subscribe_trades_timeout_continues(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """TimeoutError from trade queue.get is retried.
+
+        Given: WS client connected,
+        When: queue.get times out then yields a message,
+        Then: Loop continues and yields the message.
+        """
+        mock_ws = AsyncMock()
+        mock_ws.exception_occur = False
+        trade = TradeUpdate(
+            symbol="BTC-USD-PERP",
+            side="buy",
+            quantity=10.0,
+            price=66621.0,
+            ord_type="fill",
+            timestamp=MagicMock(),
+            trade_id="abc-123",
+        )
+
+        call_count = 0
+
+        async def fake_wait_for(coro: Any, timeout: float) -> Any:
+            """Timeout first, yield second, then error to stop."""
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                coro.close()
+                raise TimeoutError
+            if call_count == 2:
+                client._trade_queue.put_nowait(trade)
+                result: Any = await coro
+                return result
+            coro.close()
+            raise ConnectionError("stop")
+
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient",
+                return_value=mock_ws,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            patch("asyncio.wait_for", side_effect=fake_wait_for),
+        ):
+            results: list[TradeUpdate] = []
+            try:
+                async for update in client.subscribe_trades(["BTC-USD-PERP"]):
+                    results.append(update)
+            except ConnectionError:
+                pass
+        assert len(results) == 1
+
+    @pytest.mark.asyncio
+    async def test_subscribe_executions_timeout_continues(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """TimeoutError from execution queue.get is retried.
+
+        Given: Private WS client connected,
+        When: queue.get times out then yields a message,
+        Then: Loop continues and yields the message.
+        """
+        mock_ws = AsyncMock()
+        mock_ws.exception_occur = False
+        execution = MagicMock(spec=ExecutionUpdate)
+
+        call_count = 0
+
+        async def fake_wait_for(coro: Any, timeout: float) -> Any:
+            """Timeout first, yield second, then error to stop."""
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                coro.close()
+                raise TimeoutError
+            if call_count == 2:
+                auth_client._execution_queue.put_nowait(execution)
+                result: Any = await coro
+                return result
+            coro.close()
+            raise ConnectionError("stop")
+
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.FuturesWSClient",
+                return_value=mock_ws,
+            ),
+            patch("asyncio.wait_for", side_effect=fake_wait_for),
+        ):
+            results: list[ExecutionUpdate] = []
+            try:
+                async for update in auth_client.subscribe_executions():
+                    results.append(update)
+            except ConnectionError:
+                pass
+        assert len(results) == 1

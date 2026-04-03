@@ -216,7 +216,11 @@ ExecutionMode = Literal[ExecutionModeEnum.LIVE, ExecutionModeEnum.PAPER]
 """Trading mode: 'live' for real money, 'paper' for simulation."""
 
 OrderExchange = Literal[
-    ExchangeEnum.PAPER, ExchangeEnum.KRAKEN, ExchangeEnum.ZONDA, ExchangeEnum.WALUTOMAT
+    ExchangeEnum.PAPER,
+    ExchangeEnum.KRAKEN,
+    ExchangeEnum.KRAKEN_FUTURES,
+    ExchangeEnum.ZONDA,
+    ExchangeEnum.WALUTOMAT,
 ]
 """Exchanges capable of order execution (paper simulator + live venues)."""
 

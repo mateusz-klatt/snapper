@@ -225,9 +225,87 @@ class KrakenFuturesTickerEventSchema(ExchangeResponse):
     next_funding_rate_time: float | None = None
 
 
+class KrakenFuturesFillSchema(ExchangeResponse):
+    """Private fill event from authenticated ``fills``/``fills_snapshot`` WS channel.
+
+    The WS payload uses ``instrument`` (not ``symbol``), ``buy: bool`` (not
+    ``side``), ``qty`` (not ``size``), and ``time: int`` (ms epoch, not ISO).
+
+    Attributes:
+        instrument: Kraken Futures product ID (e.g., ``PI_ETHUSD``).
+        time: Fill timestamp as millisecond epoch integer.
+        price: Execution price.
+        seq: Sequence number for ordering.
+        buy: True if the fill is a buy, False for sell.
+        qty: Fill quantity in contracts.
+        remaining_order_qty: Remaining unfilled quantity on the order.
+        order_id: Exchange order ID that generated this fill.
+        fill_id: Unique fill identifier.
+        fill_type: Fill classification (``maker``, ``taker``, ``liquidation``, etc.).
+        fee_paid: Fee amount charged for this fill.
+        fee_currency: Currency of fee_paid.
+        taker_order_type: Order type of the taker (``lmt``, ``ioc``, ``mkt``, etc.).
+        order_type: Order type of this fill's order.
+        cli_ord_id: Client-provided order ID (if set on order creation).
+    """
+
+    instrument: str
+    time: int
+    price: float
+    seq: int | None = None
+    buy: bool
+    qty: float
+    remaining_order_qty: float | None = None
+    order_id: str
+    fill_id: str
+    fill_type: str | None = None
+    fee_paid: float | None = None
+    fee_currency: str | None = None
+    taker_order_type: str | None = None
+    order_type: str | None = None
+    cli_ord_id: str | None = None
+
+
+class KrakenFuturesOpenOrderSchema(ExchangeResponse):
+    """Private order from ``open_orders_snapshot`` or ``open_orders`` delta WS channel.
+
+    The WS payload uses ``instrument`` (not ``symbol``), ``direction: int``
+    (0=buy, 1=sell), ``type`` (not ``orderType``), and ``time: int`` (ms epoch).
+
+    Attributes:
+        instrument: Kraken Futures product ID (e.g., ``PI_XBTUSD``).
+        time: Order creation timestamp as millisecond epoch.
+        last_update_time: Last update timestamp as millisecond epoch.
+        qty: Total order quantity.
+        filled: Cumulative filled quantity.
+        limit_price: Limit price (0.0 if not applicable).
+        stop_price: Stop price (0.0 if not applicable).
+        type: Order type string (``limit``, ``stop``, ``take_profit``).
+        order_id: Exchange order ID.
+        direction: 0 for buy, 1 for sell.
+        reduce_only: Whether the order is reduce-only.
+        cli_ord_id: Client-provided order ID.
+    """
+
+    instrument: str
+    time: int
+    last_update_time: int | None = None
+    qty: float
+    filled: float = 0.0
+    limit_price: float = 0.0
+    stop_price: float = 0.0
+    type: str = "limit"
+    order_id: str
+    direction: int = 0
+    reduce_only: bool = False
+    cli_ord_id: str | None = None
+
+
 __all__ = [
+    "KrakenFuturesFillSchema",
     "KrakenFuturesInstrumentSchema",
     "KrakenFuturesMarginLevelSchema",
+    "KrakenFuturesOpenOrderSchema",
     "KrakenFuturesTickerEventSchema",
     "KrakenFuturesTickerSchema",
     "KrakenFuturesTradeEventSchema",
