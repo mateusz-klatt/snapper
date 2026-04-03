@@ -8,9 +8,11 @@ REST API Operations:
     - Market data: tickers via polling
     - Order management: create, cancel, get orders
     - Account: balance inquiries
+    - Execution streaming: polling-based fill detection
 
 Features:
     - HTTP polling for real-time ticker updates
+    - Polling-based execution streaming (no WebSocket available)
     - RSA signature authentication for private API
     - Candle building from tick data
     - Support for both public and authenticated endpoints
@@ -25,9 +27,11 @@ either as PEM format or base64-encoded PEM.
 import asyncio
 import base64
 import contextlib
+import math
 import time
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from typing import Any
@@ -79,6 +83,25 @@ _NOT_CONNECTED_MSG = "Not connected - call connect() first"
 _AUTH_REQUIRED_MSG = "Trading requires authentication - provide api_key and private_key"
 
 
+@dataclass
+class _TrackedOrder:
+    """Internal state for polling-based execution tracking.
+
+    Stores the last-known snapshot of an active order so that
+    fill deltas and disappearance events can be computed across
+    polling cycles.
+    """
+
+    order_id: str
+    cl_ord_id: str
+    symbol: str
+    side: OrderSideEnum
+    order_type: OrderTypeEnum
+    amount: float
+    filled: float
+    price: float
+
+
 class WalutomatExchangeClient(ExchangeClientBase):
     """Walutomat FX exchange client with REST API support.
 
@@ -103,6 +126,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
         api_key: str | None = None,
         private_key_data: str | None = None,
         repository: Repository | None = None,
+        execution_poll_interval: float = 5.0,
     ) -> None:
         """Initialize Walutomat exchange client.
 
@@ -112,6 +136,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
             api_key: Walutomat API key for authenticated requests.
             private_key_data: RSA private key (PEM or base64-encoded PEM).
             repository: Database repository for order/execution logging.
+            execution_poll_interval: Interval between execution polls (default: 5s).
 
         Raises:
             ValueError: If private key format is invalid.
@@ -147,6 +172,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
         self._error_count = 0
         self._max_consecutive_errors = 5
         self._tick_buffers: dict[str, list[tuple[float, float]]] = {}
+        self._execution_poll_interval = execution_poll_interval
 
     def _require_connected(self) -> httpx.AsyncClient:
         """Verify HTTP client is connected and return it.
@@ -610,17 +636,121 @@ class WalutomatExchangeClient(ExchangeClientBase):
         )
 
     def subscribe_executions(self) -> AsyncIterator[ExecutionUpdate]:
-        """Not implemented - Walutomat is market data only.
+        """Subscribe to execution updates via polling.
+
+        Polls active orders at ``_execution_poll_interval`` and yields
+        ``ExecutionUpdate`` items when fill quantities increase or orders
+        disappear from the active-orders endpoint.
+
+        The first poll seeds tracking state without yielding to avoid
+        bogus fills for orders already tracked by executor recovery.
 
         Yields:
-            Never yields; raises before producing any value.
+            ExecutionUpdate for each detected fill delta or terminal event.
 
         Raises:
-            NotImplementedError: Always raised.
+            RuntimeError: If not connected or missing credentials.
         """
-        return _RaisingAsyncIterator[ExecutionUpdate](
-            NotImplementedError("Walutomat is market data only - no trading API")
-        )
+        return self._poll_executions()
+
+    async def _poll_executions(self) -> AsyncIterator[ExecutionUpdate]:
+        """Poll active orders and yield fill updates.
+
+        First poll seeds tracking state without yielding (avoids bogus fills
+        for orders already tracked by executor recovery). Subsequent polls
+        detect fill deltas and order disappearances.
+
+        Yields:
+            ExecutionUpdate for each detected fill or disappearance.
+        """
+        self._require_authenticated()
+
+        tracked: dict[str, _TrackedOrder] = {}
+        first_poll = True
+
+        while self._running:
+            try:
+                orders = await self.get_orders()
+                current_ids: set[str] = set()
+
+                for order in orders:
+                    current_ids.add(order.id)
+                    prev = tracked.get(order.id)
+
+                    tracked[order.id] = _TrackedOrder(
+                        order_id=order.id,
+                        cl_ord_id=order.client_order_id or "",
+                        symbol=order.symbol,
+                        side=order.side,
+                        order_type=order.type,
+                        amount=order.amount,
+                        filled=order.filled,
+                        price=order.price or 0.0,
+                    )
+
+                    if first_poll:
+                        continue
+
+                    if prev is not None and order.filled > prev.filled:
+                        yield ExecutionUpdate(
+                            order_id=order.id,
+                            exec_type="trade",
+                            symbol=order.symbol,
+                            side=order.side,
+                            order_type=order.type,
+                            order_status=(
+                                OrderStatusEnum.FILLED
+                                if math.isclose(order.filled, order.amount)
+                                else (
+                                    OrderStatusEnum.PARTIALLY_FILLED
+                                    if order.filled > 0
+                                    else OrderStatusEnum.OPEN
+                                )
+                            ),
+                            timestamp=datetime.now(UTC),
+                            cum_qty=order.filled,
+                            cl_ord_id=order.client_order_id or "",
+                            order_qty=order.amount,
+                            limit_price=order.price,
+                            average_price=order.price,
+                        )
+
+                if not first_poll:
+                    disappeared = set(tracked.keys()) - current_ids
+                    for oid in disappeared:
+                        t = tracked.pop(oid)
+                        is_filled = math.isclose(t.filled, t.amount)
+                        yield ExecutionUpdate(
+                            order_id=t.order_id,
+                            exec_type="trade" if is_filled else "canceled",
+                            symbol=t.symbol,
+                            side=t.side,
+                            order_type=t.order_type,
+                            order_status=(
+                                OrderStatusEnum.FILLED if is_filled else OrderStatusEnum.CANCELED
+                            ),
+                            timestamp=datetime.now(UTC),
+                            cum_qty=t.filled,
+                            cl_ord_id=t.cl_ord_id,
+                            order_qty=t.amount,
+                            limit_price=t.price,
+                        )
+                        if not is_filled and t.filled > 0:
+                            logger.warning(
+                                "Walutomat order {} disappeared with partial fill "
+                                "({}/{}), marking CANCELLED. "
+                                "Prior fills already published during polling.",
+                                oid,
+                                t.filled,
+                                t.amount,
+                            )
+
+                first_poll = False
+
+            except Exception:
+                logger.exception("Walutomat execution poll failed")
+
+            await asyncio.sleep(self._execution_poll_interval)
 
     def subscribe_instruments(self, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
         """Subscribe to instrument/pair information.

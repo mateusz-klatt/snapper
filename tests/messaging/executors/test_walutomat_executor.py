@@ -88,3 +88,19 @@ def test_get_default_parameters_returns_empty_dict(
     """
     defaults = WalutomatOrderExecutor.get_default_parameters(cast(AppSettings, SimpleNamespace()))
     assert defaults == {}
+
+
+def test_executor_client_supports_websocket_executions(
+    monkeypatch: pytest.MonkeyPatch,
+    mocked_settings: SimpleNamespace,
+) -> None:
+    """Verify exchange client supports_websocket_executions is True.
+
+    Given a WalutomatExchangeClient created without credentials,
+    When supports_websocket_executions is checked,
+    Then it is True (inherited from ExchangeClientBase default).
+    """
+    from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
+
+    client = WalutomatExchangeClient()
+    assert client.supports_websocket_executions is True

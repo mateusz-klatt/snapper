@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
+from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
@@ -860,18 +861,479 @@ async def test_subscribe_trades_not_supported() -> None:
             """Consumed by iteration to trigger exception."""
 
 
-@pytest.mark.asyncio()
-async def test_subscribe_executions_not_supported() -> None:
-    """Verify subscribe_executions is not supported.
+def _make_order_snapshot(
+    order_id: str = "ord-1",
+    client_order_id: str | None = "sub-1",
+    symbol: str = "EUR-PLN",
+    side: OrderSideEnum = OrderSideEnum.BUY,
+    order_type: OrderTypeEnum = OrderTypeEnum.LIMIT,
+    amount: float = 100.0,
+    price: float = 4.50,
+    status: OrderStatusEnum = OrderStatusEnum.OPEN,
+    filled: float = 0.0,
+) -> ExchangeOrderSnapshot:
+    """Build an ExchangeOrderSnapshot for execution polling tests."""
+    return ExchangeOrderSnapshot(
+        id=order_id,
+        client_order_id=client_order_id,
+        symbol=symbol,
+        side=side,
+        type=order_type,
+        amount=amount,
+        price=price,
+        status=status,
+        filled=filled,
+        remaining=amount - filled,
+        timestamp=1700000000.0,
+    )
 
-    Given: A Walutomat client,
+
+def _build_polling_client(
+    execution_poll_interval: float = 0.0,
+) -> WalutomatExchangeClient:
+    """Build a WalutomatExchangeClient wired for execution polling tests."""
+    client = WalutomatExchangeClient(execution_poll_interval=execution_poll_interval)
+    client._http_client = cast(Any, object())
+    client._api_key = "test-key"
+    client._private_key = cast(Any, object())
+    client._running = True
+    return client
+
+
+@pytest.mark.asyncio()
+async def test_subscribe_executions_first_poll_seeds_without_yield() -> None:
+    """Verify first poll populates tracking but yields nothing.
+
+    Given: A connected client with one active order,
+    When: subscribe_executions polls once and stops,
+    Then: No ExecutionUpdate is yielded (first poll seeds only).
+    """
+    client = _build_polling_client()
+    order = _make_order_snapshot(filled=50.0)
+    poll_count = 0
+
+    async def _mock_get_orders(
+        symbol: str | None = None,
+        status: OrderStatusEnum | None = None,
+        limit: int | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count > 1:
+            client._running = False
+        return [order]
+
+    client.get_orders = _mock_get_orders
+
+    results: list[ExecutionUpdate] = []
+    async for update in client.subscribe_executions():
+        results.append(update)
+
+    assert results == []
+
+
+@pytest.mark.asyncio()
+async def test_subscribe_executions_yields_fill_on_filled_increase() -> None:
+    """Verify fill update is yielded when filled quantity increases.
+
+    Given: A tracked order with filled=0,
+    When: Second poll shows filled=30,
+    Then: ExecutionUpdate with cum_qty=30 and PARTIALLY_FILLED status is yielded.
+    """
+    client = _build_polling_client()
+    poll_count = 0
+
+    async def _mock_get_orders(
+        symbol: str | None = None,
+        status: OrderStatusEnum | None = None,
+        limit: int | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count == 1:
+            return [_make_order_snapshot(filled=0.0)]
+        if poll_count == 2:
+            return [_make_order_snapshot(filled=30.0)]
+        client._running = False
+        return [_make_order_snapshot(filled=30.0)]
+
+    client.get_orders = _mock_get_orders
+
+    results: list[ExecutionUpdate] = []
+    async for update in client.subscribe_executions():
+        results.append(update)
+
+    assert len(results) == 1
+    assert results[0].order_id == "ord-1"
+    assert results[0].cum_qty == 30.0
+    assert results[0].order_status == OrderStatusEnum.OPEN
+    assert results[0].exec_type == "trade"
+    assert results[0].cl_ord_id == "sub-1"
+
+
+@pytest.mark.asyncio()
+async def test_subscribe_executions_yields_filled_when_complete() -> None:
+    """Verify CLOSED status when order is fully filled.
+
+    Given: A tracked order with filled=50,
+    When: Second poll shows filled=100 (== amount),
+    Then: ExecutionUpdate with CLOSED status (FILLED normalized) is yielded.
+    """
+    client = _build_polling_client()
+    poll_count = 0
+
+    async def _mock_get_orders(
+        symbol: str | None = None,
+        status: OrderStatusEnum | None = None,
+        limit: int | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count == 1:
+            return [_make_order_snapshot(filled=50.0)]
+        if poll_count == 2:
+            return [_make_order_snapshot(filled=100.0)]
+        client._running = False
+        return [_make_order_snapshot(filled=100.0)]
+
+    client.get_orders = _mock_get_orders
+
+    results: list[ExecutionUpdate] = []
+    async for update in client.subscribe_executions():
+        results.append(update)
+
+    assert len(results) == 1
+    assert results[0].order_status == OrderStatusEnum.CLOSED
+    assert results[0].cum_qty == 100.0
+    assert results[0].exec_type == "trade"
+
+
+@pytest.mark.asyncio()
+async def test_subscribe_executions_no_yield_when_no_change() -> None:
+    """Verify no update when filled quantity does not change.
+
+    Given: A tracked order with filled=30,
+    When: Second poll also shows filled=30,
+    Then: No ExecutionUpdate is yielded.
+    """
+    client = _build_polling_client()
+    poll_count = 0
+
+    async def _mock_get_orders(
+        symbol: str | None = None,
+        status: OrderStatusEnum | None = None,
+        limit: int | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count <= 2:
+            return [_make_order_snapshot(filled=30.0)]
+        client._running = False
+        return [_make_order_snapshot(filled=30.0)]
+
+    client.get_orders = _mock_get_orders
+
+    results: list[ExecutionUpdate] = []
+    async for update in client.subscribe_executions():
+        results.append(update)
+
+    assert results == []
+
+
+@pytest.mark.asyncio()
+async def test_subscribe_executions_handles_disappeared_filled_order() -> None:
+    """Verify CLOSED event when fully filled order disappears.
+
+    Given: A tracked order with filled==amount,
+    When: Order disappears from active orders,
+    Then: ExecutionUpdate with CLOSED status and exec_type='trade' is yielded.
+    """
+    client = _build_polling_client()
+    poll_count = 0
+
+    async def _mock_get_orders(
+        symbol: str | None = None,
+        status: OrderStatusEnum | None = None,
+        limit: int | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count == 1:
+            return [_make_order_snapshot(filled=100.0, amount=100.0)]
+        if poll_count == 2:
+            return []
+        client._running = False
+        return []
+
+    client.get_orders = _mock_get_orders
+
+    results: list[ExecutionUpdate] = []
+    async for update in client.subscribe_executions():
+        results.append(update)
+
+    assert len(results) == 1
+    assert results[0].order_status == OrderStatusEnum.CLOSED
+    assert results[0].exec_type == "trade"
+    assert results[0].cum_qty == 100.0
+
+
+@pytest.mark.asyncio()
+async def test_subscribe_executions_handles_disappeared_partial_order() -> None:
+    """Verify CANCELED event when partially filled order disappears.
+
+    Given: A tracked order with 0 < filled < amount,
+    When: Order disappears from active orders,
+    Then: ExecutionUpdate with CANCELED status is yielded and warning is logged.
+    """
+    client = _build_polling_client()
+    poll_count = 0
+
+    async def _mock_get_orders(
+        symbol: str | None = None,
+        status: OrderStatusEnum | None = None,
+        limit: int | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count == 1:
+            return [_make_order_snapshot(filled=30.0)]
+        if poll_count == 2:
+            return []
+        client._running = False
+        return []
+
+    client.get_orders = _mock_get_orders
+
+    results: list[ExecutionUpdate] = []
+    async for update in client.subscribe_executions():
+        results.append(update)
+
+    assert len(results) == 1
+    assert results[0].order_status == OrderStatusEnum.CANCELED
+    assert results[0].exec_type == "canceled"
+    assert results[0].cum_qty == 30.0
+
+
+@pytest.mark.asyncio()
+async def test_subscribe_executions_handles_disappeared_unfilled_order() -> None:
+    """Verify CANCELED event when unfilled order disappears.
+
+    Given: A tracked order with filled=0,
+    When: Order disappears from active orders,
+    Then: ExecutionUpdate with CANCELED status is yielded (no warning logged).
+    """
+    client = _build_polling_client()
+    poll_count = 0
+
+    async def _mock_get_orders(
+        symbol: str | None = None,
+        status: OrderStatusEnum | None = None,
+        limit: int | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count == 1:
+            return [_make_order_snapshot(filled=0.0)]
+        if poll_count == 2:
+            return []
+        client._running = False
+        return []
+
+    client.get_orders = _mock_get_orders
+
+    results: list[ExecutionUpdate] = []
+    async for update in client.subscribe_executions():
+        results.append(update)
+
+    assert len(results) == 1
+    assert results[0].order_status == OrderStatusEnum.CANCELED
+    assert results[0].exec_type == "canceled"
+    assert results[0].cum_qty == 0.0
+
+
+@pytest.mark.asyncio()
+async def test_subscribe_executions_handles_api_error() -> None:
+    """Verify polling continues after API error.
+
+    Given: A connected client,
+    When: get_orders raises an exception on second poll,
+    Then: Error is logged, third poll proceeds normally.
+    """
+    client = _build_polling_client()
+    poll_count = 0
+
+    async def _mock_get_orders(
+        symbol: str | None = None,
+        status: OrderStatusEnum | None = None,
+        limit: int | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count == 1:
+            return [_make_order_snapshot(filled=0.0)]
+        if poll_count == 2:
+            raise ConnectionError("API unavailable")
+        if poll_count == 3:
+            return [_make_order_snapshot(filled=50.0)]
+        client._running = False
+        return [_make_order_snapshot(filled=50.0)]
+
+    client.get_orders = _mock_get_orders
+
+    results: list[ExecutionUpdate] = []
+    async for update in client.subscribe_executions():
+        results.append(update)
+
+    assert len(results) == 1
+    assert results[0].cum_qty == 50.0
+
+
+@pytest.mark.asyncio()
+async def test_subscribe_executions_respects_poll_interval() -> None:
+    """Verify asyncio.sleep is called with execution_poll_interval.
+
+    Given: A client with execution_poll_interval=7.5,
+    When: One poll cycle completes,
+    Then: asyncio.sleep is called with 7.5.
+    """
+    client = _build_polling_client(execution_poll_interval=7.5)
+    poll_count = 0
+    sleep_values: list[float] = []
+
+    async def _mock_get_orders(
+        symbol: str | None = None,
+        status: OrderStatusEnum | None = None,
+        limit: int | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count > 1:
+            client._running = False
+        return []
+
+    original_sleep = asyncio.sleep
+
+    async def _mock_sleep(delay: float) -> None:
+        sleep_values.append(delay)
+        await original_sleep(0)
+
+    client.get_orders = _mock_get_orders
+
+    import snapper.infrastructure.exchanges.implementations.walutomat as walutomat_mod
+
+    original_asyncio_sleep = walutomat_mod.asyncio.sleep
+    walutomat_mod.asyncio.sleep = _mock_sleep
+    try:
+        async for _update in client.subscribe_executions():
+            pass
+    finally:
+        walutomat_mod.asyncio.sleep = original_asyncio_sleep
+
+    assert 7.5 in sleep_values
+
+
+@pytest.mark.asyncio()
+async def test_subscribe_executions_uses_correct_field_names() -> None:
+    """Verify ExecutionUpdate uses order_id, cl_ord_id, cum_qty field names.
+
+    Given: A tracked order that gets partially filled,
+    When: ExecutionUpdate is yielded,
+    Then: Fields are order_id (not exchange_order_id), cl_ord_id (not client_order_id),
+          cum_qty (not filled_qty).
+    """
+    client = _build_polling_client()
+    poll_count = 0
+
+    async def _mock_get_orders(
+        symbol: str | None = None,
+        status: OrderStatusEnum | None = None,
+        limit: int | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count == 1:
+            return [_make_order_snapshot(filled=0.0)]
+        if poll_count == 2:
+            return [_make_order_snapshot(filled=25.0)]
+        client._running = False
+        return [_make_order_snapshot(filled=25.0)]
+
+    client.get_orders = _mock_get_orders
+
+    results: list[ExecutionUpdate] = []
+    async for update in client.subscribe_executions():
+        results.append(update)
+
+    assert len(results) == 1
+    update = results[0]
+    assert update.order_id == "ord-1"
+    assert update.cl_ord_id == "sub-1"
+    assert update.cum_qty == 25.0
+    assert update.order_qty == 100.0
+    assert update.limit_price == 4.50
+
+
+@pytest.mark.asyncio()
+async def test_subscribe_executions_fails_when_not_connected() -> None:
+    """Verify RuntimeError when client is not connected.
+
+    Given: A client without HTTP connection,
     When: subscribe_executions() is iterated,
-    Then: NotImplementedError is raised.
+    Then: RuntimeError with NOT_CONNECTED message is raised.
     """
     client = WalutomatExchangeClient()
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(RuntimeError, match="Not connected"):
         async for _item in client.subscribe_executions():
-            """Consumed by iteration to trigger exception."""
+            pass
+
+
+@pytest.mark.asyncio()
+async def test_subscribe_executions_fails_when_no_credentials() -> None:
+    """Verify RuntimeError when credentials are missing.
+
+    Given: A connected client without API key,
+    When: subscribe_executions() is iterated,
+    Then: RuntimeError with AUTH_REQUIRED message is raised.
+    """
+    client = WalutomatExchangeClient()
+    client._http_client = cast(Any, object())
+    with pytest.raises(RuntimeError, match="Trading requires authentication"):
+        async for _item in client.subscribe_executions():
+            pass
+
+
+@pytest.mark.asyncio()
+async def test_subscribe_executions_new_order_no_yield_after_first_poll() -> None:
+    """Verify new order appearing after first poll with filled=0 does not yield.
+
+    Given: Empty first poll (seeds tracking),
+    When: Second poll shows a new order with filled=0,
+    Then: No ExecutionUpdate is yielded (new order, no fill delta).
+    """
+    client = _build_polling_client()
+    poll_count = 0
+
+    async def _mock_get_orders(
+        symbol: str | None = None,
+        status: OrderStatusEnum | None = None,
+        limit: int | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count == 1:
+            return []
+        if poll_count == 2:
+            return [_make_order_snapshot(filled=0.0)]
+        client._running = False
+        return [_make_order_snapshot(filled=0.0)]
+
+    client.get_orders = _mock_get_orders
+
+    results: list[ExecutionUpdate] = []
+    async for update in client.subscribe_executions():
+        results.append(update)
+
+    assert results == []
 
 
 @pytest.mark.asyncio()
