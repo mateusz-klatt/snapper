@@ -16,6 +16,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+import snapper.infrastructure.exchanges.implementations.walutomat as walutomat_mod
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
@@ -1219,8 +1220,6 @@ async def test_subscribe_executions_respects_poll_interval() -> None:
 
     client.get_orders = _mock_get_orders
 
-    import snapper.infrastructure.exchanges.implementations.walutomat as walutomat_mod
-
     original_asyncio_sleep = walutomat_mod.asyncio.sleep
     walutomat_mod.asyncio.sleep = _mock_sleep
     try:
@@ -1334,6 +1333,80 @@ async def test_subscribe_executions_new_order_no_yield_after_first_poll() -> Non
         results.append(update)
 
     assert results == []
+
+
+@pytest.mark.asyncio()
+async def test_subscribe_executions_new_order_with_prefilled_yields() -> None:
+    """Verify new order appearing with filled>0 yields ExecutionUpdate.
+
+    Given: Empty first poll (seeds tracking),
+    When: Second poll shows a new order with filled=50,
+    Then: ExecutionUpdate with cum_qty=50 is yielded.
+    """
+    client = _build_polling_client()
+    poll_count = 0
+
+    async def _mock_get_orders(
+        symbol: str | None = None,
+        status: OrderStatusEnum | None = None,
+        limit: int | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count == 1:
+            return []
+        if poll_count == 2:
+            return [_make_order_snapshot(filled=50.0)]
+        client._running = False
+        return [_make_order_snapshot(filled=50.0)]
+
+    client.get_orders = _mock_get_orders
+
+    results: list[ExecutionUpdate] = []
+    async for update in client.subscribe_executions():
+        results.append(update)
+
+    assert len(results) == 1
+    assert results[0].cum_qty == 50.0
+    assert results[0].exec_type == "trade"
+    assert results[0].order_status == OrderStatusEnum.OPEN
+
+
+@pytest.mark.asyncio()
+async def test_subscribe_executions_first_poll_failure_still_seeds_next() -> None:
+    """Verify first poll failure resets first_poll flag.
+
+    Given: First poll raises an exception,
+    When: Second poll succeeds with an order,
+    Then: Second poll seeds tracking (no yield), third poll detects fills.
+    """
+    client = _build_polling_client()
+    poll_count = 0
+
+    async def _mock_get_orders(
+        symbol: str | None = None,
+        status: OrderStatusEnum | None = None,
+        limit: int | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count == 1:
+            raise ConnectionError("API unavailable")
+        if poll_count == 2:
+            return [_make_order_snapshot(filled=0.0)]
+        if poll_count == 3:
+            return [_make_order_snapshot(filled=50.0)]
+        client._running = False
+        return [_make_order_snapshot(filled=50.0)]
+
+    client.get_orders = _mock_get_orders
+
+    results: list[ExecutionUpdate] = []
+    async for update in client.subscribe_executions():
+        results.append(update)
+
+    assert len(results) == 1
+    assert results[0].cum_qty == 50.0
 
 
 @pytest.mark.asyncio()

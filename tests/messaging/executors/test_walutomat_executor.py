@@ -7,6 +7,7 @@ from typing import cast
 import pytest
 
 from snapper.config.app import AppSettings
+from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
 from snapper.messaging.executors.walutomat import WalutomatOrderExecutor
 
 
@@ -100,7 +101,5 @@ def test_executor_client_supports_websocket_executions(
     When supports_websocket_executions is checked,
     Then it is True (inherited from ExchangeClientBase default).
     """
-    from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
-
     client = WalutomatExchangeClient()
     assert client.supports_websocket_executions is True

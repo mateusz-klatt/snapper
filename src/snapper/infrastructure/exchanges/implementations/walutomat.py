@@ -691,7 +691,10 @@ class WalutomatExchangeClient(ExchangeClientBase):
                     if first_poll:
                         continue
 
-                    if prev is not None and order.filled > prev.filled:
+                    should_yield = (prev is not None and order.filled > prev.filled) or (
+                        prev is None and order.filled > 0
+                    )
+                    if should_yield:
                         yield ExecutionUpdate(
                             order_id=order.id,
                             exec_type="trade",
@@ -712,7 +715,6 @@ class WalutomatExchangeClient(ExchangeClientBase):
                             cl_ord_id=order.client_order_id or "",
                             order_qty=order.amount,
                             limit_price=order.price,
-                            average_price=order.price,
                         )
 
                 if not first_poll:
@@ -748,6 +750,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
                 first_poll = False
 
             except Exception:
+                first_poll = False
                 logger.exception("Walutomat execution poll failed")
 
             await asyncio.sleep(self._execution_poll_interval)
