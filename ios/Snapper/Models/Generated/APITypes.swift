@@ -47,6 +47,7 @@ enum ConfiguredProcessRole: String, Codable, Sendable {
 enum ExecutionDataExchange: String, Codable, Sendable {
     case paper
     case kraken
+    case krakenFutures = "kraken_futures"
     case zonda
     case walutomat
 }
@@ -70,6 +71,7 @@ enum HealthCheckDataStatus: String, Codable, Sendable {
 enum OrderDataExchange: String, Codable, Sendable {
     case paper
     case kraken
+    case krakenFutures = "kraken_futures"
     case zonda
     case walutomat
 }
@@ -94,6 +96,7 @@ enum OrderDataOrderType: String, Codable, Sendable {
 enum PositionDataExchange: String, Codable, Sendable {
     case paper
     case kraken
+    case krakenFutures = "kraken_futures"
     case zonda
     case walutomat
 }
@@ -155,6 +158,7 @@ enum ProcessStopDataStatus: String, Codable, Sendable {
 enum SignalDataExchange: String, Codable, Sendable {
     case paper
     case kraken
+    case krakenFutures = "kraken_futures"
     case zonda
     case walutomat
 }

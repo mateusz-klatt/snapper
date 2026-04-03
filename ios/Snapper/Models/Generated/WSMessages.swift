@@ -21,6 +21,7 @@ enum HeartbeatDataStatus: String, Codable, Sendable {
 enum OrderCancelDataExchange: String, Codable, Sendable {
     case paper
     case kraken
+    case krakenFutures = "kraken_futures"
     case zonda
     case walutomat
 }
@@ -28,6 +29,7 @@ enum OrderCancelDataExchange: String, Codable, Sendable {
 enum OrderEventDataExchange: String, Codable, Sendable {
     case paper
     case kraken
+    case krakenFutures = "kraken_futures"
     case zonda
     case walutomat
 }
@@ -44,6 +46,7 @@ enum OrderEventDataEvent: String, Codable, Sendable {
 enum OrderReplaceDataExchange: String, Codable, Sendable {
     case paper
     case kraken
+    case krakenFutures = "kraken_futures"
     case zonda
     case walutomat
 }
@@ -51,6 +54,7 @@ enum OrderReplaceDataExchange: String, Codable, Sendable {
 enum OrderRequestDataExchange: String, Codable, Sendable {
     case paper
     case kraken
+    case krakenFutures = "kraken_futures"
     case zonda
     case walutomat
 }

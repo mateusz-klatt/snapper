@@ -1554,7 +1554,7 @@ export type Components = {
              * Exchange
              * @enum {string}
              */
-            exchange: "paper" | "kraken" | "zonda" | "walutomat";
+            exchange: "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
             /**
              * Side
              * @enum {string}
@@ -2049,7 +2049,7 @@ export type Components = {
              * Exchange
              * @enum {string}
              */
-            exchange: "paper" | "kraken" | "zonda" | "walutomat";
+            exchange: "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
             /**
              * Mode
              * @default live
@@ -2167,7 +2167,7 @@ export type Components = {
              * Exchange
              * @enum {string}
              */
-            exchange: "paper" | "kraken" | "zonda" | "walutomat";
+            exchange: "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
             /**
              * Mode
              * @default live
@@ -3088,7 +3088,7 @@ export type Components = {
              * Exchange
              * @enum {string}
              */
-            exchange: "paper" | "kraken" | "zonda" | "walutomat";
+            exchange: "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
             /**
              * Side
              * @enum {string}
@@ -5268,7 +5268,7 @@ export interface Operations {
                 /** @description Filter by strategy */
                 strategy?: string | null;
                 /** @description Filter by exchange */
-                exchange?: ("paper" | "kraken" | "zonda" | "walutomat") | null;
+                exchange?: ("paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat") | null;
                 /** @description Hours of history to return */
                 hours?: number;
                 /** @description Number of signals to return */
@@ -5590,7 +5590,7 @@ export interface Operations {
                 /** @description Symbol to filter by */
                 symbol?: string | null;
                 /** @description Filter by exchange */
-                exchange?: ("paper" | "kraken" | "zonda" | "walutomat") | null;
+                exchange?: ("paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat") | null;
                 /** @description Number of orders to return */
                 limit?: number;
                 /** @description Number of orders to skip */

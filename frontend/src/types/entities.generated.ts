@@ -15,7 +15,7 @@ export type {
 } from './ws.generated'
 
 type Exchange = 'kraken' | 'kraken_futures' | 'kraken_equities' | 'zonda' | 'walutomat' | 'polygon'
-type OrderExchange = 'paper' | 'kraken' | 'zonda' | 'walutomat'
+type Exchange2 = 'paper' | 'kraken' | 'kraken_futures' | 'zonda' | 'walutomat'
 type TradeSide = 'buy' | 'sell'
 type Mode = 'live' | 'paper'
 
@@ -73,7 +73,7 @@ export interface Execution {
   exchangeOrderId?: string | null
   clientOrderId: string
   instrument: string
-  exchange: OrderExchange
+  exchange: Exchange2
   side: TradeSide
   size: number
   price: number
@@ -127,7 +127,7 @@ export interface OrderCancel {
   publicId: string
   timestamp: Date
   sessionId: string
-  exchange: OrderExchange
+  exchange: Exchange2
   instrument: string
   exchangeOrderId: string
   clientOrderId: string
@@ -145,7 +145,7 @@ export interface Order {
   exchangeOrderId?: string | null
   clientOrderId: string
   instrument: string
-  exchange: OrderExchange
+  exchange: Exchange2
   mode?: Mode
   side: TradeSide
   status: string
@@ -172,7 +172,7 @@ export interface OrderEvent {
   sessionId: string
   exchangeOrderId: string
   clientOrderId: string
-  exchange: OrderExchange
+  exchange: Exchange2
   instrument: string
   event: 'submitted' | 'accepted' | 'rejected' | 'cancelled' | 'expired' | 'replaced'
   reason?: string | null
@@ -187,7 +187,7 @@ export interface OrderReplace {
   publicId: string
   timestamp: Date
   sessionId: string
-  exchange: OrderExchange
+  exchange: Exchange2
   instrument: string
   exchangeOrderId: string
   clientOrderId: string
@@ -205,7 +205,7 @@ export interface OrderRequest {
   timestamp: Date
   sessionId: string
   strategyId: string
-  exchange: OrderExchange
+  exchange: Exchange2
   instrument: string
   mode: Mode
   side: TradeSide
@@ -226,7 +226,7 @@ export interface Position {
   timestamp: Date
   sessionId: string
   instrument: string
-  exchange: OrderExchange
+  exchange: Exchange2
   mode?: Mode
   quantity: number
   averagePrice: number
@@ -282,7 +282,7 @@ export interface Signal {
   timestamp: Date
   sessionId: string
   instrument: string
-  exchange: OrderExchange
+  exchange: Exchange2
   side: TradeSide
   strength: number
   reason: string
