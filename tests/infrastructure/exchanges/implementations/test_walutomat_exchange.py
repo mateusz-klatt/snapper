@@ -26,6 +26,7 @@ from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
+from snapper.infrastructure.exchanges.implementations.walutomat import _TrackedOrder
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketPair
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketResponse
 
@@ -427,13 +428,15 @@ async def test_polling_loop_stops_on_errors(monkeypatch: pytest.MonkeyPatch) -> 
 async def test_get_order_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify get_order raises for missing order.
 
-    Given: A connected client with no matching orders,
+    Given: A connected client with empty API result,
     When: get_order() is called,
     Then: ValueError is raised.
     """
     client = WalutomatExchangeClient(api_key="k", private_key_data=_generate_private_key_pem())
-    client._http_client = AsyncMock()
-    monkeypatch.setattr(client, "get_orders", AsyncMock(return_value=[]))
+    get_resp = StubResponse({"success": True, "result": []})
+    stub_client = StubAsyncClient(get_responses=[get_resp])
+    client._http_client = cast(httpx.AsyncClient, stub_client)
+    monkeypatch.setattr(client, "_get_auth_headers", lambda *_args, **_kwargs: {"X-API-Key": "k"})
     with pytest.raises(ValueError):
         await client.get_order("abc")
 
@@ -1728,40 +1731,46 @@ async def test_create_order_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio()
 async def test_cancel_order_fetches_latest(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify cancel_order returns updated order state.
+    """Verify cancel_order returns parsed order from close endpoint.
 
     Given: A connected client with credentials,
     When: cancel_order() is called,
-    Then: Latest order state is fetched and returned.
+    Then: Order is closed via POST /market_fx/orders/close and result is parsed.
     """
     client = WalutomatExchangeClient(
         api_key="key",
         private_key_data=_generate_private_key_pem(),
     )
-    stub_client = StubAsyncClient(post_responses=[StubResponse({"success": True})])
+    close_response = StubResponse(
+        {
+            "success": True,
+            "result": {
+                "orderId": "abc123",
+                "submitId": "sub-1",
+                "currencyPair": "EURPLN",
+                "buySell": "BUY",
+                "volume": "100.00",
+                "limitPrice": "4.2000",
+                "status": "CLOSED",
+                "completion": 0,
+                "soldAmount": "0.00",
+                "boughtAmount": "0.00",
+                "commissionAmount": "0",
+                "commissionCurrency": "EUR",
+            },
+        }
+    )
+    stub_client = StubAsyncClient(post_responses=[close_response])
     client._http_client = cast(httpx.AsyncClient, stub_client)
 
     def auth_headers(_endpoint: str, _body: str) -> dict[str, str]:
         return {"X-API-Key": "key"}
 
     monkeypatch.setattr(client, "_get_auth_headers", auth_headers)
-    expected_order = ExchangeOrderSnapshot(
-        id="abc123",
-        client_order_id=None,
-        symbol="EUR-PLN",
-        side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
-        amount=100.0,
-        price=4.2,
-        status=OrderStatusEnum.OPEN,
-        filled=0.0,
-        remaining=100.0,
-        timestamp=0.0,
-    )
-    monkeypatch.setattr(client, "get_order", AsyncMock(return_value=expected_order))
     result = await client.cancel_order("abc123")
-    assert result is expected_order
-    assert stub_client.post_calls[0][0].endswith("/cancel")
+    assert result.id == "abc123"
+    assert result.status == OrderStatusEnum.CANCELED
+    assert stub_client.post_calls[0][0].endswith("/market_fx/orders/close")
 
 
 @pytest.mark.asyncio()
@@ -1780,41 +1789,48 @@ async def test_cancel_order_requires_authentication() -> None:
 
 @pytest.mark.asyncio()
 async def test_get_order_returns_matched_order(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify get_order returns matching order.
+    """Verify get_order returns parsed order from findOrders endpoint.
 
-    Given: A connected client with matching order,
+    Given: A connected client with matching order in API,
     When: get_order() is called with order ID,
-    Then: Matching ExchangeOrderSnapshot is returned.
+    Then: Parsed ExchangeOrderSnapshot is returned.
     """
     client = WalutomatExchangeClient(
         api_key="key",
         private_key_data=_generate_private_key_pem(),
     )
-    stub_client = StubAsyncClient()
-    client._http_client = cast(httpx.AsyncClient, stub_client)
-    order = ExchangeOrderSnapshot(
-        id="target",
-        client_order_id=None,
-        symbol="EUR-PLN",
-        side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
-        amount=100.0,
-        price=4.2,
-        status=OrderStatusEnum.OPEN,
-        filled=0.0,
-        remaining=100.0,
-        timestamp=0.0,
+    get_resp = StubResponse(
+        {
+            "success": True,
+            "result": [
+                {
+                    "orderId": "target",
+                    "submitId": "sub-1",
+                    "currencyPair": "EURPLN",
+                    "buySell": "BUY",
+                    "volume": "100.00",
+                    "limitPrice": "4.2000",
+                    "status": "ACTIVE",
+                    "boughtAmount": "0.00",
+                    "commissionAmount": "0",
+                },
+            ],
+        }
     )
-    monkeypatch.setattr(client, "get_orders", AsyncMock(return_value=[order]))
+    stub_client = StubAsyncClient(get_responses=[get_resp])
+    client._http_client = cast(httpx.AsyncClient, stub_client)
+    monkeypatch.setattr(client, "_get_auth_headers", lambda *_args, **_kwargs: {"X-API-Key": "key"})
     result = await client.get_order("target")
-    assert result is order
+    assert result.id == "target"
+    assert result.symbol == "EUR-PLN"
+    assert result.status == OrderStatusEnum.OPEN
 
 
 @pytest.mark.asyncio()
 async def test_get_order_raises_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify get_order raises for empty orders list.
+    """Verify get_order raises for empty API result.
 
-    Given: A connected client with no orders,
+    Given: A connected client with no matching orders from API,
     When: get_order() is called,
     Then: ValueError is raised.
     """
@@ -1822,41 +1838,30 @@ async def test_get_order_raises_when_missing(monkeypatch: pytest.MonkeyPatch) ->
         api_key="key",
         private_key_data=_generate_private_key_pem(),
     )
-    stub_client = StubAsyncClient()
+    get_resp = StubResponse({"success": True, "result": []})
+    stub_client = StubAsyncClient(get_responses=[get_resp])
     client._http_client = cast(httpx.AsyncClient, stub_client)
-    monkeypatch.setattr(client, "get_orders", AsyncMock(return_value=[]))
+    monkeypatch.setattr(client, "_get_auth_headers", lambda *_args, **_kwargs: {"X-API-Key": "key"})
     with pytest.raises(ValueError, match="not found"):
         await client.get_order("missing")
 
 
 @pytest.mark.asyncio()
-async def test_get_order_raises_when_no_ids_match(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify get_order raises when no ID matches.
+async def test_get_order_raises_when_api_returns_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify get_order raises when API returns success=false.
 
-    Given: A connected client with orders but none matching,
-    When: get_order() is called with non-existent ID,
+    Given: A connected client with API returning failure,
+    When: get_order() is called,
     Then: ValueError is raised.
     """
     client = WalutomatExchangeClient(
         api_key="key",
         private_key_data=_generate_private_key_pem(),
     )
-    stub_client = StubAsyncClient()
+    get_resp = StubResponse({"success": False, "errors": ["not found"]})
+    stub_client = StubAsyncClient(get_responses=[get_resp])
     client._http_client = cast(httpx.AsyncClient, stub_client)
-    order = ExchangeOrderSnapshot(
-        id="other",
-        client_order_id=None,
-        symbol="EUR-PLN",
-        side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
-        amount=100.0,
-        price=4.2,
-        status=OrderStatusEnum.OPEN,
-        filled=0.0,
-        remaining=100.0,
-        timestamp=0.0,
-    )
-    monkeypatch.setattr(client, "get_orders", AsyncMock(return_value=[order]))
+    monkeypatch.setattr(client, "_get_auth_headers", lambda *_args, **_kwargs: {"X-API-Key": "key"})
     with pytest.raises(ValueError, match="not found"):
         await client.get_order("missing")
 
@@ -1900,6 +1905,609 @@ async def test_get_orders_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert orders[0].id == "abc"
     assert orders[0].symbol == "EUR-PLN"
     assert math.isclose(orders[0].filled, 20.0, rel_tol=1e-9)
+
+
+def _make_api_order(
+    order_id: str = "ord-1",
+    submit_id: str = "sub-1",
+    currency_pair: str = "EURPLN",
+    buy_sell: str = "BUY",
+    volume: str = "100.00",
+    limit_price: str = "4.2800",
+    status: str = "ACTIVE",
+    completion: int = 0,
+    sold_amount: str = "0.00",
+    bought_amount: str = "50.00",
+    commission_amount: str = "0.10",
+    commission_currency: str = "EUR",
+) -> dict[str, Any]:
+    """Build a raw Walutomat API order dictionary for parser tests."""
+    return {
+        "orderId": order_id,
+        "submitId": submit_id,
+        "currencyPair": currency_pair,
+        "buySell": buy_sell,
+        "volume": volume,
+        "limitPrice": limit_price,
+        "status": status,
+        "completion": completion,
+        "soldAmount": sold_amount,
+        "boughtAmount": bought_amount,
+        "commissionAmount": commission_amount,
+        "commissionCurrency": commission_currency,
+    }
+
+
+def test_parse_order_buy_uses_bought_amount() -> None:
+    """Verify parser uses boughtAmount for BUY side fill.
+
+    Given: A BUY order with boughtAmount=50 and soldAmount=200,
+    When: _parse_walutomat_order is called,
+    Then: filled equals boughtAmount (50), not soldAmount.
+    """
+    data = _make_api_order(buy_sell="BUY", bought_amount="50.00", sold_amount="200.00")
+    result = WalutomatExchangeClient._parse_walutomat_order(data)
+    assert math.isclose(result.filled, 50.0, rel_tol=1e-9)
+
+
+def test_parse_order_sell_uses_sold_amount() -> None:
+    """Verify parser uses soldAmount for SELL side fill.
+
+    Given: A SELL order with soldAmount=75 and boughtAmount=300,
+    When: _parse_walutomat_order is called,
+    Then: filled equals soldAmount (75), not boughtAmount.
+    """
+    data = _make_api_order(buy_sell="SELL", sold_amount="75.00", bought_amount="300.00")
+    result = WalutomatExchangeClient._parse_walutomat_order(data)
+    assert math.isclose(result.filled, 75.0, rel_tol=1e-9)
+
+
+def test_parse_order_commission_into_fee() -> None:
+    """Verify parser maps commissionAmount to fee and commissionCurrency to fee_currency.
+
+    Given: An order with commissionAmount=0.10 and commissionCurrency=EUR,
+    When: _parse_walutomat_order is called,
+    Then: fee=0.10 and fee_currency='EUR'.
+    """
+    data = _make_api_order(commission_amount="0.10", commission_currency="EUR")
+    result = WalutomatExchangeClient._parse_walutomat_order(data)
+    assert result.fee is not None
+    assert math.isclose(result.fee, 0.10, rel_tol=1e-9)
+    assert result.fee_currency == "EUR"
+
+
+def test_parse_order_active_status() -> None:
+    """Verify parser maps ACTIVE status to OPEN.
+
+    Given: An order with status=ACTIVE,
+    When: _parse_walutomat_order is called,
+    Then: OrderStatusEnum.OPEN is returned.
+    """
+    data = _make_api_order(status="ACTIVE")
+    result = WalutomatExchangeClient._parse_walutomat_order(data)
+    assert result.status == OrderStatusEnum.OPEN
+
+
+def test_parse_order_closed_complete_status() -> None:
+    """Verify parser maps CLOSED with completion=100 to CLOSED.
+
+    Given: An order with status=CLOSED and completion=100,
+    When: _parse_walutomat_order is called,
+    Then: OrderStatusEnum.CLOSED is returned.
+    """
+    data = _make_api_order(status="CLOSED", completion=100)
+    result = WalutomatExchangeClient._parse_walutomat_order(data)
+    assert result.status == OrderStatusEnum.CLOSED
+
+
+def test_parse_order_closed_partial_status() -> None:
+    """Verify parser maps CLOSED with completion<100 to CANCELED.
+
+    Given: An order with status=CLOSED and completion=50,
+    When: _parse_walutomat_order is called,
+    Then: OrderStatusEnum.CANCELED is returned.
+    """
+    data = _make_api_order(status="CLOSED", completion=50)
+    result = WalutomatExchangeClient._parse_walutomat_order(data)
+    assert result.status == OrderStatusEnum.CANCELED
+
+
+@pytest.mark.asyncio()
+async def test_get_order_uses_find_orders_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify get_order calls the findOrders endpoint with orderId query param.
+
+    Given: A connected client with credentials,
+    When: get_order('ord-42') is called,
+    Then: GET URL contains /market_fx/orders?orderId=ord-42.
+    """
+    client = WalutomatExchangeClient(api_key="key", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse(
+        {
+            "success": True,
+            "result": [_make_api_order(order_id="ord-42")],
+        }
+    )
+    stub_client = StubAsyncClient(get_responses=[get_resp])
+    client._http_client = cast(httpx.AsyncClient, stub_client)
+    monkeypatch.setattr(client, "_get_auth_headers", lambda *_args, **_kwargs: {"X-API-Key": "key"})
+    await client.get_order("ord-42")
+    assert "/market_fx/orders?orderId=ord-42" in stub_client.get_calls[0][0]
+
+
+@pytest.mark.asyncio()
+async def test_get_order_signs_endpoint_with_query_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify get_order passes endpoint with query string to _get_auth_headers.
+
+    Given: A connected client with credentials,
+    When: get_order('ord-99') is called,
+    Then: _get_auth_headers receives endpoint containing ?orderId=ord-99.
+    """
+    client = WalutomatExchangeClient(api_key="key", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse(
+        {
+            "success": True,
+            "result": [_make_api_order(order_id="ord-99")],
+        }
+    )
+    stub_client = StubAsyncClient(get_responses=[get_resp])
+    client._http_client = cast(httpx.AsyncClient, stub_client)
+    captured_endpoints: list[str] = []
+
+    def capture_auth(endpoint: str, body: str = "") -> dict[str, str]:
+        captured_endpoints.append(endpoint)
+        return {"X-API-Key": "key"}
+
+    monkeypatch.setattr(client, "_get_auth_headers", capture_auth)
+    await client.get_order("ord-99")
+    assert any("?orderId=ord-99" in ep for ep in captured_endpoints)
+
+
+@pytest.mark.asyncio()
+async def test_get_order_returns_completed_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify get_order returns a fully completed order.
+
+    Given: A connected client with CLOSED+completion=100 order in API,
+    When: get_order() is called,
+    Then: ExchangeOrderSnapshot with CLOSED status is returned.
+    """
+    client = WalutomatExchangeClient(api_key="key", private_key_data=_generate_private_key_pem())
+    get_resp = StubResponse(
+        {
+            "success": True,
+            "result": [
+                _make_api_order(
+                    order_id="ord-done",
+                    status="CLOSED",
+                    completion=100,
+                    bought_amount="100.00",
+                ),
+            ],
+        }
+    )
+    stub_client = StubAsyncClient(get_responses=[get_resp])
+    client._http_client = cast(httpx.AsyncClient, stub_client)
+    monkeypatch.setattr(client, "_get_auth_headers", lambda *_args, **_kwargs: {"X-API-Key": "key"})
+    result = await client.get_order("ord-done")
+    assert result.status == OrderStatusEnum.CLOSED
+    assert math.isclose(result.filled, 100.0, rel_tol=1e-9)
+
+
+@pytest.mark.asyncio()
+async def test_cancel_order_uses_close_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify cancel_order POSTs to /market_fx/orders/close.
+
+    Given: A connected client with credentials,
+    When: cancel_order() is called,
+    Then: POST URL ends with /market_fx/orders/close.
+    """
+    client = WalutomatExchangeClient(api_key="key", private_key_data=_generate_private_key_pem())
+    close_resp = StubResponse(
+        {
+            "success": True,
+            "result": _make_api_order(status="CLOSED", completion=0),
+        }
+    )
+    stub_client = StubAsyncClient(post_responses=[close_resp])
+    client._http_client = cast(httpx.AsyncClient, stub_client)
+    monkeypatch.setattr(client, "_get_auth_headers", lambda *_args, **_kwargs: {"X-API-Key": "key"})
+    await client.cancel_order("ord-1")
+    assert stub_client.post_calls[0][0].endswith("/market_fx/orders/close")
+
+
+@pytest.mark.asyncio()
+async def test_cancel_order_sends_order_id_in_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify cancel_order sends orderId in form body.
+
+    Given: A connected client with credentials,
+    When: cancel_order('ord-77') is called,
+    Then: POST body contains 'orderId=ord-77'.
+    """
+    client = WalutomatExchangeClient(api_key="key", private_key_data=_generate_private_key_pem())
+    close_resp = StubResponse(
+        {
+            "success": True,
+            "result": _make_api_order(order_id="ord-77", status="CLOSED", completion=0),
+        }
+    )
+    stub_client = StubAsyncClient(post_responses=[close_resp])
+    client._http_client = cast(httpx.AsyncClient, stub_client)
+    monkeypatch.setattr(client, "_get_auth_headers", lambda *_args, **_kwargs: {"X-API-Key": "key"})
+    await client.cancel_order("ord-77")
+    posted_body = stub_client.post_calls[0][1].get("content", "")
+    assert "orderId=ord-77" in posted_body
+
+
+@pytest.mark.asyncio()
+async def test_cancel_order_returns_canceled_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify cancel_order returns CANCELED for CLOSED+completion=0.
+
+    Given: A connected client with credentials,
+    When: cancel_order() is called and API returns CLOSED with completion=0,
+    Then: Returned snapshot has status CANCELED.
+    """
+    client = WalutomatExchangeClient(api_key="key", private_key_data=_generate_private_key_pem())
+    close_resp = StubResponse(
+        {
+            "success": True,
+            "result": _make_api_order(status="CLOSED", completion=0, bought_amount="0.00"),
+        }
+    )
+    stub_client = StubAsyncClient(post_responses=[close_resp])
+    client._http_client = cast(httpx.AsyncClient, stub_client)
+    monkeypatch.setattr(client, "_get_auth_headers", lambda *_args, **_kwargs: {"X-API-Key": "key"})
+    result = await client.cancel_order("ord-1")
+    assert result.status == OrderStatusEnum.CANCELED
+
+
+@pytest.mark.asyncio()
+async def test_disappeared_order_queries_find_orders() -> None:
+    """Verify _resolve_disappeared calls get_order for final state.
+
+    Given: A tracked order that disappeared,
+    When: _resolve_disappeared is invoked,
+    Then: get_order is called with the order ID.
+    """
+    client = _build_polling_client()
+    called_with: list[str] = []
+
+    async def mock_get_order(order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
+        called_with.append(order_id)
+        return _make_order_snapshot(
+            order_id=order_id,
+            filled=100.0,
+            amount=100.0,
+            status=OrderStatusEnum.CLOSED,
+        )
+
+    client.get_order = mock_get_order
+
+    tracked = _TrackedOrder(
+        order_id="ord-1",
+        cl_ord_id="sub-1",
+        symbol="EUR-PLN",
+        side=OrderSideEnum.BUY,
+        order_type=OrderTypeEnum.LIMIT,
+        amount=100.0,
+        filled=50.0,
+        price=4.50,
+    )
+    events: list[ExecutionUpdate] = []
+    async for event in client._resolve_disappeared("ord-1", tracked):
+        events.append(event)
+    assert "ord-1" in called_with
+
+
+@pytest.mark.asyncio()
+async def test_disappeared_order_uses_api_response() -> None:
+    """Verify _resolve_disappeared uses API response for event data.
+
+    Given: A tracked order that disappeared with API returning different fill,
+    When: _resolve_disappeared is invoked,
+    Then: ExecutionUpdate uses fill from API response, not tracked state.
+    """
+    client = _build_polling_client()
+
+    async def mock_get_order(order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
+        return _make_order_snapshot(
+            order_id=order_id,
+            filled=100.0,
+            amount=100.0,
+            status=OrderStatusEnum.CLOSED,
+        )
+
+    client.get_order = mock_get_order
+
+    tracked = _TrackedOrder(
+        order_id="ord-1",
+        cl_ord_id="sub-1",
+        symbol="EUR-PLN",
+        side=OrderSideEnum.BUY,
+        order_type=OrderTypeEnum.LIMIT,
+        amount=100.0,
+        filled=50.0,
+        price=4.50,
+    )
+    events: list[ExecutionUpdate] = []
+    async for event in client._resolve_disappeared("ord-1", tracked):
+        events.append(event)
+    assert events[0].cum_qty == 100.0
+
+
+@pytest.mark.asyncio()
+async def test_disappeared_order_fallback_on_error() -> None:
+    """Verify _resolve_disappeared falls back to tracked state on API error.
+
+    Given: A tracked order that disappeared and get_order raises,
+    When: _resolve_disappeared is invoked,
+    Then: Fallback event uses tracked snapshot data.
+    """
+    client = _build_polling_client()
+
+    async def mock_get_order(order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
+        raise ConnectionError("API unavailable")
+
+    client.get_order = mock_get_order
+
+    tracked = _TrackedOrder(
+        order_id="ord-1",
+        cl_ord_id="sub-1",
+        symbol="EUR-PLN",
+        side=OrderSideEnum.BUY,
+        order_type=OrderTypeEnum.LIMIT,
+        amount=100.0,
+        filled=30.0,
+        price=4.50,
+    )
+    events: list[ExecutionUpdate] = []
+    async for event in client._resolve_disappeared("ord-1", tracked):
+        events.append(event)
+    assert len(events) == 1
+    assert events[0].cum_qty == 30.0
+    assert events[0].order_status == OrderStatusEnum.CANCELED
+
+
+@pytest.mark.asyncio()
+async def test_disappeared_partial_fill_cancel_emits_two_events() -> None:
+    """Verify partial fill + cancel emits two events when new fill exists.
+
+    Given: A tracked order with filled=30 that disappeared,
+    When: API shows CANCELED with filled=60 (new fill delta),
+    Then: Two events: trade (PARTIALLY_FILLED) + canceled (CANCELED).
+    """
+    client = _build_polling_client()
+
+    async def mock_get_order(order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
+        return _make_order_snapshot(
+            order_id=order_id,
+            filled=60.0,
+            amount=100.0,
+            status=OrderStatusEnum.CANCELED,
+        )
+
+    client.get_order = mock_get_order
+
+    tracked = _TrackedOrder(
+        order_id="ord-1",
+        cl_ord_id="sub-1",
+        symbol="EUR-PLN",
+        side=OrderSideEnum.BUY,
+        order_type=OrderTypeEnum.LIMIT,
+        amount=100.0,
+        filled=30.0,
+        price=4.50,
+    )
+    events: list[ExecutionUpdate] = []
+    async for event in client._resolve_disappeared("ord-1", tracked):
+        events.append(event)
+    assert len(events) == 2
+    assert events[0].exec_type == "trade"
+    assert events[0].order_status == OrderStatusEnum.OPEN
+    assert events[0].cum_qty == 60.0
+    assert events[1].exec_type == "canceled"
+    assert events[1].order_status == OrderStatusEnum.CANCELED
+
+
+@pytest.mark.asyncio()
+async def test_disappeared_partial_cancel_no_new_fill_emits_one_event() -> None:
+    """Verify cancel without new fill emits only one canceled event.
+
+    Given: A tracked order with filled=30 that disappeared,
+    When: API shows CANCELED with same filled=30 (no new fill delta),
+    Then: One event: canceled (CANCELED).
+    """
+    client = _build_polling_client()
+
+    async def mock_get_order(order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
+        return _make_order_snapshot(
+            order_id=order_id,
+            filled=30.0,
+            amount=100.0,
+            status=OrderStatusEnum.CANCELED,
+        )
+
+    client.get_order = mock_get_order
+
+    tracked = _TrackedOrder(
+        order_id="ord-1",
+        cl_ord_id="sub-1",
+        symbol="EUR-PLN",
+        side=OrderSideEnum.BUY,
+        order_type=OrderTypeEnum.LIMIT,
+        amount=100.0,
+        filled=30.0,
+        price=4.50,
+    )
+    events: list[ExecutionUpdate] = []
+    async for event in client._resolve_disappeared("ord-1", tracked):
+        events.append(event)
+    assert len(events) == 1
+    assert events[0].exec_type == "canceled"
+    assert events[0].order_status == OrderStatusEnum.CANCELED
+
+
+@pytest.mark.asyncio()
+async def test_disappeared_fully_filled_emits_single_trade() -> None:
+    """Verify fully filled disappeared order emits single trade event.
+
+    Given: A tracked order with filled=50 that disappeared,
+    When: API shows CLOSED with filled=100 (fully filled),
+    Then: One event: trade with FILLED status.
+    """
+    client = _build_polling_client()
+
+    async def mock_get_order(order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
+        return _make_order_snapshot(
+            order_id=order_id,
+            filled=100.0,
+            amount=100.0,
+            status=OrderStatusEnum.CLOSED,
+        )
+
+    client.get_order = mock_get_order
+
+    tracked = _TrackedOrder(
+        order_id="ord-1",
+        cl_ord_id="sub-1",
+        symbol="EUR-PLN",
+        side=OrderSideEnum.BUY,
+        order_type=OrderTypeEnum.LIMIT,
+        amount=100.0,
+        filled=50.0,
+        price=4.50,
+    )
+    events: list[ExecutionUpdate] = []
+    async for event in client._resolve_disappeared("ord-1", tracked):
+        events.append(event)
+    assert len(events) == 1
+    assert events[0].exec_type == "trade"
+    assert events[0].order_status == OrderStatusEnum.CLOSED
+    assert events[0].cum_qty == 100.0
+
+
+@pytest.mark.asyncio()
+async def test_active_fill_event_has_fees() -> None:
+    """Verify active fill event includes fee breakdown.
+
+    Given: A tracked order with fee and fee_currency on snapshot,
+    When: Fill delta is detected during polling,
+    Then: ExecutionUpdate has fees=[ExecutionFeeBreakdown(asset, quantity)].
+    """
+    client = _build_polling_client()
+    poll_count = 0
+
+    async def _mock_get_orders(
+        symbol: str | None = None,
+        status: OrderStatusEnum | None = None,
+        limit: int | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count == 1:
+            return [_make_order_snapshot(filled=0.0)]
+        snap = _make_order_snapshot(filled=30.0)
+        snap.fee = 0.06
+        snap.fee_currency = "EUR"
+        if poll_count > 2:
+            client._running = False
+        return [snap]
+
+    client.get_orders = _mock_get_orders
+
+    results: list[ExecutionUpdate] = []
+    async for update in client.subscribe_executions():
+        results.append(update)
+
+    assert len(results) == 1
+    assert results[0].fees is not None
+    assert len(results[0].fees) == 1
+    assert results[0].fees[0].asset == "EUR"
+    assert math.isclose(results[0].fees[0].quantity, 0.06, rel_tol=1e-9)
+
+
+@pytest.mark.asyncio()
+async def test_disappeared_order_fees_populated() -> None:
+    """Verify disappearance fill event includes fees from API response.
+
+    Given: A tracked order that disappeared,
+    When: API returns order with commission data,
+    Then: ExecutionUpdate has fees from the API response.
+    """
+    client = _build_polling_client()
+
+    async def mock_get_order(order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
+        snap = _make_order_snapshot(
+            order_id=order_id,
+            filled=100.0,
+            amount=100.0,
+            status=OrderStatusEnum.CLOSED,
+        )
+        snap.fee = 0.20
+        snap.fee_currency = "EUR"
+        return snap
+
+    client.get_order = mock_get_order
+
+    tracked = _TrackedOrder(
+        order_id="ord-1",
+        cl_ord_id="sub-1",
+        symbol="EUR-PLN",
+        side=OrderSideEnum.BUY,
+        order_type=OrderTypeEnum.LIMIT,
+        amount=100.0,
+        filled=50.0,
+        price=4.50,
+    )
+    events: list[ExecutionUpdate] = []
+    async for event in client._resolve_disappeared("ord-1", tracked):
+        events.append(event)
+    assert events[0].fees is not None
+    assert events[0].fees[0].asset == "EUR"
+    assert math.isclose(events[0].fees[0].quantity, 0.20, rel_tol=1e-9)
+
+
+@pytest.mark.asyncio()
+async def test_disappeared_order_fee_usd_equiv_not_set() -> None:
+    """Verify disappearance fee breakdown does not set fee_usd_equiv.
+
+    Given: A tracked order that disappeared with commission data,
+    When: _resolve_disappeared emits events,
+    Then: ExecutionFeeBreakdown only has asset and quantity (no usd_equiv).
+    """
+    client = _build_polling_client()
+
+    async def mock_get_order(order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
+        snap = _make_order_snapshot(
+            order_id=order_id,
+            filled=100.0,
+            amount=100.0,
+            status=OrderStatusEnum.CLOSED,
+        )
+        snap.fee = 0.15
+        snap.fee_currency = "PLN"
+        return snap
+
+    client.get_order = mock_get_order
+
+    tracked = _TrackedOrder(
+        order_id="ord-1",
+        cl_ord_id="sub-1",
+        symbol="EUR-PLN",
+        side=OrderSideEnum.BUY,
+        order_type=OrderTypeEnum.LIMIT,
+        amount=100.0,
+        filled=50.0,
+        price=4.50,
+    )
+    events: list[ExecutionUpdate] = []
+    async for event in client._resolve_disappeared("ord-1", tracked):
+        events.append(event)
+    assert events[0].fees is not None
+    fee_breakdown = events[0].fees[0]
+    assert fee_breakdown.asset == "PLN"
+    assert fee_breakdown.quantity == 0.15
+    assert events[0].fee_usd_equiv is None
 
 
 @pytest.mark.asyncio()

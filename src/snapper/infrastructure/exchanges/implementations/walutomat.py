@@ -50,6 +50,7 @@ from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
+from snapper.infrastructure.exchanges.contracts import ExecutionFeeBreakdown
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
@@ -718,38 +719,15 @@ class WalutomatExchangeClient(ExchangeClientBase):
                             order_qty=order.amount,
                             limit_price=order.price,
                             average_price=order.price,
+                            fees=self._build_fees(order),
                         )
 
                 if not first_poll:
                     disappeared = set(tracked.keys()) - current_ids
                     for oid in disappeared:
                         t = tracked.pop(oid)
-                        is_filled = math.isclose(t.filled, t.amount)
-                        yield ExecutionUpdate(
-                            order_id=t.order_id,
-                            exec_type="trade" if is_filled else "canceled",
-                            symbol=t.symbol,
-                            side=t.side,
-                            order_type=t.order_type,
-                            order_status=(
-                                OrderStatusEnum.FILLED if is_filled else OrderStatusEnum.CANCELED
-                            ),
-                            timestamp=datetime.now(UTC),
-                            cum_qty=t.filled,
-                            cl_ord_id=t.cl_ord_id,
-                            order_qty=t.amount,
-                            limit_price=t.price,
-                            average_price=t.price if t.price else None,
-                        )
-                        if not is_filled and t.filled > 0:
-                            logger.warning(
-                                "Walutomat order {} disappeared with partial fill "
-                                "({}/{}), marking CANCELLED. "
-                                "Prior fills already published during polling.",
-                                oid,
-                                t.filled,
-                                t.amount,
-                            )
+                        async for event in self._resolve_disappeared(oid, t):
+                            yield event
 
                 first_poll = False
 
@@ -766,6 +744,111 @@ class WalutomatExchangeClient(ExchangeClientBase):
                         self._execution_wake.wait(),
                         timeout=self._execution_idle_interval,
                     )
+
+    @staticmethod
+    def _build_fees(snapshot: ExchangeOrderSnapshot) -> list[ExecutionFeeBreakdown] | None:
+        """Build fee breakdown from snapshot commission data.
+
+        Args:
+            snapshot: Order snapshot with fee and fee_currency fields.
+
+        Returns:
+            Single-element fee list if commission data available, else None.
+        """
+        if snapshot.fee and snapshot.fee_currency:
+            return [ExecutionFeeBreakdown(asset=snapshot.fee_currency, quantity=snapshot.fee)]
+        return None
+
+    async def _resolve_disappeared(
+        self,
+        oid: str,
+        tracked: _TrackedOrder,
+    ) -> AsyncIterator[ExecutionUpdate]:
+        """Resolve terminal state for an order that disappeared from active list.
+
+        Queries the findOrders endpoint for actual final state. Emits a fill
+        event before the cancel event when there is an unreported fill delta
+        (prevents fill loss when executor short-circuits canceled events).
+
+        Falls back to tracked snapshot if the API query fails.
+
+        Args:
+            oid: Exchange order ID that disappeared.
+            tracked: Last-known tracked state from polling.
+
+        Yields:
+            One or two ExecutionUpdate events depending on final state.
+        """
+        try:
+            final = await self.get_order(oid)
+            has_new_fill = final.filled > tracked.filled
+            fees = self._build_fees(final)
+
+            if final.status == OrderStatusEnum.CLOSED:
+                yield ExecutionUpdate(
+                    order_id=final.id,
+                    exec_type="trade",
+                    symbol=final.symbol,
+                    side=final.side,
+                    order_type=final.type,
+                    order_status=OrderStatusEnum.FILLED,
+                    timestamp=datetime.now(UTC),
+                    cum_qty=final.filled,
+                    cl_ord_id=final.client_order_id or tracked.cl_ord_id,
+                    order_qty=final.amount,
+                    limit_price=final.price,
+                    average_price=final.price,
+                    fees=fees,
+                )
+            else:
+                if has_new_fill:
+                    yield ExecutionUpdate(
+                        order_id=final.id,
+                        exec_type="trade",
+                        symbol=final.symbol,
+                        side=final.side,
+                        order_type=final.type,
+                        order_status=OrderStatusEnum.PARTIALLY_FILLED,
+                        timestamp=datetime.now(UTC),
+                        cum_qty=final.filled,
+                        cl_ord_id=final.client_order_id or tracked.cl_ord_id,
+                        order_qty=final.amount,
+                        limit_price=final.price,
+                        average_price=final.price,
+                        fees=fees,
+                    )
+                yield ExecutionUpdate(
+                    order_id=final.id,
+                    exec_type="canceled",
+                    symbol=final.symbol,
+                    side=final.side,
+                    order_type=final.type,
+                    order_status=OrderStatusEnum.CANCELED,
+                    timestamp=datetime.now(UTC),
+                    cum_qty=final.filled,
+                    cl_ord_id=final.client_order_id or tracked.cl_ord_id,
+                    order_qty=final.amount,
+                    limit_price=final.price,
+                )
+        except Exception:
+            logger.exception(
+                "Failed to query final state for order {}, using tracked snapshot", oid
+            )
+            is_filled = math.isclose(tracked.filled, tracked.amount)
+            yield ExecutionUpdate(
+                order_id=tracked.order_id,
+                exec_type="trade" if is_filled else "canceled",
+                symbol=tracked.symbol,
+                side=tracked.side,
+                order_type=tracked.order_type,
+                order_status=(OrderStatusEnum.FILLED if is_filled else OrderStatusEnum.CANCELED),
+                timestamp=datetime.now(UTC),
+                cum_qty=tracked.filled,
+                cl_ord_id=tracked.cl_ord_id,
+                order_qty=tracked.amount,
+                limit_price=tracked.price,
+                average_price=tracked.price if tracked.price else None,
+            )
 
     def subscribe_instruments(self, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
         """Subscribe to instrument/pair information.
@@ -866,36 +949,45 @@ class WalutomatExchangeClient(ExchangeClientBase):
         return order
 
     async def cancel_order(self, order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
-        """Cancel an existing order.
+        """Withdraw an order from the market.
+
+        Uses the v2 close endpoint which returns full order details
+        including final fill amounts and commission.
 
         Args:
             order_id: Order ID to cancel.
-            symbol: Trading pair (optional).
+            symbol: Trading pair (unused, kept for interface compatibility).
 
         Returns:
-            Cancelled order snapshot.
+            Closed order snapshot with accurate final state.
 
         Raises:
-            RuntimeError: If not connected or not authenticated.
+            RuntimeError: If not connected or not authenticated, or cancel fails.
         """
+        _ = symbol
         client = self._require_authenticated()
-        endpoint = f"/api/v2.0.0/market_fx/orders/{order_id}/cancel"
-        headers = self._get_auth_headers(endpoint, "")
-        url = f"{self.api_base_url}/market_fx/orders/{order_id}/cancel"
-        response = await client.post(url, headers=headers)
+        endpoint = "/api/v2.0.0/market_fx/orders/close"
+        body = f"orderId={order_id}"
+        headers = self._get_auth_headers(endpoint, body)
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+        url = f"{self.api_base_url}/market_fx/orders/close"
+        response = await client.post(url, content=body, headers=headers)
         response.raise_for_status()
         result = response.json()
         if not result.get("success"):
-            raise RuntimeError(f"ExchangeOrderSnapshot cancellation failed: {result}")
-        logger.info(f"Cancelled order {order_id}")
-        return await self.get_order(order_id, symbol)
+            raise RuntimeError(f"Order cancellation failed: {result}")
+        logger.info("Cancelled order {}", order_id)
+        return self._parse_walutomat_order(result["result"])
 
     async def get_order(self, order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
-        """Get order details by ID.
+        """Get order details by ID, including completed and canceled orders.
+
+        Uses the findOrders endpoint which returns orders in any state,
+        not just active ones.
 
         Args:
             order_id: Order ID to fetch.
-            symbol: Trading pair (optional).
+            symbol: Trading pair (unused, kept for interface compatibility).
 
         Returns:
             Order snapshot.
@@ -904,12 +996,17 @@ class WalutomatExchangeClient(ExchangeClientBase):
             RuntimeError: If not connected or not authenticated.
             ValueError: If order not found.
         """
-        self._require_authenticated()
-        orders = await self.get_orders()
-        for order in orders:
-            if order.id == order_id:
-                return order
-        raise ValueError(f"ExchangeOrderSnapshot {order_id} not found")
+        _ = symbol
+        client = self._require_authenticated()
+        endpoint = f"/api/v2.0.0/market_fx/orders?orderId={order_id}"
+        headers = self._get_auth_headers(endpoint, "")
+        url = f"{self.api_base_url}/market_fx/orders?orderId={order_id}"
+        response = await client.get(url, headers=headers)
+        response.raise_for_status()
+        result = response.json()
+        if not result.get("success") or not result.get("result"):
+            raise ValueError(f"Order {order_id} not found")
+        return self._parse_walutomat_order(result["result"][0])
 
     @staticmethod
     def _parse_walutomat_order(order_data: dict[str, Any]) -> ExchangeOrderSnapshot:
@@ -919,23 +1016,38 @@ class WalutomatExchangeClient(ExchangeClientBase):
             order_data: Raw order data dictionary from Walutomat API.
 
         Returns:
-            Parsed ExchangeOrderSnapshot.
+            Parsed ExchangeOrderSnapshot with side-aware fill, status mapping,
+            and commission data.
         """
+        is_buy = order_data["buySell"] == "BUY"
+        fill_field = "boughtAmount" if is_buy else "soldAmount"
+        filled = float(order_data.get(fill_field, 0))
+        volume = float(order_data["volume"])
+
+        if order_data["status"] == "ACTIVE":
+            status = OrderStatusEnum.OPEN
+        elif order_data.get("completion", 0) == 100:
+            status = OrderStatusEnum.CLOSED
+        else:
+            status = OrderStatusEnum.CANCELED
+
+        commission_str = order_data.get("commissionAmount", "0")
+        commission = float(commission_str)
+
         return ExchangeOrderSnapshot(
             id=order_data["orderId"],
             client_order_id=order_data.get("submitId"),
             symbol=walutomat_rest_to_native(order_data["currencyPair"]),
-            side=OrderSideEnum.BUY if order_data["buySell"] == "BUY" else OrderSideEnum.SELL,
+            side=OrderSideEnum.BUY if is_buy else OrderSideEnum.SELL,
             type=OrderTypeEnum.LIMIT,
-            amount=float(order_data["volume"]),
+            amount=volume,
             price=float(order_data["limitPrice"]),
-            status=(
-                OrderStatusEnum.OPEN if order_data["status"] == "ACTIVE" else OrderStatusEnum.CLOSED
-            ),
-            filled=float(order_data.get("boughtAmount", 0)),
-            remaining=float(order_data["volume"]) - float(order_data.get("boughtAmount", 0)),
+            status=status,
+            filled=filled,
+            remaining=volume - filled,
             timestamp=time.time(),
-            fee=None,
+            fee=commission if commission > 0 else None,
+            fee_currency=order_data.get("commissionCurrency"),
         )
 
     async def get_orders(
