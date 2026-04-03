@@ -898,6 +898,7 @@ def _build_polling_client(
     client._api_key = "test-key"
     client._private_key = cast(Any, object())
     client._running = True
+    client._execution_idle_interval = 0.0
     return client
 
 
@@ -1193,7 +1194,7 @@ async def test_subscribe_executions_handles_api_error() -> None:
 async def test_subscribe_executions_respects_poll_interval() -> None:
     """Verify asyncio.sleep is called with execution_poll_interval.
 
-    Given: A client with execution_poll_interval=7.5,
+    Given: A client with execution_poll_interval=7.5 and tracked orders,
     When: One poll cycle completes,
     Then: asyncio.sleep is called with 7.5.
     """
@@ -1210,7 +1211,7 @@ async def test_subscribe_executions_respects_poll_interval() -> None:
         poll_count += 1
         if poll_count > 1:
             client._running = False
-        return []
+        return [_make_order_snapshot(filled=0.0)]
 
     original_sleep = asyncio.sleep
 
@@ -1408,6 +1409,161 @@ async def test_subscribe_executions_first_poll_failure_still_seeds_next() -> Non
 
     assert len(results) == 1
     assert results[0].cum_qty == 50.0
+
+
+@pytest.mark.asyncio()
+async def test_subscribe_executions_idles_when_no_tracked_orders() -> None:
+    """Verify polling continues when no orders are tracked.
+
+    Given: A client with no active orders,
+    When: Two poll cycles complete,
+    Then: Polling uses idle wait (event/timeout) instead of active sleep.
+    """
+    client = _build_polling_client(execution_poll_interval=0.0)
+    poll_count = 0
+
+    async def _mock_get_orders(
+        symbol: str | None = None,
+        status: OrderStatusEnum | None = None,
+        limit: int | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count > 2:
+            client._running = False
+        return []
+
+    client.get_orders = _mock_get_orders
+
+    async for _update in client.subscribe_executions():
+        pass
+
+    assert poll_count >= 2
+
+
+@pytest.mark.asyncio()
+async def test_subscribe_executions_wake_event_interrupts_idle() -> None:
+    """Verify wake event interrupts idle sleep immediately.
+
+    Given: A client idling with no tracked orders,
+    When: _execution_wake event is set,
+    Then: Polling resumes without waiting for full idle timeout.
+    """
+    client = _build_polling_client(execution_poll_interval=0.0)
+    client._execution_idle_interval = 60.0
+    poll_count = 0
+
+    async def _mock_get_orders(
+        symbol: str | None = None,
+        status: OrderStatusEnum | None = None,
+        limit: int | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count == 1:
+            return []
+        if poll_count == 2:
+            return [_make_order_snapshot(filled=50.0)]
+        client._running = False
+        return [_make_order_snapshot(filled=50.0)]
+
+    client.get_orders = _mock_get_orders
+
+    async def _wake_after_short_delay() -> None:
+        await asyncio.sleep(0.01)
+        client._execution_wake.set()
+
+    asyncio.get_event_loop().create_task(_wake_after_short_delay())
+
+    results: list[ExecutionUpdate] = []
+    async for update in client.subscribe_executions():
+        results.append(update)
+
+    assert poll_count >= 2
+
+
+@pytest.mark.asyncio()
+async def test_subscribe_executions_active_interval_when_tracked() -> None:
+    """Verify polling uses active interval when orders are tracked.
+
+    Given: A client with a tracked order,
+    When: Poll cycle completes with orders present,
+    Then: asyncio.sleep uses execution_poll_interval (not idle interval).
+    """
+    client = _build_polling_client(execution_poll_interval=0.0)
+    client._execution_idle_interval = 60.0
+    poll_count = 0
+    sleep_values: list[float] = []
+
+    async def _mock_get_orders(
+        symbol: str | None = None,
+        status: OrderStatusEnum | None = None,
+        limit: int | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count > 2:
+            client._running = False
+        return [_make_order_snapshot(filled=0.0)]
+
+    original_sleep = asyncio.sleep
+
+    async def _mock_sleep(delay: float) -> None:
+        sleep_values.append(delay)
+        await original_sleep(0)
+
+    client.get_orders = _mock_get_orders
+
+    original_asyncio_sleep = walutomat_mod.asyncio.sleep
+    walutomat_mod.asyncio.sleep = _mock_sleep
+    try:
+        async for _update in client.subscribe_executions():
+            pass
+    finally:
+        walutomat_mod.asyncio.sleep = original_asyncio_sleep
+
+    assert 0.0 in sleep_values
+    assert 60.0 not in sleep_values
+
+
+@pytest.mark.asyncio()
+async def test_create_order_sets_wake_event() -> None:
+    """Verify create_order sets the wake event to interrupt idle polling.
+
+    Given: A connected authenticated client,
+    When: create_order is called,
+    Then: _execution_wake event is set.
+    """
+    client = WalutomatExchangeClient()
+    client._api_key = "test-key"
+    client._private_key = cast(Any, object())
+
+    assert not client._execution_wake.is_set()
+
+    async def _mock_post(
+        url: str,
+        content: str = "",
+        headers: dict[str, str] | None = None,
+    ) -> StubResponse:
+        return StubResponse({"success": True, "result": {"orderId": "ord-123"}})
+
+    client._http_client = cast(Any, SimpleNamespace(post=_mock_post))
+
+    monkeypatch_obj = pytest.MonkeyPatch()
+    monkeypatch_obj.setattr(client, "_log_order_to_db", AsyncMock(return_value=None))
+    monkeypatch_obj.setattr(client, "_get_auth_headers", lambda *a: {})
+    try:
+        req = ExchangeOrderRequest(
+            symbol="EUR-PLN",
+            side=OrderSideEnum.BUY,
+            type=OrderTypeEnum.LIMIT,
+            amount=1.0,
+            price=4.28,
+        )
+        await client.create_order(req)
+        assert client._execution_wake.is_set()
+    finally:
+        monkeypatch_obj.undo()
 
 
 @pytest.mark.asyncio()

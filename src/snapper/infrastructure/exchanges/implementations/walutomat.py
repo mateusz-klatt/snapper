@@ -173,6 +173,8 @@ class WalutomatExchangeClient(ExchangeClientBase):
         self._max_consecutive_errors = 5
         self._tick_buffers: dict[str, list[tuple[float, float]]] = {}
         self._execution_poll_interval = execution_poll_interval
+        self._execution_idle_interval = 30.0
+        self._execution_wake: asyncio.Event = asyncio.Event()
 
     def _require_connected(self) -> httpx.AsyncClient:
         """Verify HTTP client is connected and return it.
@@ -755,7 +757,15 @@ class WalutomatExchangeClient(ExchangeClientBase):
                 first_poll = False
                 logger.exception("Walutomat execution poll failed")
 
-            await asyncio.sleep(self._execution_poll_interval)
+            if tracked:
+                await asyncio.sleep(self._execution_poll_interval)
+            else:
+                self._execution_wake.clear()
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(
+                        self._execution_wake.wait(),
+                        timeout=self._execution_idle_interval,
+                    )
 
     def subscribe_instruments(self, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
         """Subscribe to instrument/pair information.
@@ -852,6 +862,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
         if db_result is not None:
             order.db_order_id = db_result[0]
             order.db_order_public_id = db_result[1]
+        self._execution_wake.set()
         return order
 
     async def cancel_order(self, order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
