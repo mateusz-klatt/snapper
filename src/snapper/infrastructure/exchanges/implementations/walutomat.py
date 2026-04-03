@@ -784,6 +784,13 @@ class WalutomatExchangeClient(ExchangeClientBase):
             has_new_fill = final.filled > tracked.filled
             fees = self._build_fees(final)
 
+            if final.status == OrderStatusEnum.OPEN:
+                logger.warning(
+                    "Order {} disappeared from active list but API reports OPEN, "
+                    "possible transient omission — skipping terminal event",
+                    oid,
+                )
+                return
             if final.status == OrderStatusEnum.CLOSED:
                 yield ExecutionUpdate(
                     order_id=final.id,
@@ -800,7 +807,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
                     average_price=final.price,
                     fees=fees,
                 )
-            else:
+            elif final.status == OrderStatusEnum.CANCELED:
                 if has_new_fill:
                     yield ExecutionUpdate(
                         order_id=final.id,

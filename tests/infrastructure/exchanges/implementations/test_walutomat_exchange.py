@@ -471,7 +471,9 @@ async def test_get_orders_filters_and_limit(monkeypatch: pytest.MonkeyPatch) -> 
                     "buySell": "SELL",
                     "limitPrice": 4.0,
                     "volume": 2.0,
-                    "status": "FILLED",
+                    "status": "CLOSED",
+                    "completion": 100,
+                    "soldAmount": 2.0,
                     "boughtAmount": 2.0,
                 },
             ],
@@ -2387,6 +2389,43 @@ async def test_disappeared_fully_filled_emits_single_trade() -> None:
 
 
 @pytest.mark.asyncio()
+async def test_disappeared_order_still_open_skips_terminal() -> None:
+    """Verify no terminal event when API reports order still OPEN.
+
+    Given: An order disappeared from active list,
+    When: get_order returns the order with OPEN status (transient omission),
+    Then: No ExecutionUpdate is yielded (order is not terminal).
+    """
+    client = _build_polling_client()
+
+    async def mock_get_order(order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
+        return _make_order_snapshot(
+            order_id=order_id,
+            filled=0.0,
+            amount=100.0,
+            status=OrderStatusEnum.OPEN,
+        )
+
+    client.get_order = mock_get_order
+
+    tracked = _TrackedOrder(
+        order_id="ord-1",
+        cl_ord_id="sub-1",
+        symbol="EUR-PLN",
+        side=OrderSideEnum.BUY,
+        order_type=OrderTypeEnum.LIMIT,
+        amount=100.0,
+        filled=0.0,
+        price=4.50,
+    )
+    events: list[ExecutionUpdate] = []
+    async for event in client._resolve_disappeared("ord-1", tracked):
+        events.append(event)
+
+    assert events == []
+
+
+@pytest.mark.asyncio()
 async def test_active_fill_event_has_fees() -> None:
     """Verify active fill event includes fee breakdown.
 
@@ -2559,7 +2598,8 @@ async def test_get_orders_filters_by_status(monkeypatch: pytest.MonkeyPatch) -> 
                 "buySell": "BUY",
                 "limitPrice": "4.2",
                 "volume": "1",
-                "status": "FILLED",
+                "status": "CLOSED",
+                "completion": 100,
             }
         ],
     }
