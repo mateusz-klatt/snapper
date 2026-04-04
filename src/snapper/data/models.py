@@ -950,6 +950,7 @@ class TradeProjectionCheckpoint(TemporalMixin, Base):
     last_venue_event_id: Mapped[int | None] = mapped_column(Integer)
     last_venue_event_at: Mapped[datetime | None] = mapped_column(TZDateTime())
     open_command_ids: Mapped[str | None] = mapped_column(Text)
+    seen_exec_ids: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
     checkpoint_at: Mapped[datetime] = mapped_column(TZDateTime())
 
 

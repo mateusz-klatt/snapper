@@ -2553,10 +2553,41 @@ class SQLAlchemyRepository(Repository):
                 "last_venue_event_id": cp.last_venue_event_id,
                 "last_venue_event_at": cp.last_venue_event_at,
                 "open_command_ids": cp.open_command_ids,
+                "seen_exec_ids": cp.seen_exec_ids,
                 "checkpoint_at": cp.checkpoint_at,
                 "session_id": cp.session_id,
             }
             return row
+
+    async def get_all_checkpoints(self, as_of: datetime) -> list[TradeProjectionCheckpointRow]:
+        """Return all active checkpoints for recovery."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(TradeProjectionCheckpoint)
+                .where(*where_active(TradeProjectionCheckpoint, as_of))
+                .order_by(TradeProjectionCheckpoint.shard_key)
+            )
+            rows: list[TradeProjectionCheckpointRow] = []
+            for cp in result.scalars().all():
+                rows.append(
+                    {
+                        "public_id": cp.public_id,
+                        "shard_key": cp.shard_key,
+                        "position_qty": cp.position_qty,
+                        "entry_price": cp.entry_price,
+                        "cash": cp.cash,
+                        "peak_equity": cp.peak_equity,
+                        "realized_pnl": cp.realized_pnl,
+                        "turnover": cp.turnover,
+                        "last_venue_event_id": cp.last_venue_event_id,
+                        "last_venue_event_at": cp.last_venue_event_at,
+                        "open_command_ids": cp.open_command_ids,
+                        "seen_exec_ids": cp.seen_exec_ids,
+                        "checkpoint_at": cp.checkpoint_at,
+                        "session_id": cp.session_id,
+                    }
+                )
+            return rows
 
     async def get_fill_exec_ids_for_shard(self, shard_key: str) -> set[str]:
         """Return all exec_id and trade_id values from fill events for a shard.

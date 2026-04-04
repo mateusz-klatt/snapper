@@ -461,5 +461,6 @@ class TradeService:
             "last_venue_event_id": shard.last_venue_event_id,
             "last_venue_event_at": datetime.now(UTC),
             "open_command_ids": json.dumps(active_cmd_ids) if active_cmd_ids else None,
+            "seen_exec_ids": json.dumps(sorted(shard.seen_exec_ids)),
             "checkpoint_at": datetime.now(UTC),
         }

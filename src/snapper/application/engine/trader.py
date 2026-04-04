@@ -13,6 +13,7 @@ The coordinator:
 
 import asyncio
 import contextlib
+import json
 import time
 from datetime import UTC
 from datetime import datetime
@@ -26,6 +27,7 @@ from loguru import logger
 
 from snapper.application.engine.config import EngineConfigModel
 from snapper.application.engine.service import TradingEngineService
+from snapper.application.portfolio.models import PositionStateModel
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.process_parameters import TraderParameters
 from snapper.application.process_manager.registry import register_process
@@ -192,16 +194,19 @@ class TraderCoordinator(RegisterableProcess):
         logger.info("ZMQTrader: Settings service initialized with database access")
 
     async def _recover_engine_state(self) -> None:
-        """Rebuild engine confirmed state from DB executions and active orders.
+        """Rebuild engine confirmed state from checkpoints, executions, and active orders.
 
-        Phase 1: Replay persisted executions to reconstruct position/portfolio.
+        Phase 0: Read checkpoints, restore TradeService/BalanceService,
+            replay delta VenueEvents, create engines with restored state.
+        Phase 1: Full-replay for shards without checkpoints (legacy path).
         Phase 2: Query active orders across ALL exchanges, create engines
             for orders that have no executions yet, set order_in_flight.
         Phase 3: Detect fill gaps (DB filled_size vs order filled_size)
             and enter degraded read-only mode if cost basis is unrecoverable.
         """
         now = datetime.now(UTC)
-        executions = await self._recover_from_executions(now)
+        recovered_shards = await self._recover_from_checkpoints(now)
+        executions = await self._recover_from_executions(now, recovered_shards)
         await self._recover_active_orders(now, executions)
         logger.info(
             f"ZMQTrader: Engine recovery complete: "
@@ -210,12 +215,144 @@ class TraderCoordinator(RegisterableProcess):
             f"{sum(1 for e in self.engines.values() if e.read_only)} degraded"
         )
 
-    async def _recover_from_executions(self, now: datetime) -> list[ExecutionRow]:
+    async def _recover_from_checkpoints(self, now: datetime) -> set[str]:
+        """Phase 0: Restore shards from persisted checkpoints + delta replay.
+
+        Returns:
+            Set of engine_keys that were fully recovered from checkpoints.
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return set()
+        try:
+            checkpoints = await self.repository.get_all_checkpoints(as_of=now)
+        except Exception as e:
+            logger.error(f"ZMQTrader: Failed to query checkpoints for recovery: {e}")
+            return set()
+        if not checkpoints:
+            logger.info("ZMQTrader: No checkpoints found, using full replay")
+            return set()
+
+        recovered: set[str] = set()
+        for cp in checkpoints:
+            shard_key = cp["shard_key"]
+            parts = shard_key.split(".")
+            if len(parts) < 3:
+                logger.warning(f"ZMQTrader: Invalid shard_key format: {shard_key}, skipping")
+                continue
+            exchange_str = parts[0]
+            instrument = parts[1]
+
+            watermark = cp["last_venue_event_id"]
+            if watermark is None:
+                logger.info(
+                    f"ZMQTrader: Checkpoint for {shard_key} has no watermark, "
+                    f"falling back to full replay"
+                )
+                continue
+            try:
+                delta_events = await self.repository.get_venue_events_after(
+                    shard_key=shard_key, after_id=watermark
+                )
+            except Exception as e:
+                logger.error(
+                    f"ZMQTrader: Failed delta replay for {shard_key}: {e}, "
+                    f"will fall back to full replay"
+                )
+                continue
+
+            seen_ids: set[str] = set(json.loads(cp["seen_exec_ids"] or "[]"))
+            open_cmd_ids: list[str] = json.loads(cp["open_command_ids"] or "[]")
+
+            self.trade_service.restore_from_checkpoint(
+                shard_key=shard_key,
+                position_qty=cp["position_qty"],
+                entry_price=cp["entry_price"],
+                cash=cp["cash"],
+                peak_equity=cp["peak_equity"],
+                realized_pnl=cp["realized_pnl"],
+                turnover=cp["turnover"],
+                last_venue_event_id=watermark,
+                open_command_ids=open_cmd_ids,
+                seen_exec_ids=seen_ids,
+            )
+            for event in delta_events:
+                self.trade_service.apply_venue_event(event)
+            if delta_events:
+                logger.info(f"ZMQTrader: Replayed {len(delta_events)} delta events for {shard_key}")
+
+            shard = self.trade_service._shards[shard_key]
+            self.balance_service.restore_from_checkpoint(
+                shard_key=shard_key,
+                cash=shard.cash,
+                position_qty=shard.position.position_qty,
+                entry_price=shard.position.entry_price,
+                peak_equity=shard.peak_equity,
+                realized_pnl=shard.position.realized_pnl,
+            )
+
+            engine = await self._create_engine_for_recovery(instrument, exchange_str)
+            if engine is None:
+                continue
+            self._restore_engine_from_shard(engine, shard_key, instrument)
+
+            engine_key = f"{instrument}@{exchange_str}-live"
+            self.engines[engine_key] = engine
+            self.last_signal_time[engine_key] = time.time()
+            recovered.add(engine_key)
+            logger.info(
+                f"ZMQTrader: Recovered {engine_key} from checkpoint: "
+                f"pos={engine.position_qty:.6f}, "
+                f"entry={engine.entry_price}, "
+                f"cash={engine.portfolio.cash:.2f}"
+            )
+        return recovered
+
+    def _restore_engine_from_shard(
+        self,
+        engine: TradingEngineService,
+        shard_key: str,
+        instrument: str,
+    ) -> None:
+        """Restore TradingEngineService from the post-delta TradeService shard.
+
+        Reads the current in-memory shard state (which already reflects
+        checkpoint + delta replay) and copies it into the engine. This
+        ensures engine, portfolio, and TradeService are all in sync.
+
+        Args:
+            engine: Freshly created engine to restore.
+            shard_key: Shard key to read from TradeService.
+            instrument: Instrument symbol for portfolio position key.
+        """
+        shard = self.trade_service._shards[shard_key]
+        engine.position_qty = shard.position.position_qty
+        engine.entry_price = shard.position.entry_price
+        engine.peak_equity = shard.peak_equity
+        engine.seen_exec_ids = set(shard.seen_exec_ids)
+        engine.portfolio.cash = shard.cash
+        engine.portfolio.turnover = shard.turnover
+        if shard.position.position_qty != 0 and shard.position.entry_price is not None:
+            engine.portfolio.positions[instrument] = PositionStateModel(
+                quantity=shard.position.position_qty,
+                average_price=shard.position.entry_price,
+                realized_pnl=shard.position.realized_pnl,
+            )
+
+    async def _recover_from_executions(
+        self, now: datetime, checkpoint_recovered: set[str] | None = None
+    ) -> list[ExecutionRow]:
         """Phase 1: Replay DB executions to rebuild engine state.
+
+        Skips engine_keys already recovered from checkpoints in Phase 0.
+
+        Args:
+            now: Current timestamp for DB queries.
+            checkpoint_recovered: Engine keys already restored from checkpoints.
 
         Returns:
             All recovered execution rows (for fill-gap detection in phase 2).
         """
+        skip_keys = checkpoint_recovered or set()
         try:
             executions = await self.repository.get_executions_for_recovery(as_of=now)
         except Exception as e:
@@ -229,6 +366,9 @@ class TraderCoordinator(RegisterableProcess):
             key = f"{exe['instrument']}@{exe['exchange']}-live"
             fills_by_key.setdefault(key, []).append(exe)
         for engine_key, fills in fills_by_key.items():
+            if engine_key in skip_keys:
+                logger.debug(f"ZMQTrader: Skipping full replay for {engine_key} (checkpoint)")
+                continue
             engine = await self._create_engine_for_recovery(
                 fills[0]["instrument"], fills[0]["exchange"]
             )
@@ -753,6 +893,7 @@ class TraderCoordinator(RegisterableProcess):
                     "last_venue_event_id": real_watermark,
                     "last_venue_event_at": now if real_watermark is not None else None,
                     "open_command_ids": cast(str, oci) if oci is not None else None,
+                    "seen_exec_ids": cast(str, snap["seen_exec_ids"]),
                     "checkpoint_at": now,
                     "session_id": self._tracker.session_id,
                     "sequence_id": self._tracker.next_sequence(f"checkpoint.{shard_key}"),

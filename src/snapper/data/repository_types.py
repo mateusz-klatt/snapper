@@ -315,6 +315,7 @@ class TradeProjectionCheckpointRow(TypedDict):
     last_venue_event_id: int | None
     last_venue_event_at: datetime | None
     open_command_ids: str | None
+    seen_exec_ids: str
     checkpoint_at: datetime
     session_id: str
 
@@ -503,6 +504,7 @@ class CheckpointUpsertRow(TypedDict):
     last_venue_event_id: int | None
     last_venue_event_at: datetime | None
     open_command_ids: str | None
+    seen_exec_ids: str
     checkpoint_at: datetime
     session_id: str
     sequence_id: int

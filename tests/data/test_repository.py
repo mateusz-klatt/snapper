@@ -3390,6 +3390,7 @@ async def test_upsert_checkpoint_and_get(tmp_path: Path) -> None:
             "last_venue_event_id": 42,
             "last_venue_event_at": now,
             "open_command_ids": '["cmd-1"]',
+            "seen_exec_ids": '["t1"]',
             "checkpoint_at": now,
             "session_id": "s1",
             "sequence_id": 1,
@@ -3415,6 +3416,7 @@ async def test_upsert_checkpoint_and_get(tmp_path: Path) -> None:
             "last_venue_event_id": 43,
             "last_venue_event_at": later,
             "open_command_ids": None,
+            "seen_exec_ids": '["t1", "t2"]',
             "checkpoint_at": later,
             "session_id": "s1",
             "sequence_id": 2,
@@ -3441,6 +3443,63 @@ async def test_get_checkpoint_returns_none_when_missing(tmp_path: Path) -> None:
     await r.create_all()
     result = await r.get_checkpoint("nonexistent.shard", datetime.now(UTC))
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_all_checkpoints_returns_all_active(tmp_path: Path) -> None:
+    """Get all checkpoints returns every active checkpoint row.
+
+    Given: two checkpoints for different shards,
+    When: get_all_checkpoints is called,
+    Then: both rows are returned ordered by shard_key.
+    """
+    db_path = tmp_path / "cp_all.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    await r.upsert_checkpoint(
+        {
+            "shard_key": "kraken.BTC-USD.live",
+            "position_qty": 0.5,
+            "entry_price": 50000.0,
+            "cash": 9000.0,
+            "peak_equity": 10000.0,
+            "realized_pnl": 0.0,
+            "turnover": 500.0,
+            "last_venue_event_id": 10,
+            "last_venue_event_at": now,
+            "open_command_ids": None,
+            "seen_exec_ids": '["t1"]',
+            "checkpoint_at": now,
+            "session_id": "s1",
+            "sequence_id": 1,
+            "bus_time": now,
+        }
+    )
+    await r.upsert_checkpoint(
+        {
+            "shard_key": "kraken.ETH-USD.live",
+            "position_qty": 10.0,
+            "entry_price": 3000.0,
+            "cash": 5000.0,
+            "peak_equity": 8000.0,
+            "realized_pnl": 50.0,
+            "turnover": 1000.0,
+            "last_venue_event_id": 20,
+            "last_venue_event_at": now,
+            "open_command_ids": None,
+            "seen_exec_ids": "[]",
+            "checkpoint_at": now,
+            "session_id": "s1",
+            "sequence_id": 2,
+            "bus_time": now,
+        }
+    )
+    rows = await r.get_all_checkpoints(now)
+    assert len(rows) == 2
+    assert rows[0]["shard_key"] == "kraken.BTC-USD.live"
+    assert rows[1]["shard_key"] == "kraken.ETH-USD.live"
+    assert rows[0]["seen_exec_ids"] == '["t1"]'
 
 
 @pytest.mark.asyncio
