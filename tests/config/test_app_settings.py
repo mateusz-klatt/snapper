@@ -651,3 +651,27 @@ class TestServerProxyProperties:
         service = MockSettingsService({})
         settings = AppSettings(bootstrap, settings_service=service)
         assert settings.use_durable_commands is False
+
+    def test_use_venue_reconciliation_defaults_false(self) -> None:
+        """Verify use_venue_reconciliation defaults to False.
+
+        Given service without use_venue_reconciliation set,
+        When accessing settings.use_venue_reconciliation,
+        Then False is returned.
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        service = MockSettingsService({})
+        settings = AppSettings(bootstrap, settings_service=service)
+        assert settings.use_venue_reconciliation is False
+
+    def test_recon_balance_threshold_defaults_to_one(self) -> None:
+        """Verify recon_balance_threshold defaults to 1.0.
+
+        Given service without recon_balance_threshold set,
+        When accessing settings.recon_balance_threshold,
+        Then 1.0 is returned.
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        service = MockSettingsService({})
+        settings = AppSettings(bootstrap, settings_service=service)
+        assert settings.recon_balance_threshold == pytest.approx(1.0)

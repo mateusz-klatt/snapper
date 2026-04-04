@@ -42,6 +42,8 @@ from snapper.data.repository_types import OrderRow
 from snapper.data.repository_types import RecordVenueEventParams
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
+from snapper.infrastructure.exchanges.contracts import ExecType
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
@@ -367,6 +369,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             ]
             if supports_ws:
                 tasks.append(asyncio.create_task(self._execution_handler()))
+            if self.settings.use_venue_reconciliation:
+                tasks.append(asyncio.create_task(self._reconciliation_handler()))
             try:
                 await asyncio.gather(*tasks)
             except asyncio.CancelledError:
@@ -906,6 +910,153 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.exception(
                 f"[{exchange_name}] Failed to record venue event {event_type} for {instrument}"
             )
+
+    async def _reconciliation_handler(self) -> None:
+        """Periodic exchange API reconciliation.
+
+        Compares exchange order state with local pending orders.
+        Detects fill gaps and disappeared orders. Logs balance mismatches.
+        Uses existing execution flow for corrective fills.
+        """
+        interval = 60.0
+        exchange_name = self._get_exchange_name()
+        while self.running:
+            await asyncio.sleep(interval)
+            try:
+                await self._reconcile_with_exchange()
+            except Exception:
+                logger.exception(f"[{exchange_name}] Reconciliation cycle failed")
+
+    async def _reconcile_with_exchange(self) -> None:
+        """Run one reconciliation cycle against the exchange API.
+
+        Queries exchange for current order state and balances,
+        compares with local pending orders, and processes corrective
+        fills for detected gaps. Uses get_order() to verify the actual
+        terminal status of disappeared orders (not just absent from
+        open set).
+        """
+        if self.exchange_client is None:
+            return
+        exchange_name = self._get_exchange_name()
+        exchange_orders = await self.exchange_client.get_orders(status=OrderStatusEnum.OPEN)
+        exchange_by_id = {o.id: o for o in exchange_orders}
+
+        for _eid, pending in list(self.pending_orders.items()):
+            exchange_oid = pending.exchange_order_id
+            if not exchange_oid:
+                continue
+
+            if exchange_oid not in exchange_by_id:
+                await self._reconcile_disappeared_order(exchange_name, exchange_oid, pending)
+            else:
+                exchange_order = exchange_by_id[exchange_oid]
+                await self._reconcile_fill_gap(exchange_name, exchange_oid, pending, exchange_order)
+
+        balances = await self.exchange_client.get_balance()
+        threshold = self.settings.recon_balance_threshold
+        for currency, bal in balances.items():
+            if abs(bal.free + bal.used - bal.total) > threshold:
+                logger.warning(
+                    f"[{exchange_name}] Recon: balance mismatch for {currency}: "
+                    f"free={bal.free} used={bal.used} total={bal.total} "
+                    f"(threshold={threshold})"
+                )
+
+    async def _reconcile_disappeared_order(
+        self,
+        exchange_name: str,
+        exchange_oid: str,
+        pending: PendingOrderState,
+    ) -> None:
+        """Handle an order absent from the open-orders snapshot.
+
+        Calls get_order() to determine actual status. Emits any
+        remaining fill gap before the terminal event.
+        """
+        assert self.exchange_client is not None
+        try:
+            snapshot = await self.exchange_client.get_order(
+                exchange_oid, pending.request.instrument
+            )
+        except Exception:
+            logger.warning(
+                f"[{exchange_name}] Recon: get_order failed for {exchange_oid}, "
+                f"skipping this cycle"
+            )
+            return
+
+        if snapshot.filled > pending.last_seen_cum_qty:
+            await self._reconcile_fill_gap(exchange_name, exchange_oid, pending, snapshot)
+
+        terminal_type: ExecType
+        terminal_status: OrderStatusEnum
+        if snapshot.status in (OrderStatusEnum.CLOSED,):
+            terminal_type = "filled"
+            terminal_status = OrderStatusEnum.CLOSED
+        else:
+            terminal_type = "canceled"
+            terminal_status = OrderStatusEnum.CANCELED
+
+        logger.warning(
+            f"[{exchange_name}] Recon: order {exchange_oid} "
+            f"disappeared (status={snapshot.status}), "
+            f"emitting terminal={terminal_type}"
+        )
+        corrective = ExecutionUpdate(
+            order_id=exchange_oid,
+            exec_type=terminal_type,
+            symbol=pending.request.instrument,
+            side=OrderSideEnum(pending.request.side),
+            order_type=OrderTypeEnum.MARKET,
+            order_status=terminal_status,
+            timestamp=datetime.now(UTC),
+        )
+        await self._process_execution(corrective)
+
+    async def _reconcile_fill_gap(
+        self,
+        exchange_name: str,
+        exchange_oid: str,
+        pending: PendingOrderState,
+        exchange_order: ExchangeOrderSnapshot,
+    ) -> None:
+        """Emit a corrective fill if exchange shows more fills than local.
+
+        Uses the exchange order's limit price as an approximate fill
+        price. Market orders without price are skipped (logged as error).
+        """
+        if exchange_order.filled <= pending.last_seen_cum_qty:
+            return
+        gap = exchange_order.filled - pending.last_seen_cum_qty
+        fill_price = exchange_order.price
+        if fill_price is None:
+            logger.error(
+                f"[{exchange_name}] Recon: fill gap for {exchange_oid} "
+                f"but no price on market order, skipping corrective fill"
+            )
+            return
+        logger.warning(
+            f"[{exchange_name}] Recon: fill gap for {exchange_oid}: "
+            f"exchange={exchange_order.filled} "
+            f"local={pending.last_seen_cum_qty}, "
+            f"corrective delta={gap} at price~{fill_price}"
+        )
+        recon_exec_id = f"recon-{exchange_oid}-{int(datetime.now(UTC).timestamp())}"
+        corrective = ExecutionUpdate(
+            order_id=exchange_oid,
+            exec_type="trade",
+            symbol=pending.request.instrument,
+            side=OrderSideEnum(pending.request.side),
+            order_type=OrderTypeEnum.LIMIT,
+            order_status=OrderStatusEnum.OPEN,
+            timestamp=datetime.now(UTC),
+            cum_qty=exchange_order.filled,
+            last_qty=gap,
+            last_price=fill_price,
+            exec_id=recon_exec_id,
+        )
+        await self._process_execution(corrective)
 
     async def _execution_handler(self) -> None:
         """Handle execution updates from the exchange WebSocket."""

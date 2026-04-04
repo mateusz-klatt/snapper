@@ -599,6 +599,32 @@ class AppSettings:
         """
         return self._get_db_setting("use_durable_commands", False)
 
+    @property
+    def use_venue_reconciliation(self) -> bool:
+        """Return whether executor-side venue reconciliation is enabled.
+
+        When True, executors periodically poll exchange APIs to detect
+        fill gaps and disappeared orders. Feature-flagged for gradual
+        rollout.
+
+        Returns:
+            True if venue reconciliation enabled, False (default).
+        """
+        return self._get_db_setting("use_venue_reconciliation", False)
+
+    @property
+    def recon_balance_threshold(self) -> float:
+        """Return the absolute threshold for balance mismatch warnings.
+
+        Reconciliation logs a WARNING when the difference between
+        exchange-reported balance and expected balance exceeds this
+        value (in base currency).
+
+        Returns:
+            Threshold in base currency units. Default 1.0.
+        """
+        return self._get_db_setting("recon_balance_threshold", 1.0)
+
     def get_setting(self, key: str, default: Any = None) -> Any:
         """Retrieve a setting value from database by key.
 
