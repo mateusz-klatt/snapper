@@ -26,6 +26,7 @@ Data Updates:
     - ``update-zonda-symbols``: Sync Zonda symbol mappings
     - ``update-polygon-symbols``: Sync Polygon symbol mappings
     - ``polygon-backfill-aggregates``: Backfill historical data
+    - ``kraken-futures-backfill-candles``: Backfill Kraken Futures OHLCV
 
 Example:
     Run the server::
@@ -59,6 +60,9 @@ from sqlalchemy.pool import NullPool
 from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.updaters.historical.aggregates import PolygonAggregatesBackfillService
 from snapper.application.updaters.historical.grouped import PolygonGroupedDailyBackfillService
+from snapper.application.updaters.historical.kraken_futures_aggregates import (
+    KrakenFuturesAggregatesBackfillService,
+)
 from snapper.application.updaters.symbols.kraken import KrakenSymbolUpdaterService
 from snapper.application.updaters.symbols.kraken_equities import KrakenEquitiesSymbolUpdaterService
 from snapper.application.updaters.symbols.kraken_futures import KrakenFuturesSymbolUpdaterService
@@ -1023,6 +1027,52 @@ def polygon_backfill_aggregates(
             raise typer.Exit(code=1) from e
 
     asyncio.run(run_aggregates_backfill())
+
+
+@app.command(name="kraken-futures-backfill-candles")
+def kraken_futures_backfill_candles(
+    symbols: Annotated[
+        list[str] | None,
+        typer.Option("--symbol", "-s", help="Native symbols to backfill (e.g., BTC-USD-PERP)"),
+    ] = None,
+    all_symbols: bool = typer.Option(False, "--all", help="Backfill all Kraken Futures symbols"),
+    timeframe: str = typer.Option(
+        "1h", "--timeframe", "-t", help="Candle interval: 1m, 1h, 4h, 1d"
+    ),
+    days_back: int = typer.Option(90, "--days", "-d", help="Days back to fetch"),
+    resume: bool = typer.Option(True, "--resume/--no-resume", help="Resume from latest candle"),
+) -> None:
+    """Backfill historical OHLCV candles from Kraken Futures.
+
+    Args:
+        symbols: List of native symbols to backfill.
+        all_symbols: Backfill all mapped Kraken Futures symbols.
+        timeframe: Candle interval string.
+        days_back: Number of days to backfill.
+        resume: Resume from last stored candle timestamp.
+    """
+
+    async def run_backfill() -> None:
+        service = KrakenFuturesAggregatesBackfillService(
+            symbols=symbols,
+            all_symbols=all_symbols,
+            timeframe=timeframe,
+            days_back=days_back,
+            resume=resume,
+        )
+        try:
+            symbol_source = "all mapped" if all_symbols else "specified/settings"
+            typer.echo(
+                f"Starting Kraken Futures candle backfill "
+                f"({timeframe}, {days_back} days, {symbol_source})..."
+            )
+            await service.start()
+            typer.echo("Kraken Futures candle backfill complete!")
+        except Exception as e:
+            typer.echo(f"Error during Kraken Futures candle backfill: {e}")
+            raise typer.Exit(code=1) from e
+
+    asyncio.run(run_backfill())
 
 
 @app.command(name="polygon-backfill-grouped")

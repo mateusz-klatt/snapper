@@ -3,8 +3,6 @@
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
-import pytest
-
 from snapper.config.app import AppSettings
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
@@ -123,13 +121,11 @@ class TestKrakenFuturesMarketDataPublisher:
         params = KrakenFuturesMarketDataPublisher.get_default_parameters(mock_settings)
         assert params == {"symbols": []}
 
-    @pytest.mark.asyncio
-    async def test_candle_loop_is_noop(self) -> None:
-        """Candle loop does nothing since Kraken Futures has no WS candle feed.
+    def test_candle_loop_uses_base_class(self) -> None:
+        """Candle loop is inherited from base class (no override).
 
         Given: A KrakenFuturesMarketDataPublisher instance,
-        When: _candle_loop is called,
-        Then: Returns immediately without error.
+        When: Checking _candle_loop,
+        Then: It is not overridden (uses base class polling via subscribe_candles).
         """
-        publisher = KrakenFuturesMarketDataPublisher(symbols=["BTC-USD-PERP"])
-        await publisher._candle_loop(["BTC-USD-PERP"], "1m")
+        assert "_candle_loop" not in KrakenFuturesMarketDataPublisher.__dict__

@@ -1,0 +1,304 @@
+"""Kraken Futures OHLCV candle backfill service.
+
+Downloads historical candle data from Kraken Futures via CCXT
+``fetch_ohlcv()`` and stores it in the database. Supports resume
+from the latest stored candle and configurable timeframes.
+"""
+
+import asyncio
+from collections.abc import Callable
+from datetime import UTC
+from datetime import datetime
+from datetime import timedelta
+from typing import Any
+
+from loguru import logger
+
+from snapper.application.process_manager.models import RegisterableProcess
+from snapper.application.process_manager.process_parameters import KrakenFuturesBackfillParameters
+from snapper.application.process_manager.registry import register_process
+from snapper.config.settings import AppSettings
+from snapper.config.settings import get_settings
+from snapper.core.types import ExchangeEnum
+from snapper.core.types import ProcessLifecycleEnum
+from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRoleEnum
+from snapper.data.repository import Repository
+from snapper.data.repository import get_repository
+from snapper.data.repository_types import CandleUpsertRow
+from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
+from snapper.infrastructure.exchanges.implementations.kraken_futures import (
+    KrakenFuturesExchangeClient,
+)
+from snapper.infrastructure.exchanges.implementations.kraken_futures import _timeframe_to_seconds
+from snapper.infrastructure.symbols.functions import get_available_kraken_futures_symbols
+from snapper.infrastructure.symbols.functions import native_to_ccxt
+from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
+from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.utils.logging import set_log_context
+
+_RATE_LIMIT_DELAY = 1.0
+_OHLCV_PAGE_LIMIT = 500
+
+
+@register_process(
+    "kraken_futures_aggregates_backfill",
+    method="start",
+    description="Kraken Futures OHLCV backfill",
+    priority=32,
+    lifecycle=ProcessLifecycleEnum.ONE_SHOT,
+    role=ProcessRoleEnum.TASK,
+    tags=("kraken_futures", "backfill", "historical"),
+    parameters_model=KrakenFuturesBackfillParameters,
+    enabled=False,
+    mode=ProcessModeEnum.THREAD,
+)
+class KrakenFuturesAggregatesBackfillService(RegisterableProcess):
+    """Backfill historical OHLCV candles for Kraken Futures instruments.
+
+    Downloads candle data via CCXT ``fetch_ohlcv()`` and persists to
+    the database in batches. Supports resume from the latest stored
+    candle timestamp.
+
+    Attributes:
+        BATCH_COMMIT_SIZE: Maximum rows per ``upsert_candles`` call.
+    """
+
+    BATCH_COMMIT_SIZE: int = 500
+
+    @staticmethod
+    def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
+        """Get default parameters from settings.
+
+        Args:
+            settings: Application settings.
+
+        Returns:
+            Default parameters with symbols, timeframe, days_back.
+        """
+        return {
+            "symbols": settings.instruments.get(ExchangeEnum.KRAKEN_FUTURES, []),
+            "all_symbols": False,
+            "timeframe": "1h",
+            "days_back": 90,
+            "resume": True,
+        }
+
+    def __init__(
+        self,
+        symbols: list[str] | None = None,
+        all_symbols: bool = False,
+        timeframe: str = "1h",
+        days_back: int = 90,
+        resume: bool = True,
+    ) -> None:
+        """Initialize the backfill service.
+
+        Args:
+            symbols: Native symbols to backfill. None uses settings default.
+            all_symbols: If True, backfill all Kraken Futures symbols.
+            timeframe: CCXT candle interval (e.g., ``1h``, ``4h``).
+            days_back: Number of days to backfill from today.
+            resume: Whether to skip already-fetched candles.
+        """
+        _timeframe_to_seconds(timeframe)
+        self._requested_symbols = list(symbols) if symbols else []
+        self._all_symbols = all_symbols
+        self._timeframe = timeframe
+        self._days_back = days_back
+        self._resume = resume
+        self.settings = get_settings()
+        self._db: Repository | None = None
+        self._instrument_cache: dict[str, str] = {}
+        self._tracker: SequenceTracker = SequenceTracker()
+
+    async def start(self) -> None:
+        """Run the backfill process.
+
+        Resolves symbols, connects to exchange, and processes each
+        symbol sequentially with rate limiting between requests.
+        """
+        set_log_context("bf:kf_agg")
+        self._db = get_repository(self.settings.db_url)
+        symbols = self._resolve_symbols()
+        if not symbols:
+            logger.warning("No Kraken Futures symbols configured for backfill")
+            return
+        client = KrakenFuturesExchangeClient()
+        await client.connect()
+        try:
+            for symbol in symbols:
+                await self._process_symbol(client, symbol)
+        finally:
+            await client.disconnect()
+
+    def _resolve_symbols(self) -> list[str]:
+        """Determine which symbols to backfill.
+
+        Returns:
+            List of native symbols to process.
+        """
+        if self._all_symbols:
+            symbols = get_available_kraken_futures_symbols()
+            logger.info(f"Resolved {len(symbols)} Kraken Futures symbols for backfill")
+            return symbols
+        if self._requested_symbols:
+            return self._requested_symbols
+        return self.settings.instruments.get(ExchangeEnum.KRAKEN_FUTURES, [])
+
+    async def _ensure_instrument(self, native_symbol: str) -> str | None:
+        """Ensure instrument exists in database, return its public_id.
+
+        Args:
+            native_symbol: Native symbol (e.g., ``BTC-USD-PERP``).
+
+        Returns:
+            The instrument_public_id, or None if symbol not in database.
+        """
+        assert self._db is not None
+        if native_symbol in self._instrument_cache:
+            return self._instrument_cache[native_symbol]
+        now = datetime.now(UTC)
+        symbol_pid = await resolve_symbol_public_id(self._db, native_symbol, as_of=now)
+        if symbol_pid is None:
+            logger.warning(f"No active Symbol row for {native_symbol}, skipping")
+            return None
+        _id, instrument_public_id = await self._db.ensure_instrument(
+            symbol_public_id=symbol_pid,
+            exchange=ExchangeEnum.KRAKEN_FUTURES,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence("instruments"),
+            timestamp=now,
+        )
+        self._instrument_cache[native_symbol] = instrument_public_id
+        return instrument_public_id
+
+    async def _get_resume_since(self, instrument_public_id: str) -> datetime | None:
+        """Get the latest candle timestamp for resume.
+
+        Args:
+            instrument_public_id: Instrument to check.
+
+        Returns:
+            Latest candle open_at timestamp, or None if no candles stored.
+        """
+        assert self._db is not None
+        candles = await self._db.get_candles(
+            instrument=instrument_public_id,
+            timeframe=self._timeframe,
+            start=None,
+            end=None,
+            exchange=ExchangeEnum.KRAKEN_FUTURES,
+            as_of=datetime.now(UTC),
+            limit=1,
+            order="desc",
+        )
+        if not candles:
+            return None
+        latest = max(c["open_at"] for c in candles)
+        return latest
+
+    async def _process_symbol(
+        self, client: KrakenFuturesExchangeClient, native_symbol: str
+    ) -> None:
+        """Backfill candles for a single symbol.
+
+        Converts native to CCXT format, determines date range, fetches
+        candles in pages with rate limiting, and batch-upserts to DB.
+
+        Args:
+            client: Connected Kraken Futures exchange client.
+            native_symbol: Native symbol (e.g., ``BTC-USD-PERP``).
+        """
+        try:
+            ccxt_symbol = native_to_ccxt(native_symbol)
+        except ValueError:
+            logger.warning(f"No CCXT alias for {native_symbol}, skipping backfill")
+            return
+        assert self._db is not None
+        instrument_pid = await self._ensure_instrument(native_symbol)
+        if instrument_pid is None:
+            return
+        now = datetime.now(UTC)
+        start_dt = now - timedelta(days=self._days_back)
+        since_ms = int(start_dt.timestamp() * 1000)
+        if self._resume:
+            resume_ts = await self._get_resume_since(instrument_pid)
+            if resume_ts is not None:
+                since_ms = int(resume_ts.timestamp() * 1000)
+                logger.info(f"Resuming {native_symbol} from {resume_ts.isoformat()}")
+        logger.info(
+            f"Starting backfill for {native_symbol} ({self._timeframe}, {self._days_back} days)"
+        )
+        total_inserted = 0
+        total_fetched = 0
+        while True:
+            candles = await client.get_ohlcv(
+                symbol=ccxt_symbol,
+                timeframe=self._timeframe,
+                since=since_ms,
+                limit=_OHLCV_PAGE_LIMIT,
+            )
+            if not candles:
+                break
+            total_fetched += len(candles)
+            rows = self._build_candle_rows(
+                candles,
+                instrument_pid,
+                self._timeframe,
+                self._tracker.session_id,
+                lambda: self._tracker.next_sequence("candles"),
+            )
+            for i in range(0, len(rows), self.BATCH_COMMIT_SIZE):
+                batch = rows[i : i + self.BATCH_COMMIT_SIZE]
+                inserted = await self._db.upsert_candles(batch)
+                total_inserted += inserted
+            last_ts_ms = int(candles[-1].timestamp * 1000)
+            since_ms = last_ts_ms + 1
+            now_ms = int(now.timestamp() * 1000)
+            if last_ts_ms >= now_ms or len(candles) < _OHLCV_PAGE_LIMIT:
+                break
+            await asyncio.sleep(_RATE_LIMIT_DELAY)
+        logger.info(
+            f"Backfill complete for {native_symbol}: "
+            f"{total_inserted} inserted from {total_fetched} fetched"
+        )
+
+    @staticmethod
+    def _build_candle_rows(
+        candles: list[OhlcvSnapshot],
+        instrument_public_id: str,
+        timeframe: str,
+        session_id: str,
+        sequence_id_fn: Callable[[], int],
+    ) -> list[CandleUpsertRow]:
+        """Convert OhlcvSnapshot list to CandleUpsertRow list.
+
+        Args:
+            candles: Raw OHLCV snapshots from exchange.
+            instrument_public_id: Stable instrument identity.
+            timeframe: Timeframe label string.
+            session_id: Session identifier for provenance.
+            sequence_id_fn: Callable returning next sequence number.
+
+        Returns:
+            List of row dicts ready for database upsert.
+        """
+        return [
+            {
+                "instrument_public_id": instrument_public_id,
+                "open_at": datetime.fromtimestamp(candle.timestamp, tz=UTC),
+                "timestamp": datetime.fromtimestamp(candle.timestamp, tz=UTC),
+                "timeframe": timeframe,
+                "open": candle.open,
+                "high": candle.high,
+                "low": candle.low,
+                "close": candle.close,
+                "volume": candle.volume,
+                "vwap": None,
+                "trades": None,
+                "session_id": session_id,
+                "sequence_id": sequence_id_fn(),
+            }
+            for candle in candles
+        ]

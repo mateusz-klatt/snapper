@@ -10,9 +10,11 @@ from unittest.mock import patch
 import pytest
 
 import snapper.infrastructure.exchanges.implementations.kraken_futures as mod
+from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
+from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
@@ -22,6 +24,7 @@ from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
 from snapper.infrastructure.exchanges.implementations.kraken_futures import _enqueue_or_drop_oldest
+from snapper.infrastructure.exchanges.implementations.kraken_futures import _timeframe_to_seconds
 
 
 @pytest.fixture()
@@ -866,16 +869,6 @@ class TestOrderMethods:
 class TestStubMethods:
     """Tests for stub methods that remain unimplemented."""
 
-    def test_subscribe_candles_raises(self, client: KrakenFuturesExchangeClient) -> None:
-        """subscribe_candles raises NotImplementedError.
-
-        Given: Any client,
-        When: subscribe_candles is called,
-        Then: Raises NotImplementedError.
-        """
-        with pytest.raises(NotImplementedError, match="no WS candle feed"):
-            client.subscribe_candles(["PF_XBTUSD"])
-
     def test_subscribe_executions_requires_auth(self, client: KrakenFuturesExchangeClient) -> None:
         """subscribe_executions raises RuntimeError without credentials.
 
@@ -886,6 +879,195 @@ class TestStubMethods:
         with pytest.raises(RuntimeError, match="API credentials required"):
             iterator = client.subscribe_executions()
             asyncio.get_event_loop().run_until_complete(iterator.__anext__())
+
+
+class TestSubscribeCandles:
+    """Tests for REST-based candle polling via subscribe_candles."""
+
+    @pytest.mark.asyncio
+    async def test_yields_candle_update(self, client: KrakenFuturesExchangeClient) -> None:
+        """subscribe_candles yields CandleUpdate from get_ohlcv polling.
+
+        Given: Client with mocked get_ohlcv returning one candle,
+        When: subscribe_candles is iterated once,
+        Then: Yields a CandleUpdate with correct fields.
+        """
+        candle = OhlcvSnapshot(
+            timestamp=1700000000.0,
+            open=50000.0,
+            high=51000.0,
+            low=49000.0,
+            close=50500.0,
+            volume=100.0,
+        )
+        call_count = 0
+
+        async def mock_ohlcv(
+            symbol: str,
+            timeframe: str = "1h",
+            since: int | None = None,
+            limit: int | None = None,
+        ) -> list[OhlcvSnapshot]:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return [candle]
+            return []
+
+        client.get_ohlcv = mock_ohlcv
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_ccxt",
+            return_value="BTC/USD:USD",
+        ):
+            iterator = client.subscribe_candles(["BTC-USD-PERP"], "1h")
+            result = await iterator.__anext__()
+        assert isinstance(result, CandleUpdate)
+        assert result.symbol == "BTC-USD-PERP"
+        assert result.open == pytest.approx(50000.0)
+        assert result.interval == 3600
+
+    @pytest.mark.asyncio
+    async def test_deduplicates_by_timestamp(self, client: KrakenFuturesExchangeClient) -> None:
+        """subscribe_candles skips candles with timestamps already seen.
+
+        Given: get_ohlcv returns a new candle followed by a stale one,
+        When: subscribe_candles is iterated,
+        Then: Only the newer candle is yielded (stale one skipped).
+        """
+        new_candle = OhlcvSnapshot(
+            timestamp=1700003600.0,
+            open=50000.0,
+            high=51000.0,
+            low=49000.0,
+            close=50500.0,
+            volume=100.0,
+        )
+        stale_candle = OhlcvSnapshot(
+            timestamp=1700000000.0,
+            open=49000.0,
+            high=50000.0,
+            low=48000.0,
+            close=49500.0,
+            volume=80.0,
+        )
+
+        async def mock_ohlcv(
+            symbol: str,
+            timeframe: str = "1h",
+            since: int | None = None,
+            limit: int | None = None,
+        ) -> list[OhlcvSnapshot]:
+            return [new_candle, stale_candle]
+
+        client.get_ohlcv = mock_ohlcv
+        results: list[CandleUpdate] = []
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_ccxt",
+                return_value="BTC/USD:USD",
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.asyncio.sleep",
+                side_effect=asyncio.CancelledError,
+            ),
+        ):
+            iterator = client.subscribe_candles(["BTC-USD-PERP"], "1h")
+            try:
+                async for update in iterator:
+                    results.append(update)
+            except asyncio.CancelledError:
+                pass
+        assert len(results) == 1
+        assert results[0].open == pytest.approx(50000.0)
+
+    @pytest.mark.asyncio
+    async def test_skips_symbols_without_ccxt_alias(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """subscribe_candles skips symbols that have no CCXT mapping.
+
+        Given: native_to_ccxt raises ValueError for a symbol,
+        When: subscribe_candles is called,
+        Then: Returns without yielding.
+        """
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_ccxt",
+            side_effect=ValueError("unknown"),
+        ):
+            iterator = client.subscribe_candles(["UNKNOWN-SYM"], "1h")
+            results = [c async for c in iterator]
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_handles_api_error(self, client: KrakenFuturesExchangeClient) -> None:
+        """subscribe_candles logs exception and continues on API error.
+
+        Given: get_ohlcv raises on first call,
+        When: subscribe_candles iterates,
+        Then: Does not crash, continues polling loop.
+        """
+        call_count = 0
+
+        async def mock_ohlcv(
+            symbol: str,
+            timeframe: str = "1h",
+            since: int | None = None,
+            limit: int | None = None,
+        ) -> list[OhlcvSnapshot]:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("API error")
+            return []
+
+        client.get_ohlcv = mock_ohlcv
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_ccxt",
+                return_value="BTC/USD:USD",
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.asyncio.sleep",
+                side_effect=asyncio.CancelledError,
+            ),
+        ):
+            iterator = client.subscribe_candles(["BTC-USD-PERP"], "1h")
+            results: list[CandleUpdate] = []
+            try:
+                async for update in iterator:
+                    results.append(update)
+            except asyncio.CancelledError:
+                pass
+        assert results == []
+        assert call_count == 1
+
+
+class TestTimeframeToSeconds:
+    """Tests for _timeframe_to_seconds helper."""
+
+    def test_known_timeframes(self) -> None:
+        """All supported timeframes map to correct seconds.
+
+        Given: Known timeframe strings,
+        When: _timeframe_to_seconds is called,
+        Then: Returns correct duration.
+        """
+        assert _timeframe_to_seconds("1m") == 60
+        assert _timeframe_to_seconds("5m") == 300
+        assert _timeframe_to_seconds("15m") == 900
+        assert _timeframe_to_seconds("1h") == 3600
+        assert _timeframe_to_seconds("4h") == 14400
+        assert _timeframe_to_seconds("1d") == 86400
+
+    def test_unsupported_timeframe_raises(self) -> None:
+        """Unsupported timeframe raises ValueError.
+
+        Given: An invalid timeframe string,
+        When: _timeframe_to_seconds is called,
+        Then: Raises ValueError with supported list.
+        """
+        with pytest.raises(ValueError, match="Unsupported timeframe"):
+            _timeframe_to_seconds("2w")
 
 
 class TestSubscribeInstruments:

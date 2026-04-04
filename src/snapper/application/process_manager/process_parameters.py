@@ -100,6 +100,24 @@ class AggregatesBackfillParameters(StrictBody):
     save_csv: bool = True
 
 
+class KrakenFuturesBackfillParameters(StrictBody):
+    """Parameters for KrakenFuturesAggregatesBackfillService.
+
+    Attributes:
+        symbols: Native symbols to backfill (empty uses all mapped).
+        all_symbols: If True, backfill all Kraken Futures symbols.
+        timeframe: CCXT candle interval (e.g. 1h, 4h, 1d).
+        days_back: Number of days to backfill from today.
+        resume: Whether to resume from last stored candle.
+    """
+
+    symbols: list[str] = []
+    all_symbols: bool = False
+    timeframe: str = "1h"
+    days_back: int = 90
+    resume: bool = True
+
+
 class GroupedDailyBackfillParameters(StrictBody):
     """Parameters for PolygonGroupedDailyBackfillService.
 

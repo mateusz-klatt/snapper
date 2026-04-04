@@ -4,9 +4,10 @@ This module provides a market data feed publisher for the Kraken Futures
 exchange. It streams real-time ticks and trades via Kraken's Futures
 WebSocket API and publishes normalized data to the ZMQ messaging bus.
 
-Candles are not available via WebSocket for Kraken Futures.
-The publisher's candle loop should be overridden to use REST OHLCV polling
-or disabled entirely.
+Candle data is ingested via REST OHLCV polling (no WebSocket candle
+feed available). The base class ``_candle_loop()`` drives polling
+through ``subscribe_candles()``, which polls ``get_ohlcv()`` at
+regular intervals.
 
 Configuration
 -------------
@@ -124,18 +125,3 @@ class KrakenFuturesMarketDataPublisher(MarketDataPublisherService[KrakenFuturesE
             0 (unlimited) — Kraken Futures WS does not document a per-connection limit.
         """
         return 0
-
-    async def _candle_loop(self, symbols: list[str], timeframe: str) -> None:
-        """No-op candle loop.
-
-        Kraken Futures has no WebSocket candle feed. Candle data should
-        be fetched via REST get_ohlcv() if needed.
-
-        Args:
-            symbols: Product symbols (unused).
-            timeframe: Candle interval (unused).
-        """
-        logger.info(
-            f"KrakenFuturesMarketDataPublisher: Candle loop disabled "
-            f"(no WS candle feed for kraken_futures, timeframe={timeframe})"
-        )

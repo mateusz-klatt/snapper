@@ -57,11 +57,40 @@ from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.symbols.functions import kraken_futures_ws_to_native
+from snapper.infrastructure.symbols.functions import native_to_ccxt
 from snapper.infrastructure.symbols.functions import native_to_kraken_futures_ws
 
 _CREDENTIALS_REQUIRED_MSG = "API credentials required for authenticated operations"
 _QUEUE_DRAIN_TIMEOUT = 0.1
 _QUEUE_MAX_SIZE = 10000
+
+_TIMEFRAME_SECONDS: dict[str, int] = {
+    "1m": 60,
+    "5m": 300,
+    "15m": 900,
+    "1h": 3600,
+    "4h": 14400,
+    "1d": 86400,
+}
+
+
+def _timeframe_to_seconds(timeframe: str) -> int:
+    """Convert CCXT timeframe string to duration in seconds.
+
+    Args:
+        timeframe: Candle interval (e.g., ``1m``, ``1h``, ``1d``).
+
+    Returns:
+        Duration in seconds.
+
+    Raises:
+        ValueError: If timeframe is not supported.
+    """
+    try:
+        return _TIMEFRAME_SECONDS[timeframe]
+    except KeyError as exc:
+        supported = ", ".join(sorted(_TIMEFRAME_SECONDS))
+        raise ValueError(f"Unsupported timeframe: {timeframe}. Supported: {supported}") from exc
 
 
 def _enqueue_or_drop_oldest(queue: asyncio.Queue[Any], item: Any, label: str) -> None:
@@ -626,21 +655,80 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         symbols: list[str],
         timeframe: str = "1m",
     ) -> AsyncIterator[CandleUpdate]:
-        """Subscribe to candle updates (not available for Kraken Futures WS).
+        """Subscribe to candle updates via REST polling.
 
-        Callers should use get_ohlcv() for REST-based candle polling.
+        Kraken Futures has no WebSocket candle feed. This method polls
+        ``get_ohlcv()`` at regular intervals and yields new candles as
+        they appear. Deduplicates by tracking the latest ``open_at``
+        timestamp per symbol.
 
         Args:
-            symbols: Product IDs (unused).
-            timeframe: Candle interval (unused).
+            symbols: Native symbols (e.g., ``BTC-USD-PERP``).
+            timeframe: Candle interval (e.g., ``1m``, ``1h``).
 
         Returns:
-            Never returns; always raises.
-
-        Raises:
-            NotImplementedError: Always. No WS candle feed available.
+            AsyncIterator yielding CandleUpdate for each new candle.
         """
-        raise NotImplementedError("Kraken Futures has no WS candle feed; use get_ohlcv() instead")
+        return self._poll_candles(symbols, timeframe)
+
+    async def _poll_candles(
+        self,
+        symbols: list[str],
+        timeframe: str,
+    ) -> AsyncIterator[CandleUpdate]:
+        """Poll OHLCV data and yield CandleUpdate items.
+
+        Converts native symbols to CCXT format via the symbol mapper.
+        Skips symbols that have no CCXT alias (e.g., dated futures).
+
+        Args:
+            symbols: Native symbols to poll.
+            timeframe: Candle interval string.
+
+        Yields:
+            CandleUpdate for each new candle detected.
+        """
+        last_seen: dict[str, float] = {}
+        poll_interval = 60.0
+        interval_seconds = _timeframe_to_seconds(timeframe)
+        ccxt_map: dict[str, str] = {}
+        for sym in symbols:
+            try:
+                ccxt_map[sym] = native_to_ccxt(sym)
+            except ValueError:
+                logger.warning(f"No CCXT alias for {sym}, skipping candle polling")
+        if not ccxt_map:
+            logger.warning("No symbols with CCXT aliases for candle polling")
+            return
+        while True:
+            for native_sym, ccxt_sym in ccxt_map.items():
+                try:
+                    since_ts = last_seen.get(native_sym)
+                    since_ms = int(since_ts * 1000) if since_ts else None
+                    candles = await self.get_ohlcv(
+                        symbol=ccxt_sym,
+                        timeframe=timeframe,
+                        since=since_ms,
+                        limit=5,
+                    )
+                    for candle in candles:
+                        if candle.timestamp > last_seen.get(native_sym, 0):
+                            last_seen[native_sym] = candle.timestamp
+                            yield CandleUpdate(
+                                symbol=native_sym,
+                                open=candle.open,
+                                high=candle.high,
+                                low=candle.low,
+                                close=candle.close,
+                                vwap=0.0,
+                                trades=0,
+                                volume=candle.volume,
+                                interval_begin=datetime.fromtimestamp(candle.timestamp, tz=UTC),
+                                interval=interval_seconds,
+                            )
+                except Exception:
+                    logger.exception(f"Failed to poll candles for {native_sym}")
+            await asyncio.sleep(poll_interval)
 
     def subscribe_trades(self, symbols: list[str]) -> AsyncIterator[TradeUpdate]:
         """Subscribe to real-time trade updates via WebSocket.
