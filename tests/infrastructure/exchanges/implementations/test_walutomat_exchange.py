@@ -2426,6 +2426,43 @@ async def test_disappeared_order_still_open_skips_terminal() -> None:
 
 
 @pytest.mark.asyncio()
+async def test_disappeared_order_unexpected_status_no_event() -> None:
+    """Verify no terminal event for unexpected status from API.
+
+    Given: An order disappeared from active list,
+    When: get_order returns a status not in (OPEN, CLOSED, CANCELED),
+    Then: No ExecutionUpdate is yielded.
+    """
+    client = _build_polling_client()
+
+    async def mock_get_order(order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
+        return _make_order_snapshot(
+            order_id=order_id,
+            filled=0.0,
+            amount=100.0,
+            status=OrderStatusEnum.EXPIRED,
+        )
+
+    client.get_order = mock_get_order
+
+    tracked = _TrackedOrder(
+        order_id="ord-1",
+        cl_ord_id="sub-1",
+        symbol="EUR-PLN",
+        side=OrderSideEnum.BUY,
+        order_type=OrderTypeEnum.LIMIT,
+        amount=100.0,
+        filled=0.0,
+        price=4.50,
+    )
+    events: list[ExecutionUpdate] = []
+    async for event in client._resolve_disappeared("ord-1", tracked):
+        events.append(event)
+
+    assert events == []
+
+
+@pytest.mark.asyncio()
 async def test_transiently_omitted_open_order_stays_tracked() -> None:
     """Verify transient OPEN omission does not create a bogus reappearance fill.
 
