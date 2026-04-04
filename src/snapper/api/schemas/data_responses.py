@@ -11,6 +11,7 @@ from typing import Literal
 from snapper.api.schemas.base import PayloadListResponse
 from snapper.api.schemas.base import PayloadResponse
 from snapper.messaging.schemas.data import CandleData
+from snapper.messaging.schemas.data import ContinuousCandleData
 from snapper.messaging.schemas.data import ContractData
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import FrontMonthData
@@ -145,6 +146,20 @@ class UnderlyingInstrumentListResponse(
     """
 
     type: Literal["underlying_instrument_list"] = "underlying_instrument_list"
+
+
+class ContinuousCandleListResponse(
+    PayloadListResponse[Literal["continuous_candle_list"], ContinuousCandleData],
+):
+    """Continuous contract candle list response wrapper.
+
+    Attributes:
+        type: Payload item type discriminator.
+        payload: List of stitched continuous candle items.
+        count: Total number of candles in the response.
+    """
+
+    type: Literal["continuous_candle_list"] = "continuous_candle_list"
 
 
 class FrontMonthResponse(

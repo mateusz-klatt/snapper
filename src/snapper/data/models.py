@@ -1041,3 +1041,45 @@ class InstrumentUnderlyingMapping(TemporalMixin, Base):
     underlying_public_id: Mapped[str] = mapped_column(UUIDColumn())
     relationship_type: Mapped[str] = mapped_column(String(16))
     contract_family: Mapped[str | None] = mapped_column(String(16))
+
+
+class ContinuousContractConfig(TemporalMixin, Base):
+    """Saved configuration preset for continuous contract series.
+
+    Stores parameters for on-demand continuous contract computation.
+    The series data itself is NOT persisted — it is computed per request
+    by ContinuousContractBuilder. CRUD endpoints deferred to a future
+    phase; Phase 3 ships schema/migration only.
+    """
+
+    __tablename__ = "continuous_contract_configs"
+    __table_args__ = (
+        Index(
+            "uq_ccc_active_key",
+            "underlying_public_id",
+            "exchange",
+            "contract_family",
+            "method",
+            "rollover_days_before",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_ccc_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        CheckConstraint(
+            "method IN ('unadjusted', 'ratio', 'panama')",
+            name="ck_ccc_method",
+        ),
+    )
+    underlying_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    exchange: Mapped[str] = mapped_column(String(20))
+    contract_family: Mapped[str] = mapped_column(String(16))
+    method: Mapped[str] = mapped_column(String(16))
+    rollover_days_before: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    label: Mapped[str | None] = mapped_column(String(64))

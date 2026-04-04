@@ -34,6 +34,7 @@ from sqlalchemy import Integer
 from sqlalchemy.types import TypeDecorator
 
 from snapper.data.models import Candle
+from snapper.data.models import ContinuousContractConfig
 from snapper.data.models import Control
 from snapper.data.models import Execution
 from snapper.data.models import Instrument
@@ -1113,6 +1114,10 @@ STATE_TABLES: dict[str, StateTableSpec] = {
     "underlying_assets": StateTableSpec(model=UnderlyingAsset, group_column=None),
     "instrument_underlying_mappings": StateTableSpec(
         model=InstrumentUnderlyingMapping,
+        group_column=None,
+    ),
+    "continuous_contract_configs": StateTableSpec(
+        model=ContinuousContractConfig,
         group_column=None,
     ),
 }

@@ -40,6 +40,7 @@ from typing import Self
 from pydantic import Field
 from pydantic import model_validator
 
+from snapper.api.schemas.base import StrictBody
 from snapper.api.schemas.base import StrictDataSchema
 from snapper.core.json_types import JsonObject
 from snapper.core.types import ExchangeEnum
@@ -575,3 +576,59 @@ class ContractData(StrictDataSchema[Literal["contract"]]):
     relationship_type: str
     contract_family: str | None
     is_front_month: bool
+
+
+class ContinuousCandleData(StrictDataSchema[Literal["continuous_candle"]]):
+    """Candle from a stitched continuous contract series.
+
+    Provenance is minted by the API handler (on-demand computation,
+    not a single DB row). open_at is domain time (interval start).
+
+    Attributes:
+        open_at: Candle interval start time.
+        timeframe: Candle timeframe (e.g., "1h", "1d").
+        open: Adjusted open price.
+        high: Adjusted high price.
+        low: Adjusted low price.
+        close: Adjusted close price.
+        volume: Raw volume (not adjusted).
+        vwap: Adjusted VWAP (nullable).
+        trades: Raw trade count (not adjusted, nullable).
+        source_contract: Native symbol of the contract this bar came from.
+        adjustment_factor: Cumulative adjustment applied (None for anchor).
+    """
+
+    type: Literal["continuous_candle"] = "continuous_candle"
+    open_at: datetime
+    timeframe: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    vwap: float | None
+    trades: int | None
+    source_contract: str
+    adjustment_factor: float | None
+
+
+class RollPointDetail(StrictBody):
+    """Roll point detail for partial failure response."""
+
+    from_contract: str
+    to_contract: str
+    roll_at: str
+
+
+class ContinuousSeriesPartialResponse(StrictDataSchema[Literal["continuous_partial"]]):
+    """Partial continuous series response when a roll gap is too large.
+
+    Returned with HTTP 200 so consumers receive usable data up to the
+    failure point. The failed_roll field signals truncation.
+    """
+
+    type: Literal["continuous_partial"] = "continuous_partial"
+    payload: list[ContinuousCandleData]
+    count: int
+    failed_roll: RollPointDetail
+    message: str

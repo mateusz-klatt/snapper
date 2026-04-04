@@ -20,6 +20,8 @@ from pydantic import SecretStr
 from typer.testing import CliRunner
 
 import snapper.cli.app as app_module
+from snapper.application.services.continuous_contract_builder import BuildResult
+from snapper.application.services.continuous_contract_builder import RollPointInfo
 from snapper.auth.domain.roles import UserRole
 from snapper.cli.app import _alembic_cfg
 from snapper.cli.app import app
@@ -3618,3 +3620,167 @@ def test_update_underlyings_no_force(
     result = cli_runner.invoke(app, ["update-underlyings"])
     assert result.exit_code == 0
     assert captured["force"] is False
+
+
+def test_build_continuous_success(cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test build-continuous command runs builder and displays output.
+
+    Given: Mocked BootstrapSettingsLoader, repository, and ContinuousContractBuilder,
+    When: build-continuous is invoked with required arguments,
+    Then: Builder runs and output shows contracts used, bar count, and roll points.
+    """
+    mock_underlying = {
+        "public_id": "ua-1",
+        "ticker": "SPX",
+        "name": "S&P 500",
+    }
+    roll_point = RollPointInfo(
+        from_contract="ESM6",
+        to_contract="ESU6",
+        roll_at=datetime(2026, 1, 3, tzinfo=UTC),
+        adjustment=10.0,
+    )
+    build_result = BuildResult(
+        candles=[],
+        contracts_used=["ESM6", "ESU6"],
+        roll_points=[roll_point],
+        failed_roll=None,
+    )
+
+    mock_repo = AsyncMock()
+    mock_repo.get_underlying_by_ticker = AsyncMock(return_value=mock_underlying)
+
+    mock_builder = AsyncMock()
+    mock_builder.build = AsyncMock(return_value=build_result)
+
+    mock_bootstrap = MagicMock()
+    mock_bootstrap.db_url = "sqlite:///:memory:"
+
+    monkeypatch.setattr(app_module, "BootstrapSettingsLoader", lambda: mock_bootstrap)
+    monkeypatch.setattr(app_module, "get_repository", lambda db_url: mock_repo)
+    monkeypatch.setattr(app_module, "ContinuousContractBuilder", lambda repository: mock_builder)
+
+    result = cli_runner.invoke(app, ["build-continuous", "SPX", "kraken_equities", "ES"])
+    assert result.exit_code == 0
+    assert "Contracts used: 2" in result.stdout
+    assert "ESM6" in result.stdout
+    assert "ESU6" in result.stdout
+    assert "Total bars: 0" in result.stdout
+    assert "Roll points: 1" in result.stdout
+    assert "adj=10.0" in result.stdout
+
+
+def test_build_continuous_underlying_not_found(
+    cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Test build-continuous exits with error when underlying not found.
+
+    Given: Repository returns None for get_underlying_by_ticker,
+    When: build-continuous is invoked,
+    Then: Exit code 1 and error message printed.
+    """
+    mock_repo = AsyncMock()
+    mock_repo.get_underlying_by_ticker = AsyncMock(return_value=None)
+
+    mock_bootstrap = MagicMock()
+    mock_bootstrap.db_url = "sqlite:///:memory:"
+
+    monkeypatch.setattr(app_module, "BootstrapSettingsLoader", lambda: mock_bootstrap)
+    monkeypatch.setattr(app_module, "get_repository", lambda db_url: mock_repo)
+
+    result = cli_runner.invoke(app, ["build-continuous", "NOPE", "kraken_equities", "ES"])
+    assert result.exit_code == 1
+    assert "Underlying not found: NOPE" in result.output
+
+
+def test_build_continuous_with_failed_roll(
+    cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Test build-continuous shows warning when series is truncated.
+
+    Given: Builder returns result with failed_roll,
+    When: build-continuous is invoked,
+    Then: Output includes WARNING about truncated series.
+    """
+    mock_underlying = {"public_id": "ua-1", "ticker": "SPX", "name": "S&P 500"}
+    failed = RollPointInfo(
+        from_contract="ESM6",
+        to_contract="ESU6",
+        roll_at=datetime(2026, 1, 3, tzinfo=UTC),
+        adjustment=None,
+    )
+    build_result = BuildResult(
+        candles=[],
+        contracts_used=["ESM6", "ESU6"],
+        roll_points=[],
+        failed_roll=failed,
+    )
+
+    mock_repo = AsyncMock()
+    mock_repo.get_underlying_by_ticker = AsyncMock(return_value=mock_underlying)
+
+    mock_builder = AsyncMock()
+    mock_builder.build = AsyncMock(return_value=build_result)
+
+    mock_bootstrap = MagicMock()
+    mock_bootstrap.db_url = "sqlite:///:memory:"
+
+    monkeypatch.setattr(app_module, "BootstrapSettingsLoader", lambda: mock_bootstrap)
+    monkeypatch.setattr(app_module, "get_repository", lambda db_url: mock_repo)
+    monkeypatch.setattr(app_module, "ContinuousContractBuilder", lambda repository: mock_builder)
+
+    result = cli_runner.invoke(app, ["build-continuous", "SPX", "kraken_equities", "ES"])
+    assert result.exit_code == 0
+    assert "WARNING" in result.stdout
+
+
+def test_build_continuous_with_explicit_dates(
+    cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Test build-continuous parses --start/--end dates and normalizes to UTC.
+
+    Given: --start and --end as ISO strings (one naive, one offset-aware),
+    When: build-continuous is invoked,
+    Then: builder.build receives UTC-normalized datetimes.
+    """
+    captured_kwargs: dict[str, Any] = {}
+    mock_result = MagicMock()
+    mock_result.candles = []
+    mock_result.contracts_used = []
+    mock_result.roll_points = []
+    mock_result.failed_roll = None
+
+    async def _capture_build(**kwargs: Any) -> MagicMock:
+        captured_kwargs.update(kwargs)
+        return mock_result
+
+    mock_builder = MagicMock()
+    mock_builder.build = _capture_build
+    mock_repo = AsyncMock()
+    mock_repo.get_underlying_by_ticker = AsyncMock(
+        return_value={"public_id": "u1", "ticker": "SPX"}
+    )
+    mock_bootstrap = MagicMock()
+    mock_bootstrap.db_url = "sqlite:///:memory:"
+
+    monkeypatch.setattr(app_module, "BootstrapSettingsLoader", lambda: mock_bootstrap)
+    monkeypatch.setattr(app_module, "get_repository", lambda db_url: mock_repo)
+    monkeypatch.setattr(app_module, "ContinuousContractBuilder", lambda repository: mock_builder)
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "build-continuous",
+            "SPX",
+            "kraken_equities",
+            "ES",
+            "--start",
+            "2026-01-01",
+            "--end",
+            "2026-06-01T00:00:00+02:00",
+        ],
+    )
+    assert result.exit_code == 0
+
+    assert captured_kwargs["start"].tzinfo == UTC
+    assert captured_kwargs["end"].tzinfo == UTC

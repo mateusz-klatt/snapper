@@ -44,6 +44,7 @@ import threading
 from datetime import UTC
 from datetime import date as date_type
 from datetime import datetime
+from datetime import timedelta
 from pathlib import Path
 from typing import Annotated
 from typing import Any
@@ -58,6 +59,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 from snapper.application.engine.trader import TraderCoordinator
+from snapper.application.services.continuous_contract_builder import ContinuousContractBuilder
 from snapper.application.updaters.historical.aggregates import PolygonAggregatesBackfillService
 from snapper.application.updaters.historical.grouped import PolygonGroupedDailyBackfillService
 from snapper.application.updaters.historical.kraken_futures_aggregates import (
@@ -87,6 +89,7 @@ from snapper.data.archiver import StateArchiver
 from snapper.data.models import Setting
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import close_and_insert
+from snapper.data.repository import get_repository
 from snapper.data.repository import where_active_now
 from snapper.data.seed.loader import run_seed
 from snapper.infrastructure.market_data.kraken import run_snapshot_update
@@ -120,6 +123,24 @@ def validate_api_keys_for_trader(paper: bool = False) -> bool:
         True if configuration is valid.
     """
     return True
+
+
+def _parse_utc(value: str) -> datetime:
+    """Parse an ISO datetime string and normalize to UTC.
+
+    Naive inputs get UTC attached. Offset-aware inputs are converted
+    to UTC via astimezone.
+
+    Args:
+        value: ISO 8601 datetime string.
+
+    Returns:
+        Timezone-aware datetime in UTC.
+    """
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 def validate_api_keys(kraken_api_key: Any, kraken_api_secret: Any, paper: bool = False) -> bool:
@@ -1358,3 +1379,70 @@ def update_underlyings(
         typer.echo("Underlying asset mappings updated successfully")
 
     asyncio.run(run_update())
+
+
+@app.command(name="build-continuous")
+def build_continuous(
+    ticker: Annotated[str, typer.Argument(help="Underlying asset ticker (e.g. SPX, GOLD)")],
+    exchange: Annotated[str, typer.Argument(help="Exchange to source contracts from")],
+    contract_family: Annotated[str, typer.Argument(help="Product root (e.g. ES, GC)")],
+    timeframe: Annotated[str, typer.Option("--timeframe", "-t")] = "1d",
+    method: Annotated[str, typer.Option("--method", "-m")] = "panama",
+    start: Annotated[str, typer.Option("--start")] = "",
+    end: Annotated[str, typer.Option("--end")] = "",
+    rollover_days: Annotated[int, typer.Option("--rollover-days")] = 0,
+) -> None:
+    """Build and display continuous contract series for an underlying.
+
+    Example: snapper build-continuous SPX kraken_equities ES --timeframe 1d
+
+    Args:
+        ticker: Underlying asset ticker (e.g. SPX, GOLD).
+        exchange: Exchange to source contracts from.
+        contract_family: Product root (e.g. ES, GC).
+        timeframe: Candle timeframe (e.g. 1d, 1h).
+        method: Adjustment method (unadjusted, ratio, panama).
+        start: Series start time (ISO format). Defaults to 365 days ago.
+        end: Series end time (ISO format). Defaults to now.
+        rollover_days: Days before expiry to roll. Defaults to 0.
+    """
+
+    async def run_build() -> None:
+        bootstrap = BootstrapSettingsLoader()
+        repo = get_repository(bootstrap.db_url)
+        builder = ContinuousContractBuilder(repository=repo)
+        now = datetime.now(UTC)
+        s = _parse_utc(start) if start else now - timedelta(days=365)
+        e = _parse_utc(end) if end else now
+        underlying = await repo.get_underlying_by_ticker(ticker, now)
+        if underlying is None:
+            typer.echo(f"Underlying not found: {ticker}", err=True)
+            raise typer.Exit(code=1)
+        result = await builder.build(
+            underlying_public_id=underlying["public_id"],
+            exchange=exchange,
+            contract_family=contract_family,
+            timeframe=timeframe,
+            start=s,
+            end=e,
+            method=method,
+            rollover_days_before=rollover_days,
+            as_of=now,
+        )
+        typer.echo(
+            f"Contracts used: {len(result.contracts_used)} ({', '.join(result.contracts_used)})"
+        )
+        typer.echo(f"Total bars: {len(result.candles)}")
+        typer.echo(f"Roll points: {len(result.roll_points)}")
+        for rp in result.roll_points:
+            typer.echo(
+                f"  {rp.from_contract} -> {rp.to_contract} "
+                f"at {rp.roll_at.isoformat()} (adj={rp.adjustment})"
+            )
+        if result.failed_roll:
+            typer.echo(
+                f"WARNING: Series truncated at {result.failed_roll.from_contract} "
+                f"-> {result.failed_roll.to_contract}"
+            )
+
+    asyncio.run(run_build())

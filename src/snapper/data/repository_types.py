@@ -510,3 +510,23 @@ class CheckpointUpsertRow(TypedDict):
     session_id: str
     sequence_id: int
     bus_time: datetime
+
+
+class ContinuousCandleRow(TypedDict):
+    """Row dict for continuous contract candle series.
+
+    Extends the candle concept with contract provenance and
+    adjustment metadata for stitched futures series.
+    """
+
+    open_at: datetime
+    timeframe: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    vwap: float | None
+    trades: int | None
+    source_contract: str
+    adjustment_factor: float | None

@@ -51,6 +51,7 @@ def test_state_tables_cover_all_14() -> None:
         "process_runs",
         "underlying_assets",
         "instrument_underlying_mappings",
+        "continuous_contract_configs",
     }
     assert set(STATE_TABLES.keys()) == expected
 

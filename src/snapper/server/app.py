@@ -66,6 +66,7 @@ from slowapi.middleware import SlowAPIMiddleware
 
 from snapper.api.auth.services.ws_token_service import get_ws_token_service
 from snapper.api.schemas.data_responses import CandleListResponse
+from snapper.api.schemas.data_responses import ContinuousCandleListResponse
 from snapper.api.schemas.data_responses import ContractListResponse
 from snapper.api.schemas.data_responses import ExchangeListResponse
 from snapper.api.schemas.data_responses import ExecutionListResponse
@@ -99,6 +100,7 @@ from snapper.api.schemas.process import SystemStatusData
 from snapper.api.schemas.process import SystemStatusResponse
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.registry import discover_processes
+from snapper.application.services.continuous_contract_builder import ContinuousContractBuilder
 from snapper.application.services.settings import SettingsService
 from snapper.application.services.settings import get_settings_service
 from snapper.auth.dependencies import get_csrf_manager
@@ -126,11 +128,14 @@ from snapper.interface.websocket.helpers import build_allowed_origins
 from snapper.messaging.infrastructure.gap_detector import GapDetectorStats
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import CandleData
+from snapper.messaging.schemas.data import ContinuousCandleData
+from snapper.messaging.schemas.data import ContinuousSeriesPartialResponse
 from snapper.messaging.schemas.data import ContractData
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import FrontMonthData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import PositionData
+from snapper.messaging.schemas.data import RollPointDetail
 from snapper.messaging.schemas.data import SignalData
 from snapper.messaging.schemas.data import UnderlyingAssetData
 from snapper.messaging.schemas.data import UnderlyingInstrumentData
@@ -1428,6 +1433,150 @@ def _create_underlying_router() -> APIRouter:
         except Exception as exc:
             logger.error(f"Failed to fetch contracts for {ticker}: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch contracts") from exc
+
+    @router.get(
+        "/underlyings/{ticker}/continuous",
+        responses={
+            400: {"description": "Invalid parameters"},
+            404: {"description": "Underlying not found or no contracts"},
+            500: {"description": "Internal server error"},
+        },
+    )
+    async def get_continuous_series(
+        request: Request,
+        ticker: str,
+        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
+        _csrf: Annotated[None, Depends(validate_csrf_token)],
+        repo: Annotated[Repository, Depends(get_repository_dependency)],
+        exchange: Annotated[str, Query(description="Exchange to source contracts from")],
+        contract_family: Annotated[str, Query(description="Product root (e.g. ES, GC)")],
+        timeframe: Annotated[str, Query(description="Candle timeframe (e.g. 1h, 1d)")],
+        start: Annotated[datetime, Query(description="Series start time (UTC)")],
+        end: Annotated[datetime, Query(description="Series end time (UTC)")],
+        method: Annotated[str, Query(description="Adjustment method")] = "panama",
+        rollover_days_before: Annotated[int, Query(description="Days before expiry to roll")] = 0,
+        as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
+    ) -> ContinuousCandleListResponse | ContinuousSeriesPartialResponse:
+        """Build and return a continuous contract candle series.
+
+        Stitches historical candle data from multiple expired futures contracts
+        into a single continuous price series using the specified adjustment method.
+
+        Args:
+            request: FastAPI request (provides REST tracker for provenance).
+            ticker: Underlying asset ticker (e.g. 'SPX', 'GOLD').
+            _auth: Authenticated user with READ_MARKET_DATA permission.
+            _csrf: CSRF token validation.
+            repo: Database repository.
+            exchange: Exchange to source contracts from.
+            contract_family: Product root (e.g. 'ES', 'GC', 'CL').
+            timeframe: Candle timeframe (e.g. '1h', '1d').
+            start: Series start time (inclusive).
+            end: Series end time (inclusive).
+            method: Adjustment method: 'unadjusted', 'ratio', 'panama'.
+            rollover_days_before: Days before expiry to roll (0 = on expiry).
+            as_of: Optional point-in-time query timestamp.
+
+        Returns:
+            Full series response, or partial response if a roll gap was too large.
+
+        Raises:
+            HTTPException: 400 for invalid params, 404 if underlying not found.
+        """
+        try:
+            if method not in ("unadjusted", "ratio", "panama"):
+                raise HTTPException(status_code=400, detail=f"Invalid method: {method}")
+            max_days = 3650
+            if (end - start).days > max_days:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Date range too large: max {max_days} days",
+                )
+            utc_start = start.astimezone(UTC) if start.tzinfo else start.replace(tzinfo=UTC)
+            utc_end = end.astimezone(UTC) if end.tzinfo else end.replace(tzinfo=UTC)
+            now = (
+                as_of.astimezone(UTC)
+                if as_of and as_of.tzinfo
+                else (as_of.replace(tzinfo=UTC) if as_of else datetime.now(UTC))
+            )
+            underlying = await repo.get_underlying_by_ticker(ticker, now)
+            if underlying is None:
+                raise HTTPException(status_code=404, detail=f"Underlying not found: {ticker}")
+            builder = ContinuousContractBuilder(repository=repo)
+            result = await builder.build(
+                underlying_public_id=underlying["public_id"],
+                exchange=exchange,
+                contract_family=contract_family,
+                timeframe=timeframe,
+                start=utc_start,
+                end=utc_end,
+                method=method,
+                rollover_days_before=rollover_days_before,
+                as_of=now,
+            )
+            tracker: SequenceTracker = request.app.state.rest_tracker
+            sid = tracker.session_id
+            items = [
+                ContinuousCandleData(
+                    public_id=str(uuid7()),
+                    session_id=sid,
+                    sequence_id=tracker.next_sequence(_REST_DATA_STREAM),
+                    timestamp=dt.datetime.now(dt.UTC),
+                    open_at=c["open_at"],
+                    timeframe=c["timeframe"],
+                    open=c["open"],
+                    high=c["high"],
+                    low=c["low"],
+                    close=c["close"],
+                    volume=c["volume"],
+                    vwap=c["vwap"],
+                    trades=c["trades"],
+                    source_contract=c["source_contract"],
+                    adjustment_factor=c["adjustment_factor"],
+                )
+                for c in result.candles
+            ]
+            if result.failed_roll is not None:
+                seq = tracker.next_sequence(_REST_DATA_STREAM)
+                ts = dt.datetime.now(dt.UTC)
+                pid = str(uuid7())
+                return ContinuousSeriesPartialResponse(
+                    session_id=sid,
+                    sequence_id=seq,
+                    public_id=pid,
+                    timestamp=ts,
+                    payload=items,
+                    count=len(items),
+                    failed_roll=RollPointDetail(
+                        from_contract=result.failed_roll.from_contract,
+                        to_contract=result.failed_roll.to_contract,
+                        roll_at=result.failed_roll.roll_at.isoformat(),
+                    ),
+                    message=(
+                        f"Series truncated at roll {result.failed_roll.from_contract} "
+                        f"-> {result.failed_roll.to_contract}: gap too large"
+                    ),
+                )
+            seq = tracker.next_sequence(_REST_DATA_STREAM)
+            ts = dt.datetime.now(dt.UTC)
+            pid = str(uuid7())
+            return ContinuousCandleListResponse(
+                session_id=sid,
+                sequence_id=seq,
+                public_id=pid,
+                timestamp=ts,
+                payload=items,
+                count=len(items),
+            )
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.error(f"Failed to build continuous series for {ticker}: {exc}")
+            raise HTTPException(
+                status_code=500, detail="Failed to build continuous series"
+            ) from exc
 
     return router
 
