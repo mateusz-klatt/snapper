@@ -245,6 +245,11 @@ class TraderCoordinator(RegisterableProcess):
             mode_str = parts[2]
             strategy_tag = parts[3] if len(parts) >= 4 else None
 
+            valid_exchanges = get_args(OrderExchange)
+            if exchange_str not in valid_exchanges:
+                logger.warning(f"ZMQTrader: Checkpoint exchange {exchange_str} not valid, skipping")
+                continue
+
             watermark = cp["last_venue_event_id"]
             if watermark is None:
                 logger.info(
@@ -879,6 +884,7 @@ class TraderCoordinator(RegisterableProcess):
             "received_at": datetime.now(UTC),
         }
         self.trade_service.apply_venue_event(venue_event)
+        self._order_shard_keys.pop(order_event.client_order_id, None)
 
     async def _persist_checkpoint(self, shard_key: str) -> None:
         """Write trade projection checkpoint to DB.

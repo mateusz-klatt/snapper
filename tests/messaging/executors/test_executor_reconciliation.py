@@ -136,6 +136,76 @@ class TestReconciliation:
         assert fill_call.exec_type == "trade"
         assert fill_call.last_qty == pytest.approx(1.0)
         assert terminal_call.exec_type == "filled"
+        assert terminal_call.cum_qty is None
+
+    @pytest.mark.asyncio
+    async def test_recon_disappeared_closed_no_price_skips_fill_emits_terminal(self) -> None:
+        """Disappeared CLOSED order with no price skips fill gap, emits terminal only.
+
+        Given: pending with cum_qty=0, get_order shows filled=1.0 but price=None, status=CLOSED,
+        When: _reconcile_with_exchange runs,
+        Then: corrective fill is skipped (no price), only terminal "filled" emitted without cum_qty.
+        """
+        ex = _make_executor()
+        ex.pending_orders["cid-1"] = _make_pending(cum_qty=0.0)
+        ex.exchange_client.get_orders = AsyncMock(return_value=[])
+        closed_no_price = _make_order_snapshot(
+            filled=1.0, price=None, status=OrderStatusEnum.CLOSED
+        )
+        ex.exchange_client.get_order = AsyncMock(return_value=closed_no_price)
+        ex.exchange_client.get_balance = AsyncMock(return_value={})
+        ex._process_execution = AsyncMock()
+
+        await ex._reconcile_with_exchange()
+
+        ex._process_execution.assert_called_once()
+        terminal = ex._process_execution.call_args.args[0]
+        assert terminal.exec_type == "filled"
+        assert terminal.cum_qty is None
+        assert terminal.last_qty is None
+
+    @pytest.mark.asyncio
+    async def test_recon_disappeared_expired_order(self) -> None:
+        """Disappeared expired order emits terminal 'expired' event.
+
+        Given: pending order, get_order returns EXPIRED,
+        When: _reconcile_with_exchange runs,
+        Then: terminal event has exec_type="expired".
+        """
+        ex = _make_executor()
+        ex.pending_orders["cid-1"] = _make_pending()
+        ex.exchange_client.get_orders = AsyncMock(return_value=[])
+        expired_snap = _make_order_snapshot(filled=0.0, status=OrderStatusEnum.EXPIRED)
+        ex.exchange_client.get_order = AsyncMock(return_value=expired_snap)
+        ex.exchange_client.get_balance = AsyncMock(return_value={})
+        ex._process_execution = AsyncMock()
+
+        await ex._reconcile_with_exchange()
+
+        ex._process_execution.assert_called_once()
+        corrective = ex._process_execution.call_args.args[0]
+        assert corrective.exec_type == "expired"
+
+    @pytest.mark.asyncio
+    async def test_recon_disappeared_non_terminal_status_deferred(self) -> None:
+        """Disappeared order with non-terminal status (e.g., OPEN) is deferred.
+
+        Given: pending order, get_order returns OPEN (API race),
+        When: _reconcile_with_exchange runs,
+        Then: no terminal event emitted, order stays in pending.
+        """
+        ex = _make_executor()
+        ex.pending_orders["cid-1"] = _make_pending()
+        ex.exchange_client.get_orders = AsyncMock(return_value=[])
+        open_snap = _make_order_snapshot(filled=0.0, status=OrderStatusEnum.OPEN)
+        ex.exchange_client.get_order = AsyncMock(return_value=open_snap)
+        ex.exchange_client.get_balance = AsyncMock(return_value={})
+        ex._process_execution = AsyncMock()
+
+        await ex._reconcile_with_exchange()
+
+        ex._process_execution.assert_not_called()
+        assert "cid-1" in ex.pending_orders
 
     @pytest.mark.asyncio
     async def test_recon_disappeared_get_order_fails_skips(self) -> None:

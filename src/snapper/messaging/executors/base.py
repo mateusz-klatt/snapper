@@ -986,14 +986,28 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             )
             return
 
+        if snapshot.status not in (
+            OrderStatusEnum.CLOSED,
+            OrderStatusEnum.CANCELED,
+            OrderStatusEnum.EXPIRED,
+        ):
+            logger.info(
+                f"[{exchange_name}] Recon: order {exchange_oid} not in open list "
+                f"but status={snapshot.status}, deferring"
+            )
+            return
+
         if snapshot.filled > pending.last_seen_cum_qty:
             await self._reconcile_fill_gap(exchange_name, exchange_oid, pending, snapshot)
 
         terminal_type: ExecType
         terminal_status: OrderStatusEnum
-        if snapshot.status in (OrderStatusEnum.CLOSED,):
+        if snapshot.status == OrderStatusEnum.CLOSED:
             terminal_type = "filled"
             terminal_status = OrderStatusEnum.CLOSED
+        elif snapshot.status == OrderStatusEnum.EXPIRED:
+            terminal_type = "expired"
+            terminal_status = OrderStatusEnum.EXPIRED
         else:
             terminal_type = "canceled"
             terminal_status = OrderStatusEnum.CANCELED
@@ -1042,7 +1056,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             f"local={pending.last_seen_cum_qty}, "
             f"corrective delta={gap} at price~{fill_price}"
         )
-        recon_exec_id = f"recon-{exchange_oid}-{int(datetime.now(UTC).timestamp())}"
+        recon_exec_id = f"recon-{exchange_oid}-{time.monotonic_ns()}"
         corrective = ExecutionUpdate(
             order_id=exchange_oid,
             exec_type="trade",

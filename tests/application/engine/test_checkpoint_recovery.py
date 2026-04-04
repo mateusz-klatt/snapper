@@ -7,6 +7,7 @@ from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import Mock
+from unittest.mock import patch
 
 import pytest
 
@@ -645,6 +646,33 @@ class TestCheckpointRecovery:
         _set_sqlalchemy_repo(coord, mock_repo)
 
         await coord._recover_engine_state()
+
+        assert len(coord.engines) == 0
+        assert "INVALID_EXCHANGE.BTC-USD.live" not in coord.trade_service._shards
+
+    @pytest.mark.asyncio
+    async def test_engine_creation_returns_none_skips_without_shard_leak(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Engine creation failure after restore does not leave orphaned shard.
+
+        Given: valid exchange checkpoint but _create_engine_for_recovery returns None,
+        When: _recover_from_checkpoints runs,
+        Then: shard is restored in TradeService but engine is not created.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        cp = _make_checkpoint()
+        mock_repo.get_all_checkpoints = AsyncMock(return_value=[cp])
+        mock_repo.get_venue_events_after = AsyncMock(return_value=[])
+        mock_repo.get_executions_for_recovery = AsyncMock(return_value=[])
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
+        _set_sqlalchemy_repo(coord, mock_repo)
+
+        with patch.object(
+            TraderCoordinator, "_create_engine_for_recovery", AsyncMock(return_value=None)
+        ):
+            await coord._recover_engine_state()
 
         assert len(coord.engines) == 0
 
