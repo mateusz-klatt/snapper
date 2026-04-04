@@ -15,6 +15,27 @@ export const ConnectionStatsSchema = z
   })
   .strict()
 
+export const ContinuousCandleDataSchema = z
+  .object({
+    type: z.literal('continuous_candle'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    open_at: z.iso.datetime(),
+    timeframe: z.string(),
+    open: z.number(),
+    high: z.number(),
+    low: z.number(),
+    close: z.number(),
+    volume: z.number(),
+    vwap: z.number().nullable(),
+    trades: z.number().int().nullable(),
+    source_contract: z.string(),
+    adjustment_factor: z.number().nullable(),
+  })
+  .strict()
+
 export const ContractDataSchema = z
   .object({
     type: z.literal('contract'),
@@ -224,6 +245,14 @@ export const ProcessStopDataSchema = z
 
 export const RelationshipTypeEnumSchema = z.enum(['exact', 'derivative', 'proxy'])
 
+export const RollPointDetailSchema = z
+  .object({
+    from_contract: z.string(),
+    to_contract: z.string(),
+    roll_at: z.string(),
+  })
+  .strict()
+
 export const SettingCategoriesResponseSchema = z
   .object({
     type: z.literal('setting_categories'),
@@ -420,6 +449,18 @@ export const SettingUpdateBodySchema = z
 
 export const RemoveSettingBodySchema = z.object({}).strict()
 
+export const ContinuousCandleListResponseSchema = z
+  .object({
+    type: z.literal('continuous_candle_list'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: z.array(ContinuousCandleDataSchema),
+    count: z.number().int(),
+  })
+  .strict()
+
 export const ContractListResponseSchema = z
   .object({
     type: z.literal('contract_list'),
@@ -533,6 +574,20 @@ export const ProcessStopResponseSchema = z
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     payload: ProcessStopDataSchema,
+  })
+  .strict()
+
+export const ContinuousSeriesPartialResponseSchema = z
+  .object({
+    type: z.literal('continuous_partial'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: z.array(ContinuousCandleDataSchema),
+    count: z.number().int(),
+    failed_roll: RollPointDetailSchema,
+    message: z.string(),
   })
   .strict()
 
@@ -1119,6 +1174,7 @@ export const SystemStatusResponseSchema = z
 
 // Type exports
 export type ConnectionStats = z.infer<typeof ConnectionStatsSchema>
+export type ContinuousCandleData = z.infer<typeof ContinuousCandleDataSchema>
 export type ContractData = z.infer<typeof ContractDataSchema>
 export type ExchangeListResponse = z.infer<typeof ExchangeListResponseSchema>
 export type ExecutionData = z.infer<typeof ExecutionDataSchema>
@@ -1136,6 +1192,7 @@ export type ProcessStartData = z.infer<typeof ProcessStartDataSchema>
 export type ProcessStatus = z.infer<typeof ProcessStatusSchema>
 export type ProcessStopData = z.infer<typeof ProcessStopDataSchema>
 export type RelationshipTypeEnum = z.infer<typeof RelationshipTypeEnumSchema>
+export type RollPointDetail = z.infer<typeof RollPointDetailSchema>
 export type SettingCategoriesResponse = z.infer<typeof SettingCategoriesResponseSchema>
 export type SettingRead = z.infer<typeof SettingReadSchema>
 export type SignalData = z.infer<typeof SignalDataSchema>
@@ -1157,6 +1214,7 @@ export type ChangePasswordBody = z.infer<typeof ChangePasswordBodySchema>
 export type AdminResetPasswordBody = z.infer<typeof AdminResetPasswordBodySchema>
 export type SettingUpdateBody = z.infer<typeof SettingUpdateBodySchema>
 export type RemoveSettingBody = z.infer<typeof RemoveSettingBodySchema>
+export type ContinuousCandleListResponse = z.infer<typeof ContinuousCandleListResponseSchema>
 export type ContractListResponse = z.infer<typeof ContractListResponseSchema>
 export type ExecutionListResponse = z.infer<typeof ExecutionListResponseSchema>
 export type FrontMonthResponse = z.infer<typeof FrontMonthResponseSchema>
@@ -1168,6 +1226,7 @@ export type ProcessSummaryData = z.infer<typeof ProcessSummaryDataSchema>
 export type ProcessCreateData = z.infer<typeof ProcessCreateDataSchema>
 export type ProcessStartResponse = z.infer<typeof ProcessStartResponseSchema>
 export type ProcessStopResponse = z.infer<typeof ProcessStopResponseSchema>
+export type ContinuousSeriesPartialResponse = z.infer<typeof ContinuousSeriesPartialResponseSchema>
 export type SettingListResponse = z.infer<typeof SettingListResponseSchema>
 export type SettingResponse = z.infer<typeof SettingResponseSchema>
 export type SignalListResponse = z.infer<typeof SignalListResponseSchema>

@@ -905,6 +905,50 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
+    "/api/underlyings/{ticker}/continuous": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Continuous Series
+         * @description Build and return a continuous contract candle series.
+         *
+         *     Stitches historical candle data from multiple expired futures contracts
+         *     into a single continuous price series using the specified adjustment method.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         ticker: Underlying asset ticker (e.g. 'SPX', 'GOLD').
+         *         _auth: Authenticated user with READ_MARKET_DATA permission.
+         *         _csrf: CSRF token validation.
+         *         repo: Database repository.
+         *         exchange: Exchange to source contracts from.
+         *         contract_family: Product root (e.g. 'ES', 'GC', 'CL').
+         *         timeframe: Candle timeframe (e.g. '1h', '1d').
+         *         start: Series start time (inclusive).
+         *         end: Series end time (inclusive).
+         *         method: Adjustment method: 'unadjusted', 'ratio', 'panama'.
+         *         rollover_days_before: Days before expiry to roll (0 = on expiry).
+         *         as_of: Optional point-in-time query timestamp.
+         *
+         *     Returns:
+         *         Full series response, or partial response if a roll gap was too large.
+         *
+         *     Raises:
+         *         HTTPException: 400 for invalid params, 404 if underlying not found.
+         */
+        get: Operations["get_continuous_series_api_underlyings__ticker__continuous_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/orders": {
         parameters: {
             query?: never;
@@ -1375,6 +1419,138 @@ export type Components = {
              * @default 0
              */
             active_clients: number;
+        };
+        /**
+         * ContinuousCandleData
+         * @description Candle from a stitched continuous contract series.
+         *
+         *     Provenance is minted by the API handler (on-demand computation,
+         *     not a single DB row). open_at is domain time (interval start).
+         *
+         *     Attributes:
+         *         open_at: Candle interval start time.
+         *         timeframe: Candle timeframe (e.g., "1h", "1d").
+         *         open: Adjusted open price.
+         *         high: Adjusted high price.
+         *         low: Adjusted low price.
+         *         close: Adjusted close price.
+         *         volume: Raw volume (not adjusted).
+         *         vwap: Adjusted VWAP (nullable).
+         *         trades: Raw trade count (not adjusted, nullable).
+         *         source_contract: Native symbol of the contract this bar came from.
+         *         adjustment_factor: Cumulative adjustment applied (None for anchor).
+         */
+        ContinuousCandleData: {
+            /**
+             * Type
+             * @default continuous_candle
+             * @constant
+             */
+            type: "continuous_candle";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /**
+             * Open At
+             * Format: date-time
+             */
+            open_at: string;
+            /** Timeframe */
+            timeframe: string;
+            /** Open */
+            open: number;
+            /** High */
+            high: number;
+            /** Low */
+            low: number;
+            /** Close */
+            close: number;
+            /** Volume */
+            volume: number;
+            /** Vwap */
+            vwap: number | null;
+            /** Trades */
+            trades: number | null;
+            /** Source Contract */
+            source_contract: string;
+            /** Adjustment Factor */
+            adjustment_factor: number | null;
+        };
+        /**
+         * ContinuousCandleListResponse
+         * @description Continuous contract candle list response wrapper.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         *         payload: List of stitched continuous candle items.
+         *         count: Total number of candles in the response.
+         */
+        ContinuousCandleListResponse: {
+            /**
+             * Type
+             * @default continuous_candle_list
+             * @constant
+             */
+            type: "continuous_candle_list";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Payload */
+            payload: Components["schemas"]["ContinuousCandleData"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
+            count: number;
+        };
+        /**
+         * ContinuousSeriesPartialResponse
+         * @description Partial continuous series response when a roll gap is too large.
+         *
+         *     Returned with HTTP 200 so consumers receive usable data up to the
+         *     failure point. The failed_roll field signals truncation.
+         */
+        ContinuousSeriesPartialResponse: {
+            /**
+             * Type
+             * @default continuous_partial
+             * @constant
+             */
+            type: "continuous_partial";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Payload */
+            payload: Components["schemas"]["ContinuousCandleData"][];
+            /** Count */
+            count: number;
+            failed_roll: Components["schemas"]["RollPointDetail"];
+            /** Message */
+            message: string;
         };
         /**
          * ContractData
@@ -2897,6 +3073,18 @@ export type Components = {
          * @enum {string}
          */
         RelationshipTypeEnum: "exact" | "derivative" | "proxy";
+        /**
+         * RollPointDetail
+         * @description Roll point detail for partial failure response.
+         */
+        RollPointDetail: {
+            /** From Contract */
+            from_contract: string;
+            /** To Contract */
+            to_contract: string;
+            /** Roll At */
+            roll_at: string;
+        };
         /**
          * SettingCategoriesResponse
          * @description Setting categories list response.
@@ -5560,6 +5748,75 @@ export interface Operations {
                 };
             };
             /** @description Underlying not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_continuous_series_api_underlyings__ticker__continuous_get: {
+        parameters: {
+            query: {
+                /** @description Exchange to source contracts from */
+                exchange: string;
+                /** @description Product root (e.g. ES, GC) */
+                contract_family: string;
+                /** @description Candle timeframe (e.g. 1h, 1d) */
+                timeframe: string;
+                /** @description Series start time (UTC) */
+                start: string;
+                /** @description Series end time (UTC) */
+                end: string;
+                /** @description Adjustment method */
+                method?: string;
+                /** @description Days before expiry to roll */
+                rollover_days_before?: number;
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
+            };
+            header?: never;
+            path: {
+                ticker: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["ContinuousCandleListResponse"] | Components["schemas"]["ContinuousSeriesPartialResponse"];
+                };
+            };
+            /** @description Invalid parameters */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Underlying not found or no contracts */
             404: {
                 headers: {
                     [name: string]: unknown;

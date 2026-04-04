@@ -42,6 +42,28 @@ export interface Candle {
 }
 
 /**
+ * Canonical ContinuousCandle entity.
+ * From WebSocket ContinuousCandleData.
+ */
+export interface ContinuousCandle {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  openAt: Date
+  timeframe: string
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+  vwap: number | null
+  trades: number | null
+  sourceContract: string
+  adjustmentFactor: number | null
+}
+
+/**
  * Canonical Contract entity.
  * From WebSocket ContractData.
  */
@@ -214,6 +236,7 @@ export interface OrderRequest {
   price?: number | null
   clientOrderId: string
   signaledAt?: Date | null
+  strategyTag?: string | null
 }
 
 /**

@@ -43,6 +43,27 @@ export const CandleDataSchema = z
   })
   .strict()
 
+export const ContinuousCandleDataSchema = z
+  .object({
+    type: z.literal('continuous_candle'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    open_at: z.iso.datetime(),
+    timeframe: z.string(),
+    open: z.number(),
+    high: z.number(),
+    low: z.number(),
+    close: z.number(),
+    volume: z.number(),
+    vwap: z.number().nullable(),
+    trades: z.number().int().nullable(),
+    source_contract: z.string(),
+    adjustment_factor: z.number().nullable(),
+  })
+  .strict()
+
 export const ContractDataSchema = z
   .object({
     type: z.literal('contract'),
@@ -193,6 +214,7 @@ export const OrderRequestDataSchema = z
     price: z.number().nullable(),
     client_order_id: z.string(),
     signaled_at: z.iso.datetime().nullable(),
+    strategy_tag: z.string().nullable(),
   })
   .strict()
 

@@ -350,6 +350,89 @@ struct ConnectionStats: Codable, Sendable {
     }
 }
 
+struct ContinuousCandleData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let openAt: Date
+    let timeframe: String
+    let open: Double
+    let high: Double
+    let low: Double
+    let close: Double
+    let volume: Double
+    let vwap: Double?
+    let trades: Int?
+    let sourceContract: String
+    let adjustmentFactor: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case openAt = "open_at"
+        case timeframe
+        case open
+        case high
+        case low
+        case close
+        case volume
+        case vwap
+        case trades
+        case sourceContract = "source_contract"
+        case adjustmentFactor = "adjustment_factor"
+    }
+}
+
+struct ContinuousCandleListResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: [ContinuousCandleData]
+    /// Number of items in payload
+    let count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+        case count
+    }
+}
+
+struct ContinuousSeriesPartialResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: [ContinuousCandleData]
+    let count: Int
+    let failedRoll: RollPointDetail
+    let message: String
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+        case count
+        case failedRoll = "failed_roll"
+        case message
+    }
+}
+
 struct ContractData: Codable, Sendable {
     let type: String?
     let sequenceId: Int
@@ -1210,6 +1293,18 @@ struct RefreshResponse: Codable, Sendable {
         case timestamp
         case sessionId = "session_id"
         case payload
+    }
+}
+
+struct RollPointDetail: Codable, Sendable {
+    let fromContract: String
+    let toContract: String
+    let rollAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case fromContract = "from_contract"
+        case toContract = "to_contract"
+        case rollAt = "roll_at"
     }
 }
 
