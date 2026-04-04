@@ -5820,14 +5820,12 @@ def test_resolve_fee_falls_back_to_single_fee_entry() -> None:
     assert base_module.ExchangeExecutorService._resolve_fee(execution) == (2.5, "PLN")
 
 
-def test_resolve_fee_multi_asset_uses_first_with_warning(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Verify _resolve_fee uses first entry and logs warning for multi-asset fees.
+def test_resolve_fee_multi_asset_uses_first() -> None:
+    """Verify _resolve_fee uses first non-zero entry for multi-asset fees.
 
     Given: Execution with fees=[ETH 0.1, BTC 0.001],
     When: _resolve_fee is called,
-    Then: Returns (0.1, "ETH") and warning is logged.
+    Then: Returns (0.1, "ETH") from first entry.
     """
     execution = SimpleNamespace(
         fee_usd_equiv=None,
