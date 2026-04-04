@@ -725,9 +725,13 @@ class WalutomatExchangeClient(ExchangeClientBase):
                 if not first_poll:
                     disappeared = set(tracked.keys()) - current_ids
                     for oid in disappeared:
-                        t = tracked.pop(oid)
+                        t = tracked[oid]
+                        resolved_terminal = False
                         async for event in self._resolve_disappeared(oid, t):
+                            resolved_terminal = True
                             yield event
+                        if resolved_terminal:
+                            tracked.pop(oid, None)
 
                 first_poll = False
 

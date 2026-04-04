@@ -2426,6 +2426,54 @@ async def test_disappeared_order_still_open_skips_terminal() -> None:
 
 
 @pytest.mark.asyncio()
+async def test_transiently_omitted_open_order_stays_tracked() -> None:
+    """Verify transient OPEN omission does not create a bogus reappearance fill.
+
+    Given: A tracked partially filled order that disappears from /active,
+    When: get_order reports it still OPEN and the order later reappears unchanged,
+    Then: No duplicate ExecutionUpdate is yielded for the same cumulative fill.
+    """
+    client = _build_polling_client()
+    poll_count = 0
+
+    async def _mock_get_orders(
+        symbol: str | None = None,
+        status: OrderStatusEnum | None = None,
+        limit: int | None = None,
+    ) -> list[ExchangeOrderSnapshot]:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count == 1:
+            return [_make_order_snapshot(filled=30.0)]
+        if poll_count == 2:
+            return []
+        if poll_count == 3:
+            client._running = False
+            return [_make_order_snapshot(filled=30.0)]
+        client._running = False
+        return []
+
+    async def _mock_get_order(
+        order_id: str,
+        symbol: str | None = None,
+    ) -> ExchangeOrderSnapshot:
+        return _make_order_snapshot(
+            order_id=order_id,
+            filled=30.0,
+            status=OrderStatusEnum.OPEN,
+        )
+
+    client.get_orders = _mock_get_orders
+    client.get_order = _mock_get_order
+
+    results: list[ExecutionUpdate] = []
+    async for update in client.subscribe_executions():
+        results.append(update)
+
+    assert results == []
+
+
+@pytest.mark.asyncio()
 async def test_active_fill_event_has_fees() -> None:
     """Verify active fill event includes fee breakdown.
 
