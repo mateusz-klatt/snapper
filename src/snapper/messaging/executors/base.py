@@ -1106,6 +1106,34 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         )
         return "filled" if qty_complete or exchange_terminal else "partial"
 
+    @staticmethod
+    def _resolve_fee(execution: ExecutionUpdate) -> tuple[float, str]:
+        """Resolve scalar fee amount and asset from execution data.
+
+        Priority: fee_usd_equiv (USD, incl. negative rebates) then
+        non-zero entries from fees breakdown (native currency).
+
+        Args:
+            execution: Execution update with optional fee fields.
+
+        Returns:
+            Tuple of (fee_amount, fee_asset). Zero fee returns (0.0, "").
+        """
+        if execution.fee_usd_equiv is not None and execution.fee_usd_equiv != 0.0:
+            return execution.fee_usd_equiv, "USD"
+        if execution.fees:
+            nonzero = [e for e in execution.fees if e.quantity != 0.0]
+            if not nonzero:
+                return 0.0, ""
+            if len(nonzero) > 1:
+                logger.warning(
+                    "Multi-asset fees not supported, using first entry: {}",
+                    execution.fees,
+                )
+            entry = nonzero[0]
+            return entry.quantity, entry.asset
+        return 0.0, ""
+
     def _build_execution_data(
         self,
         execution: ExecutionUpdate,
@@ -1124,7 +1152,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Returns:
             Tuple of (stream_key, ExecutionData) ready for publishing.
         """
-        total_fee = execution.fee_usd_equiv or 0.0
+        fee_amount, fee_asset = self._resolve_fee(execution)
         now = datetime.now(UTC)
         topic = order_event_topic(exchange_name, original_order.instrument, "executed")
         client_id = original_order.client_order_id
@@ -1153,8 +1181,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             price=avg_price,
             last_size=delta_size,
             last_price=delta_price,
-            fee=total_fee,
-            fee_asset="USD" if total_fee > 0 else "",
+            fee=fee_amount,
+            fee_asset=fee_asset,
             status=status,
             executed_at=execution.timestamp,
         )
@@ -1213,6 +1241,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     await self.exchange_client._log_execution_to_db(
                         order_public_id=pending.order_public_id,
                         execution=execution,
+                        delta_size=fill.last_size,
+                        delta_price=fill.last_price,
+                        fee=fill.fee,
+                        fee_asset=fill.fee_asset,
+                        status=fill.status,
                     )
                 if pending.db_order_id is not None:
                     db_status = (

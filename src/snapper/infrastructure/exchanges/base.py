@@ -443,29 +443,53 @@ class ExchangeClientBase(ABC):
         self,
         order_public_id: str,
         execution: ExecutionUpdate,
+        delta_size: float | None = None,
+        delta_price: float | None = None,
+        fee: float | None = None,
+        fee_asset: str | None = None,
+        status: str | None = None,
     ) -> None:
         """Persist an execution (fill) to the database.
 
-        This internal method is called when an order is partially or
-        fully filled to record the execution details.
+        When resolved values are provided (from _build_execution_data),
+        they are used instead of re-deriving from raw execution fields.
+        This ensures DB records match published ExecutionData.
 
         Args:
             order_public_id: Logical order identity (stable across versions).
-            execution: Execution details including price, size, and fees.
+            execution: Execution details (timestamp, side, exec_id, trade_id).
+            delta_size: Resolved fill delta size. Falls back to raw execution fields.
+            delta_price: Resolved fill price. Falls back to raw execution fields.
+            fee: Resolved fee amount. Falls back to fee_usd_equiv.
+            fee_asset: Resolved fee currency. Falls back to "USD".
+            status: Resolved fill status. Falls back to to_fill_status().
         """
         if self.repository is None or self._tracker is None:
             return
+        resolved_size = (
+            delta_size
+            if delta_size is not None
+            else (execution.last_qty or execution.cum_qty or 0.0)
+        )
+        resolved_price = (
+            delta_price
+            if delta_price is not None
+            else (execution.last_price or execution.average_price or 0.0)
+        )
+        resolved_fee = fee if fee is not None else (execution.fee_usd_equiv or 0.0)
+        resolved_fee_asset = fee_asset if fee_asset is not None else "USD"
+        resolved_status = status if status is not None else to_fill_status(execution)
         try:
             seq = self._tracker.next_sequence("executions")
             await self.repository.insert_execution(
                 order_public_id=order_public_id,
                 timestamp=execution.timestamp,
                 side=execution.side.value,
-                status=to_fill_status(execution),
-                price=execution.last_price or execution.average_price or 0.0,
-                size=execution.last_qty or execution.cum_qty or 0.0,
-                fee=execution.fee_usd_equiv or 0.0,
-                fee_asset="USD",
+                status=resolved_status,
+                price=resolved_price,
+                size=resolved_size,
+                fee=resolved_fee,
+                fee_asset=resolved_fee_asset,
                 exec_id=execution.exec_id,
                 trade_id=str(execution.trade_id) if execution.trade_id is not None else None,
                 session_id=self._tracker.session_id,

@@ -25,6 +25,7 @@ import snapper.messaging.executors.base as base_module
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
+from snapper.infrastructure.exchanges.contracts import ExecutionFeeBreakdown
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
@@ -761,9 +762,12 @@ async def test_process_execution_default_filled_and_removes_pending(
         cum_qty=None,
         average_price=None,
         fee_usd_equiv=None,
+        fees=None,
         last_qty=None,
         last_price=None,
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        side=SimpleNamespace(value="buy"),
+        trade_id=None,
     )
     await ex._process_execution(execution)
     assert order.client_order_id not in ex.pending_orders
@@ -5775,3 +5779,101 @@ def test_create_reconciliation_task_always_none() -> None:
     ex.settings = SimpleNamespace(use_durable_commands=True)
     task = ex._create_reconciliation_task("kraken")
     assert task is None
+
+
+def test_resolve_fee_prefers_usd_equiv() -> None:
+    """Verify _resolve_fee prefers fee_usd_equiv over fees breakdown.
+
+    Given: Execution with fee_usd_equiv=5.0 and fees=[EUR 3.0],
+    When: _resolve_fee is called,
+    Then: Returns (5.0, "USD").
+    """
+    execution = SimpleNamespace(
+        fee_usd_equiv=5.0,
+        fees=[ExecutionFeeBreakdown(asset="EUR", quantity=3.0)],
+    )
+    assert base_module.ExchangeExecutorService._resolve_fee(execution) == (5.0, "USD")
+
+
+def test_resolve_fee_negative_usd_rebate() -> None:
+    """Verify _resolve_fee preserves negative fee_usd_equiv (rebates).
+
+    Given: Execution with fee_usd_equiv=-0.5,
+    When: _resolve_fee is called,
+    Then: Returns (-0.5, "USD").
+    """
+    execution = SimpleNamespace(fee_usd_equiv=-0.5, fees=None)
+    assert base_module.ExchangeExecutorService._resolve_fee(execution) == (-0.5, "USD")
+
+
+def test_resolve_fee_falls_back_to_single_fee_entry() -> None:
+    """Verify _resolve_fee uses fees breakdown when fee_usd_equiv is None.
+
+    Given: Execution with fee_usd_equiv=None and fees=[PLN 2.5],
+    When: _resolve_fee is called,
+    Then: Returns (2.5, "PLN").
+    """
+    execution = SimpleNamespace(
+        fee_usd_equiv=None,
+        fees=[ExecutionFeeBreakdown(asset="PLN", quantity=2.5)],
+    )
+    assert base_module.ExchangeExecutorService._resolve_fee(execution) == (2.5, "PLN")
+
+
+def test_resolve_fee_multi_asset_uses_first_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verify _resolve_fee uses first entry and logs warning for multi-asset fees.
+
+    Given: Execution with fees=[ETH 0.1, BTC 0.001],
+    When: _resolve_fee is called,
+    Then: Returns (0.1, "ETH") and warning is logged.
+    """
+    execution = SimpleNamespace(
+        fee_usd_equiv=None,
+        fees=[
+            ExecutionFeeBreakdown(asset="ETH", quantity=0.1),
+            ExecutionFeeBreakdown(asset="BTC", quantity=0.001),
+        ],
+    )
+    result = base_module.ExchangeExecutorService._resolve_fee(execution)
+    assert result == (0.1, "ETH")
+
+
+def test_resolve_fee_zero_quantity_entry_ignored() -> None:
+    """Verify _resolve_fee ignores zero-quantity fee entries.
+
+    Given: Execution with fees=[EUR 0.0],
+    When: _resolve_fee is called,
+    Then: Returns (0.0, "").
+    """
+    execution = SimpleNamespace(
+        fee_usd_equiv=None,
+        fees=[ExecutionFeeBreakdown(asset="EUR", quantity=0.0)],
+    )
+    assert base_module.ExchangeExecutorService._resolve_fee(execution) == (0.0, "")
+
+
+def test_resolve_fee_no_fee_returns_zero() -> None:
+    """Verify _resolve_fee returns zero when no fee data available.
+
+    Given: Execution with no fee data,
+    When: _resolve_fee is called,
+    Then: Returns (0.0, "").
+    """
+    execution = SimpleNamespace(fee_usd_equiv=None, fees=None)
+    assert base_module.ExchangeExecutorService._resolve_fee(execution) == (0.0, "")
+
+
+def test_resolve_fee_zero_usd_equiv_falls_through() -> None:
+    """Verify fee_usd_equiv=0.0 falls through to fees breakdown.
+
+    Given: Execution with fee_usd_equiv=0.0 and fees=[PLN 1.5],
+    When: _resolve_fee is called,
+    Then: Returns (1.5, "PLN") not (0.0, "USD").
+    """
+    execution = SimpleNamespace(
+        fee_usd_equiv=0.0,
+        fees=[ExecutionFeeBreakdown(asset="PLN", quantity=1.5)],
+    )
+    assert base_module.ExchangeExecutorService._resolve_fee(execution) == (1.5, "PLN")
