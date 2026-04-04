@@ -6,6 +6,7 @@ Fetches and persists ticker symbols from Polygon.io API (44k+ tickers).
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from typing import cast
 
 from loguru import logger
 from sqlalchemy import select
@@ -13,6 +14,7 @@ from sqlalchemy import select
 from snapper.application.process_manager.process_parameters import PolygonSymbolUpdaterParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
+from snapper.application.updaters.symbols.types import PolygonSymbolRecord
 from snapper.config.settings import AppSettings
 from snapper.core.types import AliasChannelEnum
 from snapper.core.types import AssetTypeEnum
@@ -102,7 +104,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
 
     @staticmethod
     def _split_native_symbol(
-        native_symbol: str, symbol_data: dict[str, Any]
+        native_symbol: str, symbol_data: PolygonSymbolRecord
     ) -> tuple[str, str | None]:
         """Split a native symbol into base and quote components.
 
@@ -242,12 +244,13 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
             symbols: List of symbol dictionaries from Polygon API.
         """
         assert self.repository is not None
+        records = cast(list[PolygonSymbolRecord], symbols)
         stats = {"updated": 0, "inserted": 0, "skipped": 0}
         now = datetime.now(UTC)
         processed_symbol_public_ids: set[str] = set()
         try:
             with self.repository.get_session() as session:
-                for symbol_data in symbols:
+                for symbol_data in records:
                     ticker = symbol_data.get("ticker")
                     if not ticker:
                         continue
@@ -326,7 +329,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
             return f"{pair[:3].upper()}-{pair[3:].upper()}"
         return None
 
-    def _match_polygon_to_native(self, ticker: str, symbol_data: dict[str, Any]) -> str | None:
+    def _match_polygon_to_native(self, ticker: str, symbol_data: PolygonSymbolRecord) -> str | None:
         """Match Polygon ticker to native symbol format.
 
         Args:

@@ -6,12 +6,14 @@ Fetches and persists FX pair symbols from Walutomat REST API.
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from typing import cast
 
 from loguru import logger
 
 from snapper.application.process_manager.process_parameters import SymbolUpdaterParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
+from snapper.application.updaters.symbols.types import WalutomatSymbolRecord
 from snapper.config.settings import AppSettings
 from snapper.core.types import AliasChannelEnum
 from snapper.core.types import AssetTypeEnum
@@ -76,12 +78,13 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
                 native_symbol, base, and quote keys.
         """
         assert self.repository is not None, "Repository not initialized"
+        records = cast(list[WalutomatSymbolRecord], symbols)
         created_count = 0
         updated_count = 0
         with self.repository.get_session() as session:
             processed_symbol_public_ids: set[str] = set()
             now = datetime.now(UTC)
-            for instrument in symbols:
+            for instrument in records:
                 native_symbol = instrument["native_symbol"]
                 sid = self._tracker.session_id
                 symbol_public_id = self._upsert_symbol(

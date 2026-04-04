@@ -10,12 +10,14 @@ import inspect
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from typing import cast
 
 from loguru import logger
 
 from snapper.application.process_manager.process_parameters import SymbolUpdaterParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
+from snapper.application.updaters.symbols.types import KrakenSymbolRecord
 from snapper.config.settings import AppSettings
 from snapper.core.types import AliasChannelEnum
 from snapper.core.types import AssetTypeEnum
@@ -618,7 +620,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         return list(mappings.values())
 
     def _persist_ws_only_symbol(
-        self, session: Any, symbol_data: dict[str, Any], symbol_public_id: str, now: datetime
+        self, session: Any, symbol_data: KrakenSymbolRecord, symbol_public_id: str, now: datetime
     ) -> tuple[int, int]:
         """Persist a WS-only symbol: one WS alias + market-data-only capability.
 
@@ -681,7 +683,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         return created, updated
 
     def _persist_rest_symbol(
-        self, session: Any, symbol_data: dict[str, Any], symbol_public_id: str, now: datetime
+        self, session: Any, symbol_data: KrakenSymbolRecord, symbol_public_id: str, now: datetime
     ) -> tuple[int, int]:
         """Persist a REST symbol: ws/rest/ccxt aliases + full capability.
 
@@ -704,7 +706,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         )
         for exchange, channel, key in alias_mappings:
             exchange_symbol = symbol_data.get(key)
-            if not exchange_symbol:
+            if not isinstance(exchange_symbol, str) or not exchange_symbol:
                 continue
             result = self._upsert_alias(
                 session,
@@ -765,6 +767,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             symbols: List of symbol data dicts from Kraken.
         """
         assert self.repository is not None, "Repository not initialized"
+        records = cast(list[KrakenSymbolRecord], symbols)
         created_count = 0
         updated_count = 0
         ws_only_count = 0
@@ -772,7 +775,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             with self.repository.get_session() as session:
                 processed_symbol_public_ids: set[str] = set()
                 now = datetime.now(UTC)
-                for symbol_data in symbols:
+                for symbol_data in records:
                     native_symbol = symbol_data["native_symbol"]
                     asset_type: AssetTypeEnum = (
                         AssetTypeEnum.EQUITY

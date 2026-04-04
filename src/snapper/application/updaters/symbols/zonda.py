@@ -6,12 +6,14 @@ Fetches and persists trading pair symbols from Zonda (BitBay) API.
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from typing import cast
 
 from loguru import logger
 
 from snapper.application.process_manager.process_parameters import SymbolUpdaterParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
+from snapper.application.updaters.symbols.types import ZondaSymbolRecord
 from snapper.config.settings import AppSettings
 from snapper.core.types import AliasChannelEnum
 from snapper.core.types import AssetTypeEnum
@@ -135,13 +137,14 @@ class ZondaSymbolUpdaterService(SymbolUpdaterService[ZondaExchangeClient]):
                 ccxt_symbol, base, and quote keys.
         """
         assert self.repository is not None, "Repository not initialized"
+        records = cast(list[ZondaSymbolRecord], symbols)
         created_count = 0
         updated_count = 0
         try:
             with self.repository.get_session() as session:
                 processed_symbol_public_ids: set[str] = set()
                 now = datetime.now(UTC)
-                for symbol_data in symbols:
+                for symbol_data in records:
                     native_symbol = symbol_data["native_symbol"]
                     sid = self._tracker.session_id
                     symbol_public_id = self._upsert_symbol(
