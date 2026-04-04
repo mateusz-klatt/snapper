@@ -323,6 +323,7 @@ class OrderRequestData(StrictDataSchema[Literal["order_request"]]):
     price: float | None = None
     client_order_id: str
     signaled_at: datetime | None = None
+    strategy_tag: str | None = None
 
 
 class OrderCancelData(StrictDataSchema[Literal["order_cancel"]]):

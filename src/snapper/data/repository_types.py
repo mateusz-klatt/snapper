@@ -344,6 +344,7 @@ class RecordVenueEventParams(TypedDict, total=False):
     trade_id: str | None
     error: str | None
     venue_timestamp: datetime | None
+    strategy_tag: str | None
 
 
 class TradeCommandInsertRow(TypedDict, total=False):

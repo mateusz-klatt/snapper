@@ -1038,6 +1038,7 @@ async def test_outbox_publish_sends_to_zmq() -> None:
     cmd: dict[str, Any] = {
         "public_id": "cmd-1",
         "client_order_id": "cid-1",
+        "shard_key": "kraken.BTC-USD.live",
         "exchange": "kraken",
         "instrument": "BTC-USD",
         "mode": "live",

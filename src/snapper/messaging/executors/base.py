@@ -620,6 +620,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                         "exchange_order_id": exchange_order_id,
                         "client_order_id": order.client_order_id,
                         "side": order.side,
+                        "strategy_tag": order.strategy_tag,
                     }
                 )
                 await self._publish_order_status(order, "accepted", exchange_order_id)
@@ -641,6 +642,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                         "client_order_id": order.client_order_id,
                         "side": order.side,
                         "error": "rejected by exchange",
+                        "strategy_tag": order.strategy_tag,
                     }
                 )
         except Exception as e:
@@ -655,6 +657,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     "client_order_id": order.client_order_id,
                     "side": order.side,
                     "error": str(e),
+                    "strategy_tag": order.strategy_tag,
                 }
             )
 
@@ -859,7 +862,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             if exchange_name == ExchangeEnum.PAPER
             else ExecutionModeEnum.LIVE
         )
+        strategy_tag = params.get("strategy_tag")
         shard_key = f"{exchange_name}.{instrument}.{mode}"
+        if mode == ExecutionModeEnum.PAPER and strategy_tag:
+            shard_key = f"{shard_key}.{strategy_tag}"
         now = datetime.now(UTC)
         try:
             await self.repository.insert_venue_event(
@@ -1033,8 +1039,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 db_order_id=pending.db_order_id, status=status
             )
         instrument = getattr(execution, "symbol", "") or ""
+        tag = None
         if pending and pending.request:
             instrument = pending.request.instrument
+            tag = pending.request.strategy_tag
         await self._record_venue_event(
             {
                 "event_type": "order_terminal",
@@ -1043,6 +1051,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 "exchange_order_id": exchange_order_id,
                 "client_order_id": client_order_id,
                 "status": execution.exec_type or "cancelled",
+                "strategy_tag": tag,
             }
         )
         logger.info(
@@ -1232,6 +1241,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     "exec_id": getattr(execution, "exec_id", None),
                     "trade_id": str(raw_tid) if raw_tid else None,
                     "venue_timestamp": getattr(execution, "timestamp", None),
+                    "strategy_tag": original_order.strategy_tag,
                 }
             )
             await self._publish_execution(topic, fill)

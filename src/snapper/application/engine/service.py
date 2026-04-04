@@ -85,6 +85,7 @@ class TradingEngineService:
         exchange: OrderExchange = ExchangeEnum.PAPER,
         repository: SQLAlchemyRepository | None = None,
         outbox: OutboxDispatcher | None = None,
+        strategy_tag: str | None = None,
     ) -> None:
         """Initialize trading engine for a specific instrument.
 
@@ -97,6 +98,9 @@ class TradingEngineService:
             exchange: Target exchange. Defaults to "paper" for simulation.
             repository: Optional DB repository for writing TradeCommand.
             outbox: Optional outbox dispatcher to notify after DB write.
+            strategy_tag: Strategy discriminator for paper mode sharding.
+                Paper engines with different tags get isolated shard_keys.
+                Ignored for live mode (one consolidated position per instrument).
         """
         self.instrument = instrument
         self.execution_socket = execution_socket
@@ -115,7 +119,13 @@ class TradingEngineService:
         self.read_only = False
         self._repository = repository
         self._outbox = outbox
-        self._shard_key = f"{exchange}.{instrument}.{self.mode}"
+        self._strategy_tag = strategy_tag
+        base = f"{exchange}.{instrument}.{self.mode}"
+        self._shard_key = (
+            f"{base}.{strategy_tag}"
+            if self.mode == ExecutionModeEnum.PAPER and strategy_tag
+            else base
+        )
 
     def _check_in_flight_timeout(self) -> None:
         """Clear in-flight guard if timeout has elapsed.
@@ -339,6 +349,7 @@ class TradingEngineService:
                 price=None,
                 client_order_id=order_public_id,
                 exchange=self.exchange,
+                strategy_tag=self._strategy_tag,
                 signaled_at=signaled_at_dt,
             )
             await self.execution_socket.send(topic, order, flags=zmq.NOBLOCK)

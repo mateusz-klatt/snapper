@@ -735,6 +735,7 @@ class _EngineStub:
         exchange: str,
         repository: Any = None,
         outbox: Any = None,
+        strategy_tag: str | None = None,
     ) -> None:
         self.instrument = instrument
         self.execution_socket = execution_socket
@@ -744,6 +745,8 @@ class _EngineStub:
         self.exchange = exchange
         self.repository = repository
         self.outbox = outbox
+        self.pending_client_order_id: str | None = None
+        self._shard_key = f"{exchange}.{instrument}.live"
         self.execute_calls: list[dict[str, Any]] = []
 
     async def execute_desired_units(
@@ -2170,6 +2173,8 @@ class StubEngine:
         """Initialize the instance."""
         self.instrument = instrument
         self.execution_socket = execution_socket
+        self.pending_client_order_id: str | None = None
+        self._shard_key = f"paper.{instrument}.paper"
         self.calls: list[tuple[float, float | None]] = []
 
     async def execute_desired_units(

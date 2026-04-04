@@ -143,6 +143,7 @@ class TraderCoordinator(RegisterableProcess):
         self.trade_service: TradeService = TradeService()
         self.balance_service: BalanceService = BalanceService()
         self.outbox: OutboxDispatcher | None = None
+        self._order_shard_keys: dict[str, str] = {}
 
     @staticmethod
     def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
@@ -241,6 +242,8 @@ class TraderCoordinator(RegisterableProcess):
                 continue
             exchange_str = parts[0]
             instrument = parts[1]
+            mode_str = parts[2]
+            strategy_tag = parts[3] if len(parts) >= 4 else None
 
             watermark = cp["last_venue_event_id"]
             if watermark is None:
@@ -290,12 +293,18 @@ class TraderCoordinator(RegisterableProcess):
                 realized_pnl=shard.position.realized_pnl,
             )
 
-            engine = await self._create_engine_for_recovery(instrument, exchange_str)
+            engine = await self._create_engine_for_recovery(
+                instrument, exchange_str, strategy_tag=strategy_tag
+            )
             if engine is None:
                 continue
             self._restore_engine_from_shard(engine, shard_key, instrument)
 
-            engine_key = f"{instrument}@{exchange_str}-live"
+            engine_key = (
+                f"{instrument}@{exchange_str}-{strategy_tag}"
+                if strategy_tag
+                else f"{instrument}@{exchange_str}-{mode_str}"
+            )
             self.engines[engine_key] = engine
             self.last_signal_time[engine_key] = time.time()
             recovered.add(engine_key)
@@ -413,6 +422,7 @@ class TraderCoordinator(RegisterableProcess):
             client_oid = db_order.get("client_order_id", "")
             engine.pending_client_order_id = client_oid
             engine._in_flight_since = time.monotonic()
+            self._order_shard_keys[client_oid] = engine._shard_key
             db_filled = float(db_order.get("filled_size", 0.0))
             exec_filled = sum(
                 e["size"] for e in executions if e.get("client_order_id") == client_oid
@@ -432,7 +442,10 @@ class TraderCoordinator(RegisterableProcess):
                 )
 
     async def _create_engine_for_recovery(
-        self, instrument: str, exchange_str: str
+        self,
+        instrument: str,
+        exchange_str: str,
+        strategy_tag: str | None = None,
     ) -> TradingEngineService | None:
         """Create a TradingEngineService for recovery if exchange is valid."""
         valid_exchanges = get_args(OrderExchange)
@@ -463,6 +476,7 @@ class TraderCoordinator(RegisterableProcess):
             exchange=exchange,
             repository=repo_for_engine,
             outbox=self.outbox,
+            strategy_tag=strategy_tag,
         )
 
     @staticmethod
@@ -779,7 +793,8 @@ class TraderCoordinator(RegisterableProcess):
             if parsed.exchange == ExchangeEnum.PAPER
             else ExecutionModeEnum.LIVE
         )
-        shard_key = f"{parsed.exchange}.{parsed.instrument}.{mode}"
+        flat_key = f"{parsed.exchange}.{parsed.instrument}.{mode}"
+        shard_key = self._order_shard_keys.get(order_status.client_order_id, flat_key)
         event_type_map = {
             "accepted": "order_accepted",
             "rejected": "order_rejected",
@@ -833,7 +848,8 @@ class TraderCoordinator(RegisterableProcess):
             if parsed.exchange == ExchangeEnum.PAPER
             else ExecutionModeEnum.LIVE
         )
-        shard_key = f"{parsed.exchange}.{parsed.instrument}.{mode}"
+        flat_key = f"{parsed.exchange}.{parsed.instrument}.{mode}"
+        shard_key = self._order_shard_keys.get(order_event.client_order_id, flat_key)
         venue_event: VenueEventRow = {
             "id": int(time.monotonic_ns()),
             "public_id": "",
@@ -1060,6 +1076,8 @@ class TraderCoordinator(RegisterableProcess):
         assert self.msg_publisher is not None
         exchange = cast(OrderExchange, cmd["exchange"])
         topic = order_command_topic(exchange, cmd["instrument"], OrderCommandEnum.SUBMIT)
+        sk_parts = cmd["shard_key"].split(".")
+        tag = sk_parts[3] if len(sk_parts) >= 4 else None
         order = OrderRequestData(
             public_id=cmd["client_order_id"],
             timestamp=datetime.now(UTC),
@@ -1074,6 +1092,7 @@ class TraderCoordinator(RegisterableProcess):
             price=cmd["price"],
             client_order_id=cmd["client_order_id"],
             exchange=exchange,
+            strategy_tag=tag,
         )
         await self.msg_publisher.send(topic, order)
 
@@ -1174,9 +1193,12 @@ class TraderCoordinator(RegisterableProcess):
             logger.warning(f"ZMQTrader: Invalid signal (missing or invalid price): {signal}")
             return
         engine_key = f"{instrument}@{exchange}-{mode}"
-        shard_key = f"{exchange}.{instrument}.{mode}"
-        if self.trade_service.is_halted(shard_key):
-            logger.warning(f"ZMQTrader: shard {shard_key} is halted, dropping signal")
+        if engine_key in self.engines:
+            halt_key = self.engines[engine_key]._shard_key
+        else:
+            halt_key = f"{exchange}.{instrument}.{mode}"
+        if self.trade_service.is_halted(halt_key):
+            logger.warning(f"ZMQTrader: shard {halt_key} is halted, dropping signal")
             return
         assert (
             self.execution_publisher is not None
@@ -1199,6 +1221,7 @@ class TraderCoordinator(RegisterableProcess):
             repo_for_engine = (
                 self.repository if isinstance(self.repository, SQLAlchemyRepository) else None
             )
+            strategy_tag = parsed.signal_type if exchange == ExchangeEnum.PAPER else None
             self.engines[engine_key] = TradingEngineService(
                 instrument,
                 execution_socket=self.msg_publisher,
@@ -1208,6 +1231,7 @@ class TraderCoordinator(RegisterableProcess):
                 exchange=exchange,
                 repository=repo_for_engine,
                 outbox=self.outbox,
+                strategy_tag=strategy_tag,
             )
             self.last_signal_time[engine_key] = 0.0
         self.last_signal_time[engine_key] = time.time()
@@ -1219,7 +1243,11 @@ class TraderCoordinator(RegisterableProcess):
         )
         signaled_at = signal.fired_at.timestamp()
         engine = self.engines[engine_key]
+        prev_oid = engine.pending_client_order_id
         await engine.execute_desired_units(desired_units, price, signaled_at=signaled_at)
+        new_oid = engine.pending_client_order_id
+        if new_oid and new_oid != prev_oid:
+            self._order_shard_keys[new_oid] = engine._shard_key
 
     async def _signal_health_monitor(self) -> None:
         """Monitor signal health and warn on signal gaps.

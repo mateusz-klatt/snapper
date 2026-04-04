@@ -5675,6 +5675,32 @@ async def test_record_venue_event_writes_to_sqlalchemy_repo() -> None:
 
 
 @pytest.mark.asyncio
+async def test_record_venue_event_paper_strategy_tag_shard_key() -> None:
+    """Paper venue event with strategy_tag produces 4-segment shard_key.
+
+    Given: an executor with SQLAlchemyRepository,
+    When: _record_venue_event is called with exchange_name=paper and strategy_tag=scalp,
+    Then: shard_key is paper.BTC-USD.paper.scalp.
+    """
+    ex: Any = MergedDummyExecutor()
+    mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+    mock_repo.insert_venue_event = AsyncMock(return_value=1)
+    ex.repository = mock_repo
+    await ex._record_venue_event(
+        {
+            "event_type": "fill_observed",
+            "exchange_name": "paper",
+            "instrument": "BTC-USD",
+            "side": "buy",
+            "strategy_tag": "scalp",
+        }
+    )
+    mock_repo.insert_venue_event.assert_called_once()
+    call_dict = mock_repo.insert_venue_event.call_args.args[0]
+    assert call_dict["shard_key"] == "paper.BTC-USD.paper.scalp"
+
+
+@pytest.mark.asyncio
 async def test_record_venue_event_handles_db_error() -> None:
     """Venue event DB write failure is logged but does not propagate.
 
@@ -5710,7 +5736,7 @@ async def test_handle_cancellation_records_terminal_venue_event() -> None:
     mock_repo = AsyncMock(spec=SQLAlchemyRepository)
     mock_repo.insert_venue_event = AsyncMock(return_value=1)
     ex.repository = mock_repo
-    order_req = SimpleNamespace(instrument="BTC-USD", client_order_id="cid-1")
+    order_req = SimpleNamespace(instrument="BTC-USD", client_order_id="cid-1", strategy_tag=None)
     ex.pending_orders["cid-1"] = base_module.PendingOrderState(
         request=order_req, db_order_id=1, order_public_id="op-1"
     )
