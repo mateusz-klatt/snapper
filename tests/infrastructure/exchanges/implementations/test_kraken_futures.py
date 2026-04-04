@@ -981,6 +981,70 @@ class TestSubscribeCandles:
         assert results[0].open == pytest.approx(50000.0)
 
     @pytest.mark.asyncio
+    async def test_re_yields_updated_candle_same_timestamp(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """subscribe_candles re-yields candle when OHLCV changes for same open_at.
+
+        Given: get_ohlcv returns candle with same timestamp but updated close,
+        When: subscribe_candles is iterated,
+        Then: Both versions are yielded (allows SCD2 revision downstream).
+        """
+        v1 = OhlcvSnapshot(
+            timestamp=1700000000.0,
+            open=50000.0,
+            high=51000.0,
+            low=49000.0,
+            close=50500.0,
+            volume=100.0,
+        )
+        v2 = OhlcvSnapshot(
+            timestamp=1700000000.0,
+            open=50000.0,
+            high=52000.0,
+            low=49000.0,
+            close=51500.0,
+            volume=150.0,
+        )
+        call_count = 0
+
+        async def mock_ohlcv(
+            symbol: str,
+            timeframe: str = "1h",
+            since: int | None = None,
+            limit: int | None = None,
+        ) -> list[OhlcvSnapshot]:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return [v1]
+            if call_count == 2:
+                return [v2]
+            return []
+
+        client.get_ohlcv = mock_ohlcv
+        results: list[CandleUpdate] = []
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_ccxt",
+                return_value="BTC/USD:USD",
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.asyncio.sleep",
+                side_effect=[None, asyncio.CancelledError],
+            ),
+        ):
+            iterator = client.subscribe_candles(["BTC-USD-PERP"], "1h")
+            try:
+                async for update in iterator:
+                    results.append(update)
+            except asyncio.CancelledError:
+                pass
+        assert len(results) == 2
+        assert results[0].close == pytest.approx(50500.0)
+        assert results[1].close == pytest.approx(51500.0)
+
+    @pytest.mark.asyncio
     async def test_skips_symbols_without_ccxt_alias(
         self, client: KrakenFuturesExchangeClient
     ) -> None:

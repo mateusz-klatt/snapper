@@ -225,7 +225,7 @@ class KrakenFuturesAggregatesBackfillService(RegisterableProcess):
         if self._resume:
             resume_ts = await self._get_resume_since(instrument_pid)
             if resume_ts is not None:
-                since_ms = int(resume_ts.timestamp() * 1000)
+                since_ms = int(resume_ts.timestamp() * 1000) + 1
                 logger.info(f"Resuming {native_symbol} from {resume_ts.isoformat()}")
         logger.info(
             f"Starting backfill for {native_symbol} ({self._timeframe}, {self._days_back} days)"

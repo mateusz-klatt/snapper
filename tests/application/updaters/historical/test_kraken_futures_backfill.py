@@ -420,7 +420,7 @@ class TestResumePath:
         ):
             await svc._process_symbol(client, "BTC-USD-PERP")
         call_args = client.get_ohlcv.call_args
-        assert call_args.kwargs["since"] == int(resume_ts.timestamp() * 1000)
+        assert call_args.kwargs["since"] == int(resume_ts.timestamp() * 1000) + 1
 
     @pytest.mark.asyncio
     async def test_resume_no_stored_candles(self) -> None:

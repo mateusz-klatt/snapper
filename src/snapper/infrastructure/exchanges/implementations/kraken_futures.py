@@ -712,7 +712,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                         limit=5,
                     )
                     for candle in candles:
-                        if candle.timestamp > last_seen.get(native_sym, 0):
+                        if candle.timestamp >= last_seen.get(native_sym, 0):
                             last_seen[native_sym] = candle.timestamp
                             yield CandleUpdate(
                                 symbol=native_sym,
