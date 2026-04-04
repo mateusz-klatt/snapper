@@ -52,10 +52,14 @@ class _KrakenSymbolRequired(TypedDict):
 
 
 class KrakenSymbolRecord(_KrakenSymbolRequired, total=False):
-    """Kraken Spot symbol record with optional alias and class fields."""
+    """Kraken Spot symbol record with optional alias and class fields.
+
+    ccxt_symbol is str | None because tokenized asset pairs
+    produce None from _extract_tokenized_pair().
+    """
 
     asset_class: str
     ws_only: str
     kraken_websocket_symbol: str
     kraken_rest_symbol: str
-    ccxt_symbol: str
+    ccxt_symbol: str | None

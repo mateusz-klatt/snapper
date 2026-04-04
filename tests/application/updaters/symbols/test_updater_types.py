@@ -107,3 +107,15 @@ class TestKrakenSymbolRecord:
         assert record["asset_class"] == "currency"
         assert record["ws_only"] == "false"
         assert record["ccxt_symbol"] == "BTC/USD"
+
+    def test_tokenized_asset_ccxt_symbol_none(self) -> None:
+        """Tokenized assets produce ccxt_symbol=None from _extract_tokenized_pair."""
+        record: KrakenSymbolRecord = {
+            "native_symbol": "NVDA-USD",
+            "base_currency": "NVDA",
+            "quote_currency": "USD",
+            "asset_class": "tokenized_asset",
+            "ccxt_symbol": None,
+        }
+        assert record["ccxt_symbol"] is None
+        assert record["asset_class"] == "tokenized_asset"
