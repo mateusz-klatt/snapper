@@ -259,12 +259,12 @@ class TestEngineApplyFillShortSelling:
         assert engine.position_qty == pytest.approx(0.0)
         assert engine.entry_price is None
 
-    def test_sell_adds_to_short(self) -> None:
-        """Verify additional SELL increases short magnitude.
+    def test_sell_adds_to_short_vwaps_entry(self) -> None:
+        """Verify additional SELL increases short magnitude with VWAP entry_price.
 
-        Given: Engine with position_qty=-0.5,
-        When: SELL fill of 0.3,
-        Then: position_qty=-0.8, entry_price unchanged.
+        Given: Engine with position_qty=-0.5 at entry_price=100,
+        When: SELL fill of 0.3 at 110,
+        Then: position_qty=-0.8, entry_price = (0.5*100 + 0.3*110)/0.8 = 103.75.
         """
         engine = self._make_engine()
         engine.position_qty = -0.5
@@ -272,7 +272,7 @@ class TestEngineApplyFillShortSelling:
         fill = self._make_fill("sell", 0.3, 110.0, trade_id="t3")
         engine.apply_fill(fill)
         assert engine.position_qty == pytest.approx(-0.8)
-        assert engine.entry_price == pytest.approx(100.0)
+        assert engine.entry_price == pytest.approx(103.75)
 
     def test_buy_flips_short_to_long(self) -> None:
         """Verify oversized BUY flips from short to long.

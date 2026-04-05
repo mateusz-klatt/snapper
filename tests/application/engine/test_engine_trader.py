@@ -787,6 +787,7 @@ def _configure_settings(monkeypatch: pytest.MonkeyPatch) -> tuple[SimpleNamespac
         risk_max_leverage=2.0,
         risk_max_drawdown=0.15,
         allow_short_selling=False,
+        has_db_access=True,
     )
 
     def _stub_get_settings() -> SimpleNamespace:
@@ -2201,6 +2202,7 @@ async def test_on_signal_converts_iso_timestamp(monkeypatch: pytest.MonkeyPatch)
         db_url=TEST_DB_URL,
         zmq_broker_xsub="inproc://broker",
         allow_short_selling=False,
+        has_db_access=True,
     )
     monkeypatch.setattr(trader_module, "get_settings", lambda: settings)
     monkeypatch.setattr(
@@ -2253,6 +2255,7 @@ async def test_on_signal_drops_when_shard_halted(monkeypatch: pytest.MonkeyPatch
         db_url=TEST_DB_URL,
         zmq_broker_xsub="inproc://broker",
         allow_short_selling=False,
+        has_db_access=True,
     )
     monkeypatch.setattr(trader_module, "get_settings", lambda: settings)
     monkeypatch.setattr(trader_module, "is_tradeable", lambda _i, _e: True)
@@ -3076,8 +3079,13 @@ class TestRecovery:
         assert engine.entry_price == pytest.approx(50000.0)
         assert "t1" in engine.seen_exec_ids
 
-    def test_apply_execution_row_buy_existing_position(self) -> None:
-        """Verify buy into existing position does not reset entry price."""
+    def test_apply_execution_row_buy_existing_position_vwaps(self) -> None:
+        """Verify buy into existing position VWAPs entry price.
+
+        Given: Engine with position_qty=0.3 at entry_price=49000,
+        When: BUY fill of 0.2 at 50000,
+        Then: entry_price = (0.3*49000 + 0.2*50000) / 0.5 = 49400.
+        """
         socket = MagicMock()
         socket.tracker = Mock(session_id="s1")
         engine = TradingEngineService(
@@ -3097,7 +3105,7 @@ class TestRecovery:
         }
         TraderCoordinator._apply_execution_row_to_engine(engine, cast(Any, fill_row))
         assert engine.position_qty == pytest.approx(0.5)
-        assert engine.entry_price == pytest.approx(49000.0)
+        assert engine.entry_price == pytest.approx(49400.0)
 
     def test_apply_execution_row_partial_sell_keeps_entry(self) -> None:
         """Verify partial sell keeps entry price when position remains."""

@@ -164,6 +164,15 @@ class AppSettings:
         """
         return self._bootstrap.telemetry_recording_enabled
 
+    @property
+    def has_db_access(self) -> bool:
+        """Check whether this settings instance has database access.
+
+        Returns:
+            True if SettingsService was initialized, False otherwise.
+        """
+        return self._settings_service is not None
+
     def _get_db_setting[T](self, key: str, default: T) -> T:
         """Retrieve a setting value from database with fallback to default.
 

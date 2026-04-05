@@ -180,6 +180,12 @@ class TradingEngineService:
             self.entry_price = None
         elif old_qty <= 0 < self.position_qty or old_qty >= 0 > self.position_qty:
             self.entry_price = fill.last_price
+        elif self.entry_price is not None and abs(self.position_qty) > abs(old_qty):
+            old_abs = abs(old_qty)
+            new_abs = abs(self.position_qty)
+            self.entry_price = (
+                old_abs * self.entry_price + fill.last_size * fill.last_price
+            ) / new_abs
         if fill.client_order_id == self.pending_client_order_id and fill.status == "filled":
             self.order_in_flight = False
             self.pending_client_order_id = None
@@ -374,23 +380,30 @@ class TradingEngineService:
             logger.debug(f"Published order command (direct): {order_public_id}")
         return order_public_id
 
-    def _cap_opening_size(self, opening_qty: float, current_price: float) -> float:
+    def _cap_opening_size(
+        self, opening_qty: float, current_price: float, closing_proceeds: float = 0.0
+    ) -> float:
         """Apply leverage, cash, and lot-size constraints to the opening portion.
+
+        For flip transitions, closing_proceeds estimates the cash freed by
+        closing the existing position so the opening cap reflects post-close state.
 
         Args:
             opening_qty: Unsigned quantity for the new direction.
             current_price: Current market price.
+            closing_proceeds: Estimated cash from closing the existing position.
 
         Returns:
             Capped and rounded opening quantity (unsigned).
         """
         fee_rate = self.cfg.fee_bps / 10000.0
         reserve = max(0.01, self.portfolio.cash * 1e-3)
-        cash_avail = max(self.portfolio.cash - reserve, 0.0)
+        cash_avail = max(self.portfolio.cash + closing_proceeds - reserve, 0.0)
         exposure = self.portfolio.notional_exposure(self.instrument, current_price)
         effective_cash = cash_avail / (1.0 + fee_rate)
+        post_close_exposure = max(exposure - closing_proceeds, 0.0)
         opening_qty = self.risk.cap_size_by_leverage(
-            exposure, effective_cash, current_price, opening_qty
+            post_close_exposure, effective_cash, current_price, opening_qty
         )
         max_size_by_cash = effective_cash / current_price if current_price > 0 else 0.0
         opening_qty = max(min(opening_qty, max_size_by_cash), 0.0)
@@ -398,6 +411,35 @@ class TradingEngineService:
         lot = float(specs.get("lot_size", 0.0))
         tick = float(specs.get("tick_size", 0.0))
         return self.risk.round_size(opening_qty, lot, current_price, tick)
+
+    def _classify_delta(self, desired_units: float, abs_delta: float) -> tuple[float, float]:
+        """Split position delta into closing and opening portions.
+
+        For flip transitions the closing portion is unconstrained, while
+        the opening portion will be subject to cash and leverage caps.
+
+        Args:
+            desired_units: Target position size.
+            abs_delta: Absolute size of the position change.
+
+        Returns:
+            Tuple of (closing_qty, opening_qty), both unsigned.
+        """
+        crosses_zero = (self.position_qty > 0 and desired_units < 0) or (
+            self.position_qty < 0 and desired_units > 0
+        )
+        is_opening = (self.position_qty <= 0 and desired_units > 0) or (
+            self.position_qty >= 0 and desired_units < 0
+        )
+        if crosses_zero:
+            closing = abs(self.position_qty)
+            return closing, abs_delta - closing
+        if is_opening:
+            return 0.0, abs_delta
+        is_reducing = abs(desired_units) < abs(self.position_qty)
+        if is_reducing:
+            return abs_delta, 0.0
+        return 0.0, abs_delta
 
     async def execute_desired_units(
         self, desired_units: float, current_price: float, signaled_at: float | None = None
@@ -434,27 +476,13 @@ class TradingEngineService:
             return
         equity = self._mark_to_market(current_price)
         side = TradeSideEnum.BUY if delta > 0 else TradeSideEnum.SELL
-        abs_delta = abs(delta)
-        is_opening = (self.position_qty <= 0 and desired_units > 0) or (
-            self.position_qty >= 0 and desired_units < 0
-        )
-        crosses_zero = (self.position_qty > 0 and desired_units < 0) or (
-            self.position_qty < 0 and desired_units > 0
-        )
-        if crosses_zero:
-            closing_qty = abs(self.position_qty)
-            opening_qty = abs_delta - closing_qty
-        elif is_opening:
-            closing_qty = 0.0
-            opening_qty = abs_delta
-        else:
-            closing_qty = abs_delta
-            opening_qty = 0.0
+        closing_qty, opening_qty = self._classify_delta(desired_units, abs(delta))
         if opening_qty > 0:
             if not self.risk.can_open_new_trade(equity, self.peak_equity):
                 opening_qty = 0.0
             else:
-                opening_qty = self._cap_opening_size(opening_qty, current_price)
+                proceeds = closing_qty * current_price if closing_qty > 0 else 0.0
+                opening_qty = self._cap_opening_size(opening_qty, current_price, proceeds)
         total_order = closing_qty + opening_qty
         specs = self.instrument_specs.get(self.instrument, {})
         lot = float(specs.get("lot_size", 0.0))

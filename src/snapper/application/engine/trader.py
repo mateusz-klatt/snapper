@@ -513,6 +513,10 @@ class TraderCoordinator(RegisterableProcess):
             engine.entry_price = None
         elif old_qty <= 0 < engine.position_qty or old_qty >= 0 > engine.position_qty:
             engine.entry_price = price
+        elif engine.entry_price is not None and abs(engine.position_qty) > abs(old_qty):
+            old_abs = abs(old_qty)
+            new_abs = abs(engine.position_qty)
+            engine.entry_price = (old_abs * engine.entry_price + size * price) / new_abs
         trade_id = fill_row.get("trade_id")
         if trade_id:
             engine.seen_exec_ids.add(trade_id)
@@ -1243,10 +1247,7 @@ class TraderCoordinator(RegisterableProcess):
             self.last_signal_time[engine_key] = 0.0
         self.last_signal_time[engine_key] = time.time()
         desired_units = strength if side == TradeSideEnum.BUY else -strength
-        try:
-            allow_shorts = self.settings.allow_short_selling
-        except RuntimeError:
-            allow_shorts = False
+        allow_shorts = self.settings.has_db_access and self.settings.allow_short_selling
         if not allow_shorts:
             desired_units = max(desired_units, 0.0)
         logger.info(
