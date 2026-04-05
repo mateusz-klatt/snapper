@@ -190,6 +190,32 @@ def _replace_execution_publisher_with_async_stub(trader: TraderCoordinator) -> M
     return async_publisher
 
 
+class TestEngineConfigModelDefaults:
+    """Tests for EngineConfigModel default values and leverage field."""
+
+    def test_defaults(self) -> None:
+        """Verify default values for EngineConfigModel.
+
+        Given: Default EngineConfigModel,
+        When: Inspecting fields,
+        Then: initial_cash=10000, fee_bps=2.0, leverage=None.
+        """
+        cfg = EngineConfigModel()
+        assert cfg.initial_cash == pytest.approx(10_000.0)
+        assert cfg.fee_bps == pytest.approx(2.0)
+        assert cfg.leverage is None
+
+    def test_leverage_set(self) -> None:
+        """Verify leverage can be configured.
+
+        Given: EngineConfigModel with leverage=3,
+        When: Inspecting leverage,
+        Then: leverage=3.
+        """
+        cfg = EngineConfigModel(leverage=3)
+        assert cfg.leverage == 3
+
+
 class TestEngineExecuteDesiredUnits:
     """Tests for TradingEngineService execute_desired_units method."""
 

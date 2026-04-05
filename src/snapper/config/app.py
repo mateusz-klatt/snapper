@@ -387,6 +387,18 @@ class AppSettings:
         return self._get_db_setting("risk_r_per_trade", 0.005)
 
     @property
+    def allow_short_selling(self) -> bool:
+        """Return whether short selling is enabled.
+
+        When False (default), SELL signals flatten the position to zero.
+        When True, SELL signals open short positions with negative desired_units.
+
+        Returns:
+            True if short selling is enabled.
+        """
+        return self._get_db_setting("allow_short_selling", False)
+
+    @property
     def log_level(self) -> str:
         """Return application logging level.
 

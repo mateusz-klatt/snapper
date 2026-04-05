@@ -20,6 +20,8 @@ class EngineConfigModel:
             Defaults to 10,000.
         fee_bps: Trading fee in basis points (1 bps = 0.01%).
             Applied to both buy and sell orders. Defaults to 2.0 bps.
+        leverage: Margin leverage for orders on margin-capable exchanges.
+            None means no leverage (spot). Integer for Kraken (2-10x).
 
     Example:
         >>> config = EngineConfigModel(initial_cash=50_000, fee_bps=5.0)
@@ -29,3 +31,4 @@ class EngineConfigModel:
 
     initial_cash: float = 10_000.0
     fee_bps: float = 2.0
+    leverage: int | None = None
