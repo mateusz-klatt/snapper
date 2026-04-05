@@ -170,15 +170,16 @@ class TradingEngineService:
         self.portfolio.update_fill(
             self.instrument, fill.side, fill.last_size, fill.last_price, fill.fee
         )
+        old_qty = self.position_qty
         if fill.side == TradeSideEnum.BUY:
-            was_flat = self.position_qty <= 0
             self.position_qty += fill.last_size
-            if was_flat and self.position_qty > 0:
-                self.entry_price = fill.last_price
         else:
-            self.position_qty = max(self.position_qty - fill.last_size, 0.0)
-            if self.position_qty <= 0:
-                self.entry_price = None
+            self.position_qty -= fill.last_size
+        if abs(self.position_qty) < 1e-12:
+            self.position_qty = 0.0
+            self.entry_price = None
+        elif old_qty <= 0 < self.position_qty or old_qty >= 0 > self.position_qty:
+            self.entry_price = fill.last_price
         if fill.client_order_id == self.pending_client_order_id and fill.status == "filled":
             self.order_in_flight = False
             self.pending_client_order_id = None

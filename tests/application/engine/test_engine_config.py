@@ -190,6 +190,121 @@ def _replace_execution_publisher_with_async_stub(trader: TraderCoordinator) -> M
     return async_publisher
 
 
+class TestEngineApplyFillShortSelling:
+    """Tests for TradingEngineService.apply_fill with short positions."""
+
+    def _make_engine(self) -> TradingEngineService:
+        """Create a minimal engine for apply_fill testing."""
+        socket = FakeSocket()
+        risk = StubRisk()
+        return TradingEngineService(
+            "BTC-USD",
+            cast(Any, socket),
+            risk=risk,
+            cfg=EngineConfigModel(initial_cash=10_000.0),
+            exchange="kraken",
+            instrument_specs={},
+        )
+
+    def _make_fill(
+        self, side: str, last_size: float, last_price: float, trade_id: str = "t1"
+    ) -> ExecutionData:
+        """Create an ExecutionData fill event."""
+        return ExecutionData(
+            public_id="pub-1",
+            timestamp=datetime.now(UTC),
+            session_id="sess-1",
+            sequence_id=1,
+            trade_id=trade_id,
+            exchange_order_id="exch-1",
+            client_order_id="cli-1",
+            instrument="BTC-USD",
+            exchange="kraken",
+            side=side,
+            size=last_size,
+            price=last_price,
+            last_size=last_size,
+            last_price=last_price,
+            fee=0.0,
+            fee_asset="USD",
+            status="filled",
+            executed_at=datetime.now(UTC),
+        )
+
+    def test_sell_from_flat_opens_short(self) -> None:
+        """Verify SELL from flat opens a short position.
+
+        Given: Engine with position_qty=0,
+        When: SELL fill applied,
+        Then: position_qty goes negative, entry_price set.
+        """
+        engine = self._make_engine()
+        fill = self._make_fill("sell", 0.5, 100.0)
+        engine.apply_fill(fill)
+        assert engine.position_qty == pytest.approx(-0.5)
+        assert engine.entry_price == pytest.approx(100.0)
+
+    def test_buy_covers_short_to_flat(self) -> None:
+        """Verify BUY covering short brings position to flat.
+
+        Given: Engine with position_qty=-0.5,
+        When: BUY fill of 0.5,
+        Then: position_qty=0, entry_price=None.
+        """
+        engine = self._make_engine()
+        engine.position_qty = -0.5
+        engine.entry_price = 100.0
+        fill = self._make_fill("buy", 0.5, 90.0, trade_id="t2")
+        engine.apply_fill(fill)
+        assert engine.position_qty == pytest.approx(0.0)
+        assert engine.entry_price is None
+
+    def test_sell_adds_to_short(self) -> None:
+        """Verify additional SELL increases short magnitude.
+
+        Given: Engine with position_qty=-0.5,
+        When: SELL fill of 0.3,
+        Then: position_qty=-0.8, entry_price unchanged.
+        """
+        engine = self._make_engine()
+        engine.position_qty = -0.5
+        engine.entry_price = 100.0
+        fill = self._make_fill("sell", 0.3, 110.0, trade_id="t3")
+        engine.apply_fill(fill)
+        assert engine.position_qty == pytest.approx(-0.8)
+        assert engine.entry_price == pytest.approx(100.0)
+
+    def test_buy_flips_short_to_long(self) -> None:
+        """Verify oversized BUY flips from short to long.
+
+        Given: Engine with position_qty=-0.5,
+        When: BUY fill of 0.8,
+        Then: position_qty=+0.3, entry_price reset to fill price.
+        """
+        engine = self._make_engine()
+        engine.position_qty = -0.5
+        engine.entry_price = 100.0
+        fill = self._make_fill("buy", 0.8, 90.0, trade_id="t4")
+        engine.apply_fill(fill)
+        assert engine.position_qty == pytest.approx(0.3)
+        assert engine.entry_price == pytest.approx(90.0)
+
+    def test_sell_flips_long_to_short(self) -> None:
+        """Verify oversized SELL flips from long to short.
+
+        Given: Engine with position_qty=+0.5,
+        When: SELL fill of 0.8,
+        Then: position_qty=-0.3, entry_price reset to fill price.
+        """
+        engine = self._make_engine()
+        engine.position_qty = 0.5
+        engine.entry_price = 100.0
+        fill = self._make_fill("sell", 0.8, 110.0, trade_id="t5")
+        engine.apply_fill(fill)
+        assert engine.position_qty == pytest.approx(-0.3)
+        assert engine.entry_price == pytest.approx(110.0)
+
+
 class TestEngineConfigModelDefaults:
     """Tests for EngineConfigModel default values and leverage field."""
 
