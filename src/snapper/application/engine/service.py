@@ -374,20 +374,48 @@ class TradingEngineService:
             logger.debug(f"Published order command (direct): {order_public_id}")
         return order_public_id
 
+    def _cap_opening_size(self, opening_qty: float, current_price: float) -> float:
+        """Apply leverage, cash, and lot-size constraints to the opening portion.
+
+        Args:
+            opening_qty: Unsigned quantity for the new direction.
+            current_price: Current market price.
+
+        Returns:
+            Capped and rounded opening quantity (unsigned).
+        """
+        fee_rate = self.cfg.fee_bps / 10000.0
+        reserve = max(0.01, self.portfolio.cash * 1e-3)
+        cash_avail = max(self.portfolio.cash - reserve, 0.0)
+        exposure = self.portfolio.notional_exposure(self.instrument, current_price)
+        effective_cash = cash_avail / (1.0 + fee_rate)
+        opening_qty = self.risk.cap_size_by_leverage(
+            exposure, effective_cash, current_price, opening_qty
+        )
+        max_size_by_cash = effective_cash / current_price if current_price > 0 else 0.0
+        opening_qty = max(min(opening_qty, max_size_by_cash), 0.0)
+        specs = self.instrument_specs.get(self.instrument, {})
+        lot = float(specs.get("lot_size", 0.0))
+        tick = float(specs.get("tick_size", 0.0))
+        return self.risk.round_size(opening_qty, lot, current_price, tick)
+
     async def execute_desired_units(
         self, desired_units: float, current_price: float, signaled_at: float | None = None
     ) -> None:
         """Execute position change based on desired position size.
 
         Main entry point for strategy signal execution. Compares desired position
-        with current position and sends appropriate buy/sell orders. Portfolio and
-        position state are NOT updated here; they change only when confirmed fills
-        arrive via apply_fill().
+        with current position and sends appropriate buy/sell orders. Supports
+        long, short, and flip transitions.
 
-        Drops the signal if an order is already in flight for this engine.
+        For flips (long→short or short→long), the delta is split into a closing
+        portion (uncapped) and an opening portion (subject to cash/leverage caps).
+
+        Portfolio and position state are NOT updated here; they change only
+        when confirmed fills arrive via apply_fill().
 
         Args:
-            desired_units: Target position size (positive = long, <= 0 = flat).
+            desired_units: Target position size (positive=long, negative=short, 0=flat).
             current_price: Current market price for sizing calculations.
             signaled_at: Unix timestamp when signal was generated.
         """
@@ -401,49 +429,45 @@ class TradingEngineService:
                 f"{self.instrument}, dropping signal"
             )
             return
+        delta = desired_units - self.position_qty
+        if abs(delta) < 1e-12:
+            return
         equity = self._mark_to_market(current_price)
-        if desired_units > 0 and self.position_qty <= 0:
+        side = TradeSideEnum.BUY if delta > 0 else TradeSideEnum.SELL
+        abs_delta = abs(delta)
+        is_opening = (self.position_qty <= 0 and desired_units > 0) or (
+            self.position_qty >= 0 and desired_units < 0
+        )
+        crosses_zero = (self.position_qty > 0 and desired_units < 0) or (
+            self.position_qty < 0 and desired_units > 0
+        )
+        if crosses_zero:
+            closing_qty = abs(self.position_qty)
+            opening_qty = abs_delta - closing_qty
+        elif is_opening:
+            closing_qty = 0.0
+            opening_qty = abs_delta
+        else:
+            closing_qty = abs_delta
+            opening_qty = 0.0
+        if opening_qty > 0:
             if not self.risk.can_open_new_trade(equity, self.peak_equity):
                 return
-            fee_rate = self.cfg.fee_bps / 10000.0
-            reserve = max(0.01, self.portfolio.cash * 1e-3)
-            cash_avail = max(self.portfolio.cash - reserve, 0.0)
-            exposure = self.portfolio.notional_exposure(self.instrument, current_price)
-            effective_cash = cash_avail / (1.0 + fee_rate)
-            desired_units = self.risk.cap_size_by_leverage(
-                exposure, effective_cash, current_price, desired_units
-            )
-            max_size_by_cash = effective_cash / current_price if current_price > 0 else 0.0
-            desired_units = max(min(desired_units, max_size_by_cash), 0.0)
-            specs = self.instrument_specs.get(self.instrument, {})
-            lot = float(specs.get("lot_size", 0.0))
-            tick = float(specs.get("tick_size", 0.0))
-            desired_units = self.risk.round_size(desired_units, lot, current_price, tick)
-            if desired_units <= 0:
-                return
-            client_order_id = await self._send_order(
-                side=TradeSideEnum.BUY,
-                size=desired_units,
-                price=current_price,
-                reason="engine-buy",
-                signaled_at=signaled_at,
-            )
-            self.order_in_flight = True
-            self.pending_client_order_id = client_order_id
-            self._in_flight_since = time.monotonic()
-        elif desired_units <= 0 and self.position_qty > 0:
-            specs = self.instrument_specs.get(self.instrument, {})
-            lot = float(specs.get("lot_size", 0.0))
-            qty_to_sell = self.risk.round_down_to_step(self.position_qty, lot)
-            if qty_to_sell <= 0:
-                return
-            client_order_id = await self._send_order(
-                side=TradeSideEnum.SELL,
-                size=qty_to_sell,
-                price=current_price,
-                reason="engine-sell",
-                signaled_at=signaled_at,
-            )
-            self.order_in_flight = True
-            self.pending_client_order_id = client_order_id
-            self._in_flight_since = time.monotonic()
+            opening_qty = self._cap_opening_size(opening_qty, current_price)
+        total_order = closing_qty + opening_qty
+        specs = self.instrument_specs.get(self.instrument, {})
+        lot = float(specs.get("lot_size", 0.0))
+        total_order = self.risk.round_down_to_step(total_order, lot)
+        if total_order <= 0:
+            return
+        reason = "engine-buy" if side == TradeSideEnum.BUY else "engine-sell"
+        client_order_id = await self._send_order(
+            side=side,
+            size=total_order,
+            price=current_price,
+            reason=reason,
+            signaled_at=signaled_at,
+        )
+        self.order_in_flight = True
+        self.pending_client_order_id = client_order_id
+        self._in_flight_since = time.monotonic()

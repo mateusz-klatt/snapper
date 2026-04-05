@@ -518,6 +518,140 @@ class TestEngineExecuteDesiredUnits:
             assert qty % lot_size == pytest.approx(0.0) or abs(qty % lot_size) < 1e-10
 
 
+class TestExecuteDesiredUnitsShortSelling:
+    """Tests for execute_desired_units short selling transitions."""
+
+    def _make_engine(self) -> tuple[TradingEngineService, MagicMock]:
+        """Create engine with mock socket for short selling tests."""
+        mock_socket = MagicMock()
+        mock_socket.send = AsyncMock()
+        mock_socket.tracker = SequenceTracker()
+        mock_socket.session_id = mock_socket.tracker.session_id
+        engine = TradingEngineService(
+            instrument="BTC-USD",
+            execution_socket=mock_socket,
+            risk=RiskEvaluator(RiskConfigModel(r_per_trade=0.02, max_leverage=1.0)),
+            cfg=EngineConfigModel(initial_cash=10_000.0, fee_bps=2.0),
+            instrument_specs={"BTC-USD": {"tick_size": 0.01, "lot_size": 0.0001}},
+            exchange="kraken",
+        )
+        return engine, mock_socket
+
+    @pytest.mark.asyncio
+    async def test_open_short_from_flat(self) -> None:
+        """Verify negative desired_units opens a short position.
+
+        Given: Flat engine (position_qty=0),
+        When: desired_units=-0.1,
+        Then: SELL order sent.
+        """
+        engine, mock_socket = self._make_engine()
+        await engine.execute_desired_units(-0.1, current_price=50_000.0)
+        assert mock_socket.send.called
+        order = mock_socket.send.call_args[0][1]
+        assert order.side == "sell"
+        assert order.quantity > 0
+        assert engine.order_in_flight is True
+
+    @pytest.mark.asyncio
+    async def test_cover_short_to_flat(self) -> None:
+        """Verify desired_units=0 closes a short position.
+
+        Given: Engine with position_qty=-0.1,
+        When: desired_units=0,
+        Then: BUY order sent for 0.1.
+        """
+        engine, mock_socket = self._make_engine()
+        engine.position_qty = -0.1
+        engine.entry_price = 50_000.0
+        engine.portfolio.update_fill("BTC-USD", "sell", 0.1, 50_000.0, 0.0)
+        await engine.execute_desired_units(0.0, current_price=50_000.0)
+        assert mock_socket.send.called
+        order = mock_socket.send.call_args[0][1]
+        assert order.side == "buy"
+        assert order.quantity == pytest.approx(0.1)
+
+    @pytest.mark.asyncio
+    async def test_flip_long_to_short(self) -> None:
+        """Verify desired_units < 0 when long sends SELL for full flip.
+
+        Given: Engine with position_qty=+0.05,
+        When: desired_units=-0.05,
+        Then: SELL order for closing(0.05) + opening(<=0.05).
+        """
+        engine, mock_socket = self._make_engine()
+        engine.position_qty = 0.05
+        engine.entry_price = 50_000.0
+        engine.portfolio.update_fill("BTC-USD", "buy", 0.05, 50_000.0, 0.0)
+        await engine.execute_desired_units(-0.05, current_price=50_000.0)
+        assert mock_socket.send.called
+        order = mock_socket.send.call_args[0][1]
+        assert order.side == "sell"
+        assert order.quantity >= 0.05
+
+    @pytest.mark.asyncio
+    async def test_flip_short_to_long(self) -> None:
+        """Verify desired_units > 0 when short sends BUY for full flip.
+
+        Given: Engine with position_qty=-0.05,
+        When: desired_units=+0.05,
+        Then: BUY order for covering(0.05) + opening(<=0.05).
+        """
+        engine, mock_socket = self._make_engine()
+        engine.position_qty = -0.05
+        engine.entry_price = 50_000.0
+        engine.portfolio.update_fill("BTC-USD", "sell", 0.05, 50_000.0, 0.0)
+        await engine.execute_desired_units(0.05, current_price=50_000.0)
+        assert mock_socket.send.called
+        order = mock_socket.send.call_args[0][1]
+        assert order.side == "buy"
+        assert order.quantity >= 0.05
+
+    @pytest.mark.asyncio
+    async def test_short_drawdown_gate_blocks(self) -> None:
+        """Verify drawdown gate blocks new short position.
+
+        Given: Flat engine with drawdown exceeding limit,
+        When: desired_units=-0.1,
+        Then: No order sent.
+        """
+        engine, mock_socket = self._make_engine()
+        engine.peak_equity = 20_000.0
+        await engine.execute_desired_units(-0.1, current_price=50_000.0)
+        assert not mock_socket.send.called
+
+    @pytest.mark.asyncio
+    async def test_close_short_no_drawdown_check(self) -> None:
+        """Verify closing a short skips drawdown gate.
+
+        Given: Short position with drawdown exceeding limit,
+        When: desired_units=0 (close short),
+        Then: BUY order sent (closing is always allowed).
+        """
+        engine, mock_socket = self._make_engine()
+        engine.position_qty = -0.1
+        engine.entry_price = 50_000.0
+        engine.portfolio.update_fill("BTC-USD", "sell", 0.1, 50_000.0, 0.0)
+        engine.peak_equity = 20_000.0
+        await engine.execute_desired_units(0.0, current_price=50_000.0)
+        assert mock_socket.send.called
+        order = mock_socket.send.call_args[0][1]
+        assert order.side == "buy"
+
+    @pytest.mark.asyncio
+    async def test_already_at_target_no_order(self) -> None:
+        """Verify no order when already at desired position.
+
+        Given: Engine with position_qty=-0.1,
+        When: desired_units=-0.1,
+        Then: No order sent (delta is zero).
+        """
+        engine, mock_socket = self._make_engine()
+        engine.position_qty = -0.1
+        await engine.execute_desired_units(-0.1, current_price=50_000.0)
+        assert not mock_socket.send.called
+
+
 @pytest.mark.asyncio
 class TestTraderSignalHandling:
     """Tests for TraderCoordinator signal handling."""
