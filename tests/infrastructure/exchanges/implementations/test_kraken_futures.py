@@ -3182,32 +3182,83 @@ class TestKrakenFuturesLiveFixtures:
         assert snap.filled == pytest.approx(0.0)
 
     @pytest.mark.asyncio
-    async def test_cancel_order_not_found_fast_cancel(
+    @pytest.mark.asyncio
+    async def test_cancel_not_found_reconciles_via_get_order(
         self, client: KrakenFuturesExchangeClient
     ) -> None:
-        """Fast cancel returns notFound status with empty orderEvents.
+        """NotFound cancel reconciles via get_order to detect late fills.
 
-        When the SDK cancel is called before the order fully propagates,
-        the exchange returns status=notFound with no orderEvents. The client
-        must still return CANCELED status.
+        When the SDK cancel returns notFound (order not yet propagated or
+        already filled), the client must call get_order to retrieve the
+        actual state rather than blindly declaring CANCELED.
 
-        Given: SDK cancel returns notFound with empty orderEvents.
+        Given: SDK cancel returns notFound, get_orders_status shows FULLY_EXECUTED.
         When: cancel_order is called.
-        Then: Snapshot has CANCELED status despite notFound from SDK.
+        Then: Snapshot reflects the filled state from get_order, not CANCELED.
         """
         assert client._trade_client is not None
         client._trade_client.cancel_order = MagicMock(
             return_value={
                 "cancelStatus": {
                     "status": "notFound",
-                    "order_id": "a178ba6f-418e-4d71-a5cd-e9171b55b7f2",
+                    "order_id": "a178ba6f-reconcile",
                     "orderEvents": [],
                 }
             }
         )
-        snap = await client.cancel_order("a178ba6f-418e-4d71-a5cd-e9171b55b7f2", "BTC-USD-PERP")
-        assert snap.id == "a178ba6f-418e-4d71-a5cd-e9171b55b7f2"
-        assert snap.status == OrderStatusEnum.CANCELED
+        client._trade_client.get_orders_status = MagicMock(
+            return_value={
+                "orders": [
+                    {
+                        "order": {
+                            "orderId": "a178ba6f-reconcile",
+                            "cliOrdId": None,
+                            "type": "lmt",
+                            "symbol": "PF_XBTUSD",
+                            "side": "buy",
+                            "quantity": 0,
+                            "filled": 0.0001,
+                            "limitPrice": 66000.0,
+                            "reduceOnly": False,
+                        },
+                        "status": "FULLY_EXECUTED",
+                    }
+                ]
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            return_value="BTC-USD-PERP",
+        ):
+            snap = await client.cancel_order("a178ba6f-reconcile", "BTC-USD-PERP")
+        assert snap.id == "a178ba6f-reconcile"
+        assert snap.status == OrderStatusEnum.CLOSED
+        assert snap.filled == pytest.approx(0.0001)
+
+    @pytest.mark.asyncio
+    async def test_cancel_not_found_fallback_when_get_order_fails(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """NotFound cancel falls back to OPEN when get_order also fails.
+
+        Given: SDK cancel returns notFound, get_orders_status returns empty.
+        When: cancel_order is called.
+        Then: Falls back to minimal snapshot with OPEN status (notFound unmapped).
+        """
+        assert client._trade_client is not None
+        client._trade_client.cancel_order = MagicMock(
+            return_value={
+                "cancelStatus": {
+                    "status": "notFound",
+                    "order_id": "a178ba6f-fallback",
+                    "orderEvents": [],
+                }
+            }
+        )
+        client._trade_client.get_orders_status = MagicMock(return_value={"orders": []})
+        snap = await client.cancel_order("a178ba6f-fallback", "BTC-USD-PERP")
+        assert snap.id == "a178ba6f-fallback"
+        assert snap.status == OrderStatusEnum.OPEN
         assert snap.symbol == "BTC-USD-PERP"
 
     @pytest.mark.asyncio

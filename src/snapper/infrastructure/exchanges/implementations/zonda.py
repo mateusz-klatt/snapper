@@ -751,7 +751,7 @@ class ZondaExchangeClient(ExchangeClientBase):
                 request.price,
                 order_params,
             )
-            exchange_id = str(ccxt_order.get("id", ""))
+            exchange_id = str(ccxt_order.get("id") or "")
             order = ExchangeOrderSnapshot(
                 id=exchange_id,
                 client_order_id=request.client_order_id,

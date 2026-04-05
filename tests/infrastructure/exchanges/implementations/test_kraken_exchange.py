@@ -562,6 +562,33 @@ class TestKrakenExchangeClient:
             assert order.db_order_id is None
             mock_log.assert_not_called()
 
+    async def test_create_order_none_id_treated_as_empty(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """Verify create order with None id is treated as empty string.
+
+        Given: CCXT returns a response with id=None,
+        When: create_order is called,
+        Then: The snapshot has empty id and db logging is skipped.
+        """
+        mock_client = AsyncMock()
+        mock_log = AsyncMock(return_value=None)
+        with (
+            patch.object(kraken_client, "_ccxt_client", mock_client),
+            patch.object(kraken_client, "_log_order_to_db", mock_log),
+        ):
+            mock_client.create_order.return_value = {"id": None}
+            order_request = ExchangeOrderRequest(
+                symbol="BTC-USD",
+                side=OrderSideEnum.BUY,
+                type=OrderTypeEnum.MARKET,
+                amount=float("0.1"),
+            )
+            order = await kraken_client.create_order(order_request)
+            assert order.id == ""
+            assert order.status == OrderStatusEnum.PENDING
+            mock_log.assert_not_called()
+
     async def test_create_order_error(self, kraken_client: KrakenExchangeClient) -> None:
         """Verify create order error."""
         order_request = ExchangeOrderRequest(

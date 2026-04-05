@@ -366,7 +366,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             float(request.price) if request.price else None,
             ccxt_params,
         )
-        exchange_id = str(order_data.get("id", ""))
+        exchange_id = str(order_data.get("id") or "")
         order = ExchangeOrderSnapshot(
             id=exchange_id,
             client_order_id=request.client_order_id,

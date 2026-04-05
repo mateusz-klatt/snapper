@@ -462,6 +462,11 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         if order_data:
             order_data["status"] = status_str
             return self._convert_sdk_order(order_data)
+        if status_str == "notFound":
+            try:
+                return await self.get_order(order_id, symbol)
+            except Exception:
+                logger.warning("cancel_order: notFound and get_order failed for {}", order_id)
         return ExchangeOrderSnapshot(
             id=order_id,
             client_order_id=None,
