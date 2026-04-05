@@ -320,9 +320,9 @@ class TestTraderCoverage:
     async def test_on_signal_processes_sell_signal(
         self, mock_get_settings: MagicMock, mock_get_repository: MagicMock
     ) -> None:
-        """Verify sell signal triggers execution with zero units.
+        """Verify sell signal triggers execution with zero units when shorts disabled.
 
-        Given: TraderCoordinator with mocked engine for BTC-USD,
+        Given: TraderCoordinator with mocked engine for BTC-USD, shorts disabled,
         When: Sell signal is received,
         Then: Engine execute_desired_units is called with 0.0 units.
         """
@@ -334,6 +334,7 @@ class TestTraderCoverage:
             "polygon": [],
         }
         mock_settings.db_url = TEST_DB_URL
+        mock_settings.allow_short_selling = False
         mock_get_settings.return_value = mock_settings
         mock_repository = MagicMock()
         mock_get_repository.return_value = mock_repository
@@ -785,6 +786,7 @@ def _configure_settings(monkeypatch: pytest.MonkeyPatch) -> tuple[SimpleNamespac
         risk_r_per_trade=0.01,
         risk_max_leverage=2.0,
         risk_max_drawdown=0.15,
+        allow_short_selling=False,
     )
 
     def _stub_get_settings() -> SimpleNamespace:
@@ -2198,6 +2200,7 @@ async def test_on_signal_converts_iso_timestamp(monkeypatch: pytest.MonkeyPatch)
         risk_max_drawdown=0.5,
         db_url=TEST_DB_URL,
         zmq_broker_xsub="inproc://broker",
+        allow_short_selling=False,
     )
     monkeypatch.setattr(trader_module, "get_settings", lambda: settings)
     monkeypatch.setattr(
@@ -2249,6 +2252,7 @@ async def test_on_signal_drops_when_shard_halted(monkeypatch: pytest.MonkeyPatch
         risk_max_drawdown=0.5,
         db_url=TEST_DB_URL,
         zmq_broker_xsub="inproc://broker",
+        allow_short_selling=False,
     )
     monkeypatch.setattr(trader_module, "get_settings", lambda: settings)
     monkeypatch.setattr(trader_module, "is_tradeable", lambda _i, _e: True)

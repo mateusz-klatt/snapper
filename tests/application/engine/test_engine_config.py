@@ -696,6 +696,7 @@ class TestTraderSignalHandling:
         }
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
         mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.allow_short_selling = False
         mock_get_settings.return_value = mock_settings
         mock_repo = AsyncMock()
         mock_get_repo.return_value = mock_repo
@@ -764,6 +765,7 @@ class TestTraderSignalHandling:
         }
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
         mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.allow_short_selling = False
         mock_get_settings.return_value = mock_settings
         mock_repo = AsyncMock()
         mock_get_repo.return_value = mock_repo
@@ -825,6 +827,7 @@ class TestTraderSignalHandling:
         }
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
         mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.allow_short_selling = False
         mock_get_settings.return_value = mock_settings
         mock_repo = AsyncMock()
         mock_get_repo.return_value = mock_repo
@@ -892,6 +895,7 @@ class TestTraderSignalHandling:
         }
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
         mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
+        mock_settings.allow_short_selling = False
         mock_settings.risk_r_per_trade = 0.02
         mock_settings.risk_max_leverage = 1.0
         mock_settings.risk_max_drawdown = 0.1
