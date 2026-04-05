@@ -538,18 +538,20 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         acct_balances: dict[str, Any] = acct_data.get("balances", {})
         margin_req = acct_data.get("marginRequirements", {})
-        used_margin = float(margin_req.get("im", 0)) if isinstance(margin_req, dict) else 0.0
-        entries: list[AccountBalance] = []
+        total_margin = float(margin_req.get("im", 0)) if isinstance(margin_req, dict) else 0.0
+        non_zero: dict[str, float] = {}
+        grand_total = 0.0
         for curr, amount in acct_balances.items():
-            total = float(amount)
-            if total == 0:
+            val = float(amount)
+            if val == 0:
                 continue
-            entries.append(
-                AccountBalance(
-                    currency=curr, free=total - used_margin, used=used_margin, total=total
-                )
-            )
-            used_margin = 0.0
+            non_zero[curr] = val
+            grand_total += val
+        entries: list[AccountBalance] = []
+        for curr, total in non_zero.items():
+            share = (total / grand_total) if grand_total > 0 else 0.0
+            used = total_margin * share
+            entries.append(AccountBalance(currency=curr, free=total - used, used=used, total=total))
         return entries
 
     @staticmethod
@@ -569,12 +571,12 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         balance_value = float(acct_data.get("balanceValue", 0))
         if balance_value == 0:
             return None
-        initial_margin = float(acct_data.get("initialMargin", 0))
         available = float(acct_data.get("availableMargin", balance_value))
+        used = balance_value - available
         return AccountBalance(
             currency=f"{acct_name}_usd",
             free=available,
-            used=initial_margin,
+            used=max(used, 0.0),
             total=balance_value,
         )
 

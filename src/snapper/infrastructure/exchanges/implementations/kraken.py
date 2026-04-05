@@ -376,6 +376,12 @@ class KrakenExchangeClient(ExchangeClientBase):
                 order_data = await self._with_retry(
                     self._ccxt_client.fetch_order, order_id, ccxt_symbol
                 )
+            else:
+                order_data["status"] = order_data.get("status") or "open"
+                order_data["symbol"] = order_data.get("symbol") or ccxt_symbol
+                order_data["side"] = order_data.get("side") or request.side.value
+                order_data["type"] = order_data.get("type") or request.type.value
+                order_data["amount"] = order_data.get("amount") or request.amount
         order = self._convert_ccxt_order(order_data)
         db_result = await self._log_order_to_db(request, order)
         if db_result is not None:

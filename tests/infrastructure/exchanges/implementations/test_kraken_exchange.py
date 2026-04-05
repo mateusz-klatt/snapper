@@ -428,11 +428,11 @@ class TestKrakenExchangeClient:
     async def test_create_order_no_followup_when_id_missing(
         self, mock_ccxt: MagicMock, kraken_client: KrakenExchangeClient
     ) -> None:
-        """Verify create_order skips fetch_order when no id in response.
+        """Verify create_order uses request fallbacks when id and status are None.
 
         Given: CCXT create_order returns status=None and no id,
         When: create_order is called,
-        Then: fetch_order is NOT called, fallback values used.
+        Then: fetch_order is NOT called, request data populates snapshot.
         """
         mock_client = AsyncMock()
         with (
@@ -446,10 +446,10 @@ class TestKrakenExchangeClient:
         ):
             mock_client.create_order.return_value = {
                 "id": None,
-                "symbol": "BTC/USD",
-                "type": "limit",
-                "side": "buy",
-                "amount": 0.001,
+                "symbol": None,
+                "type": None,
+                "side": None,
+                "amount": None,
                 "price": 10000.0,
                 "status": None,
                 "timestamp": None,
@@ -464,8 +464,11 @@ class TestKrakenExchangeClient:
                 amount=0.001,
                 price=10000.0,
             )
-            with pytest.raises(KeyError):
-                await kraken_client.create_order(order_request)
+            order = await kraken_client.create_order(order_request)
+            assert order.status == OrderStatusEnum.OPEN
+            assert order.side == OrderSideEnum.BUY
+            assert order.type == OrderTypeEnum.LIMIT
+            assert order.amount == 0.001
             mock_client.fetch_order.assert_not_called()
 
     @patch("snapper.infrastructure.exchanges.implementations.kraken.ccxt")
