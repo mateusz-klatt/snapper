@@ -432,17 +432,14 @@ class TestKrakenExchangeClient:
 
         Given: CCXT create_order returns status=None and no id,
         When: create_order is called,
-        Then: fetch_order is NOT called, request data populates snapshot.
+        Then: fetch_order is NOT called, request data populates snapshot,
+              and order is NOT logged to DB (no exchange id to track).
         """
         mock_client = AsyncMock()
+        mock_log = AsyncMock(return_value=None)
         with (
             patch.object(kraken_client, "_ccxt_client", mock_client),
-            patch.object(
-                kraken_client,
-                "_log_order_to_db",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
+            patch.object(kraken_client, "_log_order_to_db", mock_log),
         ):
             mock_client.create_order.return_value = {
                 "id": None,
@@ -469,7 +466,9 @@ class TestKrakenExchangeClient:
             assert order.side == OrderSideEnum.BUY
             assert order.type == OrderTypeEnum.LIMIT
             assert order.amount == 0.001
+            assert order.db_order_id is None
             mock_client.fetch_order.assert_not_called()
+            mock_log.assert_not_called()
 
     @patch("snapper.infrastructure.exchanges.implementations.kraken.ccxt")
     async def test_cancel_order(

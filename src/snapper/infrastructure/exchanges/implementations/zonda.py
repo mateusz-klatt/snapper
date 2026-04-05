@@ -764,10 +764,11 @@ class ZondaExchangeClient(ExchangeClientBase):
                     ccxt_order["type"] = ccxt_order.get("type") or request.type.value
                     ccxt_order["amount"] = ccxt_order.get("amount") or request.amount
             order = self._convert_ccxt_order(ccxt_order, request.symbol)
-            db_result = await self._log_order_to_db(request, order)
-            if db_result is not None:
-                order.db_order_id = db_result[0]
-                order.db_order_public_id = db_result[1]
+            if order.id:
+                db_result = await self._log_order_to_db(request, order)
+                if db_result is not None:
+                    order.db_order_id = db_result[0]
+                    order.db_order_public_id = db_result[1]
             return order
         except Exception as e:
             raw = locals().get("ccxt_order")
@@ -795,17 +796,18 @@ class ZondaExchangeClient(ExchangeClientBase):
             open_orders = await asyncio.to_thread(self._ccxt_client.fetch_open_orders, ccxt_symbol)
             matched = [o for o in open_orders if o.get("id") == order_id]
             if not matched:
-                return self._convert_ccxt_order(
-                    {
-                        "id": order_id,
-                        "symbol": ccxt_symbol,
-                        "status": "closed",
-                        "side": "buy",
-                        "type": "limit",
-                        "amount": 0,
-                        "timestamp": None,
-                    },
-                    symbol,
+                return ExchangeOrderSnapshot(
+                    id=order_id,
+                    client_order_id=None,
+                    symbol=symbol or "",
+                    side=OrderSideEnum.BUY,
+                    type=OrderTypeEnum.LIMIT,
+                    amount=0.0,
+                    price=None,
+                    status=OrderStatusEnum.CANCELED,
+                    filled=0.0,
+                    remaining=0.0,
+                    timestamp=time.time(),
                 )
             order_data = matched[0]
             cancel_params: dict[str, Any] = {"side": order_data.get("side", "buy")}

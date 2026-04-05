@@ -383,10 +383,11 @@ class KrakenExchangeClient(ExchangeClientBase):
                 order_data["type"] = order_data.get("type") or request.type.value
                 order_data["amount"] = order_data.get("amount") or request.amount
         order = self._convert_ccxt_order(order_data)
-        db_result = await self._log_order_to_db(request, order)
-        if db_result is not None:
-            order.db_order_id = db_result[0]
-            order.db_order_public_id = db_result[1]
+        if order.id:
+            db_result = await self._log_order_to_db(request, order)
+            if db_result is not None:
+                order.db_order_id = db_result[0]
+                order.db_order_public_id = db_result[1]
         return order
 
     async def _create_order_via_native(

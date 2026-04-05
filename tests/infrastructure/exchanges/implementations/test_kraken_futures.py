@@ -2423,7 +2423,7 @@ class TestParseFlexAccount:
 
         Given: Account data without availableMargin key,
         When: _parse_flex_account is called,
-        Then: free equals balanceValue.
+        Then: free equals balanceValue, used equals 0.
         """
         acct_data: dict[str, Any] = {
             "balanceValue": 3000.0,
@@ -2432,6 +2432,25 @@ class TestParseFlexAccount:
         result = KrakenFuturesExchangeClient._parse_flex_account("flex", acct_data)
         assert result is not None
         assert result.free == pytest.approx(3000.0)
+        assert result.used == pytest.approx(0.0)
+        assert result.total == pytest.approx(3000.0)
+
+    def test_parse_flex_account_available_exceeds_total(self) -> None:
+        """Parse flex account clamps free to total when availableMargin exceeds balanceValue.
+
+        Given: Account data where availableMargin > balanceValue,
+        When: _parse_flex_account is called,
+        Then: free is clamped to balanceValue, used is 0.
+        """
+        acct_data: dict[str, Any] = {
+            "balanceValue": 100.0,
+            "availableMargin": 110.0,
+        }
+        result = KrakenFuturesExchangeClient._parse_flex_account("flex", acct_data)
+        assert result is not None
+        assert result.free == pytest.approx(100.0)
+        assert result.used == pytest.approx(0.0)
+        assert result.total == pytest.approx(100.0)
 
 
 class TestGetBalanceFlexWallet:

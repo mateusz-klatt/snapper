@@ -571,7 +571,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         balance_value = float(acct_data.get("balanceValue", 0))
         if balance_value == 0:
             return None
-        available = float(acct_data.get("availableMargin", balance_value))
+        available = min(float(acct_data.get("availableMargin", balance_value)), balance_value)
         used = balance_value - available
         return AccountBalance(
             currency=f"{acct_name}_usd",

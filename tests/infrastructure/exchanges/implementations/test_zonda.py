@@ -1051,12 +1051,14 @@ class TestZondaRestAPI:
             mock_fetch.assert_called_once_with("PARTIAL-ZND", "BTC/EUR")
 
     @pytest.mark.asyncio
-    async def test_cancel_order_not_found_returns_closed(self, client: ZondaExchangeClient) -> None:
-        """Test cancel_order returns closed snapshot when order already filled.
+    async def test_cancel_order_not_found_returns_canceled(
+        self, client: ZondaExchangeClient
+    ) -> None:
+        """Test cancel_order returns canceled snapshot when order not in open orders.
 
         Given: Client with credentials and fetch_open_orders returns empty list.
         When: cancel_order('missing-id', 'BTC-EUR') is called.
-        Then: Snapshot with status=CLOSED returned (order already terminal).
+        Then: Snapshot with status=CANCELED returned (order already terminal).
         """
         client.api_key = "test_key"
         client.api_secret = "test_secret"
@@ -1067,7 +1069,8 @@ class TestZondaRestAPI:
         ):
             result = await client.cancel_order("missing-id", "BTC-EUR")
             assert result.id == "missing-id"
-            assert result.status == OrderStatusEnum.CLOSED
+            assert result.status == OrderStatusEnum.CANCELED
+            assert result.symbol == "BTC-EUR"
 
     @pytest.mark.asyncio
     async def test_cancel_order_without_price(self, client: ZondaExchangeClient) -> None:
