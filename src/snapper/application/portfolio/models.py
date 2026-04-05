@@ -26,7 +26,7 @@ class PositionStateModel:
     Tracks quantity, average entry price, and realized profit/loss.
 
     Attributes:
-        quantity: Current position size (positive = long).
+        quantity: Current position size (positive = long, negative = short).
         average_price: Volume-weighted average entry price.
         realized_pnl: Total realized profit/loss from closed trades.
     """
@@ -117,15 +117,12 @@ class PortfolioTracker:
     ) -> None:
         """Update portfolio state from a fill.
 
-        For buys:
-        - Adds to position quantity
-        - Updates average price
-        - Deducts cost + fee from cash
+        Supports both long and short positions. Uses signed-delta model
+        ported from TradeService._update_position:
 
-        For sells:
-        - Reduces position quantity
-        - Adds proceeds - fee to cash
-        - Calculates realized PnL
+        - Same-direction fills (adding to position): VWAP avg_price with abs(qty)
+        - Opposite-direction fills (reducing/flipping): realize PnL, reset on flip
+        - Cash: BUY deducts notional+fee, SELL adds notional-fee
 
         Args:
             instrument: Symbol that was traded.
@@ -135,21 +132,56 @@ class PortfolioTracker:
             fee: Trading fee paid.
         """
         pos = self.positions.setdefault(instrument, PositionStateModel())
-        notional = size * price
-        self.turnover += notional
-        cost = size * price + fee
-        if side == TradeSideEnum.BUY:
-            new_qty = pos.quantity + size
-            pos.average_price = (pos.average_price * pos.quantity + size * price) / max(
-                new_qty, EPSILON_NANO
-            )
-            pos.quantity = new_qty
-            self.cash -= cost
-            self._clamp_cash()
+        self.turnover += size * price
+        signed_delta = size if side == TradeSideEnum.BUY else -size
+        is_increasing = (pos.quantity >= 0 and signed_delta > 0) or (
+            pos.quantity <= 0 and signed_delta < 0
+        )
+        if is_increasing:
+            self._increase_position(pos, size, price)
         else:
-            pos.quantity -= size
+            self._decrease_position(pos, size, price)
+        pos.quantity += signed_delta
+        if abs(pos.quantity) < EPSILON_PICO:
+            pos.quantity = 0.0
+            pos.average_price = 0.0
+        if side == TradeSideEnum.BUY:
+            self.cash -= size * price + fee
+        else:
             self.cash += size * price - fee
-            pos.realized_pnl += (price - pos.average_price) * size
-            if pos.quantity <= EPSILON_PICO:
-                pos.average_price = 0.0
-            self._clamp_cash()
+        self._clamp_cash()
+
+    @staticmethod
+    def _increase_position(pos: PositionStateModel, fill_size: float, fill_price: float) -> None:
+        """Recalculate VWAP entry price for a position-increasing fill.
+
+        Args:
+            pos: Current position state.
+            fill_size: Unsigned fill quantity.
+            fill_price: Fill execution price.
+        """
+        old_qty = abs(pos.quantity)
+        new_qty = old_qty + fill_size
+        if pos.average_price > 0 and old_qty > 0 and new_qty > 0:
+            pos.average_price = (old_qty * pos.average_price + fill_size * fill_price) / new_qty
+        else:
+            pos.average_price = fill_price
+
+    @staticmethod
+    def _decrease_position(pos: PositionStateModel, fill_size: float, fill_price: float) -> None:
+        """Realize PnL and handle overshoot for a position-decreasing fill.
+
+        Args:
+            pos: Current position state.
+            fill_size: Unsigned fill quantity.
+            fill_price: Fill execution price.
+        """
+        close_qty = min(fill_size, abs(pos.quantity))
+        overshoot = fill_size - close_qty
+        if pos.average_price > 0 and close_qty > 0:
+            pnl_per_unit = fill_price - pos.average_price
+            if pos.quantity < 0:
+                pnl_per_unit = pos.average_price - fill_price
+            pos.realized_pnl += close_qty * pnl_per_unit
+        if overshoot > EPSILON_PICO:
+            pos.average_price = fill_price

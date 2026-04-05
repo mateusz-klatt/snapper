@@ -9,6 +9,7 @@ from snapper.application.portfolio.models import EPSILON_MICRO
 from snapper.application.portfolio.models import EPSILON_NANO
 from snapper.application.portfolio.models import EPSILON_PICO
 from snapper.application.portfolio.models import PortfolioTracker
+from snapper.application.portfolio.models import PositionStateModel
 
 
 def test_equity_without_prices_returns_cash() -> None:
@@ -262,3 +263,151 @@ def test_portfolio_equity_exposure_turnover() -> None:
     assert abs(p.turnover - 21.0) < 1e-9
     assert abs(p.cash - 1001.0) < 1e-9
     assert p.notional_exposure("BTC-USD", 120.0) == pytest.approx(0.0)
+
+
+class TestPortfolioShortSelling:
+    """Tests for short selling support in PortfolioTracker."""
+
+    def test_sell_from_flat_opens_short(self) -> None:
+        """Verify SELL from flat opens a short position.
+
+        Given: Flat position (qty=0),
+        When: SELL fill of 0.5 at price 100,
+        Then: qty=-0.5, avg_price=100, cash increases by 50.
+        """
+        p = PortfolioTracker(cash=10_000.0)
+        p.update_fill("BTC-USD", "sell", size=0.5, price=100.0, fee=0.0)
+        assert p.position_qty("BTC-USD") == pytest.approx(-0.5)
+        pos = p.positions["BTC-USD"]
+        assert pos.average_price == pytest.approx(100.0)
+        assert p.cash == pytest.approx(10_050.0)
+
+    def test_buy_covers_short_to_flat(self) -> None:
+        """Verify BUY covering a short brings position to flat.
+
+        Given: Short position of -0.5 at avg_price=100,
+        When: BUY fill of 0.5 at price 90 (profit),
+        Then: qty=0, realized_pnl=+5 (sold at 100, bought at 90).
+        """
+        p = PortfolioTracker(cash=10_050.0)
+        p.update_fill("BTC-USD", "sell", size=0.5, price=100.0, fee=0.0)
+        p.update_fill("BTC-USD", "buy", size=0.5, price=90.0, fee=0.0)
+        assert p.position_qty("BTC-USD") == pytest.approx(0.0)
+        pos = p.positions["BTC-USD"]
+        assert pos.realized_pnl == pytest.approx(5.0)
+        assert pos.average_price == pytest.approx(0.0)
+
+    def test_short_pnl_loss(self) -> None:
+        """Verify short position loss when price rises.
+
+        Given: Short at 100,
+        When: Cover at 120,
+        Then: realized_pnl = (100 - 120) * 0.5 = -10.
+        """
+        p = PortfolioTracker(cash=10_000.0)
+        p.update_fill("BTC-USD", "sell", size=0.5, price=100.0, fee=0.0)
+        p.update_fill("BTC-USD", "buy", size=0.5, price=120.0, fee=0.0)
+        pos = p.positions["BTC-USD"]
+        assert pos.realized_pnl == pytest.approx(-10.0)
+
+    def test_sell_adds_to_short(self) -> None:
+        """Verify additional SELL increases short position with VWAP.
+
+        Given: Short -0.5 at avg_price=100,
+        When: SELL 0.3 more at price=110,
+        Then: qty=-0.8, avg_price = (0.5*100 + 0.3*110) / 0.8 = 103.75.
+        """
+        p = PortfolioTracker(cash=10_000.0)
+        p.update_fill("BTC-USD", "sell", size=0.5, price=100.0, fee=0.0)
+        p.update_fill("BTC-USD", "sell", size=0.3, price=110.0, fee=0.0)
+        assert p.position_qty("BTC-USD") == pytest.approx(-0.8)
+        pos = p.positions["BTC-USD"]
+        assert pos.average_price == pytest.approx(103.75)
+
+    def test_flip_long_to_short(self) -> None:
+        """Verify BUY then oversized SELL flips from long to short.
+
+        Given: Long 0.5 at avg_price=100,
+        When: SELL 0.8 at price=110,
+        Then: qty=-0.3, realized_pnl = (110-100)*0.5 = 5, avg_price=110 (new short entry).
+        """
+        p = PortfolioTracker(cash=10_000.0)
+        p.update_fill("BTC-USD", "buy", size=0.5, price=100.0, fee=0.0)
+        p.update_fill("BTC-USD", "sell", size=0.8, price=110.0, fee=0.0)
+        assert p.position_qty("BTC-USD") == pytest.approx(-0.3)
+        pos = p.positions["BTC-USD"]
+        assert pos.realized_pnl == pytest.approx(5.0)
+        assert pos.average_price == pytest.approx(110.0)
+
+    def test_flip_short_to_long(self) -> None:
+        """Verify SHORT then oversized BUY flips from short to long.
+
+        Given: Short -0.5 at avg_price=100,
+        When: BUY 0.8 at price=90,
+        Then: qty=+0.3, realized_pnl = (100-90)*0.5 = 5, avg_price=90 (new long entry).
+        """
+        p = PortfolioTracker(cash=10_000.0)
+        p.update_fill("BTC-USD", "sell", size=0.5, price=100.0, fee=0.0)
+        p.update_fill("BTC-USD", "buy", size=0.8, price=90.0, fee=0.0)
+        assert p.position_qty("BTC-USD") == pytest.approx(0.3)
+        pos = p.positions["BTC-USD"]
+        assert pos.realized_pnl == pytest.approx(5.0)
+        assert pos.average_price == pytest.approx(90.0)
+
+    def test_notional_exposure_short(self) -> None:
+        """Verify notional_exposure uses abs(qty) for shorts.
+
+        Given: Short -0.5,
+        When: notional_exposure called at price=200,
+        Then: Returns 100.0 (not -100).
+        """
+        p = PortfolioTracker(cash=10_000.0)
+        p.update_fill("BTC-USD", "sell", size=0.5, price=100.0, fee=0.0)
+        assert p.notional_exposure("BTC-USD", 200.0) == pytest.approx(100.0)
+
+    def test_equity_with_short_position(self) -> None:
+        """Verify equity calculation with short position.
+
+        Given: Short -0.5, sold at 100, cash=10050, price now 90,
+        When: equity is calculated,
+        Then: equity = 10050 + (-0.5 * 90) = 10050 - 45 = 10005.
+        """
+        p = PortfolioTracker(cash=10_000.0)
+        p.update_fill("BTC-USD", "sell", size=0.5, price=100.0, fee=0.0)
+        eq = p.equity({"BTC-USD": 90.0})
+        assert eq == pytest.approx(10_005.0)
+
+    def test_short_with_fees(self) -> None:
+        """Verify fee handling for short entry and cover.
+
+        Given: Short at 100 with fee=1, cover at 90 with fee=1,
+        When: Both fills processed,
+        Then: cash = 10000 + (100*0.5 - 1) - (90*0.5 + 1) = 10000 + 49 - 46 = 10003.
+        """
+        p = PortfolioTracker(cash=10_000.0)
+        p.update_fill("BTC-USD", "sell", size=0.5, price=100.0, fee=1.0)
+        p.update_fill("BTC-USD", "buy", size=0.5, price=90.0, fee=1.0)
+        assert p.cash == pytest.approx(10_003.0)
+        assert p.position_qty("BTC-USD") == pytest.approx(0.0)
+
+    def test_increase_position_from_zero_sets_avg_price(self) -> None:
+        """Verify _increase_position sets avg_price when position starts at zero.
+
+        Given: PositionStateModel with quantity=0 and avg_price=0,
+        When: _increase_position is called,
+        Then: avg_price is set to fill_price.
+        """
+        pos = PositionStateModel(quantity=0.0, average_price=0.0)
+        PortfolioTracker._increase_position(pos, 1.0, 50.0)
+        assert pos.average_price == pytest.approx(50.0)
+
+    def test_decrease_position_no_avg_price(self) -> None:
+        """Verify _decrease_position skips PnL when avg_price is zero.
+
+        Given: PositionStateModel with avg_price=0,
+        When: _decrease_position is called,
+        Then: realized_pnl stays zero.
+        """
+        pos = PositionStateModel(quantity=1.0, average_price=0.0)
+        PortfolioTracker._decrease_position(pos, 0.5, 100.0)
+        assert pos.realized_pnl == pytest.approx(0.0)
