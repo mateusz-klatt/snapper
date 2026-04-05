@@ -50,6 +50,7 @@ from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
+from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
@@ -395,6 +396,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                 f"Supported: {', '.join(t.value for t in supported_order_types)}"
             )
         kraken_order_type = supported_order_types[request.type]
+        if request.post_only and kraken_order_type == "lmt":
+            kraken_order_type = "post"
         kwargs: dict[str, Any] = {
             "orderType": kraken_order_type,
             "size": request.amount,
@@ -407,6 +410,8 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             kwargs["cliOrdId"] = request.client_order_id
         if request.stop_price is not None:
             kwargs["stopPrice"] = request.stop_price
+        if request.reduce_only:
+            kwargs["reduceOnly"] = True
         result = await asyncio.to_thread(cast(Trade, self._trade_client).create_order, **kwargs)
         send_status = result.get("sendStatus", {})
         order_id = send_status.get("order_id", "")
@@ -519,6 +524,60 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             snapshots = snapshots[:limit]
         return snapshots
 
+    @staticmethod
+    def _parse_coin_margin_account(
+        acct_data: dict[str, Any],
+    ) -> list[AccountBalance]:
+        """Parse a coin-margined account (has a ``balances`` dict).
+
+        Args:
+            acct_data: Raw account dictionary from get_wallets.
+
+        Returns:
+            List of AccountBalance entries for non-zero currencies.
+        """
+        acct_balances: dict[str, Any] = acct_data.get("balances", {})
+        margin_req = acct_data.get("marginRequirements", {})
+        used_margin = float(margin_req.get("im", 0)) if isinstance(margin_req, dict) else 0.0
+        entries: list[AccountBalance] = []
+        for curr, amount in acct_balances.items():
+            total = float(amount)
+            if total == 0:
+                continue
+            entries.append(
+                AccountBalance(
+                    currency=curr, free=total - used_margin, used=used_margin, total=total
+                )
+            )
+            used_margin = 0.0
+        return entries
+
+    @staticmethod
+    def _parse_flex_account(
+        acct_name: str,
+        acct_data: dict[str, Any],
+    ) -> AccountBalance | None:
+        """Parse a flex/cash multi-collateral account.
+
+        Args:
+            acct_name: Account name (``flex`` or ``cash``).
+            acct_data: Raw account dictionary from get_wallets.
+
+        Returns:
+            AccountBalance or None if balance is zero.
+        """
+        balance_value = float(acct_data.get("balanceValue", 0))
+        if balance_value == 0:
+            return None
+        initial_margin = float(acct_data.get("initialMargin", 0))
+        available = float(acct_data.get("availableMargin", balance_value))
+        return AccountBalance(
+            currency=f"{acct_name}_usd",
+            free=available,
+            used=initial_margin,
+            total=balance_value,
+        )
+
     async def get_balance(self, currency: str | None = None) -> dict[str, AccountBalance]:
         """Fetch wallet balances from Kraken Futures.
 
@@ -536,24 +595,54 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         result = await asyncio.to_thread(cast(User, self._user_client).get_wallets)
         accounts: dict[str, Any] = result.get("accounts", {})
         balances: dict[str, AccountBalance] = {}
-        for acct_data in accounts.values():
+        for acct_name, acct_data in accounts.items():
             if not isinstance(acct_data, dict):
                 continue
-            acct_balances: dict[str, Any] = acct_data.get("balances", {})
-            margin_req = acct_data.get("marginRequirements", {})
-            used_margin = float(margin_req.get("im", 0)) if isinstance(margin_req, dict) else 0.0
-            for curr, amount in acct_balances.items():
-                total = float(amount)
-                if total == 0:
-                    continue
-                bal = AccountBalance(
-                    currency=curr, free=total - used_margin, used=used_margin, total=total
-                )
-                balances[curr] = bal
-                used_margin = 0.0
+            if acct_data.get("balances"):
+                for coin_bal in self._parse_coin_margin_account(acct_data):
+                    balances[coin_bal.currency] = coin_bal
+            elif acct_name in ("flex", "cash"):
+                flex_bal = self._parse_flex_account(acct_name, acct_data)
+                if flex_bal is not None:
+                    balances[flex_bal.currency] = flex_bal
         if currency:
             return {k: v for k, v in balances.items() if k == currency}
         return balances
+
+    async def get_open_positions(self) -> list[OpenPositionSnapshot]:
+        """Fetch open positions from Kraken Futures.
+
+        Returns:
+            List of open position snapshots.
+
+        Raises:
+            RuntimeError: If API credentials are missing.
+        """
+        self._require_authenticated()
+        result = await asyncio.to_thread(cast(User, self._user_client).get_open_positions)
+        raw_positions: list[dict[str, Any]] = result.get("openPositions", [])
+        positions: list[OpenPositionSnapshot] = []
+        for pos in raw_positions:
+            kraken_symbol = (pos.get("symbol") or "").upper()
+            try:
+                native_symbol = kraken_futures_ws_to_native(kraken_symbol)
+            except ValueError:
+                native_symbol = kraken_symbol
+            side_str = pos.get("side", "long")
+            side = OrderSideEnum.BUY if side_str == "long" else OrderSideEnum.SELL
+            positions.append(
+                OpenPositionSnapshot(
+                    symbol=native_symbol,
+                    side=side,
+                    size=float(pos.get("size", 0)),
+                    entry_price=float(pos.get("price", 0)),
+                    mark_price=float(pos.get("markPrice", 0)),
+                    unrealized_pnl=float(pos.get("unrealizedPnl", 0)),
+                    unrealized_funding=float(pos.get("unrealizedFunding", 0)),
+                    timestamp=datetime.now(UTC),
+                ),
+            )
+        return positions
 
     def _convert_sdk_order(self, data: dict[str, Any]) -> ExchangeOrderSnapshot:
         """Convert a Kraken Futures SDK order dict to ExchangeOrderSnapshot.

@@ -20,6 +20,8 @@ def _make_settings(**overrides: str) -> SimpleNamespace:
     defaults = {
         "kraken_api_key": "",
         "kraken_api_secret": "",
+        "kraken_futures_api_key": "",
+        "kraken_futures_api_secret": "",
         "zonda_api_key": "",
         "zonda_api_secret": "",
         "walutomat_api_key": "",
@@ -68,23 +70,26 @@ def test_build_factories_walutomat_without_private_key() -> None:
 
 
 def test_build_factories_all_exchanges() -> None:
-    """Verify all three factories when all keys set.
+    """Verify all four factories when all keys set.
 
     Given: Settings with all exchange keys,
     When: build_exchange_factories is called,
-    Then: Three factories returned.
+    Then: Four factories returned.
     """
     settings = _make_settings(
         kraken_api_key="k",
         kraken_api_secret="s",
+        kraken_futures_api_key="kf",
+        kraken_futures_api_secret="kfs",
         zonda_api_key="z",
         zonda_api_secret="zs",
         walutomat_api_key="w",
     )
     factories = build_exchange_factories(settings)
-    assert len(factories) == 3
+    assert len(factories) == 4
     names = [f[0] for f in factories]
     assert "Kraken" in names
+    assert "Kraken Futures" in names
     assert "Zonda" in names
     assert "Walutomat" in names
 

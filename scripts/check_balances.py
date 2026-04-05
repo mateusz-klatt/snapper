@@ -18,6 +18,9 @@ from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
+from snapper.infrastructure.exchanges.implementations.kraken_futures import (
+    KrakenFuturesExchangeClient,
+)
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
 from snapper.infrastructure.exchanges.implementations.zonda import ZondaExchangeClient
 
@@ -46,6 +49,16 @@ def build_exchange_factories(settings: Any) -> list[tuple[str, ExchangeFactory]]
                 lambda: KrakenExchangeClient(
                     api_key=settings.kraken_api_key,
                     api_secret=settings.kraken_api_secret,
+                ),
+            )
+        )
+    if settings.kraken_futures_api_key and settings.kraken_futures_api_secret:
+        factories.append(
+            (
+                "Kraken Futures",
+                lambda: KrakenFuturesExchangeClient(
+                    api_key=settings.kraken_futures_api_key,
+                    api_secret=settings.kraken_futures_api_secret,
                 ),
             )
         )

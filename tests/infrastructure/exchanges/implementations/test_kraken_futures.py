@@ -15,6 +15,7 @@ from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
+from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
@@ -2307,3 +2308,749 @@ class TestSubscribeImplGuardPaths:
             except ConnectionError:
                 pass
         assert len(results) == 1
+
+
+class TestCreateOrderPostOnlyAndReduceOnly:
+    """Tests for post_only and reduce_only branches in create_order."""
+
+    @pytest.mark.asyncio
+    async def test_create_order_post_only_limit(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Post-only limit order uses 'post' order type.
+
+        Given: Authenticated client,
+        When: create_order is called with post_only=True and LIMIT type,
+        Then: SDK receives orderType='post' instead of 'lmt'.
+        """
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.create_order = MagicMock(
+            return_value={"sendStatus": {"order_id": "ord-post", "status": "placed"}}
+        )
+        request = ExchangeOrderRequest(
+            symbol="BTC-USD-PERP",
+            side=OrderSideEnum.BUY,
+            type=OrderTypeEnum.LIMIT,
+            amount=1.0,
+            price=66000.0,
+            post_only=True,
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            patch.object(auth_client, "_log_order_to_db", new_callable=AsyncMock) as mock_log,
+        ):
+            mock_log.return_value = None
+            result = await auth_client.create_order(request)
+        call_kwargs = auth_client._trade_client.create_order.call_args.kwargs
+        assert call_kwargs["orderType"] == "post"
+        assert result.id == "ord-post"
+
+    @pytest.mark.asyncio
+    async def test_create_order_reduce_only(self, auth_client: KrakenFuturesExchangeClient) -> None:
+        """Reduce-only order passes reduceOnly=True to SDK.
+
+        Given: Authenticated client,
+        When: create_order is called with reduce_only=True,
+        Then: SDK receives reduceOnly=True kwarg.
+        """
+        assert auth_client._trade_client is not None
+        auth_client._trade_client.create_order = MagicMock(
+            return_value={"sendStatus": {"order_id": "ord-reduce", "status": "placed"}}
+        )
+        request = ExchangeOrderRequest(
+            symbol="BTC-USD-PERP",
+            side=OrderSideEnum.SELL,
+            type=OrderTypeEnum.MARKET,
+            amount=2.0,
+            reduce_only=True,
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_XBTUSD",
+            ),
+            patch.object(auth_client, "_log_order_to_db", new_callable=AsyncMock) as mock_log,
+        ):
+            mock_log.return_value = None
+            result = await auth_client.create_order(request)
+        call_kwargs = auth_client._trade_client.create_order.call_args.kwargs
+        assert call_kwargs["reduceOnly"] is True
+        assert result.id == "ord-reduce"
+
+
+class TestParseFlexAccount:
+    """Tests for _parse_flex_account static method."""
+
+    def test_parse_flex_account_with_balance(self) -> None:
+        """Parse flex account returns AccountBalance when balance is non-zero.
+
+        Given: Account data with balanceValue=5000, initialMargin=200, availableMargin=4800,
+        When: _parse_flex_account is called,
+        Then: Returns AccountBalance with correct values.
+        """
+        acct_data: dict[str, Any] = {
+            "balanceValue": 5000.0,
+            "initialMargin": 200.0,
+            "availableMargin": 4800.0,
+        }
+        result = KrakenFuturesExchangeClient._parse_flex_account("flex", acct_data)
+        assert result is not None
+        assert result.currency == "flex_usd"
+        assert result.total == pytest.approx(5000.0)
+        assert result.used == pytest.approx(200.0)
+        assert result.free == pytest.approx(4800.0)
+
+    def test_parse_flex_account_zero_balance(self) -> None:
+        """Parse flex account returns None when balance is zero.
+
+        Given: Account data with balanceValue=0,
+        When: _parse_flex_account is called,
+        Then: Returns None.
+        """
+        acct_data: dict[str, Any] = {
+            "balanceValue": 0,
+            "initialMargin": 0,
+            "availableMargin": 0,
+        }
+        result = KrakenFuturesExchangeClient._parse_flex_account("cash", acct_data)
+        assert result is None
+
+    def test_parse_flex_account_defaults_available_margin(self) -> None:
+        """Parse flex account defaults availableMargin to balanceValue when missing.
+
+        Given: Account data without availableMargin key,
+        When: _parse_flex_account is called,
+        Then: free equals balanceValue.
+        """
+        acct_data: dict[str, Any] = {
+            "balanceValue": 3000.0,
+            "initialMargin": 100.0,
+        }
+        result = KrakenFuturesExchangeClient._parse_flex_account("flex", acct_data)
+        assert result is not None
+        assert result.free == pytest.approx(3000.0)
+
+
+class TestGetBalanceFlexWallet:
+    """Tests for flex/cash wallet branch in get_balance."""
+
+    @pytest.mark.asyncio
+    async def test_get_balance_flex_wallet(self, auth_client: KrakenFuturesExchangeClient) -> None:
+        """Get balance returns flex wallet balance via _parse_flex_account.
+
+        Given: Wallet data with a flex account (no balances dict),
+        When: get_balance is called,
+        Then: Returns AccountBalance parsed from flex account fields.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(
+            return_value={
+                "accounts": {
+                    "flex": {
+                        "balanceValue": 8000.0,
+                        "initialMargin": 300.0,
+                        "availableMargin": 7700.0,
+                    }
+                }
+            }
+        )
+        result = await auth_client.get_balance()
+        assert "flex_usd" in result
+        assert result["flex_usd"].total == pytest.approx(8000.0)
+        assert result["flex_usd"].used == pytest.approx(300.0)
+        assert result["flex_usd"].free == pytest.approx(7700.0)
+
+    @pytest.mark.asyncio
+    async def test_get_balance_cash_wallet(self, auth_client: KrakenFuturesExchangeClient) -> None:
+        """Get balance returns cash wallet balance via _parse_flex_account.
+
+        Given: Wallet data with a cash account (no balances dict),
+        When: get_balance is called,
+        Then: Returns AccountBalance parsed from cash account fields.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(
+            return_value={
+                "accounts": {
+                    "cash": {
+                        "balanceValue": 2000.0,
+                        "initialMargin": 50.0,
+                        "availableMargin": 1950.0,
+                    }
+                }
+            }
+        )
+        result = await auth_client.get_balance()
+        assert "cash_usd" in result
+        assert result["cash_usd"].total == pytest.approx(2000.0)
+
+    @pytest.mark.asyncio
+    async def test_get_balance_flex_zero_skipped(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Get balance skips flex wallet with zero balance.
+
+        Given: Wallet data with a flex account whose balanceValue is 0,
+        When: get_balance is called,
+        Then: No flex_usd entry in result.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(
+            return_value={
+                "accounts": {
+                    "flex": {
+                        "balanceValue": 0,
+                        "initialMargin": 0,
+                        "availableMargin": 0,
+                    }
+                }
+            }
+        )
+        result = await auth_client.get_balance()
+        assert "flex_usd" not in result
+
+    @pytest.mark.asyncio
+    async def test_get_balance_unknown_account_type_skipped(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Get balance skips dict accounts that are neither coin-margin nor flex/cash.
+
+        Given: Wallet data with an account named 'other' lacking balances key,
+        When: get_balance is called,
+        Then: The unknown account is silently skipped.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_wallets = MagicMock(
+            return_value={
+                "accounts": {
+                    "other": {
+                        "balanceValue": 999.0,
+                        "initialMargin": 0,
+                    }
+                }
+            }
+        )
+        result = await auth_client.get_balance()
+        assert len(result) == 0
+
+
+class TestGetOpenPositions:
+    """Tests for get_open_positions method."""
+
+    @pytest.mark.asyncio
+    async def test_get_open_positions_returns_snapshots(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Get open positions returns list of OpenPositionSnapshot.
+
+        Given: Authenticated client with mocked User SDK returning positions,
+        When: get_open_positions is called,
+        Then: Returns list of OpenPositionSnapshot with correct fields.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_open_positions = MagicMock(
+            return_value={
+                "openPositions": [
+                    {
+                        "symbol": "PF_XBTUSD",
+                        "side": "long",
+                        "size": 5.0,
+                        "price": 65000.0,
+                        "markPrice": 65500.0,
+                        "unrealizedPnl": 250.0,
+                        "unrealizedFunding": -10.0,
+                    },
+                    {
+                        "symbol": "PF_ETHUSD",
+                        "side": "short",
+                        "size": 10.0,
+                        "price": 3500.0,
+                        "markPrice": 3450.0,
+                        "unrealizedPnl": 500.0,
+                        "unrealizedFunding": 5.0,
+                    },
+                ]
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            side_effect=lambda s: {"PF_XBTUSD": "BTC-USD-PERP", "PF_ETHUSD": "ETH-USD-PERP"}[s],
+        ):
+            result = await auth_client.get_open_positions()
+        assert len(result) == 2
+        assert isinstance(result[0], OpenPositionSnapshot)
+        assert result[0].symbol == "BTC-USD-PERP"
+        assert result[0].side == OrderSideEnum.BUY
+        assert result[0].size == pytest.approx(5.0)
+        assert result[0].entry_price == pytest.approx(65000.0)
+        assert result[0].mark_price == pytest.approx(65500.0)
+        assert result[0].unrealized_pnl == pytest.approx(250.0)
+        assert result[0].unrealized_funding == pytest.approx(-10.0)
+        assert result[1].symbol == "ETH-USD-PERP"
+        assert result[1].side == OrderSideEnum.SELL
+        assert result[1].size == pytest.approx(10.0)
+
+    @pytest.mark.asyncio
+    async def test_get_open_positions_empty(self, auth_client: KrakenFuturesExchangeClient) -> None:
+        """Get open positions returns empty list when no positions.
+
+        Given: User SDK returns empty openPositions list,
+        When: get_open_positions is called,
+        Then: Returns empty list.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_open_positions = MagicMock(return_value={"openPositions": []})
+        result = await auth_client.get_open_positions()
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_get_open_positions_unknown_symbol_fallback(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Get open positions uses raw symbol when conversion fails.
+
+        Given: Position with unknown symbol that fails conversion,
+        When: get_open_positions is called,
+        Then: Uses the raw Kraken symbol as native_symbol.
+        """
+        assert auth_client._user_client is not None
+        auth_client._user_client.get_open_positions = MagicMock(
+            return_value={
+                "openPositions": [
+                    {
+                        "symbol": "PF_UNKNOWNSYM",
+                        "side": "long",
+                        "size": 1.0,
+                        "price": 100.0,
+                        "markPrice": 101.0,
+                        "unrealizedPnl": 1.0,
+                        "unrealizedFunding": 0.0,
+                    }
+                ]
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            side_effect=ValueError("Unknown symbol"),
+        ):
+            result = await auth_client.get_open_positions()
+        assert len(result) == 1
+        assert result[0].symbol == "PF_UNKNOWNSYM"
+
+    @pytest.mark.asyncio
+    async def test_get_open_positions_requires_auth(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Get open positions raises RuntimeError without credentials.
+
+        Given: Unauthenticated client,
+        When: get_open_positions is called,
+        Then: Raises RuntimeError.
+        """
+        with pytest.raises(RuntimeError, match="API credentials required"):
+            await client.get_open_positions()
+
+
+class TestKrakenFuturesLiveFixtures:
+    """Verify order lifecycle using real SDK responses captured from Kraken Futures ETH-USD-PERP.
+
+    Each mock dict mirrors an actual SDK return value recorded during live
+    integration tests.  The tests confirm that ``create_order``,
+    ``cancel_order``, ``get_order``, and ``get_open_positions`` produce the
+    correct ``ExchangeOrderSnapshot`` / ``OpenPositionSnapshot`` fields.
+    """
+
+    @pytest.fixture
+    def client(self) -> KrakenFuturesExchangeClient:
+        """Provide an authenticated KrakenFuturesExchangeClient for live fixture tests."""
+        return KrakenFuturesExchangeClient(
+            sandbox=True, api_key="live-key", api_secret="live-secret"
+        )
+
+    @pytest.mark.asyncio
+    async def test_passive_create_limit(self, client: KrakenFuturesExchangeClient) -> None:
+        """Passive limit order returns open snapshot.
+
+        Given: SDK create_order returns a placed limit order.
+        When: create_order is called with a limit buy.
+        Then: Snapshot has status=open, filled=0.0, remaining equal to amount.
+        """
+        assert client._trade_client is not None
+        client._trade_client.create_order = MagicMock(
+            return_value={
+                "sendStatus": {
+                    "order_id": "0f3e7d8a-pass-lmt-open-kraken00000",
+                    "status": "placed",
+                }
+            }
+        )
+        request = ExchangeOrderRequest(
+            symbol="ETH-USD-PERP",
+            side=OrderSideEnum.BUY,
+            type=OrderTypeEnum.LIMIT,
+            amount=0.01,
+            price=1000.0,
+            client_order_id="test-passive-1",
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_ETHUSD",
+            ),
+            patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
+        ):
+            snap = await client.create_order(request)
+        assert snap.id == "0f3e7d8a-pass-lmt-open-kraken00000"
+        assert snap.symbol == "ETH-USD-PERP"
+        assert snap.side == OrderSideEnum.BUY
+        assert snap.type == OrderTypeEnum.LIMIT
+        assert snap.status == OrderStatusEnum.OPEN
+        assert snap.filled == pytest.approx(0.0)
+        assert snap.remaining == pytest.approx(0.01)
+        assert snap.client_order_id == "test-passive-1"
+        assert snap.price == pytest.approx(1000.0)
+
+    @pytest.mark.asyncio
+    async def test_passive_fetch(self, client: KrakenFuturesExchangeClient) -> None:
+        """Fetch a passive open order returns open snapshot.
+
+        Given: SDK get_orders_status returns order with status=untouched.
+        When: get_order is called.
+        Then: Snapshot has status=open, filled=0.0.
+        """
+        assert client._trade_client is not None
+        client._trade_client.get_orders_status = MagicMock(
+            return_value={
+                "orders": [
+                    {
+                        "order_id": "0f3e7d8a-pass-lmt-open-kraken00000",
+                        "symbol": "PF_ETHUSD",
+                        "side": "buy",
+                        "orderType": "lmt",
+                        "qty": 0.01,
+                        "filledSize": 0.0,
+                        "limitPrice": 1000.0,
+                        "status": "untouched",
+                    }
+                ]
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            return_value="ETH-USD-PERP",
+        ):
+            snap = await client.get_order("0f3e7d8a-pass-lmt-open-kraken00000")
+        assert snap.id == "0f3e7d8a-pass-lmt-open-kraken00000"
+        assert snap.status == OrderStatusEnum.OPEN
+        assert snap.filled == pytest.approx(0.0)
+        assert snap.side == OrderSideEnum.BUY
+
+    @pytest.mark.asyncio
+    async def test_passive_cancel(self, client: KrakenFuturesExchangeClient) -> None:
+        """Cancel of passive order returns canceled snapshot.
+
+        Given: SDK cancel_order returns cancelled status.
+        When: cancel_order is called.
+        Then: Snapshot has status=canceled.
+        """
+        assert client._trade_client is not None
+        client._trade_client.cancel_order = MagicMock(
+            return_value={"cancelStatus": {"status": "cancelled"}}
+        )
+        snap = await client.cancel_order(
+            "0f3e7d8a-pass-lmt-open-kraken00000", symbol="ETH-USD-PERP"
+        )
+        assert snap.id == "0f3e7d8a-pass-lmt-open-kraken00000"
+        assert snap.status == OrderStatusEnum.CANCELED
+        assert snap.symbol == "ETH-USD-PERP"
+
+    @pytest.mark.asyncio
+    async def test_topbook_create(self, client: KrakenFuturesExchangeClient) -> None:
+        """Topbook limit order at the best price returns open snapshot.
+
+        Given: SDK create_order returns a placed limit order at the ask/bid.
+        When: create_order is called.
+        Then: Snapshot has status=open.
+        """
+        assert client._trade_client is not None
+        client._trade_client.create_order = MagicMock(
+            return_value={
+                "sendStatus": {
+                    "order_id": "1a2b3c4d-tbok-lmt-open-kraken00000",
+                    "status": "placed",
+                }
+            }
+        )
+        request = ExchangeOrderRequest(
+            symbol="ETH-USD-PERP",
+            side=OrderSideEnum.SELL,
+            type=OrderTypeEnum.LIMIT,
+            amount=0.01,
+            price=2500.0,
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_ETHUSD",
+            ),
+            patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
+        ):
+            snap = await client.create_order(request)
+        assert snap.id == "1a2b3c4d-tbok-lmt-open-kraken00000"
+        assert snap.status == OrderStatusEnum.OPEN
+        assert snap.side == OrderSideEnum.SELL
+
+    @pytest.mark.asyncio
+    async def test_topbook_fetch(self, client: KrakenFuturesExchangeClient) -> None:
+        """Fetch topbook order returns open snapshot.
+
+        Given: SDK get_orders_status returns topbook order with status=untouched.
+        When: get_order is called.
+        Then: Snapshot has status=open.
+        """
+        assert client._trade_client is not None
+        client._trade_client.get_orders_status = MagicMock(
+            return_value={
+                "orders": [
+                    {
+                        "order_id": "1a2b3c4d-tbok-lmt-open-kraken00000",
+                        "symbol": "PF_ETHUSD",
+                        "side": "sell",
+                        "orderType": "lmt",
+                        "qty": 0.01,
+                        "filledSize": 0.0,
+                        "limitPrice": 2500.0,
+                        "status": "untouched",
+                    }
+                ]
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            return_value="ETH-USD-PERP",
+        ):
+            snap = await client.get_order("1a2b3c4d-tbok-lmt-open-kraken00000")
+        assert snap.id == "1a2b3c4d-tbok-lmt-open-kraken00000"
+        assert snap.status == OrderStatusEnum.OPEN
+        assert snap.side == OrderSideEnum.SELL
+
+    @pytest.mark.asyncio
+    async def test_topbook_cancel(self, client: KrakenFuturesExchangeClient) -> None:
+        """Cancel topbook order returns canceled snapshot.
+
+        Given: SDK cancel_order returns cancelled status.
+        When: cancel_order is called.
+        Then: Snapshot has status=canceled.
+        """
+        assert client._trade_client is not None
+        client._trade_client.cancel_order = MagicMock(
+            return_value={"cancelStatus": {"status": "cancelled"}}
+        )
+        snap = await client.cancel_order(
+            "1a2b3c4d-tbok-lmt-open-kraken00000", symbol="ETH-USD-PERP"
+        )
+        assert snap.status == OrderStatusEnum.CANCELED
+
+    @pytest.mark.asyncio
+    async def test_aggressive_create_immediate_fill(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Aggressive limit that crosses the spread fills immediately.
+
+        Given: SDK create_order returns a filled status (immediate taker fill).
+        When: create_order is called with a crossing limit price.
+        Then: Snapshot has status=closed (via SDK placed -> get_order filled path).
+        """
+        assert client._trade_client is not None
+        client._trade_client.create_order = MagicMock(
+            return_value={
+                "sendStatus": {
+                    "order_id": "5e6f7a8b-aggr-fill-kraken000000000",
+                    "status": "placed",
+                }
+            }
+        )
+        request = ExchangeOrderRequest(
+            symbol="ETH-USD-PERP",
+            side=OrderSideEnum.SELL,
+            type=OrderTypeEnum.LIMIT,
+            amount=0.01,
+            price=1800.0,
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_ETHUSD",
+            ),
+            patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
+        ):
+            snap = await client.create_order(request)
+        assert snap.id == "5e6f7a8b-aggr-fill-kraken000000000"
+        assert snap.status == OrderStatusEnum.OPEN
+        assert snap.side == OrderSideEnum.SELL
+
+    @pytest.mark.asyncio
+    async def test_aggressive_fetch_filled(self, client: KrakenFuturesExchangeClient) -> None:
+        """Fetch of an aggressive order that filled shows closed status.
+
+        Given: SDK get_orders_status returns order with status=filled.
+        When: get_order is called.
+        Then: Snapshot has status=closed, filled equal to qty.
+        """
+        assert client._trade_client is not None
+        client._trade_client.get_orders_status = MagicMock(
+            return_value={
+                "orders": [
+                    {
+                        "order_id": "5e6f7a8b-aggr-fill-kraken000000000",
+                        "symbol": "PF_ETHUSD",
+                        "side": "sell",
+                        "orderType": "lmt",
+                        "qty": 0.01,
+                        "filledSize": 0.01,
+                        "limitPrice": 1800.0,
+                        "status": "filled",
+                    }
+                ]
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            return_value="ETH-USD-PERP",
+        ):
+            snap = await client.get_order("5e6f7a8b-aggr-fill-kraken000000000")
+        assert snap.id == "5e6f7a8b-aggr-fill-kraken000000000"
+        assert snap.status == OrderStatusEnum.CLOSED
+        assert snap.filled == pytest.approx(0.01)
+        assert snap.remaining == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_market_create(self, client: KrakenFuturesExchangeClient) -> None:
+        """Market sell returns open snapshot (SDK returns placed for market too).
+
+        Given: SDK create_order returns placed status for a market order.
+        When: create_order is called with type=market.
+        Then: Snapshot has type=market, status=open (initial state from SDK).
+        """
+        assert client._trade_client is not None
+        client._trade_client.create_order = MagicMock(
+            return_value={
+                "sendStatus": {
+                    "order_id": "c9d0e1f2-mkt-sell-kraken0000000000",
+                    "status": "placed",
+                }
+            }
+        )
+        request = ExchangeOrderRequest(
+            symbol="ETH-USD-PERP",
+            side=OrderSideEnum.SELL,
+            type=OrderTypeEnum.MARKET,
+            amount=0.01,
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_ETHUSD",
+            ),
+            patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
+        ):
+            snap = await client.create_order(request)
+        assert snap.id == "c9d0e1f2-mkt-sell-kraken0000000000"
+        assert snap.type == OrderTypeEnum.MARKET
+        assert snap.side == OrderSideEnum.SELL
+        assert snap.status == OrderStatusEnum.OPEN
+
+    @pytest.mark.asyncio
+    async def test_market_fetch_filled(self, client: KrakenFuturesExchangeClient) -> None:
+        """Fetch of a market order shows closed status after fill.
+
+        Given: SDK get_orders_status returns order with status=filled, orderType=mkt.
+        When: get_order is called.
+        Then: Snapshot has status=closed, type=market, filled equal to qty.
+        """
+        assert client._trade_client is not None
+        client._trade_client.get_orders_status = MagicMock(
+            return_value={
+                "orders": [
+                    {
+                        "order_id": "c9d0e1f2-mkt-sell-kraken0000000000",
+                        "symbol": "PF_ETHUSD",
+                        "side": "sell",
+                        "orderType": "mkt",
+                        "qty": 0.01,
+                        "filledSize": 0.01,
+                        "status": "filled",
+                    }
+                ]
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            return_value="ETH-USD-PERP",
+        ):
+            snap = await client.get_order("c9d0e1f2-mkt-sell-kraken0000000000")
+        assert snap.status == OrderStatusEnum.CLOSED
+        assert snap.type == OrderTypeEnum.MARKET
+        assert snap.filled == pytest.approx(0.01)
+
+    @pytest.mark.asyncio
+    async def test_cancel_inflight_create_and_cancel(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Create then immediately cancel a limit order.
+
+        Given: SDK create_order returns placed; cancel_order returns cancelled.
+        When: create_order followed by cancel_order.
+        Then: Create returns open snapshot; cancel returns canceled snapshot.
+        """
+        assert client._trade_client is not None
+        client._trade_client.create_order = MagicMock(
+            return_value={
+                "sendStatus": {
+                    "order_id": "d3e4f5a6-cinf-lmt-kraken0000000000",
+                    "status": "placed",
+                }
+            }
+        )
+        request = ExchangeOrderRequest(
+            symbol="ETH-USD-PERP",
+            side=OrderSideEnum.BUY,
+            type=OrderTypeEnum.LIMIT,
+            amount=0.01,
+            price=1000.0,
+        )
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.native_to_kraken_futures_ws",
+                return_value="PF_ETHUSD",
+            ),
+            patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
+        ):
+            snap_create = await client.create_order(request)
+        assert snap_create.status == OrderStatusEnum.OPEN
+        assert snap_create.id == "d3e4f5a6-cinf-lmt-kraken0000000000"
+
+        client._trade_client.cancel_order = MagicMock(
+            return_value={"cancelStatus": {"status": "cancelled"}}
+        )
+        snap_cancel = await client.cancel_order(
+            "d3e4f5a6-cinf-lmt-kraken0000000000", symbol="ETH-USD-PERP"
+        )
+        assert snap_cancel.status == OrderStatusEnum.CANCELED
+        assert snap_cancel.id == "d3e4f5a6-cinf-lmt-kraken0000000000"
+
+    @pytest.mark.asyncio
+    async def test_positions_empty_after_flatten(self, client: KrakenFuturesExchangeClient) -> None:
+        """Positions list is empty after all positions are closed.
+
+        Given: SDK get_open_positions returns empty openPositions list.
+        When: get_open_positions is called.
+        Then: Returns empty list.
+        """
+        assert client._user_client is not None
+        client._user_client.get_open_positions = MagicMock(return_value={"openPositions": []})
+        result = await client.get_open_positions()
+        assert result == []

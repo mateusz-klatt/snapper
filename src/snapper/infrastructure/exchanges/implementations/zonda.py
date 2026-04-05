@@ -692,6 +692,36 @@ class ZondaExchangeClient(ExchangeClientBase):
             logger.error(f"Failed to get OhlcvSnapshot for {symbol}: {e}")
             raise
 
+    @staticmethod
+    def _convert_ccxt_order(
+        ccxt_order: dict[str, Any], native_symbol: str | None = None
+    ) -> ExchangeOrderSnapshot:
+        """Convert a CCXT order dict to ExchangeOrderSnapshot.
+
+        Args:
+            ccxt_order: Raw order dict from CCXT.
+            native_symbol: Override native symbol (when known from request context).
+
+        Returns:
+            Populated ExchangeOrderSnapshot.
+        """
+        ccxt_symbol = ccxt_order.get("symbol")
+        symbol = native_symbol or (ccxt_to_native(ccxt_symbol) if ccxt_symbol else "")
+        return ExchangeOrderSnapshot(
+            id=ccxt_order["id"],
+            client_order_id=ccxt_order.get("clientOrderId"),
+            symbol=symbol,
+            side=OrderSideEnum(ccxt_order.get("side", "buy")),
+            type=OrderTypeEnum(ccxt_order.get("type", "limit")),
+            amount=float(ccxt_order.get("amount") or 0),
+            price=float(ccxt_order["price"]) if ccxt_order.get("price") else None,
+            status=OrderStatusEnum(ccxt_order.get("status", "open")),
+            filled=float(ccxt_order.get("filled") or 0),
+            remaining=float(ccxt_order.get("remaining") or 0),
+            timestamp=float(ccxt_order.get("timestamp") or time.time() * 1000) / 1000.0,
+            fee=float(ccxt_order["fee"]["cost"]) if ccxt_order.get("fee") else None,
+        )
+
     async def create_order(self, request: ExchangeOrderRequest) -> ExchangeOrderSnapshot:
         """Create a new order on Zonda.
 
@@ -721,20 +751,13 @@ class ZondaExchangeClient(ExchangeClientBase):
                 request.price,
                 order_params,
             )
-            order = ExchangeOrderSnapshot(
-                id=ccxt_order["id"],
-                client_order_id=ccxt_order.get("clientOrderId"),
-                symbol=request.symbol,
-                side=OrderSideEnum(ccxt_order.get("side", request.side.value)),
-                type=OrderTypeEnum(ccxt_order.get("type", request.type.value)),
-                amount=float(ccxt_order.get("amount") or request.amount),
-                price=float(ccxt_order["price"]) if ccxt_order.get("price") else None,
-                status=OrderStatusEnum(ccxt_order.get("status", "open")),
-                filled=float(ccxt_order.get("filled") or 0),
-                remaining=float(ccxt_order.get("remaining") or 0),
-                timestamp=float(ccxt_order.get("timestamp") or time.time() * 1000) / 1000.0,
-                fee=float(ccxt_order["fee"]["cost"]) if ccxt_order.get("fee") else None,
-            )
+            if ccxt_order.get("status") is None:
+                order_id = ccxt_order.get("id")
+                if order_id:
+                    ccxt_order = await asyncio.to_thread(
+                        self._ccxt_client.fetch_order, order_id, ccxt_symbol
+                    )
+            order = self._convert_ccxt_order(ccxt_order, request.symbol)
             db_result = await self._log_order_to_db(request, order)
             if db_result is not None:
                 order.db_order_id = db_result[0]
@@ -763,23 +786,20 @@ class ZondaExchangeClient(ExchangeClientBase):
             raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
         try:
             ccxt_symbol = native_to_ccxt(symbol) if symbol else None
-            ccxt_order = await asyncio.to_thread(
-                self._ccxt_client.cancel_order, order_id, ccxt_symbol
+            open_orders = await asyncio.to_thread(self._ccxt_client.fetch_open_orders, ccxt_symbol)
+            matched = [o for o in open_orders if o.get("id") == order_id]
+            if not matched:
+                raise ValueError(f"Order {order_id} not found in open orders")
+            order_data = matched[0]
+            cancel_params: dict[str, Any] = {"side": order_data.get("side", "buy")}
+            if order_data.get("price") is not None:
+                cancel_params["price"] = order_data["price"]
+            await asyncio.to_thread(
+                self._ccxt_client.cancel_order, order_id, ccxt_symbol, cancel_params
             )
-            return ExchangeOrderSnapshot(
-                id=ccxt_order["id"],
-                client_order_id=ccxt_order.get("clientOrderId"),
-                symbol=symbol or ccxt_to_native(ccxt_order["symbol"]),
-                side=OrderSideEnum(ccxt_order["side"]),
-                type=OrderTypeEnum(ccxt_order["type"]),
-                amount=float(ccxt_order["amount"]),
-                price=float(ccxt_order["price"]) if ccxt_order.get("price") else None,
-                status=OrderStatusEnum(ccxt_order["status"]),
-                filled=float(ccxt_order.get("filled", 0)),
-                remaining=float(ccxt_order.get("remaining", 0)),
-                timestamp=float(ccxt_order["timestamp"]) / 1000.0,
-                fee=float(ccxt_order["fee"]["cost"]) if ccxt_order.get("fee") else None,
-            )
+            snapshot = self._convert_ccxt_order(order_data, symbol)
+            snapshot.status = OrderStatusEnum.CANCELED
+            return snapshot
         except Exception as e:
             logger.error(f"Failed to cancel order {order_id}: {e}")
             raise
@@ -805,20 +825,7 @@ class ZondaExchangeClient(ExchangeClientBase):
             ccxt_order = await asyncio.to_thread(
                 self._ccxt_client.fetch_order, order_id, ccxt_symbol
             )
-            return ExchangeOrderSnapshot(
-                id=ccxt_order["id"],
-                client_order_id=ccxt_order.get("clientOrderId"),
-                symbol=symbol or ccxt_to_native(ccxt_order["symbol"]),
-                side=OrderSideEnum(ccxt_order["side"]),
-                type=OrderTypeEnum(ccxt_order["type"]),
-                amount=float(ccxt_order["amount"]),
-                price=float(ccxt_order["price"]) if ccxt_order.get("price") else None,
-                status=OrderStatusEnum(ccxt_order["status"]),
-                filled=float(ccxt_order.get("filled", 0)),
-                remaining=float(ccxt_order.get("remaining", 0)),
-                timestamp=float(ccxt_order["timestamp"]) / 1000.0,
-                fee=float(ccxt_order["fee"]["cost"]) if ccxt_order.get("fee") else None,
-            )
+            return self._convert_ccxt_order(ccxt_order, symbol)
         except Exception as e:
             logger.error(f"Failed to get order {order_id}: {e}")
             raise
@@ -859,23 +866,7 @@ class ZondaExchangeClient(ExchangeClientBase):
                 ccxt_orders = await asyncio.to_thread(
                     self._ccxt_client.fetch_orders, ccxt_symbol, None, limit
                 )
-            return [
-                ExchangeOrderSnapshot(
-                    id=o["id"],
-                    client_order_id=o.get("clientOrderId"),
-                    symbol=symbol or ccxt_to_native(o["symbol"]),
-                    side=OrderSideEnum(o["side"]),
-                    type=OrderTypeEnum(o["type"]),
-                    amount=float(o["amount"]),
-                    price=float(o["price"]) if o.get("price") else None,
-                    status=OrderStatusEnum(o["status"]),
-                    filled=float(o.get("filled", 0)),
-                    remaining=float(o.get("remaining", 0)),
-                    timestamp=float(o["timestamp"]) / 1000.0,
-                    fee=float(o["fee"]["cost"]) if o.get("fee") else None,
-                )
-                for o in ccxt_orders
-            ]
+            return [self._convert_ccxt_order(o, symbol) for o in ccxt_orders]
         except Exception as e:
             logger.error(f"Failed to get orders: {e}")
             raise

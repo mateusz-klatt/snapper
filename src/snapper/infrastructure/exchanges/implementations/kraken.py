@@ -354,9 +354,13 @@ class KrakenExchangeClient(ExchangeClientBase):
             Created order snapshot.
         """
         ccxt_symbol = native_to_ccxt(request.symbol)
-        ccxt_params: dict[str, str] = {}
+        ccxt_params: dict[str, Any] = {}
         if request.client_order_id:
             ccxt_params["clientOrderId"] = request.client_order_id
+        if request.leverage is not None:
+            ccxt_params["leverage"] = request.leverage
+        if request.post_only:
+            ccxt_params["postOnly"] = True
         order_data = await self._with_retry(
             self._ccxt_client.create_order,
             ccxt_symbol,
@@ -366,6 +370,12 @@ class KrakenExchangeClient(ExchangeClientBase):
             float(request.price) if request.price else None,
             ccxt_params,
         )
+        if order_data.get("status") is None:
+            order_id = order_data.get("id")
+            if order_id:
+                order_data = await self._with_retry(
+                    self._ccxt_client.fetch_order, order_id, ccxt_symbol
+                )
         order = self._convert_ccxt_order(order_data)
         db_result = await self._log_order_to_db(request, order)
         if db_result is not None:
@@ -398,6 +408,10 @@ class KrakenExchangeClient(ExchangeClientBase):
             }
             if request.price:
                 kraken_params["price"] = str(request.price)
+            if request.leverage is not None:
+                kraken_params["leverage"] = str(request.leverage)
+            if request.post_only:
+                kraken_params["oflags"] = "post"
             extra_params: dict[str, Any] = {}
             if request.client_order_id:
                 extra_params["cl_ord_id"] = str(request.client_order_id)
@@ -435,10 +449,13 @@ class KrakenExchangeClient(ExchangeClientBase):
             raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
         try:
             ccxt_symbol = native_to_ccxt(symbol) if symbol else None
-            order_data = await self._with_retry(
+            await self._with_retry(
                 self._ccxt_client.cancel_order,
                 order_id,
                 ccxt_symbol,
+            )
+            order_data = await self._with_retry(
+                self._ccxt_client.fetch_order, order_id, ccxt_symbol
             )
             canceled_order = self._convert_ccxt_order(order_data)
             return canceled_order
@@ -507,6 +524,12 @@ class KrakenExchangeClient(ExchangeClientBase):
             params["limit_price"] = float(request.price)
         if request.client_order_id:
             params["cl_ord_id"] = str(request.client_order_id)
+        if request.leverage is not None:
+            params["margin"] = True
+        if request.reduce_only:
+            params["reduce_only"] = True
+        if request.post_only:
+            params["post_only"] = True
         future: asyncio.Future[dict[str, Any]] = asyncio.Future()
         self._ws_order_requests[req_id] = future
         try:
@@ -1454,19 +1477,22 @@ class KrakenExchangeClient(ExchangeClientBase):
         Uses module-level _CCXT_STATUS_MAP, _CCXT_SIDE_MAP, and _CCXT_TYPE_MAP
         to translate CCXT string values to internal enum types.
         """
-        native_symbol = ccxt_to_native(ccxt_order["symbol"])
+        ccxt_symbol = ccxt_order.get("symbol")
+        native_symbol = ccxt_to_native(ccxt_symbol) if ccxt_symbol else ""
         return ExchangeOrderSnapshot(
             id=ccxt_order["id"],
             client_order_id=ccxt_order.get("clientOrderId"),
             symbol=native_symbol,
-            side=_CCXT_SIDE_MAP[ccxt_order["side"]],
-            type=_CCXT_TYPE_MAP[ccxt_order["type"]],
-            amount=float(ccxt_order["amount"]),
-            price=float(ccxt_order["price"]) if ccxt_order["price"] else None,
+            side=_CCXT_SIDE_MAP.get(ccxt_order.get("side", ""), OrderSideEnum.BUY),
+            type=_CCXT_TYPE_MAP.get(ccxt_order.get("type", ""), OrderTypeEnum.LIMIT),
+            amount=float(ccxt_order.get("amount") or 0),
+            price=float(ccxt_order["price"]) if ccxt_order.get("price") else None,
             status=_CCXT_STATUS_MAP[ccxt_order["status"]],
-            filled=float(ccxt_order.get("filled", 0)),
-            remaining=float(ccxt_order.get("remaining", 0)),
-            timestamp=ccxt_order["timestamp"] / 1000.0 if ccxt_order["timestamp"] else time.time(),
+            filled=float(ccxt_order.get("filled") or 0),
+            remaining=float(ccxt_order.get("remaining") or 0),
+            timestamp=(
+                ccxt_order["timestamp"] / 1000.0 if ccxt_order.get("timestamp") else time.time()
+            ),
             fee=float(ccxt_order["fee"]["cost"]) if ccxt_order.get("fee") else None,
         )
 

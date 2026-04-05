@@ -132,6 +132,9 @@ class ExchangeOrderRequest:
     stop_price: float | None = None
     client_order_id: str | None = None
     signaled_at: datetime | None = None
+    leverage: int | None = None
+    reduce_only: bool = False
+    post_only: bool = False
 
 
 type ExecType = Literal[
@@ -160,6 +163,7 @@ __all__ = [
     "ExecType",
     "LiquidityIndicator",
     "ExchangeOrderSnapshot",
+    "OpenPositionSnapshot",
     "TickerUpdate",
     "CandleUpdate",
     "TradeUpdate",
@@ -305,3 +309,17 @@ class InstrumentPairDescriptor:
     position_limit_long: int | None = None
     position_limit_short: int | None = None
     tick_size: float | None = None
+
+
+@dataclass
+class OpenPositionSnapshot:
+    """Snapshot of an open position on a derivatives exchange."""
+
+    symbol: str
+    side: OrderSideEnum
+    size: float
+    entry_price: float
+    mark_price: float
+    unrealized_pnl: float
+    unrealized_funding: float
+    timestamp: datetime

@@ -363,13 +363,122 @@ class TestKrakenExchangeClient:
             mock_client.create_order.assert_called_once()
 
     @patch("snapper.infrastructure.exchanges.implementations.kraken.ccxt")
+    async def test_create_order_follows_up_when_status_none(
+        self, mock_ccxt: MagicMock, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """Verify create_order calls fetch_order when CCXT returns status=None.
+
+        Given: CCXT create_order returns incomplete data with status=None,
+        When: create_order is called,
+        Then: fetch_order is called to retrieve full order data.
+        """
+        mock_client = AsyncMock()
+        with (
+            patch.object(kraken_client, "_ccxt_client", mock_client),
+            patch.object(
+                kraken_client,
+                "_log_order_to_db",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            mock_client.create_order.return_value = {
+                "id": "PARTIAL-123",
+                "symbol": "BTC/USD",
+                "type": "limit",
+                "side": "buy",
+                "amount": 0.001,
+                "price": 10000.0,
+                "status": None,
+                "timestamp": None,
+                "filled": None,
+                "remaining": None,
+                "fee": None,
+            }
+            mock_client.fetch_order.return_value = {
+                "id": "PARTIAL-123",
+                "clientOrderId": "uuid7-client",
+                "symbol": "BTC/USD",
+                "type": "limit",
+                "side": "buy",
+                "amount": 0.001,
+                "price": 10000.0,
+                "status": "open",
+                "timestamp": 1640995200000,
+                "filled": 0.0,
+                "remaining": 0.001,
+                "fee": {"cost": 0.0, "currency": "USD"},
+            }
+            order_request = ExchangeOrderRequest(
+                symbol="BTC-USD",
+                side=OrderSideEnum.BUY,
+                type=OrderTypeEnum.LIMIT,
+                amount=0.001,
+                price=10000.0,
+            )
+            order = await kraken_client.create_order(order_request)
+            assert order.id == "PARTIAL-123"
+            assert order.status == OrderStatusEnum.OPEN
+            assert order.client_order_id == "uuid7-client"
+            assert order.filled == 0.0
+            assert order.remaining == 0.001
+            mock_client.fetch_order.assert_called_once_with("PARTIAL-123", "BTC/USD")
+
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.ccxt")
+    async def test_create_order_no_followup_when_id_missing(
+        self, mock_ccxt: MagicMock, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """Verify create_order skips fetch_order when no id in response.
+
+        Given: CCXT create_order returns status=None and no id,
+        When: create_order is called,
+        Then: fetch_order is NOT called, fallback values used.
+        """
+        mock_client = AsyncMock()
+        with (
+            patch.object(kraken_client, "_ccxt_client", mock_client),
+            patch.object(
+                kraken_client,
+                "_log_order_to_db",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            mock_client.create_order.return_value = {
+                "id": None,
+                "symbol": "BTC/USD",
+                "type": "limit",
+                "side": "buy",
+                "amount": 0.001,
+                "price": 10000.0,
+                "status": None,
+                "timestamp": None,
+                "filled": None,
+                "remaining": None,
+                "fee": None,
+            }
+            order_request = ExchangeOrderRequest(
+                symbol="BTC-USD",
+                side=OrderSideEnum.BUY,
+                type=OrderTypeEnum.LIMIT,
+                amount=0.001,
+                price=10000.0,
+            )
+            with pytest.raises(KeyError):
+                await kraken_client.create_order(order_request)
+            mock_client.fetch_order.assert_not_called()
+
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.ccxt")
     async def test_cancel_order(
         self, mock_ccxt: MagicMock, kraken_client: KrakenExchangeClient
     ) -> None:
-        """Verify cancel order."""
+        """Verify cancel order calls cancel then fetch_order for full data."""
         mock_client = AsyncMock()
         with patch.object(kraken_client, "_ccxt_client", mock_client):
             mock_client.cancel_order.return_value = {
+                "info": {"result": {"count": 1}},
+            }
+            mock_client.fetch_order.return_value = {
                 "id": "test_order_123",
                 "symbol": "BTC/USD",
                 "type": "limit",
@@ -381,12 +490,14 @@ class TestKrakenExchangeClient:
                 "fee": None,
                 "filled": 0.0,
                 "remaining": 0.1,
-                "info": {"result": "success"},
+                "clientOrderId": "cl-123",
             }
             result = await kraken_client.cancel_order("test_order_123", "BTC-USD")
             assert result.id == "test_order_123"
             assert result.status == OrderStatusEnum.CANCELED
+            assert result.client_order_id == "cl-123"
             mock_client.cancel_order.assert_called_once_with("test_order_123", "BTC/USD")
+            mock_client.fetch_order.assert_called_once_with("test_order_123", "BTC/USD")
 
     @patch("snapper.infrastructure.exchanges.implementations.kraken.ccxt")
     async def test_get_balance(
@@ -4604,3 +4715,1358 @@ class TestKrakenExchangeClientSimpleEdgeCases:
             mock_ccxt.load_markets = AsyncMock(side_effect=Exception("Connection Error"))
             with pytest.raises(Exception, match="Connection Error"):
                 await client.connect()
+
+
+class TestCcxtOrderLeverageAndPostOnly:
+    """Tests for leverage and post_only passthrough in _create_order_via_ccxt."""
+
+    @pytest.fixture
+    def client(self) -> KrakenExchangeClient:
+        """Provide authenticated test client instance."""
+        return KrakenExchangeClient(
+            api_key="test_key",
+            api_secret="test_secret",
+            sandbox=False,
+        )
+
+    @pytest.fixture(autouse=True)
+    def _patch_symbol_mapper(self, monkeypatch: MonkeyPatch) -> None:
+        """Map native symbols to CCXT format via identity function."""
+
+        def _identity(symbol: str) -> str:
+            return symbol
+
+        monkeypatch.setattr(
+            "snapper.infrastructure.exchanges.implementations.kraken.native_to_ccxt", _identity
+        )
+
+    @pytest.mark.asyncio
+    async def test_ccxt_order_with_leverage(self, client: KrakenExchangeClient) -> None:
+        """Verify leverage is passed through ccxt_params when set.
+
+        Given: An ExchangeOrderRequest with leverage=3,
+        When: _create_order_via_ccxt is called,
+        Then: The ccxt create_order call includes leverage=3 in params.
+        """
+        with patch.object(client, "_ccxt_client") as mock_ccxt:
+            mock_ccxt.create_order = AsyncMock(
+                return_value={
+                    "id": "lev-id",
+                    "symbol": "BTC/USD",
+                    "amount": 1.0,
+                    "side": "buy",
+                    "type": "limit",
+                    "status": "open",
+                    "price": 50000.0,
+                    "filled": 0.0,
+                    "remaining": 1.0,
+                    "timestamp": 1640995200000,
+                    "datetime": "2022-01-01T00:00:00.000Z",
+                    "fee": None,
+                    "trades": [],
+                    "info": {},
+                }
+            )
+            request = ExchangeOrderRequest(
+                symbol="BTC-USD",
+                side=OrderSideEnum.BUY,
+                type=OrderTypeEnum.LIMIT,
+                amount=1.0,
+                price=50000.0,
+                leverage=3,
+            )
+            with patch.object(client, "_log_order_to_db", new_callable=AsyncMock) as mock_log:
+                mock_log.return_value = None
+                result = await client.create_order(request)
+            call_args = mock_ccxt.create_order.call_args
+            params = call_args[0][5]
+            assert params["leverage"] == 3
+            assert result.id == "lev-id"
+
+    @pytest.mark.asyncio
+    async def test_ccxt_order_with_post_only(self, client: KrakenExchangeClient) -> None:
+        """Verify post_only is passed through ccxt_params when True.
+
+        Given: An ExchangeOrderRequest with post_only=True,
+        When: _create_order_via_ccxt is called,
+        Then: The ccxt create_order call includes postOnly=True in params.
+        """
+        with patch.object(client, "_ccxt_client") as mock_ccxt:
+            mock_ccxt.create_order = AsyncMock(
+                return_value={
+                    "id": "post-id",
+                    "symbol": "BTC/USD",
+                    "amount": 1.0,
+                    "side": "buy",
+                    "type": "limit",
+                    "status": "open",
+                    "price": 50000.0,
+                    "filled": 0.0,
+                    "remaining": 1.0,
+                    "timestamp": 1640995200000,
+                    "datetime": "2022-01-01T00:00:00.000Z",
+                    "fee": None,
+                    "trades": [],
+                    "info": {},
+                }
+            )
+            request = ExchangeOrderRequest(
+                symbol="BTC-USD",
+                side=OrderSideEnum.BUY,
+                type=OrderTypeEnum.LIMIT,
+                amount=1.0,
+                price=50000.0,
+                post_only=True,
+            )
+            with patch.object(client, "_log_order_to_db", new_callable=AsyncMock) as mock_log:
+                mock_log.return_value = None
+                result = await client.create_order(request)
+            call_args = mock_ccxt.create_order.call_args
+            params = call_args[0][5]
+            assert params["postOnly"] is True
+            assert result.id == "post-id"
+
+
+class TestNativeOrderLeverageAndPostOnly:
+    """Tests for leverage and post_only in _create_order_via_native."""
+
+    @pytest.fixture
+    def client(self) -> KrakenExchangeClient:
+        """Provide authenticated test client instance."""
+        return KrakenExchangeClient(
+            api_key="test_key",
+            api_secret="test_secret",
+            sandbox=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_native_order_with_leverage(self, client: KrakenExchangeClient) -> None:
+        """Verify leverage is converted to string in native API params.
+
+        Given: An ExchangeOrderRequest with leverage=5,
+        When: _create_order_via_native is called (via fallback),
+        Then: The native Trade.create_order call includes leverage='5'.
+        """
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.native_to_ccxt",
+                side_effect=ValueError("Unknown native symbol: AAPLx-USD"),
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.native_to_kraken_rest",
+                return_value="AAPLx/USD",
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.Trade"
+            ) as mock_trade_class,
+        ):
+            mock_trade_client = MagicMock()
+            mock_trade_class.return_value = mock_trade_client
+            mock_trade_client.create_order.return_value = {
+                "txid": ["NAT-LEV"],
+                "descr": {"order": "buy 10 AAPLx/USD @ limit 150.0"},
+            }
+            request = ExchangeOrderRequest(
+                symbol="AAPLx-USD",
+                side=OrderSideEnum.BUY,
+                type=OrderTypeEnum.LIMIT,
+                amount=10.0,
+                price=150.0,
+                leverage=5,
+            )
+            result = await client.create_order(request)
+            call_kwargs = mock_trade_client.create_order.call_args.kwargs
+            assert call_kwargs["leverage"] == "5"
+            assert result.id == "NAT-LEV"
+
+    @pytest.mark.asyncio
+    async def test_native_order_with_post_only(self, client: KrakenExchangeClient) -> None:
+        """Verify post_only sets oflags to 'post' in native API params.
+
+        Given: An ExchangeOrderRequest with post_only=True,
+        When: _create_order_via_native is called (via fallback),
+        Then: The native Trade.create_order call includes oflags='post'.
+        """
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.native_to_ccxt",
+                side_effect=ValueError("Unknown native symbol: AAPLx-USD"),
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.native_to_kraken_rest",
+                return_value="AAPLx/USD",
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.Trade"
+            ) as mock_trade_class,
+        ):
+            mock_trade_client = MagicMock()
+            mock_trade_class.return_value = mock_trade_client
+            mock_trade_client.create_order.return_value = {
+                "txid": ["NAT-POST"],
+                "descr": {"order": "buy 10 AAPLx/USD @ limit 150.0"},
+            }
+            request = ExchangeOrderRequest(
+                symbol="AAPLx-USD",
+                side=OrderSideEnum.BUY,
+                type=OrderTypeEnum.LIMIT,
+                amount=10.0,
+                price=150.0,
+                post_only=True,
+            )
+            result = await client.create_order(request)
+            call_kwargs = mock_trade_client.create_order.call_args.kwargs
+            assert call_kwargs["oflags"] == "post"
+            assert result.id == "NAT-POST"
+
+
+class TestWsOrderLeverageReduceOnlyPostOnly:
+    """Tests for leverage, reduce_only, and post_only in create_order_ws."""
+
+    @pytest.fixture
+    def client(self) -> KrakenExchangeClient:
+        """Provide authenticated test client instance."""
+        return KrakenExchangeClient(
+            api_key="test_key",
+            api_secret="test_secret",
+            sandbox=False,
+        )
+
+    @pytest.mark.asyncio
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.native_to_kraken_websocket")
+    async def test_ws_order_with_leverage(
+        self, mock_native_ws: MagicMock, client: KrakenExchangeClient
+    ) -> None:
+        """Verify leverage sets margin=True in WebSocket order params.
+
+        Given: An ExchangeOrderRequest with leverage=2,
+        When: create_order_ws is called,
+        Then: The WebSocket message params include margin=True.
+        """
+        mock_native_ws.return_value = "XBT/USD"
+        client._ws_connected = True
+
+        class _StubWs:
+            def __init__(self) -> None:
+                self.sent: list[dict[str, Any]] = []
+
+            async def send_message(self, message: dict[str, Any]) -> None:
+                self.sent.append(message)
+
+        ws_client = _StubWs()
+        original_send = ws_client.send_message
+
+        async def _send_and_resolve(message: dict[str, Any]) -> None:
+            await original_send(message)
+            req_id = message.get("req_id")
+            if req_id is not None and req_id in client._ws_order_requests:
+                client._ws_order_requests[req_id].set_result(
+                    {"result": {"order_id": "WS-LEV", "cl_ord_id": "cid"}}
+                )
+
+        ws_client.send_message = _send_and_resolve
+
+        with patch.object(client, "_get_or_create_ws_client", AsyncMock(return_value=ws_client)):
+            request = ExchangeOrderRequest(
+                symbol="BTC-USD",
+                side=OrderSideEnum.BUY,
+                type=OrderTypeEnum.LIMIT,
+                amount=1.0,
+                price=50000.0,
+                leverage=2,
+            )
+            snapshot = await client.create_order_ws(request)
+        assert ws_client.sent[0]["params"]["margin"] is True
+        assert snapshot.id == "WS-LEV"
+
+    @pytest.mark.asyncio
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.native_to_kraken_websocket")
+    async def test_ws_order_with_reduce_only(
+        self, mock_native_ws: MagicMock, client: KrakenExchangeClient
+    ) -> None:
+        """Verify reduce_only is passed through in WebSocket order params.
+
+        Given: An ExchangeOrderRequest with reduce_only=True,
+        When: create_order_ws is called,
+        Then: The WebSocket message params include reduce_only=True.
+        """
+        mock_native_ws.return_value = "XBT/USD"
+        client._ws_connected = True
+
+        class _StubWs:
+            def __init__(self) -> None:
+                self.sent: list[dict[str, Any]] = []
+
+            async def send_message(self, message: dict[str, Any]) -> None:
+                self.sent.append(message)
+
+        ws_client = _StubWs()
+        original_send = ws_client.send_message
+
+        async def _send_and_resolve(message: dict[str, Any]) -> None:
+            await original_send(message)
+            req_id = message.get("req_id")
+            if req_id is not None and req_id in client._ws_order_requests:
+                client._ws_order_requests[req_id].set_result(
+                    {"result": {"order_id": "WS-RED", "cl_ord_id": "cid"}}
+                )
+
+        ws_client.send_message = _send_and_resolve
+
+        with patch.object(client, "_get_or_create_ws_client", AsyncMock(return_value=ws_client)):
+            request = ExchangeOrderRequest(
+                symbol="BTC-USD",
+                side=OrderSideEnum.BUY,
+                type=OrderTypeEnum.MARKET,
+                amount=1.0,
+                reduce_only=True,
+            )
+            snapshot = await client.create_order_ws(request)
+        assert ws_client.sent[0]["params"]["reduce_only"] is True
+        assert snapshot.id == "WS-RED"
+
+    @pytest.mark.asyncio
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.native_to_kraken_websocket")
+    async def test_ws_order_with_post_only(
+        self, mock_native_ws: MagicMock, client: KrakenExchangeClient
+    ) -> None:
+        """Verify post_only is passed through in WebSocket order params.
+
+        Given: An ExchangeOrderRequest with post_only=True,
+        When: create_order_ws is called,
+        Then: The WebSocket message params include post_only=True.
+        """
+        mock_native_ws.return_value = "XBT/USD"
+        client._ws_connected = True
+
+        class _StubWs:
+            def __init__(self) -> None:
+                self.sent: list[dict[str, Any]] = []
+
+            async def send_message(self, message: dict[str, Any]) -> None:
+                self.sent.append(message)
+
+        ws_client = _StubWs()
+        original_send = ws_client.send_message
+
+        async def _send_and_resolve(message: dict[str, Any]) -> None:
+            await original_send(message)
+            req_id = message.get("req_id")
+            if req_id is not None and req_id in client._ws_order_requests:
+                client._ws_order_requests[req_id].set_result(
+                    {"result": {"order_id": "WS-POST", "cl_ord_id": "cid"}}
+                )
+
+        ws_client.send_message = _send_and_resolve
+
+        with patch.object(client, "_get_or_create_ws_client", AsyncMock(return_value=ws_client)):
+            request = ExchangeOrderRequest(
+                symbol="BTC-USD",
+                side=OrderSideEnum.BUY,
+                type=OrderTypeEnum.LIMIT,
+                amount=1.0,
+                price=50000.0,
+                post_only=True,
+            )
+            snapshot = await client.create_order_ws(request)
+        assert ws_client.sent[0]["params"]["post_only"] is True
+        assert snapshot.id == "WS-POST"
+
+
+class TestKrakenLiveFixtures:
+    """Tests using real Kraken API response data as mock fixtures.
+
+    All fixture data comes from live integration tests against Kraken spot
+    for BTC-EUR. These tests verify that ExchangeOrderSnapshot fields are
+    correctly populated when the client processes real exchange responses
+    across three execution paths: CCXT, native REST, and WebSocket.
+    """
+
+    CCXT_PASSIVE_CREATE: dict[str, Any] = {
+        "id": "OODTGX",
+        "clientOrderId": "019d5d4c-d6ab",
+        "symbol": "BTC/EUR",
+        "type": "limit",
+        "side": "buy",
+        "amount": 0.0001,
+        "price": 29119.5,
+        "status": "open",
+        "timestamp": 1743800000000,
+        "fee": None,
+        "filled": 0.0,
+        "remaining": 0.0001,
+    }
+
+    CCXT_PASSIVE_FETCH: dict[str, Any] = {
+        "id": "OODTGX",
+        "clientOrderId": "019d5d4c-d6ab",
+        "symbol": "BTC/EUR",
+        "type": "limit",
+        "side": "buy",
+        "amount": 0.0001,
+        "price": 29119.5,
+        "status": "open",
+        "timestamp": 1743800000000,
+        "fee": None,
+        "filled": 0.0,
+        "remaining": 0.0001,
+    }
+
+    CCXT_PASSIVE_CANCEL_FETCH: dict[str, Any] = {
+        "id": "OODTGX",
+        "clientOrderId": "019d5d4c-d6ab",
+        "symbol": "BTC/EUR",
+        "type": "limit",
+        "side": "buy",
+        "amount": 0.0001,
+        "price": 29119.5,
+        "status": "canceled",
+        "timestamp": 1743800000000,
+        "fee": None,
+        "filled": 0.0,
+        "remaining": 0.0001,
+    }
+
+    CCXT_TOPBOOK_CREATE: dict[str, Any] = {
+        "id": "ONHBU2",
+        "clientOrderId": None,
+        "symbol": "BTC/EUR",
+        "type": "limit",
+        "side": "sell",
+        "amount": 0.0001,
+        "price": 58239.1,
+        "status": "open",
+        "timestamp": 1743800100000,
+        "fee": None,
+        "filled": 0.0,
+        "remaining": 0.0001,
+    }
+
+    CCXT_TOPBOOK_FETCH_FILLED: dict[str, Any] = {
+        "id": "ONHBU2",
+        "clientOrderId": None,
+        "symbol": "BTC/EUR",
+        "type": "limit",
+        "side": "sell",
+        "amount": 0.0001,
+        "price": 58239.1,
+        "status": "closed",
+        "timestamp": 1743800100000,
+        "fee": None,
+        "filled": 0.0001,
+        "remaining": 0.0,
+    }
+
+    CCXT_TOPBOOK_CANCEL_UNFILLED: dict[str, Any] = {
+        "id": "ONE2HB",
+        "clientOrderId": None,
+        "symbol": "BTC/EUR",
+        "type": "limit",
+        "side": "sell",
+        "amount": 0.0001,
+        "price": 58239.1,
+        "status": "canceled",
+        "timestamp": 1743800200000,
+        "fee": None,
+        "filled": 0.0,
+        "remaining": 0.0001,
+    }
+
+    CCXT_AGGRESSIVE_CREATE: dict[str, Any] = {
+        "id": "O2CMWJ",
+        "clientOrderId": None,
+        "symbol": "BTC/EUR",
+        "type": "limit",
+        "side": "sell",
+        "amount": 0.0001,
+        "price": 58238.0,
+        "status": "closed",
+        "timestamp": 1743800300000,
+        "fee": {"cost": 0.01456, "currency": "EUR"},
+        "filled": 0.0001,
+        "remaining": 0.0,
+    }
+
+    CCXT_AGGRESSIVE_FETCH: dict[str, Any] = {
+        "id": "O2CMWJ",
+        "clientOrderId": None,
+        "symbol": "BTC/EUR",
+        "type": "limit",
+        "side": "sell",
+        "amount": 0.0001,
+        "price": 58238.0,
+        "status": "closed",
+        "timestamp": 1743800300000,
+        "fee": {"cost": 0.01456, "currency": "EUR"},
+        "filled": 0.0001,
+        "remaining": 0.0,
+    }
+
+    CCXT_MARKET_CREATE: dict[str, Any] = {
+        "id": "OJWE3F",
+        "clientOrderId": None,
+        "symbol": "BTC/EUR",
+        "type": "market",
+        "side": "sell",
+        "amount": 0.0001,
+        "price": 58232.7,
+        "status": "closed",
+        "timestamp": 1743800400000,
+        "fee": {"cost": 0.02329, "currency": "EUR"},
+        "filled": 0.0001,
+        "remaining": 0.0,
+    }
+
+    CCXT_MARKET_FETCH: dict[str, Any] = {
+        "id": "OJWE3F",
+        "clientOrderId": None,
+        "symbol": "BTC/EUR",
+        "type": "market",
+        "side": "sell",
+        "amount": 0.0001,
+        "price": 58232.7,
+        "status": "closed",
+        "timestamp": 1743800400000,
+        "fee": {"cost": 0.02329, "currency": "EUR"},
+        "filled": 0.0001,
+        "remaining": 0.0,
+    }
+
+    CCXT_CANCEL_INFLIGHT_CREATE: dict[str, Any] = {
+        "id": "OLKARR",
+        "clientOrderId": None,
+        "symbol": "BTC/EUR",
+        "type": "limit",
+        "side": "buy",
+        "amount": 0.0001,
+        "price": 29119.5,
+        "status": "open",
+        "timestamp": 1743800500000,
+        "fee": None,
+        "filled": 0.0,
+        "remaining": 0.0001,
+    }
+
+    CCXT_CANCEL_INFLIGHT_CANCEL_FETCH: dict[str, Any] = {
+        "id": "OLKARR",
+        "clientOrderId": None,
+        "symbol": "BTC/EUR",
+        "type": "limit",
+        "side": "buy",
+        "amount": 0.0001,
+        "price": 29119.5,
+        "status": "canceled",
+        "timestamp": 1743800500000,
+        "fee": None,
+        "filled": 0.0,
+        "remaining": 0.0001,
+    }
+
+    @pytest.fixture
+    def client(self) -> KrakenExchangeClient:
+        """Provide authenticated test client instance."""
+        return KrakenExchangeClient(
+            api_key="test_key",
+            api_secret="test_secret",
+            sandbox=False,
+        )
+
+    @pytest.fixture(autouse=True)
+    def _patch_symbol_mapper(self, monkeypatch: MonkeyPatch) -> None:
+        """Map native symbols to CCXT format for BTC-EUR."""
+
+        def _native_to_ccxt(symbol: str) -> str:
+            return symbol.replace("-", "/")
+
+        def _ccxt_to_native(symbol: str) -> str:
+            return symbol.replace("/", "-")
+
+        monkeypatch.setattr(
+            "snapper.infrastructure.exchanges.implementations.kraken.native_to_ccxt",
+            _native_to_ccxt,
+        )
+        monkeypatch.setattr(
+            "snapper.infrastructure.exchanges.implementations.kraken.ccxt_to_native",
+            _ccxt_to_native,
+        )
+
+    @pytest.mark.asyncio
+    async def test_ccxt_passive_create(self, client: KrakenExchangeClient) -> None:
+        """Verify CCXT passive limit buy creates open order with real fixture data.
+
+        Given: A limit buy at 29119.5 EUR for 0.0001 BTC (well below market),
+        When: create_order is called via CCXT path,
+        Then: The snapshot has status=OPEN, filled=0, correct client_order_id.
+        """
+        with (
+            patch.object(client, "_ccxt_client") as mock_ccxt,
+            patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
+        ):
+            mock_ccxt.create_order = AsyncMock(return_value=dict(self.CCXT_PASSIVE_CREATE))
+            request = ExchangeOrderRequest(
+                symbol="BTC-EUR",
+                side=OrderSideEnum.BUY,
+                type=OrderTypeEnum.LIMIT,
+                amount=0.0001,
+                price=29119.5,
+                client_order_id="019d5d4c-d6ab",
+            )
+            snapshot = await client.create_order(request)
+        assert snapshot.id == "OODTGX"
+        assert snapshot.client_order_id == "019d5d4c-d6ab"
+        assert snapshot.symbol == "BTC-EUR"
+        assert snapshot.side == OrderSideEnum.BUY
+        assert snapshot.type == OrderTypeEnum.LIMIT
+        assert snapshot.amount == pytest.approx(0.0001)
+        assert snapshot.price == pytest.approx(29119.5)
+        assert snapshot.status == OrderStatusEnum.OPEN
+        assert snapshot.filled == pytest.approx(0.0)
+        assert snapshot.remaining == pytest.approx(0.0001)
+        assert snapshot.fee is None
+
+    @pytest.mark.asyncio
+    async def test_ccxt_passive_fetch(self, client: KrakenExchangeClient) -> None:
+        """Verify CCXT fetch of passive open order returns same data.
+
+        Given: A passive limit buy order OODTGX is resting on the book,
+        When: get_order is called,
+        Then: The snapshot matches the create response exactly.
+        """
+        with patch.object(client, "_ccxt_client") as mock_ccxt:
+            mock_ccxt.fetch_order = AsyncMock(return_value=dict(self.CCXT_PASSIVE_FETCH))
+            snapshot = await client.get_order("OODTGX", "BTC-EUR")
+        assert snapshot.id == "OODTGX"
+        assert snapshot.status == OrderStatusEnum.OPEN
+        assert snapshot.filled == pytest.approx(0.0)
+        assert snapshot.remaining == pytest.approx(0.0001)
+        assert snapshot.price == pytest.approx(29119.5)
+
+    @pytest.mark.asyncio
+    async def test_ccxt_passive_cancel(self, client: KrakenExchangeClient) -> None:
+        """Verify CCXT cancel of passive order returns canceled status.
+
+        Given: A passive limit buy order OODTGX,
+        When: cancel_order is called (calls cancel then fetch),
+        Then: The snapshot has status=CANCELED with filled=0.
+        """
+        with patch.object(client, "_ccxt_client") as mock_ccxt:
+            mock_ccxt.cancel_order = AsyncMock(return_value={"info": {"result": {"count": 1}}})
+            mock_ccxt.fetch_order = AsyncMock(return_value=dict(self.CCXT_PASSIVE_CANCEL_FETCH))
+            snapshot = await client.cancel_order("OODTGX", "BTC-EUR")
+        assert snapshot.id == "OODTGX"
+        assert snapshot.status == OrderStatusEnum.CANCELED
+        assert snapshot.filled == pytest.approx(0.0)
+        assert snapshot.remaining == pytest.approx(0.0001)
+        assert snapshot.client_order_id == "019d5d4c-d6ab"
+        mock_ccxt.cancel_order.assert_called_once_with("OODTGX", "BTC/EUR")
+        mock_ccxt.fetch_order.assert_called_once_with("OODTGX", "BTC/EUR")
+
+    @pytest.mark.asyncio
+    async def test_ccxt_topbook_create_post_only(self, client: KrakenExchangeClient) -> None:
+        """Verify CCXT topbook post_only sell creates open order.
+
+        Given: A limit sell at 58239.1 EUR with post_only near top of book,
+        When: create_order is called with post_only=True,
+        Then: The snapshot is open, unfilled, and postOnly is in CCXT params.
+        """
+        with (
+            patch.object(client, "_ccxt_client") as mock_ccxt,
+            patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
+        ):
+            mock_ccxt.create_order = AsyncMock(return_value=dict(self.CCXT_TOPBOOK_CREATE))
+            request = ExchangeOrderRequest(
+                symbol="BTC-EUR",
+                side=OrderSideEnum.SELL,
+                type=OrderTypeEnum.LIMIT,
+                amount=0.0001,
+                price=58239.1,
+                post_only=True,
+            )
+            snapshot = await client.create_order(request)
+        assert snapshot.id == "ONHBU2"
+        assert snapshot.status == OrderStatusEnum.OPEN
+        assert snapshot.filled == pytest.approx(0.0)
+        call_args = mock_ccxt.create_order.call_args
+        params = call_args[0][5]
+        assert params["postOnly"] is True
+
+    @pytest.mark.asyncio
+    async def test_ccxt_topbook_fetch_filled_as_maker(self, client: KrakenExchangeClient) -> None:
+        """Verify CCXT fetch shows topbook order got filled as maker.
+
+        Given: A post_only limit sell ONHBU2 that was matched as maker,
+        When: get_order is called,
+        Then: The snapshot has status=CLOSED, filled=0.0001, remaining=0.
+        """
+        with patch.object(client, "_ccxt_client") as mock_ccxt:
+            mock_ccxt.fetch_order = AsyncMock(return_value=dict(self.CCXT_TOPBOOK_FETCH_FILLED))
+            snapshot = await client.get_order("ONHBU2", "BTC-EUR")
+        assert snapshot.id == "ONHBU2"
+        assert snapshot.status == OrderStatusEnum.CLOSED
+        assert snapshot.filled == pytest.approx(0.0001)
+        assert snapshot.remaining == pytest.approx(0.0)
+        assert snapshot.price == pytest.approx(58239.1)
+        assert snapshot.side == OrderSideEnum.SELL
+
+    @pytest.mark.asyncio
+    async def test_ccxt_topbook_cancel_unfilled(self, client: KrakenExchangeClient) -> None:
+        """Verify CCXT cancel of unfilled topbook order from different run.
+
+        Given: A topbook limit sell ONE2HB that was not filled,
+        When: cancel_order is called,
+        Then: The snapshot has status=CANCELED, filled=0.
+        """
+        with patch.object(client, "_ccxt_client") as mock_ccxt:
+            mock_ccxt.cancel_order = AsyncMock(return_value={"info": {"result": {"count": 1}}})
+            mock_ccxt.fetch_order = AsyncMock(return_value=dict(self.CCXT_TOPBOOK_CANCEL_UNFILLED))
+            snapshot = await client.cancel_order("ONE2HB", "BTC-EUR")
+        assert snapshot.id == "ONE2HB"
+        assert snapshot.status == OrderStatusEnum.CANCELED
+        assert snapshot.filled == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_ccxt_aggressive_create_immediately_filled(
+        self, client: KrakenExchangeClient
+    ) -> None:
+        """Verify CCXT aggressive limit sell is immediately filled.
+
+        Given: A limit sell at 58238.0 (crossing the spread),
+        When: create_order is called,
+        Then: The snapshot has status=CLOSED, filled=full amount, fee=0.01456.
+        """
+        with (
+            patch.object(client, "_ccxt_client") as mock_ccxt,
+            patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
+        ):
+            mock_ccxt.create_order = AsyncMock(return_value=dict(self.CCXT_AGGRESSIVE_CREATE))
+            request = ExchangeOrderRequest(
+                symbol="BTC-EUR",
+                side=OrderSideEnum.SELL,
+                type=OrderTypeEnum.LIMIT,
+                amount=0.0001,
+                price=58238.0,
+            )
+            snapshot = await client.create_order(request)
+        assert snapshot.id == "O2CMWJ"
+        assert snapshot.status == OrderStatusEnum.CLOSED
+        assert snapshot.filled == pytest.approx(0.0001)
+        assert snapshot.remaining == pytest.approx(0.0)
+        assert snapshot.fee == pytest.approx(0.01456)
+
+    @pytest.mark.asyncio
+    async def test_ccxt_aggressive_fetch(self, client: KrakenExchangeClient) -> None:
+        """Verify CCXT fetch of aggressively filled order is idempotent.
+
+        Given: An immediately filled limit sell O2CMWJ,
+        When: get_order is called,
+        Then: The snapshot matches the create response.
+        """
+        with patch.object(client, "_ccxt_client") as mock_ccxt:
+            mock_ccxt.fetch_order = AsyncMock(return_value=dict(self.CCXT_AGGRESSIVE_FETCH))
+            snapshot = await client.get_order("O2CMWJ", "BTC-EUR")
+        assert snapshot.id == "O2CMWJ"
+        assert snapshot.status == OrderStatusEnum.CLOSED
+        assert snapshot.filled == pytest.approx(0.0001)
+        assert snapshot.fee == pytest.approx(0.01456)
+
+    @pytest.mark.asyncio
+    async def test_ccxt_market_create(self, client: KrakenExchangeClient) -> None:
+        """Verify CCXT market sell is immediately filled with taker fee.
+
+        Given: A market sell for 0.0001 BTC,
+        When: create_order is called,
+        Then: The snapshot has status=CLOSED, price=58232.7, fee=0.02329.
+        """
+        with (
+            patch.object(client, "_ccxt_client") as mock_ccxt,
+            patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
+        ):
+            mock_ccxt.create_order = AsyncMock(return_value=dict(self.CCXT_MARKET_CREATE))
+            request = ExchangeOrderRequest(
+                symbol="BTC-EUR",
+                side=OrderSideEnum.SELL,
+                type=OrderTypeEnum.MARKET,
+                amount=0.0001,
+            )
+            snapshot = await client.create_order(request)
+        assert snapshot.id == "OJWE3F"
+        assert snapshot.status == OrderStatusEnum.CLOSED
+        assert snapshot.type == OrderTypeEnum.MARKET
+        assert snapshot.filled == pytest.approx(0.0001)
+        assert snapshot.remaining == pytest.approx(0.0)
+        assert snapshot.price == pytest.approx(58232.7)
+        assert snapshot.fee == pytest.approx(0.02329)
+
+    @pytest.mark.asyncio
+    async def test_ccxt_market_fetch(self, client: KrakenExchangeClient) -> None:
+        """Verify CCXT fetch of filled market order is idempotent.
+
+        Given: An immediately filled market sell OJWE3F,
+        When: get_order is called,
+        Then: The snapshot matches the create response.
+        """
+        with patch.object(client, "_ccxt_client") as mock_ccxt:
+            mock_ccxt.fetch_order = AsyncMock(return_value=dict(self.CCXT_MARKET_FETCH))
+            snapshot = await client.get_order("OJWE3F", "BTC-EUR")
+        assert snapshot.id == "OJWE3F"
+        assert snapshot.status == OrderStatusEnum.CLOSED
+        assert snapshot.type == OrderTypeEnum.MARKET
+        assert snapshot.fee == pytest.approx(0.02329)
+
+    @pytest.mark.asyncio
+    async def test_ccxt_cancel_inflight_create_then_cancel(
+        self, client: KrakenExchangeClient
+    ) -> None:
+        """Verify CCXT create + immediate cancel flow with real IDs.
+
+        Given: A limit buy OLKARR that is created then immediately canceled,
+        When: create_order then cancel_order are called in sequence,
+        Then: Create returns OPEN, cancel returns CANCELED.
+        """
+        with (
+            patch.object(client, "_ccxt_client") as mock_ccxt,
+            patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
+        ):
+            mock_ccxt.create_order = AsyncMock(return_value=dict(self.CCXT_CANCEL_INFLIGHT_CREATE))
+            request = ExchangeOrderRequest(
+                symbol="BTC-EUR",
+                side=OrderSideEnum.BUY,
+                type=OrderTypeEnum.LIMIT,
+                amount=0.0001,
+                price=29119.5,
+            )
+            create_snap = await client.create_order(request)
+        assert create_snap.id == "OLKARR"
+        assert create_snap.status == OrderStatusEnum.OPEN
+
+        with patch.object(client, "_ccxt_client") as mock_ccxt:
+            mock_ccxt.cancel_order = AsyncMock(return_value={"info": {"result": {"count": 1}}})
+            mock_ccxt.fetch_order = AsyncMock(
+                return_value=dict(self.CCXT_CANCEL_INFLIGHT_CANCEL_FETCH)
+            )
+            cancel_snap = await client.cancel_order("OLKARR", "BTC-EUR")
+        assert cancel_snap.id == "OLKARR"
+        assert cancel_snap.status == OrderStatusEnum.CANCELED
+        assert cancel_snap.filled == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_ccxt_create_status_none_triggers_fetch(
+        self, client: KrakenExchangeClient
+    ) -> None:
+        """Verify CCXT follow-up fetch when create returns status=None.
+
+        Given: CCXT create_order returns status=None (incomplete response),
+        When: create_order is called,
+        Then: An automatic fetch_order is triggered to get full data.
+        """
+        create_response = dict(self.CCXT_PASSIVE_CREATE)
+        create_response["status"] = None
+        create_response["filled"] = None
+        create_response["remaining"] = None
+        create_response["timestamp"] = None
+        with (
+            patch.object(client, "_ccxt_client") as mock_ccxt,
+            patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
+        ):
+            mock_ccxt.create_order = AsyncMock(return_value=create_response)
+            mock_ccxt.fetch_order = AsyncMock(return_value=dict(self.CCXT_PASSIVE_FETCH))
+            request = ExchangeOrderRequest(
+                symbol="BTC-EUR",
+                side=OrderSideEnum.BUY,
+                type=OrderTypeEnum.LIMIT,
+                amount=0.0001,
+                price=29119.5,
+                client_order_id="019d5d4c-d6ab",
+            )
+            snapshot = await client.create_order(request)
+        mock_ccxt.fetch_order.assert_called_once_with("OODTGX", "BTC/EUR")
+        assert snapshot.id == "OODTGX"
+        assert snapshot.status == OrderStatusEnum.OPEN
+        assert snapshot.filled == pytest.approx(0.0)
+        assert snapshot.remaining == pytest.approx(0.0001)
+
+    @pytest.mark.asyncio
+    async def test_native_passive_create(self, client: KrakenExchangeClient) -> None:
+        """Verify native REST path creates order with real fixture data.
+
+        Given: A symbol unsupported by CCXT that falls back to native API,
+        When: create_order is called and native Trade client returns a txid,
+        Then: The snapshot has status=PENDING with the real order ID.
+        """
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.native_to_ccxt",
+                side_effect=ValueError("Unknown native symbol: BTC-EUR"),
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.native_to_kraken_rest",
+                return_value="XBTEUR",
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.Trade"
+            ) as mock_trade_class,
+            patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
+        ):
+            mock_trade_client = MagicMock()
+            mock_trade_class.return_value = mock_trade_client
+            mock_trade_client.create_order.return_value = {"txid": ["OODTGX"]}
+            request = ExchangeOrderRequest(
+                symbol="BTC-EUR",
+                side=OrderSideEnum.BUY,
+                type=OrderTypeEnum.LIMIT,
+                amount=0.0001,
+                price=29119.5,
+                client_order_id="019d5d4c-d6ab",
+            )
+            snapshot = await client.create_order(request)
+        assert snapshot.id == "OODTGX"
+        assert snapshot.symbol == "BTC-EUR"
+        assert snapshot.side == OrderSideEnum.BUY
+        assert snapshot.type == OrderTypeEnum.LIMIT
+        assert snapshot.amount == pytest.approx(0.0001)
+        assert snapshot.price == pytest.approx(29119.5)
+        assert snapshot.status == OrderStatusEnum.PENDING
+        assert snapshot.filled == pytest.approx(0.0)
+        assert snapshot.remaining == pytest.approx(0.0001)
+        assert snapshot.client_order_id == "019d5d4c-d6ab"
+
+    @pytest.mark.asyncio
+    async def test_native_topbook_create_post_only(self, client: KrakenExchangeClient) -> None:
+        """Verify native REST path passes post_only as oflags=post.
+
+        Given: A post_only limit sell via native API fallback,
+        When: create_order falls back to native API,
+        Then: The native Trade client receives oflags='post'.
+        """
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.native_to_ccxt",
+                side_effect=ValueError("Unknown native symbol: BTC-EUR"),
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.native_to_kraken_rest",
+                return_value="XBTEUR",
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.Trade"
+            ) as mock_trade_class,
+            patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
+        ):
+            mock_trade_client = MagicMock()
+            mock_trade_class.return_value = mock_trade_client
+            mock_trade_client.create_order.return_value = {"txid": ["ONHBU2"]}
+            request = ExchangeOrderRequest(
+                symbol="BTC-EUR",
+                side=OrderSideEnum.SELL,
+                type=OrderTypeEnum.LIMIT,
+                amount=0.0001,
+                price=58239.1,
+                post_only=True,
+            )
+            snapshot = await client.create_order(request)
+        call_kwargs = mock_trade_client.create_order.call_args.kwargs
+        assert call_kwargs["oflags"] == "post"
+        assert snapshot.id == "ONHBU2"
+        assert snapshot.status == OrderStatusEnum.PENDING
+
+    @pytest.mark.asyncio
+    async def test_native_aggressive_create(self, client: KrakenExchangeClient) -> None:
+        """Verify native REST path for aggressive limit sell.
+
+        Given: An aggressive limit sell via native API fallback,
+        When: create_order falls back to native API,
+        Then: The snapshot has PENDING status (native doesn't return fill info).
+        """
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.native_to_ccxt",
+                side_effect=ValueError("Unknown native symbol: BTC-EUR"),
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.native_to_kraken_rest",
+                return_value="XBTEUR",
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.Trade"
+            ) as mock_trade_class,
+            patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
+        ):
+            mock_trade_client = MagicMock()
+            mock_trade_class.return_value = mock_trade_client
+            mock_trade_client.create_order.return_value = {"txid": ["O2CMWJ"]}
+            request = ExchangeOrderRequest(
+                symbol="BTC-EUR",
+                side=OrderSideEnum.SELL,
+                type=OrderTypeEnum.LIMIT,
+                amount=0.0001,
+                price=58238.0,
+            )
+            snapshot = await client.create_order(request)
+        assert snapshot.id == "O2CMWJ"
+        assert snapshot.side == OrderSideEnum.SELL
+        assert snapshot.price == pytest.approx(58238.0)
+        assert snapshot.status == OrderStatusEnum.PENDING
+
+    @pytest.mark.asyncio
+    async def test_native_market_create(self, client: KrakenExchangeClient) -> None:
+        """Verify native REST path for market sell.
+
+        Given: A market sell via native API fallback,
+        When: create_order falls back to native API,
+        Then: The snapshot has PENDING status with no price.
+        """
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.native_to_ccxt",
+                side_effect=ValueError("Unknown native symbol: BTC-EUR"),
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.native_to_kraken_rest",
+                return_value="XBTEUR",
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.Trade"
+            ) as mock_trade_class,
+            patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
+        ):
+            mock_trade_client = MagicMock()
+            mock_trade_class.return_value = mock_trade_client
+            mock_trade_client.create_order.return_value = {"txid": ["OJWE3F"]}
+            request = ExchangeOrderRequest(
+                symbol="BTC-EUR",
+                side=OrderSideEnum.SELL,
+                type=OrderTypeEnum.MARKET,
+                amount=0.0001,
+            )
+            snapshot = await client.create_order(request)
+        assert snapshot.id == "OJWE3F"
+        assert snapshot.type == OrderTypeEnum.MARKET
+        assert snapshot.status == OrderStatusEnum.PENDING
+        assert snapshot.price is None
+
+    @pytest.mark.asyncio
+    async def test_native_cancel_inflight(self, client: KrakenExchangeClient) -> None:
+        """Verify native REST path cancel returns CANCELED status.
+
+        Given: An order OLKARR created via native API that needs canceling,
+        When: cancel_order falls back to native API,
+        Then: The snapshot has status=CANCELED.
+        """
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.native_to_ccxt",
+                side_effect=ValueError("Unknown native symbol: BTC-EUR"),
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.Trade"
+            ) as mock_trade_class,
+        ):
+            mock_trade_client = MagicMock()
+            mock_trade_class.return_value = mock_trade_client
+            mock_trade_client.cancel_order.return_value = {"count": 1}
+            snapshot = await client.cancel_order("OLKARR", symbol="BTC-EUR")
+        assert snapshot.id == "OLKARR"
+        assert snapshot.status == OrderStatusEnum.CANCELED
+        mock_trade_client.cancel_order.assert_called_once_with(txid="OLKARR")
+
+    @pytest.mark.asyncio
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.native_to_kraken_websocket")
+    async def test_ws_passive_create(
+        self, mock_native_ws: MagicMock, client: KrakenExchangeClient
+    ) -> None:
+        """Verify WebSocket path creates passive limit buy with real IDs.
+
+        Given: A limit buy at 29119.5 EUR via WebSocket,
+        When: create_order_ws is called,
+        Then: The snapshot has PENDING status with the real order ID.
+        """
+        mock_native_ws.return_value = "XBT/EUR"
+        client._ws_connected = True
+
+        class _StubWs:
+            def __init__(self) -> None:
+                self.sent: list[dict[str, Any]] = []
+
+            async def send_message(self, message: dict[str, Any]) -> None:
+                self.sent.append(message)
+
+        ws_client = _StubWs()
+        original_send = ws_client.send_message
+
+        async def _send_and_resolve(message: dict[str, Any]) -> None:
+            await original_send(message)
+            req_id = message.get("req_id")
+            if req_id is not None and req_id in client._ws_order_requests:
+                client._ws_order_requests[req_id].set_result(
+                    {
+                        "result": {
+                            "order_id": "OODTGX",
+                            "cl_ord_id": "019d5d4c-d6ab",
+                        },
+                    }
+                )
+
+        ws_client.send_message = _send_and_resolve
+
+        with patch.object(client, "_get_or_create_ws_client", AsyncMock(return_value=ws_client)):
+            request = ExchangeOrderRequest(
+                symbol="BTC-EUR",
+                side=OrderSideEnum.BUY,
+                type=OrderTypeEnum.LIMIT,
+                amount=0.0001,
+                price=29119.5,
+                client_order_id="019d5d4c-d6ab",
+            )
+            snapshot = await client.create_order_ws(request)
+        assert snapshot.id == "OODTGX"
+        assert snapshot.client_order_id == "019d5d4c-d6ab"
+        assert snapshot.symbol == "BTC-EUR"
+        assert snapshot.side == OrderSideEnum.BUY
+        assert snapshot.type == OrderTypeEnum.LIMIT
+        assert snapshot.amount == pytest.approx(0.0001)
+        assert snapshot.price == pytest.approx(29119.5)
+        assert snapshot.status == OrderStatusEnum.PENDING
+        assert snapshot.filled == pytest.approx(0.0)
+        assert snapshot.remaining == pytest.approx(0.0001)
+        sent_params = ws_client.sent[0]["params"]
+        assert sent_params["limit_price"] == pytest.approx(29119.5)
+        assert sent_params["cl_ord_id"] == "019d5d4c-d6ab"
+
+    @pytest.mark.asyncio
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.native_to_kraken_websocket")
+    async def test_ws_topbook_create_post_only(
+        self, mock_native_ws: MagicMock, client: KrakenExchangeClient
+    ) -> None:
+        """Verify WebSocket path passes post_only for topbook sell.
+
+        Given: A post_only limit sell at 58239.1 EUR via WebSocket,
+        When: create_order_ws is called with post_only=True,
+        Then: The WS message includes post_only=True in params.
+        """
+        mock_native_ws.return_value = "XBT/EUR"
+        client._ws_connected = True
+
+        class _StubWs:
+            def __init__(self) -> None:
+                self.sent: list[dict[str, Any]] = []
+
+            async def send_message(self, message: dict[str, Any]) -> None:
+                self.sent.append(message)
+
+        ws_client = _StubWs()
+        original_send = ws_client.send_message
+
+        async def _send_and_resolve(message: dict[str, Any]) -> None:
+            await original_send(message)
+            req_id = message.get("req_id")
+            if req_id is not None and req_id in client._ws_order_requests:
+                client._ws_order_requests[req_id].set_result({"result": {"order_id": "ONHBU2"}})
+
+        ws_client.send_message = _send_and_resolve
+
+        with patch.object(client, "_get_or_create_ws_client", AsyncMock(return_value=ws_client)):
+            request = ExchangeOrderRequest(
+                symbol="BTC-EUR",
+                side=OrderSideEnum.SELL,
+                type=OrderTypeEnum.LIMIT,
+                amount=0.0001,
+                price=58239.1,
+                post_only=True,
+            )
+            snapshot = await client.create_order_ws(request)
+        assert snapshot.id == "ONHBU2"
+        assert snapshot.status == OrderStatusEnum.PENDING
+        assert ws_client.sent[0]["params"]["post_only"] is True
+        assert ws_client.sent[0]["params"]["limit_price"] == pytest.approx(58239.1)
+
+    @pytest.mark.asyncio
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.native_to_kraken_websocket")
+    async def test_ws_aggressive_create(
+        self, mock_native_ws: MagicMock, client: KrakenExchangeClient
+    ) -> None:
+        """Verify WebSocket path for aggressive limit sell.
+
+        Given: A limit sell at 58238.0 EUR (crossing spread) via WebSocket,
+        When: create_order_ws is called,
+        Then: The snapshot has PENDING status (WS returns before fill confirmation).
+        """
+        mock_native_ws.return_value = "XBT/EUR"
+        client._ws_connected = True
+
+        class _StubWs:
+            def __init__(self) -> None:
+                self.sent: list[dict[str, Any]] = []
+
+            async def send_message(self, message: dict[str, Any]) -> None:
+                self.sent.append(message)
+
+        ws_client = _StubWs()
+        original_send = ws_client.send_message
+
+        async def _send_and_resolve(message: dict[str, Any]) -> None:
+            await original_send(message)
+            req_id = message.get("req_id")
+            if req_id is not None and req_id in client._ws_order_requests:
+                client._ws_order_requests[req_id].set_result({"result": {"order_id": "O2CMWJ"}})
+
+        ws_client.send_message = _send_and_resolve
+
+        with patch.object(client, "_get_or_create_ws_client", AsyncMock(return_value=ws_client)):
+            request = ExchangeOrderRequest(
+                symbol="BTC-EUR",
+                side=OrderSideEnum.SELL,
+                type=OrderTypeEnum.LIMIT,
+                amount=0.0001,
+                price=58238.0,
+            )
+            snapshot = await client.create_order_ws(request)
+        assert snapshot.id == "O2CMWJ"
+        assert snapshot.side == OrderSideEnum.SELL
+        assert snapshot.price == pytest.approx(58238.0)
+        assert snapshot.status == OrderStatusEnum.PENDING
+
+    @pytest.mark.asyncio
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.native_to_kraken_websocket")
+    async def test_ws_market_create(
+        self, mock_native_ws: MagicMock, client: KrakenExchangeClient
+    ) -> None:
+        """Verify WebSocket path for market sell.
+
+        Given: A market sell for 0.0001 BTC via WebSocket,
+        When: create_order_ws is called,
+        Then: The snapshot has PENDING status with no price.
+        """
+        mock_native_ws.return_value = "XBT/EUR"
+        client._ws_connected = True
+
+        class _StubWs:
+            def __init__(self) -> None:
+                self.sent: list[dict[str, Any]] = []
+
+            async def send_message(self, message: dict[str, Any]) -> None:
+                self.sent.append(message)
+
+        ws_client = _StubWs()
+        original_send = ws_client.send_message
+
+        async def _send_and_resolve(message: dict[str, Any]) -> None:
+            await original_send(message)
+            req_id = message.get("req_id")
+            if req_id is not None and req_id in client._ws_order_requests:
+                client._ws_order_requests[req_id].set_result({"result": {"order_id": "OJWE3F"}})
+
+        ws_client.send_message = _send_and_resolve
+
+        with patch.object(client, "_get_or_create_ws_client", AsyncMock(return_value=ws_client)):
+            request = ExchangeOrderRequest(
+                symbol="BTC-EUR",
+                side=OrderSideEnum.SELL,
+                type=OrderTypeEnum.MARKET,
+                amount=0.0001,
+            )
+            snapshot = await client.create_order_ws(request)
+        assert snapshot.id == "OJWE3F"
+        assert snapshot.type == OrderTypeEnum.MARKET
+        assert snapshot.status == OrderStatusEnum.PENDING
+        assert snapshot.price is None
+        assert "limit_price" not in ws_client.sent[0]["params"]
+
+    @pytest.mark.asyncio
+    @patch("snapper.infrastructure.exchanges.implementations.kraken.native_to_kraken_websocket")
+    async def test_ws_cancel_inflight(
+        self, mock_native_ws: MagicMock, client: KrakenExchangeClient
+    ) -> None:
+        """Verify WebSocket cancel returns CANCELED status with real ID.
+
+        Given: An order OLKARR that needs canceling via WebSocket,
+        When: cancel_order_ws is called,
+        Then: The snapshot has status=CANCELED with the correct order ID.
+        """
+        mock_native_ws.return_value = "XBT/EUR"
+        client._ws_connected = True
+
+        class _StubWs:
+            def __init__(self) -> None:
+                self.sent: list[dict[str, Any]] = []
+
+            async def send_message(self, message: dict[str, Any]) -> None:
+                self.sent.append(message)
+
+        ws_client = _StubWs()
+        original_send = ws_client.send_message
+
+        async def _send_and_resolve(message: dict[str, Any]) -> None:
+            await original_send(message)
+            req_id = message.get("req_id")
+            if req_id is not None and req_id in client._ws_order_requests:
+                client._ws_order_requests[req_id].set_result({"success": True})
+
+        ws_client.send_message = _send_and_resolve
+
+        with patch.object(client, "_get_or_create_ws_client", AsyncMock(return_value=ws_client)):
+            snapshot = await client.cancel_order_ws("OLKARR")
+        assert snapshot.id == "OLKARR"
+        assert snapshot.status == OrderStatusEnum.CANCELED
+        assert ws_client.sent[0]["params"]["order_id"] == ["OLKARR"]
+        assert client._ws_order_requests == {}
+
+    @pytest.mark.asyncio
+    async def test_ccxt_cancel_does_fetch_cancel_fetch(self, client: KrakenExchangeClient) -> None:
+        """Verify cancel_order calls cancel then fetch_order for full data.
+
+        Given: A resting order OODTGX,
+        When: cancel_order is called via CCXT path,
+        Then: It calls _ccxt_client.cancel_order then _ccxt_client.fetch_order
+              and returns full snapshot data from the fetch.
+        """
+        with patch.object(client, "_ccxt_client") as mock_ccxt:
+            mock_ccxt.cancel_order = AsyncMock(return_value={"info": {"result": {"count": 1}}})
+            mock_ccxt.fetch_order = AsyncMock(return_value=dict(self.CCXT_PASSIVE_CANCEL_FETCH))
+            snapshot = await client.cancel_order("OODTGX", "BTC-EUR")
+        mock_ccxt.cancel_order.assert_called_once_with("OODTGX", "BTC/EUR")
+        mock_ccxt.fetch_order.assert_called_once_with("OODTGX", "BTC/EUR")
+        assert snapshot.id == "OODTGX"
+        assert snapshot.status == OrderStatusEnum.CANCELED
+        assert snapshot.side == OrderSideEnum.BUY
+        assert snapshot.type == OrderTypeEnum.LIMIT
+        assert snapshot.amount == pytest.approx(0.0001)
+        assert snapshot.price == pytest.approx(29119.5)
+        assert snapshot.filled == pytest.approx(0.0)
+        assert snapshot.remaining == pytest.approx(0.0001)
+        assert snapshot.client_order_id == "019d5d4c-d6ab"
+
+    @pytest.mark.asyncio
+    async def test_ccxt_create_then_fetch_lifecycle(self, client: KrakenExchangeClient) -> None:
+        """Verify full create-then-fetch lifecycle with real fixture data.
+
+        Given: A passive limit buy created via CCXT,
+        When: create_order is followed by get_order,
+        Then: Both return consistent snapshots with the same ID and data.
+        """
+        with (
+            patch.object(client, "_ccxt_client") as mock_ccxt,
+            patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
+        ):
+            mock_ccxt.create_order = AsyncMock(return_value=dict(self.CCXT_PASSIVE_CREATE))
+            request = ExchangeOrderRequest(
+                symbol="BTC-EUR",
+                side=OrderSideEnum.BUY,
+                type=OrderTypeEnum.LIMIT,
+                amount=0.0001,
+                price=29119.5,
+                client_order_id="019d5d4c-d6ab",
+            )
+            create_snap = await client.create_order(request)
+
+        with patch.object(client, "_ccxt_client") as mock_ccxt:
+            mock_ccxt.fetch_order = AsyncMock(return_value=dict(self.CCXT_PASSIVE_FETCH))
+            fetch_snap = await client.get_order("OODTGX", "BTC-EUR")
+
+        assert create_snap.id == fetch_snap.id
+        assert create_snap.status == fetch_snap.status
+        assert create_snap.filled == fetch_snap.filled
+        assert create_snap.remaining == fetch_snap.remaining
+        assert create_snap.price == fetch_snap.price
+        assert create_snap.amount == fetch_snap.amount
+        assert create_snap.side == fetch_snap.side
+        assert create_snap.type == fetch_snap.type

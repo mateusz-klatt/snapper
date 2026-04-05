@@ -1,7 +1,15 @@
-"""Unit tests for Kraken exchange OHLC schemas."""
+"""Unit tests for Kraken exchange OHLC schemas and exchange contracts."""
+
+from datetime import UTC
+from datetime import datetime
 
 import pytest
 
+from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
+from snapper.infrastructure.exchanges.contracts import OrderSideEnum
+from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
+from snapper.infrastructure.exchanges.contracts import to_fill_status
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenCandleSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenOhlcEventEnvelope
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenOhlcSubscribeParamsSchema
@@ -75,3 +83,70 @@ def test_ohlc_message_helpers_return_primary_symbol_and_dicts() -> None:
     assert message.primary_symbol() == "ETH-USD"
     assert len(normalized) == 2
     assert normalized[0]["close"] == pytest.approx(3025.0)
+
+
+class TestToFillStatus:
+    """Tests for to_fill_status helper function."""
+
+    def _make_execution(
+        self, status: OrderStatusEnum, cum_qty: float | None = None
+    ) -> ExecutionUpdate:
+        """Build a minimal ExecutionUpdate for fill-status testing.
+
+        Args:
+            status: Order status to set on the execution.
+            cum_qty: Cumulative filled quantity (optional).
+
+        Returns:
+            ExecutionUpdate with the specified status and cum_qty.
+        """
+        return ExecutionUpdate(
+            order_id="test-order",
+            exec_type="trade",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=OrderTypeEnum.LIMIT,
+            order_status=status,
+            timestamp=datetime.now(UTC),
+            cum_qty=cum_qty,
+        )
+
+    def test_partial_when_open_with_fills(self) -> None:
+        """Return 'partial' for an open order with cumulative fills.
+
+        Given: ExecutionUpdate with OPEN status and cum_qty > 0,
+        When: to_fill_status is called,
+        Then: Returns 'partial'.
+        """
+        execution = self._make_execution(OrderStatusEnum.OPEN, cum_qty=5.0)
+        assert to_fill_status(execution) == "partial"
+
+    def test_filled_when_closed(self) -> None:
+        """Return 'filled' for a closed order.
+
+        Given: ExecutionUpdate with CLOSED status,
+        When: to_fill_status is called,
+        Then: Returns 'filled'.
+        """
+        execution = self._make_execution(OrderStatusEnum.CLOSED)
+        assert to_fill_status(execution) == "filled"
+
+    def test_filled_when_open_with_zero_cum_qty(self) -> None:
+        """Return 'filled' for an open order with zero cum_qty.
+
+        Given: ExecutionUpdate with OPEN status and cum_qty=0,
+        When: to_fill_status is called,
+        Then: Returns 'filled' (no partial fills yet).
+        """
+        execution = self._make_execution(OrderStatusEnum.OPEN, cum_qty=0.0)
+        assert to_fill_status(execution) == "filled"
+
+    def test_filled_when_open_with_none_cum_qty(self) -> None:
+        """Return 'filled' for an open order with None cum_qty.
+
+        Given: ExecutionUpdate with OPEN status and cum_qty=None,
+        When: to_fill_status is called,
+        Then: Returns 'filled' (None treated as zero).
+        """
+        execution = self._make_execution(OrderStatusEnum.OPEN, cum_qty=None)
+        assert to_fill_status(execution) == "filled"
