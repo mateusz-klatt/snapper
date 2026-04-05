@@ -639,6 +639,25 @@ class TestExecuteDesiredUnitsShortSelling:
         assert order.side == "buy"
 
     @pytest.mark.asyncio
+    async def test_flip_long_to_short_drawdown_closes_only(self) -> None:
+        """Verify flip under drawdown still closes the long but skips opening short.
+
+        Given: Engine with position_qty=+0.05 and drawdown exceeding limit,
+        When: desired_units=-0.05,
+        Then: SELL order sent for closing portion (0.05) only, no short opened.
+        """
+        engine, mock_socket = self._make_engine()
+        engine.position_qty = 0.05
+        engine.entry_price = 50_000.0
+        engine.portfolio.update_fill("BTC-USD", "buy", 0.05, 50_000.0, 0.0)
+        engine.peak_equity = 20_000.0
+        await engine.execute_desired_units(-0.05, current_price=50_000.0)
+        assert mock_socket.send.called
+        order = mock_socket.send.call_args[0][1]
+        assert order.side == "sell"
+        assert order.quantity == pytest.approx(0.05)
+
+    @pytest.mark.asyncio
     async def test_already_at_target_no_order(self) -> None:
         """Verify no order when already at desired position.
 

@@ -452,8 +452,9 @@ class TradingEngineService:
             opening_qty = 0.0
         if opening_qty > 0:
             if not self.risk.can_open_new_trade(equity, self.peak_equity):
-                return
-            opening_qty = self._cap_opening_size(opening_qty, current_price)
+                opening_qty = 0.0
+            else:
+                opening_qty = self._cap_opening_size(opening_qty, current_price)
         total_order = closing_qty + opening_qty
         specs = self.instrument_specs.get(self.instrument, {})
         lot = float(specs.get("lot_size", 0.0))
