@@ -224,6 +224,9 @@ _STATUS_MAP: dict[str, OrderStatusEnum] = {
     "cancelled": OrderStatusEnum.CANCELED,
     "canceled": OrderStatusEnum.CANCELED,
     "untouched": OrderStatusEnum.OPEN,
+    "ENTERED_BOOK": OrderStatusEnum.OPEN,
+    "FULLY_EXECUTED": OrderStatusEnum.CLOSED,
+    "notFound": OrderStatusEnum.CANCELED,
 }
 _ORDER_TYPE_MAP: dict[str, OrderTypeEnum] = {
     "lmt": OrderTypeEnum.LIMIT,

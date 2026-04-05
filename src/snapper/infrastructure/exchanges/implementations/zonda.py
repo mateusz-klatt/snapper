@@ -751,19 +751,20 @@ class ZondaExchangeClient(ExchangeClientBase):
                 request.price,
                 order_params,
             )
-            if ccxt_order.get("status") is None:
-                order_id = ccxt_order.get("id")
-                if order_id:
-                    ccxt_order = await asyncio.to_thread(
-                        self._ccxt_client.fetch_order, order_id, ccxt_symbol
-                    )
-                else:
-                    ccxt_order["status"] = ccxt_order.get("status") or "open"
-                    ccxt_order["symbol"] = ccxt_order.get("symbol") or ccxt_symbol
-                    ccxt_order["side"] = ccxt_order.get("side") or request.side.value
-                    ccxt_order["type"] = ccxt_order.get("type") or request.type.value
-                    ccxt_order["amount"] = ccxt_order.get("amount") or request.amount
-            order = self._convert_ccxt_order(ccxt_order, request.symbol)
+            exchange_id = str(ccxt_order.get("id", ""))
+            order = ExchangeOrderSnapshot(
+                id=exchange_id,
+                client_order_id=request.client_order_id,
+                symbol=request.symbol,
+                side=request.side,
+                type=request.type,
+                amount=float(request.amount),
+                price=float(request.price) if request.price else None,
+                status=OrderStatusEnum.PENDING,
+                filled=0.0,
+                remaining=float(request.amount),
+                timestamp=time.time(),
+            )
             if order.id:
                 db_result = await self._log_order_to_db(request, order)
                 if db_result is not None:

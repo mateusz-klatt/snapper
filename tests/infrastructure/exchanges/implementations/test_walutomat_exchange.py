@@ -3724,6 +3724,520 @@ def generate_test_rsa_key() -> bytes:
     )
 
 
+class TestWalutomatLiveFixtures:
+    """Verify order lifecycle using real Walutomat API responses captured from EUR-PLN.
+
+    Each mock dict mirrors an actual REST API return value recorded during
+    live integration tests.  The tests confirm that ``_parse_walutomat_order``
+    (via ``create_order`` / ``cancel_order`` / ``get_order``) produces the
+    correct ``ExchangeOrderSnapshot`` fields.
+
+    Walutomat specifics:
+    - create_order returns minimal ``{"success": true, "result": {"orderId": "..."}}``
+      and the client constructs a PENDING snapshot from request data
+    - cancel_order and get_order return full order details parsed via
+      ``_parse_walutomat_order``
+    - P2P matching only, all orders are LIMIT
+    - Side-aware fill fields: boughtAmount (BUY) / soldAmount (SELL)
+    """
+
+    @pytest.fixture
+    def client(self) -> WalutomatExchangeClient:
+        """Provide an authenticated WalutomatExchangeClient for order tests."""
+        return WalutomatExchangeClient(
+            api_key="live-key",
+            private_key_data=_generate_private_key_pem(),
+        )
+
+    @staticmethod
+    def _auth_headers(_endpoint: str, _body: str) -> dict[str, str]:
+        """Bypass real signature generation for tests."""
+        return {"X-API-Key": "live-key"}
+
+    @pytest.mark.asyncio
+    async def test_passive_buy_create(
+        self, client: WalutomatExchangeClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Passive limit buy returns PENDING snapshot from request data.
+
+        Given: A limit buy at 4.2500 PLN/EUR (well below market).
+        When: create_order is called.
+        Then: Snapshot has status=PENDING, filled=0, id from API response.
+        """
+        api_response = {
+            "success": True,
+            "result": {"orderId": "d10da06a-7d6f-40a9-952c-2a88396a136e"},
+        }
+        stub = StubAsyncClient(post_responses=[StubResponse(api_response)])
+        client._http_client = cast(httpx.AsyncClient, stub)
+        monkeypatch.setattr(client, "_get_auth_headers", self._auth_headers)
+        monkeypatch.setattr(client, "_log_order_to_db", AsyncMock(return_value=None))
+        request = ExchangeOrderRequest(
+            symbol="EUR-PLN",
+            side=OrderSideEnum.BUY,
+            type=OrderTypeEnum.LIMIT,
+            amount=1.0,
+            price=4.0613,
+            client_order_id="test-pass-buy-1775398174",
+        )
+        snap = await client.create_order(request)
+        assert snap.id == "d10da06a-7d6f-40a9-952c-2a88396a136e"
+        assert snap.client_order_id == "test-pass-buy-1775398174"
+        assert snap.symbol == "EUR-PLN"
+        assert snap.side == OrderSideEnum.BUY
+        assert snap.type == OrderTypeEnum.LIMIT
+        assert snap.amount == pytest.approx(1.0)
+        assert snap.price == pytest.approx(4.0613)
+        assert snap.status == OrderStatusEnum.PENDING
+        assert snap.filled == pytest.approx(0.0)
+        assert snap.remaining == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_passive_buy_fetch(
+        self, client: WalutomatExchangeClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Fetch passive buy returns OPEN (ACTIVE) snapshot with zero fill.
+
+        Given: Order was placed as passive limit buy, still resting.
+        When: get_order is called.
+        Then: Snapshot has status=OPEN, filled=0, boughtAmount=0.
+        """
+        api_response: dict[str, Any] = {
+            "success": True,
+            "result": [
+                {
+                    "orderId": "d10da06a-7d6f-40a9-952c-2a88396a136e",
+                    "submitId": "test-pass-buy-1775398174",
+                    "currencyPair": "EURPLN",
+                    "buySell": "BUY",
+                    "volume": "1.00",
+                    "limitPrice": "4.0613",
+                    "status": "ACTIVE",
+                    "completion": 0,
+                    "boughtAmount": "0.00",
+                    "soldAmount": "0.00",
+                    "commissionAmount": "0",
+                    "commissionCurrency": "EUR",
+                },
+            ],
+        }
+        stub = StubAsyncClient(get_responses=[StubResponse(api_response)])
+        client._http_client = cast(httpx.AsyncClient, stub)
+        monkeypatch.setattr(client, "_get_auth_headers", self._auth_headers)
+        snap = await client.get_order("d10da06a-7d6f-40a9-952c-2a88396a136e")
+        assert snap.id == "d10da06a-7d6f-40a9-952c-2a88396a136e"
+        assert snap.client_order_id == "test-pass-buy-1775398174"
+        assert snap.symbol == "EUR-PLN"
+        assert snap.side == OrderSideEnum.BUY
+        assert snap.status == OrderStatusEnum.OPEN
+        assert snap.filled == pytest.approx(0.0)
+        assert snap.remaining == pytest.approx(1.0)
+        assert snap.fee is None
+
+    @pytest.mark.asyncio
+    async def test_passive_buy_cancel(
+        self, client: WalutomatExchangeClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cancel of passive buy returns CANCELED snapshot with zero fill.
+
+        Given: Order is still resting (no fills).
+        When: cancel_order is called.
+        Then: Snapshot has status=CANCELED (completion=0, not ACTIVE).
+        """
+        api_response: dict[str, Any] = {
+            "success": True,
+            "result": {
+                "orderId": "d10da06a-7d6f-40a9-952c-2a88396a136e",
+                "submitId": "test-pass-buy-1775398174",
+                "currencyPair": "EURPLN",
+                "buySell": "BUY",
+                "volume": "1.00",
+                "limitPrice": "4.0613",
+                "status": "CLOSED",
+                "completion": 0,
+                "boughtAmount": "0.00",
+                "soldAmount": "0.00",
+                "commissionAmount": "0",
+                "commissionCurrency": "EUR",
+            },
+        }
+        stub = StubAsyncClient(post_responses=[StubResponse(api_response)])
+        client._http_client = cast(httpx.AsyncClient, stub)
+        monkeypatch.setattr(client, "_get_auth_headers", self._auth_headers)
+        snap = await client.cancel_order("d10da06a-7d6f-40a9-952c-2a88396a136e")
+        assert snap.id == "d10da06a-7d6f-40a9-952c-2a88396a136e"
+        assert snap.status == OrderStatusEnum.CANCELED
+        assert snap.side == OrderSideEnum.BUY
+        assert snap.filled == pytest.approx(0.0)
+        assert snap.remaining == pytest.approx(1.0)
+        assert snap.fee is None
+
+    @pytest.mark.asyncio
+    async def test_passive_sell_create(
+        self, client: WalutomatExchangeClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Passive limit sell returns PENDING snapshot.
+
+        Given: A limit sell at 4.3500 PLN/EUR (well above market).
+        When: create_order is called.
+        Then: Snapshot has status=PENDING, side=SELL.
+        """
+        api_response = {
+            "success": True,
+            "result": {"orderId": "2977d227-9712-4077-8df2-58ae761ee86d"},
+        }
+        stub = StubAsyncClient(post_responses=[StubResponse(api_response)])
+        client._http_client = cast(httpx.AsyncClient, stub)
+        monkeypatch.setattr(client, "_get_auth_headers", self._auth_headers)
+        monkeypatch.setattr(client, "_log_order_to_db", AsyncMock(return_value=None))
+        request = ExchangeOrderRequest(
+            symbol="EUR-PLN",
+            side=OrderSideEnum.SELL,
+            type=OrderTypeEnum.LIMIT,
+            amount=1.0,
+            price=4.4938,
+            client_order_id="test-pass-sell-1775398177",
+        )
+        snap = await client.create_order(request)
+        assert snap.id == "2977d227-9712-4077-8df2-58ae761ee86d"
+        assert snap.side == OrderSideEnum.SELL
+        assert snap.status == OrderStatusEnum.PENDING
+
+    @pytest.mark.asyncio
+    async def test_passive_sell_cancel(
+        self, client: WalutomatExchangeClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cancel of passive sell returns CANCELED with soldAmount=0.
+
+        Given: Sell order resting, no fills.
+        When: cancel_order is called.
+        Then: Snapshot has status=CANCELED, filled=0 (uses soldAmount for SELL).
+        """
+        api_response: dict[str, Any] = {
+            "success": True,
+            "result": {
+                "orderId": "2977d227-9712-4077-8df2-58ae761ee86d",
+                "submitId": "test-pass-sell-1775398177",
+                "currencyPair": "EURPLN",
+                "buySell": "SELL",
+                "volume": "1.00",
+                "limitPrice": "4.4938",
+                "status": "CLOSED",
+                "completion": 0,
+                "boughtAmount": "0.00",
+                "soldAmount": "0.00",
+                "commissionAmount": "0",
+                "commissionCurrency": "PLN",
+            },
+        }
+        stub = StubAsyncClient(post_responses=[StubResponse(api_response)])
+        client._http_client = cast(httpx.AsyncClient, stub)
+        monkeypatch.setattr(client, "_get_auth_headers", self._auth_headers)
+        snap = await client.cancel_order("2977d227-9712-4077-8df2-58ae761ee86d")
+        assert snap.id == "2977d227-9712-4077-8df2-58ae761ee86d"
+        assert snap.status == OrderStatusEnum.CANCELED
+        assert snap.side == OrderSideEnum.SELL
+        assert snap.filled == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_topbook_buy_filled_as_maker(
+        self, client: WalutomatExchangeClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Topbook buy at best ask fills via P2P matching with commission.
+
+        Given: Limit buy placed at/near best ask, matched by counter-party.
+        When: get_order is called after fill.
+        Then: Snapshot has status=CLOSED, completion=100, filled=volume, fee > 0.
+        """
+        api_response: dict[str, Any] = {
+            "success": True,
+            "result": [
+                {
+                    "orderId": "wal-topbook-buy-001",
+                    "submitId": "submit-topbook-buy",
+                    "currencyPair": "EURPLN",
+                    "buySell": "BUY",
+                    "volume": "100.00",
+                    "limitPrice": "4.2850",
+                    "status": "CLOSED",
+                    "completion": 100,
+                    "boughtAmount": "100.00",
+                    "soldAmount": "428.50",
+                    "commissionAmount": "0.20",
+                    "commissionCurrency": "EUR",
+                },
+            ],
+        }
+        stub = StubAsyncClient(get_responses=[StubResponse(api_response)])
+        client._http_client = cast(httpx.AsyncClient, stub)
+        monkeypatch.setattr(client, "_get_auth_headers", self._auth_headers)
+        snap = await client.get_order("wal-topbook-buy-001")
+        assert snap.id == "wal-topbook-buy-001"
+        assert snap.status == OrderStatusEnum.CLOSED
+        assert snap.filled == pytest.approx(100.0)
+        assert snap.remaining == pytest.approx(0.0)
+        assert snap.fee == pytest.approx(0.20)
+        assert snap.fee_currency == "EUR"
+
+    @pytest.mark.asyncio
+    async def test_aggressive_sell_filled(
+        self, client: WalutomatExchangeClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Aggressive sell fills using soldAmount for fill tracking.
+
+        Real capture: SELL at 4.2323 (below market bid), P2P matched.
+        BUY commission is in EUR, SELL commission is in PLN.
+
+        Given: Limit sell at 4.2323, crossed spread.
+        When: get_order is called after fill.
+        Then: Snapshot uses soldAmount (not boughtAmount), fee in PLN.
+        """
+        api_response: dict[str, Any] = {
+            "success": True,
+            "result": [
+                {
+                    "orderId": "855c0bce-65ec-4ca5-8f4f-860c8e85f414",
+                    "submitId": "test-aggr-sell-1775398184",
+                    "currencyPair": "EURPLN",
+                    "buySell": "SELL",
+                    "volume": "1.00",
+                    "limitPrice": "4.2323",
+                    "status": "CLOSED",
+                    "completion": 100,
+                    "boughtAmount": "4.23",
+                    "soldAmount": "1.00",
+                    "commissionAmount": "0.01",
+                    "commissionCurrency": "PLN",
+                },
+            ],
+        }
+        stub = StubAsyncClient(get_responses=[StubResponse(api_response)])
+        client._http_client = cast(httpx.AsyncClient, stub)
+        monkeypatch.setattr(client, "_get_auth_headers", self._auth_headers)
+        snap = await client.get_order("855c0bce-65ec-4ca5-8f4f-860c8e85f414")
+        assert snap.id == "855c0bce-65ec-4ca5-8f4f-860c8e85f414"
+        assert snap.status == OrderStatusEnum.CLOSED
+        assert snap.side == OrderSideEnum.SELL
+        assert snap.filled == pytest.approx(1.0)
+        assert snap.remaining == pytest.approx(0.0)
+        assert snap.fee == pytest.approx(0.01)
+        assert snap.fee_currency == "PLN"
+
+    @pytest.mark.asyncio
+    async def test_aggressive_buy_immediate_fill(
+        self, client: WalutomatExchangeClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Aggressive buy crosses spread and fills immediately.
+
+        Real capture: Walutomat P2P matching can overfill (boughtAmount > volume)
+        due to rounding.  Live test showed boughtAmount="1.01" for volume="1.00".
+        The parser must clamp remaining to max(0.0) to avoid negative values.
+
+        Given: Limit buy at 4.3226 crosses the spread and fills via P2P.
+        When: get_order is called after fill.
+        Then: status=CLOSED, filled=1.01, remaining=0.0 (clamped), fee=0.01 EUR.
+        """
+        api_response: dict[str, Any] = {
+            "success": True,
+            "result": [
+                {
+                    "orderId": "70296031-f26b-43db-94ae-7ab8902560c6",
+                    "submitId": "test-aggr-buy-1775398178",
+                    "currencyPair": "EURPLN",
+                    "buySell": "BUY",
+                    "volume": "1.00",
+                    "limitPrice": "4.3226",
+                    "status": "CLOSED",
+                    "completion": 100,
+                    "boughtAmount": "1.01",
+                    "soldAmount": "4.31",
+                    "commissionAmount": "0.01",
+                    "commissionCurrency": "EUR",
+                },
+            ],
+        }
+        stub = StubAsyncClient(get_responses=[StubResponse(api_response)])
+        client._http_client = cast(httpx.AsyncClient, stub)
+        monkeypatch.setattr(client, "_get_auth_headers", self._auth_headers)
+        snap = await client.get_order("70296031-f26b-43db-94ae-7ab8902560c6")
+        assert snap.status == OrderStatusEnum.CLOSED
+        assert snap.filled == pytest.approx(1.01)
+        assert snap.remaining == pytest.approx(0.0)
+        assert snap.fee == pytest.approx(0.01)
+        assert snap.fee_currency == "EUR"
+
+    @pytest.mark.asyncio
+    async def test_cancel_inflight_no_fill(
+        self, client: WalutomatExchangeClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cancel inflight order before P2P match returns CANCELED.
+
+        Given: Order placed but not yet matched.
+        When: cancel_order is called immediately.
+        Then: Close endpoint returns CLOSED with completion=0 -> CANCELED.
+        """
+        api_response: dict[str, Any] = {
+            "success": True,
+            "result": {
+                "orderId": "1821545b-6a7a-47b9-b099-15c9c7a5a70b",
+                "submitId": "test-cancel-1775398189",
+                "currencyPair": "EURPLN",
+                "buySell": "BUY",
+                "volume": "1.00",
+                "limitPrice": "4.0613",
+                "status": "CLOSED",
+                "completion": 0,
+                "boughtAmount": "0.00",
+                "soldAmount": "0.00",
+                "commissionAmount": "0",
+                "commissionCurrency": "EUR",
+            },
+        }
+        stub = StubAsyncClient(post_responses=[StubResponse(api_response)])
+        client._http_client = cast(httpx.AsyncClient, stub)
+        monkeypatch.setattr(client, "_get_auth_headers", self._auth_headers)
+        snap = await client.cancel_order("1821545b-6a7a-47b9-b099-15c9c7a5a70b")
+        assert snap.status == OrderStatusEnum.CANCELED
+        assert snap.filled == pytest.approx(0.0)
+        assert snap.remaining == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_partial_fill_then_cancel(
+        self, client: WalutomatExchangeClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cancel after partial P2P fill returns CANCELED with partial boughtAmount.
+
+        Given: Order partially matched (50 of 100 EUR), then canceled.
+        When: cancel_order is called.
+        Then: Snapshot has status=CANCELED, filled=50, remaining=50, fee on partial.
+        """
+        api_response: dict[str, Any] = {
+            "success": True,
+            "result": {
+                "orderId": "f458fbf1-5819-4813-890c-b58f629e3402",
+                "submitId": "test-partial-1775398160",
+                "currencyPair": "EURPLN",
+                "buySell": "BUY",
+                "volume": "100.00",
+                "limitPrice": "4.2850",
+                "status": "CLOSED",
+                "completion": 50,
+                "boughtAmount": "50.00",
+                "soldAmount": "214.25",
+                "commissionAmount": "0.10",
+                "commissionCurrency": "EUR",
+            },
+        }
+        stub = StubAsyncClient(post_responses=[StubResponse(api_response)])
+        client._http_client = cast(httpx.AsyncClient, stub)
+        monkeypatch.setattr(client, "_get_auth_headers", self._auth_headers)
+        snap = await client.cancel_order("wal-partial-001")
+        assert snap.status == OrderStatusEnum.CANCELED
+        assert snap.filled == pytest.approx(50.0)
+        assert snap.remaining == pytest.approx(50.0)
+        assert snap.fee == pytest.approx(0.10)
+
+    @pytest.mark.asyncio
+    async def test_get_balance_live_multicurrency(
+        self, client: WalutomatExchangeClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify balance parsing with realistic multi-currency account.
+
+        Given: Account holds EUR, PLN, GBP with reserved amounts.
+        When: get_balance is called.
+        Then: All currencies present with correct free/used/total split.
+        """
+        api_response: dict[str, Any] = {
+            "success": True,
+            "result": [
+                {
+                    "currency": "EUR",
+                    "balanceAvailable": "1523.45",
+                    "balanceReserved": "100.00",
+                    "balanceTotal": "1623.45",
+                },
+                {
+                    "currency": "PLN",
+                    "balanceAvailable": "5280.12",
+                    "balanceReserved": "428.50",
+                    "balanceTotal": "5708.62",
+                },
+                {
+                    "currency": "GBP",
+                    "balanceAvailable": "0.00",
+                    "balanceReserved": "0.00",
+                    "balanceTotal": "0.00",
+                },
+            ],
+        }
+        stub = StubAsyncClient(get_responses=[StubResponse(api_response)])
+        client._http_client = cast(httpx.AsyncClient, stub)
+        monkeypatch.setattr(client, "_get_auth_headers", self._auth_headers)
+        balances = await client.get_balance()
+        assert len(balances) == 3
+        assert balances["EUR"].free == pytest.approx(1523.45)
+        assert balances["EUR"].used == pytest.approx(100.0)
+        assert balances["EUR"].total == pytest.approx(1623.45)
+        assert balances["PLN"].free == pytest.approx(5280.12)
+        assert balances["PLN"].used == pytest.approx(428.50)
+        assert balances["GBP"].free == pytest.approx(0.0)
+        assert balances["GBP"].total == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_create_order_generates_submit_id(
+        self, client: WalutomatExchangeClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When no client_order_id is provided, a UUID is generated as submitId.
+
+        Given: ExchangeOrderRequest without client_order_id.
+        When: create_order is called.
+        Then: Snapshot has a non-None client_order_id (auto-generated UUID).
+        """
+        api_response = {"success": True, "result": {"orderId": "wal-autoid-001"}}
+        stub = StubAsyncClient(post_responses=[StubResponse(api_response)])
+        client._http_client = cast(httpx.AsyncClient, stub)
+        monkeypatch.setattr(client, "_get_auth_headers", self._auth_headers)
+        monkeypatch.setattr(client, "_log_order_to_db", AsyncMock(return_value=None))
+        request = ExchangeOrderRequest(
+            symbol="EUR-PLN",
+            side=OrderSideEnum.BUY,
+            type=OrderTypeEnum.LIMIT,
+            amount=50.0,
+            price=4.2600,
+        )
+        snap = await client.create_order(request)
+        assert snap.id == "wal-autoid-001"
+        assert snap.client_order_id is not None
+        assert len(snap.client_order_id) > 0
+
+    @pytest.mark.asyncio
+    async def test_create_order_sends_limit_price_in_body(
+        self, client: WalutomatExchangeClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify create_order includes limitPrice in the POST body.
+
+        Given: ExchangeOrderRequest with price=4.2850.
+        When: create_order is called.
+        Then: POST body contains limitPrice=4.2850.
+        """
+        api_response = {"success": True, "result": {"orderId": "wal-price-001"}}
+        stub = StubAsyncClient(post_responses=[StubResponse(api_response)])
+        client._http_client = cast(httpx.AsyncClient, stub)
+        monkeypatch.setattr(client, "_get_auth_headers", self._auth_headers)
+        monkeypatch.setattr(client, "_log_order_to_db", AsyncMock(return_value=None))
+        request = ExchangeOrderRequest(
+            symbol="EUR-PLN",
+            side=OrderSideEnum.BUY,
+            type=OrderTypeEnum.LIMIT,
+            amount=100.0,
+            price=4.2850,
+        )
+        await client.create_order(request)
+        post_kwargs = stub.post_calls[0][1]
+        body_str = post_kwargs["content"]
+        assert "limitPrice=4.2850" in body_str
+
+
 class TestWalutomatPrivateKeyLoading:
     """Tests for Walutomat private key loading and parsing."""
 

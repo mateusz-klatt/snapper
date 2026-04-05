@@ -80,8 +80,6 @@ from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
 
 _CREDENTIALS_REQUIRED_MSG = "API credentials required for trading"
 _WS_CLIENT_CONNECTED_MSG = "WebSocket client should be connected"
-_WS_ORDER_TIMEOUT_SECONDS = 10.0
-
 _CCXT_STATUS_MAP: Final[dict[str, OrderStatusEnum]] = {
     "open": OrderStatusEnum.OPEN,
     "closed": OrderStatusEnum.CLOSED,
@@ -162,8 +160,6 @@ class KrakenExchangeClient(ExchangeClientBase):
         self._execution_queue: asyncio.Queue[ExecutionUpdate] = asyncio.Queue()
         self._raw_instrument_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._instrument_queue: asyncio.Queue[InstrumentPairDescriptor] = asyncio.Queue()
-        self._ws_order_requests: dict[int, asyncio.Future[dict[str, Any]]] = {}
-        self._ws_req_id_counter = 1
         self._circuit_failures = 0
         self._circuit_open_until = 0.0
         self._max_failures = 5
@@ -370,19 +366,20 @@ class KrakenExchangeClient(ExchangeClientBase):
             float(request.price) if request.price else None,
             ccxt_params,
         )
-        if order_data.get("status") is None:
-            order_id = order_data.get("id")
-            if order_id:
-                order_data = await self._with_retry(
-                    self._ccxt_client.fetch_order, order_id, ccxt_symbol
-                )
-            else:
-                order_data["status"] = order_data.get("status") or "open"
-                order_data["symbol"] = order_data.get("symbol") or ccxt_symbol
-                order_data["side"] = order_data.get("side") or request.side.value
-                order_data["type"] = order_data.get("type") or request.type.value
-                order_data["amount"] = order_data.get("amount") or request.amount
-        order = self._convert_ccxt_order(order_data)
+        exchange_id = str(order_data.get("id", ""))
+        order = ExchangeOrderSnapshot(
+            id=exchange_id,
+            client_order_id=request.client_order_id,
+            symbol=request.symbol,
+            side=request.side,
+            type=request.type,
+            amount=float(request.amount),
+            price=float(request.price) if request.price else None,
+            status=OrderStatusEnum.PENDING,
+            filled=0.0,
+            remaining=float(request.amount),
+            timestamp=time.time(),
+        )
         if order.id:
             db_result = await self._log_order_to_db(request, order)
             if db_result is not None:
@@ -493,146 +490,6 @@ class KrakenExchangeClient(ExchangeClientBase):
         except Exception as e:
             logger.error(f"Failed to cancel order {order_id}: {e}")
             raise
-
-    async def create_order_ws(
-        self,
-        request: ExchangeOrderRequest,
-    ) -> ExchangeOrderSnapshot:
-        """Create order via WebSocket for lower latency.
-
-        Uses ``_WS_ORDER_TIMEOUT_SECONDS`` as the timeout; callers that need a
-        different deadline should wrap the call with ``asyncio.timeout()``.
-
-        Args:
-            request: Order parameters.
-
-        Returns:
-            Created order snapshot.
-
-        Raises:
-            RuntimeError: If credentials missing or WebSocket not connected.
-            TimeoutError: If order creation times out.
-        """
-        if not self.api_key or not self.api_secret:
-            raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
-        ws = await self._get_or_create_ws_client()
-        if not ws or not self._ws_connected:
-            raise RuntimeError("WebSocket not connected - call connect() first")
-        req_id = self._ws_req_id_counter
-        self._ws_req_id_counter += 1
-        ws_symbol = native_to_kraken_websocket(request.symbol)
-        params: dict[str, Any] = {
-            "order_type": request.type.value,
-            "side": request.side.value,
-            "symbol": ws_symbol,
-            "order_qty": float(request.amount),
-        }
-        if request.price:
-            params["limit_price"] = float(request.price)
-        if request.client_order_id:
-            params["cl_ord_id"] = str(request.client_order_id)
-        if request.leverage is not None:
-            params["margin"] = True
-        if request.reduce_only:
-            params["reduce_only"] = True
-        if request.post_only:
-            params["post_only"] = True
-        future: asyncio.Future[dict[str, Any]] = asyncio.Future()
-        self._ws_order_requests[req_id] = future
-        try:
-            await ws.send_message(
-                message={
-                    "method": "add_order",
-                    "params": params,
-                    "req_id": req_id,
-                },
-            )
-            async with asyncio.timeout(_WS_ORDER_TIMEOUT_SECONDS):
-                result = await future
-            return self._convert_ws_order_response(result, request)
-        except TimeoutError as e:
-            logger.error(
-                f"WebSocket order timeout after {_WS_ORDER_TIMEOUT_SECONDS}s (req_id={req_id})"
-            )
-            raise TimeoutError(
-                f"ExchangeOrderSnapshot creation timeout after {_WS_ORDER_TIMEOUT_SECONDS}s"
-            ) from e
-        finally:
-            self._ws_order_requests.pop(req_id, None)
-
-    @staticmethod
-    def _build_canceled_order_snapshot(order_id: str) -> ExchangeOrderSnapshot:
-        """Build a canceled order snapshot with default values.
-
-        Args:
-            order_id: The cancelled order ID.
-
-        Returns:
-            ExchangeOrderSnapshot with CANCELED status.
-        """
-        return ExchangeOrderSnapshot(
-            id=order_id,
-            client_order_id=None,
-            symbol="",
-            side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
-            amount=float("0"),
-            price=None,
-            status=OrderStatusEnum.CANCELED,
-            filled=float("0"),
-            remaining=float("0"),
-            timestamp=time.time(),
-            fee=None,
-        )
-
-    async def cancel_order_ws(
-        self,
-        order_id: str,
-    ) -> ExchangeOrderSnapshot:
-        """Cancel order via WebSocket for lower latency.
-
-        Uses ``_WS_ORDER_TIMEOUT_SECONDS`` as the timeout; callers that need a
-        different deadline should wrap the call with ``asyncio.timeout()``.
-
-        Args:
-            order_id: Exchange order ID to cancel.
-
-        Returns:
-            Cancelled order snapshot.
-
-        Raises:
-            RuntimeError: If credentials missing or WebSocket not connected.
-            TimeoutError: If cancellation times out.
-        """
-        if not self.api_key or not self.api_secret:
-            raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
-        ws = await self._get_or_create_ws_client()
-        if not ws or not self._ws_connected:
-            raise RuntimeError("WebSocket not connected - call connect() first")
-        req_id = self._ws_req_id_counter
-        self._ws_req_id_counter += 1
-        future: asyncio.Future[dict[str, Any]] = asyncio.Future()
-        self._ws_order_requests[req_id] = future
-        try:
-            await ws.send_message(
-                message={
-                    "method": "cancel_order",
-                    "params": {"order_id": [order_id]},
-                    "req_id": req_id,
-                },
-            )
-            async with asyncio.timeout(_WS_ORDER_TIMEOUT_SECONDS):
-                await future
-            return self._build_canceled_order_snapshot(order_id)
-        except TimeoutError as e:
-            logger.error(
-                f"WebSocket cancel timeout after {_WS_ORDER_TIMEOUT_SECONDS}s (req_id={req_id})"
-            )
-            raise TimeoutError(
-                f"ExchangeOrderSnapshot cancellation timeout after {_WS_ORDER_TIMEOUT_SECONDS}s"
-            ) from e
-        finally:
-            self._ws_order_requests.pop(req_id, None)
 
     async def get_order(self, order_id: str, symbol: str | None = None) -> ExchangeOrderSnapshot:
         """Fetch details of a specific order.
@@ -1103,9 +960,6 @@ class KrakenExchangeClient(ExchangeClientBase):
         try:
             if not isinstance(message, dict):
                 return
-            if "req_id" in message:
-                self._handle_order_request_response(message)
-                return
             if message.get("method") == "subscribe" and isinstance(message.get("result"), dict):
                 self._handle_subscription_ack(message)
                 return
@@ -1113,24 +967,6 @@ class KrakenExchangeClient(ExchangeClientBase):
                 await self._handle_channel_data(message)
         except Exception as e:
             logger.error(f"Error processing WebSocket message: {e}")
-
-    def _handle_order_request_response(self, message: dict[str, Any]) -> None:
-        """Resolve pending order request future from WebSocket response.
-
-        Args:
-            message: WebSocket message containing req_id.
-        """
-        req_id = message["req_id"]
-        if req_id not in self._ws_order_requests:
-            return
-        future = self._ws_order_requests[req_id]
-        if future.done():
-            return
-        if message.get("success"):
-            future.set_result(message)
-        else:
-            error_msg = message.get("error", "Unknown error")
-            future.set_exception(RuntimeError(f"ExchangeOrderSnapshot request failed: {error_msg}"))
 
     def _handle_subscription_ack(self, message: dict[str, Any]) -> None:
         """Process subscription acknowledgement messages by channel type.
@@ -1337,27 +1173,6 @@ class KrakenExchangeClient(ExchangeClientBase):
             raise RuntimeError("API credentials required for WebSocket trading")
         await self._ensure_ws_connected()
         return self._ws_client
-
-    def _convert_ws_order_response(
-        self, result: dict[str, Any], request: ExchangeOrderRequest
-    ) -> ExchangeOrderSnapshot:
-        order_data = result.get("result", {})
-        order_id = order_data.get("order_id", "")
-        client_order_id = order_data.get("cl_ord_id") or order_data.get("order_userref")
-        return ExchangeOrderSnapshot(
-            id=order_id,
-            client_order_id=str(client_order_id) if client_order_id else None,
-            symbol=request.symbol,
-            side=request.side,
-            type=request.type,
-            amount=float(request.amount),
-            price=float(request.price) if request.price else None,
-            status=OrderStatusEnum.PENDING,
-            filled=float("0"),
-            remaining=float(request.amount),
-            timestamp=time.time(),
-            fee=None,
-        )
 
     async def _ensure_ws_connected(self) -> None:
         if not self._ws_client:

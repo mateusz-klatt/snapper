@@ -21,7 +21,6 @@ from websockets.exceptions import ConnectionClosed
 
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
-from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
@@ -700,34 +699,20 @@ class TestZondaRestAPI:
 
     @pytest.mark.asyncio
     async def test_create_order(self, client: ZondaExchangeClient) -> None:
-        """Test create_order returns ExchangeOrder from CCXT response.
+        """Test create_order returns PENDING snapshot built from request data.
 
-        Given: Client with credentials and mocked create_order returning order data.
+        Given: Client with credentials and mocked create_order returning order id.
         When: create_order() is called with limit buy request.
-        Then: ExchangeOrder has correct id, symbol, side, type, amount, price, status,
+        Then: ExchangeOrder has PENDING status, fields from request, fee=None,
               and db_order_id / db_order_public_id populated from _log_order_to_db.
         """
         client.api_key = "test_key"
         client.api_secret = "test_secret"
-        mock_ccxt_order: dict[str, Any] = {
-            "id": "order123",
-            "clientOrderId": "client123",
-            "symbol": "BTC/EUR",
-            "side": "buy",
-            "type": "limit",
-            "amount": 1.0,
-            "price": 50000.0,
-            "status": "open",
-            "filled": 0.0,
-            "remaining": 1.0,
-            "timestamp": 1609459200000,
-            "fee": {"cost": 50.0},
-        }
         with (
             patch.object(
                 client._ccxt_client,
                 "create_order",
-                return_value=mock_ccxt_order,
+                return_value={"id": "order123"},
             ),
             patch.object(
                 client,
@@ -751,7 +736,11 @@ class TestZondaRestAPI:
             assert order.type == OrderTypeEnum.LIMIT
             assert order.amount == pytest.approx(1.0)
             assert order.price == pytest.approx(50000.0)
-            assert order.status == OrderStatusEnum.OPEN
+            assert order.status == OrderStatusEnum.PENDING
+            assert order.filled == pytest.approx(0.0)
+            assert order.remaining == pytest.approx(1.0)
+            assert order.fee is None
+            assert order.client_order_id == "client123"
             assert order.db_order_id == 42
             assert order.db_order_public_id == "pub-42"
 
@@ -978,77 +967,6 @@ class TestZondaRestAPI:
             assert orders[0].id == "order3"
             assert orders[0].price is None
             assert orders[0].fee is None
-
-    @pytest.mark.asyncio
-    async def test_create_order_follows_up_when_status_none(
-        self, client: ZondaExchangeClient
-    ) -> None:
-        """Test create_order calls fetch_order when CCXT returns status=None.
-
-        Given: CCXT create_order returns response with status=None and valid id.
-        When: create_order() is called.
-        Then: fetch_order is called to retrieve full order data.
-        """
-        client.api_key = "test_key"
-        client.api_secret = "test_secret"
-        incomplete_order: dict[str, Any] = {
-            "id": "PARTIAL-ZND",
-            "clientOrderId": None,
-            "symbol": "BTC/EUR",
-            "side": "buy",
-            "type": "limit",
-            "amount": 0.5,
-            "price": 45000.0,
-            "status": None,
-            "filled": None,
-            "remaining": None,
-            "timestamp": None,
-            "fee": None,
-        }
-        complete_order: dict[str, Any] = {
-            "id": "PARTIAL-ZND",
-            "clientOrderId": "cl-znd",
-            "symbol": "BTC/EUR",
-            "side": "buy",
-            "type": "limit",
-            "amount": 0.5,
-            "price": 45000.0,
-            "status": "open",
-            "filled": 0.0,
-            "remaining": 0.5,
-            "timestamp": 1609459200000,
-            "fee": {"cost": 0.0},
-        }
-        with (
-            patch.object(
-                client._ccxt_client,
-                "create_order",
-                return_value=incomplete_order,
-            ),
-            patch.object(
-                client._ccxt_client,
-                "fetch_order",
-                return_value=complete_order,
-            ) as mock_fetch,
-            patch.object(
-                client,
-                "_log_order_to_db",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
-        ):
-            request = ExchangeOrderRequest(
-                symbol="BTC-EUR",
-                side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.LIMIT,
-                amount=0.5,
-                price=45000.0,
-            )
-            order = await client.create_order(request)
-            assert order.id == "PARTIAL-ZND"
-            assert order.status == OrderStatusEnum.OPEN
-            assert order.client_order_id == "cl-znd"
-            mock_fetch.assert_called_once_with("PARTIAL-ZND", "BTC/EUR")
 
     @pytest.mark.asyncio
     async def test_cancel_order_not_found_returns_canceled(
@@ -2458,50 +2376,20 @@ async def test_create_order_without_client_order_id() -> None:
 
 @pytest.mark.asyncio
 async def test_create_order_market_with_none_fields() -> None:
-    """Test create_order handles Zonda market order CCXT response with None fields.
+    """Test create_order for Zonda market order returns PENDING snapshot.
 
     Given: CCXT response with timestamp=None, fee=None, clientOrderId=None
-           (real Zonda market order behavior).
+           (real Zonda market order behavior where only id is reliable).
     When: create_order() is called.
-    Then: ExchangeOrderSnapshot parsed without errors, fallback values used.
+    Then: ExchangeOrderSnapshot has PENDING status, filled=0, remaining=amount,
+          fee=None, client_order_id=None from request, timestamp > 0.
     """
     client = ZondaExchangeClient(api_key="key", api_secret="secret")
-    mock_order: dict[str, Any] = {
-        "id": "e84893a8-2a1b-11f1-81a9-4ea2d0fa018b",
-        "info": {
-            "status": "Ok",
-            "completed": True,
-            "offerId": "e84893a8-2a1b-11f1-81a9-4ea2d0fa018b",
-            "transactions": [{"amount": "0.0001", "rate": "248487.27"}],
-        },
-        "timestamp": None,
-        "datetime": None,
-        "lastTradeTimestamp": None,
-        "status": "closed",
-        "symbol": "BTC/PLN",
-        "type": "market",
-        "side": "buy",
-        "price": 248487.27,
-        "amount": 0.0001,
-        "cost": 24.848727,
-        "filled": 0.0001,
-        "remaining": 0.0,
-        "average": 248487.27,
-        "fee": None,
-        "trades": [
-            {
-                "id": None,
-                "price": 248487.27,
-                "amount": 0.0001,
-                "cost": 24.848727,
-                "info": {"amount": "0.0001", "rate": "248487.27"},
-                "fees": [],
-            }
-        ],
-        "clientOrderId": None,
-        "fees": [],
-    }
-    with patch.object(client._ccxt_client, "create_order", return_value=mock_order):
+    with patch.object(
+        client._ccxt_client,
+        "create_order",
+        return_value={"id": "e84893a8-2a1b-11f1-81a9-4ea2d0fa018b"},
+    ):
         request = ExchangeOrderRequest(
             symbol="BTC-PLN",
             side=OrderSideEnum.BUY,
@@ -2510,10 +2398,10 @@ async def test_create_order_market_with_none_fields() -> None:
         )
         order = await client.create_order(request)
         assert order.id == "e84893a8-2a1b-11f1-81a9-4ea2d0fa018b"
-        assert order.status == OrderStatusEnum.CLOSED
-        assert order.filled == pytest.approx(0.0001)
-        assert order.remaining == pytest.approx(0.0)
-        assert order.price == pytest.approx(248487.27)
+        assert order.status == OrderStatusEnum.PENDING
+        assert order.filled == pytest.approx(0.0)
+        assert order.remaining == pytest.approx(0.0001)
+        assert order.price is None
         assert order.fee is None
         assert order.client_order_id is None
         assert order.timestamp > 0
@@ -2521,39 +2409,20 @@ async def test_create_order_market_with_none_fields() -> None:
 
 @pytest.mark.asyncio
 async def test_create_order_limit_maker_with_none_fields() -> None:
-    """Test create_order handles Zonda limit order CCXT response with None fields.
+    """Test create_order for Zonda limit order returns PENDING snapshot from request.
 
-    Given: CCXT response for unfilled limit order with filled=None, remaining=None
-           (real Zonda limit order behavior).
+    Given: CCXT response for unfilled limit order (real Zonda behavior where only
+           id is reliable in the create response).
     When: create_order() is called.
-    Then: ExchangeOrderSnapshot parsed with status=open, filled=0, remaining=0.
+    Then: ExchangeOrderSnapshot has PENDING status, filled=0, remaining=amount,
+          price and amount from request, fee=None, timestamp > 0.
     """
     client = ZondaExchangeClient(api_key="key", api_secret="secret")
-    mock_order: dict[str, Any] = {
-        "id": "4d0b4b98-2a1d-11f1-81a9-4ea2d0fa018b",
-        "info": {
-            "status": "Ok",
-            "completed": False,
-            "offerId": "4d0b4b98-2a1d-11f1-81a9-4ea2d0fa018b",
-            "transactions": [],
-        },
-        "timestamp": None,
-        "datetime": None,
-        "status": "open",
-        "symbol": "BTC/PLN",
-        "type": "limit",
-        "side": "sell",
-        "price": 999999.0,
-        "amount": 0.00002,
-        "cost": None,
-        "filled": None,
-        "remaining": None,
-        "average": None,
-        "fee": None,
-        "trades": [],
-        "clientOrderId": None,
-    }
-    with patch.object(client._ccxt_client, "create_order", return_value=mock_order):
+    with patch.object(
+        client._ccxt_client,
+        "create_order",
+        return_value={"id": "4d0b4b98-2a1d-11f1-81a9-4ea2d0fa018b"},
+    ):
         request = ExchangeOrderRequest(
             symbol="BTC-PLN",
             side=OrderSideEnum.SELL,
@@ -2563,13 +2432,41 @@ async def test_create_order_limit_maker_with_none_fields() -> None:
         )
         order = await client.create_order(request)
         assert order.id == "4d0b4b98-2a1d-11f1-81a9-4ea2d0fa018b"
-        assert order.status == OrderStatusEnum.OPEN
+        assert order.status == OrderStatusEnum.PENDING
         assert order.filled == pytest.approx(0.0)
-        assert order.remaining == pytest.approx(0.0)
+        assert order.remaining == pytest.approx(0.00002)
         assert order.price == pytest.approx(999999.0)
         assert order.amount == pytest.approx(0.00002)
         assert order.fee is None
         assert order.timestamp > 0
+
+
+@pytest.mark.asyncio
+async def test_create_order_empty_id_skips_db_logging() -> None:
+    """Test create_order with empty id skips db logging.
+
+    Given: CCXT returns a response with an empty id string,
+    When: create_order is called,
+    Then: The snapshot has an empty id and db logging is not called.
+    """
+    client = ZondaExchangeClient(api_key="key", api_secret="secret")
+    mock_log = AsyncMock(return_value=None)
+    with (
+        patch.object(client._ccxt_client, "create_order", return_value={"id": ""}),
+        patch.object(client, "_log_order_to_db", mock_log),
+    ):
+        request = ExchangeOrderRequest(
+            symbol="BTC-PLN",
+            side=OrderSideEnum.BUY,
+            type=OrderTypeEnum.LIMIT,
+            amount=5e-05,
+            price=100000.0,
+        )
+        order = await client.create_order(request)
+        assert order.id == ""
+        assert order.status == OrderStatusEnum.PENDING
+        assert order.db_order_id is None
+        mock_log.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -3453,76 +3350,6 @@ async def test_subscribe_executions_generic_exception_while_running(
 
 
 @pytest.mark.asyncio
-async def test_create_order_status_none_no_id_skips_fetch() -> None:
-    """Test create_order skips fetch_order when status=None and id is falsy.
-
-    Given: CCXT create_order returns status=None with empty string id.
-    When: create_order() is called.
-    Then: fetch_order is NOT called.
-    """
-    client = ZondaExchangeClient(api_key="key", api_secret="secret")
-    incomplete_no_id: dict[str, Any] = {
-        "id": "",
-        "clientOrderId": None,
-        "symbol": "BTC/EUR",
-        "side": "buy",
-        "type": "limit",
-        "amount": 1.0,
-        "price": 45000.0,
-        "status": None,
-        "filled": 0,
-        "remaining": 1.0,
-        "timestamp": 1609459200000,
-        "fee": None,
-    }
-    dummy_snapshot = ExchangeOrderSnapshot(
-        id="",
-        client_order_id=None,
-        symbol="BTC-EUR",
-        side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
-        amount=1.0,
-        price=45000.0,
-        status=OrderStatusEnum.OPEN,
-        filled=0.0,
-        remaining=1.0,
-        timestamp=1609459200.0,
-    )
-    with (
-        patch.object(
-            client._ccxt_client,
-            "create_order",
-            return_value=incomplete_no_id,
-        ),
-        patch.object(
-            client._ccxt_client,
-            "fetch_order",
-        ) as mock_fetch,
-        patch.object(
-            client,
-            "_log_order_to_db",
-            new_callable=AsyncMock,
-            return_value=None,
-        ),
-        patch.object(
-            ZondaExchangeClient,
-            "_convert_ccxt_order",
-            return_value=dummy_snapshot,
-        ),
-    ):
-        request = ExchangeOrderRequest(
-            symbol="BTC-EUR",
-            side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
-            amount=1.0,
-            price=45000.0,
-        )
-        order = await client.create_order(request)
-        mock_fetch.assert_not_called()
-        assert order.symbol == "BTC-EUR"
-
-
-@pytest.mark.asyncio
 async def test_subscribe_candles_skips_aggregator_when_task_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3655,37 +3482,14 @@ class TestZondaLiveFixtures:
 
     @pytest.mark.asyncio
     async def test_passive_create(self, client: ZondaExchangeClient) -> None:
-        """Passive limit buy returns open snapshot with zero fill.
+        """Passive limit buy returns pending snapshot with zero fill.
 
-        Given: CCXT create_order returns a resting limit buy (real Zonda response).
+        Given: CCXT create_order returns the order id for a resting limit buy.
         When: create_order is called with a limit buy at 125689.99.
-        Then: Snapshot has id=eb363fb9, side=buy, type=limit, status=open,
-              filled=0.0, remaining=0.0 (Zonda CCXT quirk), client_order_id=None.
+        Then: Snapshot has id=eb363fb9, side=buy, type=limit, status=pending,
+              filled=0.0, remaining=5e-05, client_order_id=None.
         """
-        ccxt_response: dict[str, Any] = {
-            "id": "eb363fb9-2a1c-11f1-81a9-4ea2d0fa018b",
-            "info": {
-                "status": "Ok",
-                "completed": False,
-                "offerId": "eb363fb9-2a1c-11f1-81a9-4ea2d0fa018b",
-                "transactions": [],
-            },
-            "timestamp": None,
-            "datetime": None,
-            "status": "open",
-            "symbol": "BTC/PLN",
-            "type": "limit",
-            "side": "buy",
-            "price": 125689.99,
-            "amount": 5e-05,
-            "cost": None,
-            "filled": None,
-            "remaining": None,
-            "average": None,
-            "fee": None,
-            "trades": [],
-            "clientOrderId": None,
-        }
+        ccxt_response: dict[str, Any] = {"id": "eb363fb9-2a1c-11f1-81a9-4ea2d0fa018b"}
         with (
             patch.object(client._ccxt_client, "create_order", return_value=ccxt_response),
             patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
@@ -3703,9 +3507,9 @@ class TestZondaLiveFixtures:
         assert snap.type == OrderTypeEnum.LIMIT
         assert snap.price == pytest.approx(125689.99)
         assert snap.amount == pytest.approx(5e-05)
-        assert snap.status == OrderStatusEnum.OPEN
+        assert snap.status == OrderStatusEnum.PENDING
         assert snap.filled == pytest.approx(0.0)
-        assert snap.remaining == pytest.approx(0.0)
+        assert snap.remaining == pytest.approx(5e-05)
         assert snap.client_order_id is None
         assert snap.fee is None
 
@@ -3749,36 +3553,13 @@ class TestZondaLiveFixtures:
 
     @pytest.mark.asyncio
     async def test_topbook_create_sell(self, client: ZondaExchangeClient) -> None:
-        """Topbook limit sell at the ask returns open snapshot.
+        """Topbook limit sell at the ask returns pending snapshot.
 
-        Given: CCXT create_order returns a resting limit sell placed at the ask.
+        Given: CCXT create_order returns the order id for a resting limit sell.
         When: create_order is called with a limit sell.
-        Then: Snapshot has side=sell, status=open, filled=0.0.
+        Then: Snapshot has side=sell, status=pending, filled=0.0, remaining=5e-05.
         """
-        ccxt_response: dict[str, Any] = {
-            "id": "a1b2c3d4-tbok-sell-open-zonda00000000",
-            "info": {
-                "status": "Ok",
-                "completed": False,
-                "offerId": "a1b2c3d4-tbok-sell-open-zonda00000000",
-                "transactions": [],
-            },
-            "timestamp": None,
-            "datetime": None,
-            "status": "open",
-            "symbol": "BTC/PLN",
-            "type": "limit",
-            "side": "sell",
-            "price": 250000.0,
-            "amount": 5e-05,
-            "cost": None,
-            "filled": None,
-            "remaining": None,
-            "average": None,
-            "fee": None,
-            "trades": [],
-            "clientOrderId": None,
-        }
+        ccxt_response: dict[str, Any] = {"id": "a1b2c3d4-tbok-sell-open-zonda00000000"}
         with (
             patch.object(client._ccxt_client, "create_order", return_value=ccxt_response),
             patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
@@ -3793,8 +3574,9 @@ class TestZondaLiveFixtures:
             snap = await client.create_order(request)
         assert snap.id == "a1b2c3d4-tbok-sell-open-zonda00000000"
         assert snap.side == OrderSideEnum.SELL
-        assert snap.status == OrderStatusEnum.OPEN
+        assert snap.status == OrderStatusEnum.PENDING
         assert snap.filled == pytest.approx(0.0)
+        assert snap.remaining == pytest.approx(5e-05)
 
     @pytest.mark.asyncio
     async def test_topbook_cancel(self, client: ZondaExchangeClient) -> None:
@@ -3830,45 +3612,13 @@ class TestZondaLiveFixtures:
 
     @pytest.mark.asyncio
     async def test_aggressive_sell_immediate_fill(self, client: ZondaExchangeClient) -> None:
-        """Aggressive limit sell fills immediately as taker.
+        """Aggressive limit sell returns pending snapshot on create.
 
-        Given: CCXT create_order returns a closed (filled) limit sell.
+        Given: CCXT create_order returns the order id for a limit sell.
         When: create_order is called.
-        Then: Snapshot has status=closed, filled equal to amount.
+        Then: Snapshot has status=pending, filled=0.0, remaining=5e-05.
         """
-        ccxt_response: dict[str, Any] = {
-            "id": "f5e6d7c8-aggr-sell-fill-zonda00000000",
-            "info": {
-                "status": "Ok",
-                "completed": True,
-                "offerId": "f5e6d7c8-aggr-sell-fill-zonda00000000",
-                "transactions": [{"amount": "0.00005", "rate": "249000.00"}],
-            },
-            "timestamp": None,
-            "datetime": None,
-            "status": "closed",
-            "symbol": "BTC/PLN",
-            "type": "limit",
-            "side": "sell",
-            "price": 249000.0,
-            "amount": 5e-05,
-            "cost": 12.45,
-            "filled": 5e-05,
-            "remaining": 0.0,
-            "average": 249000.0,
-            "fee": None,
-            "trades": [
-                {
-                    "id": None,
-                    "price": 249000.0,
-                    "amount": 5e-05,
-                    "cost": 12.45,
-                    "info": {"amount": "0.00005", "rate": "249000.00"},
-                    "fees": [],
-                }
-            ],
-            "clientOrderId": None,
-        }
+        ccxt_response: dict[str, Any] = {"id": "f5e6d7c8-aggr-sell-fill-zonda00000000"}
         with (
             patch.object(client._ccxt_client, "create_order", return_value=ccxt_response),
             patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
@@ -3881,51 +3631,20 @@ class TestZondaLiveFixtures:
                 price=249000.0,
             )
             snap = await client.create_order(request)
-        assert snap.status == OrderStatusEnum.CLOSED
-        assert snap.filled == pytest.approx(5e-05)
+        assert snap.status == OrderStatusEnum.PENDING
+        assert snap.filled == pytest.approx(0.0)
+        assert snap.remaining == pytest.approx(5e-05)
         assert snap.side == OrderSideEnum.SELL
 
     @pytest.mark.asyncio
     async def test_aggressive_flatten_market_buy(self, client: ZondaExchangeClient) -> None:
-        """Flatten via market buy returns closed snapshot.
+        """Flatten via market buy returns pending snapshot on create.
 
-        Given: CCXT create_order returns a closed market buy (buy back).
+        Given: CCXT create_order returns the order id for a market buy.
         When: create_order is called with a market buy.
-        Then: Snapshot has type=market, side=buy, status=closed.
+        Then: Snapshot has type=market, side=buy, status=pending, price=None, filled=0.0.
         """
-        ccxt_response: dict[str, Any] = {
-            "id": "11223344-flat-mbuy-fill-zonda00000000",
-            "info": {
-                "status": "Ok",
-                "completed": True,
-                "offerId": "11223344-flat-mbuy-fill-zonda00000000",
-                "transactions": [{"amount": "0.00005", "rate": "249100.00"}],
-            },
-            "timestamp": None,
-            "datetime": None,
-            "status": "closed",
-            "symbol": "BTC/PLN",
-            "type": "market",
-            "side": "buy",
-            "price": 249100.0,
-            "amount": 5e-05,
-            "cost": 12.455,
-            "filled": 5e-05,
-            "remaining": 0.0,
-            "average": 249100.0,
-            "fee": None,
-            "trades": [
-                {
-                    "id": None,
-                    "price": 249100.0,
-                    "amount": 5e-05,
-                    "cost": 12.455,
-                    "info": {"amount": "0.00005", "rate": "249100.00"},
-                    "fees": [],
-                }
-            ],
-            "clientOrderId": None,
-        }
+        ccxt_response: dict[str, Any] = {"id": "11223344-flat-mbuy-fill-zonda00000000"}
         with (
             patch.object(client._ccxt_client, "create_order", return_value=ccxt_response),
             patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
@@ -3939,50 +3658,20 @@ class TestZondaLiveFixtures:
             snap = await client.create_order(request)
         assert snap.type == OrderTypeEnum.MARKET
         assert snap.side == OrderSideEnum.BUY
-        assert snap.status == OrderStatusEnum.CLOSED
-        assert snap.filled == pytest.approx(5e-05)
+        assert snap.status == OrderStatusEnum.PENDING
+        assert snap.price is None
+        assert snap.filled == pytest.approx(0.0)
+        assert snap.remaining == pytest.approx(5e-05)
 
     @pytest.mark.asyncio
     async def test_market_sell_immediate_fill(self, client: ZondaExchangeClient) -> None:
-        """Market sell fills immediately and returns closed snapshot.
+        """Market sell returns pending snapshot on create.
 
-        Given: CCXT create_order returns a closed market sell.
+        Given: CCXT create_order returns the order id for a market sell.
         When: create_order is called with a market sell.
-        Then: Snapshot has type=market, side=sell, status=closed.
+        Then: Snapshot has type=market, side=sell, status=pending, price=None, filled=0.0.
         """
-        ccxt_response: dict[str, Any] = {
-            "id": "aabbccdd-mkt-sell-fill-zonda00000000",
-            "info": {
-                "status": "Ok",
-                "completed": True,
-                "offerId": "aabbccdd-mkt-sell-fill-zonda00000000",
-                "transactions": [{"amount": "0.00005", "rate": "248500.00"}],
-            },
-            "timestamp": None,
-            "datetime": None,
-            "status": "closed",
-            "symbol": "BTC/PLN",
-            "type": "market",
-            "side": "sell",
-            "price": 248500.0,
-            "amount": 5e-05,
-            "cost": 12.425,
-            "filled": 5e-05,
-            "remaining": 0.0,
-            "average": 248500.0,
-            "fee": None,
-            "trades": [
-                {
-                    "id": None,
-                    "price": 248500.0,
-                    "amount": 5e-05,
-                    "cost": 12.425,
-                    "info": {"amount": "0.00005", "rate": "248500.00"},
-                    "fees": [],
-                }
-            ],
-            "clientOrderId": None,
-        }
+        ccxt_response: dict[str, Any] = {"id": "aabbccdd-mkt-sell-fill-zonda00000000"}
         with (
             patch.object(client._ccxt_client, "create_order", return_value=ccxt_response),
             patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
@@ -3996,50 +3685,20 @@ class TestZondaLiveFixtures:
             snap = await client.create_order(request)
         assert snap.type == OrderTypeEnum.MARKET
         assert snap.side == OrderSideEnum.SELL
-        assert snap.status == OrderStatusEnum.CLOSED
-        assert snap.filled == pytest.approx(5e-05)
+        assert snap.status == OrderStatusEnum.PENDING
+        assert snap.price is None
+        assert snap.filled == pytest.approx(0.0)
+        assert snap.remaining == pytest.approx(5e-05)
 
     @pytest.mark.asyncio
     async def test_market_flatten_buy(self, client: ZondaExchangeClient) -> None:
-        """Market buy to flatten returns closed snapshot.
+        """Market buy to flatten returns pending snapshot on create.
 
-        Given: CCXT create_order returns a closed market buy (flatten).
+        Given: CCXT create_order returns the order id for a market buy.
         When: create_order is called with a market buy.
-        Then: Snapshot has type=market, side=buy, status=closed.
+        Then: Snapshot has type=market, side=buy, status=pending, price=None.
         """
-        ccxt_response: dict[str, Any] = {
-            "id": "eeff0011-mkt-buy-flat-zonda00000000",
-            "info": {
-                "status": "Ok",
-                "completed": True,
-                "offerId": "eeff0011-mkt-buy-flat-zonda00000000",
-                "transactions": [{"amount": "0.00005", "rate": "248600.00"}],
-            },
-            "timestamp": None,
-            "datetime": None,
-            "status": "closed",
-            "symbol": "BTC/PLN",
-            "type": "market",
-            "side": "buy",
-            "price": 248600.0,
-            "amount": 5e-05,
-            "cost": 12.43,
-            "filled": 5e-05,
-            "remaining": 0.0,
-            "average": 248600.0,
-            "fee": None,
-            "trades": [
-                {
-                    "id": None,
-                    "price": 248600.0,
-                    "amount": 5e-05,
-                    "cost": 12.43,
-                    "info": {"amount": "0.00005", "rate": "248600.00"},
-                    "fees": [],
-                }
-            ],
-            "clientOrderId": None,
-        }
+        ccxt_response: dict[str, Any] = {"id": "eeff0011-mkt-buy-flat-zonda00000000"}
         with (
             patch.object(client._ccxt_client, "create_order", return_value=ccxt_response),
             patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
@@ -4053,40 +3712,18 @@ class TestZondaLiveFixtures:
             snap = await client.create_order(request)
         assert snap.type == OrderTypeEnum.MARKET
         assert snap.side == OrderSideEnum.BUY
-        assert snap.status == OrderStatusEnum.CLOSED
+        assert snap.status == OrderStatusEnum.PENDING
+        assert snap.price is None
 
     @pytest.mark.asyncio
     async def test_cancel_inflight_create_and_cancel(self, client: ZondaExchangeClient) -> None:
         """Create then immediately cancel a limit order.
 
-        Given: CCXT create_order returns open; then cancel succeeds.
+        Given: CCXT create_order returns the order id; then cancel succeeds.
         When: create_order followed by cancel_order.
-        Then: Create returns open snapshot; cancel returns canceled snapshot.
+        Then: Create returns pending snapshot; cancel returns canceled snapshot.
         """
-        create_response: dict[str, Any] = {
-            "id": "99887766-cinf-open-zonda000000000",
-            "info": {
-                "status": "Ok",
-                "completed": False,
-                "offerId": "99887766-cinf-open-zonda000000000",
-                "transactions": [],
-            },
-            "timestamp": None,
-            "datetime": None,
-            "status": "open",
-            "symbol": "BTC/PLN",
-            "type": "limit",
-            "side": "buy",
-            "price": 100000.0,
-            "amount": 5e-05,
-            "cost": None,
-            "filled": None,
-            "remaining": None,
-            "average": None,
-            "fee": None,
-            "trades": [],
-            "clientOrderId": None,
-        }
+        create_response: dict[str, Any] = {"id": "99887766-cinf-open-zonda000000000"}
         with (
             patch.object(client._ccxt_client, "create_order", return_value=create_response),
             patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
@@ -4099,7 +3736,7 @@ class TestZondaLiveFixtures:
                 price=100000.0,
             )
             snap_create = await client.create_order(request)
-        assert snap_create.status == OrderStatusEnum.OPEN
+        assert snap_create.status == OrderStatusEnum.PENDING
 
         open_order: dict[str, Any] = {
             "id": "99887766-cinf-open-zonda000000000",

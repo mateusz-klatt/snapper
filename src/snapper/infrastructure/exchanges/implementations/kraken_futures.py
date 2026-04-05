@@ -455,6 +455,13 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         )
         cancel_status = result.get("cancelStatus", {})
         status_str = cancel_status.get("status", "cancelled")
+        events = cancel_status.get("orderEvents", [])
+        order_data: dict[str, Any] = {}
+        if events:
+            order_data = events[0].get("order", {})
+        if order_data:
+            order_data["status"] = status_str
+            return self._convert_sdk_order(order_data)
         return ExchangeOrderSnapshot(
             id=order_id,
             client_order_id=None,
@@ -490,7 +497,13 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         orders = result.get("orders", [])
         if not orders:
             raise ValueError(f"Order {order_id} not found")
-        return self._convert_sdk_order(orders[0])
+        entry = orders[0]
+        inner = entry.get("order", {})
+        if inner:
+            inner["status"] = entry.get("status", inner.get("status", "placed"))
+        else:
+            inner = entry
+        return self._convert_sdk_order(inner)
 
     async def get_orders(
         self,
@@ -668,11 +681,15 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             native_symbol = kraken_symbol
         filled = float(data.get("filledSize", data.get("filled", 0)))
         unfilled = data.get("unfilledSize")
-        qty_raw = data.get("qty") or data.get("quantity") or data.get("size")
-        if unfilled is not None and qty_raw is None:
+        if unfilled is not None:
             qty = filled + float(unfilled)
+        elif "quantity" in data:
+            qty = filled + float(data["quantity"])
+        elif "size" in data:
+            qty = float(data["size"])
         else:
-            qty = float(qty_raw or 0)
+            qty_raw = data.get("qty")
+            qty = float(qty_raw) if qty_raw is not None else filled
         order_type_raw = data.get("orderType") or data.get("type", "lmt")
         return ExchangeOrderSnapshot(
             id=order_id,

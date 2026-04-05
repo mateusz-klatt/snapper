@@ -3073,3 +3073,213 @@ class TestKrakenFuturesLiveFixtures:
         client._user_client.get_open_positions = MagicMock(return_value={"openPositions": []})
         result = await client.get_open_positions()
         assert result == []
+
+    @pytest.mark.asyncio
+    async def test_get_order_nested_sdk_response(self, client: KrakenFuturesExchangeClient) -> None:
+        """get_order unwraps nested SDK get_orders_status response.
+
+        Real SDK returns {"orders": [{"order": {fields...}, "status": "ENTERED_BOOK"}]}.
+        The inner "order" dict has orderId/quantity/filled/limitPrice, and the outer
+        status must be propagated.
+
+        Given: SDK get_orders_status returns nested structure with ENTERED_BOOK status.
+        When: get_order is called.
+        Then: Snapshot has correct id, symbol, amount, price, and OPEN status.
+        """
+        assert client._trade_client is not None
+        client._trade_client.get_orders_status = MagicMock(
+            return_value={
+                "orders": [
+                    {
+                        "order": {
+                            "orderId": "a178b88c-9f26-4aee-8472-5e584b750dd4",
+                            "cliOrdId": "test-pass-buy-1775398727",
+                            "type": "post",
+                            "symbol": "PF_XBTUSD",
+                            "side": "buy",
+                            "quantity": 0.0001,
+                            "filled": 0,
+                            "limitPrice": 60163.2,
+                            "reduceOnly": False,
+                            "timestamp": "2026-04-05T14:18:47.000Z",
+                            "lastUpdateTimestamp": "2026-04-05T14:18:47.000Z",
+                        },
+                        "status": "ENTERED_BOOK",
+                        "updateReason": None,
+                        "error": None,
+                    }
+                ]
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            return_value="BTC-USD-PERP",
+        ):
+            snap = await client.get_order("a178b88c-9f26-4aee-8472-5e584b750dd4", "BTC-USD-PERP")
+        assert snap.id == "a178b88c-9f26-4aee-8472-5e584b750dd4"
+        assert snap.client_order_id == "test-pass-buy-1775398727"
+        assert snap.symbol == "BTC-USD-PERP"
+        assert snap.side == OrderSideEnum.BUY
+        assert snap.type == OrderTypeEnum.LIMIT
+        assert snap.amount == pytest.approx(0.0001)
+        assert snap.price == pytest.approx(60163.2)
+        assert snap.status == OrderStatusEnum.OPEN
+        assert snap.filled == pytest.approx(0.0)
+        assert snap.remaining == pytest.approx(0.0001)
+
+    @pytest.mark.asyncio
+    async def test_cancel_order_extracts_order_events(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """cancel_order extracts full order data from orderEvents.
+
+        Real SDK cancel returns cancelStatus.orderEvents[0].order with full
+        order details (orderId, symbol, quantity, limitPrice, filled).
+
+        Given: SDK cancel returns orderEvents with order details.
+        When: cancel_order is called.
+        Then: Snapshot has correct amount, price, side, and CANCELED status.
+        """
+        assert client._trade_client is not None
+        client._trade_client.cancel_order = MagicMock(
+            return_value={
+                "cancelStatus": {
+                    "status": "cancelled",
+                    "order_id": "a178b8a7-42f0-4d60-bfa9-06d90ff1da45",
+                    "orderEvents": [
+                        {
+                            "type": "CANCEL",
+                            "uid": "a178b8a7-42f0-4d60-bfa9-06d90ff1da45",
+                            "order": {
+                                "orderId": "a178b8a7-42f0-4d60-bfa9-06d90ff1da45",
+                                "cliOrdId": None,
+                                "type": "post",
+                                "symbol": "PF_XBTUSD",
+                                "side": "buy",
+                                "quantity": 0.0001,
+                                "filled": 0,
+                                "limitPrice": 60000.0,
+                                "reduceOnly": False,
+                                "timestamp": "2026-04-05T14:17:41.168Z",
+                                "lastUpdateTimestamp": "2026-04-05T14:17:41.168Z",
+                            },
+                        }
+                    ],
+                }
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            return_value="BTC-USD-PERP",
+        ):
+            snap = await client.cancel_order("a178b8a7-42f0-4d60-bfa9-06d90ff1da45", "BTC-USD-PERP")
+        assert snap.id == "a178b8a7-42f0-4d60-bfa9-06d90ff1da45"
+        assert snap.symbol == "BTC-USD-PERP"
+        assert snap.side == OrderSideEnum.BUY
+        assert snap.amount == pytest.approx(0.0001)
+        assert snap.price == pytest.approx(60000.0)
+        assert snap.status == OrderStatusEnum.CANCELED
+        assert snap.filled == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_cancel_order_not_found_fast_cancel(
+        self, client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Fast cancel returns notFound status with empty orderEvents.
+
+        When the SDK cancel is called before the order fully propagates,
+        the exchange returns status=notFound with no orderEvents. The client
+        must still return CANCELED status.
+
+        Given: SDK cancel returns notFound with empty orderEvents.
+        When: cancel_order is called.
+        Then: Snapshot has CANCELED status despite notFound from SDK.
+        """
+        assert client._trade_client is not None
+        client._trade_client.cancel_order = MagicMock(
+            return_value={
+                "cancelStatus": {
+                    "status": "notFound",
+                    "order_id": "a178ba6f-418e-4d71-a5cd-e9171b55b7f2",
+                    "orderEvents": [],
+                }
+            }
+        )
+        snap = await client.cancel_order("a178ba6f-418e-4d71-a5cd-e9171b55b7f2", "BTC-USD-PERP")
+        assert snap.id == "a178ba6f-418e-4d71-a5cd-e9171b55b7f2"
+        assert snap.status == OrderStatusEnum.CANCELED
+        assert snap.symbol == "BTC-USD-PERP"
+
+    @pytest.mark.asyncio
+    async def test_get_order_fully_executed(self, client: KrakenFuturesExchangeClient) -> None:
+        """get_order correctly parses FULLY_EXECUTED with quantity=0.
+
+        Real SDK: when an order is fully filled, get_orders_status returns
+        quantity=0 (remaining) and filled=0.0001 (executed).
+        The converter must compute amount = filled + quantity = 0.0001.
+
+        Given: SDK returns FULLY_EXECUTED status with quantity=0, filled=0.0001.
+        When: get_order is called.
+        Then: Snapshot has amount=0.0001, filled=0.0001, remaining=0, status=CLOSED.
+        """
+        assert client._trade_client is not None
+        client._trade_client.get_orders_status = MagicMock(
+            return_value={
+                "orders": [
+                    {
+                        "order": {
+                            "orderId": "a178d025-ab24-42e0-9f37-e5dd5cfae2b3",
+                            "cliOrdId": None,
+                            "type": "lmt",
+                            "symbol": "PF_XBTUSD",
+                            "side": "buy",
+                            "quantity": 0,
+                            "filled": 0.0001,
+                            "limitPrice": 70000.0,
+                            "reduceOnly": False,
+                            "timestamp": "2026-04-05T15:23:22.770Z",
+                            "lastUpdateTimestamp": "2026-04-05T15:23:22.770Z",
+                        },
+                        "status": "FULLY_EXECUTED",
+                    }
+                ]
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            return_value="BTC-USD-PERP",
+        ):
+            snap = await client.get_order("a178d025-ab24-42e0-9f37-e5dd5cfae2b3")
+        assert snap.id == "a178d025-ab24-42e0-9f37-e5dd5cfae2b3"
+        assert snap.amount == pytest.approx(0.0001)
+        assert snap.filled == pytest.approx(0.0001)
+        assert snap.remaining == pytest.approx(0.0)
+        assert snap.status == OrderStatusEnum.CLOSED
+        assert snap.price == pytest.approx(70000.0)
+
+    def test_convert_sdk_order_size_field(self, client: KrakenFuturesExchangeClient) -> None:
+        """Converter handles ``size`` field as total order quantity.
+
+        Some SDK responses (e.g., fill events) use ``size`` instead of
+        ``quantity`` or ``unfilledSize``. The converter must treat ``size``
+        as the total order amount.
+
+        Given: Order dict with ``size=0.0005`` and no quantity/unfilledSize.
+        When: _convert_sdk_order is called.
+        Then: amount=0.0005.
+        """
+        snap = client._convert_sdk_order(
+            {
+                "order_id": "size-field-test",
+                "symbol": "pf_xbtusd",
+                "side": "buy",
+                "size": 0.0005,
+                "filledSize": 0,
+                "orderType": "lmt",
+                "limitPrice": 65000,
+                "status": "untouched",
+            }
+        )
+        assert snap.amount == pytest.approx(0.0005)
+        assert snap.filled == pytest.approx(0.0)
+        assert snap.remaining == pytest.approx(0.0005)

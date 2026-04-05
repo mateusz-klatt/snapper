@@ -1055,7 +1055,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
             price=float(order_data["limitPrice"]),
             status=status,
             filled=filled,
-            remaining=volume - filled,
+            remaining=max(volume - filled, 0.0),
             timestamp=time.time(),
             fee=commission if commission > 0 else None,
             fee_currency=order_data.get("commissionCurrency"),
