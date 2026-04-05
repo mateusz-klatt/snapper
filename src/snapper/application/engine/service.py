@@ -295,6 +295,8 @@ class TradingEngineService:
         price: float,
         reason: str,
         signaled_at: float | None = None,
+        leverage: int | None = None,
+        reduce_only: bool = False,
     ) -> str:
         """Publish order request to ZMQ execution topic.
 
@@ -308,6 +310,8 @@ class TradingEngineService:
             price: Reference price (for market orders, used for logging).
             reason: Order reason tag (e.g., "engine-buy", "engine-stop").
             signaled_at: Unix timestamp when signal was generated.
+            leverage: Margin leverage (None for spot).
+            reduce_only: True when closing a position.
 
         Returns:
             Client order ID assigned to the published order.
@@ -336,6 +340,8 @@ class TradingEngineService:
                     "order_type": "market",
                     "quantity": size,
                     "price": None,
+                    "leverage": leverage,
+                    "reduce_only": reduce_only,
                     "status": "created",
                     "created_at": now,
                     "correlation_id": order_public_id,
@@ -365,6 +371,8 @@ class TradingEngineService:
                 exchange=self.exchange,
                 strategy_tag=self._strategy_tag,
                 signaled_at=signaled_at_dt,
+                leverage=leverage,
+                reduce_only=reduce_only,
             )
             await self.execution_socket.send(topic, order, flags=zmq.NOBLOCK)
             if self._repository is not None:
@@ -490,12 +498,15 @@ class TradingEngineService:
         if total_order <= 0:
             return
         reason = "engine-buy" if side == TradeSideEnum.BUY else "engine-sell"
+        is_pure_close = closing_qty > 0 and opening_qty <= 0
         client_order_id = await self._send_order(
             side=side,
             size=total_order,
             price=current_price,
             reason=reason,
             signaled_at=signaled_at,
+            leverage=self.cfg.leverage,
+            reduce_only=is_pure_close,
         )
         self.order_in_flight = True
         self.pending_client_order_id = client_order_id

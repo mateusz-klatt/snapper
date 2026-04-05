@@ -366,6 +366,8 @@ class TradeCommandInsertRow(TypedDict, total=False):
     order_type: str
     quantity: float
     price: float | None
+    leverage: int | None
+    reduce_only: bool
     status: str
     created_at: datetime
     correlation_id: str

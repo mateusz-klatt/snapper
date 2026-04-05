@@ -365,6 +365,29 @@ class TestAppSettingsRiskProperties:
         settings = AppSettings(bootstrap, settings_service=service)
         assert settings.risk_r_per_trade == pytest.approx(0.01)
 
+    def test_has_db_access_false_without_service(self) -> None:
+        """Verify has_db_access returns False without settings service.
+
+        Given AppSettings without database service,
+        When accessing has_db_access,
+        Then False is returned.
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        settings = AppSettings(bootstrap)
+        assert settings.has_db_access is False
+
+    def test_has_db_access_true_with_service(self) -> None:
+        """Verify has_db_access returns True with settings service.
+
+        Given AppSettings with MockSettingsService,
+        When accessing has_db_access,
+        Then True is returned.
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        service = MockSettingsService({})
+        settings = AppSettings(bootstrap, settings_service=service)
+        assert settings.has_db_access is True
+
     def test_allow_short_selling_default_false(self) -> None:
         """Verify allow_short_selling defaults to False.
 

@@ -311,6 +311,8 @@ class OrderRequestData(StrictDataSchema[Literal["order_request"]]):
         price: Limit price (required for limit orders).
         client_order_id: Client-side order identifier.
         signaled_at: Original signal timestamp (optional).
+        leverage: Margin leverage (None for spot, integer for margin).
+        reduce_only: True when closing an existing position.
     """
 
     type: Literal["order_request"] = "order_request"
@@ -325,6 +327,8 @@ class OrderRequestData(StrictDataSchema[Literal["order_request"]]):
     client_order_id: str
     signaled_at: datetime | None = None
     strategy_tag: str | None = None
+    leverage: int | None = None
+    reduce_only: bool = False
 
 
 class OrderCancelData(StrictDataSchema[Literal["order_cancel"]]):

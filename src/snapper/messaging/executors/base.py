@@ -809,6 +809,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 price=float(order.price) if order.price else None,
                 client_order_id=order.client_order_id,
                 signaled_at=order.signaled_at,
+                leverage=order.leverage,
+                reduce_only=order.reduce_only,
             )
             assert self.exchange_client is not None, _EXCHANGE_NOT_INIT_MSG
             result = await self.exchange_client.create_order(order_request)
