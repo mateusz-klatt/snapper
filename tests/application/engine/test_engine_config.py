@@ -920,6 +920,78 @@ async def test_maybe_stop_triggers_using_entry_price(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
+async def test_maybe_stop_short_triggers_on_price_rise(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify stop triggers BUY when short position and price rises.
+
+    Given: Short position at entry_price=100 with 2% stop,
+    When: Price rises to 103 (>2% above entry),
+    Then: BUY order sent with size=abs(position_qty).
+    """
+    risk = _RiskStub(stop_value=0.02)
+    engine, _ = _make_engine(risk=risk)
+    engine.position_qty = -2.0
+    engine.entry_price = 100.0
+    captured: list[tuple[Any, ...]] = []
+
+    async def _capture_send(*args: Any, **kwargs: Any) -> str:
+        captured.append((args, kwargs))
+        return "test-stop-short"
+
+    monkeypatch.setattr(engine, "_send_order", _capture_send)
+    assert await engine._maybe_stop(last_close=103.0) is True
+    assert engine.order_in_flight is True
+    call_kwargs = captured[0][1]
+    assert call_kwargs["side"] == "buy"
+    assert call_kwargs["size"] == pytest.approx(2.0)
+
+
+@pytest.mark.asyncio
+async def test_maybe_stop_short_no_trigger_on_price_fall(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify no stop when short position and price falls (favorable).
+
+    Given: Short position at entry_price=100 with 2% stop,
+    When: Price falls to 97,
+    Then: No stop triggered.
+    """
+    risk = _RiskStub(stop_value=0.02)
+    engine, _ = _make_engine(risk=risk)
+    engine.position_qty = -2.0
+    engine.entry_price = 100.0
+
+    async def _noop_send(*_args: Any, **_kwargs: Any) -> str:
+        raise AssertionError("Should not send order")
+
+    monkeypatch.setattr(engine, "_send_order", _noop_send)
+    assert await engine._maybe_stop(last_close=97.0) is False
+
+
+@pytest.mark.asyncio
+async def test_maybe_stop_short_uses_portfolio_avg_price(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify short stop uses portfolio avg_price when entry_price is None.
+
+    Given: Short position with entry_price=None, portfolio avg_price=100,
+    When: Price rises above stop threshold,
+    Then: Stop triggers using portfolio avg_price as reference.
+    """
+    risk = _RiskStub(stop_value=0.05)
+    engine, _ = _make_engine(risk=risk)
+    engine.position_qty = -1.0
+    engine.entry_price = None
+    engine.portfolio.positions[engine.instrument] = PositionStateModel(
+        quantity=-1.0, average_price=100.0
+    )
+    captured: list[tuple[Any, ...]] = []
+
+    async def _capture_send(*args: Any, **kwargs: Any) -> str:
+        captured.append((args, kwargs))
+        return "test-stop-avg"
+
+    monkeypatch.setattr(engine, "_send_order", _capture_send)
+    assert await engine._maybe_stop(last_close=106.0) is True
+    assert captured[0][1]["side"] == "buy"
+
+
+@pytest.mark.asyncio
 async def test_execute_desired_units_respects_drawdown_guard() -> None:
     """Verify execution respects drawdown guard and skips disallowed trades.
 

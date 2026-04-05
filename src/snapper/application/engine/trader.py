@@ -503,15 +503,16 @@ class TraderCoordinator(RegisterableProcess):
         price = fill_row["price"]
         fee = fill_row["fee"]
         engine.portfolio.update_fill(engine.instrument, side, size, price, fee)
+        old_qty = engine.position_qty
         if side == TradeSideEnum.BUY:
-            was_flat = engine.position_qty <= 0
             engine.position_qty += size
-            if was_flat and engine.position_qty > 0:
-                engine.entry_price = price
         else:
-            engine.position_qty = max(engine.position_qty - size, 0.0)
-            if engine.position_qty <= 0:
-                engine.entry_price = None
+            engine.position_qty -= size
+        if abs(engine.position_qty) < 1e-12:
+            engine.position_qty = 0.0
+            engine.entry_price = None
+        elif old_qty <= 0 < engine.position_qty or old_qty >= 0 > engine.position_qty:
+            engine.entry_price = price
         trade_id = fill_row.get("trade_id")
         if trade_id:
             engine.seen_exec_ids.add(trade_id)

@@ -238,34 +238,41 @@ class TradingEngineService:
     async def _maybe_stop(self, last_close: float, prev_close: float | None = None) -> bool:
         """Check and execute stop-loss if triggered.
 
-        Monitors position against stop-loss threshold based on:
-        - Entry price reference (percentage from entry)
-        - Fast drop detection (percentage from previous close)
-
-        If triggered, immediately sells entire position.
+        Monitors position against stop-loss threshold:
+        - Long: triggers when price drops below entry by stop_pct
+        - Short: triggers when price rises above entry by stop_pct
+        - Fast move detection from previous close in both directions
 
         Args:
             last_close: Current market price.
-            prev_close: Previous bar's close price for fast-drop detection.
+            prev_close: Previous bar's close price for fast-move detection.
 
         Returns:
             True if stop-loss was triggered and position closed, False otherwise.
         """
-        if self.position_qty <= 0:
+        if abs(self.position_qty) < 1e-12:
             return False
         if self.read_only or self.order_in_flight:
             return False
         stop_ref = self.entry_price
         if stop_ref is None:
             pos = self.portfolio.positions.get(self.instrument)
-            stop_ref = pos.average_price if pos and pos.quantity > 0 else None
+            stop_ref = pos.average_price if pos and pos.quantity != 0 else None
         stop_pct = self.risk.stop_pct()
-        trigger_ref = stop_ref is not None and last_close <= stop_ref * (1 - stop_pct)
-        trigger_fast = prev_close is not None and last_close <= prev_close * (1 - stop_pct)
+        if self.position_qty > 0:
+            trigger_ref = stop_ref is not None and last_close <= stop_ref * (1 - stop_pct)
+            trigger_fast = prev_close is not None and last_close <= prev_close * (1 - stop_pct)
+            stop_side = TradeSideEnum.SELL
+            stop_size = self.position_qty
+        else:
+            trigger_ref = stop_ref is not None and last_close >= stop_ref * (1 + stop_pct)
+            trigger_fast = prev_close is not None and last_close >= prev_close * (1 + stop_pct)
+            stop_side = TradeSideEnum.BUY
+            stop_size = abs(self.position_qty)
         if trigger_ref or trigger_fast:
             client_order_id = await self._send_order(
-                side=TradeSideEnum.SELL,
-                size=self.position_qty,
+                side=stop_side,
+                size=stop_size,
                 price=last_close,
                 reason="engine-stop",
             )

@@ -3187,6 +3187,60 @@ class TestRecovery:
         assert engine.position_qty == pytest.approx(0.0)
         assert engine.entry_price is None
 
+    def test_apply_execution_row_sell_opens_short(self) -> None:
+        """Verify sell from flat opens short position during recovery.
+
+        Given: Engine with position_qty=0,
+        When: SELL execution row applied,
+        Then: position_qty goes negative, entry_price set.
+        """
+        socket = MagicMock()
+        socket.tracker = Mock(session_id="s1")
+        engine = TradingEngineService(
+            "BTC-USD",
+            cast(Any, socket),
+            cfg=EngineConfigModel(initial_cash=10000.0),
+            exchange="kraken",
+        )
+        fill_row = {
+            "side": "sell",
+            "size": 0.5,
+            "price": 50000.0,
+            "fee": 0.5,
+            "trade_id": "t-short",
+        }
+        TraderCoordinator._apply_execution_row_to_engine(engine, cast(Any, fill_row))
+        assert engine.position_qty == pytest.approx(-0.5)
+        assert engine.entry_price == pytest.approx(50000.0)
+
+    def test_apply_execution_row_buy_covers_short(self) -> None:
+        """Verify buy covers short position during recovery.
+
+        Given: Engine with position_qty=-0.5,
+        When: BUY execution row of 0.5 applied,
+        Then: position_qty=0, entry_price=None.
+        """
+        socket = MagicMock()
+        socket.tracker = Mock(session_id="s1")
+        engine = TradingEngineService(
+            "BTC-USD",
+            cast(Any, socket),
+            cfg=EngineConfigModel(initial_cash=10000.0),
+            exchange="kraken",
+        )
+        engine.position_qty = -0.5
+        engine.entry_price = 50000.0
+        fill_row = {
+            "side": "buy",
+            "size": 0.5,
+            "price": 49000.0,
+            "fee": 0.5,
+            "trade_id": "t-cover",
+        }
+        TraderCoordinator._apply_execution_row_to_engine(engine, cast(Any, fill_row))
+        assert engine.position_qty == pytest.approx(0.0)
+        assert engine.entry_price is None
+
     @pytest.mark.asyncio
     async def test_recover_active_order_query_failure(
         self, monkeypatch: pytest.MonkeyPatch
