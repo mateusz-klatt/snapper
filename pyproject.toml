@@ -176,13 +176,14 @@ skip = [".venv", "build", "dist", "data/polygon", "frontend", "ios", "notebooks"
 skip_glob = ["**/node_modules/*"]
 
 [tool.pytest.ini_options]
-addopts = "-q --tb=short --timeout=15 --timeout-method=thread"
+addopts = "-q --tb=short --timeout=15 --timeout-method=thread -m 'not integration'"
 asyncio_mode = "auto"
 timeout = 15
 testpaths = ["tests", "proprietary/tests"]
 pythonpath = ["src", "proprietary/src"]
 markers = [
     "real_settings: mark test to use real Settings instead of mocked version",
+    "integration: real-broker integration test (excluded from default test run; opt in via make test-integration)",
 ]
 
 [tool.mypy]
@@ -236,7 +237,7 @@ warn_required_dynamic_aliases = true
 [tool.coverage.run]
 source = ["src/snapper", "proprietary/src", "scripts"]
 branch = true
-omit = ["*/__init__.py", "scripts/test_live_orders.py"]
+omit = ["*/__init__.py", "scripts/test_live_orders.py", "tests/integration/*"]
 
 [tool.coverage.report]
 skip_covered = true
