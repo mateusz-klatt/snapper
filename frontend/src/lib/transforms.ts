@@ -217,6 +217,7 @@ export function positionFromAPI(api: PositionData): Position {
     sessionId: api.session_id,
     instrument: api.instrument,
     exchange: api.exchange,
+    mode: api.mode,
     quantity: api.quantity,
     averagePrice: api.average_price,
     unrealizedPnl: api.unrealized_pnl,

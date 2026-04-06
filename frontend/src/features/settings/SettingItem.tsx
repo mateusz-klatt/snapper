@@ -294,11 +294,23 @@ const BooleanToggle: React.FC<BooleanToggleProps> = ({
 }) => {
   const isOn = parseBooleanString(setting.value)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [isDeleting, setIsDeleting] = useState(false)
 
   const handleToggle = async () => {
     const next = (!isOn).toString()
 
     await onUpdate(setting.key, next, setting.category, setting.description)
+  }
+
+  const handleConfirmDelete = async () => {
+    setIsDeleting(true)
+
+    try {
+      await onDelete(setting.key)
+    } finally {
+      setIsDeleting(false)
+      setShowDeleteConfirm(false)
+    }
   }
 
   const helpText = SETTING_HELP_TEXT[setting.key]
@@ -310,7 +322,7 @@ const BooleanToggle: React.FC<BooleanToggleProps> = ({
           <button
             type='button'
             onClick={handleToggle}
-            disabled={isSaving || readOnly}
+            disabled={isSaving || isDeleting || readOnly}
             data-testid={`setting-toggle-${setting.key}`}
             aria-pressed={isOn}
             aria-label={`Toggle ${setting.key}`}
@@ -337,19 +349,16 @@ const BooleanToggle: React.FC<BooleanToggleProps> = ({
           <span className='text-xs text-loss-700'>Delete this setting?</span>
           <button
             type='button'
-            onClick={async () => {
-              await onDelete(setting.key)
-              setShowDeleteConfirm(false)
-            }}
-            disabled={isSaving || readOnly}
+            onClick={handleConfirmDelete}
+            disabled={isDeleting || readOnly}
             className='rounded bg-loss-600 px-2 py-1 text-xs text-white transition-colors hover:bg-loss-700 disabled:cursor-not-allowed disabled:bg-loss-800'
           >
-            {isSaving ? 'Deleting...' : 'Yes, Delete'}
+            {isDeleting ? 'Deleting...' : 'Yes, Delete'}
           </button>
           <button
             type='button'
             onClick={() => setShowDeleteConfirm(false)}
-            disabled={isSaving}
+            disabled={isDeleting}
             className='rounded border border-dark-600 bg-alpine-50 px-2 py-1 text-xs text-alpine-900 transition-colors hover:bg-muted-200 disabled:cursor-not-allowed'
           >
             Cancel
@@ -360,7 +369,7 @@ const BooleanToggle: React.FC<BooleanToggleProps> = ({
           <button
             type='button'
             onClick={() => setShowDeleteConfirm(true)}
-            disabled={readOnly}
+            disabled={isSaving || isDeleting || readOnly}
             data-testid={`setting-delete-${setting.key}`}
             className='rounded bg-loss-50 px-3 py-1 text-xs text-loss-700 transition-colors hover:bg-loss-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-50'
           >

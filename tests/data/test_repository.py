@@ -3530,6 +3530,78 @@ async def test_update_trade_command_status_carries_forward_leverage_and_reduce_o
 
 
 @pytest.mark.asyncio
+async def test_update_trade_command_status_clears_last_error_on_success(
+    tmp_path: Path,
+) -> None:
+    """Verify last_error does NOT carry forward across a retry-then-success cycle.
+
+    Given: A trade command persisted, then a failed dispatch attempt that
+        rewrites the row to status='created' with last_error='dispatch failed'
+        (matching the outbox retry path),
+    When: A subsequent successful dispatch transitions to status='dispatched'
+        without passing last_error (the outbox success path does not),
+    Then: The new active row has last_error=None — the previous attempt's
+        error message is wiped instead of being silently carried forward.
+        Stale errors carrying through to a successful state would mislead
+        operators reading the trade_commands history.
+    """
+    db_path = tmp_path / "cmd_last_error.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _, cmd_pid = await r.insert_trade_command(
+        {
+            "command_type": "submit",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "engine-buy",
+            "client_order_id": "cid-err",
+            "venue_client_id": "vcid-err",
+            "side": "buy",
+            "order_type": "limit",
+            "quantity": 0.5,
+            "price": 50000.0,
+            "leverage": 2,
+            "reduce_only": False,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-err",
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+        }
+    )
+    after_fail = now + timedelta(milliseconds=1)
+    await r.update_trade_command_status(
+        public_id=cmd_pid,
+        new_status="created",
+        bus_time=after_fail,
+        session_id="s1",
+        sequence_id=2,
+        attempt_count=1,
+        last_error="dispatch failed",
+    )
+    after_dispatch = now + timedelta(milliseconds=2)
+    await r.update_trade_command_status(
+        public_id=cmd_pid,
+        new_status="dispatched",
+        bus_time=after_dispatch,
+        session_id="s1",
+        sequence_id=3,
+        dispatched_at=after_dispatch,
+        attempt_count=2,
+    )
+    active = await r.get_active_commands_for_shard("kraken.BTC-USD.live", after_dispatch)
+    assert len(active) == 1
+    assert active[0]["status"] == "dispatched"
+    assert active[0]["last_error"] is None
+    assert active[0]["attempt_count"] == 2
+    assert active[0]["leverage"] == 2
+
+
+@pytest.mark.asyncio
 async def test_insert_venue_event(tmp_path: Path) -> None:
     """Insert venue event persists the row and returns a monotonic local_seq.
 

@@ -498,10 +498,30 @@ describe('Position Transformers', () => {
     expect(result.instrument).toBe('BTC/USD')
 
     expect(result.exchange).toBe('kraken')
+    expect(result.mode).toBe('live')
     expect(result.averagePrice).toBe(48000)
     expect(result.unrealizedPnl).toBe(3000)
     expect(result.realizedPnl).toBe(500)
     expect(result.timestamp).toEqual(new Date('2026-01-15T10:30:00Z'))
+  })
+  it('propagates paper mode through positionFromAPI', () => {
+    const apiPosition: PositionData = {
+      type: 'position',
+      sequence_id: 0,
+      public_id: 'pos-uuid-2',
+      timestamp: '2026-01-15T10:30:00Z',
+      session_id: 'test-sid',
+      instrument: 'BTC/USD',
+      exchange: 'kraken',
+      mode: 'paper',
+      quantity: -1,
+      average_price: 48000,
+      unrealized_pnl: 0,
+      realized_pnl: 0,
+    }
+    const result = positionFromAPI(apiPosition)
+
+    expect(result.mode).toBe('paper')
   })
   it('throws when API position has no timestamp', () => {
     const apiPosition = {

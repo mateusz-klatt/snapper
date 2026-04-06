@@ -2259,9 +2259,9 @@ class SQLAlchemyRepository(Repository):
             existing = (
                 (
                     await s.execute(
-                        select(TradeCommand).where(
-                            *match_filters, *where_active(TradeCommand, bus_time)
-                        )
+                        select(TradeCommand)
+                        .where(*match_filters, *where_active(TradeCommand, bus_time))
+                        .with_for_update()
                     )
                 )
                 .scalars()
@@ -2293,7 +2293,7 @@ class SQLAlchemyRepository(Repository):
                 attempt_count=(
                     attempt_count if attempt_count is not None else existing.attempt_count
                 ),
-                last_error=last_error if last_error is not None else existing.last_error,
+                last_error=last_error,
                 created_at=existing.created_at,
                 dispatched_at=(
                     dispatched_at if dispatched_at is not None else existing.dispatched_at
