@@ -3348,6 +3348,66 @@ async def test_get_undispatched_commands(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_trade_command_query_projections_carry_leverage_and_reduce_only(
+    tmp_path: Path,
+) -> None:
+    """Verify trade command query projections expose leverage and reduce_only.
+
+    Given: A database with a trade command persisted with leverage=4 and
+        reduce_only=True (the durable command path used when
+        use_durable_commands=True),
+    When: get_undispatched_commands, get_active_commands_for_shard, and
+        get_active_commands_for_exchange are called,
+    Then: All three projections return rows that include the leverage and
+        reduce_only fields, so `_outbox_publish` can reconstruct an
+        OrderRequestData carrying the correct margin metadata. Without this
+        propagation the executor would receive defaults (None / False) on the
+        durable path and the frontend / DB would lose the short / margin
+        intent.
+    """
+    db_path = tmp_path / "cmd_lev.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    await r.insert_trade_command(
+        {
+            "command_type": "submit",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "engine-sell",
+            "client_order_id": "cid-lev",
+            "venue_client_id": "vcid-lev",
+            "side": "sell",
+            "order_type": "limit",
+            "quantity": 0.5,
+            "price": 50000.0,
+            "leverage": 4,
+            "reduce_only": True,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-lev",
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+        }
+    )
+    undispatched = await r.get_undispatched_commands(as_of=now, limit=10)
+    assert len(undispatched) == 1
+    assert undispatched[0]["leverage"] == 4
+    assert undispatched[0]["reduce_only"] is True
+    by_shard = await r.get_active_commands_for_shard("kraken.BTC-USD.live", now)
+    assert len(by_shard) == 1
+    assert by_shard[0]["leverage"] == 4
+    assert by_shard[0]["reduce_only"] is True
+    by_exchange = await r.get_active_commands_for_exchange("kraken", now)
+    assert len(by_exchange) == 1
+    assert by_exchange[0]["leverage"] == 4
+    assert by_exchange[0]["reduce_only"] is True
+
+
+@pytest.mark.asyncio
 async def test_update_trade_command_status_scd2(tmp_path: Path) -> None:
     """Update trade command status performs SCD2 close-and-insert.
 

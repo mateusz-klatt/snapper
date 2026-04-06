@@ -260,6 +260,8 @@ class TradeCommandRow(TypedDict):
     order_type: str
     quantity: float
     price: float | None
+    leverage: int | None
+    reduce_only: bool
     status: str
     attempt_count: int
     last_error: str | None

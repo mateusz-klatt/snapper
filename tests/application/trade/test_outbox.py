@@ -39,6 +39,8 @@ def _make_cmd_row(public_id: str = "cmd-1") -> TradeCommandRow:
         "order_type": "market",
         "quantity": 0.5,
         "price": None,
+        "leverage": None,
+        "reduce_only": False,
         "status": "created",
         "attempt_count": 0,
         "last_error": None,

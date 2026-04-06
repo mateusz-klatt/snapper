@@ -1104,6 +1104,8 @@ class TraderCoordinator(RegisterableProcess):
             client_order_id=cmd["client_order_id"],
             exchange=exchange,
             strategy_tag=tag,
+            leverage=cmd["leverage"],
+            reduce_only=cmd["reduce_only"],
         )
         await self.msg_publisher.send(topic, order)
 

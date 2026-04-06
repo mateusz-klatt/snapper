@@ -1417,11 +1417,51 @@ async def test_outbox_publish_sends_to_zmq() -> None:
         "order_type": "market",
         "quantity": 0.5,
         "price": None,
+        "leverage": None,
+        "reduce_only": False,
         "session_id": "s1",
         "sequence_id": 1,
     }
     await coord._outbox_publish(cmd)
     coord.msg_publisher.send.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_outbox_publish_propagates_leverage_and_reduce_only() -> None:
+    """Outbox publish forwards leverage and reduce_only into OrderRequestData.
+
+    Given: a TraderCoordinator with a mocked msg_publisher and a TradeCommandRow
+        containing leverage=3 and reduce_only=True (mimicking the durable
+        command path used when use_durable_commands=True),
+    When: _outbox_publish is called,
+    Then: The published OrderRequestData carries the same leverage/reduce_only,
+        so the executor (and downstream OrderData WS event + Order DB row)
+        observes the request-time margin metadata instead of defaults.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.msg_publisher = AsyncMock()
+    cmd: dict[str, Any] = {
+        "public_id": "cmd-lev",
+        "client_order_id": "cid-lev",
+        "shard_key": "kraken.BTC-USD.live",
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "strategy_id": "engine-sell",
+        "side": "sell",
+        "order_type": "limit",
+        "quantity": 0.5,
+        "price": 50000.0,
+        "leverage": 3,
+        "reduce_only": True,
+        "session_id": "s1",
+        "sequence_id": 2,
+    }
+    await coord._outbox_publish(cmd)
+    coord.msg_publisher.send.assert_called_once()
+    sent_order = coord.msg_publisher.send.call_args[0][1]
+    assert sent_order.leverage == 3
+    assert sent_order.reduce_only is True
 
 
 @pytest.mark.asyncio
