@@ -21,6 +21,7 @@ import pytest
 import zmq
 import zmq.asyncio
 
+import snapper.config.settings as snapper_settings
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import TradeSideEnum
 from snapper.messaging.schemas.data import OrderRequestData
@@ -151,8 +152,6 @@ class TestShortSellingE2E:
         desired_units to 0 and emit nothing on orders.commands within the
         observation window.
         """
-        import snapper.config.settings as snapper_settings
-
         mock_settings = snapper_settings.get_settings()
         monkeypatch.setattr(mock_settings, "allow_short_selling", False, raising=False)
         sub = await _subscribe_to_orders_topic(
