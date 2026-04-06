@@ -43,6 +43,7 @@ describe('useHashRouting', () => {
       'processes',
       'strategies',
       'orders',
+      'positions',
       'signals',
       'health',
       'admin',

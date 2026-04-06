@@ -644,6 +644,151 @@ describe('Settings', () => {
       description: 'Allow shorts',
     })
   })
+  it('deletes a boolean setting via the toggle row delete button', async () => {
+    const user = userEvent.setup()
+    const mockSettings = [
+      {
+        key: 'allow_short_selling',
+        value: 'false',
+        category: 'trading',
+        description: 'Allow shorts',
+        updated_at: '2024-01-01T00:00:00Z',
+        updated_by: 'admin',
+      },
+    ]
+
+    vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['trading'])
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      payload: mockSettings,
+      count: mockSettings.length,
+    } as never)
+    vi.mocked(apiClient.removeSetting).mockResolvedValue({} as never)
+    renderSettings(<Settings />)
+    await waitFor(() => {
+      expect(screen.getByText('allow_short_selling')).toBeTruthy()
+    })
+    const deleteButton = screen.getByTestId('setting-delete-allow_short_selling')
+
+    await user.click(deleteButton)
+    const confirmButton = screen.getByRole('button', { name: /Yes, Delete/i })
+
+    await user.click(confirmButton)
+    expect(apiClient.removeSetting).toHaveBeenCalledWith('allow_short_selling')
+  })
+  it('shows "Deleting..." text on the confirm button while delete is in flight', async () => {
+    const user = userEvent.setup()
+    const mockSettings = [
+      {
+        key: 'allow_short_selling',
+        value: 'false',
+        category: 'trading',
+        description: 'Allow shorts',
+        updated_at: '2024-01-01T00:00:00Z',
+        updated_by: 'admin',
+      },
+    ]
+
+    vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['trading'])
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      payload: mockSettings,
+      count: mockSettings.length,
+    } as never)
+
+    let resolveDelete: () => void = () => {}
+
+    vi.mocked(apiClient.removeSetting).mockImplementation(
+      () =>
+        new Promise(resolve => {
+          resolveDelete = () => resolve({} as never)
+        })
+    )
+    renderSettings(<Settings />)
+    await waitFor(() => {
+      expect(screen.getByText('allow_short_selling')).toBeTruthy()
+    })
+    const deleteButton = screen.getByTestId('setting-delete-allow_short_selling')
+
+    await user.click(deleteButton)
+    const confirmButton = screen.getByRole('button', { name: /Yes, Delete/i })
+
+    await user.click(confirmButton)
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Deleting/i })).toBeInTheDocument()
+    })
+    resolveDelete()
+  })
+  it('disables the toggle while an update is in flight to prevent double-apply', async () => {
+    const user = userEvent.setup()
+    const mockSettings = [
+      {
+        key: 'allow_short_selling',
+        value: 'false',
+        category: 'trading',
+        description: 'Allow shorts',
+        updated_at: '2024-01-01T00:00:00Z',
+        updated_by: 'admin',
+      },
+    ]
+
+    vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['trading'])
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      payload: mockSettings,
+      count: mockSettings.length,
+    } as never)
+
+    let resolveUpdate: () => void = () => {}
+
+    vi.mocked(apiClient.updateSetting).mockImplementation(
+      () =>
+        new Promise(resolve => {
+          resolveUpdate = () => resolve({} as never)
+        })
+    )
+    renderSettings(<Settings />)
+    await waitFor(() => {
+      expect(screen.getByText('allow_short_selling')).toBeTruthy()
+    })
+    const toggle = screen.getByTestId('setting-toggle-allow_short_selling')
+
+    await user.click(toggle)
+    await waitFor(() => {
+      expect((toggle as HTMLButtonElement).disabled).toBe(true)
+    })
+    await user.click(toggle)
+    expect(apiClient.updateSetting).toHaveBeenCalledTimes(1)
+    resolveUpdate()
+  })
+  it('cancels a boolean setting delete confirmation', async () => {
+    const user = userEvent.setup()
+    const mockSettings = [
+      {
+        key: 'allow_short_selling',
+        value: 'true',
+        category: 'trading',
+        description: 'Allow shorts',
+        updated_at: '2024-01-01T00:00:00Z',
+        updated_by: 'admin',
+      },
+    ]
+
+    vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['trading'])
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      payload: mockSettings,
+      count: mockSettings.length,
+    } as never)
+    renderSettings(<Settings />)
+    await waitFor(() => {
+      expect(screen.getByText('allow_short_selling')).toBeTruthy()
+    })
+    const deleteButton = screen.getByTestId('setting-delete-allow_short_selling')
+
+    await user.click(deleteButton)
+    const cancelButton = screen.getByRole('button', { name: /Cancel/i })
+
+    await user.click(cancelButton)
+    expect(apiClient.removeSetting).not.toHaveBeenCalled()
+    expect(screen.getByTestId('setting-delete-allow_short_selling')).toBeInTheDocument()
+  })
   it('handles update error gracefully', async () => {
     const mockSettings = [
       {

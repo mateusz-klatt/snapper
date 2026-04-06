@@ -88,9 +88,11 @@ describe('Positions', () => {
       isLoading: false,
     } as never)
     renderWithProviders(<Positions />)
-    expect(screen.getByTestId('position-side-BTC-USD')).toHaveTextContent('LONG')
+    expect(screen.getByTestId('position-side-BTC-USD-kraken-live')).toHaveTextContent('LONG')
     expect(screen.getByText('2.5000')).toBeInTheDocument()
-    expect(screen.getByTestId('position-unrealized-BTC-USD')).toHaveTextContent('+$1000.00')
+    expect(screen.getByTestId('position-unrealized-BTC-USD-kraken-live')).toHaveTextContent(
+      '+$1000.00'
+    )
   })
 
   it('renders a SHORT position with red badge and absolute quantity', async () => {
@@ -108,13 +110,15 @@ describe('Positions', () => {
       isLoading: false,
     } as never)
     renderWithProviders(<Positions />)
-    const sideBadge = screen.getByTestId('position-side-ETH-USD')
+    const sideBadge = screen.getByTestId('position-side-ETH-USD-kraken-live')
 
     expect(sideBadge).toHaveTextContent('SHORT')
     expect(sideBadge.className).toContain('text-loss-400')
     expect(screen.getByText('3.0000')).toBeInTheDocument()
-    expect(screen.getByTestId('position-unrealized-ETH-USD')).toHaveTextContent('-$150.00')
-    expect(screen.getByTestId('position-realized-ETH-USD')).toHaveTextContent('+$50.00')
+    expect(screen.getByTestId('position-unrealized-ETH-USD-kraken-live')).toHaveTextContent(
+      '-$150.00'
+    )
+    expect(screen.getByTestId('position-realized-ETH-USD-kraken-live')).toHaveTextContent('+$50.00')
   })
 
   it('renders a FLAT position with neutral badge and zero P&L formatting', async () => {
@@ -132,11 +136,11 @@ describe('Positions', () => {
       isLoading: false,
     } as never)
     renderWithProviders(<Positions />)
-    const sideBadge = screen.getByTestId('position-side-SOL-USD')
+    const sideBadge = screen.getByTestId('position-side-SOL-USD-kraken-live')
 
     expect(sideBadge).toHaveTextContent('FLAT')
     expect(sideBadge.className).toContain('text-muted-400')
-    expect(screen.getByTestId('position-unrealized-SOL-USD')).toHaveTextContent('$0.00')
+    expect(screen.getByTestId('position-unrealized-SOL-USD-kraken-live')).toHaveTextContent('$0.00')
   })
 
   it('renders multiple positions side by side', async () => {
@@ -158,7 +162,33 @@ describe('Positions', () => {
       isLoading: false,
     } as never)
     renderWithProviders(<Positions />)
-    expect(screen.getByTestId('position-side-BTC-USD')).toHaveTextContent('LONG')
-    expect(screen.getByTestId('position-side-ETH-USD')).toHaveTextContent('SHORT')
+    expect(screen.getByTestId('position-side-BTC-USD-kraken-live')).toHaveTextContent('LONG')
+    expect(screen.getByTestId('position-side-ETH-USD-kraken-live')).toHaveTextContent('SHORT')
+  })
+
+  it('disambiguates same instrument across exchanges and modes', async () => {
+    const krakenLive = makePosition({
+      instrument: 'BTC-USD',
+      exchange: 'kraken',
+      mode: 'live',
+      quantity: 1,
+      publicId: 'pos-k-live',
+    })
+    const krakenPaper = makePosition({
+      instrument: 'BTC-USD',
+      exchange: 'kraken',
+      mode: 'paper',
+      quantity: -1,
+      publicId: 'pos-k-paper',
+    })
+    const { usePositions } = await import('../../hooks/queries')
+
+    vi.mocked(usePositions).mockReturnValue({
+      data: [krakenLive, krakenPaper],
+      isLoading: false,
+    } as never)
+    renderWithProviders(<Positions />)
+    expect(screen.getByTestId('position-side-BTC-USD-kraken-live')).toHaveTextContent('LONG')
+    expect(screen.getByTestId('position-side-BTC-USD-kraken-paper')).toHaveTextContent('SHORT')
   })
 })

@@ -44,14 +44,18 @@ const formatPnl = (value: number): string => {
   return `$${abs}`
 }
 
+const positionIdSuffix = (position: Position): string =>
+  `${position.instrument}-${position.exchange}-${position.mode ?? 'live'}`
+
 const PositionRow: React.FC<{ position: Position }> = ({ position }) => {
   const side = getPositionSide(position.quantity)
   const absQuantity = Math.abs(position.quantity)
+  const suffix = positionIdSuffix(position)
 
   return (
     <div
       className='rounded-2xl border border-dark-600 bg-alpine-50 p-5 transition-colors hover:border-muted-400'
-      data-testid={`position-${position.instrument}-${position.exchange}`}
+      data-testid={`position-${suffix}`}
     >
       <div className='mb-3 flex items-center justify-between'>
         <div className='flex items-center space-x-3'>
@@ -59,7 +63,7 @@ const PositionRow: React.FC<{ position: Position }> = ({ position }) => {
           <span className='text-sm text-muted-500'>{position.exchange}</span>
           <span
             className={clsx('rounded-full px-2 py-1 text-xs font-medium', getSideBadgeClass(side))}
-            data-testid={`position-side-${position.instrument}`}
+            data-testid={`position-side-${suffix}`}
           >
             {side}
           </span>
@@ -78,7 +82,7 @@ const PositionRow: React.FC<{ position: Position }> = ({ position }) => {
           <div className='text-muted-500'>Unrealized P&amp;L</div>
           <div
             className={clsx('font-mono', getPnlClass(position.unrealizedPnl))}
-            data-testid={`position-unrealized-${position.instrument}`}
+            data-testid={`position-unrealized-${suffix}`}
           >
             {formatPnl(position.unrealizedPnl)}
           </div>
@@ -87,7 +91,7 @@ const PositionRow: React.FC<{ position: Position }> = ({ position }) => {
           <div className='text-muted-500'>Realized P&amp;L</div>
           <div
             className={clsx('font-mono', getPnlClass(position.realizedPnl))}
-            data-testid={`position-realized-${position.instrument}`}
+            data-testid={`position-realized-${suffix}`}
           >
             {formatPnl(position.realizedPnl)}
           </div>
@@ -137,10 +141,7 @@ export const Positions: React.FC = () => {
         {!isLoading && positions.length > 0 && (
           <div className='grid gap-4'>
             {positions.map((position: Position) => (
-              <PositionRow
-                key={`${position.instrument}-${position.exchange}`}
-                position={position}
-              />
+              <PositionRow key={positionIdSuffix(position)} position={position} />
             ))}
           </div>
         )}

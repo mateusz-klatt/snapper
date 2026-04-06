@@ -45,6 +45,7 @@ describe('Admin', () => {
     expect(screen.getByText('Processes')).toBeInTheDocument()
     expect(screen.getByText('Strategies')).toBeInTheDocument()
     expect(screen.getByText('Orders & Fills')).toBeInTheDocument()
+    expect(screen.getByText('Positions')).toBeInTheDocument()
     expect(screen.getByText('Signals')).toBeInTheDocument()
     expect(screen.getByText('Health')).toBeInTheDocument()
     expect(screen.getByText('Settings')).toBeInTheDocument()

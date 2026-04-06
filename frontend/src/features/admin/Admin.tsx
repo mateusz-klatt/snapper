@@ -10,6 +10,7 @@ const TAB_DISPLAY_NAMES: Record<string, string> = {
   processes: 'Processes',
   strategies: 'Strategies',
   orders: 'Orders & Fills',
+  positions: 'Positions',
   signals: 'Signals',
   health: 'Health',
   admin: 'Administration',

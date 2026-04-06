@@ -280,12 +280,20 @@ interface BooleanToggleProps {
     category: string,
     description?: string | null
   ) => Promise<void>
+  readonly onDelete: (key: string) => Promise<void>
   readonly isSaving: boolean
   readonly readOnly?: boolean
 }
 
-const BooleanToggle: React.FC<BooleanToggleProps> = ({ setting, onUpdate, isSaving, readOnly }) => {
+const BooleanToggle: React.FC<BooleanToggleProps> = ({
+  setting,
+  onUpdate,
+  onDelete,
+  isSaving,
+  readOnly,
+}) => {
   const isOn = parseBooleanString(setting.value)
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
 
   const handleToggle = async () => {
     const next = (!isOn).toString()
@@ -324,6 +332,42 @@ const BooleanToggle: React.FC<BooleanToggleProps> = ({ setting, onUpdate, isSavi
         </div>
       </div>
       {helpText && <p className='text-xs text-muted-600'>{helpText}</p>}
+      {showDeleteConfirm ? (
+        <div className='flex items-center gap-2 rounded border border-loss-700 bg-loss-50 p-2'>
+          <span className='text-xs text-loss-700'>Delete this setting?</span>
+          <button
+            type='button'
+            onClick={async () => {
+              await onDelete(setting.key)
+              setShowDeleteConfirm(false)
+            }}
+            disabled={isSaving || readOnly}
+            className='rounded bg-loss-600 px-2 py-1 text-xs text-white transition-colors hover:bg-loss-700 disabled:cursor-not-allowed disabled:bg-loss-800'
+          >
+            {isSaving ? 'Deleting...' : 'Yes, Delete'}
+          </button>
+          <button
+            type='button'
+            onClick={() => setShowDeleteConfirm(false)}
+            disabled={isSaving}
+            className='rounded border border-dark-600 bg-alpine-50 px-2 py-1 text-xs text-alpine-900 transition-colors hover:bg-muted-200 disabled:cursor-not-allowed'
+          >
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <div>
+          <button
+            type='button'
+            onClick={() => setShowDeleteConfirm(true)}
+            disabled={readOnly}
+            data-testid={`setting-delete-${setting.key}`}
+            className='rounded bg-loss-50 px-3 py-1 text-xs text-loss-700 transition-colors hover:bg-loss-800 hover:text-white disabled:cursor-not-allowed disabled:opacity-50'
+          >
+            Delete
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -352,7 +396,7 @@ export const SettingItem = ({
   const [isEditing, setIsEditing] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const isBoolean = isBooleanString(setting.value) && !isSensitive(setting.key)
-  const isJson = isJsonString(setting.value) && !isBoolean
+  const isJson = isJsonString(setting.value) && !isBooleanString(setting.value)
   const [jsonValue, setJsonValue] = useState<JsonValue | null>(null)
 
   useEffect(() => {
@@ -429,6 +473,7 @@ export const SettingItem = ({
           <BooleanToggle
             setting={setting}
             onUpdate={onUpdate}
+            onDelete={onDelete}
             isSaving={isSaving}
             readOnly={readOnly}
           />
