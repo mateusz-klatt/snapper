@@ -32,6 +32,7 @@ let resourceAccess: [String: [UserRole]] = [
     "processes": [.operatorRole, .admin],
     "strategies": [.viewer, .operatorRole, .admin],
     "orders": [.viewer, .operatorRole, .admin],
+    "positions": [.viewer, .operatorRole, .admin],
     "signals": [.viewer, .operatorRole, .admin],
     "health": [.viewer, .operatorRole, .admin],
     "admin": [.admin],
