@@ -2780,8 +2780,11 @@ class SQLAlchemyRepository(Repository):
         """Insert a funding rate row, optionally on a caller-managed session.
 
         See ``Repository.insert_funding_rate`` for the contract. When
-        the caller passes its own ``session``, this method does NOT
-        commit; the caller is responsible for transactional grouping.
+        the caller passes its own ``session``, the insert is wrapped in
+        a ``begin_nested()`` SAVEPOINT so a duplicate ``IntegrityError``
+        from the partial unique index only rolls back the savepoint —
+        the outer transaction stays usable and the caller can swallow
+        the duplicate as a "boundary already applied" no-op.
         """
         if session is None:
             async with self.session() as s:
@@ -2791,8 +2794,9 @@ class SQLAlchemyRepository(Repository):
                 await s.refresh(obj)
                 return int(obj.id)
         obj = FundingRate(**row)
-        session.add(obj)
-        await session.flush()
+        async with session.begin_nested():
+            session.add(obj)
+            await session.flush()
         return int(obj.id)
 
     async def get_funding_rates(
@@ -2848,10 +2852,13 @@ class SQLAlchemyRepository(Repository):
     ) -> int:
         """Insert an accrual ledger row, optionally on a caller-managed session.
 
-        See ``Repository.insert_accrual`` for the contract. The caller
-        is expected to swallow ``IntegrityError`` from a duplicate
-        ``(instrument, mode, accrual_type, accrued_at)`` tuple as a
-        "boundary already applied" no-op.
+        See ``Repository.insert_accrual`` for the contract. When the
+        caller passes its own ``session``, the insert is wrapped in a
+        ``begin_nested()`` SAVEPOINT so a duplicate ``IntegrityError``
+        from the partial unique index only rolls back the savepoint —
+        the outer transaction stays usable and the caller can swallow
+        the duplicate as a "boundary already applied" no-op without
+        losing earlier writes from the same outer transaction.
         """
         if session is None:
             async with self.session() as s:
@@ -2861,8 +2868,9 @@ class SQLAlchemyRepository(Repository):
                 await s.refresh(obj)
                 return int(obj.id)
         obj = AccrualLedger(**row)
-        session.add(obj)
-        await session.flush()
+        async with session.begin_nested():
+            session.add(obj)
+            await session.flush()
         return int(obj.id)
 
     async def get_accruals(

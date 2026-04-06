@@ -1146,13 +1146,6 @@ class FundingRate(TemporalMixin, Base):
             sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
-        Index(
-            "ix_funding_rates_lookup",
-            "instrument_public_id",
-            "rate_type",
-            "direction",
-            "effective_from",
-        ),
         CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_funding_rates_exchange_lower"),
         CheckConstraint(
             "rate_type IN ('spot_margin_rollover', 'perpetual_funding')",

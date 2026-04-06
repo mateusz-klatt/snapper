@@ -3,6 +3,8 @@
 from datetime import UTC
 from datetime import datetime
 
+import pytest
+
 from snapper.application.trade.trade_service import TradeService
 from snapper.data.repository_types import VenueEventRow
 
@@ -873,4 +875,142 @@ def test_restore_from_checkpoint_default_position_opened_at_is_none() -> None:
         seen_exec_ids=set(),
     )
     pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_opened_at is None
+
+
+def test_apply_fill_short_open_stamps_position_opened_at() -> None:
+    """Opening a short from flat stamps position_opened_at.
+
+    Given: a fresh TradeService at flat,
+    When: a sell fill arrives that opens a short cycle,
+    Then: position_opened_at on the projection equals the venue
+        timestamp of that fill.
+    """
+    svc = TradeService()
+    venue_time = datetime(2026, 4, 6, 12, 0, 0, tzinfo=UTC)
+    event = _make_venue_event(event_id=1, side="sell", fill_size=0.5)
+    event["venue_timestamp"] = venue_time
+    svc.apply_venue_event(event)
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == -0.5
+    assert pos.position_opened_at == venue_time
+
+
+def test_position_opened_at_carries_through_short_vwap_add() -> None:
+    """Adding to an existing short position preserves position_opened_at.
+
+    Given: a short position opened at t1,
+    When: a second sell fill at t2 adds to the short via VWAP,
+    Then: position_opened_at remains t1, not t2.
+    """
+    svc = TradeService()
+    t1 = datetime(2026, 4, 6, 12, 0, 0, tzinfo=UTC)
+    t2 = datetime(2026, 4, 6, 12, 5, 0, tzinfo=UTC)
+    e1 = _make_venue_event(event_id=1, side="sell", fill_price=50000.0, fill_size=0.4)
+    e1["venue_timestamp"] = t1
+    e2 = _make_venue_event(
+        event_id=2, side="sell", fill_price=51000.0, fill_size=0.6, exec_id="exec-2"
+    )
+    e2["venue_timestamp"] = t2
+    svc.apply_venue_event(e1)
+    svc.apply_venue_event(e2)
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == -1.0
+    assert pos.position_opened_at == t1
+
+
+def test_position_opened_at_preserved_on_partial_short_cover() -> None:
+    """Partially covering a short does NOT reset position_opened_at.
+
+    Given: a short position of -1.0 opened at t1,
+    When: a buy fill of 0.4 covers part of the short at t2,
+    Then: position drops to -0.6 and position_opened_at remains t1
+        (the open cycle has not yet closed).
+    """
+    svc = TradeService()
+    t1 = datetime(2026, 4, 6, 12, 0, 0, tzinfo=UTC)
+    t2 = datetime(2026, 4, 6, 12, 30, 0, tzinfo=UTC)
+    e1 = _make_venue_event(event_id=1, side="sell", fill_size=1.0)
+    e1["venue_timestamp"] = t1
+    svc.apply_venue_event(e1)
+    e2 = _make_venue_event(event_id=2, side="buy", fill_size=0.4, exec_id="exec-2")
+    e2["venue_timestamp"] = t2
+    svc.apply_venue_event(e2)
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == pytest.approx(-0.6)
+    assert pos.position_opened_at == t1
+
+
+def test_position_opened_at_resets_on_full_short_cover() -> None:
+    """Fully covering a short to flat resets position_opened_at to None.
+
+    Given: a short position with a stamped position_opened_at,
+    When: a buy fill exactly covers the short,
+    Then: position_opened_at is reset to None alongside entry_price.
+    """
+    svc = TradeService()
+    t1 = datetime(2026, 4, 6, 12, 0, 0, tzinfo=UTC)
+    e1 = _make_venue_event(event_id=1, side="sell", fill_size=1.0)
+    e1["venue_timestamp"] = t1
+    svc.apply_venue_event(e1)
+    e2 = _make_venue_event(event_id=2, side="buy", fill_size=1.0, exec_id="exec-2")
+    svc.apply_venue_event(e2)
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == 0.0
+    assert pos.entry_price is None
+    assert pos.position_opened_at is None
+
+
+def test_position_opened_at_resets_on_short_to_long_flip() -> None:
+    """A short-to-long flip stamps position_opened_at with the flip fill time.
+
+    Given: a short position of -1.0 opened at t1,
+    When: a buy fill of 2.0 flips the position to +1.0 at t2,
+    Then: position_opened_at is reset to t2 (new long cycle starts here).
+    """
+    svc = TradeService()
+    t1 = datetime(2026, 4, 6, 12, 0, 0, tzinfo=UTC)
+    t2 = datetime(2026, 4, 6, 13, 0, 0, tzinfo=UTC)
+    e1 = _make_venue_event(event_id=1, side="sell", fill_size=1.0)
+    e1["venue_timestamp"] = t1
+    svc.apply_venue_event(e1)
+    e2 = _make_venue_event(
+        event_id=2, side="buy", fill_size=2.0, fill_price=51000.0, exec_id="exec-2"
+    )
+    e2["venue_timestamp"] = t2
+    svc.apply_venue_event(e2)
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == 1.0
+    assert pos.position_opened_at == t2
+
+
+def test_restore_then_delta_close_resets_position_opened_at() -> None:
+    """A delta-replay close after restore clears position_opened_at.
+
+    Given: a checkpoint restored with a stamped position_opened_at,
+    When: a delta venue event closes the position to flat,
+    Then: position_opened_at is reset to None and would NOT carry over
+        a stale value into the funding accrual loop. This protects
+        against the "checkpoint had position open, delta closed it"
+        recovery edge case.
+    """
+    svc = TradeService()
+    t1 = datetime(2026, 4, 6, 12, 0, 0, tzinfo=UTC)
+    svc.restore_from_checkpoint(
+        shard_key="kraken.BTC-USD.live",
+        position_qty=1.0,
+        entry_price=50000.0,
+        cash=5000.0,
+        peak_equity=10000.0,
+        realized_pnl=0.0,
+        turnover=50000.0,
+        last_venue_event_id=10,
+        open_command_ids=[],
+        seen_exec_ids=set(),
+        position_opened_at=t1,
+    )
+    delta = _make_venue_event(event_id=11, side="sell", fill_size=1.0, exec_id="delta-1")
+    svc.apply_venue_event(delta)
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == 0.0
     assert pos.position_opened_at is None

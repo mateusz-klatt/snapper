@@ -113,11 +113,6 @@ def upgrade() -> None:
         postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_index(
-        "ix_funding_rates_lookup",
-        "funding_rates",
-        ["instrument_public_id", "rate_type", "direction", "effective_from"],
-    )
-    op.create_index(
         "ix_funding_rates_instrument_public_id",
         "funding_rates",
         ["instrument_public_id"],
@@ -197,7 +192,6 @@ def downgrade() -> None:
     op.drop_table("accrual_ledger")
 
     op.drop_index("ix_funding_rates_instrument_public_id", table_name="funding_rates")
-    op.drop_index("ix_funding_rates_lookup", table_name="funding_rates")
     op.drop_index("ix_funding_rates_public_id", table_name="funding_rates")
     op.drop_index("ix_funding_rates_unique_active", table_name="funding_rates")
     op.drop_table("funding_rates")

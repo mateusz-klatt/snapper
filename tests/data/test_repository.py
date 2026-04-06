@@ -4405,6 +4405,129 @@ async def test_insert_accrual_with_caller_session(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_insert_accrual_savepoint_isolates_duplicate_in_caller_session(
+    tmp_path: Path,
+) -> None:
+    """Caller-managed duplicate accrual rolls back the SAVEPOINT only.
+
+    Given: a caller-managed AsyncSession that already inserted accrual A,
+    When: a duplicate insert of A raises IntegrityError but the caller
+        catches it and proceeds with a different accrual B in the SAME
+        session,
+    Then: B is committed alongside A, proving the savepoint isolated
+        the duplicate failure from the outer transaction. This is the
+        contract that the future B4 funding accrual loop relies on for
+        idempotent boundary application.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    accrued_a = datetime(2026, 4, 6, 0, 0, 0, tzinfo=UTC)
+    accrued_b = datetime(2026, 4, 6, 1, 0, 0, tzinfo=UTC)
+    row_a: AccrualLedgerInsertRow = {
+        "instrument_public_id": inst_pid,
+        "mode": "live",
+        "accrual_type": "funding",
+        "accrued_at": accrued_a,
+        "amount": -0.5,
+        "amount_asset": "USD",
+        "rate": 0.0001,
+        "notional": 50000.0,
+        "position_quantity_at_accrual": 1.0,
+        "exchange": "kraken",
+        "session_id": "s1",
+        "sequence_id": 950,
+        "timestamp": now,
+    }
+    row_b: AccrualLedgerInsertRow = {
+        "instrument_public_id": inst_pid,
+        "mode": "live",
+        "accrual_type": "funding",
+        "accrued_at": accrued_b,
+        "amount": -0.6,
+        "amount_asset": "USD",
+        "rate": 0.0001,
+        "notional": 60000.0,
+        "position_quantity_at_accrual": 1.0,
+        "exchange": "kraken",
+        "session_id": "s1",
+        "sequence_id": 951,
+        "timestamp": now,
+    }
+    await r.insert_accrual(row_a)
+    async with r.session() as s:
+        with pytest.raises(IntegrityError):
+            await r.insert_accrual(row_a, session=s)
+        await r.insert_accrual(row_b, session=s)
+        await s.commit()
+    rows = await r.get_accruals(
+        instrument_public_id=inst_pid,
+        mode="live",
+        range_start=accrued_a - timedelta(hours=1),
+        range_end=accrued_b + timedelta(hours=1),
+    )
+    assert [row["accrued_at"] for row in rows] == [accrued_a, accrued_b]
+
+
+@pytest.mark.asyncio
+async def test_insert_funding_rate_savepoint_isolates_duplicate_in_caller_session(
+    tmp_path: Path,
+) -> None:
+    """Caller-managed duplicate funding rate rolls back the SAVEPOINT only.
+
+    Mirrors the accrual savepoint test for ``insert_funding_rate`` so a
+    future caller that wants to batch a funding-rate seed with another
+    write inside the same outer transaction is not poisoned by a
+    duplicate insert.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    eff_a = datetime(2026, 4, 6, 0, 0, 0, tzinfo=UTC)
+    eff_b = datetime(2026, 4, 6, 1, 0, 0, tzinfo=UTC)
+    row_a: FundingRateInsertRow = {
+        "instrument_public_id": inst_pid,
+        "exchange": "kraken",
+        "rate_type": "perpetual_funding",
+        "direction": "both",
+        "rate": 0.0001,
+        "notional_asset": "USD",
+        "effective_from": eff_a,
+        "source": "exchange_api",
+        "session_id": "s1",
+        "sequence_id": 960,
+        "timestamp": now,
+    }
+    row_b: FundingRateInsertRow = {
+        "instrument_public_id": inst_pid,
+        "exchange": "kraken",
+        "rate_type": "perpetual_funding",
+        "direction": "both",
+        "rate": 0.00015,
+        "notional_asset": "USD",
+        "effective_from": eff_b,
+        "source": "exchange_api",
+        "session_id": "s1",
+        "sequence_id": 961,
+        "timestamp": now,
+    }
+    await r.insert_funding_rate(row_a)
+    async with r.session() as s:
+        with pytest.raises(IntegrityError):
+            await r.insert_funding_rate(row_a, session=s)
+        await r.insert_funding_rate(row_b, session=s)
+        await s.commit()
+    rows = await r.get_funding_rates(
+        instrument_public_id=inst_pid,
+        exchange="kraken",
+        rate_type="perpetual_funding",
+        direction="both",
+        as_of=now,
+        range_start=eff_a - timedelta(hours=1),
+        range_end=eff_b + timedelta(hours=1),
+    )
+    assert [row["effective_from"] for row in rows] == [eff_a, eff_b]
+
+
+@pytest.mark.asyncio
 async def test_get_accruals_strict_lower_bound(tmp_path: Path) -> None:
     """get_accruals uses a STRICT lower bound on accrued_at.
 

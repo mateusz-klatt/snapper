@@ -28,6 +28,7 @@ from snapper.core.types import AliasChannelEnum
 from snapper.core.types import AssetTypeEnum
 from snapper.core.types import UpsertResult
 from snapper.data.models import Instrument
+from snapper.data.models import InstrumentSpec
 from snapper.data.models import Setting
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
@@ -410,6 +411,51 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         return str(inst.public_id)
 
     @staticmethod
+    def _resolve_funding_fields(
+        existing: InstrumentSpec | None,
+        funding_type: str | None,
+        funding_frequency_hours: int | None,
+        rollover_rate_long: float | None,
+        rollover_rate_short: float | None,
+        max_funding_rate: float | None,
+    ) -> tuple[str | None, int | None, float | None, float | None, float | None]:
+        """Conditional carry-forward resolver for funding metadata fields.
+
+        For each field the caller-provided value wins when not None;
+        otherwise the existing row's value is carried forward. This
+        lets one updater (e.g. Kraken Spot) seed funding metadata
+        without a later refresh by an unaware updater (e.g. Polygon
+        equities) clearing it on the next SCD2 revision. Each return
+        slot is statically typed to the underlying column type — no
+        dynamic ``getattr`` or ``Any`` slips into the carry-forward.
+
+        Returns a 5-tuple in the same order as the parameters.
+        """
+        if existing is None:
+            return (
+                funding_type,
+                funding_frequency_hours,
+                rollover_rate_long,
+                rollover_rate_short,
+                max_funding_rate,
+            )
+        return (
+            funding_type if funding_type is not None else existing.funding_type,
+            (
+                funding_frequency_hours
+                if funding_frequency_hours is not None
+                else existing.funding_frequency_hours
+            ),
+            (rollover_rate_long if rollover_rate_long is not None else existing.rollover_rate_long),
+            (
+                rollover_rate_short
+                if rollover_rate_short is not None
+                else existing.rollover_rate_short
+            ),
+            (max_funding_rate if max_funding_rate is not None else existing.max_funding_rate),
+        )
+
+    @staticmethod
     def _revise_instrument_spec(
         session: Any,
         instrument_public_id: str,
@@ -435,12 +481,10 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
           them as parameters.
         - **Direct assignment** (``expiry_at``, ``instrument_kind``):
           always overwritten with the parameter value, even when None.
-        - **Conditional carry-forward** (the funding fields): the
-          parameter wins when not None; otherwise the existing value is
-          carried forward via ``_choose``. This lets one updater seed
-          funding metadata (e.g. Kraken Spot rollover rates) without
-          another updater (e.g. Polygon equities) clearing it on the
-          next refresh.
+        - **Conditional carry-forward** (the funding fields): resolved
+          via :meth:`_resolve_funding_fields` so that each field's
+          provided value wins when not None and the existing value is
+          carried forward otherwise.
 
         Args:
             session: SQLAlchemy sync session.
@@ -466,13 +510,20 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             instrument_public_id,
             now,
         )
-
-        def _choose(provided: Any, attr: str) -> Any:
-            """Conditional carry-forward selector for funding fields."""
-            if provided is not None:
-                return provided
-            return getattr(existing, attr) if existing else None
-
+        (
+            resolved_funding_type,
+            resolved_funding_frequency_hours,
+            resolved_rollover_rate_long,
+            resolved_rollover_rate_short,
+            resolved_max_funding_rate,
+        ) = SymbolUpdaterService._resolve_funding_fields(
+            existing,
+            funding_type,
+            funding_frequency_hours,
+            rollover_rate_long,
+            rollover_rate_short,
+            max_funding_rate,
+        )
         spec = InstrumentSpecInput(
             tick_size=existing.tick_size if existing else None,
             lot_size=existing.lot_size if existing else None,
@@ -486,11 +537,11 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             status=existing.status if existing else None,
             expiry_at=expiry_at,
             instrument_kind=instrument_kind,
-            funding_type=_choose(funding_type, "funding_type"),
-            funding_frequency_hours=_choose(funding_frequency_hours, "funding_frequency_hours"),
-            rollover_rate_long=_choose(rollover_rate_long, "rollover_rate_long"),
-            rollover_rate_short=_choose(rollover_rate_short, "rollover_rate_short"),
-            max_funding_rate=_choose(max_funding_rate, "max_funding_rate"),
+            funding_type=resolved_funding_type,
+            funding_frequency_hours=resolved_funding_frequency_hours,
+            rollover_rate_long=resolved_rollover_rate_long,
+            rollover_rate_short=resolved_rollover_rate_short,
+            max_funding_rate=resolved_max_funding_rate,
         )
         DatabaseRepository.revise_instrument_spec_sync(
             session=session,
