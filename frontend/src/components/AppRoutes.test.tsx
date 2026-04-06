@@ -22,6 +22,9 @@ vi.mock('../features/strategies/Strategies', () => ({
 vi.mock('../features/orders/Orders', () => ({
   Orders: () => <div data-testid='orders'>Orders Component</div>,
 }))
+vi.mock('../features/positions/Positions', () => ({
+  Positions: () => <div data-testid='positions'>Positions Component</div>,
+}))
 vi.mock('../features/signals/Signals', () => ({
   Signals: () => <div data-testid='signals'>Signals Component</div>,
 }))
@@ -79,6 +82,12 @@ describe('AppRoutes', () => {
     renderWithProviders(<AppRoutes activeTab='orders' />)
     await waitFor(() => {
       expect(screen.getByTestId('orders')).toBeTruthy()
+    })
+  })
+  it('renders Positions component for positions tab', async () => {
+    renderWithProviders(<AppRoutes activeTab='positions' />)
+    await waitFor(() => {
+      expect(screen.getByTestId('positions')).toBeTruthy()
     })
   })
   it('renders Signals component for signals tab', async () => {

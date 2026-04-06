@@ -560,6 +560,90 @@ describe('Settings', () => {
     })
     expect(screen.getByText('📋 JSON')).toBeTruthy()
   })
+  it('renders boolean toggle for allow_short_selling=false', async () => {
+    const mockSettings = [
+      {
+        key: 'allow_short_selling',
+        value: 'false',
+        category: 'trading',
+        description: 'Allow shorts',
+        updated_at: '2024-01-01T00:00:00Z',
+        updated_by: 'admin',
+      },
+    ]
+
+    vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['trading'])
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      payload: mockSettings,
+      count: mockSettings.length,
+    } as never)
+    renderSettings(<Settings />)
+    await waitFor(() => {
+      expect(screen.getByText('allow_short_selling')).toBeTruthy()
+    })
+    const toggle = screen.getByTestId('setting-toggle-allow_short_selling')
+
+    expect(toggle).toBeInTheDocument()
+    expect(toggle.getAttribute('aria-pressed')).toBe('false')
+    expect(screen.getByText(/Allow the engine to open short positions/i)).toBeInTheDocument()
+  })
+  it('renders boolean toggle as ON when allow_short_selling=true', async () => {
+    const mockSettings = [
+      {
+        key: 'allow_short_selling',
+        value: 'true',
+        category: 'trading',
+        description: 'Allow shorts',
+        updated_at: '2024-01-01T00:00:00Z',
+        updated_by: 'admin',
+      },
+    ]
+
+    vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['trading'])
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      payload: mockSettings,
+      count: mockSettings.length,
+    } as never)
+    renderSettings(<Settings />)
+    await waitFor(() => {
+      expect(screen.getByText('allow_short_selling')).toBeTruthy()
+    })
+    const toggle = screen.getByTestId('setting-toggle-allow_short_selling')
+
+    expect(toggle.getAttribute('aria-pressed')).toBe('true')
+  })
+  it('flips boolean value when toggle is clicked', async () => {
+    const user = userEvent.setup()
+    const mockSettings = [
+      {
+        key: 'allow_short_selling',
+        value: 'false',
+        category: 'trading',
+        description: 'Allow shorts',
+        updated_at: '2024-01-01T00:00:00Z',
+        updated_by: 'admin',
+      },
+    ]
+
+    vi.mocked(apiClient.getSettingCategories).mockResolvedValue(['trading'])
+    vi.mocked(apiClient.getSettings).mockResolvedValue({
+      payload: mockSettings,
+      count: mockSettings.length,
+    } as never)
+    vi.mocked(apiClient.updateSetting).mockResolvedValue({} as never)
+    renderSettings(<Settings />)
+    await waitFor(() => {
+      expect(screen.getByText('allow_short_selling')).toBeTruthy()
+    })
+    const toggle = screen.getByTestId('setting-toggle-allow_short_selling')
+
+    await user.click(toggle)
+    expect(apiClient.updateSetting).toHaveBeenCalledWith('allow_short_selling', {
+      value: 'true',
+      category: 'trading',
+      description: 'Allow shorts',
+    })
+  })
   it('handles update error gracefully', async () => {
     const mockSettings = [
       {

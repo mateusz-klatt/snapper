@@ -970,7 +970,17 @@ describe('Orders', () => {
     await user.click(exportButton)
     expect(exportToCSV).toHaveBeenCalledWith(
       'orders.csv',
-      ['Instrument', 'Side', 'Type', 'Status', 'Quantity', 'Price', 'Created'],
+      [
+        'Instrument',
+        'Side',
+        'Type',
+        'Status',
+        'Quantity',
+        'Price',
+        'Leverage',
+        'Reduce Only',
+        'Created',
+      ],
       expect.arrayContaining([expect.arrayContaining(['BTC/USD', 'buy', 'limit', 'open'])])
     )
   })
@@ -1058,8 +1068,18 @@ describe('Orders', () => {
     await user.click(exportButton)
     expect(exportToCSV).toHaveBeenCalledWith(
       'orders.csv',
-      ['Instrument', 'Side', 'Type', 'Status', 'Quantity', 'Price', 'Created'],
-      [['ETH/USD', '', 'market', 'open', '2.0000', 'Market', '']]
+      [
+        'Instrument',
+        'Side',
+        'Type',
+        'Status',
+        'Quantity',
+        'Price',
+        'Leverage',
+        'Reduce Only',
+        'Created',
+      ],
+      [['ETH/USD', '', 'market', 'open', '2.0000', 'Market', '', 'false', '']]
     )
   })
   it('exports executions with zero fee and null feeAsset', async () => {
@@ -1117,6 +1137,177 @@ describe('Orders', () => {
           '0',
           '',
           executedDate.toLocaleString(),
+        ],
+      ]
+    )
+  })
+  it('renders leverage badge when order.leverage is set', async () => {
+    const mockOrders: Order[] = [
+      {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
+        clientOrderId: 'lev-1',
+        instrument: 'BTC/USD',
+        exchange: 'kraken',
+        side: 'sell',
+        orderType: 'limit',
+        size: 1,
+        filledSize: 0,
+        price: 50000,
+        status: 'open',
+        createdAt: new Date('2024-01-01T00:00:00Z'),
+        updatedAt: null,
+        leverage: 3,
+        reduceOnly: false,
+      },
+    ]
+    const { useOrders } = await import('../../hooks/queries')
+
+    vi.mocked(useOrders).mockReturnValue({
+      data: mockOrders,
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    renderWithProviders(<Orders />)
+    await waitFor(() => {
+      expect(screen.getByTestId('order-leverage-lev-1')).toHaveTextContent('3x')
+    })
+    expect(screen.queryByTestId('order-reduce-only-lev-1')).not.toBeInTheDocument()
+  })
+  it('renders reduce-only badge when order.reduceOnly is true', async () => {
+    const mockOrders: Order[] = [
+      {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
+        clientOrderId: 'ro-1',
+        instrument: 'BTC/USD',
+        exchange: 'kraken',
+        side: 'buy',
+        orderType: 'limit',
+        size: 1,
+        filledSize: 0,
+        price: 50000,
+        status: 'open',
+        createdAt: new Date('2024-01-01T00:00:00Z'),
+        updatedAt: null,
+        leverage: 5,
+        reduceOnly: true,
+      },
+    ]
+    const { useOrders } = await import('../../hooks/queries')
+
+    vi.mocked(useOrders).mockReturnValue({
+      data: mockOrders,
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    renderWithProviders(<Orders />)
+    await waitFor(() => {
+      expect(screen.getByTestId('order-leverage-ro-1')).toHaveTextContent('5x')
+      expect(screen.getByTestId('order-reduce-only-ro-1')).toHaveTextContent('REDUCE-ONLY')
+    })
+  })
+  it('omits leverage and reduce-only badges for spot orders', async () => {
+    const mockOrders: Order[] = [
+      {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
+        clientOrderId: 'spot-1',
+        instrument: 'BTC/USD',
+        exchange: 'kraken',
+        side: 'buy',
+        orderType: 'limit',
+        size: 1,
+        filledSize: 0,
+        price: 50000,
+        status: 'open',
+        createdAt: new Date('2024-01-01T00:00:00Z'),
+        updatedAt: null,
+      },
+    ]
+    const { useOrders } = await import('../../hooks/queries')
+
+    vi.mocked(useOrders).mockReturnValue({
+      data: mockOrders,
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    renderWithProviders(<Orders />)
+    await waitFor(() => {
+      expect(screen.getByText('BTC/USD')).toBeInTheDocument()
+    })
+    expect(screen.queryByTestId('order-leverage-spot-1')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('order-reduce-only-spot-1')).not.toBeInTheDocument()
+  })
+  it('exports orders CSV with leverage and reduce_only columns', async () => {
+    const { exportToCSV } = await import('../../lib/csvExport')
+    const user = userEvent.setup()
+    const created = new Date('2024-01-01T00:00:00Z')
+    const mockOrders: Order[] = [
+      {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: created,
+        sessionId: 'test-sid',
+        clientOrderId: 'lev-csv',
+        instrument: 'BTC/USD',
+        exchange: 'kraken',
+        side: 'sell',
+        orderType: 'limit',
+        size: 1.5,
+        filledSize: 0,
+        price: 50000,
+        status: 'open',
+        createdAt: created,
+        updatedAt: null,
+        leverage: 4,
+        reduceOnly: true,
+      },
+    ]
+    const { useOrders } = await import('../../hooks/queries')
+
+    vi.mocked(useOrders).mockReturnValue({
+      data: mockOrders,
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    renderWithProviders(<Orders />)
+    await waitFor(() => {
+      expect(screen.getByText('BTC/USD')).toBeInTheDocument()
+    })
+    const exportButton = screen.getByRole('button', { name: /Export CSV/i })
+
+    await user.click(exportButton)
+    expect(exportToCSV).toHaveBeenCalledWith(
+      'orders.csv',
+      [
+        'Instrument',
+        'Side',
+        'Type',
+        'Status',
+        'Quantity',
+        'Price',
+        'Leverage',
+        'Reduce Only',
+        'Created',
+      ],
+      [
+        [
+          'BTC/USD',
+          'sell',
+          'limit',
+          'open',
+          '1.5000',
+          '50000.00',
+          '4',
+          'true',
+          created.toLocaleString(),
         ],
       ]
     )

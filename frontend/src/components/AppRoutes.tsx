@@ -6,6 +6,7 @@ import { MarketData } from '../features/market/MarketData'
 import { Processes } from '../features/processes/Processes'
 import { Strategies } from '../features/strategies/Strategies'
 import { Orders } from '../features/orders/Orders'
+import { Positions } from '../features/positions/Positions'
 import { Signals } from '../features/signals/Signals'
 import { Health } from '../features/health/Health'
 import { Admin } from '../features/admin/Admin'
@@ -46,6 +47,14 @@ export function AppRoutes({ activeTab }: Readonly<AppRoutesProps>): React.ReactE
         <ErrorBoundary componentName='Orders'>
           <ProtectedRoute resource='orders'>
             <Orders />
+          </ProtectedRoute>
+        </ErrorBoundary>
+      )
+    case 'positions':
+      return (
+        <ErrorBoundary componentName='Positions'>
+          <ProtectedRoute resource='positions'>
+            <Positions />
           </ProtectedRoute>
         </ErrorBoundary>
       )

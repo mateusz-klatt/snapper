@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import {
   isJsonString,
+  isBooleanString,
+  parseBooleanString,
   SENSITIVE_PATTERNS,
   isSensitive,
   isEncrypted,
@@ -30,6 +32,59 @@ describe('isJsonString', () => {
 
   it('returns false for empty string', () => {
     expect(isJsonString('')).toBe(false)
+  })
+})
+
+describe('isBooleanString', () => {
+  it('returns true for "true"', () => {
+    expect(isBooleanString('true')).toBe(true)
+  })
+
+  it('returns true for "false"', () => {
+    expect(isBooleanString('false')).toBe(true)
+  })
+
+  it('is case-insensitive', () => {
+    expect(isBooleanString('TRUE')).toBe(true)
+    expect(isBooleanString('False')).toBe(true)
+  })
+
+  it('trims whitespace', () => {
+    expect(isBooleanString('  true  ')).toBe(true)
+  })
+
+  it('returns false for empty string', () => {
+    expect(isBooleanString('')).toBe(false)
+  })
+
+  it('returns false for non-boolean values', () => {
+    expect(isBooleanString('1')).toBe(false)
+    expect(isBooleanString('yes')).toBe(false)
+    expect(isBooleanString('truthy')).toBe(false)
+    expect(isBooleanString('{"true":true}')).toBe(false)
+  })
+})
+
+describe('parseBooleanString', () => {
+  it('parses "true" as true', () => {
+    expect(parseBooleanString('true')).toBe(true)
+  })
+
+  it('parses "false" as false', () => {
+    expect(parseBooleanString('false')).toBe(false)
+  })
+
+  it('is case-insensitive', () => {
+    expect(parseBooleanString('TRUE')).toBe(true)
+    expect(parseBooleanString('False')).toBe(false)
+  })
+
+  it('trims whitespace', () => {
+    expect(parseBooleanString('  true  ')).toBe(true)
+  })
+
+  it('returns false for non-true strings', () => {
+    expect(parseBooleanString('anything-else')).toBe(false)
   })
 })
 

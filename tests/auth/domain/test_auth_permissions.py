@@ -1523,12 +1523,24 @@ class TestResourcePermissions:
             "processes",
             "strategies",
             "orders",
+            "positions",
             "signals",
             "health",
             "admin",
             "settings",
         }
         assert set(RESOURCE_PERMISSIONS.keys()) == expected
+
+    def test_positions_requires_read_positions(self) -> None:
+        """Positions resource requires READ_POSITIONS permission.
+
+        Given: RESOURCE_PERMISSIONS mapping,
+        When: Checking the 'positions' entry,
+        Then: Its value is Permission.READ_POSITIONS so viewers/operators/admins
+            (which already hold READ_POSITIONS via ROLE_PERMISSIONS) can access
+            the new Positions tab.
+        """
+        assert RESOURCE_PERMISSIONS["positions"] == Permission.READ_POSITIONS
 
     def test_overview_requires_no_permission(self) -> None:
         """Overview resource is accessible without any specific permission.

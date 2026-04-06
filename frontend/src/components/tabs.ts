@@ -8,6 +8,7 @@ import {
   LayoutDashboard,
   Settings,
   Shield,
+  TrendingUp,
   Workflow,
 } from 'lucide-react'
 
@@ -17,6 +18,7 @@ type TabType =
   | 'processes'
   | 'strategies'
   | 'orders'
+  | 'positions'
   | 'signals'
   | 'health'
   | 'admin'
@@ -33,6 +35,7 @@ export const ALL_TABS: readonly TabConfig[] = [
   { id: 'processes', label: 'Processes', icon: Workflow },
   { id: 'strategies', label: 'Strategies', icon: Gauge },
   { id: 'orders', label: 'Orders & Executions', icon: ClipboardList },
+  { id: 'positions', label: 'Positions', icon: TrendingUp },
   { id: 'signals', label: 'Signals', icon: Bell },
   { id: 'health', label: 'Health', icon: HeartPulse },
   { id: 'admin', label: 'Administration', icon: Shield },

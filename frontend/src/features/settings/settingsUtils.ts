@@ -8,6 +8,16 @@ export function isJsonString(str: string): boolean {
   }
 }
 
+export function isBooleanString(value: string): boolean {
+  const trimmed = value.trim().toLowerCase()
+
+  return trimmed === 'true' || trimmed === 'false'
+}
+
+export function parseBooleanString(value: string): boolean {
+  return value.trim().toLowerCase() === 'true'
+}
+
 export type JsonValue =
   | string
   | number

@@ -127,10 +127,36 @@ describe('Overview', () => {
         totalPnL: 500,
         pnlPercent: 5,
         count: 3,
+        longCost: 6000,
+        shortCost: 4000,
       },
     } as never)
     renderWithMocks(<Overview />)
     expect(screen.getByText('Total Value')).toBeInTheDocument()
+    expect(screen.getByTestId('overview-long-exposure')).toHaveTextContent('$6,000.00')
+    expect(screen.getByTestId('overview-short-exposure')).toHaveTextContent('$4,000.00')
+    expect(screen.getByTestId('overview-net-delta')).toHaveTextContent('+$2,000.00')
+  })
+
+  it('shows negative net delta as red when net short', async () => {
+    const { usePositionsSummary } = await import('../../hooks/queries')
+
+    vi.mocked(usePositionsSummary).mockReturnValue({
+      isLoading: false,
+      data: {
+        totalValue: 8000,
+        totalPnL: -500,
+        pnlPercent: -5.5,
+        count: 2,
+        longCost: 1000,
+        shortCost: 7000,
+      },
+    } as never)
+    renderWithMocks(<Overview />)
+    const netDelta = screen.getByTestId('overview-net-delta')
+
+    expect(netDelta).toHaveTextContent('$-6,000.00')
+    expect(netDelta.className).toContain('text-loss-600')
   })
   it('displays running feeds status', async () => {
     const { useProcessSummary } = await import('../../hooks/queries')
@@ -320,6 +346,8 @@ describe('Overview', () => {
         totalPnL: -500,
         pnlPercent: -5,
         count: 2,
+        longCost: 5000,
+        shortCost: 5000,
       },
     } as never)
     renderWithMocks(<Overview />)

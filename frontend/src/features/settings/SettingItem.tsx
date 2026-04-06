@@ -4,6 +4,8 @@ import type { SettingRead } from '../../types/api'
 import { JsonEditor } from './JsonEditor'
 import {
   isJsonString,
+  isBooleanString,
+  parseBooleanString,
   isSensitive,
   isEncrypted,
   getCategoryColor,
@@ -12,6 +14,12 @@ import {
   type JsonValue,
   type JsonTokenType,
 } from './settingsUtils'
+
+const SETTING_HELP_TEXT: Record<string, string> = {
+  allow_short_selling:
+    'Allow the engine to open short positions. SELL signals will produce ' +
+    'negative desired_units; clamps to 0 when disabled.',
+}
 
 const JSON_TOKEN_COLORS: Record<JsonTokenType, string> = {
   key: 'text-brand-600',
@@ -264,6 +272,62 @@ const DisplayView: React.FC<DisplayViewProps> = ({
   )
 }
 
+interface BooleanToggleProps {
+  readonly setting: SettingRead
+  readonly onUpdate: (
+    key: string,
+    value: string,
+    category: string,
+    description?: string | null
+  ) => Promise<void>
+  readonly isSaving: boolean
+  readonly readOnly?: boolean
+}
+
+const BooleanToggle: React.FC<BooleanToggleProps> = ({ setting, onUpdate, isSaving, readOnly }) => {
+  const isOn = parseBooleanString(setting.value)
+
+  const handleToggle = async () => {
+    const next = (!isOn).toString()
+
+    await onUpdate(setting.key, next, setting.category, setting.description)
+  }
+
+  const helpText = SETTING_HELP_TEXT[setting.key]
+
+  return (
+    <div className='space-y-2'>
+      <div className='flex items-center justify-between'>
+        <div className='flex items-center gap-3'>
+          <button
+            type='button'
+            onClick={handleToggle}
+            disabled={isSaving || readOnly}
+            data-testid={`setting-toggle-${setting.key}`}
+            aria-pressed={isOn}
+            aria-label={`Toggle ${setting.key}`}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+              isOn ? 'bg-brand-600' : 'bg-muted-300'
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                isOn ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+          </button>
+          <span className='font-mono text-sm text-alpine-900'>{isOn ? 'true' : 'false'}</span>
+        </div>
+        <div className='text-xs text-muted-500'>
+          {new Date(setting.updated_at).toLocaleString()}
+          {setting.updated_by && ` • ${setting.updated_by}`}
+        </div>
+      </div>
+      {helpText && <p className='text-xs text-muted-600'>{helpText}</p>}
+    </div>
+  )
+}
+
 interface SettingItemProps {
   setting: SettingRead
   onUpdate: (
@@ -287,7 +351,8 @@ export const SettingItem = ({
   const [localValue, setLocalValue] = useState(setting.value)
   const [isEditing, setIsEditing] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
-  const isJson = isJsonString(setting.value)
+  const isBoolean = isBooleanString(setting.value) && !isSensitive(setting.key)
+  const isJson = isJsonString(setting.value) && !isBoolean
   const [jsonValue, setJsonValue] = useState<JsonValue | null>(null)
 
   useEffect(() => {
@@ -360,7 +425,14 @@ export const SettingItem = ({
         </div>
       </div>
       <div className='space-y-2'>
-        {isEditing ? (
+        {isBoolean ? (
+          <BooleanToggle
+            setting={setting}
+            onUpdate={onUpdate}
+            isSaving={isSaving}
+            readOnly={readOnly}
+          />
+        ) : isEditing ? (
           <EditingView
             isJson={isJson}
             jsonValue={jsonValue}

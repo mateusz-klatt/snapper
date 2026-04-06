@@ -156,7 +156,7 @@ export const useExecutions = (filters?: { limit?: number }) => {
   })
 }
 
-const usePositions = () => {
+export const usePositions = () => {
   const { isAuthenticated } = useAuth()
   const asOf = useAppStore(s => s.asOf)
 

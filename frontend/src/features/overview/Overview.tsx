@@ -52,6 +52,8 @@ interface PortfolioContentProps {
   readonly totalPnL: number
   readonly pnlPercent: number
   readonly count: number
+  readonly longCost: number
+  readonly shortCost: number
 }
 
 const PortfolioContent: React.FC<PortfolioContentProps> = ({
@@ -59,14 +61,38 @@ const PortfolioContent: React.FC<PortfolioContentProps> = ({
   totalPnL,
   pnlPercent,
   count,
+  longCost,
+  shortCost,
 }) => {
   const pnlColorClass = (value: number): string => (value >= 0 ? 'text-gain-600' : 'text-loss-600')
+  const netDelta = longCost - shortCost
 
   return (
     <div className='space-y-3'>
       <div className='flex items-center justify-between'>
         <span className='text-sm font-medium'>Total Value</span>
         <span className='font-mono text-right'>${formatCurrency(totalValue)}</span>
+      </div>
+      <div className='flex items-center justify-between'>
+        <span className='text-sm font-medium'>Long exposure</span>
+        <span className='font-mono text-right text-gain-600' data-testid='overview-long-exposure'>
+          ${formatCurrency(longCost)}
+        </span>
+      </div>
+      <div className='flex items-center justify-between'>
+        <span className='text-sm font-medium'>Short exposure</span>
+        <span className='font-mono text-right text-loss-600' data-testid='overview-short-exposure'>
+          ${formatCurrency(shortCost)}
+        </span>
+      </div>
+      <div className='flex items-center justify-between'>
+        <span className='text-sm font-medium'>Net delta</span>
+        <span
+          className={`font-mono text-right ${pnlColorClass(netDelta)}`}
+          data-testid='overview-net-delta'
+        >
+          {pnlSign(netDelta)}${formatCurrency(netDelta)}
+        </span>
       </div>
       <div className='flex items-center justify-between'>
         <span className='text-sm font-medium'>Unrealized P&L</span>

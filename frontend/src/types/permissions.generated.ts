@@ -36,6 +36,7 @@ export const RESOURCE_ACCESS: Record<string, readonly UserRole[]> = {
   processes: ['operator', 'admin'],
   strategies: ['viewer', 'operator', 'admin'],
   orders: ['viewer', 'operator', 'admin'],
+  positions: ['viewer', 'operator', 'admin'],
   signals: ['viewer', 'operator', 'admin'],
   health: ['viewer', 'operator', 'admin'],
   admin: ['admin'],

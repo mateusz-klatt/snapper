@@ -74,6 +74,27 @@ const OrderCard: React.FC<{ order: Order }> = ({ order }) => {
           <div className='text-muted-500'>Order ID</div>
           <div className='text-xs font-mono text-alpine-900'>{order.clientOrderId}</div>
         </div>
+        {order.leverage != null && (
+          <div>
+            <div className='text-muted-500'>Leverage</div>
+            <div
+              className='font-mono text-alpine-900'
+              data-testid={`order-leverage-${order.clientOrderId}`}
+            >
+              {order.leverage}x
+            </div>
+          </div>
+        )}
+        {order.reduceOnly === true && (
+          <div className='col-span-2'>
+            <span
+              className='inline-block rounded-full bg-info-900/20 px-2 py-1 text-xs font-medium text-info-400'
+              data-testid={`order-reduce-only-${order.clientOrderId}`}
+            >
+              REDUCE-ONLY
+            </span>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -132,7 +153,17 @@ export const Orders: React.FC = () => {
   )
 
   const handleExportOrders = () => {
-    const headers = ['Instrument', 'Side', 'Type', 'Status', 'Quantity', 'Price', 'Created']
+    const headers = [
+      'Instrument',
+      'Side',
+      'Type',
+      'Status',
+      'Quantity',
+      'Price',
+      'Leverage',
+      'Reduce Only',
+      'Created',
+    ]
     const rows = filteredOrders.map((o: Order) => [
       o.instrument,
       o.side ?? '',
@@ -140,6 +171,8 @@ export const Orders: React.FC = () => {
       o.status,
       o.size.toFixed(4),
       o.price ? o.price.toFixed(2) : 'Market',
+      o.leverage != null ? `${o.leverage}` : '',
+      o.reduceOnly === true ? 'true' : 'false',
       o.createdAt ? o.createdAt.toLocaleString() : '',
     ])
 
