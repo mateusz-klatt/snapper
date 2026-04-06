@@ -2287,6 +2287,8 @@ class SQLAlchemyRepository(Repository):
                 order_type=existing.order_type,
                 quantity=existing.quantity,
                 price=existing.price,
+                leverage=existing.leverage,
+                reduce_only=existing.reduce_only,
                 status=new_status,
                 attempt_count=(
                     attempt_count if attempt_count is not None else existing.attempt_count

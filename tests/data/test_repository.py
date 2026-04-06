@@ -3460,6 +3460,76 @@ async def test_update_trade_command_status_scd2(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_update_trade_command_status_carries_forward_leverage_and_reduce_only(
+    tmp_path: Path,
+) -> None:
+    """Verify update_trade_command_status SCD2 cycle preserves leverage/reduce_only.
+
+    Given: A trade command persisted with leverage=4/reduce_only=True (the durable
+        command path used when use_durable_commands=True),
+    When: update_trade_command_status is called twice to cycle created → dispatched
+        → accepted (each call closes the old SCD2 row and inserts a new one),
+    Then: After both status transitions get_active_commands_for_shard still returns
+        leverage=4 and reduce_only=True because update_trade_command_status carries
+        the immutable margin/intent fields forward from the old row when constructing
+        the replacement TradeCommand. Without this, the first status transition
+        silently zeroes the margin metadata, and any downstream query (outbox
+        retry re-read, reconciliation, crash recovery) would see defaults.
+    """
+    db_path = tmp_path / "cmd_scd2_lev.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _, cmd_pid = await r.insert_trade_command(
+        {
+            "command_type": "submit",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "engine-sell",
+            "client_order_id": "cid-scd2-lev",
+            "venue_client_id": "vcid-scd2-lev",
+            "side": "sell",
+            "order_type": "limit",
+            "quantity": 0.5,
+            "price": 50000.0,
+            "leverage": 4,
+            "reduce_only": True,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-scd2-lev",
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+        }
+    )
+    after_dispatch = now + timedelta(milliseconds=1)
+    await r.update_trade_command_status(
+        public_id=cmd_pid,
+        new_status="dispatched",
+        bus_time=after_dispatch,
+        session_id="s1",
+        sequence_id=2,
+        dispatched_at=after_dispatch,
+    )
+    after_accept = now + timedelta(milliseconds=2)
+    await r.update_trade_command_status(
+        public_id=cmd_pid,
+        new_status="accepted",
+        bus_time=after_accept,
+        session_id="s1",
+        sequence_id=3,
+        acked_at=after_accept,
+    )
+    active = await r.get_active_commands_for_shard("kraken.BTC-USD.live", after_accept)
+    assert len(active) == 1
+    assert active[0]["status"] == "accepted"
+    assert active[0]["leverage"] == 4
+    assert active[0]["reduce_only"] is True
+
+
+@pytest.mark.asyncio
 async def test_insert_venue_event(tmp_path: Path) -> None:
     """Insert venue event persists the row and returns a monotonic local_seq.
 
