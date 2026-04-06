@@ -392,6 +392,8 @@ class ExchangeClientBase(ABC):
                 session_id=self._tracker.session_id,
                 sequence_id=seq,
                 timestamp=order_time,
+                leverage=request.leverage,
+                reduce_only=request.reduce_only,
             )
         except SQLAlchemyError as e:
             logger.error(f"Failed to log order to database: {e}")

@@ -814,6 +814,8 @@ struct OrderData: Codable, Sendable {
     let error: String?
     let createdAt: Date
     let updatedAt: Date?
+    let leverage: Int?
+    let reduceOnly: Bool?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -838,6 +840,8 @@ struct OrderData: Codable, Sendable {
         case error
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case leverage
+        case reduceOnly = "reduce_only"
     }
 }
 

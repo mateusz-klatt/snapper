@@ -90,6 +90,7 @@ export type Reason = string | null;
 export type TimeInForce = string | null;
 export type Error = string | null;
 export type UpdatedAt = string | null;
+export type Leverage = number | null;
 export type Type8 = "order_event";
 export type Exchange4 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
 export type Event = "submitted" | "accepted" | "rejected" | "cancelled" | "expired" | "replaced";
@@ -106,7 +107,7 @@ export type OrderType1 = "market" | "limit" | "stop" | "stop_limit";
 export type Price1 = number | null;
 export type SignaledAt = string | null;
 export type StrategyTag = string | null;
-export type Leverage = number | null;
+export type Leverage1 = number | null;
 export type Type11 = "position";
 export type Exchange7 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
 export type Mode2 = "live" | "paper";
@@ -545,6 +546,8 @@ export interface OrderCancelData {
  *     error: Error message if order failed.
  *     created_at: Order creation timestamp.
  *     updated_at: Last status update timestamp.
+ *     leverage: Margin leverage (None for spot, integer for margin).
+ *     reduce_only: True when the order may only reduce an existing position.
  */
 export interface OrderData {
   type: Type7;
@@ -569,6 +572,8 @@ export interface OrderData {
   error?: Error;
   created_at: string;
   updated_at?: UpdatedAt;
+  leverage?: Leverage;
+  reduce_only?: boolean;
 }
 /**
  * Lightweight order event for cancel/replace confirmations.
@@ -667,7 +672,7 @@ export interface OrderRequestData {
   client_order_id: string;
   signaled_at?: SignaledAt;
   strategy_tag?: StrategyTag;
-  leverage?: Leverage;
+  leverage?: Leverage1;
   reduce_only?: boolean;
 }
 /**

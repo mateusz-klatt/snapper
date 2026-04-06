@@ -1479,6 +1479,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 filled_size=0.0,
                 price=order.price,
                 created_at=order.timestamp,
+                leverage=order.leverage,
+                reduce_only=order.reduce_only,
             )
             await self.msg_publisher.send(topic, order_status)
             logger.info(

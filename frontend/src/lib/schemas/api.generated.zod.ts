@@ -171,6 +171,8 @@ export const OrderDataSchema = z
     error: z.string().nullable().optional(),
     created_at: z.iso.datetime(),
     updated_at: z.iso.datetime().nullable().optional(),
+    leverage: z.number().int().nullable().optional(),
+    reduce_only: z.boolean(),
   })
   .strict()
 

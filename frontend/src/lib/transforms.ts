@@ -59,6 +59,8 @@ export function orderFromAPI(api: OrderData): Order {
     reason: api.reason ?? null,
     timeInForce: api.time_in_force ?? null,
     error: api.error ?? null,
+    leverage: api.leverage ?? null,
+    reduceOnly: api.reduce_only ?? false,
     createdAt: api.created_at ? new Date(api.created_at) : new Date(),
     updatedAt: api.updated_at ? new Date(api.updated_at) : null,
   }
@@ -88,6 +90,8 @@ export function orderFromWS(ws: OrderData): Order {
     averagePrice: ws.average_price ?? null,
     status: ws.status,
     reason: ws.reason ?? null,
+    leverage: ws.leverage ?? null,
+    reduceOnly: ws.reduce_only ?? false,
     createdAt: new Date(ws.created_at),
     updatedAt: ws.updated_at ? new Date(ws.updated_at) : null,
   }
@@ -337,6 +341,8 @@ export function orderDataFromEnvelope(env: OrderData): OrderData {
     reason: env.reason,
     time_in_force: env.time_in_force,
     error: env.error,
+    leverage: env.leverage,
+    reduce_only: env.reduce_only,
     created_at: env.created_at,
     updated_at: env.updated_at,
   }

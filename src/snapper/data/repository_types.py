@@ -185,6 +185,8 @@ class OrderRow(TypedDict):
     status: str
     time_in_force: str | None
     error: str | None
+    leverage: int | None
+    reduce_only: bool
 
 
 class ExecutionRow(TypedDict):

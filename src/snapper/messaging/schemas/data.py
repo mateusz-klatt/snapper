@@ -245,6 +245,8 @@ class OrderData(StrictDataSchema[Literal["order"]]):
         error: Error message if order failed.
         created_at: Order creation timestamp.
         updated_at: Last status update timestamp.
+        leverage: Margin leverage (None for spot, integer for margin).
+        reduce_only: True when the order may only reduce an existing position.
     """
 
     type: Literal["order"] = "order"
@@ -265,6 +267,8 @@ class OrderData(StrictDataSchema[Literal["order"]]):
     error: str | None = None
     created_at: datetime
     updated_at: datetime | None = None
+    leverage: int | None = None
+    reduce_only: bool = False
 
 
 class PositionData(StrictDataSchema[Literal["position"]]):

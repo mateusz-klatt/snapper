@@ -293,6 +293,62 @@ async def test_log_order_to_db_logs_successfully(mock_resolve: AsyncMock) -> Non
     assert call_kwargs["session_id"] == tracker.session_id
     assert call_kwargs["sequence_id"] >= 1
     mock_repo.insert_order.assert_awaited_once()
+    insert_kwargs = mock_repo.insert_order.call_args.kwargs
+    assert insert_kwargs["leverage"] is None
+    assert insert_kwargs["reduce_only"] is False
+
+
+@pytest.mark.asyncio()
+@patch(
+    "snapper.infrastructure.exchanges.base.resolve_symbol_public_id",
+    new_callable=AsyncMock,
+    return_value="fake-spid",
+)
+async def test_log_order_to_db_propagates_leverage_and_reduce_only(
+    mock_resolve: AsyncMock,
+) -> None:
+    """Log order forwards leverage/reduce_only from request to repository.
+
+    Given: An ExchangeOrderRequest with leverage=5 and reduce_only=True
+        (mimicking a margin reduce-only order),
+    When: _log_order_to_db is invoked,
+    Then: insert_order is called with the same leverage/reduce_only so the
+        Order DB row carries the margin/intent metadata for the frontend
+        and SCD2 history.
+    """
+    mock_repo = MagicMock(spec=Repository)
+    mock_repo.ensure_instrument = AsyncMock(return_value=(42, "inst-pub-42"))
+    mock_repo.insert_order = AsyncMock(return_value=(99, "order-uuid-123"))
+    client = DummyExchangeClient(repository=mock_repo)
+    client.set_tracker(SequenceTracker())
+    request = ExchangeOrderRequest(
+        client_order_id="client_lev",
+        symbol="BTC-USD",
+        side=OrderSideEnum.SELL,
+        type=OrderTypeEnum.LIMIT,
+        amount=1.0,
+        price=50000.0,
+        leverage=5,
+        reduce_only=True,
+    )
+    order = ExchangeOrderSnapshot(
+        id="order_lev",
+        client_order_id="client_lev",
+        symbol="BTC-USD",
+        side=OrderSideEnum.SELL,
+        type=OrderTypeEnum.LIMIT,
+        amount=1.0,
+        price=50000.0,
+        filled=0.0,
+        remaining=0.0,
+        status=OrderStatusEnum.OPEN,
+        timestamp=1234567890.0,
+    )
+    await client._log_order_to_db(request, order)
+    mock_resolve.assert_awaited_once()
+    insert_kwargs = mock_repo.insert_order.call_args.kwargs
+    assert insert_kwargs["leverage"] == 5
+    assert insert_kwargs["reduce_only"] is True
 
 
 @pytest.mark.asyncio()

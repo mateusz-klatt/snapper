@@ -435,6 +435,9 @@ class Repository(ABC):
         sequence_id: int,
         timestamp: datetime,
         time_in_force: str | None = None,
+        mode: str = "live",
+        leverage: int | None = None,
+        reduce_only: bool = False,
     ) -> tuple[int, str]:
         """Insert new order record, returning (id, public_id) tuple."""
         ...
@@ -1384,6 +1387,8 @@ class SQLAlchemyRepository(Repository):
         timestamp: datetime,
         time_in_force: str | None = None,
         mode: str = "live",
+        leverage: int | None = None,
+        reduce_only: bool = False,
     ) -> tuple[int, str]:
         """Insert new order record and return (id, public_id) tuple."""
         async with self.session() as s:
@@ -1404,6 +1409,8 @@ class SQLAlchemyRepository(Repository):
                 status=status,
                 time_in_force=time_in_force,
                 error=None,
+                leverage=leverage,
+                reduce_only=reduce_only,
                 session_id=session_id,
                 sequence_id=sequence_id,
             )
@@ -1453,6 +1460,8 @@ class SQLAlchemyRepository(Repository):
                 status=status,
                 time_in_force=old_order.time_in_force,
                 error=error,
+                leverage=old_order.leverage,
+                reduce_only=old_order.reduce_only,
                 session_id=session_id,
                 sequence_id=sequence_id,
             )
@@ -1945,6 +1954,8 @@ class SQLAlchemyRepository(Repository):
                     "status": order.status,
                     "time_in_force": order.time_in_force,
                     "error": order.error,
+                    "leverage": order.leverage,
+                    "reduce_only": order.reduce_only,
                 }
                 for order, inst, sym in result.all()
             ]
@@ -2055,6 +2066,8 @@ class SQLAlchemyRepository(Repository):
                     "status": order.status,
                     "time_in_force": order.time_in_force,
                     "error": order.error,
+                    "leverage": order.leverage,
+                    "reduce_only": order.reduce_only,
                 }
                 for order, inst, sym in result.all()
             ]

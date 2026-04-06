@@ -287,6 +287,11 @@ execution = ExecutionData(
 
 ### OrderData
 
+`OrderData` is the canonical event for order state. It carries the request-time
+margin metadata (`leverage`, `reduce_only`) all the way to subscribers and the
+REST `/orders` endpoint, so the frontend can render shorts and reduce-only
+intent.
+
 ```python
 from snapper.messaging.schemas.data import OrderData
 
@@ -295,12 +300,14 @@ order_status = OrderData(
     exchange="kraken",
     client_order_id="ord_123",
     exchange_order_id="KRAKEN-456",
-    side="buy",
+    side="sell",
     order_type="limit",
     size=0.1,
     filled_size=0.0,
     status="accepted",
     price=42000.0,
+    leverage=3,
+    reduce_only=False,
 )
 ```
 

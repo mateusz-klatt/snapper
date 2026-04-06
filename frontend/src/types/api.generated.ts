@@ -2196,6 +2196,8 @@ export type Components = {
          *         error: Error message if order failed.
          *         created_at: Order creation timestamp.
          *         updated_at: Last status update timestamp.
+         *         leverage: Margin leverage (None for spot, integer for margin).
+         *         reduce_only: True when the order may only reduce an existing position.
          */
         OrderData: {
             /**
@@ -2265,6 +2267,13 @@ export type Components = {
             created_at: string;
             /** Updated At */
             updated_at?: string | null;
+            /** Leverage */
+            leverage?: number | null;
+            /**
+             * Reduce Only
+             * @default false
+             */
+            reduce_only: boolean;
         };
         /**
          * OrderListResponse

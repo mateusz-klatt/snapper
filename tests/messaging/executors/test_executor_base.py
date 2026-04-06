@@ -264,6 +264,8 @@ def make_order(**overrides: Any) -> OrderRequestData:
         client_order_id=overrides.get("client_order_id", "c1"),
         mode=overrides.get("mode", "paper"),
         signaled_at=overrides.get("signaled_at", datetime.now(tz=UTC)),
+        leverage=overrides.get("leverage"),
+        reduce_only=overrides.get("reduce_only", False),
     )
 
 
@@ -5260,6 +5262,46 @@ class TestDeltaFillSemantics:
         ex.msg_publisher.send.assert_awaited_once()
         published = ex.msg_publisher.send.call_args[0][1]
         assert published.filled_size == 0.0
+
+    @pytest.mark.asyncio
+    async def test_publish_order_status_propagates_leverage_and_reduce_only(self) -> None:
+        """Verify leverage and reduce_only are copied from request to OrderData event.
+
+        Given: Running executor with publisher and an order request that
+            carries leverage=3 and reduce_only=True,
+        When: _publish_order_status is called,
+        Then: The published OrderData event preserves both fields so the
+            frontend / DB can render shorts and reduce-only intent correctly.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex.msg_publisher = AsyncMock()
+        order = make_order(quantity=1.0, leverage=3, reduce_only=True)
+        await ex._publish_order_status(order, "submitted")
+        ex.msg_publisher.send.assert_awaited_once()
+        published = ex.msg_publisher.send.call_args[0][1]
+        assert published.leverage == 3
+        assert published.reduce_only is True
+
+    @pytest.mark.asyncio
+    async def test_publish_order_status_defaults_leverage_and_reduce_only(self) -> None:
+        """Verify leverage/reduce_only default to None/False on the event.
+
+        Given: An order request with no leverage and reduce_only=False,
+        When: _publish_order_status is called,
+        Then: The published OrderData event mirrors the defaults — leverage
+            is None and reduce_only is False — so spot orders are not falsely
+            tagged as margin or reduce-only.
+        """
+        ex: Any = MergedDummyExecutor()
+        ex.running = True
+        ex.msg_publisher = AsyncMock()
+        order = make_order(quantity=1.0)
+        await ex._publish_order_status(order, "submitted")
+        ex.msg_publisher.send.assert_awaited_once()
+        published = ex.msg_publisher.send.call_args[0][1]
+        assert published.leverage is None
+        assert published.reduce_only is False
 
 
 class TestExecutorBasePersistence:

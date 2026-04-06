@@ -1043,6 +1043,9 @@ class DummyRepository(Repository):
         sequence_id: int,
         timestamp: datetime,
         time_in_force: str | None = None,
+        mode: str = "live",
+        leverage: int | None = None,
+        reduce_only: bool = False,
     ) -> tuple[int, str]:
         """Insert order - no-op returning (0, stub-public-id)."""
         return (0, "stub-public-id")
@@ -2110,6 +2113,9 @@ class _MinimalRepository(Repository):
         sequence_id: int,
         timestamp: datetime,
         time_in_force: str | None = None,
+        mode: str = "live",
+        leverage: int | None = None,
+        reduce_only: bool = False,
     ) -> tuple[int, str]:
         return (0, "stub-public-id")
 
@@ -2466,6 +2472,123 @@ async def test_get_orders_filters_by_exchange(tmp_path: Path) -> None:
     )
     result = await r.get_orders(limit=10, offset=0, as_of=now, exchange="zonda")
     assert len(result) == 0
+
+
+@pytest.mark.asyncio
+async def test_insert_order_persists_leverage_and_reduce_only(tmp_path: Path) -> None:
+    """Verify insert_order persists leverage and reduce_only.
+
+    Given: Repository,
+    When: insert_order is called with leverage=3 and reduce_only=True,
+    Then: get_orders returns those values on the row.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    await r.insert_order(
+        instrument_public_id=inst_pid,
+        client_order_id="c-lev",
+        exchange_order_id="e-lev",
+        created_at=now,
+        side="sell",
+        order_type="limit",
+        price=50000.0,
+        size=1.0,
+        status="open",
+        session_id="s1",
+        sequence_id=30,
+        timestamp=now,
+        leverage=3,
+        reduce_only=True,
+    )
+    result = await r.get_orders(limit=10, offset=0, as_of=now)
+    assert len(result) == 1
+    assert result[0]["leverage"] == 3
+    assert result[0]["reduce_only"] is True
+
+
+@pytest.mark.asyncio
+async def test_insert_order_defaults_leverage_and_reduce_only(tmp_path: Path) -> None:
+    """Verify insert_order defaults leverage to None and reduce_only to False.
+
+    Given: Repository,
+    When: insert_order is called without leverage/reduce_only kwargs,
+    Then: get_orders returns leverage=None and reduce_only=False.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    await r.insert_order(
+        instrument_public_id=inst_pid,
+        client_order_id="c-default",
+        exchange_order_id="e-default",
+        created_at=now,
+        side="buy",
+        order_type="limit",
+        price=50000.0,
+        size=1.0,
+        status="open",
+        session_id="s1",
+        sequence_id=31,
+        timestamp=now,
+    )
+    result = await r.get_orders(limit=10, offset=0, as_of=now)
+    assert len(result) == 1
+    assert result[0]["leverage"] is None
+    assert result[0]["reduce_only"] is False
+
+
+@pytest.mark.asyncio
+async def test_update_order_carries_forward_leverage_and_reduce_only(tmp_path: Path) -> None:
+    """Verify update_order SCD2 cycle preserves leverage and reduce_only.
+
+    Given: Repository with an order persisted with leverage=5/reduce_only=True,
+    When: update_order is called twice (first to partially_filled, then to filled),
+    Then: After both updates, get_orders still returns leverage=5 and reduce_only=True
+        because update_order carries forward the immutable margin/intent fields when
+        constructing the new SCD2 row.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    base_ts = datetime.now(UTC)
+    order_id, _ = await r.insert_order(
+        instrument_public_id=inst_pid,
+        client_order_id="c-carry",
+        exchange_order_id="e-carry",
+        created_at=base_ts,
+        side="sell",
+        order_type="limit",
+        price=50000.0,
+        size=1.0,
+        status="open",
+        session_id="s1",
+        sequence_id=40,
+        timestamp=base_ts,
+        leverage=5,
+        reduce_only=True,
+    )
+    v2 = await r.update_order(
+        order_id=order_id,
+        status="partially_filled",
+        updated_at=base_ts + timedelta(milliseconds=1),
+        session_id="s1",
+        sequence_id=41,
+        timestamp=base_ts + timedelta(milliseconds=1),
+        filled_size=0.5,
+        average_price=49999.0,
+    )
+    await r.update_order(
+        order_id=v2,
+        status="filled",
+        updated_at=base_ts + timedelta(milliseconds=2),
+        session_id="s1",
+        sequence_id=42,
+        timestamp=base_ts + timedelta(milliseconds=2),
+        filled_size=1.0,
+        average_price=49999.0,
+    )
+    result = await r.get_orders(limit=10, offset=0, as_of=base_ts + timedelta(milliseconds=3))
+    assert len(result) == 1
+    assert result[0]["status"] == "filled"
+    assert result[0]["leverage"] == 5
+    assert result[0]["reduce_only"] is True
 
 
 @pytest.mark.asyncio

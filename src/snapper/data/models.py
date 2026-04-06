@@ -304,6 +304,10 @@ class Order(TemporalMixin, Base):
     filled_size: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
     average_price: Mapped[float | None] = mapped_column(Float)
     error: Mapped[str | None] = mapped_column(String(512))
+    leverage: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reduce_only: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
 
 
 class Execution(TemporalMixin, Base):

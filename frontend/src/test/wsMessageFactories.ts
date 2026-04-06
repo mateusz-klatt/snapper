@@ -281,6 +281,8 @@ export function createOrder(
     error?: string | null
     created_at?: string
     updated_at?: string | null
+    leverage?: number | null
+    reduce_only?: boolean
   } = {}
 ) {
   return {
@@ -303,6 +305,8 @@ export function createOrder(
     error: overrides.error ?? null,
     created_at: overrides.created_at ?? PROVENANCE.timestamp,
     updated_at: overrides.updated_at ?? null,
+    leverage: overrides.leverage ?? null,
+    reduce_only: overrides.reduce_only ?? false,
   }
 }
 

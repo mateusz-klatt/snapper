@@ -181,6 +181,8 @@ export interface Order {
   error?: string | null
   createdAt: Date
   updatedAt?: Date | null
+  leverage?: number | null
+  reduceOnly?: boolean
 }
 
 /**

@@ -620,6 +620,7 @@ describe('domain API methods', () => {
             size: 1,
             filled_size: 1,
             status: 'filled',
+            reduce_only: false,
           },
         ],
         count: 1,
