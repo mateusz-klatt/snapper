@@ -44,6 +44,8 @@ from snapper.data.repository import dispose_repositories
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
 from snapper.data.repository import where_active_now
+from snapper.data.repository_types import AccrualLedgerInsertRow
+from snapper.data.repository_types import FundingRateInsertRow
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 
 
@@ -3708,6 +3710,7 @@ async def test_upsert_checkpoint_and_get(tmp_path: Path) -> None:
             "shard_key": "kraken.BTC-USD.live",
             "position_qty": 0.5,
             "entry_price": 50000.0,
+            "position_opened_at": now,
             "cash": 9000.0,
             "peak_equity": 10000.0,
             "realized_pnl": 0.0,
@@ -3728,12 +3731,14 @@ async def test_upsert_checkpoint_and_get(tmp_path: Path) -> None:
     assert cp["position_qty"] == 0.5
     assert cp["cash"] == 9000.0
     assert cp["last_venue_event_id"] == 42
+    assert cp["position_opened_at"] == now
     later = now + timedelta(seconds=1)
     cp_id2 = await r.upsert_checkpoint(
         {
             "shard_key": "kraken.BTC-USD.live",
             "position_qty": 1.0,
             "entry_price": 50000.0,
+            "position_opened_at": now,
             "cash": 8500.0,
             "peak_equity": 10500.0,
             "realized_pnl": 0.0,
@@ -3787,6 +3792,7 @@ async def test_get_all_checkpoints_returns_all_active(tmp_path: Path) -> None:
             "shard_key": "kraken.BTC-USD.live",
             "position_qty": 0.5,
             "entry_price": 50000.0,
+            "position_opened_at": now,
             "cash": 9000.0,
             "peak_equity": 10000.0,
             "realized_pnl": 0.0,
@@ -3806,6 +3812,7 @@ async def test_get_all_checkpoints_returns_all_active(tmp_path: Path) -> None:
             "shard_key": "kraken.ETH-USD.live",
             "position_qty": 10.0,
             "entry_price": 3000.0,
+            "position_opened_at": None,
             "cash": 5000.0,
             "peak_equity": 8000.0,
             "realized_pnl": 50.0,
@@ -4025,3 +4032,414 @@ async def test_get_active_commands_for_exchange(tmp_path: Path) -> None:
     assert len(cmds) == 1
     assert cmds[0]["status"] == "created"
     assert cmds[0]["instrument"] == "BTC-USD"
+
+
+@pytest.mark.asyncio
+async def test_revise_instrument_spec_persists_funding_fields(tmp_path: Path) -> None:
+    """revise_instrument_spec round-trips the new funding metadata fields.
+
+    Given: a seeded instrument with no spec,
+    When: revise_instrument_spec is called with funding fields populated,
+    Then: get_instrument_spec returns the same funding values.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    spec = InstrumentSpecInput(
+        tick_size=0.5,
+        funding_type="perpetual_funding",
+        funding_frequency_hours=1,
+        max_funding_rate=0.0025,
+    )
+    spec_id = await r.revise_instrument_spec(
+        instrument_public_id=inst_pid,
+        session_id="s1",
+        sequence_id=10,
+        timestamp=now,
+        spec=spec,
+    )
+    assert spec_id > 0
+    row = await r.get_instrument_spec(inst_pid, as_of=now)
+    assert row is not None
+    assert row["funding_type"] == "perpetual_funding"
+    assert row["funding_frequency_hours"] == 1
+    assert row["max_funding_rate"] == pytest.approx(0.0025)
+    assert row["rollover_rate_long"] is None
+    assert row["rollover_rate_short"] is None
+
+
+@pytest.mark.asyncio
+async def test_revise_instrument_spec_funding_type_check_constraint(tmp_path: Path) -> None:
+    """Funding type CHECK constraint rejects invalid values.
+
+    Given: a seeded instrument,
+    When: revise_instrument_spec is called with funding_type='bogus',
+    Then: an IntegrityError is raised by the database CHECK constraint.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    spec = InstrumentSpecInput(funding_type="bogus")
+    with pytest.raises(IntegrityError):
+        await r.revise_instrument_spec(
+            instrument_public_id=inst_pid,
+            session_id="s1",
+            sequence_id=11,
+            timestamp=now,
+            spec=spec,
+        )
+
+
+@pytest.mark.asyncio
+async def test_insert_funding_rate_round_trip(tmp_path: Path) -> None:
+    """insert_funding_rate persists a row that get_funding_rates returns.
+
+    Given: a seeded instrument,
+    When: a perpetual_funding rate is inserted with effective_from=t1,
+    Then: get_funding_rates with a window covering t1 returns one row
+        carrying the original rate, direction, and notional asset.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    effective = datetime(2026, 4, 6, 12, 0, 0, tzinfo=UTC)
+    row_id = await r.insert_funding_rate(
+        {
+            "instrument_public_id": inst_pid,
+            "exchange": "kraken",
+            "rate_type": "perpetual_funding",
+            "direction": "both",
+            "rate": 0.0001,
+            "notional_asset": "USD",
+            "effective_from": effective,
+            "source": "exchange_api",
+            "session_id": "s1",
+            "sequence_id": 100,
+            "timestamp": now,
+        }
+    )
+    assert row_id > 0
+    rows = await r.get_funding_rates(
+        instrument_public_id=inst_pid,
+        exchange="kraken",
+        rate_type="perpetual_funding",
+        direction="both",
+        as_of=now,
+        range_start=effective - timedelta(hours=1),
+        range_end=effective + timedelta(hours=1),
+    )
+    assert len(rows) == 1
+    assert rows[0]["rate"] == pytest.approx(0.0001)
+    assert rows[0]["direction"] == "both"
+    assert rows[0]["notional_asset"] == "USD"
+    assert rows[0]["source"] == "exchange_api"
+
+
+@pytest.mark.asyncio
+async def test_insert_funding_rate_duplicate_raises(tmp_path: Path) -> None:
+    """Duplicate funding rate inserts raise IntegrityError on the partial unique index.
+
+    Given: a funding rate already inserted,
+    When: a second insert with the same business key is attempted,
+    Then: an IntegrityError is raised so the caller can swallow the
+        duplicate as an idempotency no-op.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    effective = datetime(2026, 4, 6, 12, 0, 0, tzinfo=UTC)
+    row: FundingRateInsertRow = {
+        "instrument_public_id": inst_pid,
+        "exchange": "kraken",
+        "rate_type": "spot_margin_rollover",
+        "direction": "long",
+        "rate": 0.00025,
+        "notional_asset": "USD",
+        "effective_from": effective,
+        "source": "exchange_docs",
+        "session_id": "s1",
+        "sequence_id": 200,
+        "timestamp": now,
+    }
+    await r.insert_funding_rate(row)
+    with pytest.raises(IntegrityError):
+        await r.insert_funding_rate(row)
+
+
+@pytest.mark.asyncio
+async def test_insert_funding_rate_with_caller_session(tmp_path: Path) -> None:
+    """insert_funding_rate with caller-managed session does not auto-commit.
+
+    Given: a caller-managed AsyncSession,
+    When: insert_funding_rate is called with session=s,
+    Then: the row is visible inside the session before commit and
+        becomes durable only after the caller commits.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    effective = datetime(2026, 4, 6, 13, 0, 0, tzinfo=UTC)
+    row: FundingRateInsertRow = {
+        "instrument_public_id": inst_pid,
+        "exchange": "kraken",
+        "rate_type": "perpetual_funding",
+        "direction": "both",
+        "rate": 0.0002,
+        "notional_asset": "USD",
+        "effective_from": effective,
+        "source": "exchange_api",
+        "session_id": "s1",
+        "sequence_id": 300,
+        "timestamp": now,
+    }
+    async with r.session() as s:
+        new_id = await r.insert_funding_rate(row, session=s)
+        await s.commit()
+    assert new_id > 0
+    rows = await r.get_funding_rates(
+        instrument_public_id=inst_pid,
+        exchange="kraken",
+        rate_type="perpetual_funding",
+        direction="both",
+        as_of=now,
+        range_start=effective - timedelta(hours=1),
+        range_end=effective + timedelta(hours=1),
+    )
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_funding_rates_filters_by_window(tmp_path: Path) -> None:
+    """get_funding_rates honours range_start / range_end on effective_from.
+
+    Given: three funding rates inserted at t1, t2, t3,
+    When: get_funding_rates is called with the window [t2, t3],
+    Then: only the t2 and t3 rows are returned ordered ascending.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    base = datetime(2026, 4, 6, 0, 0, 0, tzinfo=UTC)
+    rates = [
+        (base, 0.0001),
+        (base + timedelta(hours=1), 0.00015),
+        (base + timedelta(hours=2), 0.0002),
+    ]
+    for idx, (eff, rate) in enumerate(rates):
+        await r.insert_funding_rate(
+            {
+                "instrument_public_id": inst_pid,
+                "exchange": "kraken",
+                "rate_type": "perpetual_funding",
+                "direction": "both",
+                "rate": rate,
+                "notional_asset": "USD",
+                "effective_from": eff,
+                "source": "exchange_api",
+                "session_id": "s1",
+                "sequence_id": 400 + idx,
+                "timestamp": now,
+            }
+        )
+    rows = await r.get_funding_rates(
+        instrument_public_id=inst_pid,
+        exchange="kraken",
+        rate_type="perpetual_funding",
+        direction="both",
+        as_of=now,
+        range_start=base + timedelta(hours=1),
+        range_end=base + timedelta(hours=2),
+    )
+    assert [row["rate"] for row in rows] == pytest.approx([0.00015, 0.0002])
+
+
+@pytest.mark.asyncio
+async def test_get_funding_rates_no_window_returns_all(tmp_path: Path) -> None:
+    """get_funding_rates returns all matching rows when window bounds are None.
+
+    Given: two funding rates with different effective_from values,
+    When: get_funding_rates is called without range_start/range_end,
+    Then: both rows are returned ordered by effective_from.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    base = datetime(2026, 4, 6, 0, 0, 0, tzinfo=UTC)
+    for idx, eff in enumerate([base, base + timedelta(hours=1)]):
+        await r.insert_funding_rate(
+            {
+                "instrument_public_id": inst_pid,
+                "exchange": "kraken",
+                "rate_type": "perpetual_funding",
+                "direction": "both",
+                "rate": 0.0001 * (idx + 1),
+                "notional_asset": "USD",
+                "effective_from": eff,
+                "source": "exchange_api",
+                "session_id": "s1",
+                "sequence_id": 500 + idx,
+                "timestamp": now,
+            }
+        )
+    rows = await r.get_funding_rates(
+        instrument_public_id=inst_pid,
+        exchange="kraken",
+        rate_type="perpetual_funding",
+        direction="both",
+        as_of=now,
+    )
+    assert len(rows) == 2
+
+
+@pytest.mark.asyncio
+async def test_insert_accrual_round_trip_and_get_last(tmp_path: Path) -> None:
+    """insert_accrual + get_last_accrual round-trip the most recent row.
+
+    Given: two accruals at t1 and t2 with t2 later,
+    When: get_last_accrual is queried,
+    Then: the t2 row is returned.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    t1 = datetime(2026, 4, 6, 0, 0, 0, tzinfo=UTC)
+    t2 = t1 + timedelta(hours=1)
+    for idx, (accrued, amount) in enumerate([(t1, -0.50), (t2, -0.75)]):
+        await r.insert_accrual(
+            {
+                "instrument_public_id": inst_pid,
+                "mode": "live",
+                "accrual_type": "funding",
+                "accrued_at": accrued,
+                "amount": amount,
+                "amount_asset": "USD",
+                "rate": 0.0001,
+                "notional": 50000.0,
+                "position_quantity_at_accrual": 1.0,
+                "exchange": "kraken",
+                "session_id": "s1",
+                "sequence_id": 600 + idx,
+                "timestamp": now,
+            }
+        )
+    last = await r.get_last_accrual(inst_pid, mode="live", accrual_type="funding")
+    assert last is not None
+    assert last["accrued_at"] == t2
+    assert last["amount"] == pytest.approx(-0.75)
+
+
+@pytest.mark.asyncio
+async def test_get_last_accrual_returns_none_when_empty(tmp_path: Path) -> None:
+    """get_last_accrual returns None when no accruals exist for the key.
+
+    Given: a fresh repository with no accruals,
+    When: get_last_accrual is queried,
+    Then: None is returned.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    last = await r.get_last_accrual(inst_pid, mode="live", accrual_type="funding")
+    assert last is None
+
+
+@pytest.mark.asyncio
+async def test_insert_accrual_duplicate_raises(tmp_path: Path) -> None:
+    """Duplicate accrual rows raise IntegrityError on the partial unique index.
+
+    Given: an accrual already inserted,
+    When: a second insert with the same business key is attempted,
+    Then: an IntegrityError is raised so the caller can swallow the
+        duplicate as a "boundary already applied" no-op.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    accrued = datetime(2026, 4, 6, 0, 0, 0, tzinfo=UTC)
+    row: AccrualLedgerInsertRow = {
+        "instrument_public_id": inst_pid,
+        "mode": "live",
+        "accrual_type": "funding",
+        "accrued_at": accrued,
+        "amount": -0.5,
+        "amount_asset": "USD",
+        "rate": 0.0001,
+        "notional": 50000.0,
+        "position_quantity_at_accrual": 1.0,
+        "exchange": "kraken",
+        "session_id": "s1",
+        "sequence_id": 700,
+        "timestamp": now,
+    }
+    await r.insert_accrual(row)
+    with pytest.raises(IntegrityError):
+        await r.insert_accrual(row)
+
+
+@pytest.mark.asyncio
+async def test_insert_accrual_with_caller_session(tmp_path: Path) -> None:
+    """insert_accrual with caller-managed session does not auto-commit.
+
+    Given: a caller-managed AsyncSession,
+    When: insert_accrual is called with session=s,
+    Then: the caller is responsible for the commit before the row is durable.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    accrued = datetime(2026, 4, 6, 1, 0, 0, tzinfo=UTC)
+    row: AccrualLedgerInsertRow = {
+        "instrument_public_id": inst_pid,
+        "mode": "live",
+        "accrual_type": "funding",
+        "accrued_at": accrued,
+        "amount": -1.0,
+        "amount_asset": "USD",
+        "rate": 0.0001,
+        "notional": 100000.0,
+        "position_quantity_at_accrual": 2.0,
+        "exchange": "kraken",
+        "session_id": "s1",
+        "sequence_id": 800,
+        "timestamp": now,
+    }
+    async with r.session() as s:
+        new_id = await r.insert_accrual(row, session=s)
+        await s.commit()
+    assert new_id > 0
+    rows = await r.get_accruals(
+        instrument_public_id=inst_pid,
+        mode="live",
+        range_start=accrued - timedelta(hours=1),
+        range_end=accrued + timedelta(hours=1),
+    )
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_accruals_strict_lower_bound(tmp_path: Path) -> None:
+    """get_accruals uses a STRICT lower bound on accrued_at.
+
+    Given: accruals at t0, t1, t2 with t0 < t1 < t2,
+    When: get_accruals is queried with range_start=t1, range_end=t2,
+    Then: only the t2 row is returned (the t1 boundary already in a
+        prior checkpoint snapshot must NOT be re-applied).
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    t0 = datetime(2026, 4, 6, 0, 0, 0, tzinfo=UTC)
+    t1 = t0 + timedelta(hours=1)
+    t2 = t0 + timedelta(hours=2)
+    for idx, accrued in enumerate([t0, t1, t2]):
+        await r.insert_accrual(
+            {
+                "instrument_public_id": inst_pid,
+                "mode": "live",
+                "accrual_type": "funding",
+                "accrued_at": accrued,
+                "amount": -0.1 * (idx + 1),
+                "amount_asset": "USD",
+                "rate": 0.0001,
+                "notional": 10000.0,
+                "position_quantity_at_accrual": 1.0,
+                "exchange": "kraken",
+                "session_id": "s1",
+                "sequence_id": 900 + idx,
+                "timestamp": now,
+            }
+        )
+    rows = await r.get_accruals(
+        instrument_public_id=inst_pid,
+        mode="live",
+        range_start=t1,
+        range_end=t2,
+    )
+    assert [row["accrued_at"] for row in rows] == [t2]

@@ -1511,7 +1511,9 @@ async def test_persist_checkpoint_writes_to_db() -> None:
 
     Given: a TraderCoordinator with SQLAlchemyRepository and a TradeService with state,
     When: _persist_checkpoint is called,
-    Then: upsert_checkpoint is called on the repository.
+    Then: upsert_checkpoint is called on the repository and the
+        forwarded row carries the position_opened_at venue timestamp
+        captured by the fill (funding fee model dependency).
     """
     coord = TraderCoordinator.__new__(TraderCoordinator)
     coord.trade_service = TradeService()
@@ -1520,8 +1522,10 @@ async def test_persist_checkpoint_writes_to_db() -> None:
     coord._tracker.next_sequence = MagicMock(return_value=1)
     mock_repo = AsyncMock(spec=SQLAlchemyRepository)
     mock_repo.upsert_checkpoint = AsyncMock(return_value=1)
+    mock_repo.get_latest_venue_event_id = AsyncMock(return_value=1)
     coord.repository = mock_repo
 
+    venue_ts = datetime(2026, 4, 6, 12, 30, 0, tzinfo=UTC)
     coord.trade_service.apply_venue_event(
         {
             "id": 1,
@@ -1548,7 +1552,7 @@ async def test_persist_checkpoint_writes_to_db() -> None:
             "exec_id": "exec-1",
             "trade_id": None,
             "error": None,
-            "venue_timestamp": datetime.now(UTC),
+            "venue_timestamp": venue_ts,
             "received_at": datetime.now(UTC),
         }
     )
@@ -1557,6 +1561,33 @@ async def test_persist_checkpoint_writes_to_db() -> None:
     call_row = mock_repo.upsert_checkpoint.call_args.args[0]
     assert call_row["shard_key"] == "kraken.BTC-USD.live"
     assert call_row["position_qty"] == 0.5
+    assert call_row["position_opened_at"] == venue_ts
+
+
+@pytest.mark.asyncio
+async def test_persist_checkpoint_writes_none_when_position_flat() -> None:
+    """When the projection has no open cycle the upsert sends position_opened_at=None.
+
+    Given: a TraderCoordinator persisting a checkpoint for a flat shard,
+    When: _persist_checkpoint is called before any fill applied to the
+        shard,
+    Then: the upsert payload's position_opened_at is None (default
+        empty-shard state).
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.trade_service = TradeService()
+    coord._tracker = MagicMock()
+    coord._tracker.session_id = "s-test"
+    coord._tracker.next_sequence = MagicMock(return_value=1)
+    mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+    mock_repo.upsert_checkpoint = AsyncMock(return_value=1)
+    mock_repo.get_latest_venue_event_id = AsyncMock(return_value=None)
+    coord.repository = mock_repo
+    coord.trade_service._get_or_create_shard("kraken.BTC-USD.live")
+    await coord._persist_checkpoint("kraken.BTC-USD.live")
+    mock_repo.upsert_checkpoint.assert_called_once()
+    call_row = mock_repo.upsert_checkpoint.call_args.args[0]
+    assert call_row["position_opened_at"] is None
 
 
 @pytest.mark.asyncio

@@ -36,11 +36,20 @@ class PositionProjection:
 
     Updated on every confirmed fill. Read by TradingEngineService for
     sizing, risk, and stop-loss decisions.
+
+    ``position_opened_at`` records the venue timestamp at which the
+    current open cycle was opened (zero-crossing on the long or short
+    side). It is reset to ``None`` whenever the position returns to
+    flat. The funding accrual subsystem (Stream B funding fee model)
+    uses it to clamp catch-up boundaries to the current open cycle so
+    accruals from a previous cycle do not retro-charge a freshly
+    reopened position.
     """
 
     position_qty: float = 0.0
     entry_price: float | None = None
     realized_pnl: float = 0.0
+    position_opened_at: datetime | None = None
 
 
 @dataclass
@@ -222,10 +231,11 @@ class TradeService:
         fee = event.get("fee") or 0.0
         notional = fill_size * fill_price
         side_lower = side.lower()
+        event_time = event.get("venue_timestamp") or event["received_at"]
 
         if side_lower in (TradeSideEnum.BUY, TradeSideEnum.SELL):
             signed_qty = fill_size if side_lower == TradeSideEnum.BUY else -fill_size
-            self._update_position(shard.position, signed_qty, fill_size, fill_price)
+            self._update_position(shard.position, signed_qty, fill_size, fill_price, event_time)
             self._update_cash(shard, side_lower, notional, fee)
 
         shard.turnover += notional
@@ -253,34 +263,70 @@ class TradeService:
         signed_qty: float,
         fill_size: float,
         fill_price: float,
+        event_time: datetime,
     ) -> None:
-        """Update position quantity and entry price for a fill."""
+        """Update position quantity and entry price for a fill.
+
+        Args:
+            pos: Position projection to mutate in place.
+            signed_qty: Fill quantity with sign (positive for BUY,
+                negative for SELL).
+            fill_size: Unsigned fill quantity.
+            fill_price: Fill execution price.
+            event_time: Venue (or fallback bus) timestamp at which the
+                fill occurred. Stamped onto ``position_opened_at`` at
+                every zero-crossing so the funding accrual loop can
+                clamp catch-up boundaries to the current open cycle.
+        """
         is_increasing = (pos.position_qty >= 0 and signed_qty > 0) or (
             pos.position_qty <= 0 and signed_qty < 0
         )
         if is_increasing:
-            self._increase_position(pos, fill_size, fill_price)
+            self._increase_position(pos, fill_size, fill_price, event_time)
         else:
-            self._decrease_position(pos, fill_size, fill_price)
+            self._decrease_position(pos, fill_size, fill_price, event_time)
 
         pos.position_qty += signed_qty
         if abs(pos.position_qty) < 1e-12:
             pos.position_qty = 0.0
             pos.entry_price = None
+            pos.position_opened_at = None
 
     @staticmethod
-    def _increase_position(pos: PositionProjection, fill_size: float, fill_price: float) -> None:
-        """Recalculate weighted-average entry price for a position-increasing fill."""
+    def _increase_position(
+        pos: PositionProjection,
+        fill_size: float,
+        fill_price: float,
+        event_time: datetime,
+    ) -> None:
+        """Recalculate weighted-average entry price for a position-increasing fill.
+
+        When the helper is called from a flat position (``entry_price``
+        is None), it stamps ``position_opened_at`` with ``event_time``.
+        VWAP-only updates (adding to an existing same-direction
+        position) preserve the original ``position_opened_at``.
+        """
         old_qty = abs(pos.position_qty)
         new_qty = old_qty + fill_size
         if pos.entry_price is not None and old_qty > 0 and new_qty > 0:
             pos.entry_price = (old_qty * pos.entry_price + fill_size * fill_price) / new_qty
         else:
             pos.entry_price = fill_price
+            pos.position_opened_at = event_time
 
     @staticmethod
-    def _decrease_position(pos: PositionProjection, fill_size: float, fill_price: float) -> None:
-        """Realize PnL and handle overshoot for a position-decreasing fill."""
+    def _decrease_position(
+        pos: PositionProjection,
+        fill_size: float,
+        fill_price: float,
+        event_time: datetime,
+    ) -> None:
+        """Realize PnL and handle overshoot for a position-decreasing fill.
+
+        On overshoot (flip transition: long-to-short or short-to-long),
+        the helper resets ``position_opened_at`` to ``event_time``
+        because the new opposite-side position opens at the fill.
+        """
         close_qty = min(fill_size, abs(pos.position_qty))
         overshoot = fill_size - close_qty
         if pos.entry_price is not None and close_qty > 0:
@@ -290,6 +336,7 @@ class TradeService:
             pos.realized_pnl += close_qty * pnl_per_unit
         if overshoot > 1e-12:
             pos.entry_price = fill_price
+            pos.position_opened_at = event_time
 
     @staticmethod
     def _update_cash(shard: ShardState, side: str, notional: float, fee: float) -> None:
@@ -330,6 +377,7 @@ class TradeService:
         last_venue_event_id: int,
         open_command_ids: list[str],
         seen_exec_ids: set[str],
+        position_opened_at: datetime | None = None,
     ) -> None:
         """Restore shard state from a checkpoint during recovery.
 
@@ -347,11 +395,17 @@ class TradeService:
             last_venue_event_id: Highest venue event ID already applied.
             open_command_ids: Public IDs of commands still in-flight.
             seen_exec_ids: Execution IDs already processed for dedup.
+            position_opened_at: Venue timestamp at which the current
+                open cycle was opened. Defaults to ``None`` so
+                checkpoints written before the funding fee model shipped
+                replay safely (NULL means: skip rate-locked accrual
+                until the next zero-crossing stamps a fresh value).
         """
         shard = self._get_or_create_shard(shard_key)
         shard.position.position_qty = position_qty
         shard.position.entry_price = entry_price
         shard.position.realized_pnl = realized_pnl
+        shard.position.position_opened_at = position_opened_at
         shard.cash = cash
         shard.peak_equity = peak_equity
         shard.turnover = turnover
@@ -454,6 +508,7 @@ class TradeService:
         return {
             "position_qty": shard.position.position_qty,
             "entry_price": shard.position.entry_price,
+            "position_opened_at": shard.position.position_opened_at,
             "cash": shard.cash,
             "peak_equity": shard.peak_equity,
             "realized_pnl": shard.position.realized_pnl,

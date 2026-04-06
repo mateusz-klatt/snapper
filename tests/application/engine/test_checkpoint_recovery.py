@@ -23,6 +23,7 @@ def _make_checkpoint(
     shard_key: str = "kraken.BTC-USD.live",
     position_qty: float = 0.5,
     entry_price: float | None = 50000.0,
+    position_opened_at: datetime | None = None,
     cash: float = 7500.0,
     peak_equity: float = 10000.0,
     realized_pnl: float = 100.0,
@@ -38,6 +39,7 @@ def _make_checkpoint(
         "shard_key": shard_key,
         "position_qty": position_qty,
         "entry_price": entry_price,
+        "position_opened_at": position_opened_at,
         "cash": cash,
         "peak_equity": peak_equity,
         "realized_pnl": realized_pnl,
@@ -143,6 +145,60 @@ class TestCheckpointRecovery:
         engine = coord.engines["BTC-USD@kraken-live"]
         assert engine.position_qty == pytest.approx(0.5)
         assert engine.entry_price == pytest.approx(50000.0)
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_recovery_restores_position_opened_at(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Checkpoint position_opened_at flows into the restored projection.
+
+        Given: a checkpoint carrying a non-NULL position_opened_at,
+        When: _recover_engine_state runs,
+        Then: TradeService projection has the same position_opened_at
+            (so the funding accrual loop can clamp catch-up boundaries).
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        opened_at = datetime(2026, 4, 6, 10, 0, 0, tzinfo=UTC)
+        mock_repo.get_all_checkpoints = AsyncMock(
+            return_value=[_make_checkpoint(position_opened_at=opened_at)]
+        )
+        mock_repo.get_venue_events_after = AsyncMock(return_value=[])
+        mock_repo.get_executions_for_recovery = AsyncMock(return_value=[])
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
+        _set_sqlalchemy_repo(coord, mock_repo)
+
+        await coord._recover_engine_state()
+
+        shard = coord.trade_service._shards["kraken.BTC-USD.live"]
+        assert shard.position.position_opened_at == opened_at
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_recovery_handles_legacy_null_position_opened_at(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Old checkpoints without position_opened_at restore as None.
+
+        Given: a checkpoint where position_opened_at is None (legacy
+            row written before this plan shipped),
+        When: _recover_engine_state runs,
+        Then: TradeService projection has position_opened_at=None and
+            recovery does not crash.
+        """
+        coord = _make_coord(monkeypatch)
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        mock_repo.get_all_checkpoints = AsyncMock(
+            return_value=[_make_checkpoint(position_opened_at=None)]
+        )
+        mock_repo.get_venue_events_after = AsyncMock(return_value=[])
+        mock_repo.get_executions_for_recovery = AsyncMock(return_value=[])
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
+        _set_sqlalchemy_repo(coord, mock_repo)
+
+        await coord._recover_engine_state()
+
+        shard = coord.trade_service._shards["kraken.BTC-USD.live"]
+        assert shard.position.position_opened_at is None
 
     @pytest.mark.asyncio
     async def test_checkpoint_recovery_replays_delta(self, monkeypatch: pytest.MonkeyPatch) -> None:

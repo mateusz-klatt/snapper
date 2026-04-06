@@ -765,6 +765,11 @@ class TestBuildFallbackSpec:
             status=None,
             expiry_at=None,
             instrument_kind="spot",
+            funding_type=None,
+            funding_frequency_hours=None,
+            rollover_rate_long=None,
+            rollover_rate_short=None,
+            max_funding_rate=None,
         )
         result = UnderlyingUpdater._build_fallback_spec(match, existing)
         assert result is None
@@ -804,6 +809,11 @@ class TestBuildFallbackSpec:
             status="online",
             expiry_at=None,
             instrument_kind=None,
+            funding_type=None,
+            funding_frequency_hours=None,
+            rollover_rate_long=None,
+            rollover_rate_short=None,
+            max_funding_rate=None,
         )
         result = UnderlyingUpdater._build_fallback_spec(match, existing)
         assert result is not None
@@ -902,6 +912,11 @@ class TestYamlSpecFallbackIntegration:
                 status=None,
                 expiry_at=None,
                 instrument_kind="spot",
+                funding_type=None,
+                funding_frequency_hours=None,
+                rollover_rate_long=None,
+                rollover_rate_short=None,
+                max_funding_rate=None,
             )
         )
         repo.get_underlying_assets = AsyncMock(return_value=[])

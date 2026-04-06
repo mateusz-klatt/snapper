@@ -711,3 +711,166 @@ def test_apply_fill_buy_into_negative_position() -> None:
     pos = svc.get_position("kraken.BTC-USD.live")
     assert abs(pos.position_qty - (-0.5)) < 1e-9
     assert pos.entry_price == 50000.0
+
+
+def test_apply_fill_stamps_position_opened_at_on_open() -> None:
+    """Opening a position from flat stamps position_opened_at with venue_timestamp.
+
+    Given: a fresh TradeService at flat,
+    When: a buy fill arrives with a known venue_timestamp,
+    Then: position_opened_at on the projection equals that venue_timestamp.
+    """
+    svc = TradeService()
+    venue_time = datetime(2026, 4, 6, 12, 0, 0, tzinfo=UTC)
+    event = _make_venue_event(event_id=1, side="buy")
+    event["venue_timestamp"] = venue_time
+    svc.apply_venue_event(event)
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_opened_at == venue_time
+
+
+def test_position_opened_at_carries_through_vwap_add() -> None:
+    """Adding to an existing same-direction position preserves position_opened_at.
+
+    Given: a long position opened at t1,
+    When: a second buy fill at t2 adds to the position via VWAP,
+    Then: position_opened_at remains t1, not t2.
+    """
+    svc = TradeService()
+    t1 = datetime(2026, 4, 6, 12, 0, 0, tzinfo=UTC)
+    t2 = datetime(2026, 4, 6, 12, 5, 0, tzinfo=UTC)
+    e1 = _make_venue_event(event_id=1, side="buy", fill_price=50000.0, fill_size=0.4)
+    e1["venue_timestamp"] = t1
+    e2 = _make_venue_event(event_id=2, side="buy", fill_price=51000.0, fill_size=0.6)
+    e2["venue_timestamp"] = t2
+    svc.apply_venue_event(e1)
+    svc.apply_venue_event(e2)
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_opened_at == t1
+
+
+def test_position_opened_at_resets_on_close() -> None:
+    """Closing a position to flat resets position_opened_at to None.
+
+    Given: a long position with a stamped position_opened_at,
+    When: a sell fill closes the position fully,
+    Then: position_opened_at is reset to None alongside entry_price.
+    """
+    svc = TradeService()
+    t1 = datetime(2026, 4, 6, 12, 0, 0, tzinfo=UTC)
+    e1 = _make_venue_event(event_id=1, side="buy", fill_size=1.0)
+    e1["venue_timestamp"] = t1
+    svc.apply_venue_event(e1)
+    e2 = _make_venue_event(event_id=2, side="sell", fill_size=1.0, exec_id="exec-2")
+    svc.apply_venue_event(e2)
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == 0.0
+    assert pos.entry_price is None
+    assert pos.position_opened_at is None
+
+
+def test_position_opened_at_resets_on_flip() -> None:
+    """A flip transition stamps position_opened_at with the flipping fill time.
+
+    Given: a long position opened at t1,
+    When: a sell fill larger than the position arrives at t2 (flips to short),
+    Then: position_opened_at is reset to t2 (the new short cycle starts here).
+    """
+    svc = TradeService()
+    t1 = datetime(2026, 4, 6, 12, 0, 0, tzinfo=UTC)
+    t2 = datetime(2026, 4, 6, 13, 0, 0, tzinfo=UTC)
+    e1 = _make_venue_event(event_id=1, side="buy", fill_size=1.0)
+    e1["venue_timestamp"] = t1
+    svc.apply_venue_event(e1)
+    e2 = _make_venue_event(
+        event_id=2, side="sell", fill_size=2.0, fill_price=49000.0, exec_id="exec-2"
+    )
+    e2["venue_timestamp"] = t2
+    svc.apply_venue_event(e2)
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_qty == -1.0
+    assert pos.position_opened_at == t2
+
+
+def test_position_opened_at_falls_back_to_received_at_when_venue_ts_missing() -> None:
+    """When venue_timestamp is None the loop falls back to received_at.
+
+    Given: a fill event with venue_timestamp=None,
+    When: the fill opens a fresh position,
+    Then: position_opened_at is the event's received_at value.
+    """
+    svc = TradeService()
+    received = datetime(2026, 4, 6, 14, 0, 0, tzinfo=UTC)
+    event = _make_venue_event(event_id=1, side="buy")
+    event["venue_timestamp"] = None
+    event["received_at"] = received
+    svc.apply_venue_event(event)
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_opened_at == received
+
+
+def test_snapshot_for_checkpoint_includes_position_opened_at() -> None:
+    """snapshot_for_checkpoint surfaces position_opened_at for persistence.
+
+    Given: a TradeService with an open position stamped at t1,
+    When: snapshot_for_checkpoint is called,
+    Then: the returned dict contains position_opened_at == t1.
+    """
+    svc = TradeService()
+    t1 = datetime(2026, 4, 6, 15, 0, 0, tzinfo=UTC)
+    e1 = _make_venue_event(event_id=1, side="buy")
+    e1["venue_timestamp"] = t1
+    svc.apply_venue_event(e1)
+    snap = svc.snapshot_for_checkpoint("kraken.BTC-USD.live")
+    assert snap["position_opened_at"] == t1
+
+
+def test_restore_from_checkpoint_restores_position_opened_at() -> None:
+    """restore_from_checkpoint accepts position_opened_at and assigns it.
+
+    Given: a fresh TradeService,
+    When: restore_from_checkpoint is called with a non-None position_opened_at,
+    Then: the projection's position_opened_at equals that value.
+    """
+    svc = TradeService()
+    t1 = datetime(2026, 4, 6, 16, 0, 0, tzinfo=UTC)
+    svc.restore_from_checkpoint(
+        shard_key="kraken.BTC-USD.live",
+        position_qty=1.0,
+        entry_price=50000.0,
+        cash=5000.0,
+        peak_equity=10000.0,
+        realized_pnl=0.0,
+        turnover=50000.0,
+        last_venue_event_id=10,
+        open_command_ids=[],
+        seen_exec_ids=set(),
+        position_opened_at=t1,
+    )
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_opened_at == t1
+
+
+def test_restore_from_checkpoint_default_position_opened_at_is_none() -> None:
+    """Old checkpoints without position_opened_at restore as None.
+
+    Given: a fresh TradeService,
+    When: restore_from_checkpoint is called without position_opened_at,
+    Then: the projection's position_opened_at is None (safe default for
+        pre-funding-fee-model checkpoints).
+    """
+    svc = TradeService()
+    svc.restore_from_checkpoint(
+        shard_key="kraken.BTC-USD.live",
+        position_qty=1.0,
+        entry_price=50000.0,
+        cash=5000.0,
+        peak_equity=10000.0,
+        realized_pnl=0.0,
+        turnover=50000.0,
+        last_venue_event_id=10,
+        open_command_ids=[],
+        seen_exec_ids=set(),
+    )
+    pos = svc.get_position("kraken.BTC-USD.live")
+    assert pos.position_opened_at is None

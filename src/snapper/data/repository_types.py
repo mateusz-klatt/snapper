@@ -312,6 +312,7 @@ class TradeProjectionCheckpointRow(TypedDict):
     shard_key: str
     position_qty: float
     entry_price: float | None
+    position_opened_at: datetime | None
     cash: float
     peak_equity: float
     realized_pnl: float
@@ -432,6 +433,11 @@ class InstrumentSpecRow(TypedDict):
     status: str | None
     expiry_at: datetime | None
     instrument_kind: str | None
+    funding_type: str | None
+    funding_frequency_hours: int | None
+    rollover_rate_long: float | None
+    rollover_rate_short: float | None
+    max_funding_rate: float | None
 
 
 class InstrumentFrontMonthRow(TypedDict):
@@ -504,6 +510,7 @@ class CheckpointUpsertRow(TypedDict):
     shard_key: str
     position_qty: float
     entry_price: float | None
+    position_opened_at: datetime | None
     cash: float
     peak_equity: float
     realized_pnl: float
@@ -536,3 +543,81 @@ class ContinuousCandleRow(TypedDict):
     trades: int | None
     source_contract: str
     adjustment_factor: float | None
+
+
+class FundingRateRow(TypedDict):
+    """Row dict returned by funding rate queries."""
+
+    public_id: str
+    instrument_public_id: str
+    exchange: str
+    rate_type: str
+    direction: str
+    rate: float
+    notional_asset: str
+    effective_from: datetime
+    source: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+
+
+class FundingRateInsertRow(TypedDict):
+    """Insert params for insert_funding_rate.
+
+    All fields are required since each row carries its own provenance
+    envelope and exchange-side ``effective_from`` timestamp.
+    """
+
+    instrument_public_id: str
+    exchange: str
+    rate_type: str
+    direction: str
+    rate: float
+    notional_asset: str
+    effective_from: datetime
+    source: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+
+
+class AccrualLedgerRow(TypedDict):
+    """Row dict returned by accrual ledger queries."""
+
+    public_id: str
+    instrument_public_id: str
+    mode: str
+    accrual_type: str
+    accrued_at: datetime
+    amount: float
+    amount_asset: str
+    rate: float
+    notional: float
+    position_quantity_at_accrual: float
+    exchange: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+
+
+class AccrualLedgerInsertRow(TypedDict):
+    """Insert params for insert_accrual.
+
+    All fields are required since accruals materialize the periodic
+    charge applied to a position and need full provenance.
+    """
+
+    instrument_public_id: str
+    mode: str
+    accrual_type: str
+    accrued_at: datetime
+    amount: float
+    amount_asset: str
+    rate: float
+    notional: float
+    position_quantity_at_accrual: float
+    exchange: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime

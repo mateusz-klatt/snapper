@@ -9,6 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
 from snapper.data.models import Instrument
@@ -482,3 +483,165 @@ class TestSyncHelpers:
             )
             session.commit()
         assert status == "created"
+
+
+class TestUpdaterReviseHelper:
+    """Tests for SymbolUpdaterService._revise_instrument_spec carry-forward.
+
+    The helper exists at
+    ``snapper.application.updaters.symbols.base.SymbolUpdaterService``
+    and merges three patterns onto the InstrumentSpec row: pure
+    carry-forward (tick_size, lot_size, ...), direct assignment
+    (expiry_at, instrument_kind), and conditional carry-forward (the
+    funding fields). The conditional pattern is exercised by the funding
+    fee model: one updater seeds rollover rates and a later refresh
+    must NOT clear them.
+    """
+
+    def test_seeds_funding_fields_when_absent(
+        self, sync_repo: tuple[DatabaseRepository, str]
+    ) -> None:
+        """Given no spec, When called with funding fields, Then they are persisted."""
+        repo, ipid = sync_repo
+        ts = _ts()
+        with repo.get_session() as session:
+            SymbolUpdaterService._revise_instrument_spec(
+                session=session,
+                instrument_public_id=ipid,
+                now=ts,
+                session_id="s1",
+                sequence_id=1,
+                funding_type="spot_margin_rollover",
+                funding_frequency_hours=4,
+                rollover_rate_long=0.00025,
+                rollover_rate_short=0.00010,
+            )
+            session.commit()
+        with repo.get_session() as session:
+            row = DatabaseRepository.get_instrument_spec_sync(
+                session, ipid, ts + timedelta(seconds=1)
+            )
+        assert row is not None
+        assert row.funding_type == "spot_margin_rollover"
+        assert row.funding_frequency_hours == 4
+        assert row.rollover_rate_long == pytest.approx(0.00025)
+        assert row.rollover_rate_short == pytest.approx(0.00010)
+
+    def test_conditional_carry_forward_preserves_funding_fields(
+        self, sync_repo: tuple[DatabaseRepository, str]
+    ) -> None:
+        """Given seeded funding fields, When called WITHOUT them, Then they survive.
+
+        This is the regression coverage for the conditional carry-forward
+        pattern: a later updater (e.g. an equities refresh) that does not
+        know about funding fields must not erase them on the next SCD2
+        revision. The helper carries forward whichever value the existing
+        row had whenever the parameter is None.
+        """
+        repo, ipid = sync_repo
+        ts1 = _ts()
+        ts2 = ts1 + timedelta(hours=1)
+        with repo.get_session() as session:
+            SymbolUpdaterService._revise_instrument_spec(
+                session=session,
+                instrument_public_id=ipid,
+                now=ts1,
+                session_id="s1",
+                sequence_id=1,
+                funding_type="perpetual_funding",
+                funding_frequency_hours=1,
+                max_funding_rate=0.0025,
+            )
+            session.commit()
+        with repo.get_session() as session:
+            SymbolUpdaterService._revise_instrument_spec(
+                session=session,
+                instrument_public_id=ipid,
+                now=ts2,
+                session_id="s1",
+                sequence_id=2,
+                instrument_kind="perpetual",
+            )
+            session.commit()
+        with repo.get_session() as session:
+            row = DatabaseRepository.get_instrument_spec_sync(
+                session, ipid, ts2 + timedelta(seconds=1)
+            )
+        assert row is not None
+        assert row.funding_type == "perpetual_funding"
+        assert row.funding_frequency_hours == 1
+        assert row.max_funding_rate == pytest.approx(0.0025)
+        assert row.instrument_kind == "perpetual"
+
+    def test_explicit_value_overrides_existing_funding_field(
+        self, sync_repo: tuple[DatabaseRepository, str]
+    ) -> None:
+        """Given a seeded rollover rate, When refreshed with a new rate, Then updated.
+
+        Verifies the conditional carry-forward correctly prefers the
+        provided value over the existing one when both are present.
+        """
+        repo, ipid = sync_repo
+        ts1 = _ts()
+        ts2 = ts1 + timedelta(hours=1)
+        with repo.get_session() as session:
+            SymbolUpdaterService._revise_instrument_spec(
+                session=session,
+                instrument_public_id=ipid,
+                now=ts1,
+                session_id="s1",
+                sequence_id=1,
+                funding_type="spot_margin_rollover",
+                rollover_rate_long=0.00025,
+            )
+            session.commit()
+        with repo.get_session() as session:
+            SymbolUpdaterService._revise_instrument_spec(
+                session=session,
+                instrument_public_id=ipid,
+                now=ts2,
+                session_id="s1",
+                sequence_id=2,
+                funding_type="spot_margin_rollover",
+                rollover_rate_long=0.00050,
+            )
+            session.commit()
+        with repo.get_session() as session:
+            row = DatabaseRepository.get_instrument_spec_sync(
+                session, ipid, ts2 + timedelta(seconds=1)
+            )
+        assert row is not None
+        assert row.rollover_rate_long == pytest.approx(0.00050)
+
+    def test_no_existing_no_funding_passed_creates_null_row(
+        self, sync_repo: tuple[DatabaseRepository, str]
+    ) -> None:
+        """Given no existing spec, When called with no funding fields, Then NULLs.
+
+        Backward-compatibility check: the helper still works for
+        updaters that have no concept of funding (e.g. Polygon equities)
+        and produces NULL columns instead of crashing.
+        """
+        repo, ipid = sync_repo
+        ts = _ts()
+        with repo.get_session() as session:
+            SymbolUpdaterService._revise_instrument_spec(
+                session=session,
+                instrument_public_id=ipid,
+                now=ts,
+                session_id="s1",
+                sequence_id=1,
+                instrument_kind="spot",
+            )
+            session.commit()
+        with repo.get_session() as session:
+            row = DatabaseRepository.get_instrument_spec_sync(
+                session, ipid, ts + timedelta(seconds=1)
+            )
+        assert row is not None
+        assert row.instrument_kind == "spot"
+        assert row.funding_type is None
+        assert row.funding_frequency_hours is None
+        assert row.rollover_rate_long is None
+        assert row.rollover_rate_short is None
+        assert row.max_funding_rate is None

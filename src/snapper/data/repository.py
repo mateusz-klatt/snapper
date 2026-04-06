@@ -72,9 +72,11 @@ from sqlalchemy.pool import StaticPool
 from snapper.core.types import AllExchange
 from snapper.data.archive_symbols import resolve_archive_symbols
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import AccrualLedger
 from snapper.data.models import Base
 from snapper.data.models import Candle
 from snapper.data.models import Execution
+from snapper.data.models import FundingRate
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentSpec
 from snapper.data.models import InstrumentUnderlyingMapping
@@ -91,10 +93,14 @@ from snapper.data.models import TradeCommand
 from snapper.data.models import TradeProjectionCheckpoint
 from snapper.data.models import UnderlyingAsset
 from snapper.data.models import VenueEvent
+from snapper.data.repository_types import AccrualLedgerInsertRow
+from snapper.data.repository_types import AccrualLedgerRow
 from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import CheckpointUpsertRow
 from snapper.data.repository_types import ExecutionRow
+from snapper.data.repository_types import FundingRateInsertRow
+from snapper.data.repository_types import FundingRateRow
 from snapper.data.repository_types import InstrumentContractRow
 from snapper.data.repository_types import InstrumentFrontMonthRow
 from snapper.data.repository_types import InstrumentSpecRow
@@ -264,7 +270,14 @@ def close_and_insert_sync(
 
 @dataclass(frozen=True)
 class InstrumentSpecInput:
-    """Typed payload for instrument trading specification revisions."""
+    """Typed payload for instrument trading specification revisions.
+
+    The funding fields (``funding_type``, ``funding_frequency_hours``,
+    ``rollover_rate_long``, ``rollover_rate_short``, ``max_funding_rate``)
+    are populated by the per-exchange symbol updaters and consumed by
+    the funding accrual coroutine. Spot exchanges without margin
+    (Zonda, Walutomat) leave them ``None``.
+    """
 
     tick_size: float | None = None
     lot_size: float | None = None
@@ -278,6 +291,11 @@ class InstrumentSpecInput:
     status: str | None = None
     expiry_at: datetime | None = None
     instrument_kind: str | None = None
+    funding_type: str | None = None
+    funding_frequency_hours: int | None = None
+    rollover_rate_long: float | None = None
+    rollover_rate_short: float | None = None
+    max_funding_rate: float | None = None
 
 
 class Repository(ABC):
@@ -947,6 +965,143 @@ class Repository(ABC):
         """
         ...
 
+    @abstractmethod
+    async def insert_funding_rate(
+        self,
+        row: FundingRateInsertRow,
+        session: AsyncSession | None = None,
+    ) -> int:
+        """Insert a funding rate row, returning its integer id.
+
+        Idempotent on the partial unique index over
+        ``(instrument_public_id, exchange, rate_type, direction,
+        effective_from)``: a duplicate raises ``IntegrityError`` which
+        the caller is expected to swallow when re-running backfills.
+
+        Args:
+            row: Insert payload with all required provenance fields.
+            session: Optional caller-managed session. When provided, the
+                method does not commit so the caller can group the
+                insert into a larger transaction.
+
+        Returns:
+            Integer ``id`` of the new row.
+        """
+        ...
+
+    @abstractmethod
+    async def get_funding_rates(
+        self,
+        instrument_public_id: str,
+        exchange: str,
+        rate_type: str,
+        direction: str,
+        as_of: datetime,
+        range_start: datetime | None = None,
+        range_end: datetime | None = None,
+    ) -> list[FundingRateRow]:
+        """Return funding rates for an instrument and direction.
+
+        Bitemporal query: ``as_of`` filters the active SCD2 versions,
+        and ``range_start`` / ``range_end`` constrain the
+        ``effective_from`` exchange-side timestamp. Range bounds follow
+        the project temporal-query convention from
+        ``feedback_temporal_query`` (always pass an explicit window
+        instead of relying on KNOWN_TO_MAX).
+
+        Args:
+            instrument_public_id: Public ID of the instrument.
+            exchange: Exchange name (lowercase).
+            rate_type: One of ``spot_margin_rollover`` or
+                ``perpetual_funding``.
+            direction: One of ``long``, ``short``, or ``both``.
+            as_of: Point-in-time for SCD2 version filter.
+            range_start: Inclusive lower bound on ``effective_from``.
+                ``None`` means no lower bound.
+            range_end: Inclusive upper bound on ``effective_from``.
+                ``None`` means no upper bound.
+
+        Returns:
+            Rows ordered by ``effective_from`` ascending.
+        """
+        ...
+
+    @abstractmethod
+    async def insert_accrual(
+        self,
+        row: AccrualLedgerInsertRow,
+        session: AsyncSession | None = None,
+    ) -> int:
+        """Insert an accrual ledger row, returning its integer id.
+
+        Idempotent on the partial unique index over
+        ``(instrument_public_id, mode, accrual_type, accrued_at)``: a
+        duplicate raises ``IntegrityError``, which the caller swallows
+        as a "boundary already applied" signal.
+
+        Args:
+            row: Insert payload with all provenance fields.
+            session: Optional caller-managed session. When provided, the
+                method does not commit so the caller can sequence the
+                insert with the in-memory mutation in a single
+                transaction.
+
+        Returns:
+            Integer ``id`` of the new row.
+        """
+        ...
+
+    @abstractmethod
+    async def get_accruals(
+        self,
+        instrument_public_id: str,
+        mode: str,
+        range_start: datetime,
+        range_end: datetime,
+    ) -> list[AccrualLedgerRow]:
+        """Return accrual ledger rows in a half-open recovery window.
+
+        Used by the funding accrual recovery path. The lower bound is
+        STRICT (``accrued_at > range_start``) so the boundary already
+        captured by the most recent checkpoint snapshot is not
+        re-applied; the upper bound is INCLUSIVE
+        (``accrued_at <= range_end``).
+
+        Args:
+            instrument_public_id: Public ID of the instrument.
+            mode: Trading mode (``live``, ``paper``, ``backtest``).
+            range_start: Strict lower bound on ``accrued_at``.
+            range_end: Inclusive upper bound on ``accrued_at``.
+
+        Returns:
+            Rows ordered by ``accrued_at`` ascending.
+        """
+        ...
+
+    @abstractmethod
+    async def get_last_accrual(
+        self,
+        instrument_public_id: str,
+        mode: str,
+        accrual_type: str,
+    ) -> AccrualLedgerRow | None:
+        """Return the most recent accrual for an instrument and type.
+
+        Used by the funding accrual loop's catch-up logic to compute
+        which boundaries are still pending since the last applied row.
+        Reads the active SCD2 version with the maximum ``accrued_at``.
+
+        Args:
+            instrument_public_id: Public ID of the instrument.
+            mode: Trading mode (``live``, ``paper``, ``backtest``).
+            accrual_type: One of ``funding``, ``rollover``, ``borrow``.
+
+        Returns:
+            Most recent accrual row, or ``None`` if no accrual has been
+            applied yet for the given key.
+        """
+        ...
+
 
 def _register_sqlite_fk_pragma(engine: Any) -> None:
     """Register PRAGMA foreign_keys=ON for every new SQLite connection.
@@ -1255,6 +1410,11 @@ class SQLAlchemyRepository(Repository):
                 status=row.status,
                 expiry_at=row.expiry_at,
                 instrument_kind=row.instrument_kind,
+                funding_type=row.funding_type,
+                funding_frequency_hours=row.funding_frequency_hours,
+                rollover_rate_long=row.rollover_rate_long,
+                rollover_rate_short=row.rollover_rate_short,
+                max_funding_rate=row.max_funding_rate,
             )
 
     async def _upsert_batch(
@@ -2567,6 +2727,7 @@ class SQLAlchemyRepository(Repository):
                 "shard_key": cp.shard_key,
                 "position_qty": cp.position_qty,
                 "entry_price": cp.entry_price,
+                "position_opened_at": cp.position_opened_at,
                 "cash": cp.cash,
                 "peak_equity": cp.peak_equity,
                 "realized_pnl": cp.realized_pnl,
@@ -2596,6 +2757,7 @@ class SQLAlchemyRepository(Repository):
                         "shard_key": cp.shard_key,
                         "position_qty": cp.position_qty,
                         "entry_price": cp.entry_price,
+                        "position_opened_at": cp.position_opened_at,
                         "cash": cp.cash,
                         "peak_equity": cp.peak_equity,
                         "realized_pnl": cp.realized_pnl,
@@ -2609,6 +2771,169 @@ class SQLAlchemyRepository(Repository):
                     }
                 )
             return rows
+
+    async def insert_funding_rate(
+        self,
+        row: FundingRateInsertRow,
+        session: AsyncSession | None = None,
+    ) -> int:
+        """Insert a funding rate row, optionally on a caller-managed session.
+
+        See ``Repository.insert_funding_rate`` for the contract. When
+        the caller passes its own ``session``, this method does NOT
+        commit; the caller is responsible for transactional grouping.
+        """
+        if session is None:
+            async with self.session() as s:
+                obj = FundingRate(**row)
+                s.add(obj)
+                await s.commit()
+                await s.refresh(obj)
+                return int(obj.id)
+        obj = FundingRate(**row)
+        session.add(obj)
+        await session.flush()
+        return int(obj.id)
+
+    async def get_funding_rates(
+        self,
+        instrument_public_id: str,
+        exchange: str,
+        rate_type: str,
+        direction: str,
+        as_of: datetime,
+        range_start: datetime | None = None,
+        range_end: datetime | None = None,
+    ) -> list[FundingRateRow]:
+        """Bitemporal lookup of funding rates with explicit time window."""
+        async with self.session() as s:
+            stmt = (
+                select(FundingRate)
+                .where(
+                    FundingRate.instrument_public_id == instrument_public_id,
+                    FundingRate.exchange == exchange,
+                    FundingRate.rate_type == rate_type,
+                    FundingRate.direction == direction,
+                    *where_active(FundingRate, as_of),
+                )
+                .order_by(FundingRate.effective_from)
+            )
+            if range_start is not None:
+                stmt = stmt.where(FundingRate.effective_from >= range_start)
+            if range_end is not None:
+                stmt = stmt.where(FundingRate.effective_from <= range_end)
+            result = await s.execute(stmt)
+            return [
+                FundingRateRow(
+                    public_id=fr.public_id,
+                    instrument_public_id=fr.instrument_public_id,
+                    exchange=fr.exchange,
+                    rate_type=fr.rate_type,
+                    direction=fr.direction,
+                    rate=fr.rate,
+                    notional_asset=fr.notional_asset,
+                    effective_from=fr.effective_from,
+                    source=fr.source,
+                    timestamp=fr.timestamp,
+                    session_id=fr.session_id,
+                    sequence_id=fr.sequence_id,
+                )
+                for fr in result.scalars().all()
+            ]
+
+    async def insert_accrual(
+        self,
+        row: AccrualLedgerInsertRow,
+        session: AsyncSession | None = None,
+    ) -> int:
+        """Insert an accrual ledger row, optionally on a caller-managed session.
+
+        See ``Repository.insert_accrual`` for the contract. The caller
+        is expected to swallow ``IntegrityError`` from a duplicate
+        ``(instrument, mode, accrual_type, accrued_at)`` tuple as a
+        "boundary already applied" no-op.
+        """
+        if session is None:
+            async with self.session() as s:
+                obj = AccrualLedger(**row)
+                s.add(obj)
+                await s.commit()
+                await s.refresh(obj)
+                return int(obj.id)
+        obj = AccrualLedger(**row)
+        session.add(obj)
+        await session.flush()
+        return int(obj.id)
+
+    async def get_accruals(
+        self,
+        instrument_public_id: str,
+        mode: str,
+        range_start: datetime,
+        range_end: datetime,
+    ) -> list[AccrualLedgerRow]:
+        """Replay-window query for accrual recovery (strict lower bound)."""
+        async with self.session() as s:
+            now = datetime.now(UTC)
+            stmt = (
+                select(AccrualLedger)
+                .where(
+                    AccrualLedger.instrument_public_id == instrument_public_id,
+                    AccrualLedger.mode == mode,
+                    AccrualLedger.accrued_at > range_start,
+                    AccrualLedger.accrued_at <= range_end,
+                    *where_active(AccrualLedger, now),
+                )
+                .order_by(AccrualLedger.accrued_at)
+            )
+            result = await s.execute(stmt)
+            return [self._accrual_row_to_dict(al) for al in result.scalars().all()]
+
+    async def get_last_accrual(
+        self,
+        instrument_public_id: str,
+        mode: str,
+        accrual_type: str,
+    ) -> AccrualLedgerRow | None:
+        """Return the most recent accrual for catch-up boundary computation."""
+        async with self.session() as s:
+            now = datetime.now(UTC)
+            stmt = (
+                select(AccrualLedger)
+                .where(
+                    AccrualLedger.instrument_public_id == instrument_public_id,
+                    AccrualLedger.mode == mode,
+                    AccrualLedger.accrual_type == accrual_type,
+                    *where_active(AccrualLedger, now),
+                )
+                .order_by(AccrualLedger.accrued_at.desc())
+                .limit(1)
+            )
+            result = await s.execute(stmt)
+            row = result.scalars().first()
+            if row is None:
+                return None
+            return self._accrual_row_to_dict(row)
+
+    @staticmethod
+    def _accrual_row_to_dict(al: AccrualLedger) -> AccrualLedgerRow:
+        """Project an AccrualLedger ORM row into the TypedDict shape."""
+        return AccrualLedgerRow(
+            public_id=al.public_id,
+            instrument_public_id=al.instrument_public_id,
+            mode=al.mode,
+            accrual_type=al.accrual_type,
+            accrued_at=al.accrued_at,
+            amount=al.amount,
+            amount_asset=al.amount_asset,
+            rate=al.rate,
+            notional=al.notional,
+            position_quantity_at_accrual=al.position_quantity_at_accrual,
+            exchange=al.exchange,
+            timestamp=al.timestamp,
+            session_id=al.session_id,
+            sequence_id=al.sequence_id,
+        )
 
     async def get_fill_exec_ids_for_shard(self, shard_key: str) -> set[str]:
         """Return all exec_id and trade_id values from fill events for a shard.

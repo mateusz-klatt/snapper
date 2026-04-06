@@ -282,6 +282,7 @@ class TraderCoordinator(RegisterableProcess):
                 last_venue_event_id=watermark,
                 open_command_ids=open_cmd_ids,
                 seen_exec_ids=seen_ids,
+                position_opened_at=cp.get("position_opened_at"),
             )
             for event in delta_events:
                 self.trade_service.apply_venue_event(event)
@@ -908,11 +909,15 @@ class TraderCoordinator(RegisterableProcess):
         oci = snap["open_command_ids"]
         real_watermark = await self.repository.get_latest_venue_event_id(shard_key)
         try:
+            opened_at = snap.get("position_opened_at")
             await self.repository.upsert_checkpoint(
                 {
                     "shard_key": shard_key,
                     "position_qty": cast(float, snap["position_qty"]),
                     "entry_price": cast(float, ep) if ep is not None else None,
+                    "position_opened_at": (
+                        cast(datetime, opened_at) if opened_at is not None else None
+                    ),
                     "cash": cast(float, snap["cash"]),
                     "peak_equity": cast(float, snap["peak_equity"]),
                     "realized_pnl": cast(float, snap["realized_pnl"]),

@@ -418,12 +418,29 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         sequence_id: int,
         expiry_at: datetime | None = None,
         instrument_kind: str | None = None,
+        funding_type: str | None = None,
+        funding_frequency_hours: int | None = None,
+        rollover_rate_long: float | None = None,
+        rollover_rate_short: float | None = None,
+        max_funding_rate: float | None = None,
     ) -> None:
-        """Merge expiry_at and instrument_kind into InstrumentSpec (sync).
+        """Merge spec fields into InstrumentSpec (sync).
 
-        Reads the existing spec (if any) and carries forward all fields,
-        overriding only the provided expiry_at/instrument_kind. Creates a
-        fresh spec row when none exists yet.
+        Reads the existing spec (if any) and carries forward fields the
+        caller did not provide. Three patterns coexist in the merged
+        payload:
+
+        - **Carry-forward** (``tick_size``, ``lot_size``, etc.): always
+          taken from the existing row, since these helpers do not accept
+          them as parameters.
+        - **Direct assignment** (``expiry_at``, ``instrument_kind``):
+          always overwritten with the parameter value, even when None.
+        - **Conditional carry-forward** (the funding fields): the
+          parameter wins when not None; otherwise the existing value is
+          carried forward via ``_choose``. This lets one updater seed
+          funding metadata (e.g. Kraken Spot rollover rates) without
+          another updater (e.g. Polygon equities) clearing it on the
+          next refresh.
 
         Args:
             session: SQLAlchemy sync session.
@@ -433,12 +450,29 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             sequence_id: Per-topic monotonic counter.
             expiry_at: Contract expiry timestamp (UTC), or None.
             instrument_kind: Product type string, or None.
+            funding_type: Funding model identifier, or None to keep
+                whatever the existing row carried.
+            funding_frequency_hours: Hours between accrual boundaries,
+                or None to carry forward.
+            rollover_rate_long: Spot margin rollover rate per boundary
+                for long positions, or None to carry forward.
+            rollover_rate_short: Spot margin rollover rate per boundary
+                for short positions, or None to carry forward.
+            max_funding_rate: Per-boundary cap on perpetual funding
+                rate magnitude, or None to carry forward.
         """
         existing = DatabaseRepository.get_instrument_spec_sync(
             session,
             instrument_public_id,
             now,
         )
+
+        def _choose(provided: Any, attr: str) -> Any:
+            """Conditional carry-forward selector for funding fields."""
+            if provided is not None:
+                return provided
+            return getattr(existing, attr) if existing else None
+
         spec = InstrumentSpecInput(
             tick_size=existing.tick_size if existing else None,
             lot_size=existing.lot_size if existing else None,
@@ -452,6 +486,11 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             status=existing.status if existing else None,
             expiry_at=expiry_at,
             instrument_kind=instrument_kind,
+            funding_type=_choose(funding_type, "funding_type"),
+            funding_frequency_hours=_choose(funding_frequency_hours, "funding_frequency_hours"),
+            rollover_rate_long=_choose(rollover_rate_long, "rollover_rate_long"),
+            rollover_rate_short=_choose(rollover_rate_short, "rollover_rate_short"),
+            max_funding_rate=_choose(max_funding_rate, "max_funding_rate"),
         )
         DatabaseRepository.revise_instrument_spec_sync(
             session=session,

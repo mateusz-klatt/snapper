@@ -107,6 +107,8 @@ __all__ = [
     "TradeCommand",
     "VenueEvent",
     "TradeProjectionCheckpoint",
+    "FundingRate",
+    "AccrualLedger",
 ]
 
 
@@ -690,6 +692,11 @@ class InstrumentSpec(TemporalMixin, Base):
             "OR instrument_kind IS NULL",
             name="ck_instrument_specs_kind",
         ),
+        CheckConstraint(
+            "funding_type IS NULL OR funding_type IN "
+            "('spot_margin_rollover', 'perpetual_funding')",
+            name="ck_instrument_specs_funding_type",
+        ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     tick_size: Mapped[float | None] = mapped_column(Float, comment="Minimum price increment")
@@ -713,6 +720,22 @@ class InstrumentSpec(TemporalMixin, Base):
     )
     instrument_kind: Mapped[str | None] = mapped_column(
         String(16), comment="Product type: spot, perpetual, future, etf, option"
+    )
+    funding_type: Mapped[str | None] = mapped_column(
+        String(32),
+        comment="Funding model: spot_margin_rollover, perpetual_funding, or NULL",
+    )
+    funding_frequency_hours: Mapped[int | None] = mapped_column(
+        Integer, comment="Hours between funding/rollover boundaries"
+    )
+    rollover_rate_long: Mapped[float | None] = mapped_column(
+        Float, comment="Spot margin rollover fee per boundary for longs"
+    )
+    rollover_rate_short: Mapped[float | None] = mapped_column(
+        Float, comment="Spot margin rollover fee per boundary for shorts"
+    )
+    max_funding_rate: Mapped[float | None] = mapped_column(
+        Float, comment="Per-boundary cap on perpetual funding rate magnitude"
     )
 
 
@@ -949,6 +972,7 @@ class TradeProjectionCheckpoint(TemporalMixin, Base):
     shard_key: Mapped[str] = mapped_column(String(64))
     position_qty: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
     entry_price: Mapped[float | None] = mapped_column(Float)
+    position_opened_at: Mapped[datetime | None] = mapped_column(TZDateTime())
     cash: Mapped[float] = mapped_column(Float)
     peak_equity: Mapped[float] = mapped_column(Float)
     realized_pnl: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
@@ -1089,3 +1113,123 @@ class ContinuousContractConfig(TemporalMixin, Base):
     method: Mapped[str] = mapped_column(String(16))
     rollover_days_before: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     label: Mapped[str | None] = mapped_column(String(64))
+
+
+class FundingRate(TemporalMixin, Base):
+    """Exchange-published funding or rollover rate at a point in time.
+
+    One active row per ``(instrument_public_id, exchange, rate_type,
+    direction, effective_from)`` tuple. Bitemporal: ``timestamp`` is bus
+    time when the row was inserted, ``effective_from`` is the
+    exchange-side time at which the rate became active. Funding accrual
+    queries use ``as_of`` to look up the rate locked at position-open
+    time (spot margin) or at the boundary (perpetual funding).
+    """
+
+    __tablename__ = "funding_rates"
+    __table_args__ = (
+        Index(
+            "ix_funding_rates_unique_active",
+            "instrument_public_id",
+            "exchange",
+            "rate_type",
+            "direction",
+            "effective_from",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_funding_rates_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_funding_rates_lookup",
+            "instrument_public_id",
+            "rate_type",
+            "direction",
+            "effective_from",
+        ),
+        CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_funding_rates_exchange_lower"),
+        CheckConstraint(
+            "rate_type IN ('spot_margin_rollover', 'perpetual_funding')",
+            name="ck_funding_rates_rate_type",
+        ),
+        CheckConstraint(
+            "direction IN ('long', 'short', 'both')",
+            name="ck_funding_rates_direction",
+        ),
+        CheckConstraint(
+            "source IN ('exchange_api', 'exchange_docs', 'manual', 'derived')",
+            name="ck_funding_rates_source",
+        ),
+    )
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    exchange: Mapped[str] = mapped_column(String(32))
+    rate_type: Mapped[str] = mapped_column(String(32))
+    direction: Mapped[str] = mapped_column(String(8))
+    rate: Mapped[float] = mapped_column(Float)
+    notional_asset: Mapped[str] = mapped_column(String(16))
+    effective_from: Mapped[datetime] = mapped_column(TZDateTime())
+    source: Mapped[str] = mapped_column(String(32))
+
+
+class AccrualLedger(TemporalMixin, Base):
+    """Periodic funding/rollover/borrow charge applied to an open position.
+
+    Append-only ledger of accruals materialized by the funding accrual
+    coroutine. The unique key over
+    ``(instrument_public_id, mode, accrual_type, accrued_at)`` provides
+    idempotency on retry: a duplicate insert hits the partial unique
+    index and is swallowed by the caller. Bitemporal so a corrected
+    accrual can be issued without losing the prior history.
+    """
+
+    __tablename__ = "accrual_ledger"
+    __table_args__ = (
+        Index(
+            "ix_accrual_ledger_unique_active",
+            "instrument_public_id",
+            "mode",
+            "accrual_type",
+            "accrued_at",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_accrual_ledger_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_accrual_ledger_recovery",
+            "instrument_public_id",
+            "mode",
+            "accrued_at",
+        ),
+        CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_accrual_ledger_exchange_lower"),
+        CheckConstraint(
+            "mode IN ('live', 'paper', 'backtest')",
+            name="ck_accrual_ledger_mode",
+        ),
+        CheckConstraint(
+            "accrual_type IN ('funding', 'rollover', 'borrow')",
+            name="ck_accrual_ledger_type",
+        ),
+    )
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    mode: Mapped[str] = mapped_column(String(8))
+    accrual_type: Mapped[str] = mapped_column(String(16))
+    accrued_at: Mapped[datetime] = mapped_column(TZDateTime(), index=True)
+    amount: Mapped[float] = mapped_column(Float)
+    amount_asset: Mapped[str] = mapped_column(String(16))
+    rate: Mapped[float] = mapped_column(Float)
+    notional: Mapped[float] = mapped_column(Float)
+    position_quantity_at_accrual: Mapped[float] = mapped_column(Float)
+    exchange: Mapped[str] = mapped_column(String(32))
