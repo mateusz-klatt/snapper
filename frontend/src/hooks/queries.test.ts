@@ -589,7 +589,7 @@ describe('queries', () => {
     })
   })
   describe('usePositionsSummary', () => {
-    it('calculates position summary', async () => {
+    it('calculates summary for all-long positions', async () => {
       mockedApiClient.getPositions.mockResolvedValueOnce(
         envelope('position_list', {
           payload: [
@@ -629,8 +629,96 @@ describe('queries', () => {
       expect(result.current.data?.instruments).toContain('BTC/USD')
       expect(result.current.data?.instruments).toContain('ETH/USD')
       expect(result.current.data?.totalPnL).toBe(90)
+      expect(result.current.data?.longCost).toBe(2000)
+      expect(result.current.data?.shortCost).toBe(0)
+      expect(result.current.data?.totalExposure).toBe(2000)
+      expect(result.current.data?.pnlPercent).toBeCloseTo(4.5, 5)
     })
-    it('returns null when no positions', async () => {
+    it('calculates summary for all-short positions (regression: pnlPercent must not be hidden)', async () => {
+      mockedApiClient.getPositions.mockResolvedValueOnce(
+        envelope('position_list', {
+          payload: [
+            {
+              type: 'position' as const,
+              public_id: '1',
+              timestamp: new Date().toISOString(),
+              instrument: 'BTC/USD',
+              exchange: 'kraken' as const,
+              quantity: -10,
+              average_price: 100,
+              unrealized_pnl: 50,
+              realized_pnl: 20,
+            },
+            {
+              type: 'position' as const,
+              public_id: '2',
+              timestamp: new Date().toISOString(),
+              instrument: 'ETH/USD',
+              exchange: 'kraken' as const,
+              quantity: -5,
+              average_price: 200,
+              unrealized_pnl: 25,
+              realized_pnl: 5,
+            },
+          ],
+          count: 2,
+        })
+      )
+      const { result } = renderHook(() => usePositionsSummary(), { wrapper: createWrapper() })
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false)
+      })
+      expect(result.current.data?.count).toBe(2)
+      expect(result.current.data?.totalPnL).toBe(100)
+      expect(result.current.data?.longCost).toBe(0)
+      expect(result.current.data?.shortCost).toBe(2000)
+      expect(result.current.data?.totalExposure).toBe(2000)
+      expect(result.current.data?.pnlPercent).toBeCloseTo(5.0, 5)
+    })
+    it('calculates summary for mixed long and short positions', async () => {
+      mockedApiClient.getPositions.mockResolvedValueOnce(
+        envelope('position_list', {
+          payload: [
+            {
+              type: 'position' as const,
+              public_id: '1',
+              timestamp: new Date().toISOString(),
+              instrument: 'BTC/USD',
+              exchange: 'kraken' as const,
+              quantity: 10,
+              average_price: 100,
+              unrealized_pnl: 50,
+              realized_pnl: 0,
+            },
+            {
+              type: 'position' as const,
+              public_id: '2',
+              timestamp: new Date().toISOString(),
+              instrument: 'ETH/USD',
+              exchange: 'kraken' as const,
+              quantity: -5,
+              average_price: 200,
+              unrealized_pnl: 25,
+              realized_pnl: 0,
+            },
+          ],
+          count: 2,
+        })
+      )
+      const { result } = renderHook(() => usePositionsSummary(), { wrapper: createWrapper() })
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false)
+      })
+      expect(result.current.data?.count).toBe(2)
+      expect(result.current.data?.longCost).toBe(1000)
+      expect(result.current.data?.shortCost).toBe(1000)
+      expect(result.current.data?.totalExposure).toBe(2000)
+      expect(result.current.data?.totalPnL).toBe(75)
+      expect(result.current.data?.pnlPercent).toBeCloseTo(3.75, 5)
+    })
+    it('returns null when positions data is unavailable', async () => {
       mockedApiClient.getPositions.mockResolvedValueOnce(null as never)
       const { result } = renderHook(() => usePositionsSummary(), { wrapper: createWrapper() })
 
@@ -639,7 +727,7 @@ describe('queries', () => {
       })
       expect(result.current.data).toBeNull()
     })
-    it('handles zero totalCost', async () => {
+    it('handles zero exposure (flat position) without dividing by zero', async () => {
       mockedApiClient.getPositions.mockResolvedValueOnce(
         envelope('position_list', {
           payload: [
@@ -660,6 +748,9 @@ describe('queries', () => {
       await waitFor(() => {
         expect(result.current.isLoading).toBe(false)
       })
+      expect(result.current.data?.longCost).toBe(0)
+      expect(result.current.data?.shortCost).toBe(0)
+      expect(result.current.data?.totalExposure).toBe(0)
       expect(result.current.data?.pnlPercent).toBe(0)
     })
   })

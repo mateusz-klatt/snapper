@@ -226,16 +226,24 @@ export const usePositionsSummary = () => {
   const { data: positions, ...rest } = usePositions()
   const summary = React.useMemo(() => {
     if (!positions) return null
-    const totalCost = positions.reduce((sum, p) => sum + p.quantity * p.averagePrice, 0)
+    const longCost = positions
+      .filter(p => p.quantity > 0)
+      .reduce((sum, p) => sum + p.quantity * p.averagePrice, 0)
+    const shortCost = positions
+      .filter(p => p.quantity < 0)
+      .reduce((sum, p) => sum + Math.abs(p.quantity) * p.averagePrice, 0)
+    const totalExposure = longCost + shortCost
     const totalPnL = positions.reduce((sum, p) => sum + p.unrealizedPnl + p.realizedPnl, 0)
-    const totalValue = totalCost + totalPnL
-    const pnlPercent = totalCost > 0 ? (totalPnL / totalCost) * 100 : 0
+    const totalValue = totalExposure + totalPnL
+    const pnlPercent = totalExposure > 0 ? (totalPnL / totalExposure) * 100 : 0
 
     return {
       count: positions.length,
       totalValue,
       totalPnL,
-      totalCost,
+      longCost,
+      shortCost,
+      totalExposure,
       pnlPercent,
       instruments: [...new Set(positions.map(p => p.instrument))],
     }
