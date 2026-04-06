@@ -284,6 +284,8 @@ struct OrderRequestData: Codable, Sendable {
     let clientOrderId: String
     let signaledAt: Date?
     let strategyTag: String?
+    let leverage: Int?
+    let reduceOnly: Bool?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -302,6 +304,8 @@ struct OrderRequestData: Codable, Sendable {
         case clientOrderId = "client_order_id"
         case signaledAt = "signaled_at"
         case strategyTag = "strategy_tag"
+        case leverage
+        case reduceOnly = "reduce_only"
     }
 }
 

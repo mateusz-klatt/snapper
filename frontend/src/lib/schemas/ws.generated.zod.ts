@@ -215,6 +215,8 @@ export const OrderRequestDataSchema = z
     client_order_id: z.string(),
     signaled_at: z.iso.datetime().nullable(),
     strategy_tag: z.string().nullable(),
+    leverage: z.number().int().nullable(),
+    reduce_only: z.boolean(),
   })
   .strict()
 

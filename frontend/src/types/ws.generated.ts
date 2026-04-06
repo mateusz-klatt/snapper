@@ -106,6 +106,7 @@ export type OrderType1 = "market" | "limit" | "stop" | "stop_limit";
 export type Price1 = number | null;
 export type SignaledAt = string | null;
 export type StrategyTag = string | null;
+export type Leverage = number | null;
 export type Type11 = "position";
 export type Exchange7 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
 export type Mode2 = "live" | "paper";
@@ -646,6 +647,8 @@ export interface OrderReplaceData {
  *     price: Limit price (required for limit orders).
  *     client_order_id: Client-side order identifier.
  *     signaled_at: Original signal timestamp (optional).
+ *     leverage: Margin leverage (None for spot, integer for margin).
+ *     reduce_only: True when closing an existing position.
  */
 export interface OrderRequestData {
   type: Type10;
@@ -664,6 +667,8 @@ export interface OrderRequestData {
   client_order_id: string;
   signaled_at?: SignaledAt;
   strategy_tag?: StrategyTag;
+  leverage?: Leverage;
+  reduce_only?: boolean;
 }
 /**
  * Portfolio position snapshot.

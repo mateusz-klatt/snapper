@@ -237,6 +237,8 @@ export interface OrderRequest {
   clientOrderId: string
   signaledAt?: Date | null
   strategyTag?: string | null
+  leverage?: number | null
+  reduceOnly?: boolean
 }
 
 /**
