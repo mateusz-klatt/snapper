@@ -165,6 +165,9 @@ class SignalData(StrictDataSchema[Literal["signal"]]):
     price: float | None = None
     strategy_name: str | None = None
     fired_at: datetime
+    wallet_public_id: str = ""
+    operator_public_id: str | None = None
+    user_public_id: str | None = None
 
     @model_validator(mode="after")
     def _paper_requires_strategy_name(self) -> Self:
@@ -217,6 +220,7 @@ class ExecutionData(StrictDataSchema[Literal["execution"]]):
     fee_asset: str
     status: FillStatus
     executed_at: datetime
+    wallet_public_id: str = ""
 
 
 class OrderData(StrictDataSchema[Literal["order"]]):
@@ -269,6 +273,8 @@ class OrderData(StrictDataSchema[Literal["order"]]):
     updated_at: datetime | None = None
     leverage: int | None = None
     reduce_only: bool = False
+    wallet_public_id: str = ""
+    operator_public_id: str | None = None
 
 
 class PositionData(StrictDataSchema[Literal["position"]]):
@@ -333,6 +339,9 @@ class OrderRequestData(StrictDataSchema[Literal["order_request"]]):
     strategy_tag: str | None = None
     leverage: int | None = None
     reduce_only: bool = False
+    wallet_public_id: str = ""
+    operator_public_id: str | None = None
+    user_public_id: str | None = None
 
 
 class OrderCancelData(StrictDataSchema[Literal["order_cancel"]]):
@@ -353,6 +362,9 @@ class OrderCancelData(StrictDataSchema[Literal["order_cancel"]]):
     instrument: str
     exchange_order_id: str
     client_order_id: str
+    wallet_public_id: str = ""
+    operator_public_id: str | None = None
+    user_public_id: str | None = None
 
 
 class OrderReplaceData(StrictDataSchema[Literal["order_replace"]]):
@@ -377,6 +389,9 @@ class OrderReplaceData(StrictDataSchema[Literal["order_replace"]]):
     client_order_id: str
     new_quantity: float | None = None
     new_price: float | None = None
+    wallet_public_id: str = ""
+    operator_public_id: str | None = None
+    user_public_id: str | None = None
 
 
 class OrderEventData(StrictDataSchema[Literal["order_event"]]):
@@ -406,6 +421,8 @@ class OrderEventData(StrictDataSchema[Literal["order_event"]]):
     instrument: str
     event: OrderEventType
     reason: str | None = None
+    wallet_public_id: str = ""
+    operator_public_id: str | None = None
 
 
 class HeartbeatData(StrictDataSchema[Literal["heartbeat"]]):
