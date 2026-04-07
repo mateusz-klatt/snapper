@@ -206,7 +206,7 @@ class TestCredentialResolverErrors:
         resolver = CredentialResolver(repo, encryption_service=encryption)
         with pytest.raises(CredentialNotFoundError) as excinfo:
             await resolver.get_credentials(
-                exchange="kraken",
+                exchange="KRAKEN",
                 wallet_public_id="00000000-0000-7000-8000-0000000000ff",
             )
         assert excinfo.value.exchange == "kraken"

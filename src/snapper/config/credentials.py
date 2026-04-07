@@ -119,13 +119,16 @@ class CredentialResolver:
             CredentialNotFoundError: No active credential row matches.
         """
         bus_time = as_of or datetime.now(UTC)
+        normalized_exchange = exchange.lower()
         row = await self._repository.get_active_credential(
-            exchange=exchange.lower(),
+            exchange=normalized_exchange,
             wallet_public_id=wallet_public_id,
             as_of=bus_time,
         )
         if row is None:
-            raise CredentialNotFoundError(exchange=exchange, wallet_public_id=wallet_public_id)
+            raise CredentialNotFoundError(
+                exchange=normalized_exchange, wallet_public_id=wallet_public_id
+            )
         plaintext = self._encryption.decrypt(row["encrypted_payload"])
         envelope: JsonObject = json.loads(plaintext)
         return {key: str(value) for key, value in envelope.items()}
