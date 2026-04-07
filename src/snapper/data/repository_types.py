@@ -621,3 +621,46 @@ class AccrualLedgerInsertRow(TypedDict):
     session_id: str
     sequence_id: int
     timestamp: datetime
+
+
+class ScopeGrantRow(TypedDict):
+    """Row dict returned by scope grant queries.
+
+    One row per ``wallet_operator_scope_grants`` SCD2 version. ``scope_kind``
+    is exactly one of ``"underlying"`` / ``"instrument"``, and exactly one of
+    ``underlying_public_id`` / ``instrument_public_id`` is non-NULL — enforced
+    at the DB layer by the ``ck_scope_grants_scope_kind_xor`` CHECK constraint.
+    """
+
+    public_id: str
+    operator_public_id: str
+    wallet_public_id: str
+    granted_by_user_public_id: str
+    scope_kind: str
+    underlying_public_id: str | None
+    instrument_public_id: str | None
+    note: str | None
+    timestamp: datetime
+    known_to: datetime
+    session_id: str
+    sequence_id: int
+
+
+class CreateScopeGrantRequest(TypedDict):
+    """Insert params for create_scope_grant.
+
+    See ``WalletOperatorScopeGrant`` for the per-field semantics. Exactly one
+    of ``underlying_public_id`` / ``instrument_public_id`` MUST be non-NULL,
+    matching the chosen ``scope_kind``. ``note`` is free-form audit text.
+    """
+
+    operator_public_id: str
+    wallet_public_id: str
+    granted_by_user_public_id: str
+    scope_kind: str
+    underlying_public_id: str | None
+    instrument_public_id: str | None
+    note: str | None
+    session_id: str
+    sequence_id: int
+    timestamp: datetime

@@ -54,6 +54,7 @@ from sqlalchemy import event
 from sqlalchemy import func
 from sqlalchemy import insert
 from sqlalchemy import select
+from sqlalchemy import text
 from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -81,6 +82,7 @@ from snapper.data.models import Instrument
 from snapper.data.models import InstrumentSpec
 from snapper.data.models import InstrumentUnderlyingMapping
 from snapper.data.models import MarketSnapshot
+from snapper.data.models import Operator
 from snapper.data.models import Order
 from snapper.data.models import Position
 from snapper.data.models import Setting
@@ -93,11 +95,13 @@ from snapper.data.models import TradeCommand
 from snapper.data.models import TradeProjectionCheckpoint
 from snapper.data.models import UnderlyingAsset
 from snapper.data.models import VenueEvent
+from snapper.data.models import WalletOperatorScopeGrant
 from snapper.data.repository_types import AccrualLedgerInsertRow
 from snapper.data.repository_types import AccrualLedgerRow
 from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import CheckpointUpsertRow
+from snapper.data.repository_types import CreateScopeGrantRequest
 from snapper.data.repository_types import ExecutionRow
 from snapper.data.repository_types import FundingRateInsertRow
 from snapper.data.repository_types import FundingRateRow
@@ -109,6 +113,7 @@ from snapper.data.repository_types import MarketSnapshotRow
 from snapper.data.repository_types import MarketSnapshotUpsertRow
 from snapper.data.repository_types import OrderRow
 from snapper.data.repository_types import PositionRow
+from snapper.data.repository_types import ScopeGrantRow
 from snapper.data.repository_types import SettingRow
 from snapper.data.repository_types import SignalRow
 from snapper.data.repository_types import TickRow
@@ -127,6 +132,9 @@ __all__ = [
     "SQLAlchemyRepository",
     "DatabaseRepository",
     "InstrumentSpecInput",
+    "ScopeGrantConflictError",
+    "ScopeGrantNotFoundError",
+    "ScopeGrantValidationError",
     "close_and_insert",
     "close_and_insert_sync",
     "get_repository",
@@ -134,6 +142,50 @@ __all__ = [
     "where_active",
     "where_active_now",
 ]
+
+
+class ScopeGrantConflictError(Exception):
+    """Raised when a wallet_operator_scope_grants insert overlaps an active grant.
+
+    Maps to HTTP 409 at the API layer. Per Plan 0 D2 (instrument-exclusive),
+    at most one operator may hold an active grant covering a given instrument
+    on a given wallet at any time.
+    """
+
+    def __init__(
+        self,
+        wallet_public_id: str,
+        conflicting_grant_public_id: str,
+        conflicting_operator_public_id: str,
+        reason: str,
+    ) -> None:
+        """Capture the conflicting grant identity for the API layer."""
+        super().__init__(
+            f"Scope grant on wallet={wallet_public_id} conflicts with grant "
+            f"{conflicting_grant_public_id} held by operator "
+            f"{conflicting_operator_public_id}: {reason}"
+        )
+        self.wallet_public_id = wallet_public_id
+        self.conflicting_grant_public_id = conflicting_grant_public_id
+        self.conflicting_operator_public_id = conflicting_operator_public_id
+        self.reason = reason
+
+
+class ScopeGrantNotFoundError(Exception):
+    """Raised when a referenced scope grant or operator does not exist.
+
+    Maps to HTTP 404 at the API layer. Used by ``handover_grant`` for the
+    source-grant existence check (rule 1) and the destination-operator
+    existence check (rule 4) per Plan 0 Section 3.7.
+    """
+
+
+class ScopeGrantValidationError(Exception):
+    """Raised when a scope grant request violates a structural invariant.
+
+    Maps to HTTP 400 at the API layer. Examples: scope_kind/public_id XOR
+    violation, self-handover (rule 2 of Section 3.7), or unknown scope_kind.
+    """
 
 
 def where_active(model: type[Any], at: datetime) -> tuple[Any, Any]:
@@ -1099,6 +1151,88 @@ class Repository(ABC):
         Returns:
             Most recent accrual row, or ``None`` if no accrual has been
             applied yet for the given key.
+        """
+        ...
+
+    @abstractmethod
+    async def create_scope_grant(self, request: CreateScopeGrantRequest) -> ScopeGrantRow:
+        """Create a new ``wallet_operator_scope_grants`` row.
+
+        Per Plan 0 D2 (instrument-exclusive), a wallet-level advisory lock is
+        acquired on PostgreSQL before the overlap check, and overlap detection
+        spans both same-scope and cross-scope conflicts (an underlying grant
+        whose expanded instrument set intersects an existing instrument grant,
+        or vice versa).
+
+        Args:
+            request: Insert payload — see ``CreateScopeGrantRequest``.
+
+        Returns:
+            The newly inserted scope grant row.
+
+        Raises:
+            ScopeGrantConflictError: An active grant on the same wallet
+                already covers (any of) the requested instruments.
+            ScopeGrantValidationError: Structural invariant violation
+                (unknown ``scope_kind``, XOR mismatch, etc.).
+        """
+        ...
+
+    @abstractmethod
+    async def list_active_scope_grants_for_wallet(
+        self,
+        wallet_public_id: str,
+        as_of: datetime,
+    ) -> list[ScopeGrantRow]:
+        """Active scope grants on the given wallet at a point in time.
+
+        Args:
+            wallet_public_id: Public ID of the wallet.
+            as_of: Bus time for the temporal query.
+
+        Returns:
+            List of active scope grant rows ordered by ``timestamp`` ascending.
+        """
+        ...
+
+    @abstractmethod
+    async def handover_grant(
+        self,
+        from_grant_public_id: str,
+        to_operator_public_id: str,
+        granted_by_user_public_id: str,
+        reason: str | None,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+    ) -> tuple[ScopeGrantRow, ScopeGrantRow]:
+        """Atomically transfer a scope grant to a different operator.
+
+        Per Plan 0 D3 — single transaction, SCD2-close the source grant and
+        insert a new grant carrying the same ``scope_kind`` /
+        ``underlying_public_id`` / ``instrument_public_id`` under the new
+        operator. Validation rules 1, 2, 4 from Section 3.7 are enforced
+        here; rule 3 (caller permission) lives in the API layer once auth
+        propagation lands in Phase 0b.
+
+        Args:
+            from_grant_public_id: Public ID of the active source grant.
+            to_operator_public_id: Public ID of the destination operator.
+            granted_by_user_public_id: Audit identity of the user performing
+                the handover (recorded on the new grant row).
+            reason: Free-form audit note (stored in the new grant's ``note``).
+            session_id: Provenance session ID.
+            sequence_id: Provenance sequence number.
+            timestamp: Bus time for the close + insert.
+
+        Returns:
+            ``(closed_from_grant, new_grant)`` — both as ``ScopeGrantRow``.
+
+        Raises:
+            ScopeGrantNotFoundError: Source grant or destination operator
+                does not exist (or source is no longer active).
+            ScopeGrantValidationError: Self-handover (no-op) or other
+                structural violation.
         """
         ...
 
@@ -3618,6 +3752,290 @@ class SQLAlchemyRepository(Repository):
                 )
                 for r in rows
             ]
+
+    async def _acquire_wallet_advisory_lock(
+        self,
+        s: AsyncSession,
+        wallet_public_id: str,
+    ) -> None:
+        """Transaction-scoped advisory lock keyed by ``hashtext(wallet_public_id)``.
+
+        Per Plan 0 D2 enforcement layer 1. Required because PostgreSQL
+        ``SELECT ... FOR UPDATE`` on zero rows locks nothing, allowing two
+        concurrent inserts to both pass overlap checks. SQLite is single-writer
+        so no extra lock is needed (BEGIN already serializes writers).
+        """
+        dialect = self.dialect_name
+        if dialect == "postgresql":
+            await s.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:wid))"),
+                {"wid": wallet_public_id},
+            )
+        elif dialect == "sqlite":
+            return
+        else:
+            raise NotImplementedError(f"wallet advisory lock not implemented for dialect={dialect}")
+
+    @staticmethod
+    def _row_from_grant(grant: WalletOperatorScopeGrant) -> ScopeGrantRow:
+        return ScopeGrantRow(
+            public_id=grant.public_id,
+            operator_public_id=grant.operator_public_id,
+            wallet_public_id=grant.wallet_public_id,
+            granted_by_user_public_id=grant.granted_by_user_public_id,
+            scope_kind=grant.scope_kind,
+            underlying_public_id=grant.underlying_public_id,
+            instrument_public_id=grant.instrument_public_id,
+            note=grant.note,
+            timestamp=grant.timestamp,
+            known_to=grant.known_to,
+            session_id=grant.session_id,
+            sequence_id=grant.sequence_id,
+        )
+
+    async def _load_active_grants_for_wallet(
+        self,
+        s: AsyncSession,
+        wallet_public_id: str,
+        as_of: datetime,
+    ) -> list[WalletOperatorScopeGrant]:
+        result = await s.execute(
+            select(WalletOperatorScopeGrant)
+            .where(
+                WalletOperatorScopeGrant.wallet_public_id == wallet_public_id,
+                *where_active(WalletOperatorScopeGrant, as_of),
+            )
+            .order_by(WalletOperatorScopeGrant.timestamp.asc())
+        )
+        return list(result.scalars().all())
+
+    async def _expand_to_instruments(
+        self,
+        s: AsyncSession,
+        scope_kind: str,
+        underlying_public_id: str | None,
+        instrument_public_id: str | None,
+        as_of: datetime,
+    ) -> set[str]:
+        """Resolve a scope reference to its concrete instrument set.
+
+        For ``scope_kind == "instrument"`` this is the singleton set
+        ``{instrument_public_id}``. For ``scope_kind == "underlying"`` this
+        queries ``instrument_underlying_mappings`` (active at ``as_of``) and
+        returns every instrument currently linked to the underlying. The
+        dynamic-scope rule from Section 14.7.4 is honored — newly added
+        mappings expand the grant transparently. Callers MUST have already
+        validated the XOR invariant (either via ``_validate_scope_xor`` for
+        requests or via the DB ``ck_scope_grants_scope_kind_xor`` CHECK
+        constraint for grants loaded from the database).
+        """
+        if scope_kind == "instrument":
+            return {cast(str, instrument_public_id)}
+        result = await s.execute(
+            select(InstrumentUnderlyingMapping.instrument_public_id).where(
+                InstrumentUnderlyingMapping.underlying_public_id == cast(str, underlying_public_id),
+                *where_active(InstrumentUnderlyingMapping, as_of),
+            )
+        )
+        return {row[0] for row in result.all()}
+
+    async def _find_overlap(
+        self,
+        s: AsyncSession,
+        existing: list[WalletOperatorScopeGrant],
+        request: CreateScopeGrantRequest,
+        as_of: datetime,
+    ) -> WalletOperatorScopeGrant | None:
+        """Cross-scope overlap detection.
+
+        Expands both the request and every existing active grant to instrument
+        sets and returns the first existing grant whose instrument set
+        intersects the request's. Returns ``None`` when no conflict is found.
+        """
+        target = await self._expand_to_instruments(
+            s,
+            request["scope_kind"],
+            request.get("underlying_public_id"),
+            request.get("instrument_public_id"),
+            as_of,
+        )
+        for grant in existing:
+            grant_set = await self._expand_to_instruments(
+                s,
+                grant.scope_kind,
+                grant.underlying_public_id,
+                grant.instrument_public_id,
+                as_of,
+            )
+            if target & grant_set:
+                return grant
+        return None
+
+    @staticmethod
+    def _validate_scope_xor(request: CreateScopeGrantRequest) -> None:
+        kind = request["scope_kind"]
+        underlying = request.get("underlying_public_id")
+        instrument = request.get("instrument_public_id")
+        if kind == "underlying":
+            if underlying is None or instrument is not None:
+                raise ScopeGrantValidationError(
+                    "scope_kind='underlying' requires underlying_public_id and "
+                    "no instrument_public_id"
+                )
+        elif kind == "instrument":
+            if instrument is None or underlying is not None:
+                raise ScopeGrantValidationError(
+                    "scope_kind='instrument' requires instrument_public_id and "
+                    "no underlying_public_id"
+                )
+        else:
+            raise ScopeGrantValidationError(f"unknown scope_kind={kind!r}")
+
+    async def create_scope_grant(self, request: CreateScopeGrantRequest) -> ScopeGrantRow:
+        """Create a new scope grant with advisory-locked overlap detection."""
+        self._validate_scope_xor(request)
+        timestamp = request["timestamp"]
+        async with self.session() as s:
+            await self._acquire_wallet_advisory_lock(s, request["wallet_public_id"])
+            existing = await self._load_active_grants_for_wallet(
+                s, request["wallet_public_id"], timestamp
+            )
+            conflict = await self._find_overlap(s, existing, request, timestamp)
+            if conflict is not None:
+                raise ScopeGrantConflictError(
+                    wallet_public_id=request["wallet_public_id"],
+                    conflicting_grant_public_id=conflict.public_id,
+                    conflicting_operator_public_id=conflict.operator_public_id,
+                    reason=(
+                        f"existing {conflict.scope_kind}-scoped grant overlaps the "
+                        f"requested {request['scope_kind']} scope"
+                    ),
+                )
+            new_grant = WalletOperatorScopeGrant(
+                operator_public_id=request["operator_public_id"],
+                wallet_public_id=request["wallet_public_id"],
+                granted_by_user_public_id=request["granted_by_user_public_id"],
+                scope_kind=request["scope_kind"],
+                underlying_public_id=request.get("underlying_public_id"),
+                instrument_public_id=request.get("instrument_public_id"),
+                note=request.get("note"),
+                session_id=request["session_id"],
+                sequence_id=request["sequence_id"],
+                timestamp=timestamp,
+                known_to=KNOWN_TO_MAX,
+            )
+            s.add(new_grant)
+            await s.commit()
+            await s.refresh(new_grant)
+            return self._row_from_grant(new_grant)
+
+    async def list_active_scope_grants_for_wallet(
+        self,
+        wallet_public_id: str,
+        as_of: datetime,
+    ) -> list[ScopeGrantRow]:
+        """Return all currently active scope grants on the wallet."""
+        async with self.session() as s:
+            grants = await self._load_active_grants_for_wallet(s, wallet_public_id, as_of)
+            return [self._row_from_grant(g) for g in grants]
+
+    async def handover_grant(
+        self,
+        from_grant_public_id: str,
+        to_operator_public_id: str,
+        granted_by_user_public_id: str,
+        reason: str | None,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+    ) -> tuple[ScopeGrantRow, ScopeGrantRow]:
+        """Atomic SCD2 close + insert handover."""
+        async with self.session() as s:
+            from_grant = (
+                (
+                    await s.execute(
+                        select(WalletOperatorScopeGrant).where(
+                            WalletOperatorScopeGrant.public_id == from_grant_public_id,
+                            *where_active(WalletOperatorScopeGrant, timestamp),
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if from_grant is None:
+                raise ScopeGrantNotFoundError(
+                    f"active scope grant {from_grant_public_id} not found at {timestamp.isoformat()}"
+                )
+            if from_grant.operator_public_id == to_operator_public_id:
+                raise ScopeGrantValidationError(
+                    f"handover target operator {to_operator_public_id} is already the holder"
+                )
+
+            await self._acquire_wallet_advisory_lock(s, from_grant.wallet_public_id)
+
+            destination = (
+                (
+                    await s.execute(
+                        select(Operator).where(
+                            Operator.public_id == to_operator_public_id,
+                            *where_active(Operator, timestamp),
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if destination is None:
+                raise ScopeGrantNotFoundError(
+                    f"destination operator {to_operator_public_id} not found at {timestamp.isoformat()}"
+                )
+
+            await s.execute(
+                update(WalletOperatorScopeGrant)
+                .where(WalletOperatorScopeGrant.id == from_grant.id)
+                .values(known_to=timestamp)
+            )
+            new_grant = WalletOperatorScopeGrant(
+                operator_public_id=to_operator_public_id,
+                wallet_public_id=from_grant.wallet_public_id,
+                granted_by_user_public_id=granted_by_user_public_id,
+                scope_kind=from_grant.scope_kind,
+                underlying_public_id=from_grant.underlying_public_id,
+                instrument_public_id=from_grant.instrument_public_id,
+                note=reason,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=timestamp,
+                known_to=KNOWN_TO_MAX,
+            )
+            s.add(new_grant)
+            try:
+                await s.commit()
+            except IntegrityError as exc:
+                raise ScopeGrantConflictError(
+                    wallet_public_id=from_grant.wallet_public_id,
+                    conflicting_grant_public_id=from_grant.public_id,
+                    conflicting_operator_public_id=to_operator_public_id,
+                    reason="concurrent handover detected by partial unique index",
+                ) from exc
+            await s.refresh(new_grant)
+
+            closed_row = ScopeGrantRow(
+                public_id=from_grant.public_id,
+                operator_public_id=from_grant.operator_public_id,
+                wallet_public_id=from_grant.wallet_public_id,
+                granted_by_user_public_id=from_grant.granted_by_user_public_id,
+                scope_kind=from_grant.scope_kind,
+                underlying_public_id=from_grant.underlying_public_id,
+                instrument_public_id=from_grant.instrument_public_id,
+                note=from_grant.note,
+                timestamp=from_grant.timestamp,
+                known_to=timestamp,
+                session_id=from_grant.session_id,
+                sequence_id=from_grant.sequence_id,
+            )
+            return closed_row, self._row_from_grant(new_grant)
 
 
 _repository_cache: dict[str, Repository] = {}
