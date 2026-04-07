@@ -103,6 +103,9 @@ export const ExecutionDataSchema = z
     fee_asset: z.string(),
     status: z.enum(['filled', 'partial']),
     executed_at: z.iso.datetime(),
+    wallet_public_id: z.string(),
+    operator_public_id: z.string().nullable(),
+    user_public_id: z.string().nullable(),
   })
   .strict()
 
@@ -135,6 +138,9 @@ export const OrderCancelDataSchema = z
     instrument: z.string(),
     exchange_order_id: z.string(),
     client_order_id: z.string(),
+    wallet_public_id: z.string(),
+    operator_public_id: z.string().nullable(),
+    user_public_id: z.string().nullable(),
   })
   .strict()
 
@@ -164,6 +170,9 @@ export const OrderDataSchema = z
     updated_at: z.iso.datetime().nullable(),
     leverage: z.number().int().nullable(),
     reduce_only: z.boolean(),
+    wallet_public_id: z.string(),
+    operator_public_id: z.string().nullable(),
+    user_public_id: z.string().nullable(),
   })
   .strict()
 
@@ -180,6 +189,9 @@ export const OrderEventDataSchema = z
     instrument: z.string(),
     event: z.enum(['submitted', 'accepted', 'rejected', 'cancelled', 'expired', 'replaced']),
     reason: z.string().nullable(),
+    wallet_public_id: z.string(),
+    operator_public_id: z.string().nullable(),
+    user_public_id: z.string().nullable(),
   })
   .strict()
 
@@ -196,6 +208,9 @@ export const OrderReplaceDataSchema = z
     client_order_id: z.string(),
     new_quantity: z.number().nullable(),
     new_price: z.number().nullable(),
+    wallet_public_id: z.string(),
+    operator_public_id: z.string().nullable(),
+    user_public_id: z.string().nullable(),
   })
   .strict()
 
@@ -219,6 +234,9 @@ export const OrderRequestDataSchema = z
     strategy_tag: z.string().nullable(),
     leverage: z.number().int().nullable(),
     reduce_only: z.boolean(),
+    wallet_public_id: z.string(),
+    operator_public_id: z.string().nullable(),
+    user_public_id: z.string().nullable(),
   })
   .strict()
 
@@ -289,6 +307,9 @@ export const SignalDataSchema = z
     price: z.number().nullable(),
     strategy_name: z.string().nullable(),
     fired_at: z.iso.datetime(),
+    wallet_public_id: z.string(),
+    operator_public_id: z.string().nullable(),
+    user_public_id: z.string().nullable(),
   })
   .strict()
 

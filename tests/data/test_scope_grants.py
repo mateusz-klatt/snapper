@@ -27,7 +27,9 @@ from sqlalchemy.exc import IntegrityError
 
 from snapper.data.models import InstrumentUnderlyingMapping
 from snapper.data.models import Operator
+from snapper.data.models import Symbol
 from snapper.data.models import UnderlyingAsset
+from snapper.data.models import UserOperatorMembership
 from snapper.data.models import Wallet
 from snapper.data.repository import ScopeGrantConflictError
 from snapper.data.repository import ScopeGrantNotFoundError
@@ -901,7 +903,6 @@ class TestGetUserOperatorMemberships:
         ids = await _seed_world(repo)
         user_pid = "00000000-0000-7000-8000-000000000010"
         async with repo.session() as s:
-            from snapper.data.models import UserOperatorMembership
 
             s.add(
                 UserOperatorMembership(
@@ -1032,8 +1033,6 @@ class TestGetInstrumentPublicIdBySymbol:
     @pytest.mark.asyncio
     async def test_returns_public_id_for_known_pair(self, repo: SQLAlchemyRepository) -> None:
         """A symbol present on the requested exchange resolves to its instrument."""
-        from snapper.data.models import Symbol
-
         async with repo.session() as s:
             s.add(
                 Symbol(

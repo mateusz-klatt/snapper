@@ -38,6 +38,7 @@ from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import HTTPException
 from fastapi import Request
+from sqlalchemy import select
 
 from snapper.api.schemas.process import AvailableProcess
 from snapper.api.schemas.process import AvailableProcessesResponse
@@ -71,9 +72,11 @@ from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessRoleEnum
+from snapper.data.models import Setting
 from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import get_repository
+from snapper.data.repository import where_active_now
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.json_body import json_body
 from snapper.server.json_body import openapi_schema
@@ -146,10 +149,6 @@ async def _read_persisted_strategy_parameters(
     """
     if not isinstance(repo, SQLAlchemyRepository):
         return None
-    from sqlalchemy import select
-
-    from snapper.data.models import Setting
-    from snapper.data.repository import where_active_now
 
     config_key = f"process_{name}"
     async with repo.session() as session:

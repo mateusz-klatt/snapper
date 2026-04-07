@@ -508,7 +508,10 @@ export type Paths = {
          *         body: Process creation request with template name and config.
          *         factory: Process launcher service.
          *         settings: Application settings.
-         *         _user: Authenticated user with MANAGE_PROCESSES permission.
+         *         user: Authenticated user with MANAGE_PROCESSES permission, used
+         *             for the Phase 0b strategy scope check on operator/wallet.
+         *         repo: Repository used to verify active scope grants for the
+         *             requested operator/wallet pair.
          *         _csrf: CSRF token validation.
          *
          *     Returns:
@@ -565,7 +568,23 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /** Start Process */
+        /**
+         * Start Process
+         * @description Start a previously created process configuration.
+         *
+         *     Phase 0b.4d / phase-close fix: ``payload.parameters`` cannot
+         *     override ``operator_public_id`` or ``wallet_public_id`` at start
+         *     time — those fields are pinned to whatever ``_enforce_strategy_scope``
+         *     validated at create time. If the caller wants to switch wallets or
+         *     operators they must update the persisted process configuration
+         *     through the create / configure path so the scope check runs again.
+         *
+         *     For strategy templates, this handler ALSO re-runs
+         *     ``_enforce_strategy_scope`` against the persisted parameters before
+         *     starting the process, so a strategy whose grant has been revoked
+         *     between create-time and start-time fails closed instead of running
+         *     on a wallet the caller no longer controls.
+         */
         post: Operations["start_process_api_processes__name__start_post"];
         delete?: never;
         options?: never;
@@ -1758,6 +1777,15 @@ export type Components = {
              * Format: date-time
              */
             executed_at: string;
+            /**
+             * Wallet Public Id
+             * @default
+             */
+            wallet_public_id: string;
+            /** Operator Public Id */
+            operator_public_id?: string | null;
+            /** User Public Id */
+            user_public_id?: string | null;
         };
         /**
          * ExecutionListResponse
@@ -2274,6 +2302,15 @@ export type Components = {
              * @default false
              */
             reduce_only: boolean;
+            /**
+             * Wallet Public Id
+             * @default
+             */
+            wallet_public_id: string;
+            /** Operator Public Id */
+            operator_public_id?: string | null;
+            /** User Public Id */
+            user_public_id?: string | null;
         };
         /**
          * OrderListResponse
@@ -3304,6 +3341,15 @@ export type Components = {
              * Format: date-time
              */
             fired_at: string;
+            /**
+             * Wallet Public Id
+             * @default
+             */
+            wallet_public_id: string;
+            /** Operator Public Id */
+            operator_public_id?: string | null;
+            /** User Public Id */
+            user_public_id?: string | null;
         };
         /**
          * SignalListResponse

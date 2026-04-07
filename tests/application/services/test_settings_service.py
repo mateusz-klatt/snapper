@@ -16,6 +16,7 @@ from sqlalchemy import select
 from snapper.api.schemas.process import ProcessCreateBody
 from snapper.api.schemas.process import ProcessCreateRequest
 from snapper.application.process_manager.models import ProcessRegistryEntry
+from snapper.application.services.settings import CREDENTIAL_KEY_PATTERNS
 from snapper.application.services.settings import SettingsService
 from snapper.application.services.settings import get_settings_service
 from snapper.config.app import AppSettings
@@ -407,8 +408,6 @@ class TestSettingsService:
             if a regression reintroduces a credential row in the
             settings table, it never reaches the system.settings topic.
         """
-        from snapper.application.services.settings import CREDENTIAL_KEY_PATTERNS
-
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
             zmq_broker_xpub="tcp://127.0.0.1:7501",

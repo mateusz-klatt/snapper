@@ -197,6 +197,9 @@ struct OrderCancelData: Codable, Sendable {
     let instrument: String
     let exchangeOrderId: String
     let clientOrderId: String
+    let walletPublicId: String?
+    let operatorPublicId: String?
+    let userPublicId: String?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -208,6 +211,9 @@ struct OrderCancelData: Codable, Sendable {
         case instrument
         case exchangeOrderId = "exchange_order_id"
         case clientOrderId = "client_order_id"
+        case walletPublicId = "wallet_public_id"
+        case operatorPublicId = "operator_public_id"
+        case userPublicId = "user_public_id"
     }
 }
 
@@ -223,6 +229,9 @@ struct OrderEventData: Codable, Sendable {
     let instrument: String
     let event: String
     let reason: String?
+    let walletPublicId: String?
+    let operatorPublicId: String?
+    let userPublicId: String?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -236,6 +245,9 @@ struct OrderEventData: Codable, Sendable {
         case instrument
         case event
         case reason
+        case walletPublicId = "wallet_public_id"
+        case operatorPublicId = "operator_public_id"
+        case userPublicId = "user_public_id"
     }
 }
 
@@ -251,6 +263,9 @@ struct OrderReplaceData: Codable, Sendable {
     let clientOrderId: String
     let newQuantity: Double?
     let newPrice: Double?
+    let walletPublicId: String?
+    let operatorPublicId: String?
+    let userPublicId: String?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -264,6 +279,9 @@ struct OrderReplaceData: Codable, Sendable {
         case clientOrderId = "client_order_id"
         case newQuantity = "new_quantity"
         case newPrice = "new_price"
+        case walletPublicId = "wallet_public_id"
+        case operatorPublicId = "operator_public_id"
+        case userPublicId = "user_public_id"
     }
 }
 
@@ -286,6 +304,9 @@ struct OrderRequestData: Codable, Sendable {
     let strategyTag: String?
     let leverage: Int?
     let reduceOnly: Bool?
+    let walletPublicId: String?
+    let operatorPublicId: String?
+    let userPublicId: String?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -306,6 +327,9 @@ struct OrderRequestData: Codable, Sendable {
         case strategyTag = "strategy_tag"
         case leverage
         case reduceOnly = "reduce_only"
+        case walletPublicId = "wallet_public_id"
+        case operatorPublicId = "operator_public_id"
+        case userPublicId = "user_public_id"
     }
 }
 

@@ -16,6 +16,7 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -228,8 +229,6 @@ class TestCredentialResolverErrors:
             returned by the patched factory (verified by the successful
             round-trip and the factory call assertion).
         """
-        from unittest.mock import patch
-
         await _seed_credential(
             repo,
             encryption,

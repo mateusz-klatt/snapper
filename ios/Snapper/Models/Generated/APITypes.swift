@@ -527,6 +527,9 @@ struct ExecutionData: Codable, Sendable {
     let feeAsset: String
     let status: String
     let executedAt: Date
+    let walletPublicId: String?
+    let operatorPublicId: String?
+    let userPublicId: String?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -548,6 +551,9 @@ struct ExecutionData: Codable, Sendable {
         case feeAsset = "fee_asset"
         case status
         case executedAt = "executed_at"
+        case walletPublicId = "wallet_public_id"
+        case operatorPublicId = "operator_public_id"
+        case userPublicId = "user_public_id"
     }
 }
 
@@ -816,6 +822,9 @@ struct OrderData: Codable, Sendable {
     let updatedAt: Date?
     let leverage: Int?
     let reduceOnly: Bool?
+    let walletPublicId: String?
+    let operatorPublicId: String?
+    let userPublicId: String?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -842,6 +851,9 @@ struct OrderData: Codable, Sendable {
         case updatedAt = "updated_at"
         case leverage
         case reduceOnly = "reduce_only"
+        case walletPublicId = "wallet_public_id"
+        case operatorPublicId = "operator_public_id"
+        case userPublicId = "user_public_id"
     }
 }
 
@@ -1414,6 +1426,9 @@ struct SignalData: Codable, Sendable {
     let price: Double?
     let strategyName: String?
     let firedAt: Date
+    let walletPublicId: String?
+    let operatorPublicId: String?
+    let userPublicId: String?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -1429,6 +1444,9 @@ struct SignalData: Codable, Sendable {
         case price
         case strategyName = "strategy_name"
         case firedAt = "fired_at"
+        case walletPublicId = "wallet_public_id"
+        case operatorPublicId = "operator_public_id"
+        case userPublicId = "user_public_id"
     }
 }
 

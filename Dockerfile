@@ -31,8 +31,7 @@ RUN python -m pip install --upgrade pip poetry \
 
 FROM python:3.14-slim AS api
 
-ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple \
-    PYTHONDONTWRITEBYTECODE=1 \
+ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     SERVER_HOST=0.0.0.0

@@ -65,6 +65,8 @@ export type ExchangeOrderId = string | null;
 export type Exchange1 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
 export type Side = "buy" | "sell";
 export type Status = "filled" | "partial";
+export type OperatorPublicId = string | null;
+export type UserPublicId = string | null;
 export type Type4 = "front_month";
 export type ContractFamily1 = string | null;
 export type Type5 = "heartbeat";
@@ -78,6 +80,8 @@ export type JsonValue =
 export type JsonPrimitive = string | number | boolean | null;
 export type Type6 = "order_cancel";
 export type Exchange2 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
+export type OperatorPublicId1 = string | null;
+export type UserPublicId1 = string | null;
 export type Type7 = "order";
 export type ExchangeOrderId1 = string | null;
 export type Exchange3 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
@@ -91,14 +95,20 @@ export type TimeInForce = string | null;
 export type Error = string | null;
 export type UpdatedAt = string | null;
 export type Leverage = number | null;
+export type OperatorPublicId2 = string | null;
+export type UserPublicId2 = string | null;
 export type Type8 = "order_event";
 export type Exchange4 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
 export type Event = "submitted" | "accepted" | "rejected" | "cancelled" | "expired" | "replaced";
 export type Reason1 = string | null;
+export type OperatorPublicId3 = string | null;
+export type UserPublicId3 = string | null;
 export type Type9 = "order_replace";
 export type Exchange5 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
 export type NewQuantity = number | null;
 export type NewPrice = number | null;
+export type OperatorPublicId4 = string | null;
+export type UserPublicId4 = string | null;
 export type Type10 = "order_request";
 export type Exchange6 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
 export type Mode1 = "live" | "paper";
@@ -108,6 +118,8 @@ export type Price1 = number | null;
 export type SignaledAt = string | null;
 export type StrategyTag = string | null;
 export type Leverage1 = number | null;
+export type OperatorPublicId5 = string | null;
+export type UserPublicId5 = string | null;
 export type Type11 = "position";
 export type Exchange7 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
 export type Mode2 = "live" | "paper";
@@ -121,6 +133,8 @@ export type Exchange8 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walut
 export type Side3 = "buy" | "sell";
 export type Price2 = number | null;
 export type StrategyName = string | null;
+export type OperatorPublicId6 = string | null;
+export type UserPublicId6 = string | null;
 export type Type16 = "symbol_alias_update";
 export type Event1 = "symbol_aliases_updated";
 export type Action = "clear_cache";
@@ -441,6 +455,9 @@ export interface ExecutionData {
   fee_asset: string;
   status: Status;
   executed_at: string;
+  wallet_public_id?: string;
+  operator_public_id?: OperatorPublicId;
+  user_public_id?: UserPublicId;
 }
 /**
  * Front-month futures contract for an underlying.
@@ -519,6 +536,9 @@ export interface OrderCancelData {
   instrument: string;
   exchange_order_id: string;
   client_order_id: string;
+  wallet_public_id?: string;
+  operator_public_id?: OperatorPublicId1;
+  user_public_id?: UserPublicId1;
 }
 /**
  * Current state of an order.
@@ -574,6 +594,9 @@ export interface OrderData {
   updated_at?: UpdatedAt;
   leverage?: Leverage;
   reduce_only?: boolean;
+  wallet_public_id?: string;
+  operator_public_id?: OperatorPublicId2;
+  user_public_id?: UserPublicId2;
 }
 /**
  * Lightweight order event for cancel/replace confirmations.
@@ -606,6 +629,9 @@ export interface OrderEventData {
   instrument: string;
   event: Event;
   reason?: Reason1;
+  wallet_public_id?: string;
+  operator_public_id?: OperatorPublicId3;
+  user_public_id?: UserPublicId3;
 }
 /**
  * Order replace/modify request from strategy to executor.
@@ -633,6 +659,9 @@ export interface OrderReplaceData {
   client_order_id: string;
   new_quantity?: NewQuantity;
   new_price?: NewPrice;
+  wallet_public_id?: string;
+  operator_public_id?: OperatorPublicId4;
+  user_public_id?: UserPublicId4;
 }
 /**
  * Order request from strategy to executor.
@@ -674,6 +703,9 @@ export interface OrderRequestData {
   strategy_tag?: StrategyTag;
   leverage?: Leverage1;
   reduce_only?: boolean;
+  wallet_public_id?: string;
+  operator_public_id?: OperatorPublicId5;
+  user_public_id?: UserPublicId5;
 }
 /**
  * Portfolio position snapshot.
@@ -787,6 +819,9 @@ export interface SignalData {
   price?: Price2;
   strategy_name?: StrategyName;
   fired_at: string;
+  wallet_public_id?: string;
+  operator_public_id?: OperatorPublicId6;
+  user_public_id?: UserPublicId6;
 }
 /**
  * Symbol alias cache invalidation message.

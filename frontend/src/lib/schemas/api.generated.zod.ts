@@ -87,6 +87,9 @@ export const ExecutionDataSchema = z
     fee_asset: z.string(),
     status: z.enum(['filled', 'partial']),
     executed_at: z.iso.datetime(),
+    wallet_public_id: z.string(),
+    operator_public_id: z.string().nullable().optional(),
+    user_public_id: z.string().nullable().optional(),
   })
   .strict()
 
@@ -173,6 +176,9 @@ export const OrderDataSchema = z
     updated_at: z.iso.datetime().nullable().optional(),
     leverage: z.number().int().nullable().optional(),
     reduce_only: z.boolean(),
+    wallet_public_id: z.string(),
+    operator_public_id: z.string().nullable().optional(),
+    user_public_id: z.string().nullable().optional(),
   })
   .strict()
 
@@ -298,6 +304,9 @@ export const SignalDataSchema = z
     price: z.number().nullable().optional(),
     strategy_name: z.string().nullable().optional(),
     fired_at: z.iso.datetime(),
+    wallet_public_id: z.string(),
+    operator_public_id: z.string().nullable().optional(),
+    user_public_id: z.string().nullable().optional(),
   })
   .strict()
 

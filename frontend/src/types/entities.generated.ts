@@ -105,6 +105,9 @@ export interface Execution {
   feeAsset: string
   status: 'filled' | 'partial'
   executedAt: Date
+  walletPublicId?: string
+  operatorPublicId?: string | null
+  userPublicId?: string | null
 }
 
 /**
@@ -153,6 +156,9 @@ export interface OrderCancel {
   instrument: string
   exchangeOrderId: string
   clientOrderId: string
+  walletPublicId?: string
+  operatorPublicId?: string | null
+  userPublicId?: string | null
 }
 
 /**
@@ -183,6 +189,9 @@ export interface Order {
   updatedAt?: Date | null
   leverage?: number | null
   reduceOnly?: boolean
+  walletPublicId?: string
+  operatorPublicId?: string | null
+  userPublicId?: string | null
 }
 
 /**
@@ -200,6 +209,9 @@ export interface OrderEvent {
   instrument: string
   event: 'submitted' | 'accepted' | 'rejected' | 'cancelled' | 'expired' | 'replaced'
   reason?: string | null
+  walletPublicId?: string
+  operatorPublicId?: string | null
+  userPublicId?: string | null
 }
 
 /**
@@ -217,6 +229,9 @@ export interface OrderReplace {
   clientOrderId: string
   newQuantity?: number | null
   newPrice?: number | null
+  walletPublicId?: string
+  operatorPublicId?: string | null
+  userPublicId?: string | null
 }
 
 /**
@@ -241,6 +256,9 @@ export interface OrderRequest {
   strategyTag?: string | null
   leverage?: number | null
   reduceOnly?: boolean
+  walletPublicId?: string
+  operatorPublicId?: string | null
+  userPublicId?: string | null
 }
 
 /**
@@ -316,6 +334,9 @@ export interface Signal {
   price?: number | null
   strategyName?: string | null
   firedAt: Date
+  walletPublicId?: string
+  operatorPublicId?: string | null
+  userPublicId?: string | null
 }
 
 /**
