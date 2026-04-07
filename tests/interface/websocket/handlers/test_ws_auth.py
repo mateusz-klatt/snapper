@@ -3323,9 +3323,13 @@ def test_refresh_token_success(
 ) -> None:
     """Refresh token returns new tokens and ws_token.
 
-    Given: Valid refresh token cookie,
+    Given: Valid refresh token cookie carrying a previously-selected
+        ``active_wallet_public_id``,
     When: Calling refresh endpoint,
-    Then: Returns rotated tokens and ws_token.
+    Then: Returns rotated tokens and ws_token, AND the principal handed
+        to ``token_manager.create_tokens`` carries the same
+        ``active_wallet_public_id`` value (round-trips through the
+        refresh path so the user's wallet selection survives a refresh).
     """
     client, user_service, token_manager, csrf_manager = auth_app
     token_manager.verify_response = TokenClaims(
@@ -3337,6 +3341,7 @@ def test_refresh_token_success(
         iat=123456,
         jti="refresh-jti",
         sid="session-123",
+        active_wallet_public_id="wallet-from-old-token",
     )
     user = UserProfile(
         session_id="test-sid",
@@ -3369,6 +3374,8 @@ def test_refresh_token_success(
     assert payload["csrf_token"] == "csrf-rot"
     assert payload["user"]["username"] == "bob"
     assert payload["user"]["role"] == "operator"
+    assert token_manager.last_created_user is not None
+    assert token_manager.last_created_user.active_wallet_public_id == "wallet-from-old-token"
 
 
 def test_get_current_user_profile_returns_user(

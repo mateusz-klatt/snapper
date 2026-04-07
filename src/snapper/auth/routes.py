@@ -223,6 +223,7 @@ async def refresh_token(
         )
     token_manager.blacklist_token(token_data.jti)
     principal = await user_service.build_auth_principal(user)
+    principal.active_wallet_public_id = token_data.active_wallet_public_id
     new_token_pair = token_manager.create_tokens(
         principal,
         session_id=token_data.sid,
