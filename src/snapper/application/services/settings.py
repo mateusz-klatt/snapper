@@ -13,6 +13,7 @@ import contextlib
 import json
 from datetime import UTC
 from datetime import datetime
+from fnmatch import fnmatch
 from typing import Any
 from uuid import uuid7
 
@@ -36,6 +37,32 @@ from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.data import SettingChangedData
 from snapper.messaging.topics.builders import system_topic
+
+CREDENTIAL_KEY_PATTERNS: tuple[str, ...] = (
+    "*_api_key",
+    "*_api_secret",
+    "*_private_key*",
+    "*_credential*",
+    "*_secret",
+    "*_password",
+)
+
+
+def _looks_like_credential_key(key: str) -> bool:
+    """Return True if the setting key matches a credential-shaped glob.
+
+    Phase 0b.5 defense in depth: even though Phase 0a moved real
+    credentials out of the ``settings`` table into the dedicated
+    ``wallet_credentials`` table with Fernet encryption, an
+    administrator could still accidentally insert a credential-shaped
+    row into ``settings`` (or a regression could reintroduce one). This
+    helper guarantees that any such row never reaches the ZMQ
+    ``system.settings`` topic regardless of how it ended up in the
+    database. Pattern matching is intentionally case-insensitive
+    because settings keys flow through humans and forms.
+    """
+    lowered = key.lower()
+    return any(fnmatch(lowered, pattern) for pattern in CREDENTIAL_KEY_PATTERNS)
 
 
 class SettingsService:
@@ -305,6 +332,11 @@ class SettingsService:
         """
         if not self._msg_publisher:
             logger.warning("ZMQ publisher not available, skipping broadcast")
+            return
+        if _looks_like_credential_key(key):
+            logger.warning(
+                f"Refusing to broadcast credential-shaped setting key '{key}' on system.settings"
+            )
             return
         topic = system_topic("settings")
         envelope = SettingChangedData(

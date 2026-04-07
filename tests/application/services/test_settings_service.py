@@ -396,6 +396,61 @@ class TestSettingsService:
         )
 
     @pytest.mark.asyncio
+    async def test_broadcast_change_drops_credential_shaped_keys(self) -> None:
+        """Verify _broadcast_change rejects credential-shaped settings keys.
+
+        Given: A SettingsService with a working ZMQ publisher,
+        When: _broadcast_change is called with a credential-shaped key
+            (Phase 0b.5 defense in depth — credentials live in
+            wallet_credentials, never in settings),
+        Then: The publisher is NOT called and a warning is logged. Even
+            if a regression reintroduces a credential row in the
+            settings table, it never reaches the system.settings topic.
+        """
+        from snapper.application.services.settings import CREDENTIAL_KEY_PATTERNS
+
+        service = SettingsService(
+            db_url="sqlite+aiosqlite:///:memory:",
+            zmq_broker_xpub="tcp://127.0.0.1:7501",
+        )
+        publisher = MagicMock()
+        publisher.send = AsyncMock()
+        publisher.tracker = SequenceTracker()
+        cast(Any, service)._msg_publisher = publisher
+        sample_keys = (
+            "kraken_api_key",
+            "kraken_api_secret",
+            "walutomat_private_key_pem",
+            "exchange_credential_blob",
+            "admin_password",
+            "session_secret",
+        )
+        for key in sample_keys:
+            with patch("snapper.application.services.settings.logger.warning") as log_warn:
+                await cast(Any, service)._broadcast_change(
+                    key, "redacted", "auth", now=datetime.now(UTC)
+                )
+            log_warn.assert_called_once()
+        publisher.send.assert_not_called()
+        assert CREDENTIAL_KEY_PATTERNS
+
+    @pytest.mark.asyncio
+    async def test_broadcast_change_credential_filter_is_case_insensitive(self) -> None:
+        """Verify the credential filter normalizes case before matching."""
+        service = SettingsService(
+            db_url="sqlite+aiosqlite:///:memory:",
+            zmq_broker_xpub="tcp://127.0.0.1:7501",
+        )
+        publisher = MagicMock()
+        publisher.send = AsyncMock()
+        publisher.tracker = SequenceTracker()
+        cast(Any, service)._msg_publisher = publisher
+        await cast(Any, service)._broadcast_change(
+            "KRAKEN_API_KEY", "redacted", "auth", now=datetime.now(UTC)
+        )
+        publisher.send.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_broadcast_change_handles_send_error(self) -> None:
         """Verify _broadcast_change logs error on send failure.
 
@@ -414,7 +469,7 @@ class TestSettingsService:
         cast(Any, service)._msg_publisher = publisher
         with patch("snapper.application.services.settings.logger.error") as log_error:
             await cast(Any, service)._broadcast_change(
-                "api_key", "secure", "auth", now=datetime.now(UTC)
+                "ui_theme", "dark", "ui", now=datetime.now(UTC)
             )
         log_error.assert_called_once()
 
