@@ -286,6 +286,129 @@ def seed_settings(conn: Connection, settings: list[SeedSetting], tracker: Sequen
     return inserted
 
 
+def seed_default_multi_tenant(conn: Connection, tracker: SequenceTracker) -> int:
+    """Seed the default Operator, Wallet, and UserOperatorMembership rows.
+
+    Plan 0 Phase 0a (single-user deployment bootstrap). Creates:
+
+    1. Operator ``label="default"`` — the seed trading identity used by
+       the single-user deployment until an admin introduces additional
+       operators.
+    2. Wallet ``label="default-paper"`` with ``is_paper=True`` — a paper
+       sandbox wallet that does not require live exchange credentials.
+    3. UserOperatorMembership linking the first admin user in the
+       ``users`` table to the default operator as ``is_primary=TRUE``.
+
+    Idempotent: the function checks each target table and inserts only
+    when the table is empty. A re-seed on an established DB is a no-op,
+    matching ``seed_users`` / ``seed_settings`` semantics.
+
+    Per Plan 0 D2 no default scope grants are inserted — the empty
+    ``users`` table case (single-user bootstrap) has nothing to grant
+    from, and UnderlyingAsset-based seed grants are deferred until the
+    UnderlyingAsset seed lands in a later phase.
+
+    Args:
+        conn: Active SQLAlchemy connection (same transaction as the
+            users/settings seed).
+        tracker: ``SequenceTracker`` for stamping provenance columns.
+
+    Returns:
+        Count of rows inserted across operators + wallets + memberships.
+    """
+    inserted = 0
+    now = _timestamp_value(conn)
+    known_to = _known_to_value(conn)
+
+    existing_ops = conn.execute(text("SELECT COUNT(*) FROM operators")).scalar() or 0
+    existing_wallets = conn.execute(text("SELECT COUNT(*) FROM wallets")).scalar() or 0
+    if existing_ops > 0 or existing_wallets > 0:
+        logger.info(
+            f"Multi-tenant bootstrap skipped: operators={existing_ops} wallets={existing_wallets}"
+        )
+        return 0
+
+    operator_public_id = str(uuid7())
+    conn.execute(
+        text(
+            "INSERT INTO operators"
+            " (public_id, label, description, timestamp, known_to, session_id, sequence_id)"
+            " VALUES"
+            " (:public_id, :label, :description, :timestamp, :known_to, :session_id, :sequence_id)"
+        ),
+        {
+            "public_id": operator_public_id,
+            "label": "default",
+            "description": "Default seed operator for single-user deployment",
+            "timestamp": now,
+            "known_to": known_to,
+            "session_id": tracker.session_id,
+            "sequence_id": tracker.next_sequence("operators"),
+        },
+    )
+    inserted += 1
+
+    wallet_public_id = str(uuid7())
+    conn.execute(
+        text(
+            "INSERT INTO wallets"
+            " (public_id, label, description, is_paper,"
+            "  timestamp, known_to, session_id, sequence_id)"
+            " VALUES"
+            " (:public_id, :label, :description, :is_paper,"
+            "  :timestamp, :known_to, :session_id, :sequence_id)"
+        ),
+        {
+            "public_id": wallet_public_id,
+            "label": "default-paper",
+            "description": "Default paper-mode wallet seeded for single-user deployment",
+            "is_paper": 1,
+            "timestamp": now,
+            "known_to": known_to,
+            "session_id": tracker.session_id,
+            "sequence_id": tracker.next_sequence("wallets"),
+        },
+    )
+    inserted += 1
+
+    admin_row = conn.execute(
+        text(
+            "SELECT public_id FROM users"
+            " WHERE role = 'admin' AND known_to = :known_to"
+            " ORDER BY id ASC LIMIT 1"
+        ),
+        {"known_to": known_to},
+    ).first()
+    if admin_row is not None:
+        conn.execute(
+            text(
+                "INSERT INTO user_operator_memberships"
+                " (public_id, user_public_id, operator_public_id, is_primary,"
+                "  timestamp, known_to, session_id, sequence_id)"
+                " VALUES"
+                " (:public_id, :user_public_id, :operator_public_id, :is_primary,"
+                "  :timestamp, :known_to, :session_id, :sequence_id)"
+            ),
+            {
+                "public_id": str(uuid7()),
+                "user_public_id": admin_row[0],
+                "operator_public_id": operator_public_id,
+                "is_primary": 1,
+                "timestamp": now,
+                "known_to": known_to,
+                "session_id": tracker.session_id,
+                "sequence_id": tracker.next_sequence("user_operator_memberships"),
+            },
+        )
+        inserted += 1
+
+    logger.info(
+        f"Seeded multi-tenant bootstrap: 1 operator, 1 wallet, "
+        f"{1 if admin_row is not None else 0} membership"
+    )
+    return inserted
+
+
 def _sync_db_url(db_url: str) -> str:
     """Convert an async database URL to sync for direct engine use.
 
@@ -319,6 +442,7 @@ def run_seed(profile: str) -> tuple[int, int]:
     with engine.connect() as conn:
         users_count = seed_users(conn, seed_data.users, tracker)
         settings_count = seed_settings(conn, seed_data.settings, tracker)
+        seed_default_multi_tenant(conn, tracker)
         conn.commit()
     engine.dispose()
     return users_count, settings_count

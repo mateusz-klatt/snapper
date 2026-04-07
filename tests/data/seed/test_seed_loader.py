@@ -3,6 +3,7 @@
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from typing import cast
 from unittest.mock import Mock
 from unittest.mock import patch
@@ -25,6 +26,7 @@ from snapper.data.seed.loader import _timestamp_value
 from snapper.data.seed.loader import load_seed_profile
 from snapper.data.seed.loader import resolve_seed_path
 from snapper.data.seed.loader import run_seed
+from snapper.data.seed.loader import seed_default_multi_tenant
 from snapper.data.seed.loader import seed_settings
 from snapper.data.seed.loader import seed_users
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -757,6 +759,7 @@ class TestRunSeed:
                     "sequence_id INTEGER NOT NULL DEFAULT 0)"
                 )
             )
+            _create_multi_tenant_tables(conn)
             conn.commit()
         engine.dispose()
         with patch("snapper.data.seed.loader.BootstrapSettingsLoader") as mock_bootstrap:
@@ -810,6 +813,7 @@ class TestRunSeed:
                     "sequence_id INTEGER NOT NULL DEFAULT 0)"
                 )
             )
+            _create_multi_tenant_tables(conn)
             conn.commit()
         engine.dispose()
         with patch("snapper.data.seed.loader.BootstrapSettingsLoader") as mock_bootstrap:
@@ -817,3 +821,188 @@ class TestRunSeed:
             users_count, settings_count = run_seed("dev")
         assert users_count == 3
         assert settings_count >= 1
+
+
+class TestSeedDefaultMultiTenant:
+    """Tests for the default multi-tenant bootstrap seed."""
+
+    def _make_db(self, tmp_path: Path) -> tuple[object, Connection]:
+        db_path = tmp_path / "test.db"
+        engine = create_engine(f"sqlite:///{db_path}", poolclass=NullPool)
+        conn = engine.connect()
+        conn.execute(
+            text(
+                "CREATE TABLE users ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
+                " username TEXT, email TEXT, password_hash TEXT, role TEXT,"
+                " is_active INTEGER, created_at TIMESTAMP, timestamp TIMESTAMP,"
+                " known_to DATETIME NOT NULL, session_id TEXT, sequence_id INTEGER)"
+            )
+        )
+        _create_multi_tenant_tables(conn)
+        conn.commit()
+        return engine, conn
+
+    def test_inserts_operator_wallet_and_membership(self, tmp_path: Path) -> None:
+        """Bootstrap creates an operator, a paper wallet, and an admin membership.
+
+        Given: An SQLite database with an admin user already seeded and
+            empty multi-tenant tables,
+        When: ``seed_default_multi_tenant`` is invoked,
+        Then: Default operator, paper wallet, and primary admin membership
+            rows are inserted.
+        """
+        engine, conn = self._make_db(tmp_path)
+        try:
+            conn.execute(
+                text(
+                    "INSERT INTO users (public_id, username, email, password_hash,"
+                    " role, is_active, created_at, timestamp, known_to,"
+                    " session_id, sequence_id)"
+                    " VALUES ('user-admin', 'admin', 'a@t.com', 'hash',"
+                    " 'admin', 1, :ts, :ts, :known_to, 's', 1)"
+                ),
+                {"ts": str(datetime.now(UTC)), "known_to": str(KNOWN_TO_MAX)},
+            )
+            conn.commit()
+
+            count = seed_default_multi_tenant(conn, SequenceTracker())
+            conn.commit()
+
+            assert count == 3
+            op_row = conn.execute(text("SELECT label FROM operators")).first()
+            assert op_row is not None
+            assert op_row[0] == "default"
+            wallet_row = conn.execute(text("SELECT label, is_paper FROM wallets")).first()
+            assert wallet_row is not None
+            assert wallet_row[0] == "default-paper"
+            assert wallet_row[1] == 1
+            membership_row = conn.execute(
+                text("SELECT user_public_id, is_primary FROM user_operator_memberships")
+            ).first()
+            assert membership_row is not None
+            assert membership_row[0] == "user-admin"
+            assert membership_row[1] == 1
+        finally:
+            conn.close()
+            cast(Any, engine).dispose()
+
+    def test_skips_when_operators_already_exist(self, tmp_path: Path) -> None:
+        """Bootstrap is a no-op when any operator row already exists.
+
+        Given: A database with a pre-existing operator,
+        When: ``seed_default_multi_tenant`` is invoked,
+        Then: Returns 0 and leaves the existing operator intact.
+        """
+        engine, conn = self._make_db(tmp_path)
+        try:
+            conn.execute(
+                text(
+                    "INSERT INTO operators (public_id, label, description, timestamp,"
+                    " known_to, session_id, sequence_id)"
+                    " VALUES ('op-1', 'pre-existing', NULL, :ts, :known_to, 's', 1)"
+                ),
+                {"ts": str(datetime.now(UTC)), "known_to": str(KNOWN_TO_MAX)},
+            )
+            conn.commit()
+
+            count = seed_default_multi_tenant(conn, SequenceTracker())
+            conn.commit()
+
+            assert count == 0
+            assert conn.execute(text("SELECT COUNT(*) FROM operators")).scalar() == 1
+            assert conn.execute(text("SELECT COUNT(*) FROM wallets")).scalar() == 0
+        finally:
+            conn.close()
+            cast(Any, engine).dispose()
+
+    def test_skips_when_wallets_already_exist(self, tmp_path: Path) -> None:
+        """Bootstrap is a no-op when any wallet row already exists.
+
+        Given: A database with a pre-existing wallet and no operators,
+        When: ``seed_default_multi_tenant`` is invoked,
+        Then: Returns 0 and does not insert the default operator.
+        """
+        engine, conn = self._make_db(tmp_path)
+        try:
+            conn.execute(
+                text(
+                    "INSERT INTO wallets (public_id, label, description, is_paper,"
+                    " timestamp, known_to, session_id, sequence_id)"
+                    " VALUES ('w-1', 'pre-existing', NULL, 0, :ts, :known_to, 's', 1)"
+                ),
+                {"ts": str(datetime.now(UTC)), "known_to": str(KNOWN_TO_MAX)},
+            )
+            conn.commit()
+
+            count = seed_default_multi_tenant(conn, SequenceTracker())
+            conn.commit()
+
+            assert count == 0
+            assert conn.execute(text("SELECT COUNT(*) FROM operators")).scalar() == 0
+        finally:
+            conn.close()
+            cast(Any, engine).dispose()
+
+    def test_skips_membership_when_no_admin_user(self, tmp_path: Path) -> None:
+        """Bootstrap skips the membership row when no admin user is present.
+
+        Given: A database with the users table empty,
+        When: ``seed_default_multi_tenant`` is invoked,
+        Then: Operator and wallet are inserted but no membership row
+            (count == 2 instead of 3).
+        """
+        engine, conn = self._make_db(tmp_path)
+        try:
+            count = seed_default_multi_tenant(conn, SequenceTracker())
+            conn.commit()
+
+            assert count == 2
+            assert conn.execute(text("SELECT COUNT(*) FROM operators")).scalar() == 1
+            assert conn.execute(text("SELECT COUNT(*) FROM wallets")).scalar() == 1
+            assert (
+                conn.execute(text("SELECT COUNT(*) FROM user_operator_memberships")).scalar() == 0
+            )
+        finally:
+            conn.close()
+            cast(Any, engine).dispose()
+
+
+def _create_multi_tenant_tables(conn: Connection) -> None:
+    """Create the minimal operators / wallets / user_operator_memberships tables.
+
+    Used by both ``TestRunSeed`` and ``TestSeedDefaultMultiTenant`` to
+    exercise the new bootstrap without pulling in the full Alembic
+    migration history.
+    """
+    conn.execute(
+        text(
+            "CREATE TABLE operators ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
+            " label TEXT, description TEXT,"
+            " timestamp TIMESTAMP, known_to DATETIME NOT NULL,"
+            " session_id TEXT NOT NULL DEFAULT '',"
+            " sequence_id INTEGER NOT NULL DEFAULT 0)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE TABLE wallets ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
+            " label TEXT, description TEXT, is_paper INTEGER NOT NULL DEFAULT 0,"
+            " timestamp TIMESTAMP, known_to DATETIME NOT NULL,"
+            " session_id TEXT NOT NULL DEFAULT '',"
+            " sequence_id INTEGER NOT NULL DEFAULT 0)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE TABLE user_operator_memberships ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
+            " user_public_id TEXT, operator_public_id TEXT,"
+            " is_primary INTEGER NOT NULL DEFAULT 0,"
+            " timestamp TIMESTAMP, known_to DATETIME NOT NULL,"
+            " session_id TEXT NOT NULL DEFAULT '',"
+            " sequence_id INTEGER NOT NULL DEFAULT 0)"
+        )
+    )
