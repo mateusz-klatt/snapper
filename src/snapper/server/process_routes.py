@@ -166,7 +166,7 @@ async def _read_persisted_strategy_parameters(
     if not isinstance(config_dict, dict):
         return None
     parameters = config_dict.get("parameters") or {}
-    class_path = config_dict.get("class_path") or ""
+    class_path = config_dict.get("class") or config_dict.get("class_path") or ""
     return {"class_path": class_path, "parameters": parameters}
 
 
@@ -667,6 +667,26 @@ async def start_process(
     """
     payload = body.payload
     overrides = payload.parameters or {}
+    persisted = await _read_persisted_strategy_parameters(repo, name)
+    persisted_role: ProcessRoleEnum | None = None
+    persisted_params: dict[str, object] | None = None
+    if persisted is not None:
+        class_path = persisted.get("class_path")
+        if isinstance(class_path, str) and class_path:
+            persisted_role = _resolve_role_for_class_path(class_path)
+            raw_params = persisted.get("parameters")
+            if isinstance(raw_params, dict):
+                persisted_params = raw_params
+    if persisted_role is ProcessRoleEnum.STRATEGY and overrides:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Strategy processes do not accept start-time parameter overrides; "
+                "update the persisted process configuration via the create endpoint "
+                "instead so the operator/wallet/output scope check runs against the "
+                "exact parameters that will launch."
+            ),
+        )
     forbidden = {"operator_public_id", "wallet_public_id"}.intersection(overrides.keys())
     if forbidden:
         raise HTTPException(
@@ -677,15 +697,8 @@ async def start_process(
                 "process configuration via the create endpoint instead."
             ),
         )
-    persisted = await _read_persisted_strategy_parameters(repo, name)
-    if persisted is not None:
-        class_path = persisted.get("class_path")
-        if isinstance(class_path, str) and class_path:
-            role = _resolve_role_for_class_path(class_path)
-            if role is not None:
-                params = persisted.get("parameters") or {}
-                if isinstance(params, dict):
-                    await _enforce_strategy_scope(params, role, user, repo)
+    if persisted_role is ProcessRoleEnum.STRATEGY and persisted_params is not None:
+        await _enforce_strategy_scope(persisted_params, persisted_role, user, repo)
     result = await factory.start_process_by_name(
         name=name,
         mode=payload.mode,

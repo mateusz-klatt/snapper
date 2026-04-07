@@ -1848,3 +1848,67 @@ class TestResolveRoleForClassPathHit:
                 _csrf=None,
             )
         mock_factory.start_process_by_name.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_start_process_rejects_strategy_with_any_override(self, tmp_path: Path) -> None:
+        """A persisted strategy + ANY parameters override is rejected with 400."""
+        import json as _json
+        from unittest.mock import patch as _patch
+
+        from fastapi import HTTPException
+
+        from snapper.application.process_manager.models import ProcessRegistryEntry
+        from snapper.data.models import Setting
+        from snapper.data.repository import SQLAlchemyRepository
+
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path}/sk4.db")
+        await repo.create_all()
+        async with repo.session() as session:
+            session.add(
+                Setting(
+                    key="process_strat-no-override",
+                    value=_json.dumps({"class": "snapper.fake.StratClass", "parameters": {}}),
+                    category="process",
+                    is_encrypted=False,
+                    timestamp=datetime.now(UTC),
+                    session_id="t",
+                    sequence_id=1,
+                )
+            )
+            await session.commit()
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters={"name": "renamed"}),
+        )
+        registry = {
+            "x": ProcessRegistryEntry(
+                class_ref=MagicMock(),
+                class_path="snapper.fake.StratClass",
+                method="start",
+                description="",
+                priority=50,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.STRATEGY,
+                tags=("strategy",),
+                parameters_model=None,
+                parameters_schema={"type": "object"},
+                enabled=False,
+                mode="thread",
+            )
+        }
+        with _patch(
+            "snapper.server.process_routes.get_registered_processes", return_value=registry
+        ), pytest.raises(HTTPException) as exc_info:
+            await start_process(
+                http_request=_make_rest_request(),
+                name="strat-no-override",
+                body=body,
+                factory=MagicMock(),
+                user=MagicMock(operator_public_ids=[]),
+                repo=repo,
+                _csrf=None,
+            )
+        assert exc_info.value.status_code == 400

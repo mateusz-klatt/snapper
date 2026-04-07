@@ -170,52 +170,34 @@ class TraderCoordinator(RegisterableProcess):
         mode_or_tag: str,
         wallet_public_id: str,
     ) -> str:
-        """Build the in-memory engine_key string with conditional wallet sharding.
+        """Build the in-memory engine_key string.
 
-        Phase 0b ships **conditional** wallet sharding to satisfy two
-        constraints simultaneously:
+        Phase 0b deliberately keeps the engines dict KEY format flat
+        (``{instrument}@{exchange}-{mode_or_tag}``) because the
+        persisted ``shard_key`` column format is also flat (Section 3.9
+        row 4 defers the wallet_short parser change to Phase 0c).
+        Including wallet in the in-memory key here without the matching
+        shard_key / venue_events / checkpoints / recovery extension
+        would create an asymmetry where live signals with a populated
+        wallet build ``...-w<wallet_short>`` engines while recovery
+        sites would only ever rebuild flat engines, producing duplicate
+        engines for the same logical position the moment any caller
+        starts populating ``wallet_public_id`` on a SignalData.
 
-        1. The persisted ``shard_key`` column format is unchanged
-           (Section 3.9 row 4 defers the wallet_short parser change to
-           Phase 0c). Recovery sites that rebuild engines from
-           checkpoints / executions / active orders therefore have no
-           way to extract a wallet identity yet, so they all pass
-           ``wallet_public_id=""`` and the helper returns the FLAT
-           legacy key ``{instrument}@{exchange}-{mode_or_tag}``. The
-           recovery path stays compatible with itself and with any live
-           signal that also arrives with an empty wallet (today's
-           single-wallet deployment).
+        Phase 0b *also* fails closed at the signal entry point on any
+        non-empty wallet (see ``_on_signal``) so the contamination
+        scenario where two strategies share a flat-key engine and stamp
+        each other's wallet identity onto outgoing commands cannot
+        happen either: a populated-wallet signal is dropped at the door
+        until Phase 0c teaches recovery the wallet dimension and this
+        helper switches to the wallet-aware
+        ``{instrument}@{exchange}-{mode_or_tag}-w{wallet_short}`` form.
 
-        2. ``TradingEngineService`` carries position state per
-           ``wallet_public_id``. If two strategies on different wallets
-           shared a single flat-key engine, the engine would commingle
-           their positions AND stamp every emitted command with
-           whichever wallet happened to initialize the engine first
-           (Codex flagged this as a High during Phase 0b phase-close
-           review). To prevent that, the helper switches to the
-           wallet-aware key
-           ``{instrument}@{exchange}-{mode_or_tag}-w{wallet_short}``
-           the moment any signal arrives with a non-empty wallet.
-
-        The transition is conditional rather than universal because
-        Phase 0b deliberately did NOT yet flip any production callsite
-        from empty-default to populated wallet. As of Phase 0b shipping
-        every recovery and live signal path arrives with empty wallet
-        and produces the legacy flat key. When Phase 0c starts
-        populating wallet on emit paths, the live engines will shard
-        by wallet immediately AND Phase 0c also rewrites the shard_key
-        parser so recovery learns to produce matching wallet-aware
-        keys. The two changes ship together in Phase 0c so there is
-        never a window where live and recovery produce different keys
-        for the same logical position.
-
-        ``wallet_short`` is the dashless lowercase form of the
-        ``wallet_public_id`` truncated to 12 hex chars, matching the
-        spec locked in Section 14.7.5 of the plan.
+        The ``wallet_public_id`` parameter is accepted (and currently
+        unused after the empty fast path) to lock in the call signature
+        for Phase 0c.
         """
-        if wallet_public_id:
-            wallet_short = wallet_public_id.replace("-", "").lower()[:12]
-            return f"{instrument}@{exchange}-{mode_or_tag}-w{wallet_short}"
+        del wallet_public_id
         return f"{instrument}@{exchange}-{mode_or_tag}"
 
     async def start(self) -> None:
@@ -1271,6 +1253,16 @@ class TraderCoordinator(RegisterableProcess):
             return
         wallet_public_id = signal.wallet_public_id or ""
         operator_public_id = signal.operator_public_id or ""
+        if wallet_public_id:
+            logger.warning(
+                f"ZMQTrader: Dropping signal with populated wallet_public_id "
+                f"'{wallet_public_id}' on instrument '{instrument}': Phase 0b "
+                f"recovery sites cannot reconstruct wallet from the persisted "
+                f"shard_key yet, so accepting wallet-tagged signals risks live/"
+                f"recovery engine divergence. Phase 0c will lift this guard "
+                f"once the shard_key parser learns the wallet_short segment."
+            )
+            return
         engine_key = self._build_engine_key(instrument, exchange, mode, wallet_public_id)
         if engine_key in self.engines:
             halt_key = self.engines[engine_key]._shard_key

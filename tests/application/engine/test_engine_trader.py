@@ -3363,17 +3363,19 @@ def test_build_engine_key_flat_when_wallet_empty() -> None:
     assert key == "BTC-USD@kraken-live"
 
 
-def test_build_engine_key_wallet_aware_when_populated() -> None:
-    """Verify a populated wallet shards by the dashless 12-char prefix.
+def test_build_engine_key_ignores_wallet_in_phase_0b() -> None:
+    """Verify _build_engine_key still returns a flat key in Phase 0b.
 
-    Given: A live signal carrying a UUID7-shaped wallet_public_id with
-        upper-case hex and dashes,
+    Given: A populated wallet_public_id (which strategies CAN already
+        emit via StrategyConfig),
     When: _build_engine_key is invoked,
-    Then: The key gains a ``-w<wallet_short>`` suffix where wallet_short
-        is the dashless lowercase form truncated to 12 hex characters,
-        per the Section 14.7.5 plan spec.
+    Then: The returned key is still flat — Phase 0b does not yet shard
+        engines by wallet because the persisted shard_key column format
+        is unchanged. ``_on_signal`` fails closed on any populated
+        wallet to prevent live/recovery divergence; this helper just
+        keeps the dict-key shape uniform.
     """
     key = TraderCoordinator._build_engine_key(
         "BTC-USD", "kraken", "live", "01975A8B-3C7D-7000-8000-AAAAAAAAAAAA"
     )
-    assert key == "BTC-USD@kraken-live-w01975a8b3c7d"
+    assert key == "BTC-USD@kraken-live"
