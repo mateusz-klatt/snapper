@@ -149,8 +149,8 @@ class TestCoordinatorSharding:
         coord._current_topic = "signals.paper.BTC-USD.scalp"
         await coord._on_signal(_make_signal())
 
-        assert "BTC-USD@paper-scalp" in coord.engines
-        engine = coord.engines["BTC-USD@paper-scalp"]
+        assert "BTC-USD@paper-scalp-w_nowallet_" in coord.engines
+        engine = coord.engines["BTC-USD@paper-scalp-w_nowallet_"]
         assert engine._strategy_tag == "scalp"
         assert engine._shard_key == "paper.BTC-USD.paper.scalp"
 
@@ -168,8 +168,8 @@ class TestCoordinatorSharding:
         coord._current_topic = "signals.kraken.BTC-USD.live"
         await coord._on_signal(_make_signal(exchange="kraken"))
 
-        assert "BTC-USD@kraken-live" in coord.engines
-        engine = coord.engines["BTC-USD@kraken-live"]
+        assert "BTC-USD@kraken-live-w_nowallet_" in coord.engines
+        engine = coord.engines["BTC-USD@kraken-live-w_nowallet_"]
         assert engine._strategy_tag is None
         assert engine._shard_key == "kraken.BTC-USD.live"
 
@@ -187,7 +187,7 @@ class TestCoordinatorSharding:
         coord._current_topic = "signals.paper.BTC-USD.scalp"
         await coord._on_signal(_make_signal())
 
-        engine = coord.engines["BTC-USD@paper-scalp"]
+        engine = coord.engines["BTC-USD@paper-scalp-w_nowallet_"]
 
         def _mock_execute(
             desired_units: float, price: float, signaled_at: float | None = None
@@ -342,8 +342,8 @@ class TestCheckpointRecoveryWithSharding:
 
         await coord._recover_engine_state()
 
-        assert "BTC-USD@paper-scalp" in coord.engines
-        engine = coord.engines["BTC-USD@paper-scalp"]
+        assert "BTC-USD@paper-scalp-w_nowallet_" in coord.engines
+        engine = coord.engines["BTC-USD@paper-scalp-w_nowallet_"]
         assert engine._strategy_tag == "scalp"
         assert engine._shard_key == "paper.BTC-USD.paper.scalp"
 

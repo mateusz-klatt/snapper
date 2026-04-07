@@ -2680,6 +2680,9 @@ class SQLAlchemyRepository(Repository):
                 session_id=session_id,
                 sequence_id=sequence_id,
                 timestamp=bus_time,
+                wallet_public_id=existing.wallet_public_id,
+                operator_public_id=existing.operator_public_id,
+                user_public_id=existing.user_public_id,
             )
             s.add(new_cmd)
             await s.commit()

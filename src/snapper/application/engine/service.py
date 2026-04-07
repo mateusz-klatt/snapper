@@ -86,6 +86,8 @@ class TradingEngineService:
         repository: SQLAlchemyRepository | None = None,
         outbox: OutboxDispatcher | None = None,
         strategy_tag: str | None = None,
+        wallet_public_id: str = "",
+        operator_public_id: str = "",
     ) -> None:
         """Initialize trading engine for a specific instrument.
 
@@ -101,6 +103,13 @@ class TradingEngineService:
             strategy_tag: Strategy discriminator for paper mode sharding.
                 Paper engines with different tags get isolated shard_keys.
                 Ignored for live mode (one consolidated position per instrument).
+            wallet_public_id: Wallet that owns positions and credentials for
+                this engine instance. Phase 0b transitional default ``""``;
+                Phase 0b.6 NOT NULL migration tightens the columns.
+            operator_public_id: Trading-identity operator that initiated the
+                strategy this engine serves. Stored on the engine for audit
+                propagation onto every TradeCommand and OrderRequestData
+                this engine emits.
         """
         self.instrument = instrument
         self.execution_socket = execution_socket
@@ -120,6 +129,8 @@ class TradingEngineService:
         self._repository = repository
         self._outbox = outbox
         self._strategy_tag = strategy_tag
+        self.wallet_public_id = wallet_public_id
+        self.operator_public_id = operator_public_id
         base = f"{exchange}.{instrument}.{self.mode}"
         self._shard_key = (
             f"{base}.{strategy_tag}"
@@ -348,6 +359,8 @@ class TradingEngineService:
                     "session_id": session_id,
                     "sequence_id": sequence_id,
                     "timestamp": now,
+                    "wallet_public_id": self.wallet_public_id or None,
+                    "operator_public_id": self.operator_public_id or None,
                 }
             )
 
@@ -373,6 +386,8 @@ class TradingEngineService:
                 signaled_at=signaled_at_dt,
                 leverage=leverage,
                 reduce_only=reduce_only,
+                wallet_public_id=self.wallet_public_id,
+                operator_public_id=self.operator_public_id or None,
             )
             await self.execution_socket.send(topic, order, flags=zmq.NOBLOCK)
             if self._repository is not None:

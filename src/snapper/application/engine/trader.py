@@ -163,6 +163,30 @@ class TraderCoordinator(RegisterableProcess):
         """Return string representation."""
         return f"TraderCoordinator(signal_topics={self.signal_topics})"
 
+    @staticmethod
+    def _build_engine_key(
+        instrument: str,
+        exchange: str,
+        mode_or_tag: str,
+        wallet_public_id: str,
+    ) -> str:
+        """Build the in-memory engine_key tuple-as-string.
+
+        Per Plan 0 Section 4.4 the trading engine is keyed by
+        ``(exchange, instrument, mode, wallet_public_id)``. Phase 0b
+        keeps the persisted ``shard_key`` column format unchanged
+        (Section 3.9 row 4 — wallet_short parser is Phase 0c) but the
+        in-memory engines dict already shards by wallet so cross-wallet
+        signals do not collide on a single engine instance.
+
+        ``wallet_public_id`` may be empty during the Phase 0b transition
+        (until Phase 0b.6 NOT NULL tightening lands). The literal
+        ``_nowallet_`` sentinel is used so recovery sites that have no
+        wallet info match live signals that arrive with no wallet info.
+        """
+        wallet_segment = wallet_public_id[:12] if wallet_public_id else "_nowallet_"
+        return f"{instrument}@{exchange}-{mode_or_tag}-w{wallet_segment}"
+
     async def start(self) -> None:
         """Start the trader coordinator.
 
@@ -306,10 +330,11 @@ class TraderCoordinator(RegisterableProcess):
                 continue
             self._restore_engine_from_shard(engine, shard_key, instrument)
 
-            engine_key = (
-                f"{instrument}@{exchange_str}-{strategy_tag}"
-                if strategy_tag
-                else f"{instrument}@{exchange_str}-{mode_str}"
+            engine_key = self._build_engine_key(
+                instrument,
+                exchange_str,
+                strategy_tag if strategy_tag else mode_str,
+                "",
             )
             self.engines[engine_key] = engine
             self.last_signal_time[engine_key] = time.time()
@@ -378,7 +403,7 @@ class TraderCoordinator(RegisterableProcess):
             return []
         fills_by_key: dict[str, list[ExecutionRow]] = {}
         for exe in executions:
-            key = f"{exe['instrument']}@{exe['exchange']}-live"
+            key = self._build_engine_key(exe["instrument"], exe["exchange"], "live", "")
             fills_by_key.setdefault(key, []).append(exe)
         for engine_key, fills in fills_by_key.items():
             if engine_key in skip_keys:
@@ -416,7 +441,7 @@ class TraderCoordinator(RegisterableProcess):
         for db_order in all_active:
             instrument = db_order["instrument"]
             exchange_str = db_order["exchange"]
-            key = f"{instrument}@{exchange_str}-live"
+            key = self._build_engine_key(instrument, exchange_str, "live", "")
             if key not in self.engines:
                 engine = await self._create_engine_for_recovery(instrument, exchange_str)
                 if engine is None:
@@ -1210,7 +1235,9 @@ class TraderCoordinator(RegisterableProcess):
         if not price or price <= 0:
             logger.warning(f"ZMQTrader: Invalid signal (missing or invalid price): {signal}")
             return
-        engine_key = f"{instrument}@{exchange}-{mode}"
+        wallet_public_id = signal.wallet_public_id or ""
+        operator_public_id = signal.operator_public_id or ""
+        engine_key = self._build_engine_key(instrument, exchange, mode, wallet_public_id)
         if engine_key in self.engines:
             halt_key = self.engines[engine_key]._shard_key
         else:
@@ -1250,6 +1277,8 @@ class TraderCoordinator(RegisterableProcess):
                 repository=repo_for_engine,
                 outbox=self.outbox,
                 strategy_tag=strategy_tag,
+                wallet_public_id=wallet_public_id,
+                operator_public_id=operator_public_id,
             )
             self.last_signal_time[engine_key] = 0.0
         self.last_signal_time[engine_key] = time.time()

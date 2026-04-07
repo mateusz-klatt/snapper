@@ -381,6 +381,9 @@ class TradeCommandInsertRow(TypedDict, total=False):
     timestamp: datetime
     idempotency_key: str | None
     supersedes_command_id: str | None
+    wallet_public_id: str | None
+    operator_public_id: str | None
+    user_public_id: str | None
 
 
 class VenueEventInsertRow(TypedDict, total=False):
