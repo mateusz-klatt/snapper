@@ -516,6 +516,20 @@ async def start_process(
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     body: Annotated[ProcessStartRequest, Depends(json_body(ProcessStartRequest))],
 ) -> ProcessStartResponse:
+    """Start a previously created process configuration.
+
+    Phase 0b.4d note: this endpoint accepts ``payload.parameters`` which
+    the launcher applies as a full replacement on top of the persisted
+    config. That means a caller with ``MANAGE_PROCESSES`` could in
+    principle bypass the create-time ``_enforce_strategy_scope`` check
+    by overriding ``operator_public_id`` / ``wallet_public_id`` at start
+    time. The risk is bounded today because executors are still wallet-
+    agnostic (Phase 0c not yet wired) and ``MANAGE_PROCESSES`` already
+    requires operator-or-admin role. Phase 0c MUST re-enforce
+    operator/wallet scope at start time once executors become per-wallet
+    and a stale start payload could otherwise route a strategy onto a
+    wallet the caller has no grant on. See plan Section 4.4 / 5.x.
+    """
     payload = body.payload
     result = await factory.start_process_by_name(
         name=name,
