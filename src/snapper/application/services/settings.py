@@ -44,7 +44,10 @@ CREDENTIAL_KEY_PATTERNS: tuple[str, ...] = (
     "*_private_key*",
     "*_credential*",
     "*_secret",
+    "*_secret_key*",
     "*_password",
+    "*_token",
+    "*_refresh_token*",
 )
 
 

@@ -424,6 +424,10 @@ class TestSettingsService:
             "exchange_credential_blob",
             "admin_password",
             "session_secret",
+            "jwt_secret_key",
+            "hmac_secret_key_v2",
+            "oauth_bearer_token",
+            "github_refresh_token_pem",
         )
         for key in sample_keys:
             with patch("snapper.application.services.settings.logger.warning") as log_warn:
