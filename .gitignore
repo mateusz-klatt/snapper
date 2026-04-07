@@ -91,3 +91,6 @@ fastlane/test_output
 plan-*.md
 
 .codex
+
+# Playwright MCP server cache (local browser snapshots, not source)
+.playwright-mcp/
