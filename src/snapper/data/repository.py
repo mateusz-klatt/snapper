@@ -3848,15 +3848,40 @@ class SQLAlchemyRepository(Repository):
     ) -> WalletOperatorScopeGrant | None:
         """Cross-scope overlap detection.
 
-        Expands both the request and every existing active grant to instrument
-        sets and returns the first existing grant whose instrument set
-        intersects the request's. Returns ``None`` when no conflict is found.
+        Returns the first existing grant that overlaps the request, or
+        ``None`` when no conflict is found. Two matching rules apply:
+
+        1. **Same-scope identity fast path.** If an existing grant points at
+           the same ``scope_kind`` + same ``underlying_public_id`` /
+           ``instrument_public_id`` as the request, it conflicts regardless
+           of any instrument-mapping expansion. This covers the edge case
+           where an underlying currently has zero active instrument mappings
+           (both expansion sets empty → empty intersection → would otherwise
+           fall through to a raw partial-unique-index IntegrityError at
+           insert time).
+
+        2. **Expanded-set intersection.** Otherwise expand both sides to
+           instrument sets via ``_expand_to_instruments`` (which honors the
+           dynamic-scope rule by querying ``instrument_underlying_mappings``
+           ACTIVE at ``as_of``) and report the first grant whose expansion
+           intersects the request's.
         """
+        req_kind = request["scope_kind"]
+        req_underlying = request.get("underlying_public_id")
+        req_instrument = request.get("instrument_public_id")
+        for grant in existing:
+            if (
+                grant.scope_kind == req_kind
+                and grant.underlying_public_id == req_underlying
+                and grant.instrument_public_id == req_instrument
+            ):
+                return grant
+
         target = await self._expand_to_instruments(
             s,
-            request["scope_kind"],
-            request.get("underlying_public_id"),
-            request.get("instrument_public_id"),
+            req_kind,
+            req_underlying,
+            req_instrument,
             as_of,
         )
         for grant in existing:
@@ -3925,7 +3950,21 @@ class SQLAlchemyRepository(Repository):
                 known_to=KNOWN_TO_MAX,
             )
             s.add(new_grant)
-            await s.commit()
+            try:
+                await s.commit()
+            except IntegrityError as exc:
+                err_msg = str(exc.orig).lower() if exc.orig else ""
+                if "unique" not in err_msg and "duplicate" not in err_msg:
+                    raise
+                raise ScopeGrantConflictError(
+                    wallet_public_id=request["wallet_public_id"],
+                    conflicting_grant_public_id="",
+                    conflicting_operator_public_id=request["operator_public_id"],
+                    reason=(
+                        "partial unique index fired during insert — a concurrent "
+                        "grant creation on the same scope already succeeded"
+                    ),
+                ) from exc
             await s.refresh(new_grant)
             return self._row_from_grant(new_grant)
 

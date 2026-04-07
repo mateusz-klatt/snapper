@@ -302,6 +302,65 @@ class TestCreateScopeGrant:
             )
 
     @pytest.mark.asyncio
+    async def test_same_underlying_duplicate_with_no_mappings_409(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Duplicate underlying grants conflict even when mappings are empty.
+
+        Regression for a Codex phase-close finding: when an underlying has
+        zero active ``instrument_underlying_mappings`` rows, ``_expand_to_instruments``
+        returns an empty set on both sides and the set-intersection overlap
+        check would fall through to the DB partial unique index,
+        surfacing a raw IntegrityError to the caller instead of a clean
+        ScopeGrantConflictError. The same-scope identity fast-path in
+        ``_find_overlap`` now catches this.
+
+        Given: A freshly-created underlying with no instrument mappings,
+            and an existing alice grant on that underlying,
+        When: bob attempts a duplicate underlying-scoped grant on the
+            same underlying,
+        Then: ScopeGrantConflictError is raised pointing at alice's grant
+            rather than a raw IntegrityError.
+        """
+        ids = await _seed_world(repo)
+        lonely_underlying_public_id: str = ""
+        async with repo.session() as s:
+            lonely = UnderlyingAsset(
+                ticker="EMPTY",
+                name="Empty Underlying",
+                asset_class="crypto",
+                session_id="test-session",
+                sequence_id=99,
+                timestamp=datetime.now(UTC) - timedelta(minutes=1),
+            )
+            s.add(lonely)
+            await s.commit()
+            await s.refresh(lonely)
+            lonely_underlying_public_id = lonely.public_id
+
+        first = await repo.create_scope_grant(
+            _make_request(
+                operator_public_id=ids["alice"],
+                wallet_public_id=ids["wallet"],
+                granted_by=ids["user_admin"],
+                scope_kind="underlying",
+                underlying_public_id=lonely_underlying_public_id,
+            )
+        )
+        with pytest.raises(ScopeGrantConflictError) as excinfo:
+            await repo.create_scope_grant(
+                _make_request(
+                    operator_public_id=ids["bob"],
+                    wallet_public_id=ids["wallet"],
+                    granted_by=ids["user_admin"],
+                    scope_kind="underlying",
+                    underlying_public_id=lonely_underlying_public_id,
+                    sequence_id=250,
+                )
+            )
+        assert excinfo.value.conflicting_grant_public_id == first["public_id"]
+
+    @pytest.mark.asyncio
     async def test_disjoint_instrument_grants_coexist(self, repo: SQLAlchemyRepository) -> None:
         """Two instrument grants on different instruments do not conflict.
 
@@ -647,6 +706,99 @@ class TestHandoverIntegrityError:
                 timestamp=datetime.now(UTC),
             )
         assert excinfo.value.conflicting_operator_public_id == ids["bob"]
+
+
+class TestCreateScopeGrantIntegrityError:
+    """Cover the concurrent-race safety net in ``create_scope_grant``.
+
+    The repository-layer overlap check is the primary line of defense, but
+    a racing concurrent insert could in theory slip past it (e.g., two
+    coroutines on SQLite where the advisory lock is a no-op). The
+    ``IntegrityError`` translation around ``s.commit()`` maps a fired
+    partial unique index to ``ScopeGrantConflictError`` so the API layer
+    still returns 409 rather than leaking the DBAPI error.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unique_integrity_error_maps_to_conflict(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """A unique IntegrityError on commit maps to ScopeGrantConflictError.
+
+        Given: A first grant succeeds via the repository,
+        When: A second ``create_scope_grant`` invocation has its
+            ``s.commit()`` patched to raise ``IntegrityError`` with a
+            ``UNIQUE`` message,
+        Then: ``create_scope_grant`` re-raises ``ScopeGrantConflictError``
+            with the same wallet_public_id.
+        """
+        ids = await _seed_world(repo)
+        real_session = repo.session
+
+        @asynccontextmanager
+        async def failing_session() -> Any:
+            async with real_session() as s:
+
+                async def boom() -> None:
+                    raise IntegrityError(
+                        "stmt", {}, RuntimeError("UNIQUE constraint failed: grants")
+                    )
+
+                object.__setattr__(s, "commit", boom)
+                yield s
+
+        with (
+            patch.object(repo, "session", failing_session),
+            pytest.raises(ScopeGrantConflictError) as excinfo,
+        ):
+            await repo.create_scope_grant(
+                _make_request(
+                    operator_public_id=ids["alice"],
+                    wallet_public_id=ids["wallet"],
+                    granted_by=ids["user_admin"],
+                    scope_kind="instrument",
+                    instrument_public_id=ids["btc_perp"],
+                )
+            )
+        assert excinfo.value.wallet_public_id == ids["wallet"]
+
+    @pytest.mark.asyncio
+    async def test_non_unique_integrity_error_reraises(self, repo: SQLAlchemyRepository) -> None:
+        """A non-unique IntegrityError on commit is re-raised untouched.
+
+        Given: ``create_scope_grant`` encounters a NOT NULL violation at
+            commit time (simulated),
+        When: The integrity error's orig message does not contain
+            ``unique`` or ``duplicate``,
+        Then: ``create_scope_grant`` re-raises the original IntegrityError
+            so the real bug surfaces with its traceback.
+        """
+        ids = await _seed_world(repo)
+        real_session = repo.session
+
+        @asynccontextmanager
+        async def failing_session() -> Any:
+            async with real_session() as s:
+
+                async def boom() -> None:
+                    raise IntegrityError("stmt", {}, RuntimeError("NOT NULL constraint failed"))
+
+                object.__setattr__(s, "commit", boom)
+                yield s
+
+        with (
+            patch.object(repo, "session", failing_session),
+            pytest.raises(IntegrityError, match="NOT NULL"),
+        ):
+            await repo.create_scope_grant(
+                _make_request(
+                    operator_public_id=ids["alice"],
+                    wallet_public_id=ids["wallet"],
+                    granted_by=ids["user_admin"],
+                    scope_kind="instrument",
+                    instrument_public_id=ids["btc_perp"],
+                )
+            )
 
 
 class TestHandoverIntegrityReraise:
