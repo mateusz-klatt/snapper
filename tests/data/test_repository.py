@@ -3532,6 +3532,81 @@ async def test_update_trade_command_status_carries_forward_leverage_and_reduce_o
 
 
 @pytest.mark.asyncio
+async def test_update_trade_command_status_carries_forward_multi_tenant_ids(
+    tmp_path: Path,
+) -> None:
+    """Verify SCD2 cycle preserves wallet/operator/user IDs across multiple transitions.
+
+    Given: A trade command inserted with all three Phase 0b multi-tenant IDs,
+    When: update_trade_command_status cycles created → dispatched → accepted,
+    Then: After both transitions get_active_commands_for_shard still returns
+        the original wallet_public_id / operator_public_id / user_public_id,
+        because update_trade_command_status copies them from the locked
+        active row when constructing the replacement TradeCommand. Without
+        this carry-forward, the very first status transition would silently
+        null out the audit identity, breaking the Phase 0b.4 outbox path.
+    """
+    db_path = tmp_path / "cmd_scd2_mt.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    wallet_pid = "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa"
+    operator_pid = "01975a8b-3c7d-7000-8000-bbbbbbbbbbbb"
+    user_pid = "01975a8b-3c7d-7000-8000-cccccccccccc"
+    _, cmd_pid = await r.insert_trade_command(
+        {
+            "command_type": "submit",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "engine-buy",
+            "client_order_id": "cid-scd2-mt",
+            "venue_client_id": "vcid-scd2-mt",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.25,
+            "price": None,
+            "leverage": None,
+            "reduce_only": False,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-scd2-mt",
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+            "wallet_public_id": wallet_pid,
+            "operator_public_id": operator_pid,
+            "user_public_id": user_pid,
+        }
+    )
+    after_dispatch = now + timedelta(milliseconds=1)
+    await r.update_trade_command_status(
+        public_id=cmd_pid,
+        new_status="dispatched",
+        bus_time=after_dispatch,
+        session_id="s1",
+        sequence_id=2,
+        dispatched_at=after_dispatch,
+    )
+    after_accept = now + timedelta(milliseconds=2)
+    await r.update_trade_command_status(
+        public_id=cmd_pid,
+        new_status="accepted",
+        bus_time=after_accept,
+        session_id="s1",
+        sequence_id=3,
+        acked_at=after_accept,
+    )
+    active = await r.get_active_commands_for_shard("kraken.BTC-USD.live", after_accept)
+    assert len(active) == 1
+    assert active[0]["status"] == "accepted"
+    assert active[0]["wallet_public_id"] == wallet_pid
+    assert active[0]["operator_public_id"] == operator_pid
+    assert active[0]["user_public_id"] == user_pid
+
+
+@pytest.mark.asyncio
 async def test_update_trade_command_status_clears_last_error_on_success(
     tmp_path: Path,
 ) -> None:

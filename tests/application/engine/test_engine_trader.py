@@ -293,7 +293,7 @@ class TestTraderCoverage:
         trader.execution_publisher = MagicMock()
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
-        trader.engines["BTC-USD@kraken-live-w_nowallet_"] = mock_engine
+        trader.engines["BTC-USD@kraken-live"] = mock_engine
         signal_msg = SignalData(
             session_id="",
             sequence_id=0,
@@ -312,9 +312,7 @@ class TestTraderCoverage:
         with patch("snapper.application.engine.trader.time.time", return_value=1234567890.0):
             await trader._on_signal(signal_msg)
         assert mock_engine.execute_desired_units.called
-        assert trader.last_signal_time["BTC-USD@kraken-live-w_nowallet_"] == pytest.approx(
-            1234567890.0
-        )
+        assert trader.last_signal_time["BTC-USD@kraken-live"] == pytest.approx(1234567890.0)
 
     @pytest.mark.asyncio
     @patch("snapper.application.engine.trader.get_repository")
@@ -344,7 +342,7 @@ class TestTraderCoverage:
         trader.execution_publisher = MagicMock()
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
-        trader.engines["BTC-USD@kraken-live-w_nowallet_"] = mock_engine
+        trader.engines["BTC-USD@kraken-live"] = mock_engine
         signal_msg = SignalData(
             session_id="",
             sequence_id=0,
@@ -391,7 +389,7 @@ class TestTraderCoverage:
         trader = TraderCoordinator()
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
-        trader.engines["BTC-USD@kraken-live-w_nowallet_"] = mock_engine
+        trader.engines["BTC-USD@kraken-live"] = mock_engine
         signal_msg = SignalData(
             session_id="",
             sequence_id=0,
@@ -478,8 +476,8 @@ class TestTraderCoverage:
         trader.execution_publisher = MagicMock()
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
-        trader.engines["BTC-USD@kraken-live-w_nowallet_"] = mock_engine
-        trader.last_signal_time["BTC-USD@kraken-live-w_nowallet_"] = 0.0
+        trader.engines["BTC-USD@kraken-live"] = mock_engine
+        trader.last_signal_time["BTC-USD@kraken-live"] = 0.0
         signal_msg = SignalData(
             session_id="",
             sequence_id=0,
@@ -497,9 +495,7 @@ class TestTraderCoverage:
         trader._current_topic = "signals.kraken.BTC-USD.live"
         with patch("snapper.application.engine.trader.time.time", return_value=1234567890.0):
             await trader._on_signal(signal_msg)
-        assert trader.last_signal_time["BTC-USD@kraken-live-w_nowallet_"] == pytest.approx(
-            1234567890.0
-        )
+        assert trader.last_signal_time["BTC-USD@kraken-live"] == pytest.approx(1234567890.0)
 
     @pytest.mark.asyncio
     @patch("snapper.application.engine.trader.get_repository")
@@ -580,7 +576,7 @@ class TestTraderCoverage:
         trader._current_topic = "signals.kraken.NONTRADEABLE-USD.live"
         with patch("snapper.application.engine.trader.is_tradeable", return_value=False):
             await trader._on_signal(signal_msg)
-        assert "NONTRADEABLE-USD@kraken-live-w_nowallet_" not in trader.engines
+        assert "NONTRADEABLE-USD@kraken-live" not in trader.engines
 
     @pytest.mark.asyncio
     @patch("snapper.application.engine.trader.get_repository")
@@ -1101,7 +1097,7 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
         reason="test",
     )
     await coord_any._on_signal(signal_valid)
-    engine_key = "BTC-USD@kraken-live-w_nowallet_"
+    engine_key = "BTC-USD@kraken-live"
     assert engine_key in coord.engines
     engine = cast(_EngineStub, coord.engines[engine_key])
     assert repository.calls[0]["symbol_public_id"] == "stub-spid"
@@ -2009,7 +2005,7 @@ async def test_signal_health_monitor_reports_stale_engines(monkeypatch: pytest.M
     """
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
-    coord.engines["BTC-USD@kraken-live-w_nowallet_"] = cast(
+    coord.engines["BTC-USD@kraken-live"] = cast(
         Any,
         _EngineStub(
             "BTC-USD",
@@ -2020,7 +2016,7 @@ async def test_signal_health_monitor_reports_stale_engines(monkeypatch: pytest.M
             exchange="kraken",
         ),
     )
-    coord.last_signal_time["BTC-USD@kraken-live-w_nowallet_"] = 0.0
+    coord.last_signal_time["BTC-USD@kraken-live"] = 0.0
     call_count = {"value": 0}
 
     async def _fake_sleep(_: float) -> None:
@@ -2047,7 +2043,7 @@ async def test_signal_health_monitor_skips_debug_for_recent_signals(
     """
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
-    coord.engines["BTC-USD@kraken-live-w_nowallet_"] = cast(
+    coord.engines["BTC-USD@kraken-live"] = cast(
         Any,
         _EngineStub(
             "BTC-USD",
@@ -2058,7 +2054,7 @@ async def test_signal_health_monitor_skips_debug_for_recent_signals(
             exchange="kraken",
         ),
     )
-    coord.last_signal_time["BTC-USD@kraken-live-w_nowallet_"] = 90.0
+    coord.last_signal_time["BTC-USD@kraken-live"] = 90.0
     call_count = {"value": 0}
 
     async def _fake_sleep(_: float) -> None:
@@ -2243,7 +2239,7 @@ async def test_on_signal_converts_iso_timestamp(monkeypatch: pytest.MonkeyPatch)
         reason="test",
     )
     await coordinator._on_signal(signal)
-    engine = cast(StubEngine, coordinator.engines["BTC-USD@paper-demo-w_nowallet_"])
+    engine = cast(StubEngine, coordinator.engines["BTC-USD@paper-demo"])
     assert engine.calls
     assert isinstance(engine.calls[0][1], float)
 
@@ -2836,8 +2832,8 @@ class TestRecovery:
         mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
         coord.repository = mock_repo
         await coord._recover_engine_state()
-        assert "BTC-USD@kraken-live-w_nowallet_" in coord.engines
-        engine = coord.engines["BTC-USD@kraken-live-w_nowallet_"]
+        assert "BTC-USD@kraken-live" in coord.engines
+        engine = coord.engines["BTC-USD@kraken-live"]
         assert engine.position_qty == pytest.approx(0.5)
         assert engine.entry_price == pytest.approx(50000.0)
         assert "t1" in engine.seen_exec_ids
@@ -2907,7 +2903,7 @@ class TestRecovery:
         coord.repository = mock_repo
         before = time.monotonic()
         await coord._recover_engine_state()
-        engine = coord.engines["BTC-USD@kraken-live-w_nowallet_"]
+        engine = coord.engines["BTC-USD@kraken-live"]
         assert engine.order_in_flight is True
         assert engine.pending_client_order_id == "c1"
         assert engine._in_flight_since is not None
@@ -2973,8 +2969,8 @@ class TestRecovery:
         mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
         coord.repository = mock_repo
         await coord._recover_engine_state()
-        assert "BTC-USD@kraken-live-w_nowallet_" in coord.engines
-        engine = coord.engines["BTC-USD@kraken-live-w_nowallet_"]
+        assert "BTC-USD@kraken-live" in coord.engines
+        engine = coord.engines["BTC-USD@kraken-live"]
         assert engine.order_in_flight is True
         assert engine.pending_client_order_id == "c1"
         assert engine.position_qty == pytest.approx(0.0)
@@ -3022,7 +3018,7 @@ class TestRecovery:
         mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
         coord.repository = mock_repo
         await coord._recover_engine_state()
-        engine = coord.engines["BTC-USD@kraken-live-w_nowallet_"]
+        engine = coord.engines["BTC-USD@kraken-live"]
         assert engine.read_only is True
         assert engine.order_in_flight is True
 
@@ -3301,8 +3297,8 @@ class TestRecovery:
         mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
         coord.repository = mock_repo
         await coord._recover_engine_state()
-        assert "BTC-USD@kraken-live-w_nowallet_" in coord.engines
-        engine = coord.engines["BTC-USD@kraken-live-w_nowallet_"]
+        assert "BTC-USD@kraken-live" in coord.engines
+        engine = coord.engines["BTC-USD@kraken-live"]
         assert engine.order_in_flight is False
 
     @pytest.mark.asyncio

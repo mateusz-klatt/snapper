@@ -713,7 +713,7 @@ class TestTraderSignalHandling:
         trader._setup_trading_components()
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
-        trader.engines["BTC-USD@paper-test_strategy-w_nowallet_"] = mock_engine
+        trader.engines["BTC-USD@paper-test_strategy"] = mock_engine
         signal = SignalData(
             session_id="",
             sequence_id=0,
@@ -782,7 +782,7 @@ class TestTraderSignalHandling:
         trader._setup_trading_components()
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
-        trader.engines["BTC-USD@paper-test_strategy-w_nowallet_"] = mock_engine
+        trader.engines["BTC-USD@paper-test_strategy"] = mock_engine
         signal = SignalData(
             session_id="",
             sequence_id=0,
@@ -844,7 +844,7 @@ class TestTraderSignalHandling:
         trader._setup_trading_components()
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
-        trader.engines["BTC-USD@paper-test_strategy-w_nowallet_"] = mock_engine
+        trader.engines["BTC-USD@paper-test_strategy"] = mock_engine
         invalid_signal = SignalData(
             session_id="",
             sequence_id=0,
@@ -914,7 +914,7 @@ class TestTraderSignalHandling:
         trader._setup_trading_components()
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
-        trader.engines["BTC-USD@paper-test_strategy-w_nowallet_"] = mock_engine
+        trader.engines["BTC-USD@paper-test_strategy"] = mock_engine
         signal = SignalData(
             session_id="",
             sequence_id=0,

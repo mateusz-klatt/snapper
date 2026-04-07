@@ -170,22 +170,32 @@ class TraderCoordinator(RegisterableProcess):
         mode_or_tag: str,
         wallet_public_id: str,
     ) -> str:
-        """Build the in-memory engine_key tuple-as-string.
+        """Build the in-memory engine_key string.
 
-        Per Plan 0 Section 4.4 the trading engine is keyed by
-        ``(exchange, instrument, mode, wallet_public_id)``. Phase 0b
-        keeps the persisted ``shard_key`` column format unchanged
-        (Section 3.9 row 4 — wallet_short parser is Phase 0c) but the
-        in-memory engines dict already shards by wallet so cross-wallet
-        signals do not collide on a single engine instance.
+        Phase 0b deliberately keeps the engines dict KEY format flat
+        (`{instrument}@{exchange}-{mode_or_tag}`) because the persisted
+        ``shard_key`` column format is also flat (Section 3.9 row 4
+        defers the wallet_short parser change to Phase 0c). Including
+        wallet in the in-memory key here without the matching shard_key
+        / venue_events / checkpoints / recovery extension would create
+        an asymmetry where live signals with a populated wallet build
+        ``...-w<wallet>`` engines while recovery sites would only ever
+        rebuild ``...-w_nowallet_`` engines, producing duplicate engines
+        for the same logical position the moment any caller starts
+        populating ``wallet_public_id`` on a SignalData.
 
-        ``wallet_public_id`` may be empty during the Phase 0b transition
-        (until Phase 0b.6 NOT NULL tightening lands). The literal
-        ``_nowallet_`` sentinel is used so recovery sites that have no
-        wallet info match live signals that arrive with no wallet info.
+        The ``wallet_public_id`` parameter is accepted (and currently
+        unused) to lock in the call signature for Phase 0c, where this
+        helper will switch to the wallet-aware format
+        ``{instrument}@{exchange}-{mode_or_tag}-w{wallet_short}`` and
+        the recovery sites will simultaneously learn to parse
+        ``wallet_short`` out of the new shard_key column. Until then
+        ``TradingEngineService.wallet_public_id`` propagates onto every
+        ``insert_trade_command`` row and ``OrderRequestData`` payload
+        but the dict-level keying stays flat.
         """
-        wallet_segment = wallet_public_id[:12] if wallet_public_id else "_nowallet_"
-        return f"{instrument}@{exchange}-{mode_or_tag}-w{wallet_segment}"
+        del wallet_public_id
+        return f"{instrument}@{exchange}-{mode_or_tag}"
 
     async def start(self) -> None:
         """Start the trader coordinator.

@@ -141,8 +141,8 @@ class TestCheckpointRecovery:
 
         await coord._recover_engine_state()
 
-        assert "BTC-USD@kraken-live-w_nowallet_" in coord.engines
-        engine = coord.engines["BTC-USD@kraken-live-w_nowallet_"]
+        assert "BTC-USD@kraken-live" in coord.engines
+        engine = coord.engines["BTC-USD@kraken-live"]
         assert engine.position_qty == pytest.approx(0.5)
         assert engine.entry_price == pytest.approx(50000.0)
 
@@ -248,7 +248,7 @@ class TestCheckpointRecovery:
 
         await coord._recover_engine_state()
 
-        engine = coord.engines["BTC-USD@kraken-live-w_nowallet_"]
+        engine = coord.engines["BTC-USD@kraken-live"]
         assert "t1" in engine.seen_exec_ids
         assert "t2" in engine.seen_exec_ids
         shard = coord.trade_service._shards["kraken.BTC-USD.live"]
@@ -294,8 +294,8 @@ class TestCheckpointRecovery:
 
         await coord._recover_engine_state()
 
-        assert "BTC-USD@kraken-live-w_nowallet_" in coord.engines
-        engine = coord.engines["BTC-USD@kraken-live-w_nowallet_"]
+        assert "BTC-USD@kraken-live" in coord.engines
+        engine = coord.engines["BTC-USD@kraken-live"]
         assert engine.position_qty == pytest.approx(0.5)
 
     @pytest.mark.asyncio
@@ -345,7 +345,7 @@ class TestCheckpointRecovery:
 
         await coord._recover_engine_state()
 
-        assert "BTC-USD@kraken-live-w_nowallet_" in coord.engines
+        assert "BTC-USD@kraken-live" in coord.engines
 
     @pytest.mark.asyncio
     async def test_checkpoint_restore_handles_null_seen_exec_ids(
@@ -369,7 +369,7 @@ class TestCheckpointRecovery:
 
         await coord._recover_engine_state()
 
-        engine = coord.engines["BTC-USD@kraken-live-w_nowallet_"]
+        engine = coord.engines["BTC-USD@kraken-live"]
         assert engine.seen_exec_ids == set()
 
     @pytest.mark.asyncio
@@ -398,7 +398,7 @@ class TestCheckpointRecovery:
 
         await coord._recover_engine_state()
 
-        engine = coord.engines["BTC-USD@kraken-live-w_nowallet_"]
+        engine = coord.engines["BTC-USD@kraken-live"]
         assert engine.position_qty == pytest.approx(2.0)
         assert engine.entry_price == pytest.approx(45000.0)
         assert engine.peak_equity == pytest.approx(12000.0)
@@ -430,7 +430,7 @@ class TestCheckpointRecovery:
 
         await coord._recover_engine_state()
 
-        engine = coord.engines["BTC-USD@kraken-live-w_nowallet_"]
+        engine = coord.engines["BTC-USD@kraken-live"]
         assert engine.portfolio.cash == pytest.approx(8000.0)
         assert engine.portfolio.turnover == pytest.approx(50000.0)
         pos = engine.portfolio.positions.get("BTC-USD")
@@ -583,8 +583,8 @@ class TestCheckpointRecovery:
 
         await coord._recover_engine_state()
 
-        assert "ETH-USD@kraken-live-w_nowallet_" in coord.engines
-        assert "BTC-USD@kraken-live-w_nowallet_" not in coord.engines
+        assert "ETH-USD@kraken-live" in coord.engines
+        assert "BTC-USD@kraken-live" not in coord.engines
 
     @pytest.mark.asyncio
     async def test_checkpoint_recovered_shard_skips_full_replay(
@@ -632,7 +632,7 @@ class TestCheckpointRecovery:
 
         await coord._recover_engine_state()
 
-        engine = coord.engines["BTC-USD@kraken-live-w_nowallet_"]
+        engine = coord.engines["BTC-USD@kraken-live"]
         assert engine.position_qty == pytest.approx(0.5)
         assert engine.portfolio.cash == pytest.approx(7500.0)
 
@@ -657,7 +657,7 @@ class TestCheckpointRecovery:
 
         await coord._recover_engine_state()
 
-        engine = coord.engines["BTC-USD@kraken-live-w_nowallet_"]
+        engine = coord.engines["BTC-USD@kraken-live"]
         assert engine.position_qty == pytest.approx(0.0)
         assert "BTC-USD" not in engine.portfolio.positions
 
@@ -753,7 +753,7 @@ class TestCheckpointRecovery:
 
         await coord._recover_engine_state()
 
-        assert "BTC-USD@kraken-live-w_nowallet_" not in coord.engines
+        assert "BTC-USD@kraken-live" not in coord.engines
         mock_repo.get_venue_events_after.assert_not_called()
         assert "kraken.BTC-USD.live" not in coord.trade_service._shards
 
@@ -778,7 +778,7 @@ class TestCheckpointRecovery:
 
         await coord._recover_engine_state()
 
-        assert "BTC-USD@kraken-live-w_nowallet_" not in coord.engines
+        assert "BTC-USD@kraken-live" not in coord.engines
         assert "kraken.BTC-USD.live" not in coord.trade_service._shards
 
     @pytest.mark.asyncio
@@ -813,7 +813,7 @@ class TestCheckpointRecovery:
 
         await coord._recover_engine_state()
 
-        engine = coord.engines["BTC-USD@kraken-live-w_nowallet_"]
+        engine = coord.engines["BTC-USD@kraken-live"]
         assert engine.position_qty != pytest.approx(0.5)
         assert "t3" in engine.seen_exec_ids
         assert engine.portfolio.cash != pytest.approx(7500.0)
