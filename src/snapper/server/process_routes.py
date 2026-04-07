@@ -70,6 +70,9 @@ from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessRoleEnum
+from snapper.data.repository import Repository
+from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import get_repository
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.json_body import json_body
 from snapper.server.json_body import openapi_schema
@@ -114,6 +117,93 @@ def get_process_factory(request: Request) -> ProcessLauncherService:
     """
     factory: ProcessLauncherService = request.app.state.process_factory
     return factory
+
+
+def get_repository_for_processes() -> Repository:
+    """FastAPI dependency for repository access in strategy permission checks.
+
+    Defined locally to avoid an import cycle with ``snapper.server.app``
+    (which imports this module to mount the process router). Returns the
+    same repository instance as ``get_repository_dependency`` in
+    ``snapper.server.app`` because both call ``get_repository`` against
+    the bootstrap settings db_url.
+    """
+    settings = get_settings()
+    return get_repository(settings.db_url)
+
+
+async def _enforce_strategy_scope(
+    parameters: dict[str, object],
+    role: ProcessRoleEnum,
+    principal: AuthPrincipal,
+    repo: Repository,
+) -> None:
+    """Validate operator/wallet scope for a strategy process launch.
+
+    Phase 0b transitional rules per ``plan_multi_tenant_foundation.md``
+    Section 4.4:
+
+    - If ``role`` is not ``STRATEGY`` the check is skipped — non-strategy
+      process templates (feeds, executors, services) do not yet carry
+      operator/wallet scope.
+    - ``operator_public_id`` and ``wallet_public_id`` are *both* optional
+      during the Phase 0b transition. If neither is set, the launch is
+      allowed for backwards compatibility (matches the empty-string
+      defaults on ``StrategyProcessParameters``).
+    - If ``operator_public_id`` is set, it must be in
+      ``principal.operator_public_ids``. ADMIN principals see every
+      active operator (resolved at login) so this naturally allows
+      admins on any operator.
+    - If both ``operator_public_id`` AND ``wallet_public_id`` are set,
+      an active scope grant for that pair must exist in
+      ``wallet_operator_scope_grants``.
+
+    Phase 0b.6 NOT NULL tightening will eventually make both fields
+    required at the schema layer, at which point this helper will reject
+    the empty-defaults path.
+
+    Raises:
+        HTTPException: 403 on operator mismatch or missing grant; 400
+            when a wallet is supplied without an operator.
+    """
+    if role is not ProcessRoleEnum.STRATEGY:
+        return
+    raw_operator = parameters.get("operator_public_id", "")
+    raw_wallet = parameters.get("wallet_public_id", "")
+    operator_public_id = raw_operator if isinstance(raw_operator, str) else ""
+    wallet_public_id = raw_wallet if isinstance(raw_wallet, str) else ""
+    if not operator_public_id and not wallet_public_id:
+        return
+    if not operator_public_id:
+        raise HTTPException(
+            status_code=400,
+            detail="wallet_public_id supplied without operator_public_id",
+        )
+    if operator_public_id not in principal.operator_public_ids:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"User '{principal.username}' has no membership on operator "
+                f"'{operator_public_id}'"
+            ),
+        )
+    if not wallet_public_id:
+        return
+    if not isinstance(repo, SQLAlchemyRepository):
+        return
+    grants = await repo.list_active_scope_grants_for_wallet(
+        wallet_public_id=wallet_public_id,
+        as_of=datetime.now(UTC),
+    )
+    matching = [g for g in grants if g["operator_public_id"] == operator_public_id]
+    if not matching:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Operator '{operator_public_id}' has no active scope grant on "
+                f"wallet '{wallet_public_id}'"
+            ),
+        )
 
 
 @router.get("/available")
@@ -284,7 +374,8 @@ async def create_process_configuration(
     http_request: Request,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
     settings: Annotated[AppSettings, Depends(get_settings)],
-    _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    repo: Annotated[Repository, Depends(get_repository_for_processes)],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     body: Annotated[ProcessCreateRequest, Depends(json_body(ProcessCreateRequest))],
 ) -> ProcessCreateResponse:
@@ -295,7 +386,10 @@ async def create_process_configuration(
         body: Process creation request with template name and config.
         factory: Process launcher service.
         settings: Application settings.
-        _user: Authenticated user with MANAGE_PROCESSES permission.
+        user: Authenticated user with MANAGE_PROCESSES permission, used
+            for the Phase 0b strategy scope check on operator/wallet.
+        repo: Repository used to verify active scope grants for the
+            requested operator/wallet pair.
         _csrf: CSRF token validation.
 
     Returns:
@@ -316,6 +410,7 @@ async def create_process_configuration(
         base_parameters = {}
     if payload.parameters:
         base_parameters.update(payload.parameters)
+    await _enforce_strategy_scope(base_parameters, entry.role, user, repo)
     final_mode = payload.mode or resolve_mode(entry.mode, payload.name)
     final_enabled = entry.enabled if payload.enabled is None else payload.enabled
     try:

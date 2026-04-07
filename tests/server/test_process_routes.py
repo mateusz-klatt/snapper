@@ -21,10 +21,12 @@ from snapper.application.process_manager.models import ProcessStopResult
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.server.process_routes import _enforce_strategy_scope
 from snapper.server.process_routes import create_process_configuration
 from snapper.server.process_routes import get_process_factory
 from snapper.server.process_routes import get_process_schema
 from snapper.server.process_routes import get_process_summary
+from snapper.server.process_routes import get_repository_for_processes
 from snapper.server.process_routes import list_available_processes
 from snapper.server.process_routes import list_configured_processes
 from snapper.server.process_routes import list_process_runs
@@ -676,7 +678,8 @@ class TestCreateProcessConfiguration:
             body=request,
             factory=mock_factory,
             settings=settings,
-            _user=MagicMock(),
+            user=MagicMock(operator_public_ids=[]),
+            repo=MagicMock(),
             _csrf=None,
         )
         mock_factory.create_process_config.assert_awaited_once_with(
@@ -733,7 +736,8 @@ class TestCreateProcessConfiguration:
                 body=request,
                 factory=factory,
                 settings=settings,
-                _user=MagicMock(),
+                user=MagicMock(operator_public_ids=[]),
+                repo=MagicMock(),
                 _csrf=None,
             )
         assert exc_info.value.status_code == 404
@@ -797,7 +801,8 @@ class TestCreateProcessConfiguration:
                 body=request,
                 factory=mock_factory,
                 settings=MagicMock(),
-                _user=MagicMock(),
+                user=MagicMock(operator_public_ids=[]),
+                repo=MagicMock(),
                 _csrf=None,
             )
         assert exc_info.value.status_code == 409
@@ -894,7 +899,8 @@ class TestProcessRoutesEdgeCases:
             body=request,
             factory=mock_factory,
             settings=MagicMock(),
-            _user=MagicMock(),
+            user=MagicMock(operator_public_ids=[]),
+            repo=MagicMock(),
             _csrf=None,
         )
         mock_factory.create_process_config.assert_called_once()
@@ -951,7 +957,8 @@ class TestProcessRoutesEdgeCases:
             body=request,
             factory=mock_factory,
             settings=MagicMock(),
-            _user=MagicMock(),
+            user=MagicMock(operator_public_ids=[]),
+            repo=MagicMock(),
             _csrf=None,
         )
         mock_factory.create_process_config.assert_called_once()
@@ -1007,7 +1014,8 @@ class TestProcessRoutesEdgeCases:
             body=request,
             factory=mock_factory,
             settings=MagicMock(),
-            _user=MagicMock(),
+            user=MagicMock(operator_public_ids=[]),
+            repo=MagicMock(),
             _csrf=None,
         )
         mock_factory.create_process_config.assert_called_once()
@@ -1108,3 +1116,144 @@ class TestProcessRoutesEdgeCases:
         )
         assert result.count == 1
         mock_factory.get_recent_runs.assert_awaited_once_with(limit=10, name="zmq_broker")
+
+
+class TestEnforceStrategyScope:
+    """Tests for the Phase 0b.4 strategy permission helper."""
+
+    @pytest.mark.asyncio
+    async def test_non_strategy_role_skipped(self) -> None:
+        """Non-strategy templates bypass the operator/wallet check."""
+        await _enforce_strategy_scope(
+            parameters={"operator_public_id": "op-1", "wallet_public_id": "w-1"},
+            role=ProcessRoleEnum.CORE,
+            principal=MagicMock(operator_public_ids=[]),
+            repo=MagicMock(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_empty_defaults_allowed(self) -> None:
+        """Strategy with empty operator/wallet keeps Phase 0a behavior."""
+        await _enforce_strategy_scope(
+            parameters={"operator_public_id": "", "wallet_public_id": ""},
+            role=ProcessRoleEnum.STRATEGY,
+            principal=MagicMock(operator_public_ids=[]),
+            repo=MagicMock(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_wallet_without_operator_rejected(self) -> None:
+        """Wallet supplied without operator -> 400."""
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as exc_info:
+            await _enforce_strategy_scope(
+                parameters={"operator_public_id": "", "wallet_public_id": "w-1"},
+                role=ProcessRoleEnum.STRATEGY,
+                principal=MagicMock(operator_public_ids=[]),
+                repo=MagicMock(),
+            )
+        assert exc_info.value.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_operator_not_in_principal_rejected(self) -> None:
+        """Operator not in principal.operator_public_ids -> 403."""
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as exc_info:
+            await _enforce_strategy_scope(
+                parameters={"operator_public_id": "op-x", "wallet_public_id": ""},
+                role=ProcessRoleEnum.STRATEGY,
+                principal=MagicMock(operator_public_ids=["op-1"], username="alice"),
+                repo=MagicMock(),
+            )
+        assert exc_info.value.status_code == 403
+        assert "alice" in exc_info.value.detail
+        assert "op-x" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_operator_only_passes_without_wallet(self) -> None:
+        """Operator membership without wallet skips the grant check."""
+        repo = MagicMock()
+        repo.list_active_scope_grants_for_wallet = AsyncMock()
+        await _enforce_strategy_scope(
+            parameters={"operator_public_id": "op-1", "wallet_public_id": ""},
+            role=ProcessRoleEnum.STRATEGY,
+            principal=MagicMock(operator_public_ids=["op-1"]),
+            repo=repo,
+        )
+        repo.list_active_scope_grants_for_wallet.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_sqlalchemy_repo_skips_grant_check(self) -> None:
+        """In-memory / non-SQLAlchemy repos defer to caller for grants."""
+        await _enforce_strategy_scope(
+            parameters={"operator_public_id": "op-1", "wallet_public_id": "w-1"},
+            role=ProcessRoleEnum.STRATEGY,
+            principal=MagicMock(operator_public_ids=["op-1"]),
+            repo=MagicMock(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_active_grant_present_succeeds(self) -> None:
+        """An active grant for (operator, wallet) lets the call through."""
+        from snapper.data.repository import SQLAlchemyRepository
+
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        repo.list_active_scope_grants_for_wallet = AsyncMock(
+            return_value=[{"operator_public_id": "op-1"}]
+        )
+        await _enforce_strategy_scope(
+            parameters={"operator_public_id": "op-1", "wallet_public_id": "w-1"},
+            role=ProcessRoleEnum.STRATEGY,
+            principal=MagicMock(operator_public_ids=["op-1"]),
+            repo=repo,
+        )
+        repo.list_active_scope_grants_for_wallet.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_matching_grant_rejected(self) -> None:
+        """No active grant on (operator, wallet) -> 403."""
+        from fastapi import HTTPException
+
+        from snapper.data.repository import SQLAlchemyRepository
+
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        repo.list_active_scope_grants_for_wallet = AsyncMock(
+            return_value=[{"operator_public_id": "op-other"}]
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await _enforce_strategy_scope(
+                parameters={"operator_public_id": "op-1", "wallet_public_id": "w-1"},
+                role=ProcessRoleEnum.STRATEGY,
+                principal=MagicMock(operator_public_ids=["op-1"]),
+                repo=repo,
+            )
+        assert exc_info.value.status_code == 403
+        assert "op-1" in exc_info.value.detail
+        assert "w-1" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_non_string_parameters_treated_as_empty(self) -> None:
+        """Non-string operator/wallet values fall through the empty branch."""
+        await _enforce_strategy_scope(
+            parameters={"operator_public_id": 42, "wallet_public_id": ["x"]},
+            role=ProcessRoleEnum.STRATEGY,
+            principal=MagicMock(operator_public_ids=[]),
+            repo=MagicMock(),
+        )
+
+
+class TestGetRepositoryForProcesses:
+    """Tests for the local repository dependency."""
+
+    def test_returns_repository(self) -> None:
+        """Dependency wraps get_settings + get_repository."""
+        with patch("snapper.server.process_routes.get_settings") as mock_get_settings, patch(
+            "snapper.server.process_routes.get_repository"
+        ) as mock_get_repo:
+            mock_get_settings.return_value = MagicMock(db_url="sqlite:///:memory:")
+            mock_get_repo.return_value = MagicMock(name="repo")
+            result = get_repository_for_processes()
+            mock_get_repo.assert_called_once_with("sqlite:///:memory:")
+            assert result is mock_get_repo.return_value

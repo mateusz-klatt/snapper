@@ -1357,7 +1357,8 @@ class TestProcessRoutesTagsFallback:
                 body=request,
                 factory=mock_factory,
                 settings=settings,
-                _user=MagicMock(),
+                user=MagicMock(operator_public_ids=[]),
+                repo=MagicMock(),
                 _csrf=None,
             )
             call_kwargs = mock_factory.create_process_config.call_args.kwargs
@@ -1414,7 +1415,8 @@ class TestProcessRoutesTagsFallback:
                 body=request,
                 factory=mock_factory,
                 settings=settings,
-                _user=MagicMock(),
+                user=MagicMock(operator_public_ids=[]),
+                repo=MagicMock(),
                 _csrf=None,
             )
             call_kwargs = mock_factory.create_process_config.call_args.kwargs
