@@ -3348,3 +3348,32 @@ class TestRecovery:
         triggered = await engine._maybe_stop(last_close=50.0, prev_close=120.0)
         assert triggered is False
         socket.send.assert_not_awaited()
+
+
+def test_build_engine_key_flat_when_wallet_empty() -> None:
+    """Verify empty wallet returns the legacy flat engine_key.
+
+    Given: An empty wallet_public_id (Phase 0b transitional default
+        and every recovery callsite),
+    When: _build_engine_key is invoked,
+    Then: The returned key has no ``-w<wallet_short>`` suffix so live
+        and recovery paths share the same key shape.
+    """
+    key = TraderCoordinator._build_engine_key("BTC-USD", "kraken", "live", "")
+    assert key == "BTC-USD@kraken-live"
+
+
+def test_build_engine_key_wallet_aware_when_populated() -> None:
+    """Verify a populated wallet shards by the dashless 12-char prefix.
+
+    Given: A live signal carrying a UUID7-shaped wallet_public_id with
+        upper-case hex and dashes,
+    When: _build_engine_key is invoked,
+    Then: The key gains a ``-w<wallet_short>`` suffix where wallet_short
+        is the dashless lowercase form truncated to 12 hex characters,
+        per the Section 14.7.5 plan spec.
+    """
+    key = TraderCoordinator._build_engine_key(
+        "BTC-USD", "kraken", "live", "01975A8B-3C7D-7000-8000-AAAAAAAAAAAA"
+    )
+    assert key == "BTC-USD@kraken-live-w01975a8b3c7d"

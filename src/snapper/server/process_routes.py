@@ -28,6 +28,7 @@ Example:
         {"mode": "process"}
 """
 
+import json
 from datetime import UTC
 from datetime import datetime
 from typing import Annotated
@@ -132,6 +133,146 @@ def get_repository_for_processes() -> Repository:
     return get_repository(settings.db_url)
 
 
+async def _read_persisted_strategy_parameters(
+    repo: Repository, name: str
+) -> dict[str, object] | None:
+    """Read the persisted process configuration for ``name``.
+
+    Returns a dict with ``template`` and ``parameters`` keys when the
+    persisted ``process_<name>`` settings row exists, otherwise None.
+    Mirrors the launcher's ``start_process_by_name`` DB read so the
+    start endpoint can re-validate the same effective parameters the
+    launcher will hand to the process constructor.
+    """
+    if not isinstance(repo, SQLAlchemyRepository):
+        return None
+    from sqlalchemy import select
+
+    from snapper.data.models import Setting
+    from snapper.data.repository import where_active_now
+
+    config_key = f"process_{name}"
+    async with repo.session() as session:
+        result = await session.execute(
+            select(Setting).where(Setting.key == config_key, *where_active_now(Setting))
+        )
+        setting = result.scalar_one_or_none()
+        if setting is None:
+            return None
+        try:
+            config_dict = json.loads(setting.value)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(config_dict, dict):
+        return None
+    parameters = config_dict.get("parameters") or {}
+    class_path = config_dict.get("class_path") or ""
+    return {"class_path": class_path, "parameters": parameters}
+
+
+def _resolve_role_for_class_path(class_path: str) -> ProcessRoleEnum | None:
+    """Look up a registered process entry by its class_path.
+
+    The launcher persists ``class_path`` in the process settings row
+    but not the template name, so the start endpoint maps class_path
+    back to a registry entry to read the role for the scope check.
+    Returns None when no matching entry exists (e.g. the template was
+    deregistered between create and start).
+    """
+    registry = get_registered_processes()
+    for entry in registry.values():
+        if entry.class_path == class_path:
+            return entry.role
+    return None
+
+
+async def _enforce_wallet_grant_exists(
+    repo: SQLAlchemyRepository,
+    operator_public_id: str,
+    wallet_public_id: str,
+    as_of: datetime,
+) -> None:
+    """Verify the operator holds at least one active grant on the wallet.
+
+    Raises 403 when the operator has zero matching grants. Coarse check
+    that runs before the per-output instrument coverage check.
+    """
+    grants = await repo.list_active_scope_grants_for_wallet(
+        wallet_public_id=wallet_public_id,
+        as_of=as_of,
+    )
+    matching = [g for g in grants if g["operator_public_id"] == operator_public_id]
+    if matching:
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            f"Operator '{operator_public_id}' has no active scope grant on "
+            f"wallet '{wallet_public_id}'"
+        ),
+    )
+
+
+async def _enforce_strategy_outputs_covered(
+    repo: SQLAlchemyRepository,
+    parameters: dict[str, object],
+    operator_public_id: str,
+    wallet_public_id: str,
+    as_of: datetime,
+) -> None:
+    """Verify every output instrument is covered by an active grant.
+
+    Maps each ``outputs`` symbol on the strategy's exchange to its
+    instrument_public_id and checks membership against the union of
+    instruments covered by all active grants for the operator on the
+    wallet. Skipped for the paper exchange (no Instrument rows) and
+    when ``outputs`` / ``exchange`` are missing or non-string. Raises
+    403 listing every uncovered symbol when the check fails.
+    """
+    raw_outputs = parameters.get("outputs", [])
+    raw_exchange = parameters.get("exchange", "")
+    if not isinstance(raw_outputs, list) or not isinstance(raw_exchange, str):
+        return
+    outputs = [o for o in raw_outputs if isinstance(o, str)]
+    if not outputs or not raw_exchange or raw_exchange == "paper":
+        return
+    covered = await repo.list_grant_covered_instrument_public_ids(
+        operator_public_id=operator_public_id,
+        wallet_public_id=wallet_public_id,
+        as_of=as_of,
+    )
+    uncovered = await _find_uncovered_outputs(repo, outputs, raw_exchange, covered, as_of)
+    if not uncovered:
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            f"Operator '{operator_public_id}' has no active grant covering "
+            f"instruments {sorted(uncovered)} on wallet '{wallet_public_id}'"
+        ),
+    )
+
+
+async def _find_uncovered_outputs(
+    repo: SQLAlchemyRepository,
+    outputs: list[str],
+    exchange: str,
+    covered: set[str],
+    as_of: datetime,
+) -> list[str]:
+    """Return the subset of output symbols whose instrument is not covered."""
+    uncovered: list[str] = []
+    for symbol in outputs:
+        instrument_public_id = await repo.get_instrument_public_id_by_symbol(
+            native_symbol=symbol,
+            exchange=exchange,
+            as_of=as_of,
+        )
+        if instrument_public_id is None or instrument_public_id not in covered:
+            uncovered.append(symbol)
+    return uncovered
+
+
 async def _enforce_strategy_scope(
     parameters: dict[str, object],
     role: ProcessRoleEnum,
@@ -191,19 +332,11 @@ async def _enforce_strategy_scope(
         return
     if not isinstance(repo, SQLAlchemyRepository):
         return
-    grants = await repo.list_active_scope_grants_for_wallet(
-        wallet_public_id=wallet_public_id,
-        as_of=datetime.now(UTC),
+    as_of = datetime.now(UTC)
+    await _enforce_wallet_grant_exists(repo, operator_public_id, wallet_public_id, as_of)
+    await _enforce_strategy_outputs_covered(
+        repo, parameters, operator_public_id, wallet_public_id, as_of
     )
-    matching = [g for g in grants if g["operator_public_id"] == operator_public_id]
-    if not matching:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"Operator '{operator_public_id}' has no active scope grant on "
-                f"wallet '{wallet_public_id}'"
-            ),
-        )
 
 
 @router.get("/available")
@@ -512,25 +645,47 @@ async def start_process(
     http_request: Request,
     name: str,
     factory: Annotated[ProcessLauncherService, Depends(get_process_factory)],
-    _user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_PROCESSES))],
+    repo: Annotated[Repository, Depends(get_repository_for_processes)],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     body: Annotated[ProcessStartRequest, Depends(json_body(ProcessStartRequest))],
 ) -> ProcessStartResponse:
     """Start a previously created process configuration.
 
-    Phase 0b.4d note: this endpoint accepts ``payload.parameters`` which
-    the launcher applies as a full replacement on top of the persisted
-    config. That means a caller with ``MANAGE_PROCESSES`` could in
-    principle bypass the create-time ``_enforce_strategy_scope`` check
-    by overriding ``operator_public_id`` / ``wallet_public_id`` at start
-    time. The risk is bounded today because executors are still wallet-
-    agnostic (Phase 0c not yet wired) and ``MANAGE_PROCESSES`` already
-    requires operator-or-admin role. Phase 0c MUST re-enforce
-    operator/wallet scope at start time once executors become per-wallet
-    and a stale start payload could otherwise route a strategy onto a
-    wallet the caller has no grant on. See plan Section 4.4 / 5.x.
+    Phase 0b.4d / phase-close fix: ``payload.parameters`` cannot
+    override ``operator_public_id`` or ``wallet_public_id`` at start
+    time — those fields are pinned to whatever ``_enforce_strategy_scope``
+    validated at create time. If the caller wants to switch wallets or
+    operators they must update the persisted process configuration
+    through the create / configure path so the scope check runs again.
+
+    For strategy templates, this handler ALSO re-runs
+    ``_enforce_strategy_scope`` against the persisted parameters before
+    starting the process, so a strategy whose grant has been revoked
+    between create-time and start-time fails closed instead of running
+    on a wallet the caller no longer controls.
     """
     payload = body.payload
+    overrides = payload.parameters or {}
+    forbidden = {"operator_public_id", "wallet_public_id"}.intersection(overrides.keys())
+    if forbidden:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Cannot override "
+                f"{sorted(forbidden)} at start time; update the persisted "
+                "process configuration via the create endpoint instead."
+            ),
+        )
+    persisted = await _read_persisted_strategy_parameters(repo, name)
+    if persisted is not None:
+        class_path = persisted.get("class_path")
+        if isinstance(class_path, str) and class_path:
+            role = _resolve_role_for_class_path(class_path)
+            if role is not None:
+                params = persisted.get("parameters") or {}
+                if isinstance(params, dict):
+                    await _enforce_strategy_scope(params, role, user, repo)
     result = await factory.start_process_by_name(
         name=name,
         mode=payload.mode,

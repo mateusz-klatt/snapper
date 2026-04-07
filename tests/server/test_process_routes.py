@@ -2,6 +2,7 @@
 
 from datetime import UTC
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -490,7 +491,8 @@ class TestStartProcess:
             name="zmq_broker",
             body=body,
             factory=mock_factory,
-            _user=MagicMock(),
+            user=MagicMock(operator_public_ids=[]),
+            repo=MagicMock(),
             _csrf=None,
         )
         assert result.payload.status == "success"
@@ -529,7 +531,8 @@ class TestStartProcess:
             name="zmq_broker",
             body=body,
             factory=mock_factory,
-            _user=MagicMock(),
+            user=MagicMock(operator_public_ids=[]),
+            repo=MagicMock(),
             _csrf=None,
         )
         assert result.payload.status == "success"
@@ -1257,3 +1260,591 @@ class TestGetRepositoryForProcesses:
             result = get_repository_for_processes()
             mock_get_repo.assert_called_once_with("sqlite:///:memory:")
             assert result is mock_get_repo.return_value
+
+
+class TestPhase0bScopeHelpers:
+    """Tests for the Phase 0b.4d / phase-close strategy scope helpers."""
+
+    @pytest.mark.asyncio
+    async def test_enforce_wallet_grant_exists_passes(self) -> None:
+        """A matching grant lets the call return without raising."""
+        from snapper.data.repository import SQLAlchemyRepository
+        from snapper.server.process_routes import _enforce_wallet_grant_exists
+
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        repo.list_active_scope_grants_for_wallet = AsyncMock(
+            return_value=[{"operator_public_id": "op-1"}]
+        )
+        await _enforce_wallet_grant_exists(repo, "op-1", "w-1", datetime.now(UTC))
+
+    @pytest.mark.asyncio
+    async def test_enforce_strategy_outputs_covered_skips_paper_exchange(self) -> None:
+        """Paper exchange has no Instrument rows so the coverage check skips."""
+        from snapper.data.repository import SQLAlchemyRepository
+        from snapper.server.process_routes import _enforce_strategy_outputs_covered
+
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        repo.list_grant_covered_instrument_public_ids = AsyncMock()
+        await _enforce_strategy_outputs_covered(
+            repo,
+            {"outputs": ["BTC-USD"], "exchange": "paper"},
+            "op-1",
+            "w-1",
+            datetime.now(UTC),
+        )
+        repo.list_grant_covered_instrument_public_ids.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_enforce_strategy_outputs_covered_skips_when_outputs_missing(self) -> None:
+        """Empty outputs list short-circuits the coverage check."""
+        from snapper.data.repository import SQLAlchemyRepository
+        from snapper.server.process_routes import _enforce_strategy_outputs_covered
+
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        repo.list_grant_covered_instrument_public_ids = AsyncMock()
+        await _enforce_strategy_outputs_covered(
+            repo,
+            {"outputs": [], "exchange": "kraken"},
+            "op-1",
+            "w-1",
+            datetime.now(UTC),
+        )
+        repo.list_grant_covered_instrument_public_ids.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_enforce_strategy_outputs_covered_skips_non_string_inputs(self) -> None:
+        """Non-list outputs / non-string exchange short-circuit cleanly."""
+        from snapper.data.repository import SQLAlchemyRepository
+        from snapper.server.process_routes import _enforce_strategy_outputs_covered
+
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        repo.list_grant_covered_instrument_public_ids = AsyncMock()
+        await _enforce_strategy_outputs_covered(
+            repo,
+            {"outputs": "BTC-USD", "exchange": "kraken"},
+            "op-1",
+            "w-1",
+            datetime.now(UTC),
+        )
+        repo.list_grant_covered_instrument_public_ids.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_enforce_strategy_outputs_covered_passes_for_covered_outputs(self) -> None:
+        """All outputs map to covered instrument_public_ids -> return."""
+        from snapper.data.repository import SQLAlchemyRepository
+        from snapper.server.process_routes import _enforce_strategy_outputs_covered
+
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        repo.list_grant_covered_instrument_public_ids = AsyncMock(return_value={"i-btc"})
+        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="i-btc")
+        await _enforce_strategy_outputs_covered(
+            repo,
+            {"outputs": ["BTC-USD"], "exchange": "kraken"},
+            "op-1",
+            "w-1",
+            datetime.now(UTC),
+        )
+        repo.get_instrument_public_id_by_symbol.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_enforce_strategy_outputs_covered_rejects_uncovered(self) -> None:
+        """An uncovered output -> 403 with the offending symbol in detail."""
+        from fastapi import HTTPException
+
+        from snapper.data.repository import SQLAlchemyRepository
+        from snapper.server.process_routes import _enforce_strategy_outputs_covered
+
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        repo.list_grant_covered_instrument_public_ids = AsyncMock(return_value={"i-eth"})
+        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="i-btc")
+        with pytest.raises(HTTPException) as exc_info:
+            await _enforce_strategy_outputs_covered(
+                repo,
+                {"outputs": ["BTC-USD"], "exchange": "kraken"},
+                "op-1",
+                "w-1",
+                datetime.now(UTC),
+            )
+        assert exc_info.value.status_code == 403
+        assert "BTC-USD" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_enforce_strategy_outputs_covered_rejects_unknown_symbol(self) -> None:
+        """A symbol that doesn't resolve to any instrument is treated as uncovered."""
+        from fastapi import HTTPException
+
+        from snapper.data.repository import SQLAlchemyRepository
+        from snapper.server.process_routes import _enforce_strategy_outputs_covered
+
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        repo.list_grant_covered_instrument_public_ids = AsyncMock(return_value=set())
+        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+        with pytest.raises(HTTPException) as exc_info:
+            await _enforce_strategy_outputs_covered(
+                repo,
+                {"outputs": ["XYZ-USD"], "exchange": "kraken"},
+                "op-1",
+                "w-1",
+                datetime.now(UTC),
+            )
+        assert exc_info.value.status_code == 403
+
+
+class TestStartProcessScopeRecheck:
+    """Tests for the Phase 0b phase-close start_process re-validation."""
+
+    @pytest.mark.asyncio
+    async def test_start_process_rejects_wallet_override(self) -> None:
+        """Override of wallet_public_id at start time -> 400."""
+        from fastapi import HTTPException
+
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(
+                mode=None,
+                parameters={"wallet_public_id": "w-x"},
+            ),
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await start_process(
+                http_request=_make_rest_request(),
+                name="any",
+                body=body,
+                factory=MagicMock(),
+                user=MagicMock(operator_public_ids=[]),
+                repo=MagicMock(),
+                _csrf=None,
+            )
+        assert exc_info.value.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_start_process_rejects_operator_override(self) -> None:
+        """Override of operator_public_id at start time -> 400."""
+        from fastapi import HTTPException
+
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(
+                mode=None,
+                parameters={"operator_public_id": "op-x"},
+            ),
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await start_process(
+                http_request=_make_rest_request(),
+                name="any",
+                body=body,
+                factory=MagicMock(),
+                user=MagicMock(operator_public_ids=[]),
+                repo=MagicMock(),
+                _csrf=None,
+            )
+        assert exc_info.value.status_code == 400
+
+
+class TestReadPersistedStrategyParameters:
+    """Tests for the persisted-config DB read used at start-time recheck."""
+
+    @pytest.mark.asyncio
+    async def test_returns_none_for_non_sqlalchemy_repo(self) -> None:
+        """In-memory test repos return None and the recheck silently skips."""
+        from snapper.server.process_routes import _read_persisted_strategy_parameters
+
+        result = await _read_persisted_strategy_parameters(MagicMock(), "any")
+        assert result is None
+
+
+class TestResolveRoleForClassPath:
+    """Tests for the class_path -> ProcessRoleEnum lookup."""
+
+    def test_returns_none_when_class_path_unknown(self) -> None:
+        """An unregistered class_path resolves to None."""
+        from snapper.server.process_routes import _resolve_role_for_class_path
+
+        result = _resolve_role_for_class_path("snapper.fake.Unknown")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_setting_missing(self, tmp_path: Path) -> None:
+        """Returns None when no persisted setting row exists."""
+        from snapper.data.repository import SQLAlchemyRepository
+        from snapper.server.process_routes import _read_persisted_strategy_parameters
+
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path}/p1.db")
+        await repo.create_all()
+        result = await _read_persisted_strategy_parameters(repo, "missing")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_persisted_dict(self, tmp_path: Path) -> None:
+        """Returns the parsed parameters dict and class_path for a real config."""
+        import json as _json
+
+        from snapper.data.models import Setting
+        from snapper.data.repository import SQLAlchemyRepository
+        from snapper.server.process_routes import _read_persisted_strategy_parameters
+
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path}/p2.db")
+        await repo.create_all()
+        async with repo.session() as session:
+            session.add(
+                Setting(
+                    key="process_strat-1",
+                    value=_json.dumps(
+                        {
+                            "class_path": "snapper.fake.StratClass",
+                            "parameters": {"name": "x", "wallet_public_id": "w-1"},
+                        }
+                    ),
+                    category="process",
+                    is_encrypted=False,
+                    timestamp=datetime.now(UTC),
+                    session_id="t",
+                    sequence_id=1,
+                )
+            )
+            await session.commit()
+        result = await _read_persisted_strategy_parameters(repo, "strat-1")
+        assert result is not None
+        assert result["class_path"] == "snapper.fake.StratClass"
+        params = result["parameters"]
+        assert isinstance(params, dict)
+        assert params.get("wallet_public_id") == "w-1"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_value_is_not_json(self, tmp_path: Path) -> None:
+        """Malformed JSON value -> None (start endpoint silently skips recheck)."""
+        from snapper.data.models import Setting
+        from snapper.data.repository import SQLAlchemyRepository
+        from snapper.server.process_routes import _read_persisted_strategy_parameters
+
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path}/p3.db")
+        await repo.create_all()
+        async with repo.session() as session:
+            session.add(
+                Setting(
+                    key="process_bad",
+                    value="not-json",
+                    category="process",
+                    is_encrypted=False,
+                    timestamp=datetime.now(UTC),
+                    session_id="t",
+                    sequence_id=1,
+                )
+            )
+            await session.commit()
+        result = await _read_persisted_strategy_parameters(repo, "bad")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_value_is_not_dict(self, tmp_path: Path) -> None:
+        """JSON value that isn't an object -> None."""
+        from snapper.data.models import Setting
+        from snapper.data.repository import SQLAlchemyRepository
+        from snapper.server.process_routes import _read_persisted_strategy_parameters
+
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path}/p4.db")
+        await repo.create_all()
+        async with repo.session() as session:
+            session.add(
+                Setting(
+                    key="process_arr",
+                    value="[1, 2, 3]",
+                    category="process",
+                    is_encrypted=False,
+                    timestamp=datetime.now(UTC),
+                    session_id="t",
+                    sequence_id=1,
+                )
+            )
+            await session.commit()
+        result = await _read_persisted_strategy_parameters(repo, "arr")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_start_process_runs_persisted_recheck_when_strategy(self, tmp_path: Path) -> None:
+        """When the persisted config maps to a STRATEGY role, start re-runs scope.
+
+        Given: A SQLAlchemyRepository with a persisted process_<name> setting
+            whose class_path matches a registered STRATEGY entry and whose
+            parameters carry an operator/wallet that the principal does not
+            own,
+        When: start_process is called with no override on those fields,
+        Then: The recheck raises 403 before factory.start_process_by_name is
+            invoked.
+        """
+        import json as _json
+        from unittest.mock import patch as _patch
+
+        from fastapi import HTTPException
+
+        from snapper.application.process_manager.models import ProcessRegistryEntry
+        from snapper.data.models import Setting
+        from snapper.data.repository import SQLAlchemyRepository
+
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path}/start.db")
+        await repo.create_all()
+        async with repo.session() as session:
+            session.add(
+                Setting(
+                    key="process_strat-foreign",
+                    value=_json.dumps(
+                        {
+                            "class_path": "snapper.fake.StratClass",
+                            "parameters": {
+                                "operator_public_id": "op-other",
+                                "wallet_public_id": "",
+                            },
+                        }
+                    ),
+                    category="process",
+                    is_encrypted=False,
+                    timestamp=datetime.now(UTC),
+                    session_id="t",
+                    sequence_id=1,
+                )
+            )
+            await session.commit()
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+        fake_class = MagicMock()
+        registry = {
+            "strat-foreign": ProcessRegistryEntry(
+                class_ref=fake_class,
+                class_path="snapper.fake.StratClass",
+                method="start",
+                description="d",
+                priority=50,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.STRATEGY,
+                tags=("strategy",),
+                parameters_model=None,
+                parameters_schema={"type": "object"},
+                enabled=False,
+                mode="thread",
+            )
+        }
+        with _patch(
+            "snapper.server.process_routes.get_registered_processes", return_value=registry
+        ):
+            mock_factory = MagicMock()
+            mock_factory.start_process_by_name = AsyncMock()
+            with pytest.raises(HTTPException) as exc_info:
+                await start_process(
+                    http_request=_make_rest_request(),
+                    name="strat-foreign",
+                    body=body,
+                    factory=mock_factory,
+                    user=MagicMock(operator_public_ids=["op-mine"], username="alice"),
+                    repo=repo,
+                    _csrf=None,
+                )
+            assert exc_info.value.status_code == 403
+            mock_factory.start_process_by_name.assert_not_called()
+
+
+class TestResolveRoleForClassPathHit:
+    """Tests for the class_path -> ProcessRoleEnum lookup positive path."""
+
+    def test_returns_role_when_class_path_matches(self) -> None:
+        """A registered class_path resolves to its role."""
+        from unittest.mock import patch as _patch
+
+        from snapper.application.process_manager.models import ProcessRegistryEntry
+        from snapper.server.process_routes import _resolve_role_for_class_path
+
+        entry = ProcessRegistryEntry(
+            class_ref=MagicMock(),
+            class_path="snapper.fake.StratClass",
+            method="start",
+            description="",
+            priority=50,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.STRATEGY,
+            tags=("strategy",),
+            parameters_model=None,
+            parameters_schema={"type": "object"},
+            enabled=False,
+            mode="thread",
+        )
+        with _patch(
+            "snapper.server.process_routes.get_registered_processes",
+            return_value={"x": entry},
+        ):
+            result = _resolve_role_for_class_path("snapper.fake.StratClass")
+        assert result is ProcessRoleEnum.STRATEGY
+
+    @pytest.mark.asyncio
+    async def test_start_process_skips_recheck_when_class_path_empty(self, tmp_path: Path) -> None:
+        """Persisted config without class_path bypasses the recheck cleanly."""
+        import json as _json
+
+        from snapper.data.models import Setting
+        from snapper.data.repository import SQLAlchemyRepository
+
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path}/sk1.db")
+        await repo.create_all()
+        async with repo.session() as session:
+            session.add(
+                Setting(
+                    key="process_no-class",
+                    value=_json.dumps({"class_path": "", "parameters": {}}),
+                    category="process",
+                    is_encrypted=False,
+                    timestamp=datetime.now(UTC),
+                    session_id="t",
+                    sequence_id=1,
+                )
+            )
+            await session.commit()
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+        mock_factory = MagicMock()
+        mock_factory.start_process_by_name = AsyncMock(
+            return_value=ProcessStartResult(status="success", message="ok")
+        )
+        await start_process(
+            http_request=_make_rest_request(),
+            name="no-class",
+            body=body,
+            factory=mock_factory,
+            user=MagicMock(operator_public_ids=[]),
+            repo=repo,
+            _csrf=None,
+        )
+        mock_factory.start_process_by_name.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_start_process_skips_recheck_when_class_path_unregistered(
+        self, tmp_path: Path
+    ) -> None:
+        """Persisted class_path that no template references skips the recheck."""
+        import json as _json
+
+        from snapper.data.models import Setting
+        from snapper.data.repository import SQLAlchemyRepository
+
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path}/sk2.db")
+        await repo.create_all()
+        async with repo.session() as session:
+            session.add(
+                Setting(
+                    key="process_unreg",
+                    value=_json.dumps(
+                        {"class_path": "snapper.fake.Unregistered", "parameters": {}}
+                    ),
+                    category="process",
+                    is_encrypted=False,
+                    timestamp=datetime.now(UTC),
+                    session_id="t",
+                    sequence_id=1,
+                )
+            )
+            await session.commit()
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+        mock_factory = MagicMock()
+        mock_factory.start_process_by_name = AsyncMock(
+            return_value=ProcessStartResult(status="success", message="ok")
+        )
+        await start_process(
+            http_request=_make_rest_request(),
+            name="unreg",
+            body=body,
+            factory=mock_factory,
+            user=MagicMock(operator_public_ids=[]),
+            repo=repo,
+            _csrf=None,
+        )
+        mock_factory.start_process_by_name.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_start_process_skips_recheck_when_parameters_not_dict(
+        self, tmp_path: Path
+    ) -> None:
+        """Persisted parameters that are not a dict skip the recheck cleanly."""
+        import json as _json
+        from unittest.mock import patch as _patch
+
+        from snapper.application.process_manager.models import ProcessRegistryEntry
+        from snapper.data.models import Setting
+        from snapper.data.repository import SQLAlchemyRepository
+
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path}/sk3.db")
+        await repo.create_all()
+        async with repo.session() as session:
+            session.add(
+                Setting(
+                    key="process_listparams",
+                    value=_json.dumps(
+                        {"class_path": "snapper.fake.StratClass", "parameters": "not-a-dict"}
+                    ),
+                    category="process",
+                    is_encrypted=False,
+                    timestamp=datetime.now(UTC),
+                    session_id="t",
+                    sequence_id=1,
+                )
+            )
+            await session.commit()
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+        registry = {
+            "x": ProcessRegistryEntry(
+                class_ref=MagicMock(),
+                class_path="snapper.fake.StratClass",
+                method="start",
+                description="",
+                priority=50,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.STRATEGY,
+                tags=("strategy",),
+                parameters_model=None,
+                parameters_schema={"type": "object"},
+                enabled=False,
+                mode="thread",
+            )
+        }
+        mock_factory = MagicMock()
+        mock_factory.start_process_by_name = AsyncMock(
+            return_value=ProcessStartResult(status="success", message="ok")
+        )
+        with _patch(
+            "snapper.server.process_routes.get_registered_processes", return_value=registry
+        ):
+            await start_process(
+                http_request=_make_rest_request(),
+                name="listparams",
+                body=body,
+                factory=mock_factory,
+                user=MagicMock(operator_public_ids=[]),
+                repo=repo,
+                _csrf=None,
+            )
+        mock_factory.start_process_by_name.assert_awaited_once()

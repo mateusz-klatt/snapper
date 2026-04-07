@@ -948,3 +948,117 @@ class TestListActiveScopeGrants:
         ids = await _seed_world(repo)
         active = await repo.list_active_scope_grants_for_wallet(ids["wallet"], datetime.now(UTC))
         assert active == []
+
+
+class TestListGrantCoveredInstrumentPublicIds:
+    """Tests for the new Phase 0b.4d coverage helper."""
+
+    @pytest.mark.asyncio
+    async def test_underlying_grant_expands_to_all_mapped_instruments(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """An underlying-scoped grant covers every mapped instrument."""
+        ids = await _seed_world(repo)
+        await repo.create_scope_grant(
+            _make_request(
+                operator_public_id=ids["alice"],
+                wallet_public_id=ids["wallet"],
+                granted_by=ids["user_admin"],
+                scope_kind="underlying",
+                underlying_public_id=ids["underlying_btc"],
+            )
+        )
+        covered = await repo.list_grant_covered_instrument_public_ids(
+            operator_public_id=ids["alice"],
+            wallet_public_id=ids["wallet"],
+            as_of=datetime.now(UTC),
+        )
+        assert covered == {ids["btc_perp"], ids["btc_spot"]}
+
+    @pytest.mark.asyncio
+    async def test_instrument_grant_returns_singleton(self, repo: SQLAlchemyRepository) -> None:
+        """An instrument-scoped grant covers only that instrument."""
+        ids = await _seed_world(repo)
+        await repo.create_scope_grant(
+            _make_request(
+                operator_public_id=ids["alice"],
+                wallet_public_id=ids["wallet"],
+                granted_by=ids["user_admin"],
+                scope_kind="instrument",
+                instrument_public_id=ids["btc_perp"],
+            )
+        )
+        covered = await repo.list_grant_covered_instrument_public_ids(
+            operator_public_id=ids["alice"],
+            wallet_public_id=ids["wallet"],
+            as_of=datetime.now(UTC),
+        )
+        assert covered == {ids["btc_perp"]}
+
+    @pytest.mark.asyncio
+    async def test_other_operator_grants_are_filtered_out(self, repo: SQLAlchemyRepository) -> None:
+        """Only the requested operator's grants contribute to the covered set."""
+        ids = await _seed_world(repo)
+        await repo.create_scope_grant(
+            _make_request(
+                operator_public_id=ids["bob"],
+                wallet_public_id=ids["wallet"],
+                granted_by=ids["user_admin"],
+                scope_kind="instrument",
+                instrument_public_id=ids["btc_perp"],
+            )
+        )
+        covered = await repo.list_grant_covered_instrument_public_ids(
+            operator_public_id=ids["alice"],
+            wallet_public_id=ids["wallet"],
+            as_of=datetime.now(UTC),
+        )
+        assert covered == set()
+
+
+class TestGetInstrumentPublicIdBySymbol:
+    """Tests for the new Phase 0b.4d symbol-to-instrument resolver."""
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_symbol_unknown(self, repo: SQLAlchemyRepository) -> None:
+        """Unknown symbol on a known exchange returns None."""
+        result = await repo.get_instrument_public_id_by_symbol(
+            native_symbol="ZZZ-USD",
+            exchange="kraken",
+            as_of=datetime.now(UTC),
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_public_id_for_known_pair(self, repo: SQLAlchemyRepository) -> None:
+        """A symbol present on the requested exchange resolves to its instrument."""
+        from snapper.data.models import Symbol
+
+        async with repo.session() as s:
+            s.add(
+                Symbol(
+                    public_id="00000000-0000-7000-8000-0000000000c1",
+                    native_symbol="BTC-USD",
+                    base="BTC",
+                    quote="USD",
+                    asset_type="crypto",
+                    created_at=datetime.now(UTC),
+                    session_id="t",
+                    sequence_id=1,
+                    timestamp=datetime.now(UTC),
+                )
+            )
+            await s.commit()
+        await repo.ensure_instrument(
+            symbol_public_id="00000000-0000-7000-8000-0000000000c1",
+            exchange="kraken",
+            session_id="t",
+            sequence_id=2,
+            timestamp=datetime.now(UTC),
+        )
+        result = await repo.get_instrument_public_id_by_symbol(
+            native_symbol="BTC-USD",
+            exchange="kraken",
+            as_of=datetime.now(UTC),
+        )
+        assert result is not None

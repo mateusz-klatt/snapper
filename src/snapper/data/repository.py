@@ -1201,6 +1201,35 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def list_grant_covered_instrument_public_ids(
+        self,
+        operator_public_id: str,
+        wallet_public_id: str,
+        as_of: datetime,
+    ) -> set[str]:
+        """Set of instrument_public_ids covered by an operator's active grants.
+
+        Expands underlying-scoped grants to their current instrument set
+        per the dynamic-scope rule. Used by the strategy permission check
+        to verify that every output a strategy emits is in the operator's
+        scope at strategy creation/start time.
+        """
+        ...
+
+    @abstractmethod
+    async def get_instrument_public_id_by_symbol(
+        self,
+        native_symbol: str,
+        exchange: str,
+        as_of: datetime,
+    ) -> str | None:
+        """Resolve a (native_symbol, exchange) pair to its instrument public_id.
+
+        Returns None when no active Instrument row exists for the pair.
+        """
+        ...
+
+    @abstractmethod
     async def handover_grant(
         self,
         from_grant_public_id: str,
@@ -4067,6 +4096,56 @@ class SQLAlchemyRepository(Repository):
         async with self.session() as s:
             grants = await self._load_active_grants_for_wallet(s, wallet_public_id, as_of)
             return [self._row_from_grant(g) for g in grants]
+
+    async def list_grant_covered_instrument_public_ids(
+        self,
+        operator_public_id: str,
+        wallet_public_id: str,
+        as_of: datetime,
+    ) -> set[str]:
+        """Return covered instrument set for an operator on a wallet.
+
+        Expands underlying-scoped grants to their current instrument set
+        per the dynamic-scope rule.
+
+        Returns an empty set when the operator has no active grants on the
+        wallet OR when the operator has only underlying-scoped grants whose
+        underlyings currently have zero active instrument mappings.
+        """
+        async with self.session() as s:
+            grants = await self._load_active_grants_for_wallet(s, wallet_public_id, as_of)
+            covered: set[str] = set()
+            for grant in grants:
+                if grant.operator_public_id != operator_public_id:
+                    continue
+                expanded = await self._expand_to_instruments(
+                    s,
+                    scope_kind=grant.scope_kind,
+                    underlying_public_id=grant.underlying_public_id,
+                    instrument_public_id=grant.instrument_public_id,
+                    as_of=as_of,
+                )
+                covered.update(expanded)
+            return covered
+
+    async def get_instrument_public_id_by_symbol(
+        self,
+        native_symbol: str,
+        exchange: str,
+        as_of: datetime,
+    ) -> str | None:
+        """Resolve a native symbol on a given exchange to its instrument public_id.
+
+        Returns None when no active Instrument row exists for the
+        ``(native_symbol, exchange)`` pair at ``as_of``. Used by the
+        Phase 0b.4 strategy permission check to map strategy ``outputs``
+        (symbols) to the instrument set covered by an operator's grants.
+        """
+        async with self.session() as s:
+            instrument = await self._resolve_active_instrument(
+                s, native_symbol=native_symbol, exchange=exchange, as_of=as_of
+            )
+            return instrument.public_id if instrument is not None else None
 
     async def handover_grant(
         self,
