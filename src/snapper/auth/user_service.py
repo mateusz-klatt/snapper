@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy import update
 
 from snapper.auth.domain.roles import UserRole
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.user import UserProfile
 from snapper.config.settings import get_settings
 from snapper.data.models import User
@@ -99,6 +100,47 @@ class UserService:
             role=UserRole(db_user.role),
             is_active=db_user.is_active,
             created_at=db_user.created_at,
+        )
+
+    async def build_auth_principal(self, user: UserProfile) -> AuthPrincipal:
+        """Build a fully-populated ``AuthPrincipal`` from a ``UserProfile``.
+
+        Resolves the multi-tenant fields (``user_public_id``,
+        ``operator_public_ids``, ``primary_operator_public_id``) from the
+        repository per Plan 0 Section 4.1. ADMIN users automatically
+        receive the operator set covering every active operator;
+        OPERATOR / VIEWER users get only their explicit memberships
+        from ``user_operator_memberships``. ``active_wallet_public_id``
+        is intentionally NOT populated here — it is UI state set by the
+        client and round-tripped through token claims.
+
+        Args:
+            user: The authenticated user profile.
+
+        Returns:
+            ``AuthPrincipal`` ready to feed into ``TokenManager.create_tokens``.
+        """
+        now = datetime.now(UTC)
+        memberships = await self.repository.get_user_operator_memberships(
+            user_public_id=user.public_id, as_of=now
+        )
+        if user.role == UserRole.ADMIN:
+            operators = await self.repository.list_active_operators(now)
+            operator_public_ids = [op["public_id"] for op in operators]
+        else:
+            operator_public_ids = [m["operator_public_id"] for m in memberships]
+        primary_match = next((m for m in memberships if m["is_primary"]), None)
+        primary_operator_public_id = (
+            primary_match["operator_public_id"] if primary_match is not None else ""
+        )
+        return AuthPrincipal(
+            username=user.username,
+            role=user.role,
+            email=user.email,
+            is_active=user.is_active,
+            user_public_id=user.public_id,
+            operator_public_ids=operator_public_ids,
+            primary_operator_public_id=primary_operator_public_id,
         )
 
     async def authenticate_user(self, username: str, password: str) -> UserProfile | None:

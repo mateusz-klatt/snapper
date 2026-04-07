@@ -3131,6 +3131,21 @@ class StubUserService:
         """Get user by ID."""
         return self.user_by_id
 
+    async def build_auth_principal(self, user: UserProfile) -> AuthPrincipal:
+        """Build a stub principal preserving the user's role and identity.
+
+        Phase 0b stub: returns an AuthPrincipal mirroring the user's
+        ``public_id`` so the login/refresh routes can populate token
+        claims without hitting the multi-tenant repository methods.
+        """
+        return AuthPrincipal(
+            username=user.username,
+            role=user.role,
+            email=user.email,
+            is_active=user.is_active,
+            user_public_id=user.public_id,
+        )
+
     async def get_all_users(
         self,
         include_inactive: bool = False,

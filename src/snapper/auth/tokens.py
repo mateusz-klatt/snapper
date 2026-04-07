@@ -118,6 +118,10 @@ class TokenManager:
             iat=issued_at,
             jti=jti,
             sid=session_identifier,
+            user_public_id=user.user_public_id,
+            operator_public_ids=user.operator_public_ids,
+            primary_operator_public_id=user.primary_operator_public_id,
+            active_wallet_public_id=user.active_wallet_public_id,
         )
         refresh_token_expires_days = (
             self.settings.auth_refresh_token_expire_days_extended
@@ -134,6 +138,10 @@ class TokenManager:
             iat=issued_at,
             jti=f"refresh_{jti}",
             sid=session_identifier,
+            user_public_id=user.user_public_id,
+            operator_public_ids=user.operator_public_ids,
+            primary_operator_public_id=user.primary_operator_public_id,
+            active_wallet_public_id=user.active_wallet_public_id,
         )
         access_token = jwt.encode(
             access_token_payload.model_dump(),
@@ -240,6 +248,10 @@ class TokenManager:
         principal = AuthPrincipal(
             username=token_data.username,
             role=token_data.role,
+            user_public_id=token_data.user_public_id,
+            operator_public_ids=token_data.operator_public_ids,
+            primary_operator_public_id=token_data.primary_operator_public_id,
+            active_wallet_public_id=token_data.active_wallet_public_id,
         )
         new_tokens = self.create_tokens(principal, session_id=token_data.sid)
         logger.info(f"Refreshed tokens for user {principal.username}")

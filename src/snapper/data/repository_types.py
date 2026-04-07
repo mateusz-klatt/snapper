@@ -646,6 +646,40 @@ class ScopeGrantRow(TypedDict):
     sequence_id: int
 
 
+class OperatorRow(TypedDict):
+    """Row dict returned by operator queries.
+
+    One row per active ``operators`` SCD2 version. Used by login flows
+    that need to compute the operator set ADMIN users automatically
+    receive (every active operator), and by future API endpoints that
+    list operators a user can act AS.
+    """
+
+    public_id: str
+    label: str
+    description: str | None
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+
+
+class UserOperatorMembershipRow(TypedDict):
+    """Row dict returned by user-operator membership queries.
+
+    One row per active ``user_operator_memberships`` SCD2 version. Carries
+    enough fields for the login flow to derive ``operator_public_ids`` /
+    ``primary_operator_public_id`` for ``AuthPrincipal``.
+    """
+
+    public_id: str
+    user_public_id: str
+    operator_public_id: str
+    is_primary: bool
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+
+
 class CreateScopeGrantRequest(TypedDict):
     """Insert params for create_scope_grant.
 

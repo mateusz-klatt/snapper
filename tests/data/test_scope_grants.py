@@ -854,6 +854,86 @@ class TestHandoverIntegrityReraise:
             )
 
 
+class TestListActiveOperators:
+    """Tests for ``SQLAlchemyRepository.list_active_operators``."""
+
+    @pytest.mark.asyncio
+    async def test_returns_active_operators_ordered_by_label(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Active operators are returned ordered by label ascending.
+
+        Given: Three operators inserted in label-out-of-order sequence,
+        When: ``list_active_operators`` is called,
+        Then: The result is ordered by label and includes all three.
+        """
+        ids = await _seed_world(repo)
+        assert "alice" in ids and "bob" in ids
+        operators = await repo.list_active_operators(datetime.now(UTC))
+        labels = [op["label"] for op in operators]
+        assert labels == sorted(labels)
+        assert "alice" in labels
+        assert "bob" in labels
+
+    @pytest.mark.asyncio
+    async def test_empty_when_no_operators(self, repo: SQLAlchemyRepository) -> None:
+        """An empty operators table returns an empty list.
+
+        Given: A fresh repository with no operator inserts,
+        When: ``list_active_operators`` is called,
+        Then: An empty list is returned.
+        """
+        operators = await repo.list_active_operators(datetime.now(UTC))
+        assert operators == []
+
+
+class TestGetUserOperatorMemberships:
+    """Tests for ``SQLAlchemyRepository.get_user_operator_memberships``."""
+
+    @pytest.mark.asyncio
+    async def test_returns_membership_with_primary_flag(self, repo: SQLAlchemyRepository) -> None:
+        """A primary membership flag round-trips through the repository.
+
+        Given: A user_operator_memberships row with is_primary=True,
+        When: ``get_user_operator_memberships`` is called for that user,
+        Then: The returned row carries ``is_primary=True``.
+        """
+        ids = await _seed_world(repo)
+        user_pid = "00000000-0000-7000-8000-000000000010"
+        async with repo.session() as s:
+            from snapper.data.models import UserOperatorMembership
+
+            s.add(
+                UserOperatorMembership(
+                    user_public_id=user_pid,
+                    operator_public_id=ids["alice"],
+                    is_primary=True,
+                    session_id="test-session",
+                    sequence_id=500,
+                    timestamp=datetime.now(UTC),
+                )
+            )
+            await s.commit()
+
+        memberships = await repo.get_user_operator_memberships(user_pid, datetime.now(UTC))
+        assert len(memberships) == 1
+        assert memberships[0]["operator_public_id"] == ids["alice"]
+        assert memberships[0]["is_primary"] is True
+
+    @pytest.mark.asyncio
+    async def test_unknown_user_returns_empty(self, repo: SQLAlchemyRepository) -> None:
+        """An unknown user has no memberships.
+
+        Given: A repository with no membership rows for the queried user,
+        When: ``get_user_operator_memberships`` is called,
+        Then: An empty list is returned.
+        """
+        memberships = await repo.get_user_operator_memberships(
+            "00000000-0000-7000-8000-00000000ffff", datetime.now(UTC)
+        )
+        assert memberships == []
+
+
 class TestListActiveScopeGrants:
     """Tests for ``SQLAlchemyRepository.list_active_scope_grants_for_wallet``."""
 

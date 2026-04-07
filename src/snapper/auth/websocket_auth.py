@@ -118,6 +118,10 @@ class WebSocketAuthManager:
         user = AuthPrincipal(
             username=token_data.username,
             role=token_data.role,
+            user_public_id=token_data.user_public_id,
+            operator_public_ids=token_data.operator_public_ids,
+            primary_operator_public_id=token_data.primary_operator_public_id,
+            active_wallet_public_id=token_data.active_wallet_public_id,
         )
         return user, token_data
 

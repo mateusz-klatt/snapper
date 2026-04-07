@@ -4,6 +4,8 @@ This module defines Pydantic schemas for JWT token claims
 and token pair responses.
 """
 
+from pydantic import Field
+
 from snapper.api.schemas.base import StrictBody
 from snapper.auth.domain.roles import UserRole
 
@@ -15,6 +17,13 @@ class TokenClaims(StrictBody):
     Does not inherit StrictDataSchema because JWT claims are external
     tokens parsed from JWTs, not internal bus messages.
 
+    Multi-tenant claims (Plan 0 Phase 0b Section 4.1) carry the same
+    identity surface as ``AuthPrincipal`` so a refresh round-trip
+    preserves the user's trading-context selection without re-querying
+    the DB. Optional defaults keep older tokens (issued before Phase 0b
+    rolled out) decodable: a stale token simply has empty multi-tenant
+    fields and the next token issuance refreshes them from the DB.
+
     Attributes:
         sub: Subject (user ID).
         username: User's username.
@@ -24,6 +33,10 @@ class TokenClaims(StrictBody):
         iat: Issued at timestamp (Unix epoch).
         jti: JWT ID (unique token identifier).
         sid: Session ID for token rotation tracking.
+        user_public_id: Stable UUID7 of the user row (Phase 0b).
+        operator_public_ids: Operators this user may act AS (Phase 0b).
+        primary_operator_public_id: Default operator at login (Phase 0b).
+        active_wallet_public_id: Last-selected wallet UI state (Phase 0b).
     """
 
     sub: str
@@ -34,6 +47,10 @@ class TokenClaims(StrictBody):
     iat: int
     jti: str
     sid: str
+    user_public_id: str = ""
+    operator_public_ids: list[str] = Field(default_factory=list)
+    primary_operator_public_id: str = ""
+    active_wallet_public_id: str | None = None
 
 
 class TokenPair(StrictBody):

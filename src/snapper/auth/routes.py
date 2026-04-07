@@ -130,7 +130,8 @@ async def login(
         )
     clear_failed_login_attempts(request, login_data.payload.username)
     token_manager = get_token_manager()
-    token_pair = token_manager.create_tokens(AuthPrincipal(username=user.username, role=user.role))
+    principal = await user_service.build_auth_principal(user)
+    token_pair = token_manager.create_tokens(principal)
     csrf_manager = get_csrf_manager()
     csrf_token = csrf_manager.generate_token()
     cookie_secure = settings.session_secure
@@ -221,8 +222,9 @@ async def refresh_token(
             detail=_USER_NOT_FOUND,
         )
     token_manager.blacklist_token(token_data.jti)
+    principal = await user_service.build_auth_principal(user)
     new_token_pair = token_manager.create_tokens(
-        AuthPrincipal(username=user.username, role=user.role),
+        principal,
         session_id=token_data.sid,
     )
     csrf_manager = get_csrf_manager()

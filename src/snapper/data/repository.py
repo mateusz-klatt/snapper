@@ -94,6 +94,7 @@ from snapper.data.models import Trade
 from snapper.data.models import TradeCommand
 from snapper.data.models import TradeProjectionCheckpoint
 from snapper.data.models import UnderlyingAsset
+from snapper.data.models import UserOperatorMembership
 from snapper.data.models import VenueEvent
 from snapper.data.models import WalletOperatorScopeGrant
 from snapper.data.repository_types import AccrualLedgerInsertRow
@@ -111,6 +112,7 @@ from snapper.data.repository_types import InstrumentSpecRow
 from snapper.data.repository_types import InstrumentUnderlyingRow
 from snapper.data.repository_types import MarketSnapshotRow
 from snapper.data.repository_types import MarketSnapshotUpsertRow
+from snapper.data.repository_types import OperatorRow
 from snapper.data.repository_types import OrderRow
 from snapper.data.repository_types import PositionRow
 from snapper.data.repository_types import ScopeGrantRow
@@ -124,6 +126,7 @@ from snapper.data.repository_types import TradeProjectionCheckpointRow
 from snapper.data.repository_types import TradeRow
 from snapper.data.repository_types import TradeUpsertRow
 from snapper.data.repository_types import UnderlyingAssetRow
+from snapper.data.repository_types import UserOperatorMembershipRow
 from snapper.data.repository_types import VenueEventInsertRow
 from snapper.data.repository_types import VenueEventRow
 
@@ -1233,6 +1236,48 @@ class Repository(ABC):
                 does not exist (or source is no longer active).
             ScopeGrantValidationError: Self-handover (no-op) or other
                 structural violation.
+        """
+        ...
+
+    @abstractmethod
+    async def list_active_operators(self, as_of: datetime) -> list[OperatorRow]:
+        """Return every active operator at the given bus time.
+
+        Used by the login flow's ADMIN role mapping (admins automatically
+        receive the operator set covering every active operator at token
+        issue time per Plan 0 Section 4.1) and by future API endpoints
+        that surface the operator catalogue.
+
+        Args:
+            as_of: Bus time for the temporal query.
+
+        Returns:
+            Active operator rows ordered by ``label`` ascending.
+        """
+        ...
+
+    @abstractmethod
+    async def get_user_operator_memberships(
+        self,
+        user_public_id: str,
+        as_of: datetime,
+    ) -> list[UserOperatorMembershipRow]:
+        """Return active operator memberships for a user.
+
+        Used by the login flow to compute ``operator_public_ids`` and
+        ``primary_operator_public_id`` on ``AuthPrincipal`` per Plan 0
+        Section 4.1.
+
+        Args:
+            user_public_id: Public ID of the user.
+            as_of: Bus time for the temporal query.
+
+        Returns:
+            Membership rows ordered by ``timestamp`` ascending. The
+            primary membership (``is_primary=True``) is included; the
+            ``user_operator_memberships`` partial unique index guarantees
+            at most one primary per user, so callers may safely pick the
+            first ``is_primary`` row.
         """
         ...
 
@@ -4078,6 +4123,54 @@ class SQLAlchemyRepository(Repository):
                 sequence_id=from_grant.sequence_id,
             )
             return closed_row, self._row_from_grant(new_grant)
+
+    async def list_active_operators(self, as_of: datetime) -> list[OperatorRow]:
+        """Return every active operator at the given bus time."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(Operator)
+                .where(*where_active(Operator, as_of))
+                .order_by(Operator.label.asc())
+            )
+            return [
+                OperatorRow(
+                    public_id=row.public_id,
+                    label=row.label,
+                    description=row.description,
+                    timestamp=row.timestamp,
+                    session_id=row.session_id,
+                    sequence_id=row.sequence_id,
+                )
+                for row in result.scalars().all()
+            ]
+
+    async def get_user_operator_memberships(
+        self,
+        user_public_id: str,
+        as_of: datetime,
+    ) -> list[UserOperatorMembershipRow]:
+        """Return active operator memberships for a user."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(UserOperatorMembership)
+                .where(
+                    UserOperatorMembership.user_public_id == user_public_id,
+                    *where_active(UserOperatorMembership, as_of),
+                )
+                .order_by(UserOperatorMembership.timestamp.asc())
+            )
+            return [
+                UserOperatorMembershipRow(
+                    public_id=row.public_id,
+                    user_public_id=row.user_public_id,
+                    operator_public_id=row.operator_public_id,
+                    is_primary=bool(row.is_primary),
+                    timestamp=row.timestamp,
+                    session_id=row.session_id,
+                    sequence_id=row.sequence_id,
+                )
+                for row in result.scalars().all()
+            ]
 
 
 _repository_cache: dict[str, Repository] = {}

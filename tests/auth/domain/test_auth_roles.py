@@ -1,5 +1,6 @@
 """Tests for authentication roles and permissions."""
 
+from collections.abc import Generator
 from datetime import UTC
 from datetime import datetime
 from unittest.mock import AsyncMock
@@ -903,3 +904,158 @@ class TestUserService:
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
         result = await user_service.close_login_event("missing-pub-id")
         assert result is False
+
+
+class TestBuildAuthPrincipal:
+    """Tests for ``UserService.build_auth_principal`` multi-tenant population."""
+
+    def _make_profile(self, role: UserRole) -> UserProfile:
+        return UserProfile(
+            public_id="user-public-id-1",
+            timestamp=datetime.now(UTC),
+            session_id="seed-session",
+            sequence_id=1,
+            username="alice",
+            email="alice@example.com",
+            role=role,
+            is_active=True,
+            created_at=datetime.now(UTC),
+        )
+
+    @pytest.fixture
+    def user_service_with_repo(self) -> Generator[UserService]:
+        """Yield a UserService whose repository has the multi-tenant lookups mocked."""
+        with patch("snapper.auth.user_service.get_repository") as mock_get_repo:
+            mock_repo = MagicMock()
+            mock_repo.list_active_operators = AsyncMock()
+            mock_repo.get_user_operator_memberships = AsyncMock()
+            mock_get_repo.return_value = mock_repo
+            UserService.clear_instance()
+            service = UserService()
+            yield service
+            UserService.clear_instance()
+
+    @pytest.mark.asyncio
+    async def test_admin_receives_every_active_operator(
+        self, user_service_with_repo: UserService
+    ) -> None:
+        """ADMIN role gets the operator set covering every active operator.
+
+        Given: Three active operators in the DB and an explicit primary
+            membership row for the admin user,
+        When: ``build_auth_principal`` is invoked for an ADMIN profile,
+        Then: ``operator_public_ids`` mirrors all three operators and
+            ``primary_operator_public_id`` is taken from the membership row.
+        """
+        repo = user_service_with_repo.repository
+        repo.list_active_operators.return_value = [
+            {
+                "public_id": "op-1",
+                "label": "alpha",
+                "description": None,
+                "timestamp": datetime.now(UTC),
+                "session_id": "s",
+                "sequence_id": 1,
+            },
+            {
+                "public_id": "op-2",
+                "label": "beta",
+                "description": None,
+                "timestamp": datetime.now(UTC),
+                "session_id": "s",
+                "sequence_id": 2,
+            },
+            {
+                "public_id": "op-3",
+                "label": "gamma",
+                "description": None,
+                "timestamp": datetime.now(UTC),
+                "session_id": "s",
+                "sequence_id": 3,
+            },
+        ]
+        repo.get_user_operator_memberships.return_value = [
+            {
+                "public_id": "m-1",
+                "user_public_id": "user-public-id-1",
+                "operator_public_id": "op-2",
+                "is_primary": True,
+                "timestamp": datetime.now(UTC),
+                "session_id": "s",
+                "sequence_id": 10,
+            }
+        ]
+
+        principal = await user_service_with_repo.build_auth_principal(
+            self._make_profile(UserRole.ADMIN)
+        )
+
+        assert principal.role == UserRole.ADMIN
+        assert principal.user_public_id == "user-public-id-1"
+        assert principal.operator_public_ids == ["op-1", "op-2", "op-3"]
+        assert principal.primary_operator_public_id == "op-2"
+
+    @pytest.mark.asyncio
+    async def test_operator_receives_only_explicit_memberships(
+        self, user_service_with_repo: UserService
+    ) -> None:
+        """OPERATOR role's operator_public_ids comes only from memberships.
+
+        Given: An OPERATOR profile with two membership rows (one primary),
+        When: ``build_auth_principal`` is invoked,
+        Then: ``operator_public_ids`` lists only the membership operators
+            (NOT the full active set), and ``primary_operator_public_id``
+            is the one flagged ``is_primary``.
+        """
+        repo = user_service_with_repo.repository
+        repo.get_user_operator_memberships.return_value = [
+            {
+                "public_id": "m-1",
+                "user_public_id": "user-public-id-1",
+                "operator_public_id": "op-77",
+                "is_primary": False,
+                "timestamp": datetime.now(UTC),
+                "session_id": "s",
+                "sequence_id": 11,
+            },
+            {
+                "public_id": "m-2",
+                "user_public_id": "user-public-id-1",
+                "operator_public_id": "op-99",
+                "is_primary": True,
+                "timestamp": datetime.now(UTC),
+                "session_id": "s",
+                "sequence_id": 12,
+            },
+        ]
+
+        principal = await user_service_with_repo.build_auth_principal(
+            self._make_profile(UserRole.OPERATOR)
+        )
+
+        repo.list_active_operators.assert_not_awaited()
+        assert principal.role == UserRole.OPERATOR
+        assert principal.operator_public_ids == ["op-77", "op-99"]
+        assert principal.primary_operator_public_id == "op-99"
+
+    @pytest.mark.asyncio
+    async def test_user_with_no_memberships_yields_empty_primary(
+        self, user_service_with_repo: UserService
+    ) -> None:
+        """A VIEWER with no memberships yields empty operator IDs and empty primary.
+
+        Given: A VIEWER profile with zero membership rows,
+        When: ``build_auth_principal`` is invoked,
+        Then: ``operator_public_ids`` is an empty list and
+            ``primary_operator_public_id`` is the empty string sentinel.
+        """
+        repo = user_service_with_repo.repository
+        repo.get_user_operator_memberships.return_value = []
+
+        principal = await user_service_with_repo.build_auth_principal(
+            self._make_profile(UserRole.VIEWER)
+        )
+
+        assert principal.operator_public_ids == []
+        assert principal.primary_operator_public_id == ""
+        assert principal.user_public_id == "user-public-id-1"
