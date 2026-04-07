@@ -96,6 +96,7 @@ from snapper.data.models import TradeProjectionCheckpoint
 from snapper.data.models import UnderlyingAsset
 from snapper.data.models import UserOperatorMembership
 from snapper.data.models import VenueEvent
+from snapper.data.models import WalletCredential
 from snapper.data.models import WalletOperatorScopeGrant
 from snapper.data.repository_types import AccrualLedgerInsertRow
 from snapper.data.repository_types import AccrualLedgerRow
@@ -129,6 +130,7 @@ from snapper.data.repository_types import UnderlyingAssetRow
 from snapper.data.repository_types import UserOperatorMembershipRow
 from snapper.data.repository_types import VenueEventInsertRow
 from snapper.data.repository_types import VenueEventRow
+from snapper.data.repository_types import WalletCredentialRow
 
 __all__ = [
     "Repository",
@@ -1278,6 +1280,35 @@ class Repository(ABC):
             ``user_operator_memberships`` partial unique index guarantees
             at most one primary per user, so callers may safely pick the
             first ``is_primary`` row.
+        """
+        ...
+
+    @abstractmethod
+    async def get_active_credential(
+        self,
+        exchange: str,
+        wallet_public_id: str,
+        as_of: datetime,
+    ) -> WalletCredentialRow | None:
+        """Return the active wallet credential row for ``(exchange, wallet)``.
+
+        Used by ``CredentialResolver`` (Plan 0 Section 4.2) at executor
+        process startup to fetch the encrypted credential payload before
+        constructing the per-wallet exchange client. Pull-on-startup
+        only — there is no caching contract on top of this method.
+
+        Args:
+            exchange: Exchange identifier (lowercase, matches the
+                ``ck_wallet_credentials_exchange_lower`` constraint).
+            wallet_public_id: Public ID of the wallet.
+            as_of: Bus time for the temporal query.
+
+        Returns:
+            The active credential row or ``None`` when no credential
+            exists for the given (exchange, wallet) pair at ``as_of``.
+            ``CredentialResolver`` translates ``None`` to its own
+            ``CredentialNotFoundError`` so the executor startup
+            failure surfaces with a clear cause.
         """
         ...
 
@@ -4171,6 +4202,37 @@ class SQLAlchemyRepository(Repository):
                 )
                 for row in result.scalars().all()
             ]
+
+    async def get_active_credential(
+        self,
+        exchange: str,
+        wallet_public_id: str,
+        as_of: datetime,
+    ) -> WalletCredentialRow | None:
+        """Return the active wallet credential row or None."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(WalletCredential).where(
+                    WalletCredential.exchange == exchange.lower(),
+                    WalletCredential.wallet_public_id == wallet_public_id,
+                    *where_active(WalletCredential, as_of),
+                )
+            )
+            row = result.scalars().first()
+            if row is None:
+                return None
+            return WalletCredentialRow(
+                public_id=row.public_id,
+                wallet_public_id=row.wallet_public_id,
+                exchange=row.exchange,
+                credential_type=row.credential_type,
+                encrypted_payload=row.encrypted_payload,
+                encryption_key_id=row.encryption_key_id,
+                label=row.label,
+                timestamp=row.timestamp,
+                session_id=row.session_id,
+                sequence_id=row.sequence_id,
+            )
 
 
 _repository_cache: dict[str, Repository] = {}

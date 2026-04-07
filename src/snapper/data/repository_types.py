@@ -646,6 +646,29 @@ class ScopeGrantRow(TypedDict):
     sequence_id: int
 
 
+class WalletCredentialRow(TypedDict):
+    """Row dict returned by wallet credential queries.
+
+    One row per active ``wallet_credentials`` SCD2 version. The
+    ``encrypted_payload`` is the Fernet-encrypted JSON envelope whose
+    inner shape depends on ``credential_type`` (see ``WalletCredential``
+    docstring). Decryption is the caller's responsibility — the
+    repository never returns plaintext to keep accidental logging /
+    serialization safe.
+    """
+
+    public_id: str
+    wallet_public_id: str
+    exchange: str
+    credential_type: str
+    encrypted_payload: str
+    encryption_key_id: str
+    label: str | None
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+
+
 class OperatorRow(TypedDict):
     """Row dict returned by operator queries.
 
