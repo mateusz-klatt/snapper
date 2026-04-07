@@ -298,6 +298,8 @@ class Order(TemporalMixin, Base):
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     mode: Mapped[str] = mapped_column(String(8), default="live", server_default="live")
+    wallet_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    operator_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
     client_order_id: Mapped[str | None] = mapped_column(String(64), index=True)
     exchange_order_id: Mapped[str | None] = mapped_column(String(64), index=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
@@ -345,6 +347,7 @@ class Execution(TemporalMixin, Base):
         ),
     )
     order_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    wallet_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
     exec_id: Mapped[str | None] = mapped_column(String(64))
     trade_id: Mapped[str | None] = mapped_column(String(64))
     side: Mapped[str] = mapped_column(String(4))
@@ -379,6 +382,7 @@ class Position(TemporalMixin, Base):
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     mode: Mapped[str] = mapped_column(String(8), default="live", server_default="live")
+    wallet_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
     quantity: Mapped[float] = mapped_column(Float)
     average_price: Mapped[float] = mapped_column(Float)
     unrealized_pnl: Mapped[float] = mapped_column(Float)
@@ -399,6 +403,8 @@ class Signal(TemporalMixin, Base):
         ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    wallet_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    operator_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
     fired_at: Mapped[datetime] = mapped_column(TZDateTime(), index=True)
     side: Mapped[str] = mapped_column(String(4))
     strength: Mapped[float] = mapped_column(Float)
@@ -656,6 +662,7 @@ class ProcessRun(TemporalMixin, Base):
         ),
     )
     process_name: Mapped[str] = mapped_column(String(64), index=True)
+    wallet_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
     role: Mapped[str] = mapped_column(String(16))
     lifecycle: Mapped[str] = mapped_column(String(16))
     status: Mapped[str] = mapped_column(String(16), index=True)
@@ -874,7 +881,10 @@ class TradeCommand(TemporalMixin, Base):
         ),
     )
     command_type: Mapped[str] = mapped_column(String(16))
-    shard_key: Mapped[str] = mapped_column(String(64))
+    shard_key: Mapped[str] = mapped_column(String(256))
+    wallet_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    operator_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    user_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
     exchange: Mapped[str] = mapped_column(String(32))
     instrument: Mapped[str] = mapped_column(String(64))
     mode: Mapped[str] = mapped_column(String(8))
@@ -925,7 +935,8 @@ class VenueEvent(TemporalMixin, Base):
         ),
     )
     event_type: Mapped[str] = mapped_column(String(32))
-    shard_key: Mapped[str] = mapped_column(String(64))
+    shard_key: Mapped[str] = mapped_column(String(256))
+    wallet_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
     command_public_id: Mapped[str | None] = mapped_column(UUIDColumn())
     exchange: Mapped[str] = mapped_column(String(32))
     instrument: Mapped[str] = mapped_column(String(64))
@@ -974,7 +985,8 @@ class TradeProjectionCheckpoint(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
     )
-    shard_key: Mapped[str] = mapped_column(String(64))
+    shard_key: Mapped[str] = mapped_column(String(256))
+    wallet_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
     position_qty: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
     entry_price: Mapped[float | None] = mapped_column(Float)
     position_opened_at: Mapped[datetime | None] = mapped_column(TZDateTime())
@@ -1222,6 +1234,8 @@ class AccrualLedger(TemporalMixin, Base):
         ),
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    wallet_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    operator_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
     mode: Mapped[str] = mapped_column(String(8))
     accrual_type: Mapped[str] = mapped_column(String(16))
     accrued_at: Mapped[datetime] = mapped_column(TZDateTime(), index=True)
