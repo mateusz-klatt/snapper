@@ -628,7 +628,7 @@ class TestHandoverIntegrityError:
             async with real_session() as s:
 
                 async def boom() -> None:
-                    raise IntegrityError("stmt", {}, RuntimeError("unique violation"))
+                    raise IntegrityError("stmt", {}, RuntimeError("UNIQUE constraint violated"))
 
                 object.__setattr__(s, "commit", boom)
                 yield s
@@ -647,6 +647,59 @@ class TestHandoverIntegrityError:
                 timestamp=datetime.now(UTC),
             )
         assert excinfo.value.conflicting_operator_public_id == ids["bob"]
+
+
+class TestHandoverIntegrityReraise:
+    """Non-unique IntegrityError from commit is not masked as a conflict."""
+
+    @pytest.mark.asyncio
+    async def test_non_unique_integrity_error_reraises(self, repo: SQLAlchemyRepository) -> None:
+        """A non-unique IntegrityError (e.g., NOT NULL/FK violation) re-raises.
+
+        Given: alice holds an active grant and handover toward bob begins,
+        When: ``s.commit()`` raises IntegrityError whose orig message does
+            NOT match ``unique`` or ``duplicate`` (simulating a future
+            NOT NULL or FK violation),
+        Then: ``handover_grant`` re-raises the original IntegrityError so
+            the real bug surfaces with its traceback intact — it is NOT
+            silently translated to ``ScopeGrantConflictError``.
+        """
+        ids = await _seed_world(repo)
+        original = await repo.create_scope_grant(
+            _make_request(
+                operator_public_id=ids["alice"],
+                wallet_public_id=ids["wallet"],
+                granted_by=ids["user_admin"],
+                scope_kind="underlying",
+                underlying_public_id=ids["underlying_btc"],
+            )
+        )
+
+        real_session = repo.session
+
+        @asynccontextmanager
+        async def failing_session() -> Any:
+            async with real_session() as s:
+
+                async def boom() -> None:
+                    raise IntegrityError("stmt", {}, RuntimeError("NOT NULL constraint failed"))
+
+                object.__setattr__(s, "commit", boom)
+                yield s
+
+        with (
+            patch.object(repo, "session", failing_session),
+            pytest.raises(IntegrityError, match="NOT NULL"),
+        ):
+            await repo.handover_grant(
+                from_grant_public_id=original["public_id"],
+                to_operator_public_id=ids["bob"],
+                granted_by_user_public_id=ids["user_admin"],
+                reason="non-unique integrity error test",
+                session_id="test-session",
+                sequence_id=901,
+                timestamp=datetime.now(UTC),
+            )
 
 
 class TestListActiveScopeGrants:

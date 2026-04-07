@@ -4013,6 +4013,9 @@ class SQLAlchemyRepository(Repository):
             try:
                 await s.commit()
             except IntegrityError as exc:
+                err_msg = str(exc.orig).lower() if exc.orig else ""
+                if "unique" not in err_msg and "duplicate" not in err_msg:
+                    raise
                 raise ScopeGrantConflictError(
                     wallet_public_id=from_grant.wallet_public_id,
                     conflicting_grant_public_id=from_grant.public_id,
