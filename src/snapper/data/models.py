@@ -109,6 +109,11 @@ __all__ = [
     "TradeProjectionCheckpoint",
     "FundingRate",
     "AccrualLedger",
+    "Wallet",
+    "WalletCredential",
+    "Operator",
+    "UserOperatorMembership",
+    "WalletOperatorScopeGrant",
 ]
 
 
@@ -1226,3 +1231,236 @@ class AccrualLedger(TemporalMixin, Base):
     notional: Mapped[float] = mapped_column(Float)
     position_quantity_at_accrual: Mapped[float] = mapped_column(Float)
     exchange: Mapped[str] = mapped_column(String(32))
+
+
+class Wallet(TemporalMixin, Base):
+    """Logical container for credentials and positions on one or more exchanges.
+
+    A wallet is a "bag of money" with its own set of API keys and its own position
+    state. Examples: alice's personal Kraken wallet, the firm's shared futures
+    wallet, a paper-mode sandbox. One wallet may have credentials on multiple
+    exchanges (e.g., the same Kraken login covers both Kraken Spot and Kraken
+    Futures via two WalletCredential rows).
+
+    Multiple operators may share one wallet via WalletOperatorScopeGrant rows
+    (trading desk pattern). One operator may hold grants on multiple wallets
+    (own personal + delegated firm wallet). The Wallet entity is distinct from
+    the Operator entity per Plan 0 D1 (multi-tenant foundation).
+    """
+
+    __tablename__ = "wallets"
+    __table_args__ = (
+        Index(
+            "ix_wallets_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_wallets_label_active",
+            "label",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+    )
+    label: Mapped[str] = mapped_column(String(128))
+    description: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    is_paper: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+
+
+class WalletCredential(TemporalMixin, Base):
+    """Per-exchange encrypted credential for a wallet.
+
+    The encrypted_payload stores a JSON envelope whose contents depend on
+    credential_type:
+        api_key_secret  -> {"api_key": "...", "api_secret": "..."}
+        rsa_pem         -> {"api_key": "...", "private_key_pem": "..."}
+        oauth           -> {"client_id": "...", "client_secret": "...", "refresh_token": "..."}
+        paper           -> {"initial_balance": 10000.0}
+
+    Encryption reuses the existing Setting encryption infrastructure (master
+    key from env var, encrypted at rest). Credentials are pull-on-startup only
+    and MUST NOT be broadcast on the system.settings ZMQ topic. Rotation
+    requires a process restart of the affected executor instance.
+    """
+
+    __tablename__ = "wallet_credentials"
+    __table_args__ = (
+        Index(
+            "ix_wallet_credentials_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_wallet_credentials_wallet_exchange_active",
+            "wallet_public_id",
+            "exchange",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index("ix_wallet_credentials_exchange", "exchange"),
+        CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_wallet_credentials_exchange_lower"),
+        CheckConstraint(
+            "credential_type IN ('api_key_secret', 'rsa_pem', 'oauth', 'paper')",
+            name="ck_wallet_credentials_type",
+        ),
+    )
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    exchange: Mapped[str] = mapped_column(String(20))
+    credential_type: Mapped[str] = mapped_column(String(32))
+    encrypted_payload: Mapped[str] = mapped_column(Text)
+    encryption_key_id: Mapped[str] = mapped_column(String(64))
+    label: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+
+class Operator(TemporalMixin, Base):
+    """A trading identity, distinct from User (login identity).
+
+    A User logs in; an Operator places trades. Many users may act as the same
+    operator (delegate access during vacation cover) and one user may act as
+    many operators (personal seat + firm seat). The user-to-operator mapping
+    is M:N via UserOperatorMembership.
+
+    The Operator is distinct from Wallet per Plan 0 D1: an operator does not
+    own a wallet, it is granted scope on one or more wallets via
+    WalletOperatorScopeGrant. Multiple operators may share one wallet
+    (trading desk pattern).
+    """
+
+    __tablename__ = "operators"
+    __table_args__ = (
+        Index(
+            "ix_operators_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_operators_label_active",
+            "label",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+    )
+    label: Mapped[str] = mapped_column(String(128))
+    description: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+
+class UserOperatorMembership(TemporalMixin, Base):
+    """Which users may act AS which operators.
+
+    M:N relationship between User and Operator. The is_primary flag identifies
+    the user's default operator (the one selected when the user logs in
+    without explicitly choosing). At most one primary operator per user.
+    """
+
+    __tablename__ = "user_operator_memberships"
+    __table_args__ = (
+        Index(
+            "ix_user_operator_memberships_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_user_operator_memberships_unique_active",
+            "user_public_id",
+            "operator_public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_user_operator_memberships_primary_unique_active",
+            "user_public_id",
+            unique=True,
+            sqlite_where=text("is_primary = 1 AND known_to = '9999-12-31 23:59:59.000000'"),
+            postgresql_where=text("is_primary = TRUE AND known_to = '9999-12-31T23:59:59+00:00'"),
+        ),
+        Index("ix_user_operator_memberships_user", "user_public_id"),
+        Index("ix_user_operator_memberships_operator", "operator_public_id"),
+    )
+    user_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    operator_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+
+
+class WalletOperatorScopeGrant(TemporalMixin, Base):
+    """Grant: operator X may trade scope Y on wallet Z.
+
+    Per Plan 0 D2 all grants are instrument-exclusive: at most ONE operator
+    may hold an active grant on any (wallet, instrument) tuple at any time.
+    There is no lock_mode column. Cooperative grants (multiple operators
+    sharing the same instrument on the same wallet) are deferred to a
+    future plan.
+
+    The CHECK constraint enforces scope_kind XOR: exactly one of
+    underlying_public_id / instrument_public_id is non-NULL. The two partial
+    unique indexes catch same-scope duplicates as defense in depth, while the
+    repository layer uses an advisory lock + cross-scope overlap check
+    (instrument_underlying_mappings expansion) to prevent cross-scope races
+    that the partial indexes cannot detect.
+    """
+
+    __tablename__ = "wallet_operator_scope_grants"
+    __table_args__ = (
+        Index(
+            "ix_scope_grants_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_scope_grants_instrument_exclusive_active",
+            "wallet_public_id",
+            "instrument_public_id",
+            unique=True,
+            sqlite_where=text(
+                "instrument_public_id IS NOT NULL AND known_to = '9999-12-31 23:59:59.000000'"
+            ),
+            postgresql_where=text(
+                "instrument_public_id IS NOT NULL AND known_to = '9999-12-31T23:59:59+00:00'"
+            ),
+        ),
+        Index(
+            "ix_scope_grants_underlying_exclusive_active",
+            "wallet_public_id",
+            "underlying_public_id",
+            unique=True,
+            sqlite_where=text(
+                "underlying_public_id IS NOT NULL AND known_to = '9999-12-31 23:59:59.000000'"
+            ),
+            postgresql_where=text(
+                "underlying_public_id IS NOT NULL AND known_to = '9999-12-31T23:59:59+00:00'"
+            ),
+        ),
+        Index("ix_scope_grants_operator", "operator_public_id"),
+        Index("ix_scope_grants_wallet", "wallet_public_id"),
+        CheckConstraint(
+            "scope_kind IN ('underlying', 'instrument')",
+            name="ck_scope_grants_scope_kind",
+        ),
+        CheckConstraint(
+            "(scope_kind = 'underlying' AND underlying_public_id IS NOT NULL "
+            "AND instrument_public_id IS NULL) "
+            "OR (scope_kind = 'instrument' AND instrument_public_id IS NOT NULL "
+            "AND underlying_public_id IS NULL)",
+            name="ck_scope_grants_scope_kind_xor",
+        ),
+    )
+    operator_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    granted_by_user_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    scope_kind: Mapped[str] = mapped_column(String(16))
+    underlying_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    instrument_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(512), nullable=True)
