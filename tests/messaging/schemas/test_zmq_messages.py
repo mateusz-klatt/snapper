@@ -543,3 +543,98 @@ class TestMessages:
         assert isinstance(msg, OrderEventData)
         assert msg.exchange_order_id == "PAPER-XYZ789"
         assert msg.event == "replaced"
+
+
+class TestMultiTenantFields:
+    """Tests for the Phase 0b.3 multi-tenant identity surface on schemas.
+
+    The 7 command/event/signal schemas listed in
+    plan_multi_tenant_foundation.md Section 4.3 each gain optional
+    ``wallet_public_id`` / ``operator_public_id`` / ``user_public_id``
+    fields. These tests lock in the default values and verify a
+    non-default round trip survives JSON serialization on the
+    ``SignalData`` and ``ExecutionData`` shapes — the same field
+    semantics apply to OrderData, OrderRequestData, OrderCancelData,
+    OrderReplaceData, and OrderEventData.
+    """
+
+    def test_signal_default_multi_tenant_fields(self) -> None:
+        """SignalData defaults: empty wallet, None operator, None user.
+
+        Given: A SignalData built without multi-tenant kwargs,
+        When: The instance is constructed,
+        Then: ``wallet_public_id`` is the empty-string sentinel and
+            both operator/user IDs are ``None``.
+        """
+        msg = SignalData(
+            session_id="",
+            sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            fired_at=datetime.now(UTC),
+            instrument="BTCUSD",
+            exchange="kraken",
+            side="buy",
+            strength=0.5,
+            reason="default-test",
+        )
+        assert msg.wallet_public_id == ""
+        assert msg.operator_public_id is None
+        assert msg.user_public_id is None
+
+    def test_signal_non_default_round_trip(self) -> None:
+        """SignalData multi-tenant fields survive a JSON round trip.
+
+        Given: A SignalData with explicit wallet/operator/user IDs,
+        When: The message is serialized and re-parsed,
+        Then: All three multi-tenant fields are preserved.
+        """
+        msg = SignalData(
+            session_id="",
+            sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            fired_at=datetime.now(UTC),
+            instrument="BTCUSD",
+            exchange="kraken",
+            side="sell",
+            strength=0.9,
+            reason="round-trip",
+            wallet_public_id="wallet-7",
+            operator_public_id="op-77",
+            user_public_id="user-777",
+        )
+        parsed = SignalData.from_json(msg.to_json())
+        assert parsed.wallet_public_id == "wallet-7"
+        assert parsed.operator_public_id == "op-77"
+        assert parsed.user_public_id == "user-777"
+
+    def test_execution_default_multi_tenant_fields(self) -> None:
+        """ExecutionData defaults: empty wallet, None operator, None user.
+
+        Given: An ExecutionData built without multi-tenant kwargs,
+        When: The instance is constructed,
+        Then: All three Phase 0b.3 fields take their safe defaults so
+            existing fixtures continue to work.
+        """
+        msg = ExecutionData(
+            session_id="",
+            sequence_id=0,
+            public_id="test-public-id",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            client_order_id="cid",
+            instrument="BTCUSD",
+            exchange="kraken",
+            side="buy",
+            size=1.0,
+            price=50000.0,
+            last_size=1.0,
+            last_price=50000.0,
+            fee=0.0,
+            fee_asset="USD",
+            status="filled",
+            executed_at=datetime.now(UTC),
+        )
+        assert msg.wallet_public_id == ""
+        assert msg.operator_public_id is None
+        assert msg.user_public_id is None

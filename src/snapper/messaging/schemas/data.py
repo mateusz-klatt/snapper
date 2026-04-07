@@ -221,6 +221,8 @@ class ExecutionData(StrictDataSchema[Literal["execution"]]):
     status: FillStatus
     executed_at: datetime
     wallet_public_id: str = ""
+    operator_public_id: str | None = None
+    user_public_id: str | None = None
 
 
 class OrderData(StrictDataSchema[Literal["order"]]):
@@ -275,6 +277,7 @@ class OrderData(StrictDataSchema[Literal["order"]]):
     reduce_only: bool = False
     wallet_public_id: str = ""
     operator_public_id: str | None = None
+    user_public_id: str | None = None
 
 
 class PositionData(StrictDataSchema[Literal["position"]]):
@@ -423,6 +426,7 @@ class OrderEventData(StrictDataSchema[Literal["order_event"]]):
     reason: str | None = None
     wallet_public_id: str = ""
     operator_public_id: str | None = None
+    user_public_id: str | None = None
 
 
 class HeartbeatData(StrictDataSchema[Literal["heartbeat"]]):
