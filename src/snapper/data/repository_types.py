@@ -160,6 +160,8 @@ class SignalRow(TypedDict):
     strategy_name: str
     price: float
     fired_at: datetime
+    wallet_public_id: str | None
+    operator_public_id: str | None
 
 
 class OrderRow(TypedDict):

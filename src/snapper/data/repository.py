@@ -2258,6 +2258,8 @@ class SQLAlchemyRepository(Repository):
                     "strategy_name": sig.strategy_name,
                     "price": sig.price,
                     "fired_at": sig.fired_at,
+                    "wallet_public_id": sig.wallet_public_id,
+                    "operator_public_id": sig.operator_public_id,
                 }
                 for sig, inst, sym in result.all()
             ]

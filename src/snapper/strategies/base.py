@@ -536,6 +536,8 @@ class BaseStrategy(ABC):
             public_id=signal_envelope.public_id,
             timestamp=signal_envelope.timestamp,
             tracker=self._tracker,
+            wallet_public_id=self.config.wallet_public_id or None,
+            operator_public_id=self.config.operator_public_id or None,
         )
         logger.debug(
             f"Strategy {self.name}: Signal {signal.side.upper()} {signal.instrument} "

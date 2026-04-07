@@ -156,6 +156,92 @@ class TestSignalService:
             assert stored_signal is not None
             assert stored_signal.price is None
 
+    async def test_store_signal_persists_multi_tenant_ids(
+        self,
+        signal_service: SignalReadService,
+        sample_signal: StrategySignal,
+        test_repository: SQLAlchemyRepository,
+    ) -> None:
+        """Verify store_signal persists wallet_public_id + operator_public_id.
+
+        Given: Repository with BTCUSD instrument and a strategy that supplies
+            wallet/operator IDs (Phase 0b.4 contract),
+        When: store_signal is called with wallet_public_id + operator_public_id,
+        Then: The persisted Signal row carries both IDs verbatim. Empty strings
+            collapse to NULL so the existing zero-value path stays unchanged.
+        """
+        await test_repository.ensure_instrument(
+            symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
+            exchange="testexchange",
+            session_id="test-session",
+            sequence_id=1,
+            timestamp=FIXED_TEST_TIME,
+        )
+        tracker = SequenceTracker()
+        wallet_pid = "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa"
+        operator_pid = "01975a8b-3c7d-7000-8000-bbbbbbbbbbbb"
+        signal_id = await signal_service.store_signal(
+            signal=sample_signal,
+            exchange="testexchange",
+            strategy_name="test_strategy",
+            price=50000.0,
+            session_id="",
+            sequence_id=0,
+            timestamp=FIXED_TEST_TIME,
+            tracker=tracker,
+            wallet_public_id=wallet_pid,
+            operator_public_id=operator_pid,
+        )
+        assert signal_id
+        async with test_repository.session() as session:
+            result = await session.execute(select(Signal).where(Signal.public_id == signal_id))
+            stored = result.scalars().first()
+            assert stored is not None
+            assert stored.wallet_public_id == wallet_pid
+            assert stored.operator_public_id == operator_pid
+
+    async def test_store_signal_empty_multi_tenant_ids_become_null(
+        self,
+        signal_service: SignalReadService,
+        sample_signal: StrategySignal,
+        test_repository: SQLAlchemyRepository,
+    ) -> None:
+        """Verify empty-string IDs collapse to NULL on the persisted row.
+
+        Given: Repository with BTCUSD instrument and a strategy with empty
+            wallet/operator (Phase 0b transitional empty defaults),
+        When: store_signal is called with empty-string IDs,
+        Then: The persisted row stores NULL for both, preserving the existing
+            no-tenant query semantics until Phase 0b.6 NOT NULL tightening.
+        """
+        await test_repository.ensure_instrument(
+            symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
+            exchange="testexchange",
+            session_id="test-session",
+            sequence_id=1,
+            timestamp=FIXED_TEST_TIME,
+        )
+        tracker = SequenceTracker()
+        signal_id = await signal_service.store_signal(
+            signal=sample_signal,
+            exchange="testexchange",
+            strategy_name="test_strategy",
+            price=50000.0,
+            session_id="",
+            sequence_id=0,
+            timestamp=FIXED_TEST_TIME,
+            tracker=tracker,
+            wallet_public_id="",
+            operator_public_id="",
+        )
+        assert signal_id
+        async with test_repository.session() as session:
+            result = await session.execute(select(Signal).where(Signal.public_id == signal_id))
+            stored = result.scalars().first()
+            assert stored is not None
+            assert stored.wallet_public_id is None
+            assert stored.operator_public_id is None
+
     async def test_store_signal_with_envelope_identity(
         self,
         signal_service: SignalReadService,

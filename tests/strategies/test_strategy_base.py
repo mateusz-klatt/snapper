@@ -802,6 +802,8 @@ async def test_emit_signal_persists_with_stamped_provenance(
         public_id: str | None = None,
         timestamp: datetime | None = None,
         tracker: object = None,
+        wallet_public_id: str | None = None,
+        operator_public_id: str | None = None,
     ) -> str:
         captured.append(
             {

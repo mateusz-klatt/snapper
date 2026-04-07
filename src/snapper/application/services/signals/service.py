@@ -101,6 +101,8 @@ class SignalReadService:
         strategy_name: str | None = None,
         price: float | None = None,
         public_id: str | None = None,
+        wallet_public_id: str | None = None,
+        operator_public_id: str | None = None,
     ) -> str:
         """Store a trading signal in the database.
 
@@ -118,6 +120,13 @@ class SignalReadService:
             tracker: Strategy-owned SequenceTracker used when a lazy
                 instrument upsert is needed. Keeps the instrument row in
                 the same session as the owning strategy component.
+            wallet_public_id: Optional wallet identity propagated from the
+                strategy's StrategyConfig (Phase 0b.4). Empty / None values
+                collapse to NULL on the persisted row until Phase 0b.6
+                NOT NULL tightening lands.
+            operator_public_id: Optional operator identity propagated from
+                the strategy's StrategyConfig (Phase 0b.4). Same Phase 0b
+                transitional rules as wallet_public_id.
 
         Returns:
             Signal event UUID or empty string on error.
@@ -139,6 +148,8 @@ class SignalReadService:
                     "price": price,
                     "session_id": session_id,
                     "sequence_id": sequence_id,
+                    "wallet_public_id": wallet_public_id or None,
+                    "operator_public_id": operator_public_id or None,
                 }
                 if public_id is not None:
                     init_kwargs["public_id"] = public_id
