@@ -1310,7 +1310,7 @@ class WalletCredential(TemporalMixin, Base):
             name="ck_wallet_credentials_type",
         ),
     )
-    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn())
     exchange: Mapped[str] = mapped_column(String(20))
     credential_type: Mapped[str] = mapped_column(String(32))
     encrypted_payload: Mapped[str] = mapped_column(Text)
