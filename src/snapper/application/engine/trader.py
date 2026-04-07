@@ -1136,6 +1136,9 @@ class TraderCoordinator(RegisterableProcess):
             strategy_tag=tag,
             leverage=cmd["leverage"],
             reduce_only=cmd["reduce_only"],
+            wallet_public_id=cmd.get("wallet_public_id") or "",
+            operator_public_id=cmd.get("operator_public_id"),
+            user_public_id=cmd.get("user_public_id"),
         )
         await self.msg_publisher.send(topic, order)
 

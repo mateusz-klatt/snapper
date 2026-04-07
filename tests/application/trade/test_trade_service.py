@@ -204,6 +204,9 @@ def test_apply_order_rejected_clears_in_flight() -> None:
             "exchange_order_id": None,
             "supersedes_command_id": None,
             "correlation_id": "corr-1",
+            "wallet_public_id": None,
+            "operator_public_id": None,
+            "user_public_id": None,
         },
     )
     assert svc.get_command_state("kraken.BTC-USD.live").in_flight is True
@@ -466,6 +469,9 @@ def test_snapshot_with_open_command() -> None:
             "exchange_order_id": None,
             "supersedes_command_id": None,
             "correlation_id": "corr-99",
+            "wallet_public_id": None,
+            "operator_public_id": None,
+            "user_public_id": None,
         },
     )
     snap = svc.snapshot_for_checkpoint("kraken.BTC-USD.live")

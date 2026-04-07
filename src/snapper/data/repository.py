@@ -2733,6 +2733,9 @@ class SQLAlchemyRepository(Repository):
                         "exchange_order_id": cmd.exchange_order_id,
                         "supersedes_command_id": cmd.supersedes_command_id,
                         "correlation_id": cmd.correlation_id,
+                        "wallet_public_id": cmd.wallet_public_id,
+                        "operator_public_id": cmd.operator_public_id,
+                        "user_public_id": cmd.user_public_id,
                     }
                 )
             return rows
@@ -2785,6 +2788,9 @@ class SQLAlchemyRepository(Repository):
                         "exchange_order_id": cmd.exchange_order_id,
                         "supersedes_command_id": cmd.supersedes_command_id,
                         "correlation_id": cmd.correlation_id,
+                        "wallet_public_id": cmd.wallet_public_id,
+                        "operator_public_id": cmd.operator_public_id,
+                        "user_public_id": cmd.user_public_id,
                     }
                 )
             return rows
@@ -2848,6 +2854,9 @@ class SQLAlchemyRepository(Repository):
                         "exchange_order_id": cmd.exchange_order_id,
                         "supersedes_command_id": cmd.supersedes_command_id,
                         "correlation_id": cmd.correlation_id,
+                        "wallet_public_id": cmd.wallet_public_id,
+                        "operator_public_id": cmd.operator_public_id,
+                        "user_public_id": cmd.user_public_id,
                     }
                 )
             return rows

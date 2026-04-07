@@ -51,6 +51,9 @@ def _make_cmd_row(public_id: str = "cmd-1") -> TradeCommandRow:
         "exchange_order_id": None,
         "supersedes_command_id": None,
         "correlation_id": "corr-1",
+        "wallet_public_id": None,
+        "operator_public_id": None,
+        "user_public_id": None,
     }
 
 

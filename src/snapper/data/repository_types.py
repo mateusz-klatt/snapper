@@ -272,6 +272,9 @@ class TradeCommandRow(TypedDict):
     exchange_order_id: str | None
     supersedes_command_id: str | None
     correlation_id: str
+    wallet_public_id: str | None
+    operator_public_id: str | None
+    user_public_id: str | None
 
 
 class VenueEventRow(TypedDict):
