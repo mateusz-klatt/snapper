@@ -177,6 +177,11 @@ class StrategyProcessParameters(StrictBody):
         outputs: ZMQ topic prefixes to publish to.
         exchange: Exchange for order execution.
         params: Strategy-specific opaque parameters.
+        wallet_public_id: Wallet that owns positions and credentials for
+            order execution. Optional during Phase 0b transition; will
+            become required after Phase 0b.6.
+        operator_public_id: Trading-identity operator that owns this
+            strategy instance. Optional during Phase 0b transition.
     """
 
     name: str
@@ -184,3 +189,5 @@ class StrategyProcessParameters(StrictBody):
     outputs: list[str]
     exchange: OrderExchange = ExchangeEnum.PAPER
     params: JsonObject | None = None
+    wallet_public_id: str = ""
+    operator_public_id: str = ""

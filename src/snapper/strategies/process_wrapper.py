@@ -64,6 +64,8 @@ def create_strategy_process(
             outputs: list[str],
             exchange: OrderExchange = ExchangeEnum.PAPER,
             params: dict[str, Any] | None = None,
+            wallet_public_id: str = "",
+            operator_public_id: str = "",
         ) -> None:
             self.process_name = process_name
             self.config = StrategyConfig(
@@ -73,6 +75,8 @@ def create_strategy_process(
                 outputs=outputs,
                 exchange=exchange,
                 params=params or {},
+                wallet_public_id=wallet_public_id,
+                operator_public_id=operator_public_id,
             )
             self.strategy: BaseStrategy | None = None
             self.factory = StrategyFactory()

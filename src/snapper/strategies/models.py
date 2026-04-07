@@ -49,6 +49,13 @@ class StrategyConfig:
         outputs: List of output instruments for signals.
         exchange: Target exchange for order execution.
         params: Strategy-specific parameters.
+        wallet_public_id: Wallet that will execute orders for this strategy.
+            Optional during Phase 0b transition (empty default); becomes
+            required after Phase 0b.6 NOT NULL tightening migration lands.
+        operator_public_id: Trading-identity operator that owns this
+            strategy instance. Optional during Phase 0b transition (empty
+            default); validated against the launching principal's
+            ``operator_public_ids`` when populated.
     """
 
     name: str
@@ -57,6 +64,8 @@ class StrategyConfig:
     outputs: list[str]
     exchange: OrderExchange = ExchangeEnum.PAPER
     params: dict[str, Any] = field(default_factory=dict)
+    wallet_public_id: str = ""
+    operator_public_id: str = ""
 
     @staticmethod
     def _is_paper_or_replay(topic: str) -> bool:

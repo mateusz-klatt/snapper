@@ -520,6 +520,8 @@ class BaseStrategy(ABC):
             exchange=self.exchange,
             strategy_name=self.name,
             fired_at=now,
+            wallet_public_id=self.config.wallet_public_id,
+            operator_public_id=self.config.operator_public_id or None,
         )
 
         if self.msg_publisher is not None:
