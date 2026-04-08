@@ -70,7 +70,7 @@ from snapper.messaging.schemas.data import SettingChangedData
 from snapper.messaging.schemas.data import SymbolAliasUpdateData
 from snapper.messaging.schemas.messages import MessageParseError
 from snapper.messaging.schemas.messages import parse_message
-from snapper.messaging.topics.builders import heartbeat_topic_from_component
+from snapper.messaging.topics.builders import heartbeat_topic
 from snapper.messaging.topics.builders import order_commands_prefix
 from snapper.messaging.topics.builders import order_event_topic
 from snapper.messaging.topics.builders import parse_order_command_topic
@@ -1601,8 +1601,25 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.error(f"[{exchange_name}] Error publishing order event: {e}")
 
     async def _heartbeat_loop(self) -> None:
-        """Periodically publish heartbeat messages and cleanup orphans."""
+        """Periodically publish heartbeat messages and cleanup orphans.
+
+        Post-0c cleanup item 3: when ``self.wallet_public_id`` is
+        populated, the heartbeat topic gains a 5th ``{wallet_short}``
+        segment so per-wallet executor instances publish on distinct
+        topics (``system.heartbeats.executor.{exchange}.{wallet_short}``).
+        The legacy 4-segment format still fires for template-mode
+        executors with empty ``wallet_public_id`` (test fixtures that
+        have not migrated to the per-wallet path).
+        """
         exchange_name = self._get_exchange_name()
+        wallet_short = (
+            self.wallet_public_id.replace("-", "")[:12].lower() if self.wallet_public_id else ""
+        )
+        component = (
+            f"executor.{exchange_name}.{wallet_short}"
+            if wallet_short
+            else f"executor.{exchange_name}"
+        )
         while self.running:
             try:
                 await asyncio.sleep(self.settings.zmq_heartbeat_interval_ms / 1000.0)
@@ -1611,8 +1628,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 self._cleanup_expired_orphans()
                 self.heartbeat_seq += 1
                 lag_ms = 0
-                component = f"executor.{exchange_name}"
-                hb_topic = heartbeat_topic_from_component(component)
+                hb_topic = heartbeat_topic("executor", exchange_name, wallet_short=wallet_short)
                 hb_msg = HeartbeatData(
                     public_id=str(uuid7()),
                     timestamp=datetime.now(UTC),
@@ -1625,6 +1641,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     meta={
                         "running": self.running,
                         "exchange": exchange_name,
+                        "wallet_public_id": self.wallet_public_id,
                         "broker_xsub": self.settings.zmq_broker_xsub,
                         "broker_xpub": self.settings.zmq_broker_xpub,
                     },
