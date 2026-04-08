@@ -86,13 +86,11 @@ Envelope shapes by `credential_type`:
 Seed profiles (`dev.toml` / `prod.toml`) are the current mechanism
 for populating `wallet_credentials`. A runtime credential management
 UI (list / add / rotate / delete per-wallet credentials, with
-automatic executor restart on rotation) is planned as part of the
-upcoming frontend work — see Phase 0d Section 6.4 of
-`proprietary/plans/plan_multi_tenant_foundation.md`. Until the UI
-ships, rotation requires editing the seed file and running the
-seed command against a clean database (seed is idempotent — it
-skips wallets that already exist), or direct SQL surgery on the
-encrypted payload.
+automatic executor restart on rotation) is on the frontend roadmap.
+Until the UI ships, rotation requires editing the seed file and
+running the seed command against a clean database (seed is
+idempotent — it skips wallets that already exist), or direct SQL
+surgery on the encrypted payload.
 
 Seed file structure:
 

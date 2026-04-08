@@ -1,27 +1,28 @@
 """Multi-tenant foundation: tighten wallet_public_id to NOT NULL on 8 write-path tables.
 
-Plan 0 / Phase 0c.6 (multi-tenant foundation, step 6 of 7).
+Migration 0010 added nullable ``wallet_public_id`` /
+``operator_public_id`` / ``user_public_id`` columns to the 9
+write-path tables so that the initial multi-tenant schema could
+ship without breaking every existing callsite. A follow-up
+refactor moved executors to per-wallet instances, wired the wallet
+cache into the trader coordinator, and switched every production
+insert path to populate ``wallet_public_id``. This migration
+closes the loop:
 
-Migration 0010 added nullable ``wallet_public_id`` / ``operator_public_id`` /
-``user_public_id`` columns to the 9 write-path tables so that Phase 0a
-could ship without breaking every existing callsite. Phase 0c.1-0c.5 then
-refactored executors into per-wallet instances, wired the wallet cache
-into the trader coordinator, and switched every production insert path
-to populate ``wallet_public_id``. This migration closes the loop:
-
-1. ALTER ``wallet_public_id`` to ``NOT NULL`` on the 8 write-path tables
-   that genuinely know their wallet at insert time. ``process_runs``
-   stays nullable because broker / market-data feeder processes are
-   wallet-agnostic.
+1. ALTER ``wallet_public_id`` to ``NOT NULL`` on the 8 write-path
+   tables that genuinely know their wallet at insert time.
+   ``process_runs`` stays nullable because broker / market-data
+   feeder processes are wallet-agnostic.
 
 2. DROP + CREATE the ``positions`` unique index to include
-   ``wallet_public_id``. Two wallets holding the same instrument in
-   the same mode must coexist; the same wallet must still conflict.
+   ``wallet_public_id``. Two wallets holding the same instrument
+   in the same mode must coexist; the same wallet must still
+   conflict.
 
-3. DROP + CREATE the ``accrual_ledger`` unique + recovery indexes with
-   ``wallet_public_id`` PREPENDED. Per-wallet accrual queries hit the
-   prepended column for index sargability, and the unique key no longer
-   bleeds across wallets.
+3. DROP + CREATE the ``accrual_ledger`` unique + recovery indexes
+   with ``wallet_public_id`` PREPENDED. Per-wallet accrual queries
+   hit the prepended column for index sargability, and the unique
+   key no longer bleeds across wallets.
 
 Tables tightened (8):
 
@@ -33,18 +34,15 @@ Tables NOT tightened:
 
 - ``process_runs`` — broker/feeds stay wallet-agnostic.
 - ``orders.operator_public_id`` / ``orders.user_public_id``,
-  ``signals.operator_public_id``, ``trade_commands.{operator,user}_public_id``,
-  ``accrual_ledger.operator_public_id`` — stay nullable per
-  Plan Section 3.2 (strategy-emitted rows carry NULL operator/user).
+  ``signals.operator_public_id``,
+  ``trade_commands.{operator,user}_public_id``,
+  ``accrual_ledger.operator_public_id`` — stay nullable because
+  strategy-emitted rows carry NULL operator/user.
 
-Pre-launch DB is disposable per D4 so there is no backfill step: the
-migration assumes every existing row already has a populated wallet,
-which is true after Phase 0c.5 shipped + ``make migrate-dev`` was
-re-run against a clean DB.
-
-Plan and rationale: ``proprietary/plans/plan_multi_tenant_foundation.md``
-Sections 3.9 rows 1+2, Section 4.0 deferral note, Section 5 Phase 0c
-contract.
+The pre-launch DB is disposable, so there is no backfill step:
+the migration assumes every existing row already has a populated
+wallet, which is true after the per-wallet executor refactor shipped
+and ``make migrate-dev`` was re-run against a clean DB.
 """
 
 from collections.abc import Sequence

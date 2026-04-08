@@ -1,7 +1,5 @@
 """Multi-tenant foundation: wallets, operators, scope grants.
 
-Plan 0 / Phase 0a (multi-tenant foundation, step 1 of N).
-
 Adds the 5 new tables that form the multi-tenant 3-entity model:
 
 - ``wallets`` — logical container for credentials and positions on one or
@@ -13,20 +11,17 @@ Adds the 5 new tables that form the multi-tenant 3-entity model:
 - ``user_operator_memberships`` — M:N which users may act AS which operators.
   At most one primary operator per user.
 - ``wallet_operator_scope_grants`` — M:N which operators may trade which
-  scopes on which wallets. All grants are instrument-exclusive per Plan 0 D2:
-  at most one operator per (wallet, instrument) tuple at any time. The CHECK
-  constraint enforces scope_kind XOR (exactly one of underlying_public_id /
+  scopes on which wallets. All grants are instrument-exclusive: at most one
+  operator per (wallet, instrument) tuple at any time. The CHECK constraint
+  enforces scope_kind XOR (exactly one of underlying_public_id /
   instrument_public_id is non-NULL).
 
-This migration only adds the 5 new tables. The follow-up migration will add
+This migration only adds the 5 new tables. A follow-up migration adds
 ``wallet_public_id`` / ``operator_public_id`` columns to the existing
 write-path tables (positions, orders, executions, signals, trade_commands,
 venue_events, trade_projection_checkpoints, process_runs, accrual_ledger),
-bump shard_key column lengths from String(64) to String(256), and extend the
-accrual_ledger unique index to include wallet_public_id.
-
-Plan and rationale: ``proprietary/plans/plan_multi_tenant_foundation.md``
-Sections 3.1, 14.6, 14.7, 14.8.
+bumps shard_key column lengths from String(64) to String(256), and extends
+the accrual_ledger unique index to include wallet_public_id.
 """
 
 from collections.abc import Sequence

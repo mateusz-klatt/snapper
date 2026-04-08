@@ -1,25 +1,27 @@
 """Multi-tenant foundation: extend existing tables with wallet/operator columns.
 
-Plan 0 / Phase 0a (multi-tenant foundation, step 2 of N).
+Adds nullable ``wallet_public_id`` / ``operator_public_id`` /
+``user_public_id`` columns to the 9 write-path tables and bumps
+``shard_key`` from ``String(64)`` to ``String(256)`` on the 3 tables
+that carry it. The pre-launch DB is disposable, so this migration
+only ALTERs the existing schema; backfill and tightening to NOT NULL
+happen in a follow-up migration.
 
-Adds nullable ``wallet_public_id`` / ``operator_public_id`` / ``user_public_id``
-columns to the 9 write-path tables and bumps ``shard_key`` from ``String(64)``
-to ``String(256)`` on the 3 tables that carry it. Per Plan 0 D4 the pre-launch
-DB is disposable, so this migration only ALTERs the existing schema; backfill
-and tightening to NOT NULL happen later.
+Columns land nullable in this step because:
 
-Why nullable now (vs. NOT NULL per Plan 0 Section 3.2):
-
-- The default seed (User → Operator → Wallet → ScopeGrants) lands in step 4.
-- Production callsites populate wallet_public_id once the per-wallet trader
-  coordinator is wired up in step 4 / Phase 0c.
-- Until both exist, NOT NULL would force every existing write-path test to
-  invent a wallet UUID, exploding the blast radius of step 2.
-- Step 5 of Phase 0a tightens these columns to NOT NULL after seed and
-  callsites are in place. Index extensions (Position unique on
-  wallet_public_id, AccrualLedger unique prepend) also move to step 5 — with
-  NULL values present, both PostgreSQL and SQLite treat NULLs as distinct in
-  unique indexes, which would silently weaken the dedup guarantee.
+- The default seed (User → Operator → Wallet → ScopeGrants) lands
+  in a follow-up step.
+- Production callsites populate wallet_public_id once the per-wallet
+  trader coordinator is wired up.
+- Until both exist, NOT NULL would force every existing write-path
+  test to invent a wallet UUID, exploding the blast radius of this
+  migration.
+- A follow-up migration tightens these columns to NOT NULL after
+  seed and callsites are in place. Index extensions (Position unique
+  on wallet_public_id, AccrualLedger unique prepend) also move to
+  that later step — with NULL values present, both PostgreSQL and
+  SQLite treat NULLs as distinct in unique indexes, which would
+  silently weaken the dedup guarantee.
 
 Tables touched (9):
 
@@ -35,9 +37,6 @@ Tables touched (9):
   shard_key String(64)→String(256)
 - ``process_runs`` → +wallet_public_id (broker/feeds stay NULL)
 - ``accrual_ledger`` → +wallet_public_id, +operator_public_id
-
-Plan and rationale: ``proprietary/plans/plan_multi_tenant_foundation.md``
-Sections 3.2, 3.3, 14.8.2, 14.8.3.
 """
 
 from collections.abc import Sequence
