@@ -1855,6 +1855,26 @@ class TestSystemTopicHeartbeatPaths:
         assert not valid
         assert "wallet_short" in _err
 
+    def test_system_heartbeats_executor_with_uppercase_hex_wallet_short_is_rejected(
+        self,
+    ) -> None:
+        """Phase 0c.7: uppercase hex is rejected (lowercase-only convention).
+
+        Given: ``system.heartbeats.executor.kraken.019D6CA45F2E`` — 12
+            chars, valid hex, but uppercase,
+        When: The topic is validated,
+        Then: Validation fails. The producers (``service.py:_shard_key``,
+            ``launcher.py:spawn_per_wallet_executors``, and
+            ``trader.py:_build_engine_key``) all ``.lower()`` before
+            publishing, so an uppercase wallet_short in a topic segment
+            indicates a typo or a stale tooling path that must be
+            caught at the first publish — matching the Phase 0c.5
+            lowercase-only decision for ``_parse_shard_key``.
+        """
+        valid, _err = validate_topic("system.heartbeats.executor.kraken.019D6CA45F2E")
+        assert not valid
+        assert "wallet_short" in _err
+
     def test_system_heartbeats_executor_with_wrong_length_wallet_short_is_rejected(
         self,
     ) -> None:
