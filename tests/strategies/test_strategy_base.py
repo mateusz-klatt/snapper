@@ -3793,16 +3793,18 @@ class TestTopicValidationPhase4:
 class TestExecutorBasePhase4:
     """Test suite for executor base class edge cases."""
 
-    def test_get_default_parameters_returns_empty_dict(self) -> None:
-        """Verify get_default_parameters returns empty dict.
+    def test_get_default_parameters_advertises_wallet_public_id(self) -> None:
+        """Phase 0c: ``get_default_parameters`` advertises wallet param.
 
         Given: ExchangeExecutorService,
-        When: get_default_parameters called,
-        Then: Empty dict returned.
+        When: ``get_default_parameters`` called,
+        Then: Returns ``{"wallet_public_id": ""}`` so the process
+            launcher knows the parameter exists for per-wallet
+            spawning.
         """
         mock_settings = MagicMock()
         result = ExchangeExecutorService.get_default_parameters(mock_settings)
-        assert result == {}
+        assert result == {"wallet_public_id": ""}
 
     @pytest.mark.asyncio
     async def test_publish_heartbeat_error_handling(self) -> None:

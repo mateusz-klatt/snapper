@@ -29,10 +29,26 @@ class WalutomatOrderExecutor(ExchangeExecutorService[WalutomatExchangeClient]):
     """
 
     def _create_exchange_client(self) -> WalutomatExchangeClient:
+        """Create the Walutomat exchange client.
+
+        Phase 0c: when ``self._credentials`` is populated by the
+        base-class ``_resolve_credentials`` call (non-empty
+        ``wallet_public_id``), the API key and RSA PEM come from the
+        per-wallet ``wallet_credentials`` payload
+        (``credential_type="rsa_pem"``). Otherwise the legacy
+        ``AppSettings.walutomat_api_key/_private_key`` properties
+        are used.
+        """
         repository = get_repository(self.settings.db_url)
+        if self._credentials is not None:
+            api_key = self._credentials.get("api_key", "")
+            private_key_data = self._credentials.get("private_key_pem", "")
+        else:
+            api_key = self.settings.walutomat_api_key
+            private_key_data = self.settings.walutomat_private_key
         return WalutomatExchangeClient(
-            api_key=self.settings.walutomat_api_key,
-            private_key_data=self.settings.walutomat_private_key,
+            api_key=api_key,
+            private_key_data=private_key_data,
             repository=repository,
         )
 

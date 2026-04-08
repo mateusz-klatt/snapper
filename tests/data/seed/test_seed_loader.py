@@ -843,14 +843,16 @@ class TestSeedDefaultMultiTenant:
         conn.commit()
         return engine, conn
 
-    def test_inserts_operator_wallet_and_membership(self, tmp_path: Path) -> None:
-        """Bootstrap creates an operator, a paper wallet, and an admin membership.
+    def test_inserts_operator_wallet_membership_and_paper_credential(self, tmp_path: Path) -> None:
+        """Bootstrap creates operator + wallet + admin membership + paper credential.
 
         Given: An SQLite database with an admin user already seeded and
             empty multi-tenant tables,
         When: ``seed_default_multi_tenant`` is invoked,
-        Then: Default operator, paper wallet, and primary admin membership
-            rows are inserted.
+        Then: Default operator, paper wallet, primary admin membership,
+            and a paper-mode wallet credential row are inserted (Phase 0c
+            bootstrap so the dynamic per-wallet executor spawner finds at
+            least one credential at boot).
         """
         engine, conn = self._make_db(tmp_path)
         try:
@@ -869,20 +871,37 @@ class TestSeedDefaultMultiTenant:
             count = seed_default_multi_tenant(conn, SequenceTracker())
             conn.commit()
 
-            assert count == 3
+            assert count == 4
             op_row = conn.execute(text("SELECT label FROM operators")).first()
             assert op_row is not None
             assert op_row[0] == "default"
-            wallet_row = conn.execute(text("SELECT label, is_paper FROM wallets")).first()
+            wallet_row = conn.execute(
+                text("SELECT public_id, label, is_paper FROM wallets")
+            ).first()
             assert wallet_row is not None
-            assert wallet_row[0] == "default-paper"
-            assert wallet_row[1] == 1
+            wallet_public_id = wallet_row[0]
+            assert wallet_row[1] == "default-paper"
+            assert wallet_row[2] == 1
             membership_row = conn.execute(
                 text("SELECT user_public_id, is_primary FROM user_operator_memberships")
             ).first()
             assert membership_row is not None
             assert membership_row[0] == "user-admin"
             assert membership_row[1] == 1
+            credential_row = conn.execute(
+                text(
+                    "SELECT wallet_public_id, exchange, credential_type,"
+                    " encrypted_payload, encryption_key_id, label"
+                    " FROM wallet_credentials"
+                )
+            ).first()
+            assert credential_row is not None
+            assert credential_row[0] == wallet_public_id
+            assert credential_row[1] == "paper"
+            assert credential_row[2] == "paper"
+            assert credential_row[3].startswith("gAAAAAB")
+            assert credential_row[4] == "v1"
+            assert credential_row[5] == "default-paper bootstrap"
         finally:
             conn.close()
             cast(Any, engine).dispose()
@@ -949,20 +968,21 @@ class TestSeedDefaultMultiTenant:
 
         Given: A database with the users table empty,
         When: ``seed_default_multi_tenant`` is invoked,
-        Then: Operator and wallet are inserted but no membership row
-            (count == 2 instead of 3).
+        Then: Operator + wallet + paper credential are inserted but no
+            membership row (count == 3 instead of 4).
         """
         engine, conn = self._make_db(tmp_path)
         try:
             count = seed_default_multi_tenant(conn, SequenceTracker())
             conn.commit()
 
-            assert count == 2
+            assert count == 3
             assert conn.execute(text("SELECT COUNT(*) FROM operators")).scalar() == 1
             assert conn.execute(text("SELECT COUNT(*) FROM wallets")).scalar() == 1
             assert (
                 conn.execute(text("SELECT COUNT(*) FROM user_operator_memberships")).scalar() == 0
             )
+            assert conn.execute(text("SELECT COUNT(*) FROM wallet_credentials")).scalar() == 1
         finally:
             conn.close()
             cast(Any, engine).dispose()
@@ -1001,6 +1021,17 @@ def _create_multi_tenant_tables(conn: Connection) -> None:
             "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
             " user_public_id TEXT, operator_public_id TEXT,"
             " is_primary INTEGER NOT NULL DEFAULT 0,"
+            " timestamp TIMESTAMP, known_to DATETIME NOT NULL,"
+            " session_id TEXT NOT NULL DEFAULT '',"
+            " sequence_id INTEGER NOT NULL DEFAULT 0)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE TABLE wallet_credentials ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
+            " wallet_public_id TEXT, exchange TEXT, credential_type TEXT,"
+            " encrypted_payload TEXT, encryption_key_id TEXT, label TEXT,"
             " timestamp TIMESTAMP, known_to DATETIME NOT NULL,"
             " session_id TEXT NOT NULL DEFAULT '',"
             " sequence_id INTEGER NOT NULL DEFAULT 0)"

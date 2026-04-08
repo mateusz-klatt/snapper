@@ -5944,3 +5944,284 @@ def test_resolve_fee_zero_usd_equiv_falls_through() -> None:
         fees=[ExecutionFeeBreakdown(asset="PLN", quantity=1.5)],
     )
     assert base_module.ExchangeExecutorService._resolve_fee(execution) == (1.5, "PLN")
+
+
+class TestPhase0cWalletScopedExecutor:
+    """Phase 0c per-wallet executor: credential resolver + message filter.
+
+    Covers the new ``wallet_public_id`` constructor parameter, the
+    ``_resolve_credentials`` startup hook, and the ``_is_for_my_wallet``
+    routing filter on incoming command messages. Both the legacy
+    backwards-compat path (empty ``wallet_public_id``) and the
+    Phase 0c per-wallet path are exercised.
+    """
+
+    def test_default_parameters_include_wallet_public_id(self) -> None:
+        """``get_default_parameters`` advertises wallet_public_id default.
+
+        Given: A fresh ``AppSettings`` instance,
+        When: ``ExchangeExecutorService.get_default_parameters`` runs,
+        Then: The returned dict includes ``wallet_public_id=""`` so the
+            process launcher knows the parameter exists.
+        """
+        defaults = ExchangeExecutorService.get_default_parameters(cast(Any, MagicMock()))
+        assert defaults == {"wallet_public_id": ""}
+
+    def test_init_stores_empty_wallet_by_default(self) -> None:
+        """Default constructor preserves the legacy empty-wallet behaviour."""
+        with patch("snapper.config.settings.get_settings") as mock_get_settings:
+            mock_get_settings.return_value = MagicMock(db_url=TEST_DB_URL)
+            executor = KrakenOrderExecutor()
+        assert executor.wallet_public_id == ""
+        assert executor._credentials is None
+
+    def test_init_stores_wallet_public_id_when_provided(self) -> None:
+        """Phase 0c constructor accepts an explicit wallet_public_id."""
+        with patch("snapper.config.settings.get_settings") as mock_get_settings:
+            mock_get_settings.return_value = MagicMock(db_url=TEST_DB_URL)
+            executor = KrakenOrderExecutor(wallet_public_id="019d5a8b3c7d4e5f")
+        assert executor.wallet_public_id == "019d5a8b3c7d4e5f"
+        assert executor._credentials is None
+
+    @pytest.mark.asyncio
+    async def test_resolve_credentials_returns_immediately_when_wallet_empty(
+        self,
+    ) -> None:
+        """Empty wallet_public_id keeps the legacy fallback path active.
+
+        Given: An executor with the default empty wallet_public_id,
+        When: ``_resolve_credentials`` is called,
+        Then: It returns without consulting the repository and leaves
+            ``self._credentials`` as None so concrete
+            ``_create_exchange_client`` falls back to ``AppSettings``.
+        """
+        with patch("snapper.config.settings.get_settings") as mock_get_settings:
+            mock_get_settings.return_value = MagicMock(db_url=TEST_DB_URL)
+            executor = KrakenOrderExecutor()
+        executor.repository = MagicMock()
+        await executor._resolve_credentials("kraken")
+        assert executor._credentials is None
+
+    @pytest.mark.asyncio
+    async def test_resolve_credentials_raises_when_repository_missing(self) -> None:
+        """Phase 0c lookup fails fast when called before repository init.
+
+        Given: An executor with wallet_public_id but no repository,
+        When: ``_resolve_credentials`` is called,
+        Then: A ``RuntimeError`` is raised before any DB call so the
+            startup ordering bug surfaces immediately.
+        """
+        with patch("snapper.config.settings.get_settings") as mock_get_settings:
+            mock_get_settings.return_value = MagicMock(db_url=TEST_DB_URL)
+            executor = KrakenOrderExecutor(wallet_public_id="019d5a8b3c7d4e5f")
+        executor.repository = None
+        with pytest.raises(RuntimeError, match="repository initialization"):
+            await executor._resolve_credentials("kraken")
+
+    @pytest.mark.asyncio
+    async def test_resolve_credentials_populates_credentials_dict(self) -> None:
+        """Per-wallet startup loads credentials via CredentialResolver.
+
+        Given: An executor with a non-empty wallet_public_id and an
+            initialized repository,
+        When: ``_resolve_credentials`` is called,
+        Then: It instantiates ``CredentialResolver``, fetches the row
+            for the wallet+exchange pair, and stores the decrypted
+            envelope on ``self._credentials``.
+        """
+        envelope = SimpleNamespace(
+            api_key_value="resolver-public-id",
+            api_secret_value="resolver-signing-blob",
+        )
+        expected_envelope = {
+            "api_key": envelope.api_key_value,
+            "api_secret": envelope.api_secret_value,
+        }
+        with patch("snapper.config.settings.get_settings") as mock_get_settings:
+            mock_get_settings.return_value = MagicMock(db_url=TEST_DB_URL)
+            executor = KrakenOrderExecutor(wallet_public_id="019d5a8b3c7d4e5f")
+        executor.repository = MagicMock()
+        resolver_instance = MagicMock()
+        resolver_instance.get_credentials = AsyncMock(return_value=expected_envelope)
+        with patch.object(
+            base_module, "CredentialResolver", return_value=resolver_instance
+        ) as resolver_cls:
+            await executor._resolve_credentials("kraken")
+        resolver_cls.assert_called_once_with(executor.repository)
+        resolver_instance.get_credentials.assert_awaited_once_with(
+            exchange="kraken", wallet_public_id="019d5a8b3c7d4e5f"
+        )
+        assert executor._credentials == expected_envelope
+
+    def test_is_for_my_wallet_accepts_everything_in_legacy_mode(self) -> None:
+        """Empty wallet_public_id never filters — pre-0c behaviour preserved.
+
+        Given: An executor with the default empty wallet_public_id,
+        When: ``_is_for_my_wallet`` is called with any message,
+        Then: It always returns True so existing tests and the
+            single-wallet template path keep routing every command.
+        """
+        with patch("snapper.config.settings.get_settings") as mock_get_settings:
+            mock_get_settings.return_value = MagicMock(db_url=TEST_DB_URL)
+            executor = KrakenOrderExecutor()
+        msg = SimpleNamespace(wallet_public_id="some-other-wallet")
+        assert executor._is_for_my_wallet(msg) is True
+        msg_no_attr = SimpleNamespace()
+        assert executor._is_for_my_wallet(msg_no_attr) is True
+
+    def test_is_for_my_wallet_drops_messages_for_other_wallets(self) -> None:
+        """Phase 0c filter drops cross-wallet commands silently.
+
+        Given: An executor bound to wallet ``aaa``,
+        When: ``_is_for_my_wallet`` is called with a message tagged
+            ``bbb``,
+        Then: It returns False so the executor skips processing.
+        """
+        with patch("snapper.config.settings.get_settings") as mock_get_settings:
+            mock_get_settings.return_value = MagicMock(db_url=TEST_DB_URL)
+            executor = KrakenOrderExecutor(wallet_public_id="aaa")
+        msg = SimpleNamespace(wallet_public_id="bbb")
+        assert executor._is_for_my_wallet(msg) is False
+
+    def test_is_for_my_wallet_accepts_messages_for_my_wallet(self) -> None:
+        """Phase 0c filter accepts commands matching its own wallet.
+
+        Given: An executor bound to wallet ``aaa``,
+        When: ``_is_for_my_wallet`` is called with a matching message,
+        Then: It returns True so the executor proceeds with processing.
+        """
+        with patch("snapper.config.settings.get_settings") as mock_get_settings:
+            mock_get_settings.return_value = MagicMock(db_url=TEST_DB_URL)
+            executor = KrakenOrderExecutor(wallet_public_id="aaa")
+        msg = SimpleNamespace(wallet_public_id="aaa")
+        assert executor._is_for_my_wallet(msg) is True
+
+    def test_is_for_my_wallet_drops_messages_with_no_wallet_field(self) -> None:
+        """Phase 0c filter rejects messages missing wallet_public_id.
+
+        Given: An executor bound to wallet ``aaa``,
+        When: ``_is_for_my_wallet`` is called with a message that has
+            no ``wallet_public_id`` field (legacy strategy emission
+            that has not been updated yet),
+        Then: It returns False because the executor cannot prove
+            the message belongs to its wallet.
+        """
+        with patch("snapper.config.settings.get_settings") as mock_get_settings:
+            mock_get_settings.return_value = MagicMock(db_url=TEST_DB_URL)
+            executor = KrakenOrderExecutor(wallet_public_id="aaa")
+        msg = SimpleNamespace()
+        assert executor._is_for_my_wallet(msg) is False
+
+    def test_is_for_my_wallet_treats_none_wallet_field_as_unset(self) -> None:
+        """Explicit None on wallet_public_id is treated as empty string.
+
+        Given: An executor bound to wallet ``aaa``,
+        When: ``_is_for_my_wallet`` is called with
+            ``wallet_public_id=None`` (the schema default for
+            backwards-compat envelopes),
+        Then: It returns False because None != "aaa".
+        """
+        with patch("snapper.config.settings.get_settings") as mock_get_settings:
+            mock_get_settings.return_value = MagicMock(db_url=TEST_DB_URL)
+            executor = KrakenOrderExecutor(wallet_public_id="aaa")
+        msg = SimpleNamespace(wallet_public_id=None)
+        assert executor._is_for_my_wallet(msg) is False
+
+    @pytest.mark.asyncio
+    async def test_handle_submit_drops_message_for_other_wallet(self) -> None:
+        """Submit handler skips _process_order when wallet does not match.
+
+        Given: An executor bound to wallet ``mine``,
+        When: ``_handle_submit_command`` receives an OrderRequestData
+            tagged with ``wallet_public_id="other"``,
+        Then: ``_process_order`` is never invoked, exercising the
+            early-return branch in the submit handler.
+        """
+        with patch("snapper.config.settings.get_settings") as mock_get_settings:
+            mock_get_settings.return_value = MagicMock(db_url=TEST_DB_URL)
+            executor = KrakenOrderExecutor(wallet_public_id="mine")
+        process_mock = AsyncMock()
+        cast(Any, executor)._process_order = process_mock
+        payload = json.dumps(
+            {
+                "type": "order_request",
+                "session_id": "s",
+                "sequence_id": 1,
+                "public_id": "abc",
+                "timestamp": "2026-04-08T00:00:00Z",
+                "strategy_id": "manual",
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "mode": "live",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 0.1,
+                "client_order_id": "co1",
+                "wallet_public_id": "other",
+            }
+        )
+        await cast(Any, executor)._handle_submit_command(payload, "kraken", "BTC-USD")
+        process_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_handle_cancel_drops_message_for_other_wallet(self) -> None:
+        """Cancel handler skips _process_cancel when wallet does not match.
+
+        Given: An executor bound to wallet ``mine``,
+        When: ``_handle_cancel_command`` receives an OrderCancelData
+            tagged with ``wallet_public_id="other"``,
+        Then: ``_process_cancel`` is never invoked.
+        """
+        with patch("snapper.config.settings.get_settings") as mock_get_settings:
+            mock_get_settings.return_value = MagicMock(db_url=TEST_DB_URL)
+            executor = KrakenOrderExecutor(wallet_public_id="mine")
+        cancel_mock = AsyncMock()
+        cast(Any, executor)._process_cancel = cancel_mock
+        payload = json.dumps(
+            {
+                "type": "order_cancel",
+                "session_id": "s",
+                "sequence_id": 1,
+                "public_id": "abc",
+                "timestamp": "2026-04-08T00:00:00Z",
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "exchange_order_id": "ex-123",
+                "client_order_id": "co1",
+                "wallet_public_id": "other",
+            }
+        )
+        await cast(Any, executor)._handle_cancel_command(payload, "kraken", "BTC-USD")
+        cancel_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_handle_replace_drops_message_for_other_wallet(self) -> None:
+        """Replace handler skips _process_replace when wallet does not match.
+
+        Given: An executor bound to wallet ``mine``,
+        When: ``_handle_replace_command`` receives an OrderReplaceData
+            tagged with ``wallet_public_id="other"``,
+        Then: ``_process_replace`` is never invoked.
+        """
+        with patch("snapper.config.settings.get_settings") as mock_get_settings:
+            mock_get_settings.return_value = MagicMock(db_url=TEST_DB_URL)
+            executor = KrakenOrderExecutor(wallet_public_id="mine")
+        replace_mock = AsyncMock()
+        cast(Any, executor)._process_replace = replace_mock
+        payload = json.dumps(
+            {
+                "type": "order_replace",
+                "session_id": "s",
+                "sequence_id": 1,
+                "public_id": "abc",
+                "timestamp": "2026-04-08T00:00:00Z",
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "exchange_order_id": "ex-123",
+                "client_order_id": "co1",
+                "new_quantity": 0.2,
+                "wallet_public_id": "other",
+            }
+        )
+        await cast(Any, executor)._handle_replace_command(payload, "kraken", "BTC-USD")
+        replace_mock.assert_not_awaited()

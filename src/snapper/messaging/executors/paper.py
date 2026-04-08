@@ -77,14 +77,25 @@ class PaperOrderExecutor(ExchangeExecutorService[PaperExchangeClient]):
     def _create_exchange_client(self) -> PaperExchangeClient:
         """Create paper trading client.
 
+        Phase 0c: when ``self._credentials`` is populated by the
+        base-class ``_resolve_credentials`` call (non-empty
+        ``wallet_public_id``), the initial balance comes from the
+        per-wallet ``wallet_credentials`` payload. Otherwise the legacy
+        hardcoded default (10000.0) is used — matching pre-0c tests
+        that instantiate ``PaperOrderExecutor()`` without a wallet.
+
         Returns:
             PaperExchangeClient with simulated balance.
         """
         repository = get_repository(self.settings.db_url)
+        if self._credentials is not None:
+            initial_balance = float(self._credentials.get("initial_balance", "10000.0"))
+        else:
+            initial_balance = 10000.0
         return PaperExchangeClient(
             repository=repository,
             fill_delay=0.1,
-            initial_balance=10000.0,
+            initial_balance=initial_balance,
         )
 
     def _get_exchange_name(self) -> OrderExchange:

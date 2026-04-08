@@ -1,5 +1,6 @@
 """Tests for PaperOrderExecutor and PaperExchangeClient."""
 
+import math
 import time
 from datetime import UTC
 from datetime import datetime
@@ -810,15 +811,16 @@ class TestPaperMarketDataMethods:
 class TestPaperOrderExecutor:
     """Tests for PaperOrderExecutor service."""
 
-    def test_get_default_parameters_returns_empty_dict(self) -> None:
-        """Test get_default_parameters returns empty dict.
+    def test_get_default_parameters_advertises_wallet_public_id(self) -> None:
+        """``get_default_parameters`` advertises Phase 0c wallet param.
 
         Given: AppSettings instance,
-        When: get_default_parameters is called,
-        Then: Empty dictionary is returned.
+        When: ``get_default_parameters`` is called,
+        Then: Returns ``{"wallet_public_id": ""}`` so the process
+            launcher knows the parameter exists.
         """
         settings = MagicMock(spec=AppSettings)
-        assert PaperOrderExecutor.get_default_parameters(settings) == {}
+        assert PaperOrderExecutor.get_default_parameters(settings) == {"wallet_public_id": ""}
 
     @patch("snapper.messaging.executors.paper.PaperExchangeClient")
     @patch("snapper.messaging.executors.paper.get_repository")
@@ -829,11 +831,13 @@ class TestPaperOrderExecutor:
         mock_get_repository: MagicMock,
         mock_paper_client: MagicMock,
     ) -> None:
-        """Test _create_exchange_client uses repository.
+        """Legacy fallback keeps the hardcoded initial balance.
 
-        Given: PaperOrderExecutor with db_url in settings,
-        When: _create_exchange_client is called,
-        Then: PaperExchangeClient is created with repository.
+        Given: PaperOrderExecutor with the default empty wallet_public_id
+            and db_url in settings,
+        When: ``_create_exchange_client`` is called,
+        Then: PaperExchangeClient is created with the legacy 10000.0
+            initial balance because ``self._credentials`` is None.
         """
         settings = SimpleNamespace(db_url="sqlite:///:memory:")
         mock_get_settings.return_value = settings
@@ -848,6 +852,31 @@ class TestPaperOrderExecutor:
             initial_balance=10000.0,
         )
         assert client is mock_paper_client.return_value
+
+    @patch("snapper.messaging.executors.paper.PaperExchangeClient")
+    @patch("snapper.messaging.executors.paper.get_repository")
+    @patch("snapper.messaging.executors.base.get_settings")
+    def test_create_exchange_client_uses_credential_initial_balance(
+        self,
+        mock_get_settings: MagicMock,
+        mock_get_repository: MagicMock,
+        mock_paper_client: MagicMock,
+    ) -> None:
+        """Phase 0c per-wallet path: initial balance comes from credential dict.
+
+        Given: PaperOrderExecutor with a populated credential envelope
+            (``initial_balance=2500.0`` as a stringified value),
+        When: ``_create_exchange_client`` is called,
+        Then: PaperExchangeClient receives the per-wallet balance.
+        """
+        settings = SimpleNamespace(db_url="sqlite:///:memory:")
+        mock_get_settings.return_value = settings
+        mock_get_repository.return_value = object()
+        executor = PaperOrderExecutor(wallet_public_id="019d5a8b3c7d4e5f")
+        executor._credentials = {"initial_balance": "2500.0"}
+        executor._create_exchange_client()
+        kwargs = mock_paper_client.call_args.kwargs
+        assert math.isclose(kwargs["initial_balance"], 2500.0)
 
     @patch("snapper.messaging.executors.base.get_settings")
     def test_get_exchange_name(self, mock_get_settings: MagicMock) -> None:

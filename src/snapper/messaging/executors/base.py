@@ -23,6 +23,7 @@ from loguru import logger
 
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.services.settings import SettingsService
+from snapper.config.credentials import CredentialResolver
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_service
@@ -114,11 +115,28 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Returns:
             Dictionary of default parameters for this executor.
         """
-        return {}
+        return {"wallet_public_id": ""}
 
-    def __init__(self) -> None:
-        """Initialize the instance."""
+    def __init__(self, wallet_public_id: str = "") -> None:
+        """Initialize the instance.
+
+        Args:
+            wallet_public_id: Phase 0c multi-tenant routing key. When
+                non-empty, the executor loads credentials from
+                ``wallet_credentials`` via ``CredentialResolver`` at
+                startup and drops incoming command messages whose
+                ``wallet_public_id`` does not match. When empty (the
+                legacy default preserved for backwards compatibility
+                with pre-0c tests and the single-wallet template
+                deployment path), the executor falls back to the legacy
+                ``AppSettings.{exchange}_api_key/_secret`` properties
+                and accepts every routed command. The legacy fallback
+                will be removed once every test instantiates executors
+                with an explicit ``wallet_public_id``.
+        """
         self.settings = get_settings()
+        self.wallet_public_id: str = wallet_public_id
+        self._credentials: dict[str, str] | None = None
         self.context: zmq.asyncio.Context | None = None
         self.subscriber: ValidatedSubscriber | None = None
         self.publisher: ValidatedPublisher | None = None
@@ -163,6 +181,71 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         )
         self.settings = get_settings_with_service(settings_service)
         logger.info("AppSettings service initialized with database access")
+
+    async def _resolve_credentials(self, exchange_name: OrderExchange) -> None:
+        """Load wallet-scoped credentials when wallet_public_id is populated.
+
+        Phase 0c wiring: per-wallet executor instances resolve their
+        credentials from ``wallet_credentials`` via
+        ``CredentialResolver`` exactly once during startup. When
+        ``self.wallet_public_id`` is empty (legacy template path used
+        by pre-0c tests and the single-wallet default deployment), no
+        lookup happens and ``self._credentials`` stays ``None`` so
+        concrete ``_create_exchange_client`` implementations fall back
+        to the legacy ``AppSettings`` credential properties.
+
+        Args:
+            exchange_name: Exchange identifier used as the credential
+                lookup key (normalized to lowercase by the resolver).
+
+        Raises:
+            RuntimeError: When ``self.wallet_public_id`` is set but the
+                repository has not yet been initialized.
+            CredentialNotFoundError: When no active credential row
+                exists for the wallet/exchange pair. Propagated so the
+                executor process fails fast at startup.
+        """
+        if not self.wallet_public_id:
+            return
+        if self.repository is None:
+            raise RuntimeError(
+                "ExchangeExecutorService._resolve_credentials requires "
+                "repository initialization before credential lookup."
+            )
+        resolver = CredentialResolver(self.repository)
+        self._credentials = await resolver.get_credentials(
+            exchange=exchange_name,
+            wallet_public_id=self.wallet_public_id,
+        )
+        logger.info(
+            f"ExchangeExecutorService[{exchange_name}]: Resolved credentials "
+            f"for wallet={self.wallet_public_id}"
+        )
+
+    def _is_for_my_wallet(self, msg: Any) -> bool:
+        """Filter guard: is this command targeted at my wallet instance?
+
+        Phase 0c routing: the per-wallet executor instances all
+        subscribe to the same exchange-prefix topic. Each instance
+        drops commands whose ``wallet_public_id`` does not match its
+        own. When ``self.wallet_public_id`` is empty (legacy template
+        path) every message is accepted — matching pre-0c behavior.
+        The legacy branch will be removed once every callsite that
+        emits commands populates ``wallet_public_id``.
+
+        Args:
+            msg: Parsed command message (OrderRequestData,
+                OrderCancelData, or OrderReplaceData). The filter
+                reads the optional ``wallet_public_id`` attribute.
+
+        Returns:
+            True if the message should be processed by this executor
+            instance, False if it must be silently dropped.
+        """
+        if not self.wallet_public_id:
+            return True
+        msg_wallet = getattr(msg, "wallet_public_id", "") or ""
+        return msg_wallet == self.wallet_public_id
 
     def _setup_zmq_sockets(self, exchange_name: OrderExchange) -> None:
         """Create and connect ZMQ subscriber and publisher sockets.
@@ -352,6 +435,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.warning(f"{exchange_name} execution service already running")
             return
         await self._initialize_settings()
+        await self._resolve_credentials(exchange_name)
         self.exchange_client = self._create_exchange_client()
         self.exchange_client.set_tracker(self._tracker)
         self._setup_zmq_sockets(exchange_name)
@@ -535,6 +619,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if not isinstance(order_msg, OrderRequestData):
             logger.warning(f"Received non-order message on submit topic: {order_msg.type}")
             return
+        if not self._is_for_my_wallet(order_msg):
+            return
         if self._validate_command_invariants(order_msg, exchange_name, topic_instrument):
             await self._process_order(order_msg)
 
@@ -556,6 +642,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if not isinstance(cancel_msg, OrderCancelData):
             logger.warning(f"Received non-cancel message on cancel topic: {cancel_msg.type}")
             return
+        if not self._is_for_my_wallet(cancel_msg):
+            return
         if self._validate_command_invariants(cancel_msg, exchange_name, topic_instrument):
             await self._process_cancel(cancel_msg)
 
@@ -576,6 +664,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             return
         if not isinstance(replace_msg, OrderReplaceData):
             logger.warning(f"Received non-replace message on replace topic: {replace_msg.type}")
+            return
+        if not self._is_for_my_wallet(replace_msg):
             return
         if self._validate_command_invariants(replace_msg, exchange_name, topic_instrument):
             await self._process_replace(replace_msg)

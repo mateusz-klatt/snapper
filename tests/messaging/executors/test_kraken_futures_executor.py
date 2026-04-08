@@ -28,6 +28,15 @@ def mocked_settings(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     return settings
 
 
+@pytest.fixture
+def wallet_credential_envelope() -> SimpleNamespace:
+    """Phase 0c: per-wallet credential envelope used by tests below."""
+    return SimpleNamespace(
+        api_key_value="wallet-kfutures-public-id",
+        api_secret_value="wallet-kfutures-signing-blob",
+    )
+
+
 def test_create_exchange_client_uses_executor_settings(
     monkeypatch: pytest.MonkeyPatch,
     mocked_settings: SimpleNamespace,
@@ -77,16 +86,57 @@ def test_get_exchange_name_returns_literal(
     assert get_exchange_name() == "kraken_futures"
 
 
-def test_get_default_parameters_returns_empty_dict(
+def test_get_default_parameters_advertises_wallet_public_id(
     mocked_settings: SimpleNamespace,
 ) -> None:
-    """Verify default kwargs is empty (credentials from settings).
+    """Phase 0c: default kwargs advertises wallet_public_id.
 
     Given the KrakenFuturesOrderExecutor class,
-    When get_default_parameters is called with any settings,
-    Then it returns an empty dict (executor uses settings directly).
+    When ``get_default_parameters`` is called,
+    Then it returns ``{"wallet_public_id": ""}``.
     """
     defaults = KrakenFuturesOrderExecutor.get_default_parameters(
         cast(AppSettings, SimpleNamespace())
     )
-    assert defaults == {}
+    assert defaults == {"wallet_public_id": ""}
+
+
+def test_create_exchange_client_uses_credential_dict_when_wallet_set(
+    monkeypatch: pytest.MonkeyPatch,
+    mocked_settings: SimpleNamespace,
+    wallet_credential_envelope: SimpleNamespace,
+) -> None:
+    """Phase 0c: per-wallet credentials override AppSettings fallback.
+
+    Given a KrakenFuturesOrderExecutor with a non-empty wallet_public_id
+        and a populated ``self._credentials`` dict,
+    When ``_create_exchange_client`` is called,
+    Then KrakenFuturesExchangeClient receives the per-wallet
+        api_key/secret from the credential dict.
+    """
+    created_kwargs: dict[str, Any] = {}
+
+    class _StubClient:
+        def __init__(self, **kwargs: Any) -> None:
+            created_kwargs.update(kwargs)
+
+    monkeypatch.setattr(
+        "snapper.messaging.executors.kraken_futures.KrakenFuturesExchangeClient",
+        _StubClient,
+    )
+    monkeypatch.setattr(
+        "snapper.messaging.executors.kraken_futures.get_repository",
+        lambda _: None,
+    )
+    executor = KrakenFuturesOrderExecutor(wallet_public_id="019d5a8b3c7d4e5f")
+    cast(Any, executor)._credentials = {
+        "api_key": wallet_credential_envelope.api_key_value,
+        "api_secret": wallet_credential_envelope.api_secret_value,
+    }
+    client = cast(Any, executor)._create_exchange_client()
+    assert isinstance(client, _StubClient)
+    assert created_kwargs == {
+        "api_key": wallet_credential_envelope.api_key_value,
+        "api_secret": wallet_credential_envelope.api_secret_value,
+        "repository": None,
+    }

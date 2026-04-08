@@ -15,6 +15,7 @@ Example:
     >>> users, settings = run_seed("dev")
 """
 
+import json
 import tomllib
 from dataclasses import dataclass
 from dataclasses import field
@@ -289,7 +290,8 @@ def seed_settings(conn: Connection, settings: list[SeedSetting], tracker: Sequen
 def seed_default_multi_tenant(conn: Connection, tracker: SequenceTracker) -> int:
     """Seed the default Operator, Wallet, and UserOperatorMembership rows.
 
-    Plan 0 Phase 0a (single-user deployment bootstrap). Creates:
+    Plan 0 Phase 0a (single-user deployment bootstrap) + Phase 0c paper
+    credential bootstrap. Creates:
 
     1. Operator ``label="default"`` — the seed trading identity used by
        the single-user deployment until an admin introduces additional
@@ -298,6 +300,12 @@ def seed_default_multi_tenant(conn: Connection, tracker: SequenceTracker) -> int
        sandbox wallet that does not require live exchange credentials.
     3. UserOperatorMembership linking the first admin user in the
        ``users`` table to the default operator as ``is_primary=TRUE``.
+    4. WalletCredential row for the default-paper wallet on exchange
+       ``"paper"`` with ``credential_type="paper"`` so Phase 0c dynamic
+       per-wallet executor spawning finds at least one credential row at
+       boot. The encrypted payload is
+       ``{"initial_balance": "10000.0"}`` — Fernet-encrypted with the
+       same master password used for ``settings`` encryption.
 
     Idempotent: the function checks each target table and inserts only
     when the table is empty. A re-seed on an established DB is a no-op,
@@ -314,7 +322,8 @@ def seed_default_multi_tenant(conn: Connection, tracker: SequenceTracker) -> int
         tracker: ``SequenceTracker`` for stamping provenance columns.
 
     Returns:
-        Count of rows inserted across operators + wallets + memberships.
+        Count of rows inserted across operators + wallets + memberships
+        + wallet_credentials.
     """
     inserted = 0
     now = _timestamp_value(conn)
@@ -402,9 +411,39 @@ def seed_default_multi_tenant(conn: Connection, tracker: SequenceTracker) -> int
         )
         inserted += 1
 
+    encryption = get_encryption_service()
+    paper_envelope = json.dumps({"initial_balance": "10000.0"})
+    encrypted_payload = encryption.encrypt(paper_envelope)
+    conn.execute(
+        text(
+            "INSERT INTO wallet_credentials"
+            " (public_id, wallet_public_id, exchange, credential_type,"
+            "  encrypted_payload, encryption_key_id, label,"
+            "  timestamp, known_to, session_id, sequence_id)"
+            " VALUES"
+            " (:public_id, :wallet_public_id, :exchange, :credential_type,"
+            "  :encrypted_payload, :encryption_key_id, :label,"
+            "  :timestamp, :known_to, :session_id, :sequence_id)"
+        ),
+        {
+            "public_id": str(uuid7()),
+            "wallet_public_id": wallet_public_id,
+            "exchange": "paper",
+            "credential_type": "paper",
+            "encrypted_payload": encrypted_payload,
+            "encryption_key_id": "v1",
+            "label": "default-paper bootstrap",
+            "timestamp": now,
+            "known_to": known_to,
+            "session_id": tracker.session_id,
+            "sequence_id": tracker.next_sequence("wallet_credentials"),
+        },
+    )
+    inserted += 1
+
     logger.info(
         f"Seeded multi-tenant bootstrap: 1 operator, 1 wallet, "
-        f"{1 if admin_row is not None else 0} membership"
+        f"{1 if admin_row is not None else 0} membership, 1 paper credential"
     )
     return inserted
 

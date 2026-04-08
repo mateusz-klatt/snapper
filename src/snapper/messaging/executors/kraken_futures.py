@@ -65,13 +65,26 @@ class KrakenFuturesOrderExecutor(ExchangeExecutorService[KrakenFuturesExchangeCl
     def _create_exchange_client(self) -> KrakenFuturesExchangeClient:
         """Create authenticated Kraken Futures client.
 
+        Phase 0c: when ``self._credentials`` is populated by the
+        base-class ``_resolve_credentials`` call (non-empty
+        ``wallet_public_id``), the API key/secret come from the
+        per-wallet ``wallet_credentials`` payload. Otherwise the
+        legacy ``AppSettings.kraken_futures_api_key/_secret``
+        properties are used.
+
         Returns:
-            KrakenFuturesExchangeClient with API credentials from settings.
+            KrakenFuturesExchangeClient with API credentials.
         """
         repository = get_repository(self.settings.db_url)
+        if self._credentials is not None:
+            api_key = self._credentials.get("api_key", "")
+            api_secret = self._credentials.get("api_secret", "")
+        else:
+            api_key = self.settings.kraken_futures_api_key
+            api_secret = self.settings.kraken_futures_api_secret
         return KrakenFuturesExchangeClient(
-            api_key=self.settings.kraken_futures_api_key,
-            api_secret=self.settings.kraken_futures_api_secret,
+            api_key=api_key,
+            api_secret=api_secret,
             repository=repository,
         )
 
