@@ -1586,6 +1586,10 @@ async def test_persist_checkpoint_writes_to_db() -> None:
     coord._tracker = MagicMock()
     coord._tracker.session_id = "s-test"
     coord._tracker.next_sequence = MagicMock(return_value=1)
+    unrelated_engine = MagicMock()
+    unrelated_engine._shard_key = "kraken.ETH-USD.live"
+    coord.engines = {"ETH-USD@kraken-live": unrelated_engine}
+    coord._wallet_short_to_id = {}
     mock_repo = AsyncMock(spec=SQLAlchemyRepository)
     mock_repo.upsert_checkpoint = AsyncMock(return_value=1)
     mock_repo.get_latest_venue_event_id = AsyncMock(return_value=1)
@@ -1645,6 +1649,8 @@ async def test_persist_checkpoint_writes_none_when_position_flat() -> None:
     coord._tracker = MagicMock()
     coord._tracker.session_id = "s-test"
     coord._tracker.next_sequence = MagicMock(return_value=1)
+    coord.engines = {}
+    coord._wallet_short_to_id = {}
     mock_repo = AsyncMock(spec=SQLAlchemyRepository)
     mock_repo.upsert_checkpoint = AsyncMock(return_value=1)
     mock_repo.get_latest_venue_event_id = AsyncMock(return_value=None)
@@ -1654,6 +1660,39 @@ async def test_persist_checkpoint_writes_none_when_position_flat() -> None:
     mock_repo.upsert_checkpoint.assert_called_once()
     call_row = mock_repo.upsert_checkpoint.call_args.args[0]
     assert call_row["position_opened_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_persist_checkpoint_carries_operator_from_matching_engine() -> None:
+    """Post-0c cleanup item 2: operator_public_id persisted from engine.
+
+    Given: A TraderCoordinator with an engine whose ``_shard_key``
+        matches the shard being checkpointed and whose
+        ``operator_public_id`` is populated,
+    When: ``_persist_checkpoint`` is called,
+    Then: The upsert row carries the engine's ``operator_public_id``
+        so that subsequent ``_recover_from_checkpoints`` can restore
+        the engine with the correct operator attribution.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.trade_service = TradeService()
+    coord._tracker = MagicMock()
+    coord._tracker.session_id = "s-test"
+    coord._tracker.next_sequence = MagicMock(return_value=1)
+    coord._wallet_short_to_id = {}
+    mock_engine = MagicMock()
+    mock_engine._shard_key = "kraken.BTC-USD.live"
+    mock_engine.operator_public_id = "01975a8b-3c7d-7000-8000-000000000aa1"
+    coord.engines = {"BTC-USD@kraken-live": mock_engine}
+    mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+    mock_repo.upsert_checkpoint = AsyncMock(return_value=1)
+    mock_repo.get_latest_venue_event_id = AsyncMock(return_value=None)
+    coord.repository = mock_repo
+    coord.trade_service._get_or_create_shard("kraken.BTC-USD.live")
+    await coord._persist_checkpoint("kraken.BTC-USD.live")
+    mock_repo.upsert_checkpoint.assert_called_once()
+    call_row = mock_repo.upsert_checkpoint.call_args.args[0]
+    assert call_row["operator_public_id"] == "01975a8b-3c7d-7000-8000-000000000aa1"
 
 
 @pytest.mark.asyncio
@@ -1683,6 +1722,8 @@ async def test_persist_checkpoint_handles_db_error() -> None:
     coord._tracker = MagicMock()
     coord._tracker.session_id = "s-test"
     coord._tracker.next_sequence = MagicMock(return_value=1)
+    coord.engines = {}
+    coord._wallet_short_to_id = {}
     mock_repo = AsyncMock(spec=SQLAlchemyRepository)
     mock_repo.upsert_checkpoint = AsyncMock(side_effect=RuntimeError("DB down"))
     coord.repository = mock_repo

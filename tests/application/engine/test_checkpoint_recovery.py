@@ -50,6 +50,7 @@ def _make_checkpoint(
         "seen_exec_ids": seen_exec_ids,
         "checkpoint_at": checkpoint_at or datetime(2024, 6, 1, tzinfo=UTC),
         "session_id": "s-test",
+        "operator_public_id": None,
     }
 
 

@@ -1525,6 +1525,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                         order_public_id=pending.order_public_id,
                         execution=execution,
                         wallet_public_id=self.wallet_public_id,
+                        operator_public_id=pending.request.operator_public_id,
                         delta_size=fill.last_size,
                         delta_price=fill.last_price,
                         fee=fill.fee,

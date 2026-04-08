@@ -419,6 +419,7 @@ class TraderCoordinator(RegisterableProcess):
                 exchange_str,
                 strategy_tag=strategy_tag,
                 wallet_public_id=wallet_public_id,
+                operator_public_id=cp.get("operator_public_id") or "",
             )
             if engine is None:
                 continue
@@ -497,6 +498,7 @@ class TraderCoordinator(RegisterableProcess):
             return []
         fills_by_key: dict[str, list[ExecutionRow]] = {}
         wallet_for_key: dict[str, str] = {}
+        operator_for_key: dict[str, str] = {}
         for exe in executions:
             wallet_public_id = exe.get("wallet_public_id") or ""
             key = self._build_engine_key(
@@ -504,6 +506,9 @@ class TraderCoordinator(RegisterableProcess):
             )
             fills_by_key.setdefault(key, []).append(exe)
             wallet_for_key.setdefault(key, wallet_public_id)
+            operator_on_row = exe.get("operator_public_id") or ""
+            if operator_on_row and not operator_for_key.get(key):
+                operator_for_key[key] = operator_on_row
         for engine_key, fills in fills_by_key.items():
             if engine_key in skip_keys:
                 logger.debug(f"ZMQTrader: Skipping full replay for {engine_key} (checkpoint)")
@@ -512,6 +517,7 @@ class TraderCoordinator(RegisterableProcess):
                 fills[0]["instrument"],
                 fills[0]["exchange"],
                 wallet_public_id=wallet_for_key.get(engine_key, ""),
+                operator_public_id=operator_for_key.get(engine_key, ""),
             )
             if engine is None:
                 continue
@@ -1050,12 +1056,18 @@ class TraderCoordinator(RegisterableProcess):
         parsed_shard = self._parse_shard_key(shard_key)
         wallet_short = parsed_shard[3] if parsed_shard else ""
         wallet_public_id = self._wallet_short_to_id.get(wallet_short, "") if wallet_short else ""
+        operator_public_id: str | None = None
+        for engine in self.engines.values():
+            if engine._shard_key == shard_key:
+                operator_public_id = engine.operator_public_id or None
+                break
         try:
             opened_at = snap.get("position_opened_at")
             await self.repository.upsert_checkpoint(
                 {
                     "shard_key": shard_key,
                     "wallet_public_id": wallet_public_id,
+                    "operator_public_id": operator_public_id,
                     "position_qty": cast(float, snap["position_qty"]),
                     "entry_price": cast(float, ep) if ep is not None else None,
                     "position_opened_at": (

@@ -563,11 +563,14 @@ class Repository(ABC):
         wallet_public_id: str,
         exec_id: str | None = None,
         trade_id: str | None = None,
+        operator_public_id: str | None = None,
     ) -> int:
         """Insert execution record, returning execution ID.
 
         Phase 0c.6: ``wallet_public_id`` is mandatory so recovery can
-        group fills into the correct per-wallet engine.
+        group fills into the correct per-wallet engine. Post-0c
+        cleanup item 2: ``operator_public_id`` is nullable so strategy-
+        emitted fills without a human operator still persist.
         """
         ...
 
@@ -1961,12 +1964,14 @@ class SQLAlchemyRepository(Repository):
         wallet_public_id: str,
         exec_id: str | None = None,
         trade_id: str | None = None,
+        operator_public_id: str | None = None,
     ) -> int:
         """Insert execution record and return generated ID."""
         async with self.session() as s:
             execution = Execution(
                 order_public_id=order_public_id,
                 wallet_public_id=wallet_public_id,
+                operator_public_id=operator_public_id,
                 exec_id=exec_id,
                 trade_id=trade_id,
                 timestamp=timestamp,
@@ -2492,6 +2497,7 @@ class SQLAlchemyRepository(Repository):
                     "status": exe.status,
                     "executed_at": exe.executed_at or exe.timestamp,
                     "wallet_public_id": exe.wallet_public_id,
+                    "operator_public_id": exe.operator_public_id,
                 }
                 for exe, order, inst, sym in result.all()
             ]
@@ -2629,6 +2635,7 @@ class SQLAlchemyRepository(Repository):
                     "status": exe.status,
                     "executed_at": exe.executed_at or exe.timestamp,
                     "wallet_public_id": exe.wallet_public_id,
+                    "operator_public_id": exe.operator_public_id,
                 }
                 for exe, order, inst, sym in result.all()
             ]
@@ -3105,6 +3112,7 @@ class SQLAlchemyRepository(Repository):
                 "seen_exec_ids": cp.seen_exec_ids,
                 "checkpoint_at": cp.checkpoint_at,
                 "session_id": cp.session_id,
+                "operator_public_id": cp.operator_public_id,
             }
             return row
 
@@ -3135,6 +3143,7 @@ class SQLAlchemyRepository(Repository):
                         "seen_exec_ids": cp.seen_exec_ids,
                         "checkpoint_at": cp.checkpoint_at,
                         "session_id": cp.session_id,
+                        "operator_public_id": cp.operator_public_id,
                     }
                 )
             return rows

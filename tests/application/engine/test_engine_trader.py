@@ -2944,6 +2944,62 @@ class TestRecovery:
         assert coord.engines[key_legacy].wallet_public_id == ""
 
     @pytest.mark.asyncio
+    async def test_recover_from_executions_propagates_operator_from_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Post-0c cleanup item 2: execution recovery reads operator from row.
+
+        Given: A single execution row carrying both ``wallet_public_id``
+            and ``operator_public_id`` (populated by the new
+            ``insert_execution`` plumbing at fill time),
+        When: ``_recover_engine_state`` runs and replays the execution,
+        Then: The recovered engine has the operator attribution from
+            the execution row instead of empty string — closes the
+            Phase 0c.5 Medium residual where execution-sourced
+            engines had empty operator.
+        """
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        coord.msg_publisher = cast(Any, MagicMock(tracker=Mock(session_id="s1")))
+        wallet = "01975a8b-3c7d-7000-8000-000000000ca1"
+        operator = "01975a8b-3c7d-7000-8000-000000000ca2"
+        mock_repo = AsyncMock()
+        mock_repo.get_executions_for_recovery = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "exe-op",
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                    "trade_id": "t-op",
+                    "exchange_order_id": "ex-op",
+                    "client_order_id": "c-op",
+                    "instrument": "BTC-USD",
+                    "exchange": "kraken",
+                    "side": "buy",
+                    "size": 0.5,
+                    "price": 50000.0,
+                    "fee": 0.5,
+                    "fee_asset": "USD",
+                    "status": "filled",
+                    "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
+                    "wallet_public_id": wallet,
+                    "operator_public_id": operator,
+                }
+            ]
+        )
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
+        mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
+        coord.repository = mock_repo
+        await coord._recover_engine_state()
+        wallet_short = wallet.replace("-", "")[:12].lower()
+        key = f"BTC-USD@kraken-live-w{wallet_short}"
+        assert key in coord.engines
+        engine = coord.engines[key]
+        assert engine.wallet_public_id == wallet
+        assert engine.operator_public_id == operator
+
+    @pytest.mark.asyncio
     async def test_recover_active_order_propagates_operator_public_id(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

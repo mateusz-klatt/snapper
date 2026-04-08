@@ -214,6 +214,7 @@ class ExecutionRow(TypedDict):
     status: str
     executed_at: datetime
     wallet_public_id: str | None
+    operator_public_id: str | None
 
 
 class PositionRow(TypedDict):
@@ -332,6 +333,7 @@ class TradeProjectionCheckpointRow(TypedDict):
     seen_exec_ids: str
     checkpoint_at: datetime
     session_id: str
+    operator_public_id: str | None
 
 
 class RecordVenueEventParams(TypedDict, total=False):
@@ -537,6 +539,7 @@ class CheckpointUpsertRow(TypedDict):
     sequence_id: int
     bus_time: datetime
     wallet_public_id: str
+    operator_public_id: NotRequired[str | None]
 
 
 class ContinuousCandleRow(TypedDict):

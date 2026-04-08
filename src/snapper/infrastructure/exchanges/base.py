@@ -448,6 +448,7 @@ class ExchangeClientBase(ABC):
         order_public_id: str,
         execution: ExecutionUpdate,
         wallet_public_id: str,
+        operator_public_id: str | None = None,
         delta_size: float | None = None,
         delta_price: float | None = None,
         fee: float | None = None,
@@ -466,6 +467,11 @@ class ExchangeClientBase(ABC):
             wallet_public_id: Owning wallet for routing and Phase 0c.6
                 NOT NULL schema compliance. Normally read by the caller
                 from the per-wallet executor instance.
+            operator_public_id: Trading identity that initiated the
+                order this fill belongs to. Post-0c cleanup item 2:
+                nullable because strategy-emitted orders have no
+                human operator. Read by the caller from the pending
+                order's ``OrderRequestData.operator_public_id``.
             delta_size: Resolved fill delta size. Falls back to raw execution fields.
             delta_price: Resolved fill price. Falls back to raw execution fields.
             fee: Resolved fee amount. Falls back to fee_usd_equiv.
@@ -499,6 +505,7 @@ class ExchangeClientBase(ABC):
                 fee=resolved_fee,
                 fee_asset=resolved_fee_asset,
                 wallet_public_id=wallet_public_id,
+                operator_public_id=operator_public_id,
                 exec_id=execution.exec_id,
                 trade_id=str(execution.trade_id) if execution.trade_id is not None else None,
                 session_id=self._tracker.session_id,
