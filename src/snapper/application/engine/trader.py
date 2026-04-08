@@ -1047,11 +1047,15 @@ class TraderCoordinator(RegisterableProcess):
         ep = snap["entry_price"]
         oci = snap["open_command_ids"]
         real_watermark = await self.repository.get_latest_venue_event_id(shard_key)
+        parsed_shard = self._parse_shard_key(shard_key)
+        wallet_short = parsed_shard[3] if parsed_shard else ""
+        wallet_public_id = self._wallet_short_to_id.get(wallet_short, "") if wallet_short else ""
         try:
             opened_at = snap.get("position_opened_at")
             await self.repository.upsert_checkpoint(
                 {
                     "shard_key": shard_key,
+                    "wallet_public_id": wallet_public_id,
                     "position_qty": cast(float, snap["position_qty"]),
                     "entry_price": cast(float, ep) if ep is not None else None,
                     "position_opened_at": (

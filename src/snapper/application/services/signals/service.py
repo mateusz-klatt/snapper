@@ -148,7 +148,7 @@ class SignalReadService:
                     "price": price,
                     "session_id": session_id,
                     "sequence_id": sequence_id,
-                    "wallet_public_id": wallet_public_id or None,
+                    "wallet_public_id": wallet_public_id or "",
                     "operator_public_id": operator_public_id or None,
                 }
                 if public_id is not None:

@@ -597,7 +597,11 @@ async def test_log_execution_to_db_returns_early_when_no_repository() -> None:
         last_price=50000.0,
         last_qty=1.0,
     )
-    await client._log_execution_to_db(order_public_id="order-pub-1", execution=execution)
+    await client._log_execution_to_db(
+        order_public_id="order-pub-1",
+        wallet_public_id="",
+        execution=execution,
+    )
 
 
 @pytest.mark.asyncio()
@@ -626,7 +630,11 @@ async def test_log_execution_to_db_logs_successfully() -> None:
         last_qty=1.0,
         fee_usd_equiv=10.0,
     )
-    await client._log_execution_to_db(order_public_id="order-pub-1", execution=execution)
+    await client._log_execution_to_db(
+        order_public_id="order-pub-1",
+        wallet_public_id="",
+        execution=execution,
+    )
     mock_repo.insert_execution.assert_called_once()
     call_args = mock_repo.insert_execution.call_args[1]
     assert call_args["order_public_id"] == "order-pub-1"
@@ -665,7 +673,11 @@ async def test_log_execution_to_db_uses_fallback_values() -> None:
         cum_qty=2.5,
         fee_usd_equiv=None,
     )
-    await client._log_execution_to_db(order_public_id="order-pub-2", execution=execution)
+    await client._log_execution_to_db(
+        order_public_id="order-pub-2",
+        wallet_public_id="",
+        execution=execution,
+    )
     mock_repo.insert_execution.assert_called_once()
     call_args = mock_repo.insert_execution.call_args[1]
     assert call_args["status"] == "filled"
@@ -699,7 +711,11 @@ async def test_log_execution_to_db_partial_fill_status() -> None:
         cum_qty=0.5,
         fee_usd_equiv=5.0,
     )
-    await client._log_execution_to_db(order_public_id="order-pub-3", execution=execution)
+    await client._log_execution_to_db(
+        order_public_id="order-pub-3",
+        wallet_public_id="",
+        execution=execution,
+    )
     call_args = mock_repo.insert_execution.call_args[1]
     assert call_args["status"] == "partial"
 
@@ -725,7 +741,11 @@ async def test_log_execution_to_db_handles_exception() -> None:
         order_status=OrderStatusEnum.FILLED,
         timestamp=datetime.now(UTC),
     )
-    await client._log_execution_to_db(order_public_id="order-pub-4", execution=execution)
+    await client._log_execution_to_db(
+        order_public_id="order-pub-4",
+        wallet_public_id="",
+        execution=execution,
+    )
 
 
 @pytest.mark.asyncio()

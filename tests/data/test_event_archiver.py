@@ -931,6 +931,7 @@ def test_repo_get_order_archive_map(tmp_path: Path) -> None:
         order = Order(
             public_id="order-1",
             instrument_public_id="inst-btc",
+            wallet_public_id="00000000-0000-7000-8000-000000000001",
             client_order_id="client-1",
             created_at=ts,
             side="buy",
@@ -978,6 +979,7 @@ def test_repo_get_order_archive_map_skips_orphan(tmp_path: Path) -> None:
         order = Order(
             public_id="order-orphan",
             instrument_public_id="inst-orphan",
+            wallet_public_id="00000000-0000-7000-8000-000000000001",
             client_order_id="client-1",
             created_at=ts,
             side="buy",

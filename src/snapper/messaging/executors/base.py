@@ -905,6 +905,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 signaled_at=order.signaled_at,
                 leverage=order.leverage,
                 reduce_only=order.reduce_only,
+                wallet_public_id=self.wallet_public_id,
+                operator_public_id=order.operator_public_id,
             )
             assert self.exchange_client is not None, _EXCHANGE_NOT_INIT_MSG
             result = await self.exchange_client.create_order(order_request)
@@ -972,6 +974,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 {
                     "event_type": params["event_type"],
                     "shard_key": shard_key,
+                    "wallet_public_id": self.wallet_public_id,
                     "exchange": exchange_name,
                     "instrument": instrument,
                     "mode": mode,
@@ -1512,6 +1515,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     await self.exchange_client._log_execution_to_db(
                         order_public_id=pending.order_public_id,
                         execution=execution,
+                        wallet_public_id=self.wallet_public_id,
                         delta_size=fill.last_size,
                         delta_price=fill.last_price,
                         fee=fill.fee,

@@ -135,6 +135,8 @@ class ExchangeOrderRequest:
     leverage: int | None = None
     reduce_only: bool = False
     post_only: bool = False
+    wallet_public_id: str = ""
+    operator_public_id: str | None = None
 
 
 type ExecType = Literal[

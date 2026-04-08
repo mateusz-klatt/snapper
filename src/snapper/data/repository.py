@@ -509,12 +509,20 @@ class Repository(ABC):
         session_id: str,
         sequence_id: int,
         timestamp: datetime,
+        wallet_public_id: str,
+        operator_public_id: str | None = None,
         time_in_force: str | None = None,
         mode: str = "live",
         leverage: int | None = None,
         reduce_only: bool = False,
     ) -> tuple[int, str]:
-        """Insert new order record, returning (id, public_id) tuple."""
+        """Insert new order record, returning (id, public_id) tuple.
+
+        Phase 0c.6: ``wallet_public_id`` is mandatory; the schema
+        enforces ``NOT NULL`` and the routing layer relies on it to
+        dispatch fills back to the owning per-wallet engine.
+        ``operator_public_id`` is nullable for strategy-emitted orders.
+        """
         ...
 
     @abstractmethod
@@ -533,7 +541,9 @@ class Repository(ABC):
     ) -> int:
         """Close old order version and insert new one (SCD Type 2).
 
-        Returns the new version's integer id.
+        Returns the new version's integer id. Wallet and operator
+        attribution is copied from the closed row so Phase 0c.6 NOT NULL
+        tightening holds across SCD2 versions.
         """
         ...
 
@@ -550,10 +560,15 @@ class Repository(ABC):
         fee_asset: str,
         session_id: str,
         sequence_id: int,
+        wallet_public_id: str,
         exec_id: str | None = None,
         trade_id: str | None = None,
     ) -> int:
-        """Insert execution record, returning execution ID."""
+        """Insert execution record, returning execution ID.
+
+        Phase 0c.6: ``wallet_public_id`` is mandatory so recovery can
+        group fills into the correct per-wallet engine.
+        """
         ...
 
     @abstractmethod
@@ -1837,6 +1852,8 @@ class SQLAlchemyRepository(Repository):
         session_id: str,
         sequence_id: int,
         timestamp: datetime,
+        wallet_public_id: str,
+        operator_public_id: str | None = None,
         time_in_force: str | None = None,
         mode: str = "live",
         leverage: int | None = None,
@@ -1847,6 +1864,8 @@ class SQLAlchemyRepository(Repository):
             order = Order(
                 instrument_public_id=instrument_public_id,
                 mode=mode,
+                wallet_public_id=wallet_public_id,
+                operator_public_id=operator_public_id,
                 client_order_id=client_order_id,
                 exchange_order_id=exchange_order_id,
                 created_at=created_at,
@@ -1896,6 +1915,8 @@ class SQLAlchemyRepository(Repository):
                 public_id=old_order.public_id,
                 instrument_public_id=old_order.instrument_public_id,
                 mode=old_order.mode,
+                wallet_public_id=old_order.wallet_public_id,
+                operator_public_id=old_order.operator_public_id,
                 client_order_id=old_order.client_order_id,
                 exchange_order_id=exchange_order_id or old_order.exchange_order_id,
                 created_at=old_order.created_at,
@@ -1934,6 +1955,7 @@ class SQLAlchemyRepository(Repository):
         fee_asset: str,
         session_id: str,
         sequence_id: int,
+        wallet_public_id: str,
         exec_id: str | None = None,
         trade_id: str | None = None,
     ) -> int:
@@ -1941,6 +1963,7 @@ class SQLAlchemyRepository(Repository):
         async with self.session() as s:
             execution = Execution(
                 order_public_id=order_public_id,
+                wallet_public_id=wallet_public_id,
                 exec_id=exec_id,
                 trade_id=trade_id,
                 timestamp=timestamp,
@@ -2699,9 +2722,17 @@ class SQLAlchemyRepository(Repository):
             return sorted(row[0] for row in result.fetchall())
 
     async def insert_trade_command(self, row: TradeCommandInsertRow) -> tuple[int, str]:
-        """Insert a new trade command row and return (id, public_id)."""
+        """Insert a new trade command row and return (id, public_id).
+
+        Phase 0c.6 makes ``wallet_public_id`` NOT NULL at the schema
+        level. Callers that have not yet migrated to providing an
+        explicit wallet default to the empty-string legacy sentinel
+        (the same default that :class:`ExchangeExecutorService` uses
+        for single-wallet template instantiations).
+        """
         async with self.session() as s:
-            cmd = TradeCommand(**row)
+            row_with_defaults: dict[str, Any] = {"wallet_public_id": "", **row}
+            cmd = TradeCommand(**row_with_defaults)
             s.add(cmd)
             await s.commit()
             await s.refresh(cmd)
@@ -2963,9 +2994,16 @@ class SQLAlchemyRepository(Repository):
             return rows
 
     async def insert_venue_event(self, row: VenueEventInsertRow) -> int:
-        """Insert a venue event and return its local_seq."""
+        """Insert a venue event and return its local_seq.
+
+        Phase 0c.6 legacy-default: callers without a populated
+        ``wallet_public_id`` get empty string to satisfy the NOT NULL
+        constraint. Production executor paths always populate the
+        wallet explicitly; the default only covers pre-0c.6 fixtures.
+        """
         async with self.session() as s:
-            ve = VenueEvent(**row)
+            row_with_defaults: dict[str, Any] = {"wallet_public_id": "", **row}
+            ve = VenueEvent(**row_with_defaults)
             s.add(ve)
             await s.commit()
             await s.refresh(ve)
@@ -3016,10 +3054,13 @@ class SQLAlchemyRepository(Repository):
     async def upsert_checkpoint(self, row: CheckpointUpsertRow) -> int:
         """SCD2 upsert for trade projection checkpoint.
 
-        Returns the new row id.
+        Returns the new row id. Phase 0c.6 legacy-default: missing
+        ``wallet_public_id`` collapses to empty string for
+        NOT-NULL-compliant inserts on legacy fixtures.
         """
         async with self.session() as s:
             new_values: dict[str, Any] = {k: v for k, v in row.items() if k != "bus_time"}
+            new_values.setdefault("wallet_public_id", "")
             obj = await close_and_insert(
                 s,
                 TradeProjectionCheckpoint,
@@ -3183,14 +3224,15 @@ class SQLAlchemyRepository(Repository):
         the duplicate as a "boundary already applied" no-op without
         losing earlier writes from the same outer transaction.
         """
+        row_with_defaults: dict[str, Any] = {"wallet_public_id": "", **row}
         if session is None:
             async with self.session() as s:
-                obj = AccrualLedger(**row)
+                obj = AccrualLedger(**row_with_defaults)
                 s.add(obj)
                 await s.commit()
                 await s.refresh(obj)
                 return int(obj.id)
-        obj = AccrualLedger(**row)
+        obj = AccrualLedger(**row_with_defaults)
         async with session.begin_nested():
             session.add(obj)
             await session.flush()

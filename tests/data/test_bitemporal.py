@@ -399,6 +399,7 @@ class TestOrderBitemporal:
 
         order_id, order_public_id = await repo.insert_order(
             instrument_public_id=inst_public_id,
+            wallet_public_id="00000000-0000-7000-8000-000000000001",
             client_order_id="cli-001",
             exchange_order_id=None,
             created_at=base_ts,
@@ -540,6 +541,7 @@ class TestExecutionDedup:
 
         order_id, order_public_id = await repo.insert_order(
             instrument_public_id=inst_public_id,
+            wallet_public_id="00000000-0000-7000-8000-000000000001",
             client_order_id="cli-dedup",
             exchange_order_id=None,
             created_at=base_ts,
@@ -565,6 +567,7 @@ class TestExecutionDedup:
 
         await repo.insert_execution(
             order_public_id=order_public_id,
+            wallet_public_id="00000000-0000-7000-8000-000000000001",
             timestamp=base_ts + timedelta(seconds=10),
             side="buy",
             status="filled",
@@ -580,6 +583,7 @@ class TestExecutionDedup:
         with pytest.raises(IntegrityError):
             await repo.insert_execution(
                 order_public_id=order_public_id,
+                wallet_public_id="00000000-0000-7000-8000-000000000001",
                 timestamp=base_ts + timedelta(seconds=15),
                 side="buy",
                 status="filled",
@@ -1702,6 +1706,7 @@ class TestInstrumentBitemporal:
         async with repo.session() as s:
             signal = Signal(
                 instrument_public_id=inst_public_id,
+                wallet_public_id="00000000-0000-7000-8000-000000000001",
                 fired_at=datetime.now(UTC),
                 timestamp=datetime.now(UTC),
                 side="buy",
@@ -2039,6 +2044,7 @@ class TestInstrumentJoinSemantics:
         now = datetime.now(UTC)
         order_id, order_pid = await repo.insert_order(
             instrument_public_id=inst_public_id,
+            wallet_public_id="00000000-0000-7000-8000-000000000001",
             client_order_id="cli-join",
             exchange_order_id=None,
             created_at=now,
@@ -2082,6 +2088,7 @@ class TestInstrumentJoinSemantics:
 
         order_id, order_pid = await repo.insert_order(
             instrument_public_id=inst_public_id,
+            wallet_public_id="00000000-0000-7000-8000-000000000001",
             client_order_id="cli-exec-join",
             exchange_order_id="ex-exec-join",
             created_at=now,
@@ -2097,6 +2104,7 @@ class TestInstrumentJoinSemantics:
 
         exec_id = await repo.insert_execution(
             order_public_id=order_pid,
+            wallet_public_id="00000000-0000-7000-8000-000000000001",
             timestamp=datetime.now(UTC),
             side="buy",
             status="filled",
@@ -2146,6 +2154,7 @@ class TestInstrumentJoinSemantics:
         async with repo.session() as s:
             pos = Position(
                 instrument_public_id=inst_public_id,
+                wallet_public_id="00000000-0000-7000-8000-000000000001",
                 quantity=1.5,
                 average_price=50000.0,
                 unrealized_pnl=100.0,
@@ -2273,6 +2282,7 @@ class TestInstrumentJoinSemantics:
 
         order_id, _ = await repo.insert_order(
             instrument_public_id=inst_public_id,
+            wallet_public_id="00000000-0000-7000-8000-000000000001",
             client_order_id="cli-cross",
             exchange_order_id=None,
             created_at=now,
@@ -2289,6 +2299,7 @@ class TestInstrumentJoinSemantics:
         async with repo.session() as s:
             signal = Signal(
                 instrument_public_id=inst_public_id,
+                wallet_public_id="00000000-0000-7000-8000-000000000001",
                 fired_at=now,
                 timestamp=now,
                 side="buy",
@@ -2301,6 +2312,7 @@ class TestInstrumentJoinSemantics:
             )
             pos = Position(
                 instrument_public_id=inst_public_id,
+                wallet_public_id="00000000-0000-7000-8000-000000000001",
                 quantity=2.0,
                 average_price=50000.0,
                 unrealized_pnl=0.0,
@@ -2379,6 +2391,7 @@ class TestInstrumentJoinSemantics:
         now = datetime.now(UTC)
         await repo.insert_order(
             instrument_public_id=inst_public_id,
+            wallet_public_id="00000000-0000-7000-8000-000000000001",
             client_order_id="cli-snapshot",
             exchange_order_id=None,
             created_at=now,

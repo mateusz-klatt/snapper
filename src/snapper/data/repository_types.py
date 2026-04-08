@@ -7,6 +7,7 @@ data transfer.
 """
 
 from datetime import datetime
+from typing import NotRequired
 from typing import TypedDict
 
 
@@ -426,6 +427,7 @@ class VenueEventInsertRow(TypedDict, total=False):
     error: str | None
     venue_timestamp: datetime | None
     payload_json: str | None
+    wallet_public_id: str
 
 
 class InstrumentSpecRow(TypedDict):
@@ -534,6 +536,7 @@ class CheckpointUpsertRow(TypedDict):
     session_id: str
     sequence_id: int
     bus_time: datetime
+    wallet_public_id: str
 
 
 class ContinuousCandleRow(TypedDict):
@@ -616,7 +619,10 @@ class AccrualLedgerInsertRow(TypedDict):
     """Insert params for insert_accrual.
 
     All fields are required since accruals materialize the periodic
-    charge applied to a position and need full provenance.
+    charge applied to a position and need full provenance. Phase 0c.6
+    makes ``wallet_public_id`` mandatory (NOT NULL in the schema);
+    ``operator_public_id`` stays optional because strategy-driven
+    accruals are not necessarily initiated by a human operator.
     """
 
     instrument_public_id: str
@@ -632,6 +638,8 @@ class AccrualLedgerInsertRow(TypedDict):
     session_id: str
     sequence_id: int
     timestamp: datetime
+    wallet_public_id: str
+    operator_public_id: NotRequired[str | None]
 
 
 class ScopeGrantRow(TypedDict):

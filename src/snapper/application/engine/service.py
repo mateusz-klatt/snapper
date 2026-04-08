@@ -362,7 +362,7 @@ class TradingEngineService:
                     "session_id": session_id,
                     "sequence_id": sequence_id,
                     "timestamp": now,
-                    "wallet_public_id": self.wallet_public_id or None,
+                    "wallet_public_id": self.wallet_public_id or "",
                     "operator_public_id": self.operator_public_id or None,
                 }
             )

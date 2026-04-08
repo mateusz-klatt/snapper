@@ -768,6 +768,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
     assert len(trade_results) == 2
     order_id, order_public_id = await repo.insert_order(
         instrument_public_id=instrument_public_id,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
         client_order_id="client-1",
         exchange_order_id=None,
         created_at=base_ts,
@@ -802,6 +803,7 @@ async def test_sqlalchemy_repository_sqlite_crud(tmp_path: Path) -> None:
     )
     execution_id = await repo.insert_execution(
         order_public_id=order_public_id,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
         timestamp=base_ts + timedelta(minutes=2, seconds=30),
         side="buy",
         status="filled",
@@ -2367,6 +2369,7 @@ async def test_get_signals_returns_data(tmp_path: Path) -> None:
         s.add(
             Signal(
                 instrument_public_id=inst_pid,
+                wallet_public_id="00000000-0000-7000-8000-000000000001",
                 strategy_name="rsi",
                 side="buy",
                 strength=0.9,
@@ -2400,6 +2403,7 @@ async def test_get_signals_filters_by_exchange(tmp_path: Path) -> None:
         s.add(
             Signal(
                 instrument_public_id=inst_pid,
+                wallet_public_id="00000000-0000-7000-8000-000000000001",
                 strategy_name="rsi",
                 side="buy",
                 strength=0.9,
@@ -2430,6 +2434,7 @@ async def test_get_orders_returns_data(tmp_path: Path) -> None:
     now = datetime.now(UTC)
     await r.insert_order(
         instrument_public_id=inst_pid,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
         client_order_id="c1",
         exchange_order_id="e1",
         created_at=now,
@@ -2461,6 +2466,7 @@ async def test_get_orders_filters_by_exchange(tmp_path: Path) -> None:
     now = datetime.now(UTC)
     await r.insert_order(
         instrument_public_id=inst_pid,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
         client_order_id="c1",
         exchange_order_id="e1",
         created_at=now,
@@ -2489,6 +2495,7 @@ async def test_insert_order_persists_leverage_and_reduce_only(tmp_path: Path) ->
     now = datetime.now(UTC)
     await r.insert_order(
         instrument_public_id=inst_pid,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
         client_order_id="c-lev",
         exchange_order_id="e-lev",
         created_at=now,
@@ -2521,6 +2528,7 @@ async def test_insert_order_defaults_leverage_and_reduce_only(tmp_path: Path) ->
     now = datetime.now(UTC)
     await r.insert_order(
         instrument_public_id=inst_pid,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
         client_order_id="c-default",
         exchange_order_id="e-default",
         created_at=now,
@@ -2553,6 +2561,7 @@ async def test_update_order_carries_forward_leverage_and_reduce_only(tmp_path: P
     base_ts = datetime.now(UTC)
     order_id, _ = await r.insert_order(
         instrument_public_id=inst_pid,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
         client_order_id="c-carry",
         exchange_order_id="e-carry",
         created_at=base_ts,
@@ -2606,6 +2615,7 @@ async def test_get_executions_returns_data(tmp_path: Path) -> None:
     now = datetime.now(UTC)
     _, order_pid = await r.insert_order(
         instrument_public_id=inst_pid,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
         client_order_id="c1",
         exchange_order_id="e1",
         created_at=now,
@@ -2620,6 +2630,7 @@ async def test_get_executions_returns_data(tmp_path: Path) -> None:
     )
     await r.insert_execution(
         order_public_id=order_pid,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
         timestamp=now,
         side="buy",
         status="filled",
@@ -2648,6 +2659,7 @@ async def test_get_active_orders_for_recovery(tmp_path: Path) -> None:
     now = datetime.now(UTC)
     await r.insert_order(
         instrument_public_id=inst_pid,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
         client_order_id="c-open",
         exchange_order_id="e-open",
         created_at=now,
@@ -2662,6 +2674,7 @@ async def test_get_active_orders_for_recovery(tmp_path: Path) -> None:
     )
     await r.insert_order(
         instrument_public_id=inst_pid,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
         client_order_id="c-closed",
         exchange_order_id="e-closed",
         created_at=now,
@@ -2692,6 +2705,7 @@ async def test_get_executions_for_recovery(tmp_path: Path) -> None:
     now = datetime.now(UTC)
     _, order_pid = await r.insert_order(
         instrument_public_id=inst_pid,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
         client_order_id="c1",
         exchange_order_id="e1",
         created_at=now,
@@ -2706,6 +2720,7 @@ async def test_get_executions_for_recovery(tmp_path: Path) -> None:
     )
     await r.insert_execution(
         order_public_id=order_pid,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
         timestamp=now,
         side="buy",
         status="partial",
@@ -2718,6 +2733,7 @@ async def test_get_executions_for_recovery(tmp_path: Path) -> None:
     )
     await r.insert_execution(
         order_public_id=order_pid,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
         timestamp=now,
         side="buy",
         status="filled",
@@ -2746,6 +2762,7 @@ async def test_get_executions_for_recovery_filters_instrument(tmp_path: Path) ->
     now = datetime.now(UTC)
     _, order_pid = await r.insert_order(
         instrument_public_id=inst_pid,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
         client_order_id="c1",
         exchange_order_id="e1",
         created_at=now,
@@ -2760,6 +2777,7 @@ async def test_get_executions_for_recovery_filters_instrument(tmp_path: Path) ->
     )
     await r.insert_execution(
         order_public_id=order_pid,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
         timestamp=now,
         side="buy",
         status="filled",
@@ -2792,6 +2810,7 @@ async def test_get_active_orders_for_recovery_filters_by_wallet(tmp_path: Path) 
     wallet_b = "00000000-0000-7000-8000-0000000000b2"
     _, pid_a = await r.insert_order(
         instrument_public_id=inst_pid,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
         client_order_id="c-wallet-a",
         exchange_order_id="e-wallet-a",
         created_at=now,
@@ -2806,6 +2825,7 @@ async def test_get_active_orders_for_recovery_filters_by_wallet(tmp_path: Path) 
     )
     _, pid_b = await r.insert_order(
         instrument_public_id=inst_pid,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
         client_order_id="c-wallet-b",
         exchange_order_id="e-wallet-b",
         created_at=now,
@@ -2856,6 +2876,7 @@ async def test_get_executions_for_recovery_filters_by_wallet(tmp_path: Path) -> 
     wallet_b = "00000000-0000-7000-8000-0000000000b2"
     _, order_a = await r.insert_order(
         instrument_public_id=inst_pid,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
         client_order_id="c-exec-a",
         exchange_order_id="e-exec-a",
         created_at=now,
@@ -2870,6 +2891,7 @@ async def test_get_executions_for_recovery_filters_by_wallet(tmp_path: Path) -> 
     )
     _, order_b = await r.insert_order(
         instrument_public_id=inst_pid,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
         client_order_id="c-exec-b",
         exchange_order_id="e-exec-b",
         created_at=now,
@@ -2884,6 +2906,7 @@ async def test_get_executions_for_recovery_filters_by_wallet(tmp_path: Path) -> 
     )
     await r.insert_execution(
         order_public_id=order_a,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
         timestamp=now,
         side="buy",
         status="filled",
@@ -2896,6 +2919,7 @@ async def test_get_executions_for_recovery_filters_by_wallet(tmp_path: Path) -> 
     )
     await r.insert_execution(
         order_public_id=order_b,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
         timestamp=now,
         side="sell",
         status="filled",
@@ -2941,6 +2965,7 @@ async def test_get_positions_returns_data(tmp_path: Path) -> None:
         s.add(
             Position(
                 instrument_public_id=inst_pid,
+                wallet_public_id="",
                 quantity=1.5,
                 average_price=48000.0,
                 unrealized_pnl=3000.0,
@@ -3937,6 +3962,7 @@ async def test_upsert_checkpoint_and_get(tmp_path: Path) -> None:
     cp_id = await r.upsert_checkpoint(
         {
             "shard_key": "kraken.BTC-USD.live",
+            "wallet_public_id": "00000000-0000-7000-8000-000000000001",
             "position_qty": 0.5,
             "entry_price": 50000.0,
             "position_opened_at": now,
@@ -3965,6 +3991,7 @@ async def test_upsert_checkpoint_and_get(tmp_path: Path) -> None:
     cp_id2 = await r.upsert_checkpoint(
         {
             "shard_key": "kraken.BTC-USD.live",
+            "wallet_public_id": "00000000-0000-7000-8000-000000000001",
             "position_qty": 1.0,
             "entry_price": 50000.0,
             "position_opened_at": now,
@@ -4019,6 +4046,7 @@ async def test_get_all_checkpoints_returns_all_active(tmp_path: Path) -> None:
     await r.upsert_checkpoint(
         {
             "shard_key": "kraken.BTC-USD.live",
+            "wallet_public_id": "00000000-0000-7000-8000-000000000001",
             "position_qty": 0.5,
             "entry_price": 50000.0,
             "position_opened_at": now,
@@ -4039,6 +4067,7 @@ async def test_get_all_checkpoints_returns_all_active(tmp_path: Path) -> None:
     await r.upsert_checkpoint(
         {
             "shard_key": "kraken.ETH-USD.live",
+            "wallet_public_id": "00000000-0000-7000-8000-000000000001",
             "position_qty": 10.0,
             "entry_price": 3000.0,
             "position_opened_at": None,
@@ -4529,6 +4558,7 @@ async def test_insert_accrual_round_trip_and_get_last(tmp_path: Path) -> None:
         await r.insert_accrual(
             {
                 "instrument_public_id": inst_pid,
+                "wallet_public_id": "00000000-0000-7000-8000-000000000001",
                 "mode": "live",
                 "accrual_type": "funding",
                 "accrued_at": accrued,
@@ -4576,6 +4606,7 @@ async def test_insert_accrual_duplicate_raises(tmp_path: Path) -> None:
     accrued = datetime(2026, 4, 6, 0, 0, 0, tzinfo=UTC)
     row: AccrualLedgerInsertRow = {
         "instrument_public_id": inst_pid,
+        "wallet_public_id": "00000000-0000-7000-8000-000000000001",
         "mode": "live",
         "accrual_type": "funding",
         "accrued_at": accrued,
@@ -4607,6 +4638,7 @@ async def test_insert_accrual_with_caller_session(tmp_path: Path) -> None:
     accrued = datetime(2026, 4, 6, 1, 0, 0, tzinfo=UTC)
     row: AccrualLedgerInsertRow = {
         "instrument_public_id": inst_pid,
+        "wallet_public_id": "00000000-0000-7000-8000-000000000001",
         "mode": "live",
         "accrual_type": "funding",
         "accrued_at": accrued,
@@ -4654,6 +4686,7 @@ async def test_insert_accrual_savepoint_isolates_duplicate_in_caller_session(
     accrued_b = datetime(2026, 4, 6, 1, 0, 0, tzinfo=UTC)
     row_a: AccrualLedgerInsertRow = {
         "instrument_public_id": inst_pid,
+        "wallet_public_id": "00000000-0000-7000-8000-000000000001",
         "mode": "live",
         "accrual_type": "funding",
         "accrued_at": accrued_a,
@@ -4669,6 +4702,7 @@ async def test_insert_accrual_savepoint_isolates_duplicate_in_caller_session(
     }
     row_b: AccrualLedgerInsertRow = {
         "instrument_public_id": inst_pid,
+        "wallet_public_id": "00000000-0000-7000-8000-000000000001",
         "mode": "live",
         "accrual_type": "funding",
         "accrued_at": accrued_b,
@@ -4774,6 +4808,7 @@ async def test_get_accruals_strict_lower_bound(tmp_path: Path) -> None:
         await r.insert_accrual(
             {
                 "instrument_public_id": inst_pid,
+                "wallet_public_id": "00000000-0000-7000-8000-000000000001",
                 "mode": "live",
                 "accrual_type": "funding",
                 "accrued_at": accrued,

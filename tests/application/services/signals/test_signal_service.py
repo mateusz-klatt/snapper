@@ -200,19 +200,22 @@ class TestSignalService:
             assert stored.wallet_public_id == wallet_pid
             assert stored.operator_public_id == operator_pid
 
-    async def test_store_signal_empty_multi_tenant_ids_become_null(
+    async def test_store_signal_empty_wallet_stored_as_empty_string_post_0c6(
         self,
         signal_service: SignalReadService,
         sample_signal: StrategySignal,
         test_repository: SQLAlchemyRepository,
     ) -> None:
-        """Verify empty-string IDs collapse to NULL on the persisted row.
+        """Verify an empty wallet_public_id is persisted as empty string, not NULL.
 
-        Given: Repository with BTCUSD instrument and a strategy with empty
-            wallet/operator (Phase 0b transitional empty defaults),
-        When: store_signal is called with empty-string IDs,
-        Then: The persisted row stores NULL for both, preserving the existing
-            no-tenant query semantics until Phase 0b.6 NOT NULL tightening.
+        Given: Repository with BTCUSD instrument and a strategy call that
+            passes an empty wallet_public_id (legacy no-tenant path from
+            tests that have not migrated to passing a real wallet UUID),
+        When: store_signal is called with ``wallet_public_id=""``,
+        Then: The persisted row stores the empty string (Phase 0c.6 NOT
+            NULL tightening forbids NULL; empty string is the legacy
+            sentinel the runtime accepts). ``operator_public_id`` stays
+            nullable per the ORM so it still collapses to NULL on empty.
         """
         await test_repository.ensure_instrument(
             symbol_public_id=BTCUSD_SYMBOL_PUBLIC_ID,
@@ -239,7 +242,7 @@ class TestSignalService:
             result = await session.execute(select(Signal).where(Signal.public_id == signal_id))
             stored = result.scalars().first()
             assert stored is not None
-            assert stored.wallet_public_id is None
+            assert stored.wallet_public_id == ""
             assert stored.operator_public_id is None
 
     async def test_store_signal_with_envelope_identity(
