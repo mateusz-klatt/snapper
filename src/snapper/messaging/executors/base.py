@@ -306,7 +306,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         now = datetime.now(UTC)
         try:
             db_active = await self.repository.get_active_orders_for_recovery(
-                exchange=exchange_name, as_of=now
+                exchange=exchange_name,
+                as_of=now,
+                wallet_public_id=self.wallet_public_id,
             )
         except Exception as e:
             logger.error(f"[{exchange_name}] Failed to query DB active orders: {e}")
@@ -365,6 +367,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             price=db_order.get("price"),
             client_order_id=client_order_id,
             exchange=exchange_name,
+            wallet_public_id=db_order.get("wallet_public_id") or self.wallet_public_id,
+            operator_public_id=db_order.get("operator_public_id"),
         )
         pending = PendingOrderState(
             request=fake_request,

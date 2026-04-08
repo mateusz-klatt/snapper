@@ -189,6 +189,8 @@ class OrderRow(TypedDict):
     error: str | None
     leverage: int | None
     reduce_only: bool
+    wallet_public_id: str | None
+    operator_public_id: str | None
 
 
 class ExecutionRow(TypedDict):
@@ -210,6 +212,7 @@ class ExecutionRow(TypedDict):
     fee_asset: str
     status: str
     executed_at: datetime
+    wallet_public_id: str | None
 
 
 class PositionRow(TypedDict):

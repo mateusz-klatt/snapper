@@ -1592,6 +1592,94 @@ class TestResolveRoleForClassPath:
             assert exc_info.value.status_code == 403
             mock_factory.start_process_by_name.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_start_process_handles_persisted_parameters_not_dict(
+        self, tmp_path: Path
+    ) -> None:
+        """Persisted ``parameters`` field that isn't a dict is treated as None.
+
+        Phase 0c.3 regression: covers the false branch of
+        ``isinstance(raw_params, dict)`` inside ``start_process`` so the
+        line 677 branch in ``process_routes.py`` stays at 100% even
+        when test execution order shifts.
+
+        Given: A SQLAlchemyRepository with a persisted process_<name>
+            setting whose JSON value has ``class_path`` set but
+            ``parameters`` set to a JSON list (not a dict),
+        When: ``start_process`` is called for that name and the class
+            resolves to STRATEGY,
+        Then: The persisted_params stays None, the recheck still runs
+            against an empty params dict, and the call proceeds to
+            ``factory.start_process_by_name`` (no 403 because the
+            principal still controls the operator with no
+            wallet_public_id constraint).
+        """
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path}/start_notdict.db")
+        await repo.create_all()
+        async with repo.session() as session:
+            session.add(
+                Setting(
+                    key="process_strat-listparams",
+                    value=_json.dumps(
+                        {
+                            "class_path": "snapper.fake.StratClass",
+                            "parameters": [1, 2, 3],
+                        }
+                    ),
+                    category="process",
+                    is_encrypted=False,
+                    timestamp=datetime.now(UTC),
+                    session_id="t",
+                    sequence_id=1,
+                )
+            )
+            await session.commit()
+        body = ProcessStartRequest(
+            session_id="sid",
+            sequence_id=1,
+            public_id="pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            payload=ProcessStartBody(mode=None, parameters=None),
+        )
+        fake_class = MagicMock()
+        registry = {
+            "strat-listparams": ProcessRegistryEntry(
+                class_ref=fake_class,
+                class_path="snapper.fake.StratClass",
+                method="start",
+                description="d",
+                priority=50,
+                lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+                role=ProcessRoleEnum.STRATEGY,
+                tags=("strategy",),
+                parameters_model=None,
+                parameters_schema={"type": "object"},
+                enabled=False,
+                mode="thread",
+            )
+        }
+        with _patch(
+            "snapper.server.process_routes.get_registered_processes", return_value=registry
+        ):
+            mock_factory = MagicMock()
+            mock_factory.start_process_by_name = AsyncMock(
+                return_value=ProcessStartResult(status="success", message="ok", public_id="run-1")
+            )
+            await start_process(
+                http_request=_make_rest_request(),
+                name="strat-listparams",
+                body=body,
+                factory=mock_factory,
+                user=MagicMock(
+                    operator_public_ids=["op-mine"],
+                    primary_operator_public_id="op-mine",
+                    username="alice",
+                ),
+                repo=repo,
+                _csrf=None,
+            )
+            mock_factory.start_process_by_name.assert_awaited_once()
+
 
 class TestResolveRoleForClassPathHit:
     """Tests for the class_path -> ProcessRoleEnum lookup positive path."""

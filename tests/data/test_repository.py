@@ -20,6 +20,7 @@ from unittest.mock import Mock
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -2771,6 +2772,159 @@ async def test_get_executions_for_recovery_filters_instrument(tmp_path: Path) ->
     )
     result = await r.get_executions_for_recovery(as_of=now, instrument="ETH-USD")
     assert len(result) == 0
+
+
+@pytest.mark.asyncio
+async def test_get_active_orders_for_recovery_filters_by_wallet(tmp_path: Path) -> None:
+    """Phase 0c.3: wallet_public_id filter scopes recovery to one wallet.
+
+    Given: Two active orders on the same exchange tagged with two
+        different ``wallet_public_id`` values via direct SCD2 update,
+    When: ``get_active_orders_for_recovery`` is called with
+        ``wallet_public_id=wallet_a``,
+    Then: Only the order tagged ``wallet_a`` is returned, exercising
+        the new ``Order.wallet_public_id == wallet_public_id`` clause
+        added in Phase 0c.3.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    wallet_a = "00000000-0000-7000-8000-0000000000a1"
+    wallet_b = "00000000-0000-7000-8000-0000000000b2"
+    _, pid_a = await r.insert_order(
+        instrument_public_id=inst_pid,
+        client_order_id="c-wallet-a",
+        exchange_order_id="e-wallet-a",
+        created_at=now,
+        side="buy",
+        order_type="market",
+        price=None,
+        size=1.0,
+        status="open",
+        session_id="s1",
+        sequence_id=30,
+        timestamp=now,
+    )
+    _, pid_b = await r.insert_order(
+        instrument_public_id=inst_pid,
+        client_order_id="c-wallet-b",
+        exchange_order_id="e-wallet-b",
+        created_at=now,
+        side="sell",
+        order_type="limit",
+        price=51000.0,
+        size=0.5,
+        status="open",
+        session_id="s1",
+        sequence_id=31,
+        timestamp=now,
+    )
+    async with r.session() as s:
+        await s.execute(
+            text("UPDATE orders SET wallet_public_id=:w_a WHERE public_id=:pid_a"),
+            {"w_a": wallet_a, "pid_a": pid_a},
+        )
+        await s.execute(
+            text("UPDATE orders SET wallet_public_id=:w_b WHERE public_id=:pid_b"),
+            {"w_b": wallet_b, "pid_b": pid_b},
+        )
+        await s.commit()
+    filtered = await r.get_active_orders_for_recovery(
+        exchange="kraken", as_of=now, wallet_public_id=wallet_a
+    )
+    assert len(filtered) == 1
+    assert filtered[0]["client_order_id"] == "c-wallet-a"
+    assert filtered[0]["wallet_public_id"] == wallet_a
+    legacy = await r.get_active_orders_for_recovery(exchange="kraken", as_of=now)
+    assert len(legacy) == 2
+    assert {row["client_order_id"] for row in legacy} == {"c-wallet-a", "c-wallet-b"}
+
+
+@pytest.mark.asyncio
+async def test_get_executions_for_recovery_filters_by_wallet(tmp_path: Path) -> None:
+    """Phase 0c.3: wallet_public_id filter scopes execution recovery.
+
+    Given: Two executions tagged with two different ``wallet_public_id``
+        values via direct SCD2 update,
+    When: ``get_executions_for_recovery`` is called with
+        ``wallet_public_id=wallet_a``,
+    Then: Only the execution tagged ``wallet_a`` is returned and the
+        legacy default still returns both rows.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    wallet_a = "00000000-0000-7000-8000-0000000000a1"
+    wallet_b = "00000000-0000-7000-8000-0000000000b2"
+    _, order_a = await r.insert_order(
+        instrument_public_id=inst_pid,
+        client_order_id="c-exec-a",
+        exchange_order_id="e-exec-a",
+        created_at=now,
+        side="buy",
+        order_type="limit",
+        price=50000.0,
+        size=1.0,
+        status="filled",
+        session_id="s1",
+        sequence_id=40,
+        timestamp=now,
+    )
+    _, order_b = await r.insert_order(
+        instrument_public_id=inst_pid,
+        client_order_id="c-exec-b",
+        exchange_order_id="e-exec-b",
+        created_at=now,
+        side="sell",
+        order_type="limit",
+        price=51000.0,
+        size=1.0,
+        status="filled",
+        session_id="s1",
+        sequence_id=41,
+        timestamp=now,
+    )
+    await r.insert_execution(
+        order_public_id=order_a,
+        timestamp=now,
+        side="buy",
+        status="filled",
+        price=50000.0,
+        size=1.0,
+        fee=5.0,
+        fee_asset="USD",
+        session_id="s1",
+        sequence_id=42,
+    )
+    await r.insert_execution(
+        order_public_id=order_b,
+        timestamp=now,
+        side="sell",
+        status="filled",
+        price=51000.0,
+        size=1.0,
+        fee=5.0,
+        fee_asset="USD",
+        session_id="s1",
+        sequence_id=43,
+    )
+    async with r.session() as s:
+        await s.execute(
+            text("UPDATE executions SET wallet_public_id=:w_a WHERE order_public_id=:order_a"),
+            {"w_a": wallet_a, "order_a": order_a},
+        )
+        await s.execute(
+            text("UPDATE executions SET wallet_public_id=:w_b WHERE order_public_id=:order_b"),
+            {"w_b": wallet_b, "order_b": order_b},
+        )
+        await s.commit()
+    filtered = await r.get_executions_for_recovery(
+        as_of=now, exchange="kraken", wallet_public_id=wallet_a
+    )
+    assert len(filtered) == 1
+    assert filtered[0]["client_order_id"] == "c-exec-a"
+    assert filtered[0]["wallet_public_id"] == wallet_a
+    legacy = await r.get_executions_for_recovery(as_of=now, exchange="kraken")
+    assert len(legacy) == 2
+    assert {row["client_order_id"] for row in legacy} == {"c-exec-a", "c-exec-b"}
 
 
 @pytest.mark.asyncio

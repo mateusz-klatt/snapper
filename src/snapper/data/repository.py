@@ -712,7 +712,10 @@ class Repository(ABC):
 
     @abstractmethod
     async def get_active_orders_for_recovery(
-        self, exchange: str, as_of: datetime
+        self,
+        exchange: str,
+        as_of: datetime,
+        wallet_public_id: str = "",
     ) -> list[OrderRow]:
         """Retrieve non-terminal orders for startup recovery.
 
@@ -723,6 +726,16 @@ class Repository(ABC):
         Args:
             exchange: Exchange name to filter by.
             as_of: Point-in-time for temporal query.
+            wallet_public_id: Phase 0c.3 multi-tenant filter. When
+                non-empty, only orders matching ``Order.wallet_public_id
+                == wallet_public_id`` are returned so each per-wallet
+                executor instance recovers exclusively its own orders
+                and never spills cross-wallet state into
+                ``pending_orders``. The legacy default ``""`` skips the
+                filter for backwards compatibility with the single-
+                wallet template path; the legacy branch will be
+                removed once Phase 0c.5 flips templates to
+                ``enabled=False``.
 
         Returns:
             Active order dicts ordered by created_at ASC (chronological
@@ -732,7 +745,11 @@ class Repository(ABC):
 
     @abstractmethod
     async def get_executions_for_recovery(
-        self, as_of: datetime, exchange: str | None = None, instrument: str | None = None
+        self,
+        as_of: datetime,
+        exchange: str | None = None,
+        instrument: str | None = None,
+        wallet_public_id: str = "",
     ) -> list[ExecutionRow]:
         """Retrieve all executions for startup state reconstruction.
 
@@ -744,6 +761,12 @@ class Repository(ABC):
             as_of: Point-in-time for temporal query.
             exchange: Optional exchange filter.
             instrument: Optional native symbol filter.
+            wallet_public_id: Phase 0c.3 multi-tenant filter. When
+                non-empty, only executions whose
+                ``Execution.wallet_public_id`` matches are returned.
+                The legacy default ``""`` skips the filter for
+                backwards compatibility with the single-wallet
+                template path.
 
         Returns:
             Execution dicts ordered by timestamp ASC for replay,
@@ -2387,6 +2410,8 @@ class SQLAlchemyRepository(Repository):
                     "error": order.error,
                     "leverage": order.leverage,
                     "reduce_only": order.reduce_only,
+                    "wallet_public_id": order.wallet_public_id,
+                    "operator_public_id": order.operator_public_id,
                 }
                 for order, inst, sym in result.all()
             ]
@@ -2440,6 +2465,7 @@ class SQLAlchemyRepository(Repository):
                     "fee_asset": exe.fee_asset,
                     "status": exe.status,
                     "executed_at": exe.executed_at or exe.timestamp,
+                    "wallet_public_id": exe.wallet_public_id,
                 }
                 for exe, order, inst, sym in result.all()
             ]
@@ -2447,7 +2473,10 @@ class SQLAlchemyRepository(Repository):
     _ACTIVE_ORDER_STATUSES = ("open", "pending", "pending_new", "new", "partially_filled")
 
     async def get_active_orders_for_recovery(
-        self, exchange: str, as_of: datetime
+        self,
+        exchange: str,
+        as_of: datetime,
+        wallet_public_id: str = "",
     ) -> list[OrderRow]:
         """Retrieve non-terminal orders for startup recovery."""
         async with self.session() as s:
@@ -2474,6 +2503,8 @@ class SQLAlchemyRepository(Repository):
                 )
                 .order_by(Order.created_at)
             )
+            if wallet_public_id:
+                query = query.where(Order.wallet_public_id == wallet_public_id)
             result = await s.execute(query)
             return [
                 {
@@ -2499,12 +2530,18 @@ class SQLAlchemyRepository(Repository):
                     "error": order.error,
                     "leverage": order.leverage,
                     "reduce_only": order.reduce_only,
+                    "wallet_public_id": order.wallet_public_id,
+                    "operator_public_id": order.operator_public_id,
                 }
                 for order, inst, sym in result.all()
             ]
 
     async def get_executions_for_recovery(
-        self, as_of: datetime, exchange: str | None = None, instrument: str | None = None
+        self,
+        as_of: datetime,
+        exchange: str | None = None,
+        instrument: str | None = None,
+        wallet_public_id: str = "",
     ) -> list[ExecutionRow]:
         """Retrieve all executions for startup state reconstruction."""
         async with self.session() as s:
@@ -2544,6 +2581,8 @@ class SQLAlchemyRepository(Repository):
                     .scalar_subquery()
                 )
                 query = query.where(Instrument.symbol_public_id == sym_subq)
+            if wallet_public_id:
+                query = query.where(Execution.wallet_public_id == wallet_public_id)
             result = await s.execute(query)
             return [
                 {
@@ -2563,6 +2602,7 @@ class SQLAlchemyRepository(Repository):
                     "fee_asset": exe.fee_asset,
                     "status": exe.status,
                     "executed_at": exe.executed_at or exe.timestamp,
+                    "wallet_public_id": exe.wallet_public_id,
                 }
                 for exe, order, inst, sym in result.all()
             ]
