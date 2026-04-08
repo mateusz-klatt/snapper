@@ -509,7 +509,7 @@ export type Paths = {
          *         factory: Process launcher service.
          *         settings: Application settings.
          *         user: Authenticated user with MANAGE_PROCESSES permission, used
-         *             for the Phase 0b strategy scope check on operator/wallet.
+         *             for the strategy scope check on operator/wallet.
          *         repo: Repository used to verify active scope grants for the
          *             requested operator/wallet pair.
          *         _csrf: CSRF token validation.
@@ -572,7 +572,7 @@ export type Paths = {
          * Start Process
          * @description Start a previously created process configuration.
          *
-         *     Phase 0b.4d / phase-close fix: ``payload.parameters`` cannot
+         *     ``payload.parameters`` cannot
          *     override ``operator_public_id`` or ``wallet_public_id`` at start
          *     time — those fields are pinned to whatever ``_enforce_strategy_scope``
          *     validated at create time. If the caller wants to switch wallets or
