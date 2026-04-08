@@ -171,7 +171,11 @@ Components:
 
 - **Broker** (`infrastructure/broker.py`) — XPUB/XSUB proxy
 - **Publishers** (`publishers/`) — Market data publication
-- **Executors** (`executors/`) — Order execution on exchanges
+- **Executors** (`executors/`) — Per-wallet order execution on
+  exchanges. One executor process per `(exchange, wallet)` pair is
+  spawned at boot from active `wallet_credentials` rows; each
+  instance filters incoming commands by `wallet_public_id` and loads
+  its credentials via `CredentialResolver` during startup.
 - **Schemas** (`schemas/`) — Pydantic message models
 - **Topics** (`topics/`) — ZMQ topic definitions
 

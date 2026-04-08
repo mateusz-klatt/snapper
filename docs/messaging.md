@@ -108,7 +108,8 @@ database artifacts used by the trade runtime. They are not additional ZMQ topics
 
 | Topic | Description |
 | ----- | ----------- |
-| `system.heartbeats.executor.{exchange}` | Executor heartbeat (e.g. `executor.kraken`) |
+| `system.heartbeats.executor.{exchange}` | Executor heartbeat for the single-wallet template path (4 segments) |
+| `system.heartbeats.executor.{exchange}.{wallet_short}` | Per-wallet executor heartbeat (5 segments). `wallet_short` is the first 12 lowercase hex characters of the wallet UUID |
 | `system.heartbeats.strategy.{name}` | Strategy heartbeat (e.g. `strategy.rsi_btc_1h`) |
 | `system.heartbeats.feed.{exchange}` | Feed heartbeat (e.g. `feed.kraken`, `feed.paper.kraken`) |
 | `system.settings` | Configuration change notifications |
@@ -117,8 +118,11 @@ database artifacts used by the trade runtime. They are not additional ZMQ topics
 | `system.replay.end` | Replay end |
 
 Heartbeat `component` values use dot notation matching the topic path after
-`system.heartbeats.`: `executor.kraken`, `strategy.rsi_btc_1h`, `feed.kraken`,
-`feed.paper.kraken`.
+`system.heartbeats.`: `executor.kraken`, `executor.kraken.019d6ca45f2e`,
+`strategy.rsi_btc_1h`, `feed.kraken`, `feed.paper.kraken`. The per-wallet
+executor heartbeat envelope additionally carries `meta.wallet_public_id` so
+subscribers that prefix-match the 4-segment parent topic can still
+disambiguate by reading the payload.
 
 ## Message Data Classes
 

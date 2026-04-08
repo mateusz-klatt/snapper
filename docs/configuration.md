@@ -52,19 +52,72 @@ DB_URL=postgresql+asyncpg://user:password@localhost:5432/snapper
 
 ## Database Settings
 
-Sensitive data is stored encrypted in the `settings` table.
+Sensitive data is stored encrypted in the `settings` table. Wallet-scoped
+exchange credentials (api keys, secrets, PEM material) live in a separate
+`wallet_credentials` table — see [Wallet Credentials](#wallet-credentials)
+below. Shared market-data provider keys stay in `settings`.
 
-### Exchange API Keys
+### Market Data API Keys
 
 | Key | Description |
 | --- | ----------- |
-| `kraken_api_key` | Kraken API key |
-| `kraken_api_secret` | Kraken API secret |
-| `polygon_api_key` | Polygon.io API key |
-| `walutomat_api_key` | Walutomat API key |
-| `walutomat_private_key` | Walutomat private key |
-| `zonda_api_key` | Zonda API key |
-| `zonda_api_secret` | Zonda API secret |
+| `polygon_api_key` | Polygon.io API key (shared market data — not wallet-scoped) |
+
+### Wallet Credentials
+
+Per-exchange trading credentials live in the `wallet_credentials` table
+and are loaded by `CredentialResolver` during per-wallet executor
+startup. Each row carries:
+
+| Column | Description |
+| --- | ----------- |
+| `wallet_public_id` | UUID of the owning wallet (`(label, is_paper)` unique in `wallets` table) |
+| `exchange` | Exchange identifier (`kraken`, `kraken_futures`, `walutomat`, `zonda`, `paper`) |
+| `credential_type` | Envelope shape: `api_key_secret`, `rsa_pem`, `oauth`, or `paper` |
+| `encrypted_payload` | Fernet-encrypted JSON envelope (shape depends on `credential_type`) |
+| `label` | Human-readable description of the credential row |
+
+Envelope shapes by `credential_type`:
+
+- `api_key_secret` — `{"api_key": "...", "api_secret": "..."}` (Kraken, Zonda, Kraken Futures)
+- `rsa_pem` — `{"api_key": "...", "private_key_pem": "..."}` (Walutomat)
+- `paper` — `{"initial_balance": "10000.0"}` (paper wallets)
+
+Seed profiles (`dev.toml` / `prod.toml`) are the current mechanism
+for populating `wallet_credentials`. A runtime credential management
+UI (list / add / rotate / delete per-wallet credentials, with
+automatic executor restart on rotation) is planned as part of the
+upcoming frontend work — see Phase 0d Section 6.4 of
+`proprietary/plans/plan_multi_tenant_foundation.md`. Until the UI
+ships, rotation requires editing the seed file and running the
+seed command against a clean database (seed is idempotent — it
+skips wallets that already exist), or direct SQL surgery on the
+encrypted payload.
+
+Seed file structure:
+
+```toml
+[[wallets]]
+label = "default"
+is_paper = false
+
+[[wallets.credentials]]
+exchange = "kraken"
+credential_type = "api_key_secret"
+api_key = "your-kraken-api-key"
+api_secret = "your-kraken-api-secret"
+
+[[wallets.credentials]]
+exchange = "walutomat"
+credential_type = "rsa_pem"
+api_key = "your-walutomat-api-key"
+private_key_pem_base64 = "your-pem-base64-encoded"
+```
+
+Two wallets named `default` — one with `is_paper=true` and one with
+`is_paper=false` — coexist via the `(label, is_paper)` unique index.
+The seed loader encrypts every payload with the master-password Fernet
+key before insert.
 
 ### Trading Parameters
 
@@ -157,7 +210,21 @@ host = settings.server_host
 from snapper.config.settings import get_settings_with_service
 
 settings = get_settings_with_service(settings_service)
-api_key = settings.kraken_api_key  # Decrypted from database
+polygon_key = settings.polygon_api_key  # Decrypted from database
+```
+
+Wallet-scoped exchange credentials do NOT appear on `AppSettings`. They
+are loaded by `CredentialResolver` during per-wallet executor startup:
+
+```python
+from snapper.config.credentials import CredentialResolver
+
+resolver = CredentialResolver(repository)
+envelope = await resolver.get_credentials(
+    exchange="kraken",
+    wallet_public_id="01975a8b-3c7d-7000-8000-0000000000a1",
+)
+# envelope == {"api_key": "...", "api_secret": "..."}
 ```
 
 ## Managing Settings via API

@@ -903,15 +903,24 @@ List all settings, optionally filtered by category.
 ```json
 [
     {
-        "key": "kraken_api_key",
-        "value": "xK9m...",
-        "category": "exchanges",
-        "description": "Kraken REST API key",
+        "key": "polygon_api_key",
+        "value": "IvLG...",
+        "category": "api",
+        "description": "Polygon.io market-data API key",
         "updated_at": "2026-01-15T10:00:00Z",
         "updated_by": "admin"
     }
 ]
 ```
+
+Note: per-wallet trading credentials (kraken, walutomat, zonda,
+kraken_futures) are NOT exposed through the settings endpoints.
+They live in the `wallet_credentials` table and are currently
+managed via seed files (`proprietary/data/seed/dev.toml` /
+`prod.toml` — see
+[Configuration / Wallet Credentials](configuration.md#wallet-credentials)).
+REST endpoints for runtime wallet credential management land with
+the upcoming frontend work.
 
 ### GET /api/settings/categories
 
@@ -932,7 +941,7 @@ Set (create or update) a setting value.
 **Request:**
 
 ```http
-POST /api/settings/kraken_api_key/set
+POST /api/settings/polygon_api_key/set
 Content-Type: application/json
 X-CSRF-Token: <csrf_token>
 
@@ -943,8 +952,8 @@ X-CSRF-Token: <csrf_token>
     "timestamp": "2026-01-18T12:00:00Z",
     "payload": {
         "value": "new-api-key-value",
-        "category": "exchanges",
-        "description": "Kraken REST API key"
+        "category": "api",
+        "description": "Polygon.io market-data API key"
     }
 }
 ```
@@ -968,10 +977,10 @@ X-CSRF-Token: <csrf_token>
     "timestamp": "2026-01-18T12:00:00Z",
     "payload": {
         "type": "setting_read",
-        "key": "kraken_api_key",
+        "key": "polygon_api_key",
         "value": "new-api-key-value",
-        "category": "exchanges",
-        "description": "Kraken REST API key",
+        "category": "api",
+        "description": "Polygon.io market-data API key",
         "updated_at": "2026-01-18T12:00:00Z",
         "updated_by": "admin"
     }
@@ -985,7 +994,7 @@ Soft-delete a setting by key (sets `known_to` to current time).
 **Request:**
 
 ```http
-POST /api/settings/kraken_api_key/remove
+POST /api/settings/polygon_api_key/remove
 Content-Type: application/json
 X-CSRF-Token: <csrf_token>
 
@@ -1007,7 +1016,7 @@ X-CSRF-Token: <csrf_token>
     "session_id": "<server-session>",
     "sequence_id": 2,
     "timestamp": "2026-01-18T12:00:01Z",
-    "payload": "Setting 'kraken_api_key' deleted successfully"
+    "payload": "Setting 'polygon_api_key' deleted successfully"
 }
 ```
 
