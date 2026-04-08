@@ -121,12 +121,14 @@ class SignalReadService:
                 instrument upsert is needed. Keeps the instrument row in
                 the same session as the owning strategy component.
             wallet_public_id: Optional wallet identity propagated from the
-                strategy's StrategyConfig (Phase 0b.4). Empty / None values
-                collapse to NULL on the persisted row until Phase 0b.6
-                NOT NULL tightening lands.
+                strategy's StrategyConfig (Phase 0b.4). Phase 0c.6: empty
+                or None values collapse to the empty-string legacy
+                sentinel to satisfy the NOT NULL constraint on
+                ``signals.wallet_public_id``.
             operator_public_id: Optional operator identity propagated from
-                the strategy's StrategyConfig (Phase 0b.4). Same Phase 0b
-                transitional rules as wallet_public_id.
+                the strategy's StrategyConfig (Phase 0b.4). Stays
+                nullable per the ORM; empty or None values still collapse
+                to SQL NULL on the persisted row.
 
         Returns:
             Signal event UUID or empty string on error.

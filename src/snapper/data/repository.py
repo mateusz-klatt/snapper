@@ -1130,9 +1130,12 @@ class Repository(ABC):
         """Insert an accrual ledger row, returning its integer id.
 
         Idempotent on the partial unique index over
-        ``(instrument_public_id, mode, accrual_type, accrued_at)``: a
-        duplicate raises ``IntegrityError``, which the caller swallows
-        as a "boundary already applied" signal.
+        ``(wallet_public_id, instrument_public_id, mode, accrual_type,
+        accrued_at)``: a duplicate raises ``IntegrityError``, which the
+        caller swallows as a "boundary already applied" signal. Phase
+        0c.6 prepends ``wallet_public_id`` to the dedup key so two
+        wallets can accrue the same instrument/mode/type/boundary
+        without conflict.
 
         Args:
             row: Insert payload with all provenance fields.
