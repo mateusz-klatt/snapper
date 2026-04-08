@@ -1311,7 +1311,12 @@ class TraderCoordinator(RegisterableProcess):
                     await self._dispatch_order_event(topic_str, msg_bytes)
                     continue
                 signal = SignalData.from_json(msg_bytes.decode())
-                self._gap_detector.check(topic_str, signal.session_id, signal.sequence_id)
+                self._gap_detector.check(
+                    topic_str,
+                    signal.session_id,
+                    signal.sequence_id,
+                    wallet_public_id=signal.wallet_public_id or "",
+                )
                 logger.info(f"ZMQTrader: Received signal from {topic_str}: {signal}")
                 self._current_topic = topic_str
                 await self._on_signal(signal)

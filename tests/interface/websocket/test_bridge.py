@@ -1426,7 +1426,9 @@ class TestCheckGap:
         payload = '{"type":"tick","session_id":"abc","sequence_id":5}'
         with patch.object(bridge._gap_detector, "check") as mock_check:
             result = bridge._check_gap("market.ticks", "market.kraken.BTC-USD.ticks", payload)
-        mock_check.assert_called_once_with("market.kraken.BTC-USD.ticks", "abc", 5)
+        mock_check.assert_called_once_with(
+            "market.kraken.BTC-USD.ticks", "abc", 5, wallet_public_id=""
+        )
         assert bridge.topic_metrics["market.ticks"].invalid_messages == 0
         assert result is True
 

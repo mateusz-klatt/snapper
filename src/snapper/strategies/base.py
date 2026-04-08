@@ -397,10 +397,16 @@ class BaseStrategy(ABC):
 
         Parses the payload via parse_message to get session_id and sequence_id.
         Silently skips messages that fail parsing (e.g. unknown types).
+        Phase 0c.7: passes ``wallet_public_id`` (when the typed message
+        carries one) so per-wallet streams on the same topic do not
+        interleave into false gaps.
         """
         try:
             msg = parse_message(payload_str)
-            self._gap_detector.check(topic, msg.session_id, msg.sequence_id)
+            wallet_public_id = getattr(msg, "wallet_public_id", "") or ""
+            self._gap_detector.check(
+                topic, msg.session_id, msg.sequence_id, wallet_public_id=wallet_public_id
+            )
         except MessageParseError:
             pass
 

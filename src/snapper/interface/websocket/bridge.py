@@ -346,7 +346,10 @@ class ZmqWebSocketBridgeService:
         try:
             envelope = GapEnvelope.model_validate_json(payload_str)
             if not self._gap_detector.check(
-                received_topic, envelope.session_id, envelope.sequence_id
+                received_topic,
+                envelope.session_id,
+                envelope.sequence_id,
+                wallet_public_id=envelope.wallet_public_id,
             ):
                 if topic in self.topic_metrics:
                     self.topic_metrics[topic].invalid_messages += 1

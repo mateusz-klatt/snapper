@@ -176,23 +176,36 @@ def signal_topic(
     return f"signals.{exchange_str}.{instrument}.{signal_type}"
 
 
-def heartbeat_topic(component: str, name: str) -> str:
+def heartbeat_topic(component: str, name: str, wallet_short: str = "") -> str:
     """Build a heartbeat topic string.
 
     Args:
         component: Component category (e.g., 'feed', 'executor', 'strategy').
         name: Specific component name (e.g., 'kraken', 'paper').
+        wallet_short: Optional 12-hex-char wallet prefix (Phase 0c.7).
+            When supplied for an executor component, the topic gains a
+            5th segment ``.{wallet_short}`` so per-wallet executor
+            instances publish on distinct heartbeat topics. Empty
+            string (the default) preserves the legacy 4-segment layout
+            used by template executors and non-executor components.
 
     Returns:
-        Formatted topic string like 'system.heartbeats.executor.kraken'.
+        Formatted topic string like 'system.heartbeats.executor.kraken'
+        or 'system.heartbeats.executor.kraken.019d6ca45f2e' for a
+        per-wallet instance.
 
     Examples:
         >>> heartbeat_topic("executor", "kraken")
         'system.heartbeats.executor.kraken'
+        >>> heartbeat_topic("executor", "kraken", wallet_short="019d6ca45f2e")
+        'system.heartbeats.executor.kraken.019d6ca45f2e'
         >>> heartbeat_topic("feed", "polygon")
         'system.heartbeats.feed.polygon'
     """
-    return f"system.heartbeats.{component}.{name}"
+    base = f"system.heartbeats.{component}.{name}"
+    if wallet_short:
+        return f"{base}.{wallet_short}"
+    return base
 
 
 def system_topic(topic_type: str) -> str:

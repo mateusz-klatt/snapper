@@ -497,10 +497,40 @@ def _validate_feed_heartbeat(segments: list[str]) -> tuple[bool, str]:
     )
 
 
+_HEX_CHARSET = frozenset("0123456789abcdef")
+_WALLET_SHORT_LENGTH = 12
+
+
+def _is_valid_wallet_short(segment: str) -> bool:
+    """Return True when ``segment`` matches the wallet_short shape.
+
+    A wallet_short segment is exactly 12 lowercase hex characters — the
+    same derivation used by ``TradingEngineService._shard_key``,
+    ``ProcessLauncherService.spawn_per_wallet_executors``, and
+    ``TraderCoordinator._build_engine_key``. This helper keeps the
+    heartbeat topic validator in sync with those producers so a
+    typo'd segment is rejected as early as the first publish.
+    """
+    if len(segment) != _WALLET_SHORT_LENGTH:
+        return False
+    return all(c in _HEX_CHARSET for c in segment)
+
+
 def _validate_heartbeat_topic(segments: list[str]) -> tuple[bool, str]:
     """Validate heartbeat topic structure.
 
-    Expected: system.heartbeats[.{component_type}[.{component_name}]]
+    Expected layouts:
+
+    - ``system.heartbeats`` (2 seg) — global heartbeat
+    - ``system.heartbeats.strategy.{name}`` (4 seg)
+    - ``system.heartbeats.executor.{exchange}`` (4 seg) — single-wallet
+      template, still accepted during the Phase 0c migration window
+    - ``system.heartbeats.executor.{exchange}.{wallet_short}`` (5 seg) —
+      Phase 0c.7 per-wallet executor instance. The 5th segment must be
+      exactly 12 lowercase hex characters.
+    - ``system.heartbeats.feed.{exchange}`` or
+      ``system.heartbeats.feed.paper.{source}`` — delegated to
+      :func:`_validate_feed_heartbeat`.
 
     Args:
         segments: Split topic segments (first two are 'system.heartbeats').
@@ -511,10 +541,31 @@ def _validate_heartbeat_topic(segments: list[str]) -> tuple[bool, str]:
     if len(segments) == 2:
         return True, ""
     component_type = segments[2]
-    if component_type in {"strategy", "executor"}:
-        if len(segments) >= 4:
+    if component_type == "strategy":
+        if len(segments) == 4:
             return True, ""
-        return False, f"system.heartbeats.{component_type} requires component name"
+        return (
+            False,
+            "system.heartbeats.strategy requires exactly 4 segments: "
+            "system.heartbeats.strategy.{name}",
+        )
+    if component_type == "executor":
+        if len(segments) == 4:
+            return True, ""
+        if len(segments) == 5:
+            wallet_short = segments[4]
+            if _is_valid_wallet_short(wallet_short):
+                return True, ""
+            return (
+                False,
+                "system.heartbeats.executor.{exchange}.{wallet_short}: "
+                "wallet_short must be 12 lowercase hex characters",
+            )
+        return (
+            False,
+            "system.heartbeats.executor requires 4 segments (template) "
+            "or 5 segments (per-wallet instance with wallet_short)",
+        )
     if component_type == "feed":
         return _validate_feed_heartbeat(segments)
     return False, f"Invalid heartbeat component type '{component_type}'"

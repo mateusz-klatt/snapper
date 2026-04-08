@@ -44,11 +44,15 @@ class GapEnvelope(PartialBody):
         session_id: Producer session identifier (empty string when absent).
         sequence_id: Per-table monotonic counter (zero when absent).
         type: Payload item type discriminator (empty string when absent).
+        wallet_public_id: Owning wallet for Phase 0c.7 per-wallet stream
+            partitioning. Empty string when absent — legacy pre-0c.7
+            producers simply fall back to topic-only GapDetector keying.
     """
 
     session_id: str = ""
     sequence_id: int = 0
     type: str = ""
+    wallet_public_id: str = ""
 
 
 class MessageParseError(Exception):

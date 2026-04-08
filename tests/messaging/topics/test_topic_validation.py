@@ -1128,10 +1128,10 @@ class TestSystemTopicValidation:
         """
         valid, _err = validate_topic("system.heartbeats.strategy")
         assert not valid
-        assert "requires component name" in _err
+        assert "4 segments" in _err
         valid, _err = validate_topic("system.heartbeats.executor")
         assert not valid
-        assert "requires component name" in _err
+        assert "4 segments" in _err or "5 segments" in _err
         valid, _err = validate_topic("system.heartbeats.feed")
         assert not valid
         assert "4 seg" in _err
@@ -1828,6 +1828,57 @@ class TestSystemTopicHeartbeatPaths:
         """
         valid, _err = validate_topic("system.heartbeats.executor.kraken")
         assert valid
+
+    def test_system_heartbeats_executor_with_wallet_short_is_valid(self) -> None:
+        """Phase 0c.7: 5-segment per-wallet executor heartbeat is accepted.
+
+        Given: ``system.heartbeats.executor.{exchange}.{wallet_short}``
+            where wallet_short is 12 lowercase hex chars,
+        When: The topic is validated,
+        Then: Validation succeeds.
+        """
+        valid, _err = validate_topic("system.heartbeats.executor.kraken.019d6ca45f2e")
+        assert valid
+        assert _err == ""
+
+    def test_system_heartbeats_executor_with_non_hex_wallet_short_is_rejected(
+        self,
+    ) -> None:
+        """Phase 0c.7: 5th segment must be hex (not strategy-tag-like).
+
+        Given: ``system.heartbeats.executor.kraken.notahexvalue`` — 12
+            chars but non-hex,
+        When: The topic is validated,
+        Then: Validation fails with a ``wallet_short`` error message.
+        """
+        valid, _err = validate_topic("system.heartbeats.executor.kraken.notahexvalue")
+        assert not valid
+        assert "wallet_short" in _err
+
+    def test_system_heartbeats_executor_with_wrong_length_wallet_short_is_rejected(
+        self,
+    ) -> None:
+        """Phase 0c.7: 5th segment must be exactly 12 characters.
+
+        Given: ``system.heartbeats.executor.kraken.deadbeef`` — hex but
+            only 8 chars,
+        When: The topic is validated,
+        Then: Validation fails with a ``wallet_short`` error message.
+        """
+        valid, _err = validate_topic("system.heartbeats.executor.kraken.deadbeef")
+        assert not valid
+        assert "wallet_short" in _err
+
+    def test_system_heartbeats_executor_with_6_segments_is_rejected(self) -> None:
+        """Phase 0c.7: executor heartbeat rejects >5 segments.
+
+        Given: A 6-segment executor heartbeat topic,
+        When: Validated,
+        Then: Validation fails with a segment-count error.
+        """
+        valid, _err = validate_topic("system.heartbeats.executor.kraken.019d6ca45f2e.extra")
+        assert not valid
+        assert "4 segments" in _err or "5 segments" in _err
 
     def test_system_heartbeats_feed_valid(self) -> None:
         """Verify feed heartbeat with exchange is valid.
@@ -3145,7 +3196,7 @@ def test_system_heartbeats_strategy_missing_name() -> None:
     """
     valid, message = validate_topic("system.heartbeats.strategy")
     assert valid is False
-    assert "requires component name" in message
+    assert "4 segments" in message
 
 
 def test_system_heartbeats_invalid_component_type() -> None:

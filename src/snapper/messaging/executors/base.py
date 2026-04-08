@@ -567,8 +567,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 payload_str = payload_bytes.decode("utf-8")
                 try:
                     parsed_msg = parse_message(payload_str)
+                    parsed_wallet = getattr(parsed_msg, "wallet_public_id", "") or ""
                     self._gap_detector.check(
-                        topic_str, parsed_msg.session_id, parsed_msg.sequence_id
+                        topic_str,
+                        parsed_msg.session_id,
+                        parsed_msg.sequence_id,
+                        wallet_public_id=parsed_wallet,
                     )
                 except MessageParseError:
                     pass

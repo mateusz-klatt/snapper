@@ -1,16 +1,31 @@
 """Sequence gap detection for ZMQ and WebSocket message streams.
 
-Detects gaps in message sequences by tracking per-topic state: the last
+Detects gaps in message sequences by tracking per-stream state: the last
 seen session_id and expected next sequence_id. Logs warnings on gaps,
 info on session resets, and debug on duplicates/reorders.
 
-Phase 1 scope invariant: exactly one active producer session per exact
-topic at any given time. Multi-producer support is out of scope.
+Phase 0c.7 multi-tenant update: a "stream" is now partitioned by the
+tuple ``(received_topic, wallet_public_id)`` instead of by topic alone.
+Two per-wallet executor instances can share an exchange-prefix topic
+(e.g. ``orders.events.kraken.BTC-USD.filled``) and publish with their
+own per-wallet sequence counters; partitioning by wallet prevents the
+interleaved streams from producing false gap alarms. Legacy callers
+that do not know their wallet (or receive messages from legacy
+producers that do not carry ``wallet_public_id``) pass the empty
+string, which degrades cleanly back to topic-only keying.
 """
 
 from dataclasses import dataclass
 
 from loguru import logger
+
+StreamKey = tuple[str, str]
+"""Partition key for one tracked message stream.
+
+A stream is uniquely identified by ``(received_topic, wallet_public_id)``.
+The wallet component defaults to empty string for legacy pre-0c.7
+producers that do not populate wallet on their messages.
+"""
 
 
 @dataclass
@@ -54,16 +69,34 @@ class GapDetector:
         """
         self._name = name
         self._log_prefix = f"[GapDetector:{name}]" if name else "[GapDetector]"
-        self._streams: dict[str, _StreamState] = {}
+        self._streams: dict[StreamKey, _StreamState] = {}
         self.stats: GapDetectorStats = GapDetectorStats()
 
-    def check(self, received_topic: str, session_id: str, sequence_id: int) -> bool:
+    @staticmethod
+    def _format_key(key: StreamKey) -> str:
+        """Render a ``(topic, wallet_public_id)`` key for log messages."""
+        topic, wallet_public_id = key
+        if wallet_public_id:
+            return f"{topic} (wallet={wallet_public_id[:8]})"
+        return topic
+
+    def check(
+        self,
+        received_topic: str,
+        session_id: str,
+        sequence_id: int,
+        wallet_public_id: str = "",
+    ) -> bool:
         """Check a received message for sequence gaps.
 
         Args:
             received_topic: The ZMQ topic the message arrived on.
             session_id: Producer session UUID from the message payload.
             sequence_id: Sequence number from the message payload.
+            wallet_public_id: Owning wallet for per-wallet stream
+                partitioning (Phase 0c.7). Empty string keeps the
+                legacy topic-only behavior for producers or message
+                types that do not carry a wallet.
 
         Returns:
             True if the message carries valid provenance and was processed,
@@ -77,17 +110,19 @@ class GapDetector:
             self.stats.rejected_unstamped += 1
             return False
 
-        state = self._streams.get(received_topic)
+        stream_key: StreamKey = (received_topic, wallet_public_id)
+        key_label = self._format_key(stream_key)
+        state = self._streams.get(stream_key)
 
         if state is None:
-            self._streams[received_topic] = _StreamState(
+            self._streams[stream_key] = _StreamState(
                 last_session_id=session_id,
                 expected_sequence_id=sequence_id + 1,
             )
             if sequence_id > 1:
                 self.stats.mid_stream_joins += 1
                 logger.info(
-                    f"{self._log_prefix} Joined mid-stream on {received_topic} "
+                    f"{self._log_prefix} Joined mid-stream on {key_label} "
                     f"at seq={sequence_id} (session={session_id[:8]})"
                 )
             return True
@@ -95,7 +130,7 @@ class GapDetector:
         if state.last_session_id != session_id:
             self.stats.session_resets += 1
             logger.info(
-                f"{self._log_prefix} Session reset on {received_topic}: "
+                f"{self._log_prefix} Session reset on {key_label}: "
                 f"{state.last_session_id[:8]} -> {session_id[:8]}, "
                 f"seq={sequence_id}"
             )
@@ -111,7 +146,7 @@ class GapDetector:
             gap_size = sequence_id - state.expected_sequence_id
             self.stats.gaps_detected += gap_size
             logger.warning(
-                f"{self._log_prefix} Gap on {received_topic}: "
+                f"{self._log_prefix} Gap on {key_label}: "
                 f"expected seq={state.expected_sequence_id}, "
                 f"got seq={sequence_id} "
                 f"(missing {gap_size} message(s), "
@@ -122,7 +157,7 @@ class GapDetector:
 
         self.stats.duplicates += 1
         logger.debug(
-            f"{self._log_prefix} Duplicate/reorder on {received_topic}: "
+            f"{self._log_prefix} Duplicate/reorder on {key_label}: "
             f"expected seq={state.expected_sequence_id}, "
             f"got seq={sequence_id} "
             f"(session={session_id[:8]})"
@@ -130,20 +165,23 @@ class GapDetector:
         return True
 
     def reset_topic(self, topic: str) -> None:
-        """Clear tracking state for a topic.
+        """Clear tracking state for a topic across all wallet partitions.
 
         Called when the bridge unsubscribes from a ZMQ topic (no more
         WS clients). Without this, resubscribing later would produce
         false gaps because messages published while unsubscribed are
-        never received.
+        never received. Phase 0c.7: the stream dict is now partitioned
+        by ``(topic, wallet_public_id)``, so this drops every partition
+        that matches the given topic regardless of wallet.
 
         Args:
             topic: The ZMQ topic whose state should be discarded.
         """
-        removed = self._streams.pop(topic, None)
-        if removed is not None:
+        matching_keys = [key for key in self._streams if key[0] == topic]
+        for key in matching_keys:
+            removed = self._streams.pop(key)
             logger.debug(
-                f"{self._log_prefix} Reset tracking for {topic} "
+                f"{self._log_prefix} Reset tracking for {self._format_key(key)} "
                 f"(was at seq={removed.expected_sequence_id}, "
                 f"session={removed.last_session_id[:8]})"
             )

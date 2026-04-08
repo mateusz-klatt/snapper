@@ -321,6 +321,28 @@ class TestHeartbeatTopic:
         result = heartbeat_topic("strategy", "macd_btc_1h")
         assert result == "system.heartbeats.strategy.macd_btc_1h"
 
+    def test_executor_heartbeat_with_wallet_short_appends_5th_segment(self) -> None:
+        """Phase 0c.7: per-wallet executor heartbeat appends wallet_short.
+
+        Given: executor component + exchange + a 12-hex wallet_short,
+        When: heartbeat_topic is built,
+        Then: The topic gains a 5th segment so per-wallet instances
+            publish on distinct heartbeat topics.
+        """
+        result = heartbeat_topic("executor", "kraken", wallet_short="019d6ca45f2e")
+        assert result == "system.heartbeats.executor.kraken.019d6ca45f2e"
+
+    def test_executor_heartbeat_empty_wallet_short_keeps_legacy_layout(self) -> None:
+        """Empty wallet_short preserves the 4-segment legacy topic.
+
+        The legacy single-wallet template path does not know its
+        wallet at construction time and passes ``wallet_short=""``;
+        the builder must not emit a trailing ``.`` segment in that
+        case.
+        """
+        result = heartbeat_topic("executor", "kraken", wallet_short="")
+        assert result == "system.heartbeats.executor.kraken"
+
 
 class TestSystemTopic:
     """Tests for system_topic builder function."""

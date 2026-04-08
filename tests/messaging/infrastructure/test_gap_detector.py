@@ -194,3 +194,95 @@ class TestGapDetector:
         """
         gd = GapDetector()
         gd.reset_topic("nonexistent.topic")
+
+
+class TestGapDetectorPhase0c7WalletPartitioning:
+    """Phase 0c.7: ``(topic, wallet_public_id)`` stream partitioning."""
+
+    def test_two_wallets_on_same_topic_do_not_collide(self) -> None:
+        """Messages from two wallets on the same topic are tracked independently.
+
+        Given: A GapDetector receiving messages on the same topic from
+            two different per-wallet producers, each with its own
+            monotonic sequence starting at 1,
+        When: The interleaved sequences arrive,
+        Then: No gaps are detected — the detector partitions state by
+            ``(topic, wallet_public_id)``.
+        """
+        gd = GapDetector()
+        wallet_a = "01975a8b-3c7d-7000-8000-0000000000a1"
+        wallet_b = "01975a8b-aaaa-7000-8000-0000000000a2"
+        gd.check("orders.events.kraken.BTC-USD.filled", "s1", 1, wallet_public_id=wallet_a)
+        gd.check("orders.events.kraken.BTC-USD.filled", "s1", 1, wallet_public_id=wallet_b)
+        gd.check("orders.events.kraken.BTC-USD.filled", "s1", 2, wallet_public_id=wallet_a)
+        gd.check("orders.events.kraken.BTC-USD.filled", "s1", 2, wallet_public_id=wallet_b)
+        assert gd.stats.gaps_detected == 0
+        assert gd.stats.mid_stream_joins == 0
+        assert gd.stats.session_resets == 0
+
+    def test_legacy_empty_wallet_degrades_to_topic_only(self) -> None:
+        """Omitting wallet_public_id keeps the legacy topic-only behavior.
+
+        Given: A GapDetector called without ``wallet_public_id``,
+        When: Two producers publish on the same topic (legacy single
+            stream assumption),
+        Then: The second producer's sequence=1 triggers a session_reset
+            (expected topic-only semantics).
+        """
+        gd = GapDetector()
+        gd.check("orders.events.kraken.BTC-USD.filled", "s1", 1)
+        gd.check("orders.events.kraken.BTC-USD.filled", "s2", 1)
+        assert gd.stats.session_resets == 1
+
+    def test_wallet_partition_gap_detection(self) -> None:
+        """Gap detection still runs per-wallet partition.
+
+        Given: Wallet A publishes sequence 1, 2, 5 on a shared topic
+            (gap of 2), wallet B publishes sequence 1, 2 on the same
+            topic (no gap),
+        When: The interleaved stream arrives,
+        Then: Only the wallet-A gap is counted; wallet B is clean.
+        """
+        gd = GapDetector()
+        wallet_a = "01975a8b-3c7d-7000-8000-0000000000a1"
+        wallet_b = "01975a8b-aaaa-7000-8000-0000000000a2"
+        gd.check("shared.topic", "s1", 1, wallet_public_id=wallet_a)
+        gd.check("shared.topic", "s1", 1, wallet_public_id=wallet_b)
+        gd.check("shared.topic", "s1", 2, wallet_public_id=wallet_a)
+        gd.check("shared.topic", "s1", 2, wallet_public_id=wallet_b)
+        gd.check("shared.topic", "s1", 5, wallet_public_id=wallet_a)
+        assert gd.stats.gaps_detected == 2
+
+    def test_reset_topic_clears_all_wallet_partitions(self) -> None:
+        """reset_topic drops every wallet partition for the given topic.
+
+        Given: A GapDetector tracking two wallet partitions on the
+            same topic,
+        When: ``reset_topic`` is called for the topic,
+        Then: Both partitions are removed and a follow-up sequence=1
+            from either wallet does not register as mid-stream join.
+        """
+        gd = GapDetector(name="bridge")
+        wallet_a = "01975a8b-3c7d-7000-8000-0000000000a1"
+        wallet_b = "01975a8b-aaaa-7000-8000-0000000000a2"
+        gd.check("shared.topic", "s1", 1, wallet_public_id=wallet_a)
+        gd.check("shared.topic", "s1", 1, wallet_public_id=wallet_b)
+        gd.check("shared.topic", "s1", 2, wallet_public_id=wallet_a)
+        gd.reset_topic("shared.topic")
+        gd.check("shared.topic", "s1", 1, wallet_public_id=wallet_a)
+        gd.check("shared.topic", "s1", 1, wallet_public_id=wallet_b)
+        assert gd.stats.gaps_detected == 0
+        assert gd.stats.mid_stream_joins == 0
+
+    def test_log_label_includes_wallet_short_when_populated(self) -> None:
+        """Gap log messages include a wallet short prefix when wallet is set."""
+        messages: list[str] = []
+        sink_id = logger.add(lambda msg: messages.append(str(msg)), level="WARNING")
+        try:
+            gd = GapDetector(name="trader")
+            wallet = "01975a8b-3c7d-7000-8000-0000000000a1"
+            gd.check("shared.topic", "s1", 1, wallet_public_id=wallet)
+            gd.check("shared.topic", "s1", 5, wallet_public_id=wallet)
+        finally:
+            logger.remove(sink_id)
+        assert any("wallet=" in m for m in messages)
