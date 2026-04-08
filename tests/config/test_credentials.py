@@ -59,7 +59,6 @@ async def _seed_credential(
             exchange=exchange,
             credential_type=credential_type,
             encrypted_payload=encrypted,
-            encryption_key_id="test-master-key",
             label=None,
             session_id="test-session",
             sequence_id=1,
@@ -349,7 +348,6 @@ class TestListActiveWalletCredentials:
                 encrypted_payload=encryption.encrypt(
                     json.dumps({"api_key": "old", "api_secret": "old"})
                 ),
-                encryption_key_id="test-master-key",
                 label=None,
                 session_id="test-session",
                 sequence_id=1,

@@ -18,6 +18,8 @@ from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.seed.loader import SeedProfile
 from snapper.data.seed.loader import SeedSetting
 from snapper.data.seed.loader import SeedUser
+from snapper.data.seed.loader import SeedWalletCredential
+from snapper.data.seed.loader import _build_credential_envelope
 from snapper.data.seed.loader import _hash_password
 from snapper.data.seed.loader import _known_to_value
 from snapper.data.seed.loader import _package_dir
@@ -880,7 +882,7 @@ class TestSeedDefaultMultiTenant:
             ).first()
             assert wallet_row is not None
             wallet_public_id = wallet_row[0]
-            assert wallet_row[1] == "default-paper"
+            assert wallet_row[1] == "default"
             assert wallet_row[2] == 1
             membership_row = conn.execute(
                 text("SELECT user_public_id, is_primary FROM user_operator_memberships")
@@ -891,7 +893,7 @@ class TestSeedDefaultMultiTenant:
             credential_row = conn.execute(
                 text(
                     "SELECT wallet_public_id, exchange, credential_type,"
-                    " encrypted_payload, encryption_key_id, label"
+                    " encrypted_payload, label"
                     " FROM wallet_credentials"
                 )
             ).first()
@@ -900,8 +902,7 @@ class TestSeedDefaultMultiTenant:
             assert credential_row[1] == "paper"
             assert credential_row[2] == "paper"
             assert credential_row[3].startswith("gAAAAAB")
-            assert credential_row[4] == "v1"
-            assert credential_row[5] == "default-paper bootstrap"
+            assert credential_row[4] == "default paper bootstrap"
         finally:
             conn.close()
             cast(Any, engine).dispose()
@@ -988,6 +989,29 @@ class TestSeedDefaultMultiTenant:
             cast(Any, engine).dispose()
 
 
+class TestBuildCredentialEnvelope:
+    """Tests for ``_build_credential_envelope`` payload packing."""
+
+    def test_unknown_credential_type_raises_value_error(self) -> None:
+        """Unknown credential_type surfaces a fail-fast ValueError.
+
+        Given: A ``SeedWalletCredential`` with a ``credential_type``
+            that does not match any of the supported envelopes
+            (``api_key_secret`` / ``rsa_pem`` / ``paper``),
+        When: ``_build_credential_envelope`` is called,
+        Then: A ``ValueError`` is raised listing the exchange name and
+            the set of allowed credential types — so a typo in the
+            seed TOML fails at seed time instead of storing an empty
+            envelope that crashes later at executor startup.
+        """
+        cred = SeedWalletCredential(
+            exchange="kraken",
+            credential_type="oauth",
+        )
+        with pytest.raises(ValueError, match="Unknown seed credential_type 'oauth'"):
+            _build_credential_envelope(cred)
+
+
 def _create_multi_tenant_tables(conn: Connection) -> None:
     """Create the minimal operators / wallets / user_operator_memberships tables.
 
@@ -1031,7 +1055,7 @@ def _create_multi_tenant_tables(conn: Connection) -> None:
             "CREATE TABLE wallet_credentials ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, public_id TEXT,"
             " wallet_public_id TEXT, exchange TEXT, credential_type TEXT,"
-            " encrypted_payload TEXT, encryption_key_id TEXT, label TEXT,"
+            " encrypted_payload TEXT, label TEXT,"
             " timestamp TIMESTAMP, known_to DATETIME NOT NULL,"
             " session_id TEXT NOT NULL DEFAULT '',"
             " sequence_id INTEGER NOT NULL DEFAULT 0)"

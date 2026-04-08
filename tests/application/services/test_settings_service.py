@@ -794,9 +794,9 @@ def test_settings_strict_mode_database_settings() -> None:
         _ = s.timeframes
     with pytest.raises(
         RuntimeError,
-        match="Cannot access database setting 'kraken_api_key' - SettingsService not initialized",
+        match="Cannot access database setting 'polygon_api_key' - SettingsService not initialized",
     ):
-        _ = s.kraken_api_key
+        _ = s.polygon_api_key
     with pytest.raises(
         RuntimeError,
         match="Cannot access database setting 'zmq_heartbeat_interval_ms' - "

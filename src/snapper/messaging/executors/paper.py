@@ -77,21 +77,28 @@ class PaperOrderExecutor(ExchangeExecutorService[PaperExchangeClient]):
     def _create_exchange_client(self) -> PaperExchangeClient:
         """Create paper trading client.
 
-        Phase 0c: when ``self._credentials`` is populated by the
-        base-class ``_resolve_credentials`` call (non-empty
-        ``wallet_public_id``), the initial balance comes from the
-        per-wallet ``wallet_credentials`` payload. Otherwise the legacy
-        hardcoded default (10000.0) is used — matching pre-0c tests
-        that instantiate ``PaperOrderExecutor()`` without a wallet.
+        Reads ``initial_balance`` from the per-wallet
+        ``wallet_credentials`` envelope (``credential_type="paper"``)
+        resolved by the base-class ``_resolve_credentials`` call
+        during ``start()``. Post-0c cleanup removed the hardcoded
+        10000.0 default — every paper wallet must have an explicit
+        balance in its credential envelope. Tests that instantiate
+        ``PaperOrderExecutor()`` with an empty ``wallet_public_id``
+        must inject ``self._credentials = {"initial_balance": "..."}``
+        before calling ``start()``.
 
         Returns:
             PaperExchangeClient with simulated balance.
         """
         repository = get_repository(self.settings.db_url)
-        if self._credentials is not None:
-            initial_balance = float(self._credentials.get("initial_balance", "10000.0"))
-        else:
-            initial_balance = 10000.0
+        if self._credentials is None:
+            raise RuntimeError(
+                "PaperOrderExecutor: credentials not resolved. Ensure "
+                "wallet_public_id is set and wallet_credentials contains "
+                "a row for exchange='paper', or inject self._credentials "
+                "directly in tests before calling start()."
+            )
+        initial_balance = float(self._credentials["initial_balance"])
         return PaperExchangeClient(
             repository=repository,
             fill_delay=0.1,

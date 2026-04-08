@@ -73,16 +73,74 @@ class SeedSetting:
 
 
 @dataclass
+class SeedWalletCredential:
+    """Seed data for one wallet credential row (nested under a SeedWallet).
+
+    Attributes:
+        exchange: Exchange name (e.g. ``"kraken"``, ``"walutomat"``,
+            ``"paper"``). Must pass the ``ck_wallet_credentials_exchange_lower``
+            CHECK constraint — always lowercase.
+        credential_type: One of ``"api_key_secret"``, ``"rsa_pem"``,
+            ``"oauth"``, ``"paper"``. Determines which fields of this
+            dataclass are packed into the encrypted envelope.
+        api_key: Exchange API key (for ``api_key_secret`` / ``rsa_pem``).
+        api_secret: Exchange API secret (for ``api_key_secret``).
+        private_key_pem_base64: Base64-encoded PEM private key
+            (for ``rsa_pem``, e.g. Walutomat).
+        initial_balance: Starting cash balance (for ``paper``, as a
+            string so the TOML type is unambiguous).
+        label: Optional human-readable description of this credential
+            row. Stored as-is in ``wallet_credentials.label``.
+    """
+
+    exchange: str
+    credential_type: str
+    api_key: str = ""
+    api_secret: str = ""
+    private_key_pem_base64: str = ""
+    initial_balance: str = ""
+    label: str | None = None
+
+
+@dataclass
+class SeedWallet:
+    """Seed data for one wallet + its per-exchange credential rows.
+
+    Represents one ``[[wallets]]`` entry in the profile TOML. The
+    ``credentials`` list maps to nested ``[[wallets.credentials]]``
+    sub-entries. Seed loader upserts the wallet by the
+    ``(label, is_paper)`` unique key (post-0c cleanup item 0) and
+    inserts each credential row against that wallet's ``public_id``.
+
+    Attributes:
+        label: Human-readable identity for the wallet (no mode / no
+            exchange suffix — those are separate columns).
+        is_paper: ``True`` for simulated paper wallets, ``False`` for
+            real-money live wallets.
+        description: Optional free-text description.
+        credentials: Per-exchange credential envelopes nested under
+            this wallet.
+    """
+
+    label: str
+    is_paper: bool
+    description: str | None = None
+    credentials: list[SeedWalletCredential] = field(default_factory=list)
+
+
+@dataclass
 class SeedProfile:
     """Complete seed profile parsed from TOML.
 
     Attributes:
         users: List of user seed entries.
         settings: List of setting seed entries.
+        wallets: List of wallet seed entries (with nested credentials).
     """
 
     users: list[SeedUser] = field(default_factory=list)
     settings: list[SeedSetting] = field(default_factory=list)
+    wallets: list[SeedWallet] = field(default_factory=list)
 
 
 def _package_dir() -> Path:
@@ -137,7 +195,19 @@ def load_seed_profile(profile: str) -> SeedProfile:
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     users = [SeedUser(**entry) for entry in data.get("users", [])]
     settings = [SeedSetting(**entry) for entry in data.get("settings", [])]
-    return SeedProfile(users=users, settings=settings)
+    wallets: list[SeedWallet] = []
+    for wallet_entry in data.get("wallets", []):
+        credential_entries = wallet_entry.get("credentials", [])
+        credentials = [SeedWalletCredential(**cred) for cred in credential_entries]
+        wallets.append(
+            SeedWallet(
+                label=wallet_entry["label"],
+                is_paper=bool(wallet_entry.get("is_paper", False)),
+                description=wallet_entry.get("description"),
+                credentials=credentials,
+            )
+        )
+    return SeedProfile(users=users, settings=settings, wallets=wallets)
 
 
 def _hash_password(password: str) -> str:
@@ -287,39 +357,150 @@ def seed_settings(conn: Connection, settings: list[SeedSetting], tracker: Sequen
     return inserted
 
 
-def seed_default_multi_tenant(conn: Connection, tracker: SequenceTracker) -> int:
-    """Seed the default Operator, Wallet, and UserOperatorMembership rows.
+def _build_credential_envelope(cred: SeedWalletCredential) -> str:
+    """Pack a SeedWalletCredential into the JSON envelope stored in DB.
 
-    Plan 0 Phase 0a (single-user deployment bootstrap) + Phase 0c paper
-    credential bootstrap. Creates:
+    The shape of the envelope depends on ``credential_type`` and must
+    match what ``CredentialResolver`` + the concrete
+    ``_create_exchange_client`` methods expect to read back:
 
-    1. Operator ``label="default"`` — the seed trading identity used by
-       the single-user deployment until an admin introduces additional
-       operators.
-    2. Wallet ``label="default-paper"`` with ``is_paper=True`` — a paper
-       sandbox wallet that does not require live exchange credentials.
+    - ``api_key_secret`` → ``{"api_key": ..., "api_secret": ...}``
+    - ``rsa_pem`` → ``{"api_key": ..., "private_key_pem": ...}`` where
+      the PEM value is passed in the seed as base64 (so a multi-line
+      PEM fits cleanly in a TOML string literal) and decoded here.
+    - ``paper`` → ``{"initial_balance": "..."}``
+
+    Any unknown ``credential_type`` raises ``ValueError`` so a typo in
+    the seed file fails fast instead of storing an empty envelope.
+    """
+    if cred.credential_type == "api_key_secret":
+        return json.dumps({"api_key": cred.api_key, "api_secret": cred.api_secret})
+    if cred.credential_type == "rsa_pem":
+        import base64
+
+        pem_bytes = base64.b64decode(cred.private_key_pem_base64)
+        return json.dumps({"api_key": cred.api_key, "private_key_pem": pem_bytes.decode("utf-8")})
+    if cred.credential_type == "paper":
+        balance = cred.initial_balance or "10000.0"
+        return json.dumps({"initial_balance": balance})
+    raise ValueError(
+        f"Unknown seed credential_type '{cred.credential_type}' for exchange "
+        f"'{cred.exchange}'. Expected one of: api_key_secret, rsa_pem, paper."
+    )
+
+
+def _seed_wallet_with_credentials(
+    conn: Connection,
+    wallet: SeedWallet,
+    tracker: SequenceTracker,
+    now: datetime | str,
+    known_to: datetime | str,
+) -> int:
+    """Insert one wallet row and its nested credential rows.
+
+    Called per ``[[wallets]]`` entry in the seed TOML. Encrypts every
+    credential payload with the master-password Fernet key before
+    insert. Returns the number of rows inserted (always ``1 + len(
+    credentials)`` unless the wallet already exists — see the unique
+    index on ``(label, is_paper)``).
+
+    Raises ``IntegrityError`` if two seed entries collide on
+    ``(label, is_paper)`` so the operator fixes the TOML instead of
+    getting a silently-merged wallet.
+    """
+    encryption = get_encryption_service()
+    wallet_public_id = str(uuid7())
+    conn.execute(
+        text(
+            "INSERT INTO wallets"
+            " (public_id, label, description, is_paper,"
+            "  timestamp, known_to, session_id, sequence_id)"
+            " VALUES"
+            " (:public_id, :label, :description, :is_paper,"
+            "  :timestamp, :known_to, :session_id, :sequence_id)"
+        ),
+        {
+            "public_id": wallet_public_id,
+            "label": wallet.label,
+            "description": wallet.description,
+            "is_paper": 1 if wallet.is_paper else 0,
+            "timestamp": now,
+            "known_to": known_to,
+            "session_id": tracker.session_id,
+            "sequence_id": tracker.next_sequence("wallets"),
+        },
+    )
+    inserted = 1
+    for cred in wallet.credentials:
+        envelope = _build_credential_envelope(cred)
+        encrypted_payload = encryption.encrypt(envelope)
+        conn.execute(
+            text(
+                "INSERT INTO wallet_credentials"
+                " (public_id, wallet_public_id, exchange, credential_type,"
+                "  encrypted_payload, label,"
+                "  timestamp, known_to, session_id, sequence_id)"
+                " VALUES"
+                " (:public_id, :wallet_public_id, :exchange, :credential_type,"
+                "  :encrypted_payload, :label,"
+                "  :timestamp, :known_to, :session_id, :sequence_id)"
+            ),
+            {
+                "public_id": str(uuid7()),
+                "wallet_public_id": wallet_public_id,
+                "exchange": cred.exchange,
+                "credential_type": cred.credential_type,
+                "encrypted_payload": encrypted_payload,
+                "label": cred.label,
+                "timestamp": now,
+                "known_to": known_to,
+                "session_id": tracker.session_id,
+                "sequence_id": tracker.next_sequence("wallet_credentials"),
+            },
+        )
+        inserted += 1
+    return inserted
+
+
+def seed_default_multi_tenant(
+    conn: Connection,
+    tracker: SequenceTracker,
+    wallets: list[SeedWallet] | None = None,
+) -> int:
+    """Seed the default Operator, Wallets (with credentials), and memberships.
+
+    Plan 0 Phase 0a + Phase 0c + post-0c cleanup item 0. Creates:
+
+    1. Operator ``label="default"`` — the seed trading identity used
+       by the single-user deployment until an admin introduces
+       additional operators.
+    2. One ``Wallet`` + nested ``WalletCredential`` rows per entry in
+       the ``wallets`` argument. Each wallet is identified by the
+       ``(label, is_paper)`` unique key so a ``default``/paper and a
+       ``default``/live wallet can coexist. When ``wallets`` is None
+       or empty, a single hardcoded ``default``/paper wallet is
+       created as the bootstrap fallback so fresh ``make migrate-dev``
+       runs against seed profiles that predate the ``[[wallets]]``
+       TOML format still produce a working paper sandbox.
     3. UserOperatorMembership linking the first admin user in the
        ``users`` table to the default operator as ``is_primary=TRUE``.
-    4. WalletCredential row for the default-paper wallet on exchange
-       ``"paper"`` with ``credential_type="paper"`` so Phase 0c dynamic
-       per-wallet executor spawning finds at least one credential row at
-       boot. The encrypted payload is
-       ``{"initial_balance": "10000.0"}`` — Fernet-encrypted with the
-       same master password used for ``settings`` encryption.
 
-    Idempotent: the function checks each target table and inserts only
-    when the table is empty. A re-seed on an established DB is a no-op,
-    matching ``seed_users`` / ``seed_settings`` semantics.
+    Idempotent: the function checks the ``operators`` and ``wallets``
+    tables and skips the entire bootstrap when either is non-empty.
+    A re-seed on an established DB is a no-op, matching the
+    ``seed_users`` / ``seed_settings`` semantics.
 
-    Per Plan 0 D2 no default scope grants are inserted — the empty
-    ``users`` table case (single-user bootstrap) has nothing to grant
-    from, and UnderlyingAsset-based seed grants are deferred until the
-    UnderlyingAsset seed lands in a later phase.
+    Per Plan 0 D2 no default scope grants are inserted.
 
     Args:
         conn: Active SQLAlchemy connection (same transaction as the
             users/settings seed).
         tracker: ``SequenceTracker`` for stamping provenance columns.
+        wallets: Optional list of ``SeedWallet`` entries from the
+            profile TOML. When ``None`` or empty, a single hardcoded
+            ``default``/paper wallet with an ``{"initial_balance":
+            "10000.0"}`` credential envelope is inserted as the
+            legacy bootstrap path.
 
     Returns:
         Count of rows inserted across operators + wallets + memberships
@@ -357,28 +538,31 @@ def seed_default_multi_tenant(conn: Connection, tracker: SequenceTracker) -> int
     )
     inserted += 1
 
-    wallet_public_id = str(uuid7())
-    conn.execute(
-        text(
-            "INSERT INTO wallets"
-            " (public_id, label, description, is_paper,"
-            "  timestamp, known_to, session_id, sequence_id)"
-            " VALUES"
-            " (:public_id, :label, :description, :is_paper,"
-            "  :timestamp, :known_to, :session_id, :sequence_id)"
-        ),
-        {
-            "public_id": wallet_public_id,
-            "label": "default-paper",
-            "description": "Default paper-mode wallet seeded for single-user deployment",
-            "is_paper": 1,
-            "timestamp": now,
-            "known_to": known_to,
-            "session_id": tracker.session_id,
-            "sequence_id": tracker.next_sequence("wallets"),
-        },
-    )
-    inserted += 1
+    wallet_list: list[SeedWallet] = wallets or []
+    if not wallet_list:
+        wallet_list = [
+            SeedWallet(
+                label="default",
+                is_paper=True,
+                description="Default paper-mode wallet seeded for single-user deployment",
+                credentials=[
+                    SeedWalletCredential(
+                        exchange="paper",
+                        credential_type="paper",
+                        initial_balance="10000.0",
+                        label="default paper bootstrap",
+                    )
+                ],
+            )
+        ]
+
+    wallet_count = 0
+    credential_count = 0
+    for wallet in wallet_list:
+        wallet_rows = _seed_wallet_with_credentials(conn, wallet, tracker, now, known_to)
+        wallet_count += 1
+        credential_count += wallet_rows - 1
+        inserted += wallet_rows
 
     admin_row = conn.execute(
         text(
@@ -411,39 +595,10 @@ def seed_default_multi_tenant(conn: Connection, tracker: SequenceTracker) -> int
         )
         inserted += 1
 
-    encryption = get_encryption_service()
-    paper_envelope = json.dumps({"initial_balance": "10000.0"})
-    encrypted_payload = encryption.encrypt(paper_envelope)
-    conn.execute(
-        text(
-            "INSERT INTO wallet_credentials"
-            " (public_id, wallet_public_id, exchange, credential_type,"
-            "  encrypted_payload, encryption_key_id, label,"
-            "  timestamp, known_to, session_id, sequence_id)"
-            " VALUES"
-            " (:public_id, :wallet_public_id, :exchange, :credential_type,"
-            "  :encrypted_payload, :encryption_key_id, :label,"
-            "  :timestamp, :known_to, :session_id, :sequence_id)"
-        ),
-        {
-            "public_id": str(uuid7()),
-            "wallet_public_id": wallet_public_id,
-            "exchange": "paper",
-            "credential_type": "paper",
-            "encrypted_payload": encrypted_payload,
-            "encryption_key_id": "v1",
-            "label": "default-paper bootstrap",
-            "timestamp": now,
-            "known_to": known_to,
-            "session_id": tracker.session_id,
-            "sequence_id": tracker.next_sequence("wallet_credentials"),
-        },
-    )
-    inserted += 1
-
     logger.info(
-        f"Seeded multi-tenant bootstrap: 1 operator, 1 wallet, "
-        f"{1 if admin_row is not None else 0} membership, 1 paper credential"
+        f"Seeded multi-tenant bootstrap: 1 operator, {wallet_count} wallet(s), "
+        f"{1 if admin_row is not None else 0} membership, "
+        f"{credential_count} wallet credential(s)"
     )
     return inserted
 
@@ -481,7 +636,7 @@ def run_seed(profile: str) -> tuple[int, int]:
     with engine.connect() as conn:
         users_count = seed_users(conn, seed_data.users, tracker)
         settings_count = seed_settings(conn, seed_data.settings, tracker)
-        seed_default_multi_tenant(conn, tracker)
+        seed_default_multi_tenant(conn, tracker, wallets=seed_data.wallets)
         conn.commit()
     engine.dispose()
     return users_count, settings_count

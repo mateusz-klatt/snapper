@@ -12,10 +12,8 @@ from snapper.messaging.executors.kraken_futures import KrakenFuturesOrderExecuto
 
 @pytest.fixture
 def mocked_settings(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
-    """Provide mocked AppSettings with Kraken Futures API credentials."""
+    """Provide mocked AppSettings (post-0c: no per-exchange credential properties)."""
     settings = SimpleNamespace(
-        kraken_futures_api_key="futures-api-key",
-        kraken_futures_api_secret="futures-api-secret",
         db_url="sqlite:///:memory:",
         zmq_broker_xpub="tcp://127.0.0.1:5555",
         zmq_broker_xsub="tcp://127.0.0.1:5556",
@@ -37,15 +35,19 @@ def wallet_credential_envelope() -> SimpleNamespace:
     )
 
 
-def test_create_exchange_client_uses_executor_settings(
+def test_create_exchange_client_uses_injected_credentials(
     monkeypatch: pytest.MonkeyPatch,
     mocked_settings: SimpleNamespace,
+    wallet_credential_envelope: SimpleNamespace,
 ) -> None:
-    """Verify exchange client receives correct API credentials.
+    """Verify exchange client receives credentials from ``self._credentials``.
 
-    Given a KrakenFuturesOrderExecutor with mocked settings,
-    When _create_exchange_client is called,
-    Then KrakenFuturesExchangeClient receives api_key, api_secret, and repository.
+    Given: A ``KrakenFuturesOrderExecutor`` with an injected
+        ``_credentials`` envelope,
+    When: ``_create_exchange_client`` is called,
+    Then: ``KrakenFuturesExchangeClient`` is constructed with the
+        injected credentials — post-0c cleanup removed the legacy
+        ``AppSettings.kraken_futures_api_key`` fallback.
     """
     created_kwargs: dict[str, Any] = {}
 
@@ -62,14 +64,39 @@ def test_create_exchange_client_uses_executor_settings(
         lambda _: None,
     )
     executor = KrakenFuturesOrderExecutor()
+    executor._credentials = {
+        "api_key": wallet_credential_envelope.api_key_value,
+        "api_secret": wallet_credential_envelope.api_secret_value,
+    }
     create_client = cast(Any, executor)._create_exchange_client
     client = create_client()
     assert isinstance(client, _StubClient)
     assert created_kwargs == {
-        "api_key": mocked_settings.kraken_futures_api_key,
-        "api_secret": mocked_settings.kraken_futures_api_secret,
+        "api_key": wallet_credential_envelope.api_key_value,
+        "api_secret": wallet_credential_envelope.api_secret_value,
         "repository": None,
     }
+
+
+def test_create_exchange_client_raises_without_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    mocked_settings: SimpleNamespace,
+) -> None:
+    """Post-0c: no credentials means fail-fast RuntimeError.
+
+    Given: A ``KrakenFuturesOrderExecutor`` instantiated without a
+        wallet_public_id and ``self._credentials`` still ``None``,
+    When: ``_create_exchange_client`` is called,
+    Then: A ``RuntimeError`` is raised with an actionable message.
+    """
+    monkeypatch.setattr(
+        "snapper.messaging.executors.kraken_futures.get_repository",
+        lambda _: None,
+    )
+    executor = KrakenFuturesOrderExecutor()
+    create_client = cast(Any, executor)._create_exchange_client
+    with pytest.raises(RuntimeError, match="credentials not resolved"):
+        create_client()
 
 
 def test_get_exchange_name_returns_literal(

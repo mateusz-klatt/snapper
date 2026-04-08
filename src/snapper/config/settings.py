@@ -22,7 +22,7 @@ Example:
         from snapper.config.settings import get_settings_with_service
 
         settings = get_settings_with_service(settings_service)
-        api_key = settings.kraken_api_key
+        polygon_key = settings.polygon_api_key
 """
 
 from functools import lru_cache

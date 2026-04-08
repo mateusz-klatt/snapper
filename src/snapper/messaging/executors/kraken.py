@@ -76,27 +76,36 @@ class KrakenOrderExecutor(ExchangeExecutorService[KrakenExchangeClient]):
     def _create_exchange_client(self) -> KrakenExchangeClient:
         """Create authenticated Kraken client.
 
-        Phase 0c: when ``self._credentials`` is populated by the
-        base-class ``_resolve_credentials`` call (non-empty
-        ``wallet_public_id``), the API key/secret come from the
-        per-wallet ``wallet_credentials`` payload. Otherwise the
-        legacy ``AppSettings.kraken_api_key/_secret`` properties are
-        used — matching pre-0c tests that instantiate
-        ``KrakenOrderExecutor()`` without a wallet.
+        Reads ``api_key`` / ``api_secret`` from the per-wallet
+        ``wallet_credentials`` envelope resolved by the base-class
+        ``_resolve_credentials`` call during ``start()``. Post-0c
+        cleanup removed the legacy ``AppSettings.kraken_api_key`` /
+        ``kraken_api_secret`` fallback — credentials come from the
+        ``wallet_credentials`` table via ``CredentialResolver``, full
+        stop. Tests that instantiate ``KrakenOrderExecutor()`` with
+        an empty ``wallet_public_id`` must inject ``self._credentials``
+        directly before calling ``start()``.
 
         Returns:
             KrakenExchangeClient with API credentials.
+
+        Raises:
+            CredentialNotFound: Propagated from ``_resolve_credentials``
+                when the wallet has no active Kraken credential row.
+            KeyError: If ``self._credentials`` is missing the
+                ``api_key`` / ``api_secret`` keys (malformed envelope).
         """
         repository = get_repository(self.settings.db_url)
-        if self._credentials is not None:
-            api_key = self._credentials.get("api_key", "")
-            api_secret = self._credentials.get("api_secret", "")
-        else:
-            api_key = self.settings.kraken_api_key
-            api_secret = self.settings.kraken_api_secret
+        if self._credentials is None:
+            raise RuntimeError(
+                "KrakenOrderExecutor: credentials not resolved. Ensure "
+                "wallet_public_id is set and wallet_credentials contains "
+                "a row for exchange='kraken', or inject self._credentials "
+                "directly in tests before calling start()."
+            )
         return KrakenExchangeClient(
-            api_key=api_key,
-            api_secret=api_secret,
+            api_key=self._credentials["api_key"],
+            api_secret=self._credentials["api_secret"],
             repository=repository,
         )
 

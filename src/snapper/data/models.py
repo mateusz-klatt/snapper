@@ -1275,8 +1275,9 @@ class Wallet(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
         Index(
-            "ix_wallets_label_active",
+            "ix_wallets_label_is_paper_active",
             "label",
+            "is_paper",
             unique=True,
             sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
@@ -1296,6 +1297,14 @@ class WalletCredential(TemporalMixin, Base):
         rsa_pem         -> {"api_key": "...", "private_key_pem": "..."}
         oauth           -> {"client_id": "...", "client_secret": "...", "refresh_token": "..."}
         paper           -> {"initial_balance": 10000.0}
+
+    The payload is encrypted with the same master-password-derived Fernet
+    key used by ``SettingsEncryptionService`` for sensitive settings.
+    Rotation semantics: rotate the master password → re-encrypt every
+    ``wallet_credentials`` row in lockstep → restart. There is no per-row
+    ``encryption_key_id``: the master password is the single source of
+    truth, and any multi-key overlap window would be a future enhancement
+    (plan Section 4.2 — YAGNI per post-0c cleanup item 0).
 
     Encryption reuses the existing Setting encryption infrastructure (master
     key from env var, encrypted at rest). Credentials are pull-on-startup only
@@ -1331,7 +1340,6 @@ class WalletCredential(TemporalMixin, Base):
     exchange: Mapped[str] = mapped_column(String(20))
     credential_type: Mapped[str] = mapped_column(String(32))
     encrypted_payload: Mapped[str] = mapped_column(Text)
-    encryption_key_id: Mapped[str] = mapped_column(String(64))
     label: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
 

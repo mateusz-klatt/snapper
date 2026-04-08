@@ -246,11 +246,7 @@ def _build_mock_settings() -> Mock:
     mock_settings.zmq_broker_xsub = bootstrap.zmq_broker_xsub
     mock_settings.zmq_broker_xpub = bootstrap.zmq_broker_xpub
     mock_settings.telemetry_recording_enabled = bootstrap.telemetry_recording_enabled
-    mock_settings.kraken_api_key = ""
-    mock_settings.kraken_api_secret = ""
     mock_settings.polygon_api_key = ""
-    mock_settings.walutomat_api_key = ""
-    mock_settings.walutomat_private_key = ""
     mock_settings.auth_secret_key = "test-secret-key-for-testing-only-32-bytes-long"
     mock_settings.csrf_secret_key = "test-csrf-secret-key-for-testing"
     mock_settings.auth_access_token_expire_minutes = 15

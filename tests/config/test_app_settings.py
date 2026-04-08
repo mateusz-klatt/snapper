@@ -24,13 +24,13 @@ def test_db_setting_raises_without_service() -> None:
     """Verify accessing DB setting without service raises RuntimeError.
 
     Given AppSettings with settings_service=None,
-    When accessing kraken_api_key,
+    When accessing polygon_api_key (a DB-backed property),
     Then RuntimeError is raised with appropriate message.
     """
     bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
     settings = AppSettings(bootstrap, settings_service=None)
     with pytest.raises(RuntimeError, match="SettingsService not initialized"):
-        _ = settings.kraken_api_key
+        _ = settings.polygon_api_key
 
 
 def test_db_setting_returns_default_when_none_from_service() -> None:
@@ -60,56 +60,16 @@ class MockSettingsService:
         return self.values.get(key, default)
 
 
-class TestAppSettingsCredentialProperties:
-    """Tests for AppSettings API credential property accessors."""
+class TestAppSettingsMarketDataProperties:
+    """Tests for AppSettings market-data API property accessors.
 
-    def test_kraken_api_key_returns_value(self) -> None:
-        """Verify kraken_api_key returns configured value.
-
-        Given service with kraken_api_key set,
-        When accessing settings.kraken_api_key,
-        Then configured value is returned.
-        """
-        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
-        service = MockSettingsService({"kraken_api_key": "test-kraken-key"})
-        settings = AppSettings(bootstrap, settings_service=service)
-        assert settings.kraken_api_key == "test-kraken-key"
-
-    def test_kraken_api_secret_returns_value(self) -> None:
-        """Verify kraken_api_secret returns configured value.
-
-        Given service with kraken_api_secret set,
-        When accessing settings.kraken_api_secret,
-        Then configured value is returned.
-        """
-        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
-        service = MockSettingsService({"kraken_api_secret": "test-secret"})
-        settings = AppSettings(bootstrap, settings_service=service)
-        assert settings.kraken_api_secret == "test-secret"
-
-    def test_kraken_futures_api_key_returns_value(self) -> None:
-        """Verify kraken_futures_api_key returns configured value.
-
-        Given service with kraken_futures_api_key set,
-        When accessing settings.kraken_futures_api_key,
-        Then configured value is returned.
-        """
-        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
-        service = MockSettingsService({"kraken_futures_api_key": "futures-key"})
-        settings = AppSettings(bootstrap, settings_service=service)
-        assert settings.kraken_futures_api_key == "futures-key"
-
-    def test_kraken_futures_api_secret_returns_value(self) -> None:
-        """Verify kraken_futures_api_secret returns configured value.
-
-        Given service with kraken_futures_api_secret set,
-        When accessing settings.kraken_futures_api_secret,
-        Then configured value is returned.
-        """
-        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
-        service = MockSettingsService({"kraken_futures_api_secret": "futures-secret"})
-        settings = AppSettings(bootstrap, settings_service=service)
-        assert settings.kraken_futures_api_secret == "futures-secret"
+    Post-0c cleanup item 0 removed the per-exchange trading credential
+    properties (``kraken_api_key``, ``walutomat_api_key`` etc.) because
+    wallet-scoped credentials now live in the ``wallet_credentials``
+    table and are loaded by ``CredentialResolver`` during per-wallet
+    executor startup. ``polygon_api_key`` stays on ``AppSettings``
+    because Polygon is a shared market-data provider, not a wallet.
+    """
 
     def test_polygon_api_key_returns_value(self) -> None:
         """Verify polygon_api_key returns configured value.
@@ -122,54 +82,6 @@ class TestAppSettingsCredentialProperties:
         service = MockSettingsService({"polygon_api_key": "poly-key"})
         settings = AppSettings(bootstrap, settings_service=service)
         assert settings.polygon_api_key == "poly-key"
-
-    def test_walutomat_api_key_returns_value(self) -> None:
-        """Verify walutomat_api_key returns configured value.
-
-        Given service with walutomat_api_key set,
-        When accessing settings.walutomat_api_key,
-        Then configured value is returned.
-        """
-        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
-        service = MockSettingsService({"walutomat_api_key": "walut-key"})
-        settings = AppSettings(bootstrap, settings_service=service)
-        assert settings.walutomat_api_key == "walut-key"
-
-    def test_walutomat_private_key_returns_value(self) -> None:
-        """Verify walutomat_private_key returns configured value.
-
-        Given service with walutomat_private_key set,
-        When accessing settings.walutomat_private_key,
-        Then configured value is returned.
-        """
-        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
-        service = MockSettingsService({"walutomat_private_key": "private-key"})
-        settings = AppSettings(bootstrap, settings_service=service)
-        assert settings.walutomat_private_key == "private-key"
-
-    def test_zonda_api_key_returns_value(self) -> None:
-        """Verify zonda_api_key returns configured value.
-
-        Given service with zonda_api_key set,
-        When accessing settings.zonda_api_key,
-        Then configured value is returned.
-        """
-        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
-        service = MockSettingsService({"zonda_api_key": "zonda-key"})
-        settings = AppSettings(bootstrap, settings_service=service)
-        assert settings.zonda_api_key == "zonda-key"
-
-    def test_zonda_api_secret_returns_value(self) -> None:
-        """Verify zonda_api_secret returns configured value.
-
-        Given service with zonda_api_secret set,
-        When accessing settings.zonda_api_secret,
-        Then configured value is returned.
-        """
-        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
-        service = MockSettingsService({"zonda_api_secret": "zonda-secret"})
-        settings = AppSettings(bootstrap, settings_service=service)
-        assert settings.zonda_api_secret == "zonda-secret"
 
 
 class TestAppSettingsAuthProperties:

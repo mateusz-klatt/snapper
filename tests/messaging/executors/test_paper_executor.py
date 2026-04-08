@@ -822,36 +822,29 @@ class TestPaperOrderExecutor:
         settings = MagicMock(spec=AppSettings)
         assert PaperOrderExecutor.get_default_parameters(settings) == {"wallet_public_id": ""}
 
-    @patch("snapper.messaging.executors.paper.PaperExchangeClient")
     @patch("snapper.messaging.executors.paper.get_repository")
     @patch("snapper.messaging.executors.base.get_settings")
-    def test_create_exchange_client_uses_repository(
+    def test_create_exchange_client_raises_without_credentials(
         self,
         mock_get_settings: MagicMock,
         mock_get_repository: MagicMock,
-        mock_paper_client: MagicMock,
     ) -> None:
-        """Legacy fallback keeps the hardcoded initial balance.
+        """Post-0c: PaperOrderExecutor without credentials raises RuntimeError.
 
         Given: PaperOrderExecutor with the default empty wallet_public_id
-            and db_url in settings,
+            and ``self._credentials`` still ``None``,
         When: ``_create_exchange_client`` is called,
-        Then: PaperExchangeClient is created with the legacy 10000.0
-            initial balance because ``self._credentials`` is None.
+        Then: A ``RuntimeError`` surfaces with an actionable message.
+            The legacy hardcoded 10000.0 fallback was removed; every
+            paper wallet must carry an explicit ``initial_balance`` in
+            its credential envelope (post-0c cleanup item 1).
         """
         settings = SimpleNamespace(db_url="sqlite:///:memory:")
         mock_get_settings.return_value = settings
-        repository = object()
-        mock_get_repository.return_value = repository
+        mock_get_repository.return_value = object()
         executor = PaperOrderExecutor()
-        client = executor._create_exchange_client()
-        mock_get_repository.assert_called_once_with("sqlite:///:memory:")
-        mock_paper_client.assert_called_once_with(
-            repository=repository,
-            fill_delay=0.1,
-            initial_balance=10000.0,
-        )
-        assert client is mock_paper_client.return_value
+        with pytest.raises(RuntimeError, match="credentials not resolved"):
+            executor._create_exchange_client()
 
     @patch("snapper.messaging.executors.paper.PaperExchangeClient")
     @patch("snapper.messaging.executors.paper.get_repository")

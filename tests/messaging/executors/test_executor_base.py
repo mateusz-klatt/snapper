@@ -2746,8 +2746,6 @@ class TestExecutorCoverage:
         service = KrakenOrderExecutor()
         mock_settings_service = MagicMock()
         mock_settings_with_db = self._create_mock_settings()
-        mock_settings_with_db.kraken_api_key = "test_api_key"
-        mock_settings_with_db.kraken_api_secret = "test_api_secret"
         mock_exchange_client = MagicMock()
         mock_exchange_client.__aenter__ = AsyncMock(return_value=mock_exchange_client)
         mock_exchange_client.__aexit__ = AsyncMock(return_value=None)
@@ -3543,17 +3541,20 @@ class TestExecutorWebSocketExecutions:
     """Tests for executor websocket executions."""
 
     def _create_mock_settings(self, with_credentials: bool = True) -> MagicMock:
+        """Provide mocked AppSettings without per-exchange credential properties.
+
+        Post-0c cleanup: credentials live in wallet_credentials and are
+        loaded by ``CredentialResolver`` at executor startup. Tests that
+        need a credential-less executor path use ``with_credentials=False``
+        to document intent; the field is otherwise unused because
+        ``_create_exchange_client`` reads from ``self._credentials``
+        directly, not from AppSettings.
+        """
         mock_settings = MagicMock()
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
         mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
         mock_settings.zmq_heartbeat_interval_ms = 1000
         mock_settings.db_url = TEST_DB_URL
-        if with_credentials:
-            mock_settings.kraken_api_key = "test_api_key"
-            mock_settings.kraken_api_secret = "test_api_secret"
-        else:
-            mock_settings.kraken_api_key = None
-            mock_settings.kraken_api_secret = None
         return mock_settings
 
     @pytest.mark.asyncio

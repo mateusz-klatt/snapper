@@ -681,7 +681,6 @@ class WalletCredentialRow(TypedDict):
     exchange: str
     credential_type: str
     encrypted_payload: str
-    encryption_key_id: str
     label: str | None
     timestamp: datetime
     session_id: str

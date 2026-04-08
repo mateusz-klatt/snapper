@@ -13,10 +13,8 @@ from snapper.messaging.executors.walutomat import WalutomatOrderExecutor
 
 @pytest.fixture
 def mocked_settings(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
-    """Provide mocked AppSettings with Walutomat API credentials."""
+    """Provide mocked AppSettings (post-0c: no per-exchange credential properties)."""
     settings = SimpleNamespace(
-        walutomat_api_key="api-key",
-        walutomat_private_key="-----BEGIN KEY-----...",
         db_url="sqlite:///:memory:",
         zmq_broker_xpub="tcp://127.0.0.1:5555",
         zmq_broker_xsub="tcp://127.0.0.1:5556",
@@ -38,15 +36,21 @@ def wallet_credential_envelope() -> SimpleNamespace:
     )
 
 
-def test_create_exchange_client_uses_executor_settings(
+def test_create_exchange_client_uses_injected_credentials(
     monkeypatch: pytest.MonkeyPatch,
     mocked_settings: SimpleNamespace,
+    wallet_credential_envelope: SimpleNamespace,
 ) -> None:
-    """Verify exchange client receives correct API credentials.
+    """Verify exchange client receives credentials from ``self._credentials``.
 
-    Given a WalutomatOrderExecutor with mocked settings,
-    When _create_exchange_client is called,
-    Then WalutomatExchangeClient receives api_key, private_key_data, and repository.
+    Given: A ``WalutomatOrderExecutor`` with an injected
+        ``_credentials`` envelope containing ``api_key`` and
+        ``private_key_pem``,
+    When: ``_create_exchange_client`` is called,
+    Then: ``WalutomatExchangeClient`` is constructed with the injected
+        credentials — post-0c cleanup removed the legacy
+        ``AppSettings.walutomat_api_key`` / ``walutomat_private_key``
+        fallback.
     """
     created_kwargs: dict[str, Any] = {}
 
@@ -63,14 +67,39 @@ def test_create_exchange_client_uses_executor_settings(
         lambda _: None,
     )
     executor = WalutomatOrderExecutor()
+    executor._credentials = {
+        "api_key": wallet_credential_envelope.api_key_value,
+        "private_key_pem": wallet_credential_envelope.private_key_pem_value,
+    }
     create_client = cast(Any, executor)._create_exchange_client
     client = create_client()
     assert isinstance(client, _StubClient)
     assert created_kwargs == {
-        "api_key": mocked_settings.walutomat_api_key,
-        "private_key_data": mocked_settings.walutomat_private_key,
+        "api_key": wallet_credential_envelope.api_key_value,
+        "private_key_data": wallet_credential_envelope.private_key_pem_value,
         "repository": None,
     }
+
+
+def test_create_exchange_client_raises_without_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    mocked_settings: SimpleNamespace,
+) -> None:
+    """Post-0c: no credentials means fail-fast RuntimeError.
+
+    Given: A ``WalutomatOrderExecutor`` instantiated without a
+        wallet_public_id and ``self._credentials`` still ``None``,
+    When: ``_create_exchange_client`` is called,
+    Then: A ``RuntimeError`` is raised with an actionable message.
+    """
+    monkeypatch.setattr(
+        "snapper.messaging.executors.walutomat.get_repository",
+        lambda _: None,
+    )
+    executor = WalutomatOrderExecutor()
+    create_client = cast(Any, executor)._create_exchange_client
+    with pytest.raises(RuntimeError, match="credentials not resolved"):
+        create_client()
 
 
 def test_get_exchange_name_returns_literal(

@@ -28,7 +28,12 @@ Example:
 
         settings_service = await get_settings_service(db_url, ...)
         settings = get_settings_with_service(settings_service)
-        api_key = settings.kraken_api_key  # From encrypted DB
+        polygon_key = settings.polygon_api_key  # From encrypted DB
+
+    Wallet-scoped exchange credentials (kraken, walutomat, zonda,
+    kraken_futures) do NOT live on AppSettings. They are loaded from
+    the ``wallet_credentials`` table by ``CredentialResolver`` during
+    per-wallet executor startup (Phase 0c + post-0c cleanup item 0).
 """
 
 from typing import Any
@@ -198,85 +203,18 @@ class AppSettings:
         return result if result is not None else default
 
     @property
-    def kraken_api_key(self) -> str:
-        """Return Kraken exchange API key from database settings.
-
-        Returns:
-            Kraken API key string, empty if not configured.
-        """
-        return self._get_db_setting("kraken_api_key", "")
-
-    @property
-    def kraken_api_secret(self) -> str:
-        """Return Kraken exchange API secret from database settings.
-
-        Returns:
-            Kraken API secret string, empty if not configured.
-        """
-        return self._get_db_setting("kraken_api_secret", "")
-
-    @property
-    def kraken_futures_api_key(self) -> str:
-        """Return Kraken Futures API key from database settings.
-
-        Returns:
-            Kraken Futures API key string, empty if not configured.
-        """
-        return self._get_db_setting("kraken_futures_api_key", "")
-
-    @property
-    def kraken_futures_api_secret(self) -> str:
-        """Return Kraken Futures API secret from database settings.
-
-        Returns:
-            Kraken Futures API secret string, empty if not configured.
-        """
-        return self._get_db_setting("kraken_futures_api_secret", "")
-
-    @property
     def polygon_api_key(self) -> str:
         """Return Polygon.io API key from database settings.
+
+        Polygon is a shared market-data provider, not a wallet-scoped
+        exchange, so the key stays in the ``settings`` table. Per-wallet
+        trading credentials (kraken, walutomat, zonda, kraken_futures)
+        live in ``wallet_credentials`` after post-0c cleanup item 0.
 
         Returns:
             Polygon API key string, empty if not configured.
         """
         return self._get_db_setting("polygon_api_key", "")
-
-    @property
-    def walutomat_api_key(self) -> str:
-        """Return Walutomat API key from database settings.
-
-        Returns:
-            Walutomat API key string, empty if not configured.
-        """
-        return self._get_db_setting("walutomat_api_key", "")
-
-    @property
-    def walutomat_private_key(self) -> str:
-        """Return Walutomat private key from database settings.
-
-        Returns:
-            Walutomat private key string, empty if not configured.
-        """
-        return self._get_db_setting("walutomat_private_key", "")
-
-    @property
-    def zonda_api_key(self) -> str:
-        """Return Zonda exchange API key from database settings.
-
-        Returns:
-            Zonda API key string, empty if not configured.
-        """
-        return self._get_db_setting("zonda_api_key", "")
-
-    @property
-    def zonda_api_secret(self) -> str:
-        """Return Zonda exchange API secret from database settings.
-
-        Returns:
-            Zonda API secret string, empty if not configured.
-        """
-        return self._get_db_setting("zonda_api_secret", "")
 
     @property
     def auth_secret_key(self) -> str:

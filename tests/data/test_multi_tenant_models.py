@@ -86,7 +86,6 @@ class TestWalletCredentialModel:
             exchange="kraken",
             credential_type="api_key_secret",
             encrypted_payload='{"api_key": "<encrypted>", "api_secret": "<encrypted>"}',
-            encryption_key_id="master-key-v1",
             label="Alice's Kraken Spot",
             session_id="test-session",
             sequence_id=1,
@@ -96,7 +95,6 @@ class TestWalletCredentialModel:
         assert credential.exchange == "kraken"
         assert credential.credential_type == "api_key_secret"
         assert "encrypted" in credential.encrypted_payload
-        assert credential.encryption_key_id == "master-key-v1"
         assert credential.label == "Alice's Kraken Spot"
 
     def test_credential_paper_type(self) -> None:
@@ -111,7 +109,6 @@ class TestWalletCredentialModel:
             exchange="paper",
             credential_type="paper",
             encrypted_payload='{"initial_balance": 10000.0}',
-            encryption_key_id="master-key-v1",
             session_id="test-session",
             sequence_id=1,
             timestamp=datetime.now(UTC),

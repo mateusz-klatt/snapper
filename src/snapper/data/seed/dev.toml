@@ -21,3 +21,14 @@ key = "ui_origin"
 value = "http://localhost:3000,http://localhost:8000"
 category = "server"
 description = "Allowed UI origins for WebSocket CORS (comma-separated)"
+
+[[wallets]]
+label = "default"
+is_paper = true
+description = "Default paper-mode wallet seeded for open-source dev deployment"
+
+[[wallets.credentials]]
+exchange = "paper"
+credential_type = "paper"
+initial_balance = "10000.0"
+label = "default paper bootstrap"

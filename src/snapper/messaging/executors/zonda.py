@@ -31,23 +31,23 @@ class ZondaOrderExecutor(ExchangeExecutorService[ZondaExchangeClient]):
     def _create_exchange_client(self) -> ZondaExchangeClient:
         """Create the Zonda exchange client.
 
-        Phase 0c: when ``self._credentials`` is populated by the
-        base-class ``_resolve_credentials`` call (non-empty
-        ``wallet_public_id``), the API key/secret come from the
-        per-wallet ``wallet_credentials`` payload. Otherwise the
-        legacy ``AppSettings.zonda_api_key/_secret`` properties
-        are used.
+        Reads ``api_key`` / ``api_secret`` from the per-wallet
+        ``wallet_credentials`` envelope resolved by the base-class
+        ``_resolve_credentials`` call during ``start()``. Post-0c
+        cleanup removed the legacy ``AppSettings.zonda_api_key``
+        fallback.
         """
         repository = get_repository(self.settings.db_url)
-        if self._credentials is not None:
-            api_key = self._credentials.get("api_key", "")
-            api_secret = self._credentials.get("api_secret", "")
-        else:
-            api_key = self.settings.zonda_api_key
-            api_secret = self.settings.zonda_api_secret
+        if self._credentials is None:
+            raise RuntimeError(
+                "ZondaOrderExecutor: credentials not resolved. Ensure "
+                "wallet_public_id is set and wallet_credentials contains "
+                "a row for exchange='zonda', or inject self._credentials "
+                "directly in tests before calling start()."
+            )
         return ZondaExchangeClient(
-            api_key=api_key,
-            api_secret=api_secret,
+            api_key=self._credentials["api_key"],
+            api_secret=self._credentials["api_secret"],
             repository=repository,
         )
 
