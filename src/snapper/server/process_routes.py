@@ -280,14 +280,13 @@ async def _enforce_strategy_scope(
 ) -> None:
     """Validate operator/wallet scope for a strategy process launch.
 
-    Phase 0b transitional rules per ``plan_multi_tenant_foundation.md``
-    Section 4.4:
+    Transitional rules:
 
     - If ``role`` is not ``STRATEGY`` the check is skipped — non-strategy
       process templates (feeds, executors, services) do not yet carry
       operator/wallet scope.
     - ``operator_public_id`` and ``wallet_public_id`` are *both* optional
-      during the Phase 0b transition. If neither is set, the launch is
+      during the transition. If neither is set, the launch is
       allowed for backwards compatibility (matches the empty-string
       defaults on ``StrategyProcessParameters``).
     - If ``operator_public_id`` is set, it must be in
@@ -298,7 +297,7 @@ async def _enforce_strategy_scope(
       an active scope grant for that pair must exist in
       ``wallet_operator_scope_grants``.
 
-    Phase 0b.6 NOT NULL tightening will eventually make both fields
+    NOT NULL tightening will eventually make both fields
     required at the schema layer, at which point this helper will reject
     the empty-defaults path.
 
@@ -519,7 +518,7 @@ async def create_process_configuration(
         factory: Process launcher service.
         settings: Application settings.
         user: Authenticated user with MANAGE_PROCESSES permission, used
-            for the Phase 0b strategy scope check on operator/wallet.
+            for the strategy scope check on operator/wallet.
         repo: Repository used to verify active scope grants for the
             requested operator/wallet pair.
         _csrf: CSRF token validation.
@@ -651,7 +650,7 @@ async def start_process(
 ) -> ProcessStartResponse:
     """Start a previously created process configuration.
 
-    Phase 0b.4d / phase-close fix: ``payload.parameters`` cannot
+    ``payload.parameters`` cannot
     override ``operator_public_id`` or ``wallet_public_id`` at start
     time — those fields are pinned to whatever ``_enforce_strategy_scope``
     validated at create time. If the caller wants to switch wallets or

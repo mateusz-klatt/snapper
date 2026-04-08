@@ -33,7 +33,7 @@ Example:
     Wallet-scoped exchange credentials (kraken, walutomat, zonda,
     kraken_futures) do NOT live on AppSettings. They are loaded from
     the ``wallet_credentials`` table by ``CredentialResolver`` during
-    per-wallet executor startup (Phase 0c + post-0c cleanup item 0).
+    per-wallet executor startup.
 """
 
 from typing import Any
@@ -209,7 +209,7 @@ class AppSettings:
         Polygon is a shared market-data provider, not a wallet-scoped
         exchange, so the key stays in the ``settings`` table. Per-wallet
         trading credentials (kraken, walutomat, zonda, kraken_futures)
-        live in ``wallet_credentials`` after post-0c cleanup item 0.
+        live in ``wallet_credentials``.
 
         Returns:
             Polygon API key string, empty if not configured.

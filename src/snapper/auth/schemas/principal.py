@@ -21,7 +21,7 @@ class AuthPrincipal(StrictBody):
     directly in REST responses — endpoints that need to return user data
     should load the User from DB and project to UserProfile.
 
-    Multi-tenant fields (Plan 0 Phase 0b Section 4.1):
+    Multi-tenant fields:
 
     - ``user_public_id`` carries the stable UUID7 of the user row so
       authorization decisions are not coupled to mutable usernames. The
@@ -49,10 +49,10 @@ class AuthPrincipal(StrictBody):
         role: User's role (VIEWER, OPERATOR, ADMIN).
         email: Optional email address.
         is_active: Whether user account is active.
-        user_public_id: Stable UUID7 of the user row (Phase 0b).
-        operator_public_ids: Operators this user may act AS (Phase 0b).
-        primary_operator_public_id: Default operator at login (Phase 0b).
-        active_wallet_public_id: Last-selected wallet UI state (Phase 0b).
+        user_public_id: Stable UUID7 of the user row.
+        operator_public_ids: Operators this user may act AS.
+        primary_operator_public_id: Default operator at login.
+        active_wallet_public_id: Last-selected wallet UI state.
     """
 
     username: str

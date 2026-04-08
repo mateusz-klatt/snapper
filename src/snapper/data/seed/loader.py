@@ -109,7 +109,7 @@ class SeedWallet:
     Represents one ``[[wallets]]`` entry in the profile TOML. The
     ``credentials`` list maps to nested ``[[wallets.credentials]]``
     sub-entries. Seed loader upserts the wallet by the
-    ``(label, is_paper)`` unique key (post-0c cleanup item 0) and
+    ``(label, is_paper)`` unique key and
     inserts each credential row against that wallet's ``public_id``.
 
     Attributes:
@@ -475,7 +475,7 @@ def seed_default_multi_tenant(
 ) -> int:
     """Seed the default Operator, Wallets (with credentials), and memberships.
 
-    Plan 0 Phase 0a + Phase 0c + post-0c cleanup item 0. Creates:
+    Creates:
 
     1. Operator ``label="default"`` — the seed trading identity used
        by the single-user deployment until an admin introduces
@@ -496,7 +496,7 @@ def seed_default_multi_tenant(
     A re-seed on an established DB is a no-op, matching the
     ``seed_users`` / ``seed_settings`` semantics.
 
-    Per Plan 0 D2 no default scope grants are inserted.
+    No default scope grants are inserted.
 
     Args:
         conn: Active SQLAlchemy connection (same transaction as the

@@ -80,12 +80,12 @@ class PaperOrderExecutor(ExchangeExecutorService[PaperExchangeClient]):
         Reads ``initial_balance`` from the per-wallet
         ``wallet_credentials`` envelope (``credential_type="paper"``)
         resolved by the base-class ``_resolve_credentials`` call
-        during ``start()``. Post-0c cleanup removed the hardcoded
-        10000.0 default — every paper wallet must have an explicit
-        balance in its credential envelope. Tests that instantiate
-        ``PaperOrderExecutor()`` with an empty ``wallet_public_id``
-        must inject ``self._credentials = {"initial_balance": "..."}``
-        before calling ``start()``.
+        during ``start()``. Every paper wallet must carry an explicit
+        ``initial_balance`` in its credential envelope. Tests that
+        instantiate ``PaperOrderExecutor()`` with an empty
+        ``wallet_public_id`` must inject
+        ``self._credentials = {"initial_balance": "..."}`` before
+        calling ``start()``.
 
         Returns:
             PaperExchangeClient with simulated balance.

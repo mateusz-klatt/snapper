@@ -34,9 +34,7 @@ class WalutomatOrderExecutor(ExchangeExecutorService[WalutomatExchangeClient]):
         Reads ``api_key`` / ``private_key_pem`` from the per-wallet
         ``wallet_credentials`` envelope (``credential_type="rsa_pem"``)
         resolved by the base-class ``_resolve_credentials`` call
-        during ``start()``. Post-0c cleanup removed the legacy
-        ``AppSettings.walutomat_api_key`` / ``walutomat_private_key``
-        fallback.
+        during ``start()``.
         """
         repository = get_repository(self.settings.db_url)
         if self._credentials is None:

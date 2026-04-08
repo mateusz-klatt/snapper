@@ -54,8 +54,7 @@ CREDENTIAL_KEY_PATTERNS: tuple[str, ...] = (
 def _looks_like_credential_key(key: str) -> bool:
     """Return True if the setting key matches a credential-shaped glob.
 
-    Phase 0b.5 defense in depth: even though Phase 0a moved real
-    credentials out of the ``settings`` table into the dedicated
+    Defense in depth: even though credentials live in the dedicated
     ``wallet_credentials`` table with Fernet encryption, an
     administrator could still accidentally insert a credential-shaped
     row into ``settings`` (or a regression could reintroduce one). This

@@ -4,15 +4,15 @@ Detects gaps in message sequences by tracking per-stream state: the last
 seen session_id and expected next sequence_id. Logs warnings on gaps,
 info on session resets, and debug on duplicates/reorders.
 
-Phase 0c.7 multi-tenant update: a "stream" is now partitioned by the
-tuple ``(received_topic, wallet_public_id)`` instead of by topic alone.
-Two per-wallet executor instances can share an exchange-prefix topic
-(e.g. ``orders.events.kraken.BTC-USD.filled``) and publish with their
-own per-wallet sequence counters; partitioning by wallet prevents the
-interleaved streams from producing false gap alarms. Legacy callers
-that do not know their wallet (or receive messages from legacy
-producers that do not carry ``wallet_public_id``) pass the empty
-string, which degrades cleanly back to topic-only keying.
+A "stream" is partitioned by the tuple ``(received_topic,
+wallet_public_id)`` instead of by topic alone. Two per-wallet executor
+instances can share an exchange-prefix topic (e.g.
+``orders.events.kraken.BTC-USD.filled``) and publish with their own
+per-wallet sequence counters; partitioning by wallet prevents the
+interleaved streams from producing false gap alarms. Callers that do
+not know their wallet (or receive messages from producers that do not
+carry ``wallet_public_id``) pass the empty string, which degrades
+cleanly back to topic-only keying.
 """
 
 from dataclasses import dataclass
@@ -23,8 +23,9 @@ StreamKey = tuple[str, str]
 """Partition key for one tracked message stream.
 
 A stream is uniquely identified by ``(received_topic, wallet_public_id)``.
-The wallet component defaults to empty string for legacy pre-0c.7
-producers that do not populate wallet on their messages.
+The wallet component defaults to empty string for producers that do
+not populate wallet on their messages, which degrades the partition
+back to topic-only keying.
 """
 
 
@@ -94,7 +95,7 @@ class GapDetector:
             session_id: Producer session UUID from the message payload.
             sequence_id: Sequence number from the message payload.
             wallet_public_id: Owning wallet for per-wallet stream
-                partitioning (Phase 0c.7). Empty string keeps the
+                partitioning. Empty string keeps the
                 legacy topic-only behavior for producers or message
                 types that do not carry a wallet.
 
@@ -170,7 +171,7 @@ class GapDetector:
         Called when the bridge unsubscribes from a ZMQ topic (no more
         WS clients). Without this, resubscribing later would produce
         false gaps because messages published while unsubscribed are
-        never received. Phase 0c.7: the stream dict is now partitioned
+        never received. The stream dict is partitioned
         by ``(topic, wallet_public_id)``, so this drops every partition
         that matches the given topic regardless of wallet.
 

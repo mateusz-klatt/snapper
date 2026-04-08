@@ -464,14 +464,14 @@ class ExchangeClientBase(ABC):
         Args:
             order_public_id: Logical order identity (stable across versions).
             execution: Execution details (timestamp, side, exec_id, trade_id).
-            wallet_public_id: Owning wallet for routing and Phase 0c.6
+            wallet_public_id: Owning wallet for routing and
                 NOT NULL schema compliance. Normally read by the caller
                 from the per-wallet executor instance.
             operator_public_id: Trading identity that initiated the
-                order this fill belongs to. Post-0c cleanup item 2:
-                nullable because strategy-emitted orders have no
-                human operator. Read by the caller from the pending
-                order's ``OrderRequestData.operator_public_id``.
+                order this fill belongs to. Nullable because strategy-
+                emitted orders have no human operator. Read by the
+                caller from the pending order's
+                ``OrderRequestData.operator_public_id``.
             delta_size: Resolved fill delta size. Falls back to raw execution fields.
             delta_price: Resolved fill price. Falls back to raw execution fields.
             fee: Resolved fee amount. Falls back to fee_usd_equiv.

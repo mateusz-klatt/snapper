@@ -173,17 +173,15 @@ class TraderCoordinator(RegisterableProcess):
     ) -> str:
         """Build the in-memory engine_key string.
 
-        Phase 0c.4 wallet-aware sharding: when ``wallet_public_id`` is
+        Wallet-aware sharding: when ``wallet_public_id`` is
         non-empty, the key gets a ``-w{wallet_short}`` suffix where
         ``wallet_short`` is the first 12 hex characters of the wallet
         UUID7 with dashes stripped (matching the spawner naming used
         by ``ProcessLauncherService.spawn_per_wallet_executors`` and
         the ``TradingEngineService._shard_key`` segment). Empty
-        ``wallet_public_id`` keeps the legacy flat format
+        ``wallet_public_id`` keeps the flat format
         (``{instrument}@{exchange}-{mode_or_tag}``) for backwards
-        compatibility with the single-wallet template path; the
-        legacy branch is removed in Phase 0c.5 once every callsite
-        populates wallet identity.
+        compatibility with the single-wallet template path.
 
         The wallet-aware key is what unblocks the
         ``_on_signal`` fail-closed guard lifted in this same commit:
@@ -203,8 +201,8 @@ class TraderCoordinator(RegisterableProcess):
     def _parse_shard_key(shard_key: str) -> tuple[str, str, str, str, str | None] | None:
         """Parse a persisted ``shard_key`` into its components.
 
-        Phase 0c.4 introduces an optional ``w{wallet_short}`` segment
-        between ``mode`` and the optional paper-mode strategy_tag.
+        An optional ``w{wallet_short}`` segment sits between ``mode``
+        and the optional paper-mode strategy_tag.
         The parser handles both legacy (3- or 4-segment) and
         wallet-aware (4- or 5-segment) formats.
 
@@ -266,7 +264,7 @@ class TraderCoordinator(RegisterableProcess):
         logger.info("ZMQTrader: Settings service initialized with database access")
 
     async def _build_wallet_short_cache(self) -> None:
-        """Phase 0c.4: populate the wallet_short -> wallet_public_id cache.
+        """Populate the wallet_short -> wallet_public_id cache.
 
         Reads every active row from ``wallet_credentials`` and indexes
         the wallet by its 12-hex-char prefix. The cache lets the
@@ -303,12 +301,12 @@ class TraderCoordinator(RegisterableProcess):
     async def _recover_engine_state(self) -> None:
         """Rebuild engine confirmed state from checkpoints, executions, and active orders.
 
-        Phase 0: Read checkpoints, restore TradeService/BalanceService,
+        Step 0: Read checkpoints, restore TradeService/BalanceService,
             replay delta VenueEvents, create engines with restored state.
-        Phase 1: Full-replay for shards without checkpoints (legacy path).
-        Phase 2: Query active orders across ALL exchanges, create engines
+        Step 1: Full-replay for shards without checkpoints (legacy path).
+        Step 2: Query active orders across ALL exchanges, create engines
             for orders that have no executions yet, set order_in_flight.
-        Phase 3: Detect fill gaps (DB filled_size vs order filled_size)
+        Step 3: Detect fill gaps (DB filled_size vs order filled_size)
             and enter degraded read-only mode if cost basis is unrecoverable.
         """
         now = datetime.now(UTC)
@@ -323,7 +321,7 @@ class TraderCoordinator(RegisterableProcess):
         )
 
     async def _recover_from_checkpoints(self, now: datetime) -> set[str]:
-        """Phase 0: Restore shards from persisted checkpoints + delta replay.
+        """Restore shards from persisted checkpoints + delta replay.
 
         Returns:
             Set of engine_keys that were fully recovered from checkpoints.
@@ -476,9 +474,9 @@ class TraderCoordinator(RegisterableProcess):
     async def _recover_from_executions(
         self, now: datetime, checkpoint_recovered: set[str] | None = None
     ) -> list[ExecutionRow]:
-        """Phase 1: Replay DB executions to rebuild engine state.
+        """Replay DB executions to rebuild engine state.
 
-        Skips engine_keys already recovered from checkpoints in Phase 0.
+        Skips engine_keys already recovered from checkpoints.
 
         Args:
             now: Current timestamp for DB queries.

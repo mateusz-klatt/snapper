@@ -622,8 +622,8 @@ class AccrualLedgerInsertRow(TypedDict):
     """Insert params for insert_accrual.
 
     All fields are required since accruals materialize the periodic
-    charge applied to a position and need full provenance. Phase 0c.6
-    makes ``wallet_public_id`` mandatory (NOT NULL in the schema);
+    charge applied to a position and need full provenance.
+    ``wallet_public_id`` is mandatory (NOT NULL in the schema);
     ``operator_public_id`` stays optional because strategy-driven
     accruals are not necessarily initiated by a human operator.
     """

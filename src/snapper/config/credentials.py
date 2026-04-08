@@ -1,10 +1,7 @@
 """Per-wallet credential resolver for executor processes.
 
-Plan 0 Phase 0b Section 4.2. Replaces the legacy
-``AppSettings.kraken_api_key`` / ``walutomat_api_key`` properties that
-read credentials from the ``settings`` table broadcast on the ZMQ
-``system.settings`` topic. Credentials now live in the
-``wallet_credentials`` table, are encrypted at rest with the same
+Credentials live in the ``wallet_credentials`` table, are encrypted
+at rest with the same
 Fernet key as ``settings``, and are pulled exactly once at executor
 process startup. Rotation requires a process restart of the affected
 executor instance — there is no hot-reload contract.
@@ -70,7 +67,7 @@ class CredentialResolver:
 
     The resolver does NOT subscribe to any ZMQ topic and does NOT
     listen for ``settings`` updates: ``wallet_credentials`` is a
-    pull-only surface by design (Plan 0 Section 4.5 broadcast safety).
+    pull-only surface by design (broadcast safety — no ZMQ propagation).
     """
 
     def __init__(

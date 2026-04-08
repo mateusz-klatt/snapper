@@ -107,7 +107,7 @@ class UserService:
 
         Resolves the multi-tenant fields (``user_public_id``,
         ``operator_public_ids``, ``primary_operator_public_id``) from the
-        repository per Plan 0 Section 4.1. ADMIN users automatically
+        repository. ADMIN users automatically
         receive the operator set covering every active operator;
         OPERATOR / VIEWER users get only their explicit memberships
         from ``user_operator_memberships``. ``active_wallet_public_id``

@@ -18,9 +18,8 @@ Requires a ``wallet_credentials`` row with
 ``exchange="kraken_futures"``, ``credential_type="api_key_secret"``,
 and a Fernet-encrypted envelope ``{"api_key": "...", "api_secret":
 "..."}``. Loaded at executor startup via ``CredentialResolver``.
-Post-0c cleanup item 1 removed the legacy
-``AppSettings.kraken_futures_api_key`` / ``kraken_futures_api_secret``
-fallback — wallet_credentials is now the single source of truth.
+``wallet_credentials`` is the single source of truth for Kraken
+Futures API credentials.
 """
 
 from snapper.application.process_manager.registry import register_process
@@ -71,9 +70,7 @@ class KrakenFuturesOrderExecutor(ExchangeExecutorService[KrakenFuturesExchangeCl
 
         Reads ``api_key`` / ``api_secret`` from the per-wallet
         ``wallet_credentials`` envelope resolved by the base-class
-        ``_resolve_credentials`` call during ``start()``. Post-0c
-        cleanup removed the legacy ``AppSettings.kraken_futures_api_key``
-        fallback.
+        ``_resolve_credentials`` call during ``start()``.
 
         Returns:
             KrakenFuturesExchangeClient with API credentials.

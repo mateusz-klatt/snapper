@@ -33,9 +33,7 @@ class ZondaOrderExecutor(ExchangeExecutorService[ZondaExchangeClient]):
 
         Reads ``api_key`` / ``api_secret`` from the per-wallet
         ``wallet_credentials`` envelope resolved by the base-class
-        ``_resolve_credentials`` call during ``start()``. Post-0c
-        cleanup removed the legacy ``AppSettings.zonda_api_key``
-        fallback.
+        ``_resolve_credentials`` call during ``start()``.
         """
         repository = get_repository(self.settings.db_url)
         if self._credentials is None:

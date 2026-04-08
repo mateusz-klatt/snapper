@@ -121,21 +121,17 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """Initialize the instance.
 
         Args:
-            wallet_public_id: Phase 0c multi-tenant routing key. When
+            wallet_public_id: Multi-tenant routing key. When
                 non-empty, the executor loads credentials from
                 ``wallet_credentials`` via ``CredentialResolver`` at
                 startup and drops incoming command messages whose
                 ``wallet_public_id`` does not match. When empty (the
-                legacy default preserved for backwards compatibility
-                with pre-0c tests that instantiate concrete executors
-                directly), ``_resolve_credentials`` is a no-op and
-                ``self._credentials`` stays ``None``. Tests that rely
-                on this path must inject ``self._credentials`` directly
-                before calling ``start()`` — post-0c cleanup item 1
-                removed the legacy ``AppSettings.kraken_api_key`` /
-                ``walutomat_api_key`` / etc. fallback, so a concrete
-                ``_create_exchange_client`` with ``self._credentials
-                is None`` now raises ``RuntimeError``.
+                legacy default preserved for tests that instantiate
+                concrete executors directly), ``_resolve_credentials``
+                is a no-op and ``self._credentials`` stays ``None``;
+                those tests must inject ``self._credentials`` directly
+                before calling ``start()``, otherwise the concrete
+                ``_create_exchange_client`` raises ``RuntimeError``.
         """
         self.settings = get_settings()
         self.wallet_public_id: str = wallet_public_id
@@ -188,16 +184,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     async def _resolve_credentials(self, exchange_name: OrderExchange) -> None:
         """Load wallet-scoped credentials when wallet_public_id is populated.
 
-        Phase 0c wiring: per-wallet executor instances resolve their
-        credentials from ``wallet_credentials`` via
-        ``CredentialResolver`` exactly once during startup. When
-        ``self.wallet_public_id`` is empty (legacy template path used
-        by pre-0c tests), no lookup happens and ``self._credentials``
-        stays ``None``. Post-0c cleanup item 1 removed the legacy
-        ``AppSettings`` fallback, so those tests must inject
-        ``self._credentials`` directly before ``start()`` — otherwise
-        the concrete ``_create_exchange_client`` method will raise
-        ``RuntimeError`` with an actionable message.
+        Per-wallet executor instances resolve their credentials from
+        ``wallet_credentials`` via ``CredentialResolver`` exactly once
+        during startup. When ``self.wallet_public_id`` is empty
+        (legacy template path used by tests that instantiate concrete
+        executors directly), no lookup happens and ``self._credentials``
+        stays ``None``; those tests must inject ``self._credentials``
+        directly before ``start()`` or the concrete
+        ``_create_exchange_client`` will raise ``RuntimeError``.
 
         Args:
             exchange_name: Exchange identifier used as the credential
@@ -230,13 +224,13 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     def _is_for_my_wallet(self, msg: Any) -> bool:
         """Filter guard: is this command targeted at my wallet instance?
 
-        Phase 0c routing: the per-wallet executor instances all
-        subscribe to the same exchange-prefix topic. Each instance
-        drops commands whose ``wallet_public_id`` does not match its
-        own. When ``self.wallet_public_id`` is empty (legacy template
-        path) every message is accepted — matching pre-0c behavior.
-        The legacy branch will be removed once every callsite that
-        emits commands populates ``wallet_public_id``.
+        Per-wallet executor instances all subscribe to the same
+        exchange-prefix topic. Each instance drops commands whose
+        ``wallet_public_id`` does not match its own. When
+        ``self.wallet_public_id`` is empty (legacy template path),
+        every message is accepted — this branch only fires for
+        single-wallet template instances and tests that instantiate
+        executors directly without populating a wallet.
 
         Args:
             msg: Parsed command message (OrderRequestData,
@@ -1603,7 +1597,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     async def _heartbeat_loop(self) -> None:
         """Periodically publish heartbeat messages and cleanup orphans.
 
-        Post-0c cleanup item 3: when ``self.wallet_public_id`` is
+        When ``self.wallet_public_id`` is
         populated, the heartbeat topic gains a 5th ``{wallet_short}``
         segment so per-wallet executor instances publish on distinct
         topics (``system.heartbeats.executor.{exchange}.{wallet_short}``).

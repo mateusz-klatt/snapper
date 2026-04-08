@@ -1264,7 +1264,7 @@ class Wallet(TemporalMixin, Base):
     Multiple operators may share one wallet via WalletOperatorScopeGrant rows
     (trading desk pattern). One operator may hold grants on multiple wallets
     (own personal + delegated firm wallet). The Wallet entity is distinct from
-    the Operator entity per Plan 0 D1 (multi-tenant foundation).
+    the Operator entity (multi-tenant foundation).
     """
 
     __tablename__ = "wallets"
@@ -1306,7 +1306,7 @@ class WalletCredential(TemporalMixin, Base):
     ``wallet_credentials`` row in lockstep → restart. There is no per-row
     ``encryption_key_id``: the master password is the single source of
     truth, and any multi-key overlap window would be a future enhancement
-    (plan Section 4.2 — YAGNI per post-0c cleanup item 0).
+    (plan Section 4.2 — YAGNI for now).
 
     Encryption reuses the existing Setting encryption infrastructure (master
     key from env var, encrypted at rest). Credentials are pull-on-startup only
@@ -1353,7 +1353,7 @@ class Operator(TemporalMixin, Base):
     many operators (personal seat + firm seat). The user-to-operator mapping
     is M:N via UserOperatorMembership.
 
-    The Operator is distinct from Wallet per Plan 0 D1: an operator does not
+    The Operator is distinct from Wallet: an operator does not
     own a wallet, it is granted scope on one or more wallets via
     WalletOperatorScopeGrant. Multiple operators may share one wallet
     (trading desk pattern).
@@ -1423,7 +1423,7 @@ class UserOperatorMembership(TemporalMixin, Base):
 class WalletOperatorScopeGrant(TemporalMixin, Base):
     """Grant: operator X may trade scope Y on wallet Z.
 
-    Per Plan 0 D2 all grants are instrument-exclusive: at most ONE operator
+    All grants are instrument-exclusive: at most ONE operator
     may hold an active grant on any (wallet, instrument) tuple at any time.
     There is no lock_mode column. Cooperative grants (multiple operators
     sharing the same instrument on the same wallet) are deferred to a

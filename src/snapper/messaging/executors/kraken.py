@@ -17,9 +17,8 @@ Configuration
 Requires a ``wallet_credentials`` row with ``exchange="kraken"``,
 ``credential_type="api_key_secret"``, and a Fernet-encrypted envelope
 ``{"api_key": "...", "api_secret": "..."}``. Loaded at executor
-startup via ``CredentialResolver``. Post-0c cleanup item 1 removed
-the legacy ``AppSettings.kraken_api_key`` / ``kraken_api_secret``
-fallback — wallet_credentials is now the single source of truth.
+startup via ``CredentialResolver``. ``wallet_credentials`` is the
+single source of truth for Kraken API credentials.
 
 Example:
 -------
@@ -81,12 +80,9 @@ class KrakenOrderExecutor(ExchangeExecutorService[KrakenExchangeClient]):
 
         Reads ``api_key`` / ``api_secret`` from the per-wallet
         ``wallet_credentials`` envelope resolved by the base-class
-        ``_resolve_credentials`` call during ``start()``. Post-0c
-        cleanup removed the legacy ``AppSettings.kraken_api_key`` /
-        ``kraken_api_secret`` fallback — credentials come from the
-        ``wallet_credentials`` table via ``CredentialResolver``, full
-        stop. Tests that instantiate ``KrakenOrderExecutor()`` with
-        an empty ``wallet_public_id`` must inject ``self._credentials``
+        ``_resolve_credentials`` call during ``start()``. Tests that
+        instantiate ``KrakenOrderExecutor()`` with an empty
+        ``wallet_public_id`` must inject ``self._credentials``
         directly before calling ``start()``.
 
         Returns:

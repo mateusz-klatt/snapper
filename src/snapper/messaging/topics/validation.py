@@ -524,9 +524,9 @@ def _validate_heartbeat_topic(segments: list[str]) -> tuple[bool, str]:
     - ``system.heartbeats`` (2 seg) — global heartbeat
     - ``system.heartbeats.strategy.{name}`` (4 seg)
     - ``system.heartbeats.executor.{exchange}`` (4 seg) — single-wallet
-      template, still accepted during the Phase 0c migration window
+      template
     - ``system.heartbeats.executor.{exchange}.{wallet_short}`` (5 seg) —
-      Phase 0c.7 per-wallet executor instance. The 5th segment must be
+      per-wallet executor instance. The 5th segment must be
       exactly 12 lowercase hex characters.
     - ``system.heartbeats.feed.{exchange}`` or
       ``system.heartbeats.feed.paper.{source}`` — delegated to

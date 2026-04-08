@@ -178,10 +178,10 @@ class StrategyProcessParameters(StrictBody):
         exchange: Exchange for order execution.
         params: Strategy-specific opaque parameters.
         wallet_public_id: Wallet that owns positions and credentials for
-            order execution. Optional during Phase 0b transition; will
-            become required after Phase 0b.6.
+            order execution. Empty default for backwards compatibility;
+            becomes required after NOT NULL tightening.
         operator_public_id: Trading-identity operator that owns this
-            strategy instance. Optional during Phase 0b transition.
+            strategy instance. Empty default.
     """
 
     name: str

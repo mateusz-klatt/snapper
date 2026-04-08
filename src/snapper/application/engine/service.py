@@ -104,8 +104,8 @@ class TradingEngineService:
                 Paper engines with different tags get isolated shard_keys.
                 Ignored for live mode (one consolidated position per instrument).
             wallet_public_id: Wallet that owns positions and credentials for
-                this engine instance. Phase 0b transitional default ``""``;
-                Phase 0b.6 NOT NULL migration tightens the columns.
+                this engine instance. Transitional default ``""``;
+                NOT NULL migration tightens the columns.
             operator_public_id: Trading-identity operator that initiated the
                 strategy this engine serves. Stored on the engine for audit
                 propagation onto every TradeCommand and OrderRequestData

@@ -152,8 +152,8 @@ __all__ = [
 class ScopeGrantConflictError(Exception):
     """Raised when a wallet_operator_scope_grants insert overlaps an active grant.
 
-    Maps to HTTP 409 at the API layer. Per Plan 0 D2 (instrument-exclusive),
-    at most one operator may hold an active grant covering a given instrument
+    Maps to HTTP 409 at the API layer. Instrument-exclusive: at most one
+    operator may hold an active grant covering a given instrument
     on a given wallet at any time.
     """
 
@@ -181,7 +181,7 @@ class ScopeGrantNotFoundError(Exception):
 
     Maps to HTTP 404 at the API layer. Used by ``handover_grant`` for the
     source-grant existence check (rule 1) and the destination-operator
-    existence check (rule 4) per Plan 0 Section 3.7.
+    existence check (rule 4).
     """
 
 
@@ -518,7 +518,7 @@ class Repository(ABC):
     ) -> tuple[int, str]:
         """Insert new order record, returning (id, public_id) tuple.
 
-        Phase 0c.6: ``wallet_public_id`` is mandatory; the schema
+        ``wallet_public_id`` is mandatory; the schema
         enforces ``NOT NULL`` and the routing layer relies on it to
         dispatch fills back to the owning per-wallet engine.
         ``operator_public_id`` is nullable for strategy-emitted orders.
@@ -542,7 +542,7 @@ class Repository(ABC):
         """Close old order version and insert new one (SCD Type 2).
 
         Returns the new version's integer id. Wallet and operator
-        attribution is copied from the closed row so Phase 0c.6 NOT NULL
+        attribution is copied from the closed row so NOT NULL
         tightening holds across SCD2 versions.
         """
         ...
@@ -567,9 +567,9 @@ class Repository(ABC):
     ) -> int:
         """Insert execution record, returning execution ID.
 
-        Phase 0c.6: ``wallet_public_id`` is mandatory so recovery can
-        group fills into the correct per-wallet engine. Post-0c
-        cleanup item 2: ``operator_public_id`` is nullable so strategy-
+        ``wallet_public_id`` is mandatory so recovery can
+        group fills into the correct per-wallet engine.
+        ``operator_public_id`` is nullable so strategy-
         emitted fills without a human operator still persist.
         """
         ...
@@ -744,16 +744,14 @@ class Repository(ABC):
         Args:
             exchange: Exchange name to filter by.
             as_of: Point-in-time for temporal query.
-            wallet_public_id: Phase 0c.3 multi-tenant filter. When
+            wallet_public_id: Multi-tenant filter. When
                 non-empty, only orders matching ``Order.wallet_public_id
                 == wallet_public_id`` are returned so each per-wallet
                 executor instance recovers exclusively its own orders
                 and never spills cross-wallet state into
                 ``pending_orders``. The legacy default ``""`` skips the
                 filter for backwards compatibility with the single-
-                wallet template path; the legacy branch will be
-                removed once Phase 0c.5 flips templates to
-                ``enabled=False``.
+                wallet template path.
 
         Returns:
             Active order dicts ordered by created_at ASC (chronological
@@ -779,7 +777,7 @@ class Repository(ABC):
             as_of: Point-in-time for temporal query.
             exchange: Optional exchange filter.
             instrument: Optional native symbol filter.
-            wallet_public_id: Phase 0c.3 multi-tenant filter. When
+            wallet_public_id: Multi-tenant filter. When
                 non-empty, only executions whose
                 ``Execution.wallet_public_id`` matches are returned.
                 The legacy default ``""`` skips the filter for
@@ -1135,10 +1133,9 @@ class Repository(ABC):
         Idempotent on the partial unique index over
         ``(wallet_public_id, instrument_public_id, mode, accrual_type,
         accrued_at)``: a duplicate raises ``IntegrityError``, which the
-        caller swallows as a "boundary already applied" signal. Phase
-        0c.6 prepends ``wallet_public_id`` to the dedup key so two
-        wallets can accrue the same instrument/mode/type/boundary
-        without conflict.
+        caller swallows as a "boundary already applied" signal. The
+        wallet prefix in the dedup key lets two wallets accrue the
+        same instrument/mode/type/boundary without conflict.
 
         Args:
             row: Insert payload with all provenance fields.
@@ -1207,7 +1204,7 @@ class Repository(ABC):
     async def create_scope_grant(self, request: CreateScopeGrantRequest) -> ScopeGrantRow:
         """Create a new ``wallet_operator_scope_grants`` row.
 
-        Per Plan 0 D2 (instrument-exclusive), a wallet-level advisory lock is
+        Instrument-exclusive: a wallet-level advisory lock is
         acquired on PostgreSQL before the overlap check, and overlap detection
         spans both same-scope and cross-scope conflicts (an underlying grant
         whose expanded instrument set intersects an existing instrument grant,
@@ -1286,12 +1283,12 @@ class Repository(ABC):
     ) -> tuple[ScopeGrantRow, ScopeGrantRow]:
         """Atomically transfer a scope grant to a different operator.
 
-        Per Plan 0 D3 — single transaction, SCD2-close the source grant and
+        Single transaction: SCD2-close the source grant and
         insert a new grant carrying the same ``scope_kind`` /
         ``underlying_public_id`` / ``instrument_public_id`` under the new
         operator. Validation rules 1, 2, 4 from Section 3.7 are enforced
         here; rule 3 (caller permission) lives in the API layer once auth
-        propagation lands in Phase 0b.
+        propagation is wired.
 
         Args:
             from_grant_public_id: Public ID of the active source grant.
@@ -1320,7 +1317,7 @@ class Repository(ABC):
 
         Used by the login flow's ADMIN role mapping (admins automatically
         receive the operator set covering every active operator at token
-        issue time per Plan 0 Section 4.1) and by future API endpoints
+        issue time) and by future API endpoints
         that surface the operator catalogue.
 
         Args:
@@ -1340,8 +1337,7 @@ class Repository(ABC):
         """Return active operator memberships for a user.
 
         Used by the login flow to compute ``operator_public_ids`` and
-        ``primary_operator_public_id`` on ``AuthPrincipal`` per Plan 0
-        Section 4.1.
+        ``primary_operator_public_id`` on ``AuthPrincipal``.
 
         Args:
             user_public_id: Public ID of the user.
@@ -1365,7 +1361,7 @@ class Repository(ABC):
     ) -> WalletCredentialRow | None:
         """Return the active wallet credential row for ``(exchange, wallet)``.
 
-        Used by ``CredentialResolver`` (Plan 0 Section 4.2) at executor
+        Used by ``CredentialResolver`` at executor
         process startup to fetch the encrypted credential payload before
         constructing the per-wallet exchange client. Pull-on-startup
         only — there is no caching contract on top of this method.
@@ -1392,7 +1388,7 @@ class Repository(ABC):
     ) -> list[WalletCredentialRow]:
         """Return every active wallet credential row at ``as_of``.
 
-        Phase 0c.2 dynamic per-wallet executor spawning consumes this
+        Dynamic per-wallet executor spawning consumes this
         list at server boot to discover the ``(exchange, wallet)``
         pairs that need a dedicated executor instance. Each row drives
         one ``ProcessLauncherService.start_process`` call with a
@@ -2734,7 +2730,7 @@ class SQLAlchemyRepository(Repository):
     async def insert_trade_command(self, row: TradeCommandInsertRow) -> tuple[int, str]:
         """Insert a new trade command row and return (id, public_id).
 
-        Phase 0c.6 makes ``wallet_public_id`` NOT NULL at the schema
+        ``wallet_public_id`` is NOT NULL at the schema
         level. Callers that have not yet migrated to providing an
         explicit wallet default to the empty-string legacy sentinel
         (the same default that :class:`ExchangeExecutorService` uses
@@ -3006,10 +3002,11 @@ class SQLAlchemyRepository(Repository):
     async def insert_venue_event(self, row: VenueEventInsertRow) -> int:
         """Insert a venue event and return its local_seq.
 
-        Phase 0c.6 legacy-default: callers without a populated
-        ``wallet_public_id`` get empty string to satisfy the NOT NULL
+        Callers without a populated ``wallet_public_id`` get the
+        empty-string legacy sentinel to satisfy the NOT NULL
         constraint. Production executor paths always populate the
-        wallet explicitly; the default only covers pre-0c.6 fixtures.
+        wallet explicitly; the default only covers test fixtures
+        that have not migrated to providing one.
         """
         async with self.session() as s:
             row_with_defaults: dict[str, Any] = {"wallet_public_id": "", **row}
@@ -3064,7 +3061,7 @@ class SQLAlchemyRepository(Repository):
     async def upsert_checkpoint(self, row: CheckpointUpsertRow) -> int:
         """SCD2 upsert for trade projection checkpoint.
 
-        Returns the new row id. Phase 0c.6 legacy-default: missing
+        Returns the new row id. Legacy-default: missing
         ``wallet_public_id`` collapses to empty string for
         NOT-NULL-compliant inserts on legacy fixtures.
         """
@@ -4003,7 +4000,8 @@ class SQLAlchemyRepository(Repository):
     ) -> None:
         """Transaction-scoped advisory lock keyed by ``hashtext(wallet_public_id)``.
 
-        Per Plan 0 D2 enforcement layer 1. Required because PostgreSQL
+        Enforcement layer 1 for instrument-exclusive grants. Required
+        because PostgreSQL
         ``SELECT ... FOR UPDATE`` on zero rows locks nothing, allowing two
         concurrent inserts to both pass overlap checks. SQLite is single-writer
         so no extra lock is needed (BEGIN already serializes writers).
@@ -4262,7 +4260,7 @@ class SQLAlchemyRepository(Repository):
 
         Returns None when no active Instrument row exists for the
         ``(native_symbol, exchange)`` pair at ``as_of``. Used by the
-        Phase 0b.4 strategy permission check to map strategy ``outputs``
+        strategy permission check to map strategy ``outputs``
         (symbols) to the instrument set covered by an operator's grants.
         """
         async with self.session() as s:

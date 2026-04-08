@@ -17,12 +17,12 @@ class TokenClaims(StrictBody):
     Does not inherit StrictDataSchema because JWT claims are external
     tokens parsed from JWTs, not internal bus messages.
 
-    Multi-tenant claims (Plan 0 Phase 0b Section 4.1) carry the same
-    identity surface as ``AuthPrincipal`` so a refresh round-trip
-    preserves the user's trading-context selection without re-querying
-    the DB. Optional defaults keep older tokens (issued before Phase 0b
-    rolled out) decodable: a stale token simply has empty multi-tenant
-    fields and the next token issuance refreshes them from the DB.
+    Multi-tenant claims carry the same identity surface as
+    ``AuthPrincipal`` so a refresh round-trip preserves the user's
+    trading-context selection without re-querying the DB. Optional
+    defaults keep older tokens decodable: a stale token simply has
+    empty multi-tenant fields and the next token issuance refreshes
+    them from the DB.
 
     Attributes:
         sub: Subject (user ID).
@@ -33,10 +33,10 @@ class TokenClaims(StrictBody):
         iat: Issued at timestamp (Unix epoch).
         jti: JWT ID (unique token identifier).
         sid: Session ID for token rotation tracking.
-        user_public_id: Stable UUID7 of the user row (Phase 0b).
-        operator_public_ids: Operators this user may act AS (Phase 0b).
-        primary_operator_public_id: Default operator at login (Phase 0b).
-        active_wallet_public_id: Last-selected wallet UI state (Phase 0b).
+        user_public_id: Stable UUID7 of the user row.
+        operator_public_ids: Operators this user may act AS.
+        primary_operator_public_id: Default operator at login.
+        active_wallet_public_id: Last-selected wallet UI state.
     """
 
     sub: str

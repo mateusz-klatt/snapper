@@ -397,7 +397,7 @@ class BaseStrategy(ABC):
 
         Parses the payload via parse_message to get session_id and sequence_id.
         Silently skips messages that fail parsing (e.g. unknown types).
-        Phase 0c.7: passes ``wallet_public_id`` (when the typed message
+        Passes ``wallet_public_id`` (when the typed message
         carries one) so per-wallet streams on the same topic do not
         interleave into false gaps.
         """

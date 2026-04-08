@@ -456,24 +456,20 @@ class ProcessLauncherService:
     async def spawn_per_wallet_executors(self) -> int:
         """Spawn one executor instance per active ``wallet_credentials`` row.
 
-        Phase 0c.2 of the multi-tenant refactor. Queries
-        ``wallet_credentials`` for every active row and starts a
+        Queries ``wallet_credentials`` for every active row and starts a
         per-wallet executor instance for each ``(exchange,
         wallet_public_id)`` pair via :meth:`start_process`. The dynamic
         process name is ``executor_{exchange}_w{wallet_short}`` where
         ``wallet_short`` is the first 12 hex characters of the wallet
-        UUID7 (Phase 0c.4 shard_key segment, populated here so the
-        cache is consistent at boot).
+        UUID7 (shard_key segment, populated here so the cache is
+        consistent at boot).
 
-        The spawn loop is intentionally **additive** during Phase 0c.2:
-        executor templates registered with ``enabled=True`` continue to
-        run as the legacy single-wallet path. Each per-wallet instance
-        joins the same exchange-prefix topic subscription and the
-        wallet filter on :meth:`ExchangeExecutorService._is_for_my_wallet`
-        keeps cross-wallet messages from spilling into the wrong
-        instance. Phase 0c.5 (legacy fallback cleanup) flips the
-        templates to ``enabled=False`` once every test populates
-        ``wallet_public_id`` directly.
+        The spawn loop is intentionally **additive**: executor templates
+        registered with ``enabled=True`` continue to run as the legacy
+        single-wallet path. Each per-wallet instance joins the same
+        exchange-prefix topic subscription and the wallet filter on
+        :meth:`ExchangeExecutorService._is_for_my_wallet` keeps
+        cross-wallet messages from spilling into the wrong instance.
 
         The spawner skips any exchange whose template class is not
         registered (e.g. an exchange-specific build that omits
@@ -503,7 +499,7 @@ class ProcessLauncherService:
             logger.error(f"Failed to query wallet_credentials for spawner: {exc}")
             return 0
         if not credentials:
-            logger.info("Phase 0c.2 spawner: no wallet credentials, skipping")
+            logger.info("Per-wallet spawner: no wallet credentials, skipping")
             return 0
         registry = get_registered_processes()
         spawned = 0
@@ -513,7 +509,7 @@ class ProcessLauncherService:
             entry = registry.get(template_name)
             if entry is None:
                 logger.warning(
-                    f"Phase 0c.2 spawner: template '{template_name}' not "
+                    f"Per-wallet spawner: template '{template_name}' not "
                     f"registered, skipping wallet={credential['wallet_public_id']}"
                 )
                 continue
@@ -521,7 +517,7 @@ class ProcessLauncherService:
             instance_name = f"executor_{credential['exchange']}_w{wallet_short}"
             if instance_name in self.started_processes:
                 logger.info(
-                    f"Phase 0c.2 spawner: instance '{instance_name}' already running, skipping"
+                    f"Per-wallet spawner: instance '{instance_name}' already running, skipping"
                 )
                 continue
             instance_config = ProcessConfigModel(
@@ -532,7 +528,7 @@ class ProcessLauncherService:
                 method=entry.method,
                 parameters={"wallet_public_id": credential["wallet_public_id"]},
                 note=(
-                    f"Phase 0c per-wallet executor for "
+                    f"Per-wallet executor for "
                     f"exchange={credential['exchange']} "
                     f"wallet={credential['wallet_public_id']}"
                 ),
@@ -545,12 +541,12 @@ class ProcessLauncherService:
                 await self.start_process(instance_config)
                 spawned += 1
                 logger.info(
-                    f"Phase 0c.2 spawner: started '{instance_name}' for "
+                    f"Per-wallet spawner: started '{instance_name}' for "
                     f"wallet={credential['wallet_public_id']}"
                 )
             except Exception as exc:
                 logger.error(
-                    f"Phase 0c.2 spawner: failed to start '{instance_name}' "
+                    f"Per-wallet spawner: failed to start '{instance_name}' "
                     f"for wallet={credential['wallet_public_id']}: {exc}"
                 )
                 if (
@@ -558,7 +554,7 @@ class ProcessLauncherService:
                     and entry.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
                 ):
                     failed_core_names.append(instance_name)
-        logger.info(f"Phase 0c.2 spawner: started {spawned} per-wallet executor(s)")
+        logger.info(f"Per-wallet spawner: started {spawned} per-wallet executor(s)")
         if failed_core_names:
             raise CoreProcessStartupError(failed_core_names)
         return spawned

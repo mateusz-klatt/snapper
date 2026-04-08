@@ -182,7 +182,7 @@ def heartbeat_topic(component: str, name: str, wallet_short: str = "") -> str:
     Args:
         component: Component category (e.g., 'feed', 'executor', 'strategy').
         name: Specific component name (e.g., 'kraken', 'paper').
-        wallet_short: Optional 12-hex-char wallet prefix (Phase 0c.7).
+        wallet_short: Optional 12-hex-char wallet prefix.
             When supplied for an executor component, the topic gains a
             5th segment ``.{wallet_short}`` so per-wallet executor
             instances publish on distinct heartbeat topics. Empty
