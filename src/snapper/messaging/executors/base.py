@@ -1575,6 +1575,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 created_at=order.timestamp,
                 leverage=order.leverage,
                 reduce_only=order.reduce_only,
+                wallet_public_id=order.wallet_public_id,
+                operator_public_id=order.operator_public_id,
+                user_public_id=order.user_public_id,
             )
             await self.msg_publisher.send(topic, order_status)
             logger.info(

@@ -144,6 +144,7 @@ class TraderCoordinator(RegisterableProcess):
         self.balance_service: BalanceService = BalanceService()
         self.outbox: OutboxDispatcher | None = None
         self._order_shard_keys: dict[str, str] = {}
+        self._wallet_short_to_id: dict[str, str] = {}
 
     @staticmethod
     def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
@@ -172,33 +173,60 @@ class TraderCoordinator(RegisterableProcess):
     ) -> str:
         """Build the in-memory engine_key string.
 
-        Phase 0b deliberately keeps the engines dict KEY format flat
-        (``{instrument}@{exchange}-{mode_or_tag}``) because the
-        persisted ``shard_key`` column format is also flat (Section 3.9
-        row 4 defers the wallet_short parser change to Phase 0c).
-        Including wallet in the in-memory key here without the matching
-        shard_key / venue_events / checkpoints / recovery extension
-        would create an asymmetry where live signals with a populated
-        wallet build ``...-w<wallet_short>`` engines while recovery
-        sites would only ever rebuild flat engines, producing duplicate
-        engines for the same logical position the moment any caller
-        starts populating ``wallet_public_id`` on a SignalData.
+        Phase 0c.4 wallet-aware sharding: when ``wallet_public_id`` is
+        non-empty, the key gets a ``-w{wallet_short}`` suffix where
+        ``wallet_short`` is the first 12 hex characters of the wallet
+        UUID7 with dashes stripped (matching the spawner naming used
+        by ``ProcessLauncherService.spawn_per_wallet_executors`` and
+        the ``TradingEngineService._shard_key`` segment). Empty
+        ``wallet_public_id`` keeps the legacy flat format
+        (``{instrument}@{exchange}-{mode_or_tag}``) for backwards
+        compatibility with the single-wallet template path; the
+        legacy branch is removed in Phase 0c.5 once every callsite
+        populates wallet identity.
 
-        Phase 0b *also* fails closed at the signal entry point on any
-        non-empty wallet (see ``_on_signal``) so the contamination
-        scenario where two strategies share a flat-key engine and stamp
-        each other's wallet identity onto outgoing commands cannot
-        happen either: a populated-wallet signal is dropped at the door
-        until Phase 0c teaches recovery the wallet dimension and this
-        helper switches to the wallet-aware
-        ``{instrument}@{exchange}-{mode_or_tag}-w{wallet_short}`` form.
-
-        The ``wallet_public_id`` parameter is accepted (and currently
-        unused after the empty fast path) to lock in the call signature
-        for Phase 0c.
+        The wallet-aware key is what unblocks the
+        ``_on_signal`` fail-closed guard lifted in this same commit:
+        the recovery sites at :meth:`_recover_from_checkpoints`,
+        :meth:`_recover_from_executions`, and
+        :meth:`_recover_active_orders` all parse the persisted
+        ``shard_key`` segment back into ``wallet_public_id`` so
+        live and recovery engines key the same way.
         """
-        del wallet_public_id
-        return f"{instrument}@{exchange}-{mode_or_tag}"
+        base = f"{instrument}@{exchange}-{mode_or_tag}"
+        if wallet_public_id:
+            wallet_short = wallet_public_id.replace("-", "")[:12].lower()
+            return f"{base}-w{wallet_short}"
+        return base
+
+    @staticmethod
+    def _parse_shard_key(shard_key: str) -> tuple[str, str, str, str, str | None] | None:
+        """Parse a persisted ``shard_key`` into its components.
+
+        Phase 0c.4 introduces an optional ``w{wallet_short}`` segment
+        between ``mode`` and the optional paper-mode strategy_tag.
+        The parser handles both legacy (3- or 4-segment) and
+        wallet-aware (4- or 5-segment) formats.
+
+        Returns:
+            Tuple of ``(exchange, instrument, mode, wallet_short,
+            strategy_tag)`` where ``wallet_short`` is empty for
+            legacy keys and ``strategy_tag`` is None when absent.
+            Returns ``None`` if the key has fewer than 3 segments.
+        """
+        parts = shard_key.split(".")
+        if len(parts) < 3:
+            return None
+        exchange_str, instrument, mode_str = parts[0], parts[1], parts[2]
+        wallet_short = ""
+        strategy_tag: str | None = None
+        remaining = parts[3:]
+        if remaining and remaining[0].startswith("w") and len(remaining[0]) == 13:
+            wallet_short = remaining[0][1:]
+            remaining = remaining[1:]
+        if remaining:
+            strategy_tag = remaining[0]
+        return exchange_str, instrument, mode_str, wallet_short, strategy_tag
 
     async def start(self) -> None:
         """Start the trader coordinator.
@@ -229,7 +257,43 @@ class TraderCoordinator(RegisterableProcess):
         )
         self.settings = get_settings_with_service(settings_service)
         self.repository = get_repository(self.settings.db_url)
+        await self._build_wallet_short_cache()
         logger.info("ZMQTrader: Settings service initialized with database access")
+
+    async def _build_wallet_short_cache(self) -> None:
+        """Phase 0c.4: populate the wallet_short -> wallet_public_id cache.
+
+        Reads every active row from ``wallet_credentials`` and indexes
+        the wallet by its 12-hex-char prefix. The cache lets the
+        signal-routing path resolve a wallet UUID7 from a parsed
+        ``shard_key`` segment without an extra DB roundtrip per
+        message. Boot-time only — rotation requires a coordinator
+        restart, matching the executor credential pull contract.
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return
+        try:
+            credentials = await self.repository.list_active_wallet_credentials(
+                as_of=datetime.now(UTC)
+            )
+        except Exception as exc:
+            logger.warning(f"ZMQTrader: failed to load wallet_credentials cache: {exc}")
+            return
+        cache: dict[str, str] = {}
+        for row in credentials:
+            wallet_public_id = row["wallet_public_id"]
+            wallet_short = wallet_public_id.replace("-", "")[:12].lower()
+            existing = cache.get(wallet_short)
+            if existing and existing != wallet_public_id:
+                logger.error(
+                    f"ZMQTrader: wallet_short collision on '{wallet_short}' "
+                    f"between {existing} and {wallet_public_id}; signal routing "
+                    f"to the second wallet will fail"
+                )
+                continue
+            cache[wallet_short] = wallet_public_id
+        self._wallet_short_to_id = cache
+        logger.info(f"ZMQTrader: wallet_short cache populated with {len(cache)} entries")
 
     async def _recover_engine_state(self) -> None:
         """Rebuild engine confirmed state from checkpoints, executions, and active orders.
@@ -273,14 +337,19 @@ class TraderCoordinator(RegisterableProcess):
         recovered: set[str] = set()
         for cp in checkpoints:
             shard_key = cp["shard_key"]
-            parts = shard_key.split(".")
-            if len(parts) < 3:
+            parsed_shard = self._parse_shard_key(shard_key)
+            if parsed_shard is None:
                 logger.warning(f"ZMQTrader: Invalid shard_key format: {shard_key}, skipping")
                 continue
-            exchange_str = parts[0]
-            instrument = parts[1]
-            mode_str = parts[2]
-            strategy_tag = parts[3] if len(parts) >= 4 else None
+            exchange_str, instrument, mode_str, wallet_short, strategy_tag = parsed_shard
+            wallet_public_id = (
+                self._wallet_short_to_id.get(wallet_short, "") if wallet_short else ""
+            )
+            if wallet_short and not wallet_public_id:
+                logger.warning(
+                    f"ZMQTrader: Checkpoint shard_key {shard_key} carries unknown "
+                    f"wallet_short '{wallet_short}'; recovering with empty wallet"
+                )
 
             valid_exchanges = get_args(OrderExchange)
             if exchange_str not in valid_exchanges:
@@ -337,7 +406,10 @@ class TraderCoordinator(RegisterableProcess):
             )
 
             engine = await self._create_engine_for_recovery(
-                instrument, exchange_str, strategy_tag=strategy_tag
+                instrument,
+                exchange_str,
+                strategy_tag=strategy_tag,
+                wallet_public_id=wallet_public_id,
             )
             if engine is None:
                 continue
@@ -347,7 +419,7 @@ class TraderCoordinator(RegisterableProcess):
                 instrument,
                 exchange_str,
                 strategy_tag if strategy_tag else mode_str,
-                "",
+                wallet_public_id,
             )
             self.engines[engine_key] = engine
             self.last_signal_time[engine_key] = time.time()
@@ -415,15 +487,22 @@ class TraderCoordinator(RegisterableProcess):
             logger.info("ZMQTrader: No executions to recover")
             return []
         fills_by_key: dict[str, list[ExecutionRow]] = {}
+        wallet_for_key: dict[str, str] = {}
         for exe in executions:
-            key = self._build_engine_key(exe["instrument"], exe["exchange"], "live", "")
+            wallet_public_id = exe.get("wallet_public_id") or ""
+            key = self._build_engine_key(
+                exe["instrument"], exe["exchange"], "live", wallet_public_id
+            )
             fills_by_key.setdefault(key, []).append(exe)
+            wallet_for_key.setdefault(key, wallet_public_id)
         for engine_key, fills in fills_by_key.items():
             if engine_key in skip_keys:
                 logger.debug(f"ZMQTrader: Skipping full replay for {engine_key} (checkpoint)")
                 continue
             engine = await self._create_engine_for_recovery(
-                fills[0]["instrument"], fills[0]["exchange"]
+                fills[0]["instrument"],
+                fills[0]["exchange"],
+                wallet_public_id=wallet_for_key.get(engine_key, ""),
             )
             if engine is None:
                 continue
@@ -454,9 +533,12 @@ class TraderCoordinator(RegisterableProcess):
         for db_order in all_active:
             instrument = db_order["instrument"]
             exchange_str = db_order["exchange"]
-            key = self._build_engine_key(instrument, exchange_str, "live", "")
+            order_wallet_public_id = db_order.get("wallet_public_id") or ""
+            key = self._build_engine_key(instrument, exchange_str, "live", order_wallet_public_id)
             if key not in self.engines:
-                engine = await self._create_engine_for_recovery(instrument, exchange_str)
+                engine = await self._create_engine_for_recovery(
+                    instrument, exchange_str, wallet_public_id=order_wallet_public_id
+                )
                 if engine is None:
                     continue
                 self.engines[key] = engine
@@ -490,6 +572,7 @@ class TraderCoordinator(RegisterableProcess):
         instrument: str,
         exchange_str: str,
         strategy_tag: str | None = None,
+        wallet_public_id: str = "",
     ) -> TradingEngineService | None:
         """Create a TradingEngineService for recovery if exchange is valid."""
         valid_exchanges = get_args(OrderExchange)
@@ -521,6 +604,7 @@ class TraderCoordinator(RegisterableProcess):
             repository=repo_for_engine,
             outbox=self.outbox,
             strategy_tag=strategy_tag,
+            wallet_public_id=wallet_public_id,
         )
 
     @staticmethod
@@ -1130,8 +1214,8 @@ class TraderCoordinator(RegisterableProcess):
         assert self.msg_publisher is not None
         exchange = cast(OrderExchange, cmd["exchange"])
         topic = order_command_topic(exchange, cmd["instrument"], OrderCommandEnum.SUBMIT)
-        sk_parts = cmd["shard_key"].split(".")
-        tag = sk_parts[3] if len(sk_parts) >= 4 else None
+        parsed_shard = self._parse_shard_key(cmd["shard_key"])
+        tag = parsed_shard[4] if parsed_shard else None
         order = OrderRequestData(
             public_id=cmd["client_order_id"],
             timestamp=datetime.now(UTC),
@@ -1253,16 +1337,6 @@ class TraderCoordinator(RegisterableProcess):
             return
         wallet_public_id = signal.wallet_public_id or ""
         operator_public_id = signal.operator_public_id or ""
-        if wallet_public_id:
-            logger.warning(
-                f"ZMQTrader: Dropping signal with populated wallet_public_id "
-                f"'{wallet_public_id}' on instrument '{instrument}': Phase 0b "
-                f"recovery sites cannot reconstruct wallet from the persisted "
-                f"shard_key yet, so accepting wallet-tagged signals risks live/"
-                f"recovery engine divergence. Phase 0c will lift this guard "
-                f"once the shard_key parser learns the wallet_short segment."
-            )
-            return
         engine_key = self._build_engine_key(instrument, exchange, mode, wallet_public_id)
         if engine_key in self.engines:
             halt_key = self.engines[engine_key]._shard_key

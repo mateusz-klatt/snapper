@@ -26,6 +26,7 @@ from snapper.application.portfolio.models import PositionStateModel
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
 from snapper.config.app import AppSettings
+from snapper.data.repository import SQLAlchemyRepository
 from snapper.messaging.infrastructure.gap_detector import GapDetector
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ExecutionData
@@ -3363,19 +3364,269 @@ def test_build_engine_key_flat_when_wallet_empty() -> None:
     assert key == "BTC-USD@kraken-live"
 
 
-def test_build_engine_key_ignores_wallet_in_phase_0b() -> None:
-    """Verify _build_engine_key still returns a flat key in Phase 0b.
+def test_build_engine_key_includes_wallet_short_when_populated() -> None:
+    """Phase 0c.4: ``_build_engine_key`` appends ``-w{wallet_short}`` segment.
 
-    Given: A populated wallet_public_id (which strategies CAN already
-        emit via StrategyConfig),
-    When: _build_engine_key is invoked,
-    Then: The returned key is still flat — Phase 0b does not yet shard
-        engines by wallet because the persisted shard_key column format
-        is unchanged. ``_on_signal`` fails closed on any populated
-        wallet to prevent live/recovery divergence; this helper just
-        keeps the dict-key shape uniform.
+    Given: A populated wallet_public_id (UUID7 with dashes and uppercase),
+    When: ``_build_engine_key`` is invoked,
+    Then: The returned key has the legacy ``{instrument}@{exchange}-{mode}``
+        prefix plus ``-w{wallet_short}`` where ``wallet_short`` is the
+        first 12 hex characters of the wallet UUID7 with dashes
+        stripped and lowercased — matching the
+        ``ProcessLauncherService`` per-wallet executor instance name
+        and the ``TradingEngineService._shard_key`` segment so live
+        and recovery engines key the same way.
     """
     key = TraderCoordinator._build_engine_key(
         "BTC-USD", "kraken", "live", "01975A8B-3C7D-7000-8000-AAAAAAAAAAAA"
     )
+    assert key == "BTC-USD@kraken-live-w01975a8b3c7d"
+
+
+def test_build_engine_key_legacy_flat_key_when_wallet_empty() -> None:
+    """Empty ``wallet_public_id`` keeps the pre-0c.4 flat key shape.
+
+    Given: An empty ``wallet_public_id`` (legacy template path used by
+        the single-wallet bootstrap and pre-0c tests),
+    When: ``_build_engine_key`` is invoked,
+    Then: The returned key omits the wallet_short suffix entirely so
+        the legacy backwards-compat path keeps working until 0c.5.
+    """
+    key = TraderCoordinator._build_engine_key("BTC-USD", "kraken", "live", "")
     assert key == "BTC-USD@kraken-live"
+
+
+class TestPhase0cShardKeyParser:
+    """Phase 0c.4 ``_parse_shard_key`` static helper coverage."""
+
+    def test_parse_legacy_three_segment_key(self) -> None:
+        """Legacy 3-segment ``exchange.instrument.mode`` keys parse.
+
+        Given: A pre-0c.4 flat shard_key with no wallet and no tag,
+        When: ``_parse_shard_key`` is invoked,
+        Then: The tuple carries empty wallet_short and None strategy_tag.
+        """
+        parsed = TraderCoordinator._parse_shard_key("kraken.BTC-USD.live")
+        assert parsed == ("kraken", "BTC-USD", "live", "", None)
+
+    def test_parse_legacy_four_segment_key_with_strategy_tag(self) -> None:
+        """Legacy 4-segment ``...{mode}.{strategy_tag}`` keys parse.
+
+        Given: A pre-0c.4 paper shard_key with a strategy_tag suffix,
+        When: ``_parse_shard_key`` is invoked,
+        Then: The strategy_tag populates the 5th tuple field and
+            wallet_short stays empty.
+        """
+        parsed = TraderCoordinator._parse_shard_key("paper.BTC-USD.paper.scalp")
+        assert parsed == ("paper", "BTC-USD", "paper", "", "scalp")
+
+    def test_parse_wallet_aware_four_segment_key(self) -> None:
+        """Phase 0c.4 4-segment key with wallet_short suffix parses.
+
+        Given: A wallet-aware live shard_key
+            ``exchange.instrument.mode.w{12hex}``,
+        When: ``_parse_shard_key`` is invoked,
+        Then: The wallet_short field carries the 12 hex chars without
+            the ``w`` prefix and strategy_tag stays None.
+        """
+        parsed = TraderCoordinator._parse_shard_key("kraken.BTC-USD.live.w01975a8b3c7d")
+        assert parsed == ("kraken", "BTC-USD", "live", "01975a8b3c7d", None)
+
+    def test_parse_wallet_aware_five_segment_key_with_tag(self) -> None:
+        """Phase 0c.4 5-segment key with wallet_short + strategy_tag.
+
+        Given: A wallet-aware paper shard_key
+            ``exchange.instrument.mode.w{12hex}.{strategy_tag}``,
+        When: ``_parse_shard_key`` is invoked,
+        Then: Both wallet_short and strategy_tag are populated.
+        """
+        parsed = TraderCoordinator._parse_shard_key("paper.BTC-USD.paper.w01975a8b3c7d.scalp")
+        assert parsed == ("paper", "BTC-USD", "paper", "01975a8b3c7d", "scalp")
+
+    def test_parse_returns_none_on_too_few_segments(self) -> None:
+        """Keys with fewer than 3 segments return None for skip handling."""
+        assert TraderCoordinator._parse_shard_key("kraken.BTC-USD") is None
+        assert TraderCoordinator._parse_shard_key("") is None
+
+    def test_parse_ambiguous_wallet_prefix_kept_as_strategy_tag(self) -> None:
+        """A 4th segment shorter than ``w`` + 12 hex stays as strategy_tag.
+
+        Given: A segment starting with ``w`` but not exactly 13 chars
+            (i.e. a legacy strategy_tag that happens to start with w),
+        When: ``_parse_shard_key`` is invoked,
+        Then: The tag is not misinterpreted as wallet_short — it stays
+            in the strategy_tag slot and wallet_short stays empty.
+        """
+        parsed = TraderCoordinator._parse_shard_key("paper.BTC-USD.paper.wmain")
+        assert parsed == ("paper", "BTC-USD", "paper", "", "wmain")
+
+
+class TestPhase0cBuildWalletShortCache:
+    """Phase 0c.4 ``_build_wallet_short_cache`` coverage."""
+
+    def _make_trader(self) -> TraderCoordinator:
+        with patch("snapper.application.engine.trader.get_settings") as mock_settings:
+            mock_settings.return_value = MagicMock(db_url="sqlite+aiosqlite:///:memory:")
+            return TraderCoordinator(signal_topics=["signals."])
+
+    @pytest.mark.asyncio
+    async def test_skips_when_repository_not_sqlalchemy(self) -> None:
+        """Non-SQLAlchemy repository (e.g. fake stub) skips cache load."""
+        trader = self._make_trader()
+        trader.repository = cast(Any, MagicMock())
+        await trader._build_wallet_short_cache()
+        assert trader._wallet_short_to_id == {}
+
+    @pytest.mark.asyncio
+    async def test_catches_repository_exceptions_and_returns(self) -> None:
+        """DB failure during cache build is logged and swallowed.
+
+        Given: A SQLAlchemyRepository whose
+            ``list_active_wallet_credentials`` raises at boot (e.g. DB
+            migration race),
+        When: ``_build_wallet_short_cache`` is invoked,
+        Then: The exception is caught, the cache stays empty, and
+            startup continues (no CORE failure propagation here).
+        """
+        trader = self._make_trader()
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        repo.list_active_wallet_credentials = AsyncMock(side_effect=RuntimeError("db down"))
+        trader.repository = repo
+        await trader._build_wallet_short_cache()
+        assert trader._wallet_short_to_id == {}
+
+    @pytest.mark.asyncio
+    async def test_populates_cache_from_credentials(self) -> None:
+        """Two active credentials produce two cache entries."""
+        trader = self._make_trader()
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "cred-a",
+                    "wallet_public_id": "01975A8B-3C7D-7000-8000-AAAAAAAAAAAA",
+                    "exchange": "kraken",
+                    "credential_type": "api_key_secret",
+                    "encrypted_payload": "enc",
+                    "encryption_key_id": "v1",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 1,
+                },
+                {
+                    "public_id": "cred-b",
+                    "wallet_public_id": "01abcdef-0000-7000-8000-bbbbbbbbbbbb",
+                    "exchange": "paper",
+                    "credential_type": "paper",
+                    "encrypted_payload": "enc",
+                    "encryption_key_id": "v1",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 2,
+                },
+            ]
+        )
+        trader.repository = repo
+        await trader._build_wallet_short_cache()
+        assert trader._wallet_short_to_id == {
+            "01975a8b3c7d": "01975A8B-3C7D-7000-8000-AAAAAAAAAAAA",
+            "01abcdef0000": "01abcdef-0000-7000-8000-bbbbbbbbbbbb",
+        }
+
+    @pytest.mark.asyncio
+    async def test_detects_wallet_short_collision_and_skips_second(self) -> None:
+        """Collision on the first-12-hex prefix logs error and keeps winner.
+
+        Given: Two wallets whose UUID7 values collide on the first 12
+            hex characters (birthday-bound unlikely in production but
+            covered here for defensive behaviour),
+        When: ``_build_wallet_short_cache`` is invoked,
+        Then: The first wallet wins the cache slot and the second is
+            dropped with an error log — the operator notices and can
+            regenerate one wallet.
+        """
+        trader = self._make_trader()
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "cred-first",
+                    "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
+                    "exchange": "kraken",
+                    "credential_type": "api_key_secret",
+                    "encrypted_payload": "enc",
+                    "encryption_key_id": "v1",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 1,
+                },
+                {
+                    "public_id": "cred-colliding",
+                    "wallet_public_id": "01975a8b-3c7d-cccc-8000-bbbbbbbbbbbb",
+                    "exchange": "kraken",
+                    "credential_type": "api_key_secret",
+                    "encrypted_payload": "enc",
+                    "encryption_key_id": "v1",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 2,
+                },
+            ]
+        )
+        trader.repository = repo
+        await trader._build_wallet_short_cache()
+        assert trader._wallet_short_to_id == {
+            "01975a8b3c7d": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
+        }
+
+
+class TestPhase0cEngineShardKeyWithWallet:
+    """Phase 0c.4 ``TradingEngineService._shard_key`` wallet segment."""
+
+    def test_shard_key_includes_wallet_short_for_live_mode(self) -> None:
+        """Live engine with wallet produces ``...live.w{wallet_short}``.
+
+        Given: A live ``TradingEngineService`` constructed with a
+            populated ``wallet_public_id`` (UUID7 with dashes and
+            mixed case),
+        When: ``_shard_key`` is read,
+        Then: The key carries the legacy ``exchange.instrument.mode``
+            prefix plus a ``.w{wallet_short}`` segment with 12 hex
+            chars (dashes stripped, lowercased) — matching the
+            spawner and ``_build_engine_key`` naming so persisted
+            venue events stay consistent with runtime engines.
+        """
+        mock_publisher = MagicMock()
+        engine = TradingEngineService(
+            "BTC-USD",
+            execution_socket=mock_publisher,
+            cfg=EngineConfigModel(),
+            exchange="kraken",
+            wallet_public_id="01975A8B-3C7D-7000-8000-AAAAAAAAAAAA",
+        )
+        assert engine._shard_key == "kraken.BTC-USD.live.w01975a8b3c7d"
+
+    def test_shard_key_wallet_short_precedes_strategy_tag_for_paper(self) -> None:
+        """Paper engine: wallet_short segment comes before strategy_tag.
+
+        Given: A paper ``TradingEngineService`` with both a populated
+            ``wallet_public_id`` and a ``strategy_tag``,
+        When: ``_shard_key`` is read,
+        Then: The key is ``paper.BTC-USD.paper.w{wallet_short}.{tag}``
+            (wallet_short segment BEFORE strategy_tag) matching the
+            Phase 0c.4 parser contract.
+        """
+        mock_publisher = MagicMock()
+        engine = TradingEngineService(
+            "BTC-USD",
+            execution_socket=mock_publisher,
+            cfg=EngineConfigModel(),
+            exchange="paper",
+            strategy_tag="scalp",
+            wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
+        )
+        assert engine._shard_key == "paper.BTC-USD.paper.w01975a8b3c7d.scalp"

@@ -683,6 +683,36 @@ class TestCheckpointRecovery:
         assert len(coord.engines) == 0
 
     @pytest.mark.asyncio
+    async def test_checkpoint_with_unknown_wallet_short_logs_warning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Phase 0c.4: unknown wallet_short in checkpoint logs a warning.
+
+        Given: A checkpoint whose shard_key carries a ``w{wallet_short}``
+            segment not present in ``self._wallet_short_to_id`` (e.g.
+            credential removed between checkpoint persistence and
+            coordinator restart),
+        When: ``_recover_from_checkpoints`` runs,
+        Then: The unknown-wallet branch fires — the shard is still
+            recovered but with empty wallet_public_id so legacy
+            recovery paths keep working and the operator sees the
+            warning in the log.
+        """
+        coord = _make_coord(monkeypatch)
+        coord._wallet_short_to_id = {}
+        mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+        cp = _make_checkpoint(shard_key="kraken.BTC-USD.live.w01975a8b3c7d")
+        mock_repo.get_all_checkpoints = AsyncMock(return_value=[cp])
+        mock_repo.get_venue_events_after = AsyncMock(return_value=[])
+        mock_repo.get_executions_for_recovery = AsyncMock(return_value=[])
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
+        _set_sqlalchemy_repo(coord, mock_repo)
+
+        await coord._recover_engine_state()
+
+        assert "BTC-USD@kraken-live" in coord.engines
+
+    @pytest.mark.asyncio
     async def test_engine_creation_failure_skips_shard(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

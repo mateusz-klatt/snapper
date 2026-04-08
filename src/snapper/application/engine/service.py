@@ -132,6 +132,9 @@ class TradingEngineService:
         self.wallet_public_id = wallet_public_id
         self.operator_public_id = operator_public_id
         base = f"{exchange}.{instrument}.{self.mode}"
+        if wallet_public_id:
+            wallet_short = wallet_public_id.replace("-", "")[:12].lower()
+            base = f"{base}.w{wallet_short}"
         self._shard_key = (
             f"{base}.{strategy_tag}"
             if self.mode == ExecutionModeEnum.PAPER and strategy_tag

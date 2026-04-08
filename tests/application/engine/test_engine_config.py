@@ -865,19 +865,20 @@ class TestTraderSignalHandling:
     @patch("snapper.application.engine.trader.get_repository")
     @patch("snapper.application.engine.trader.get_settings")
     @patch("snapper.application.engine.trader.zmq.Context")
-    async def test_on_signal_drops_signal_with_populated_wallet(
+    async def test_on_signal_routes_wallet_tagged_signal_to_wallet_engine(
         self, mock_zmq_context: MagicMock, mock_get_settings: MagicMock, mock_get_repo: MagicMock
     ) -> None:
-        """Verify a signal carrying a non-empty wallet_public_id is dropped.
+        """Phase 0c.4: a signal with a populated wallet routes to its own engine.
 
-        Given: A live signal whose wallet_public_id is populated, which is
-            illegal in Phase 0b because recovery sites cannot reconstruct
-            wallet from the persisted shard_key yet,
+        Given: A live signal whose wallet_public_id is populated AND a
+            pre-existing flat-key engine entry for the same instrument
+            (representing the legacy single-wallet template path),
         When: ``_on_signal`` is invoked,
-        Then: The trader drops the signal silently and does NOT touch the
-            existing engine — preventing live/recovery divergence and
-            wallet contamination across strategies until Phase 0c teaches
-            recovery the wallet dimension.
+        Then: The flat-key engine is NOT touched, and the wallet
+            filter routes the signal to a separate wallet-keyed engine
+            (``BTC-USD@kraken-live-w{wallet_short}``). The Phase 0b
+            fail-closed guard is gone — wallet identity is now
+            first-class through the engine key.
         """
         mock_settings = MagicMock()
         mock_settings.instruments = {
@@ -900,9 +901,14 @@ class TestTraderSignalHandling:
         trader._setup_external_execution()
         _replace_execution_publisher_with_async_stub(trader)
         trader._setup_trading_components()
-        mock_engine = MagicMock()
-        mock_engine.execute_desired_units = AsyncMock()
-        trader.engines["BTC-USD@kraken-live"] = mock_engine
+        legacy_engine = MagicMock()
+        legacy_engine.execute_desired_units = AsyncMock()
+        trader.engines["BTC-USD@kraken-live"] = legacy_engine
+        wallet_engine = MagicMock()
+        wallet_engine.execute_desired_units = AsyncMock()
+        wallet_engine.pending_client_order_id = None
+        wallet_engine._shard_key = "kraken.BTC-USD.live.w01975a8b3c7d"
+        trader.engines["BTC-USD@kraken-live-w01975a8b3c7d"] = wallet_engine
         wallet_signal = SignalData(
             session_id="",
             sequence_id=0,
@@ -914,12 +920,13 @@ class TestTraderSignalHandling:
             strength=0.5,
             price=50000.0,
             exchange="kraken",
-            reason="phase-0b-fail-closed",
+            reason="phase-0c-wallet-routing",
             wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
         )
         trader._current_topic = "signals.kraken.BTC-USD.live"
         await trader._on_signal(wallet_signal)
-        assert not mock_engine.execute_desired_units.called
+        assert not legacy_engine.execute_desired_units.called
+        assert wallet_engine.execute_desired_units.called
 
     @patch("snapper.application.engine.trader.resolve_symbol_public_id", new_callable=AsyncMock)
     @patch("snapper.application.engine.trader.ValidatedPublisher")
