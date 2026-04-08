@@ -127,12 +127,15 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 startup and drops incoming command messages whose
                 ``wallet_public_id`` does not match. When empty (the
                 legacy default preserved for backwards compatibility
-                with pre-0c tests and the single-wallet template
-                deployment path), the executor falls back to the legacy
-                ``AppSettings.{exchange}_api_key/_secret`` properties
-                and accepts every routed command. The legacy fallback
-                will be removed once every test instantiates executors
-                with an explicit ``wallet_public_id``.
+                with pre-0c tests that instantiate concrete executors
+                directly), ``_resolve_credentials`` is a no-op and
+                ``self._credentials`` stays ``None``. Tests that rely
+                on this path must inject ``self._credentials`` directly
+                before calling ``start()`` — post-0c cleanup item 1
+                removed the legacy ``AppSettings.kraken_api_key`` /
+                ``walutomat_api_key`` / etc. fallback, so a concrete
+                ``_create_exchange_client`` with ``self._credentials
+                is None`` now raises ``RuntimeError``.
         """
         self.settings = get_settings()
         self.wallet_public_id: str = wallet_public_id
@@ -189,10 +192,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         credentials from ``wallet_credentials`` via
         ``CredentialResolver`` exactly once during startup. When
         ``self.wallet_public_id`` is empty (legacy template path used
-        by pre-0c tests and the single-wallet default deployment), no
-        lookup happens and ``self._credentials`` stays ``None`` so
-        concrete ``_create_exchange_client`` implementations fall back
-        to the legacy ``AppSettings`` credential properties.
+        by pre-0c tests), no lookup happens and ``self._credentials``
+        stays ``None``. Post-0c cleanup item 1 removed the legacy
+        ``AppSettings`` fallback, so those tests must inject
+        ``self._credentials`` directly before ``start()`` — otherwise
+        the concrete ``_create_exchange_client`` method will raise
+        ``RuntimeError`` with an actionable message.
 
         Args:
             exchange_name: Exchange identifier used as the credential

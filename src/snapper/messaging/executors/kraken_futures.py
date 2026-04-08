@@ -14,9 +14,13 @@ KrakenFuturesOrderExecutor
 
 Configuration
 -------------
-Requires API credentials configured in settings:
-- kraken_futures_api_key
-- kraken_futures_api_secret
+Requires a ``wallet_credentials`` row with
+``exchange="kraken_futures"``, ``credential_type="api_key_secret"``,
+and a Fernet-encrypted envelope ``{"api_key": "...", "api_secret":
+"..."}``. Loaded at executor startup via ``CredentialResolver``.
+Post-0c cleanup item 1 removed the legacy
+``AppSettings.kraken_futures_api_key`` / ``kraken_futures_api_secret``
+fallback — wallet_credentials is now the single source of truth.
 """
 
 from snapper.application.process_manager.registry import register_process

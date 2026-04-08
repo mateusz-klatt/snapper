@@ -1300,8 +1300,6 @@ def test_main_callback_initializes_encryption(monkeypatch: pytest.MonkeyPatch) -
 def create_mock_settings(**overrides: Any) -> type:
     """Create a mock settings class with optional attribute overrides."""
     default_attrs: dict[str, Any] = {
-        "kraken_api_key": None,
-        "kraken_api_secret": None,
         "db_url": SYNC_MEMORY_DB_URL,
         "instruments": {"kraken": ["BTC-USD"], "zonda": [], "walutomat": [], "polygon": []},
         "timeframes": ["1m"],

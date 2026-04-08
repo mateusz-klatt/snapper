@@ -27,13 +27,15 @@ import json
 import sys
 import time
 from dataclasses import asdict
+from datetime import UTC
+from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
 
 from loguru import logger
 
 from snapper.config.settings import get_bootstrap_settings
-from snapper.config.settings import get_settings_service
-from snapper.config.settings import get_settings_with_service
+from snapper.data.repository import get_repository
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
@@ -45,6 +47,7 @@ from snapper.infrastructure.exchanges.implementations.kraken_futures import (
 )
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
 from snapper.infrastructure.exchanges.implementations.zonda import ZondaExchangeClient
+from snapper.infrastructure.security.encryption import get_encryption_service
 from snapper.infrastructure.symbols.functions import native_to_ccxt
 
 logger.remove()
@@ -115,14 +118,52 @@ def emit(exchange: str, scenario: str, step: str, data: Any) -> None:
 
 
 async def get_settings() -> Any:
-    """Load application settings with decrypted API keys.
+    """Load decrypted exchange credentials from ``wallet_credentials``.
+
+    Post-0c cleanup item 0: wallet-scoped credentials live in the
+    ``wallet_credentials`` table rather than ``AppSettings``. This
+    helper queries every active live-money credential row, decrypts
+    the Fernet envelope with the master password, and returns a
+    ``SimpleNamespace`` with the legacy attribute names
+    (``kraken_api_key`` / ``kraken_api_secret`` / etc.) populated so
+    the per-exchange runners downstream do not need to change.
 
     Returns:
-        AppSettings instance with exchange credentials.
+        ``SimpleNamespace`` with eight credential attributes (empty
+        string when the corresponding wallet credential row is absent).
     """
     bootstrap = get_bootstrap_settings()
-    settings_service = await get_settings_service(bootstrap.db_url, bootstrap.zmq_broker_xpub)
-    return get_settings_with_service(settings_service)
+    repository = get_repository(bootstrap.db_url)
+    rows = await repository.list_active_wallet_credentials(as_of=datetime.now(UTC))
+    encryption = get_encryption_service()
+    attrs: dict[str, str] = {
+        "walutomat_api_key": "",
+        "walutomat_private_key": "",
+        "kraken_api_key": "",
+        "kraken_api_secret": "",
+        "kraken_futures_api_key": "",
+        "kraken_futures_api_secret": "",
+        "zonda_api_key": "",
+        "zonda_api_secret": "",
+    }
+    for row in rows:
+        if row["credential_type"] == "paper":
+            continue
+        envelope = json.loads(encryption.decrypt(row["encrypted_payload"]))
+        exchange = row["exchange"]
+        if exchange == "kraken":
+            attrs["kraken_api_key"] = envelope.get("api_key", "")
+            attrs["kraken_api_secret"] = envelope.get("api_secret", "")
+        elif exchange == "kraken_futures":
+            attrs["kraken_futures_api_key"] = envelope.get("api_key", "")
+            attrs["kraken_futures_api_secret"] = envelope.get("api_secret", "")
+        elif exchange == "walutomat":
+            attrs["walutomat_api_key"] = envelope.get("api_key", "")
+            attrs["walutomat_private_key"] = envelope.get("private_key_pem", "")
+        elif exchange == "zonda":
+            attrs["zonda_api_key"] = envelope.get("api_key", "")
+            attrs["zonda_api_secret"] = envelope.get("api_secret", "")
+    return SimpleNamespace(**attrs)
 
 
 async def run_walutomat(settings: Any, scenarios: list[str] | None = None) -> None:

@@ -378,7 +378,13 @@ def _build_credential_envelope(cred: SeedWalletCredential) -> str:
     if cred.credential_type == "rsa_pem":
         import base64
 
-        pem_bytes = base64.b64decode(cred.private_key_pem_base64)
+        try:
+            pem_bytes = base64.b64decode(cred.private_key_pem_base64)
+        except Exception as exc:
+            raise ValueError(
+                f"Invalid base64 in private_key_pem_base64 for exchange "
+                f"'{cred.exchange}': {exc}"
+            ) from exc
         return json.dumps({"api_key": cred.api_key, "private_key_pem": pem_bytes.decode("utf-8")})
     if cred.credential_type == "paper":
         balance = cred.initial_balance or "10000.0"

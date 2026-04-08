@@ -3,19 +3,24 @@
 Usage:
     python scripts/check_balances.py
 
-Requires: database with API keys configured (via settings UI or API).
+Requires: database with ``wallet_credentials`` rows seeded for the
+live-money wallet(s). Credentials live in the ``wallet_credentials``
+table (post-0c cleanup item 0) — the script enumerates active rows
+via ``CredentialResolver`` and builds one exchange client per row.
 """
 
 import asyncio
+import json
 import sys
 from collections.abc import Callable
+from datetime import UTC
+from datetime import datetime
 from typing import Any
 
 from loguru import logger
 
 from snapper.config.settings import get_bootstrap_settings
-from snapper.config.settings import get_settings_service
-from snapper.config.settings import get_settings_with_service
+from snapper.data.repository import get_repository
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
@@ -23,63 +28,75 @@ from snapper.infrastructure.exchanges.implementations.kraken_futures import (
 )
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
 from snapper.infrastructure.exchanges.implementations.zonda import ZondaExchangeClient
+from snapper.infrastructure.security.encryption import get_encryption_service
 
 logger.remove()
 logger.add(sys.stderr, level="WARNING")
 
 ExchangeFactory = Callable[[], Any]
+CredentialEnvelopes = dict[str, dict[str, str]]
 
 
-def build_exchange_factories(settings: Any) -> list[tuple[str, ExchangeFactory]]:
-    """Build list of exchange client factories from settings.
+def build_exchange_factories(
+    credentials_by_exchange: CredentialEnvelopes,
+) -> list[tuple[str, ExchangeFactory]]:
+    """Build list of exchange client factories from decrypted credentials.
 
-    Only includes exchanges that have API keys configured.
+    Only includes exchanges whose credential envelope carries the
+    fields needed to construct a client — e.g. ``api_key`` +
+    ``api_secret`` for Kraken / Zonda / Kraken Futures, and
+    ``api_key`` + ``private_key_pem`` for Walutomat.
 
     Args:
-        settings: AppSettings instance with exchange credentials.
+        credentials_by_exchange: Mapping of exchange name to decrypted
+            credential dict (the envelope shape depends on the
+            credential_type — see ``WalletCredential`` docstring).
 
     Returns:
-        List of (name, factory) tuples for configured exchanges.
+        List of (display name, factory) tuples for configured exchanges.
     """
     factories: list[tuple[str, ExchangeFactory]] = []
-    if settings.kraken_api_key and settings.kraken_api_secret:
+    kraken = credentials_by_exchange.get("kraken", {})
+    if kraken.get("api_key") and kraken.get("api_secret"):
         factories.append(
             (
                 "Kraken",
                 lambda: KrakenExchangeClient(
-                    api_key=settings.kraken_api_key,
-                    api_secret=settings.kraken_api_secret,
+                    api_key=kraken["api_key"],
+                    api_secret=kraken["api_secret"],
                 ),
             )
         )
-    if settings.kraken_futures_api_key and settings.kraken_futures_api_secret:
+    kraken_futures = credentials_by_exchange.get("kraken_futures", {})
+    if kraken_futures.get("api_key") and kraken_futures.get("api_secret"):
         factories.append(
             (
                 "Kraken Futures",
                 lambda: KrakenFuturesExchangeClient(
-                    api_key=settings.kraken_futures_api_key,
-                    api_secret=settings.kraken_futures_api_secret,
+                    api_key=kraken_futures["api_key"],
+                    api_secret=kraken_futures["api_secret"],
                 ),
             )
         )
-    if settings.zonda_api_key and settings.zonda_api_secret:
+    zonda = credentials_by_exchange.get("zonda", {})
+    if zonda.get("api_key") and zonda.get("api_secret"):
         factories.append(
             (
                 "Zonda",
                 lambda: ZondaExchangeClient(
-                    api_key=settings.zonda_api_key,
-                    api_secret=settings.zonda_api_secret,
+                    api_key=zonda["api_key"],
+                    api_secret=zonda["api_secret"],
                 ),
             )
         )
-    if settings.walutomat_api_key:
-        private_key = settings.walutomat_private_key or None
+    walutomat = credentials_by_exchange.get("walutomat", {})
+    if walutomat.get("api_key"):
         factories.append(
             (
                 "Walutomat",
                 lambda: WalutomatExchangeClient(
-                    api_key=settings.walutomat_api_key,
-                    private_key_data=private_key,
+                    api_key=walutomat["api_key"],
+                    private_key_data=walutomat.get("private_key_pem") or None,
                 ),
             )
         )
@@ -130,18 +147,40 @@ def format_balances(all_balances: dict[str, dict[str, AccountBalance]]) -> list[
     return lines
 
 
+async def _load_live_credentials() -> CredentialEnvelopes:
+    """Load decrypted credentials for all live-money wallet rows.
+
+    Queries ``wallet_credentials`` via the repository, skips paper
+    rows (paper wallets have no external exchange to query), and
+    decrypts each envelope with the master-password Fernet key. When
+    multiple live wallets have credentials for the same exchange, the
+    last one wins — post-0c single-user deployments typically have
+    exactly one live wallet so this degenerate case does not arise.
+    """
+    bootstrap = get_bootstrap_settings()
+    repository = get_repository(bootstrap.db_url)
+    rows = await repository.list_active_wallet_credentials(as_of=datetime.now(UTC))
+    encryption = get_encryption_service()
+    credentials: CredentialEnvelopes = {}
+    for row in rows:
+        if row["credential_type"] == "paper":
+            continue
+        envelope_json = encryption.decrypt(row["encrypted_payload"])
+        envelope = json.loads(envelope_json)
+        credentials[row["exchange"]] = envelope
+    return credentials
+
+
 async def _run() -> int:
     """Fetch and display balances from all exchanges.
 
     Returns:
         Exit code (0 on success, 1 if no keys configured).
     """
-    bootstrap = get_bootstrap_settings()
-    settings_service = await get_settings_service(bootstrap.db_url, bootstrap.zmq_broker_xpub)
-    settings = get_settings_with_service(settings_service)
-    factories = build_exchange_factories(settings)
+    credentials_by_exchange = await _load_live_credentials()
+    factories = build_exchange_factories(credentials_by_exchange)
     if not factories:
-        print("No exchange API keys configured in database settings.")
+        print("No exchange credentials configured in wallet_credentials.")
         return 1
     print(f"Checking {len(factories)} exchange(s)...\n")
     all_balances: dict[str, dict[str, AccountBalance]] = {}

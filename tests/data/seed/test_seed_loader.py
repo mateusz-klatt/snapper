@@ -1011,6 +1011,25 @@ class TestBuildCredentialEnvelope:
         with pytest.raises(ValueError, match="Unknown seed credential_type 'oauth'"):
             _build_credential_envelope(cred)
 
+    def test_invalid_base64_in_rsa_pem_raises_value_error_with_exchange_name(self) -> None:
+        """Malformed base64 in ``private_key_pem_base64`` surfaces a contextual error.
+
+        Given: A ``SeedWalletCredential`` with ``credential_type="rsa_pem"``
+            whose ``private_key_pem_base64`` is not valid base64,
+        When: ``_build_credential_envelope`` is called,
+        Then: A ``ValueError`` is raised naming the exchange so the
+            operator can locate the typo in a multi-credential seed
+            file instead of chasing a cryptic ``binascii.Error``.
+        """
+        cred = SeedWalletCredential(
+            exchange="walutomat",
+            credential_type="rsa_pem",
+            api_key="k",
+            private_key_pem_base64="!!!not-base64!!!",
+        )
+        with pytest.raises(ValueError, match="Invalid base64.*walutomat"):
+            _build_credential_envelope(cred)
+
 
 def _create_multi_tenant_tables(conn: Connection) -> None:
     """Create the minimal operators / wallets / user_operator_memberships tables.
