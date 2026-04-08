@@ -557,6 +557,8 @@ class TraderCoordinator(RegisterableProcess):
                 self.engines[key] = engine
                 self.last_signal_time[key] = time.time()
             engine = self.engines[key]
+            if not engine.operator_public_id and order_operator_public_id:
+                engine.operator_public_id = order_operator_public_id
             engine.order_in_flight = True
             client_oid = db_order.get("client_order_id", "")
             engine.pending_client_order_id = client_oid

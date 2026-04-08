@@ -3001,6 +3001,92 @@ class TestRecovery:
         assert engine.operator_public_id == operator
 
     @pytest.mark.asyncio
+    async def test_recover_active_order_backfills_operator_on_existing_engine(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Phase 0c.5 phase-close: backfill operator on engines reused from earlier recovery phases.
+
+        When ``_recover_from_executions`` (or ``_recover_from_checkpoints``)
+        creates an engine first, it has no source for ``operator_public_id``
+        and leaves it empty. If ``_recover_active_orders`` later finds an
+        active order on the same engine_key carrying an operator, that
+        attribution must be backfilled onto the existing engine instead
+        of being silently dropped.
+
+        Given: One execution row that creates an engine with empty
+            operator, plus one active order on the same key carrying
+            ``operator_public_id``,
+        When: ``_recover_engine_state`` runs,
+        Then: The single engine ends up with the operator populated
+            from the active order row.
+        """
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        coord.msg_publisher = cast(Any, MagicMock(tracker=Mock(session_id="s1")))
+        wallet = "01975a8b-3c7d-7000-8000-0000000000d1"
+        operator = "01975a8b-3c7d-7000-8000-0000000000e1"
+        mock_repo = AsyncMock()
+        mock_repo.get_executions_for_recovery = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "exe-bf",
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                    "trade_id": "t-bf",
+                    "exchange_order_id": "ex-bf",
+                    "client_order_id": "c-bf",
+                    "instrument": "BTC-USD",
+                    "exchange": "kraken",
+                    "side": "buy",
+                    "size": 0.4,
+                    "price": 50000.0,
+                    "fee": 0.4,
+                    "fee_asset": "USD",
+                    "status": "filled",
+                    "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
+                    "wallet_public_id": wallet,
+                }
+            ]
+        )
+        mock_repo.get_active_orders_for_recovery = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "ord-bf",
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 2,
+                    "instrument": "BTC-USD",
+                    "exchange": "kraken",
+                    "client_order_id": "c-bf2",
+                    "exchange_order_id": "ex-bf2",
+                    "status": "open",
+                    "side": "buy",
+                    "order_type": "market",
+                    "size": 0.5,
+                    "price": None,
+                    "filled_size": 0.0,
+                    "average_price": None,
+                    "time_in_force": None,
+                    "error": None,
+                    "created_at": datetime(2024, 1, 1, tzinfo=UTC),
+                    "updated_at": None,
+                    "wallet_public_id": wallet,
+                    "operator_public_id": operator,
+                }
+            ]
+        )
+        mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
+        coord.repository = mock_repo
+        await coord._recover_engine_state()
+        wallet_short = wallet.replace("-", "")[:12].lower()
+        key = f"BTC-USD@kraken-live-w{wallet_short}"
+        assert key in coord.engines
+        engine = coord.engines[key]
+        assert engine.wallet_public_id == wallet
+        assert engine.operator_public_id == operator
+
+    @pytest.mark.asyncio
     async def test_recover_with_open_order_sets_inflight(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
