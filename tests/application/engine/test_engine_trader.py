@@ -16,6 +16,7 @@ from unittest.mock import Mock
 from unittest.mock import patch
 
 import pytest
+from loguru import logger
 
 import snapper.application.engine.trader as trader_module
 from snapper.application.engine.config import EngineConfigModel
@@ -3055,6 +3056,99 @@ class TestRecovery:
         engine = coord.engines[key]
         assert engine.wallet_public_id == wallet
         assert engine.operator_public_id == operator
+
+    @pytest.mark.asyncio
+    async def test_recover_active_order_logs_warning_on_operator_conflict(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Post-0c cleanup item 4: conflicting operators on same engine_key logs warning.
+
+        Given: An execution row that creates the engine with one
+            ``operator_public_id``, followed by an active order row on
+            the same ``engine_key`` (same wallet) carrying a
+            DIFFERENT non-empty ``operator_public_id``,
+        When: ``_recover_active_orders`` runs,
+        Then: A ``logger.warning`` surfaces the conflict naming both
+            operators and the engine key. The existing engine
+            attribution is NOT overwritten — first-recovery-wins is
+            the safest default because the execution row was written
+            earlier in time than the active order.
+        """
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        coord.msg_publisher = cast(Any, MagicMock(tracker=Mock(session_id="s1")))
+        wallet = "01975a8b-3c7d-7000-8000-000000000db1"
+        operator_first = "01975a8b-3c7d-7000-8000-000000000db2"
+        operator_second = "01975a8b-3c7d-7000-8000-000000000db3"
+        mock_repo = AsyncMock()
+        mock_repo.get_executions_for_recovery = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "exe-first",
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                    "trade_id": "t-first",
+                    "exchange_order_id": "ex-first",
+                    "client_order_id": "c-first",
+                    "instrument": "BTC-USD",
+                    "exchange": "kraken",
+                    "side": "buy",
+                    "size": 0.5,
+                    "price": 50000.0,
+                    "fee": 0.5,
+                    "fee_asset": "USD",
+                    "status": "filled",
+                    "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
+                    "wallet_public_id": wallet,
+                    "operator_public_id": operator_first,
+                }
+            ]
+        )
+        mock_repo.get_active_orders_for_recovery = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "ord-conflict",
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 2,
+                    "instrument": "BTC-USD",
+                    "exchange": "kraken",
+                    "client_order_id": "c-conflict",
+                    "exchange_order_id": "ex-conflict",
+                    "status": "open",
+                    "side": "buy",
+                    "order_type": "market",
+                    "size": 0.3,
+                    "price": None,
+                    "filled_size": 0.0,
+                    "average_price": None,
+                    "time_in_force": None,
+                    "error": None,
+                    "created_at": datetime(2024, 1, 1, tzinfo=UTC),
+                    "updated_at": None,
+                    "wallet_public_id": wallet,
+                    "operator_public_id": operator_second,
+                }
+            ]
+        )
+        mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
+        coord.repository = mock_repo
+        sink: list[str] = []
+        sink_id = logger.add(lambda msg: sink.append(str(msg)), level="WARNING")
+        try:
+            await coord._recover_engine_state()
+        finally:
+            logger.remove(sink_id)
+        wallet_short = wallet.replace("-", "")[:12].lower()
+        key = f"BTC-USD@kraken-live-w{wallet_short}"
+        assert key in coord.engines
+        engine = coord.engines[key]
+        assert engine.operator_public_id == operator_first
+        assert any(
+            "operator conflict" in msg and operator_first in msg and operator_second in msg
+            for msg in sink
+        )
 
     @pytest.mark.asyncio
     async def test_recover_active_order_backfills_operator_on_existing_engine(

@@ -565,6 +565,21 @@ class TraderCoordinator(RegisterableProcess):
             engine = self.engines[key]
             if not engine.operator_public_id and order_operator_public_id:
                 engine.operator_public_id = order_operator_public_id
+            elif (
+                engine.operator_public_id
+                and order_operator_public_id
+                and engine.operator_public_id != order_operator_public_id
+            ):
+                logger.warning(
+                    f"ZMQTrader: operator conflict on {key}: engine has "
+                    f"{engine.operator_public_id}, active order "
+                    f"{db_order.get('client_order_id')} has "
+                    f"{order_operator_public_id}; keeping existing engine "
+                    f"operator attribution. Investigate whether the two "
+                    f"orders belong to the same (wallet, instrument) but "
+                    f"different operators — this indicates a grant overlap "
+                    f"or a stale recovery row."
+                )
             engine.order_in_flight = True
             client_oid = db_order.get("client_order_id", "")
             engine.pending_client_order_id = client_oid
