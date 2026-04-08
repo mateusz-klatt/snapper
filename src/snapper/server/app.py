@@ -270,6 +270,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
             logger.info("API-only mode (SERVER_API_ONLY=true) — skipping process autostart")
         else:
             await process_factory.start_all_processes()
+            await process_factory.spawn_per_wallet_executors()
         manager_ref: WebSocketConnectionManager = app.state.manager
         app.state.zmq_bridge_task = asyncio.create_task(manager_ref.zmq_bridge.start())
         logger.info("Application startup complete")

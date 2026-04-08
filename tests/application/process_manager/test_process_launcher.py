@@ -4943,3 +4943,307 @@ def test_validate_parameters_with_model(monkeypatch: pytest.MonkeyPatch) -> None
     )
     result = factory._validate_parameters(config)
     assert result == {"endpoint": "tcp://localhost:5555"}
+
+
+class TestPhase0cSpawnPerWalletExecutors:
+    """Phase 0c.2 dynamic per-wallet executor spawner coverage.
+
+    The spawner queries ``wallet_credentials`` and starts one
+    ``ProcessConfigModel`` per ``(exchange, wallet)`` pair via
+    :meth:`ProcessLauncherService.start_process`. The tests cover the
+    happy path, the empty-credentials short-circuit, the missing
+    template skip, the duplicate-instance skip, and the per-instance
+    failure isolation. ``list_active_wallet_credentials`` and
+    ``start_process`` are mocked so the tests stay pure unit tests.
+    """
+
+    def _make_factory(self) -> ProcessLauncherService:
+        settings = MagicMock()
+        settings.db_url = "sqlite+aiosqlite:///:memory:"
+        return ProcessLauncherService(settings)
+
+    def _make_entry(self, class_path: str = "test.PaperExecutor") -> ProcessRegistryEntry:
+        return ProcessRegistryEntry(
+            class_ref=cast(Any, MagicMock()),
+            class_path=class_path,
+            method="start",
+            description="paper executor template",
+            priority=30,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.CORE,
+            tags=("execution", "orders", "paper"),
+            parameters_model=None,
+            parameters_schema=None,
+            enabled=True,
+            mode="thread",
+        )
+
+    @pytest.mark.asyncio
+    async def test_spawn_returns_zero_when_no_credentials(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Empty credential list short-circuits the spawner.
+
+        Given: A repository with zero active wallet credentials,
+        When: ``spawn_per_wallet_executors`` is called,
+        Then: It returns 0 and does not call ``start_process``.
+        """
+        factory = self._make_factory()
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(return_value=[])
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        start_mock = AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        result = await factory.spawn_per_wallet_executors()
+        assert result == 0
+        start_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_spawn_returns_zero_when_repository_query_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Repository errors are logged and the spawner returns 0.
+
+        Given: A repository whose ``list_active_wallet_credentials``
+            raises (e.g. DB connection issue at boot),
+        When: ``spawn_per_wallet_executors`` is called,
+        Then: The exception is caught, the spawner returns 0, and
+            ``start_process`` is never called.
+        """
+        factory = self._make_factory()
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(side_effect=RuntimeError("db down"))
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        start_mock = AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        result = await factory.spawn_per_wallet_executors()
+        assert result == 0
+        start_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_spawn_starts_one_instance_per_credential(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each active credential row produces one start_process call.
+
+        Given: Two credential rows for two different exchanges and a
+            registered template for each,
+        When: ``spawn_per_wallet_executors`` is called,
+        Then: ``start_process`` is invoked twice with deterministic
+            instance names of the form
+            ``executor_{exchange}_w{wallet_short_12hex}`` and
+            ``parameters={"wallet_public_id": ...}`` carrying the
+            wallet ID.
+        """
+        factory = self._make_factory()
+        wallet_a = "00000000-0000-7000-8000-0000000000a1"
+        wallet_b = "00000000-0000-7000-8000-0000000000b2"
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "cred-a",
+                    "wallet_public_id": wallet_a,
+                    "exchange": "kraken",
+                    "credential_type": "api_key_secret",
+                    "encrypted_payload": "enc",
+                    "encryption_key_id": "v1",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 1,
+                },
+                {
+                    "public_id": "cred-b",
+                    "wallet_public_id": wallet_b,
+                    "exchange": "paper",
+                    "credential_type": "paper",
+                    "encrypted_payload": "enc",
+                    "encryption_key_id": "v1",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 2,
+                },
+            ]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {
+                "executor_kraken": self._make_entry("snapper.executors.KrakenExecutor"),
+                "executor_paper": self._make_entry("snapper.executors.PaperExecutor"),
+            },
+        )
+        start_mock = AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        result = await factory.spawn_per_wallet_executors()
+        assert result == 2
+        assert start_mock.await_count == 2
+        names = [call.args[0].name for call in start_mock.await_args_list]
+        assert names == [
+            "executor_kraken_w000000000000",
+            "executor_paper_w000000000000",
+        ]
+        params = [call.args[0].parameters for call in start_mock.await_args_list]
+        assert params == [
+            {"wallet_public_id": wallet_a},
+            {"wallet_public_id": wallet_b},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_spawn_skips_credentials_without_template(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Credentials for unregistered exchanges are skipped with a warning.
+
+        Given: A credential for ``exchange="bitstamp"`` but the
+            registry contains no ``executor_bitstamp`` template,
+        When: ``spawn_per_wallet_executors`` is called,
+        Then: ``start_process`` is not called and the spawner returns 0.
+        """
+        factory = self._make_factory()
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "cred-x",
+                    "wallet_public_id": "00000000-0000-7000-8000-0000000000c1",
+                    "exchange": "bitstamp",
+                    "credential_type": "api_key_secret",
+                    "encrypted_payload": "enc",
+                    "encryption_key_id": "v1",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 1,
+                },
+            ]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry()},
+        )
+        start_mock = AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        result = await factory.spawn_per_wallet_executors()
+        assert result == 0
+        start_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_spawn_skips_already_started_instances(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Idempotent: instances already running are not respawned.
+
+        Given: A credential whose computed instance name is already
+            present in ``self.started_processes`` (e.g. spawner
+            re-invoked after a failed boot),
+        When: ``spawn_per_wallet_executors`` is called,
+        Then: ``start_process`` is not invoked for that instance and
+            the spawner returns 0.
+        """
+        factory = self._make_factory()
+        wallet = "00000000-0000-7000-8000-0000000000d1"
+        factory.started_processes["executor_paper_w000000000000"] = cast(Any, MagicMock())
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "cred-d",
+                    "wallet_public_id": wallet,
+                    "exchange": "paper",
+                    "credential_type": "paper",
+                    "encrypted_payload": "enc",
+                    "encryption_key_id": "v1",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 1,
+                },
+            ]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_paper": self._make_entry()},
+        )
+        start_mock = AsyncMock()
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        result = await factory.spawn_per_wallet_executors()
+        assert result == 0
+        start_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_spawn_continues_after_per_instance_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Per-instance startup failures are isolated.
+
+        Given: Two credentials where the first fails ``start_process``
+            (e.g. exchange client crashes on init),
+        When: ``spawn_per_wallet_executors`` is called,
+        Then: The spawner logs the failure, continues with the second
+            credential, and returns the count of successful spawns.
+        """
+        factory = self._make_factory()
+        wallet_a = "00000000-0000-7000-8000-0000000000e1"
+        wallet_b = "00000000-0000-7000-8000-0000000000e2"
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "cred-e1",
+                    "wallet_public_id": wallet_a,
+                    "exchange": "kraken",
+                    "credential_type": "api_key_secret",
+                    "encrypted_payload": "enc",
+                    "encryption_key_id": "v1",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 1,
+                },
+                {
+                    "public_id": "cred-e2",
+                    "wallet_public_id": wallet_b,
+                    "exchange": "kraken",
+                    "credential_type": "api_key_secret",
+                    "encrypted_payload": "enc",
+                    "encryption_key_id": "v1",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 2,
+                },
+            ]
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": self._make_entry()},
+        )
+        start_mock = AsyncMock(side_effect=[RuntimeError("client init"), None])
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        result = await factory.spawn_per_wallet_executors()
+        assert result == 1
+        assert start_mock.await_count == 2

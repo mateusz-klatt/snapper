@@ -106,6 +106,7 @@ def test_client(mock_settings_for_tests: Any) -> Generator[Any]:
         mock_factory = MagicMock()
         mock_factory.sync_registry_to_database = AsyncMock(return_value=None)
         mock_factory.start_all_processes = AsyncMock(return_value=None)
+        mock_factory.spawn_per_wallet_executors = AsyncMock(return_value=0)
         mock_factory.stop_all_processes = AsyncMock(return_value=None)
         mock_factory.get_core_health = AsyncMock(return_value="healthy")
         mock_factory.started_processes = {}
@@ -4077,6 +4078,7 @@ def auth_routes_app_fixture() -> Generator[FastAPI]:
         mock_factory = MagicMock()
         mock_factory.sync_registry_to_database = AsyncMock(return_value=None)
         mock_factory.start_all_processes = AsyncMock(return_value=None)
+        mock_factory.spawn_per_wallet_executors = AsyncMock(return_value=0)
         mock_factory.stop_all_processes = AsyncMock(return_value=None)
         mock_factory.get_core_health = AsyncMock(return_value="healthy")
         mock_factory.started_processes = {}

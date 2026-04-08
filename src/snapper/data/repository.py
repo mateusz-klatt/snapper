@@ -1341,6 +1341,36 @@ class Repository(ABC):
         """
         ...
 
+    @abstractmethod
+    async def list_active_wallet_credentials(
+        self,
+        as_of: datetime,
+    ) -> list[WalletCredentialRow]:
+        """Return every active wallet credential row at ``as_of``.
+
+        Phase 0c.2 dynamic per-wallet executor spawning consumes this
+        list at server boot to discover the ``(exchange, wallet)``
+        pairs that need a dedicated executor instance. Each row drives
+        one ``ProcessLauncherService.start_process`` call with a
+        per-wallet ``ProcessConfigModel`` whose ``parameters`` carry
+        the wallet's public ID into ``ExchangeExecutorService``.
+
+        The result is ordered by ``(exchange, wallet_public_id)`` so
+        the spawner produces deterministic process names regardless
+        of insertion order — important for log diff stability across
+        boots.
+
+        Args:
+            as_of: Bus time for the temporal query (process boot time
+                in production; explicit timestamps in tests).
+
+        Returns:
+            List of active credential rows. Empty list when no
+            credentials are seeded yet (e.g. fresh DB before
+            ``seed_default_multi_tenant`` runs).
+        """
+        ...
+
 
 def _register_sqlite_fk_pragma(engine: Any) -> None:
     """Register PRAGMA foreign_keys=ON for every new SQLite connection.
@@ -4326,6 +4356,37 @@ class SQLAlchemyRepository(Repository):
                 session_id=row.session_id,
                 sequence_id=row.sequence_id,
             )
+
+    async def list_active_wallet_credentials(
+        self,
+        as_of: datetime,
+    ) -> list[WalletCredentialRow]:
+        """Return all active wallet credentials at ``as_of``.
+
+        Ordered by ``(exchange, wallet_public_id)`` for deterministic
+        spawner behaviour across boots.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(WalletCredential)
+                .where(*where_active(WalletCredential, as_of))
+                .order_by(WalletCredential.exchange, WalletCredential.wallet_public_id)
+            )
+            return [
+                WalletCredentialRow(
+                    public_id=row.public_id,
+                    wallet_public_id=row.wallet_public_id,
+                    exchange=row.exchange,
+                    credential_type=row.credential_type,
+                    encrypted_payload=row.encrypted_payload,
+                    encryption_key_id=row.encryption_key_id,
+                    label=row.label,
+                    timestamp=row.timestamp,
+                    session_id=row.session_id,
+                    sequence_id=row.sequence_id,
+                )
+                for row in result.scalars().all()
+            ]
 
 
 _repository_cache: dict[str, Repository] = {}

@@ -247,3 +247,117 @@ class TestCredentialResolverErrors:
             )
         mock_factory.assert_called_once()
         assert creds == {"api_key": "fallback-key", "api_secret": "fallback-secret"}
+
+
+class TestListActiveWalletCredentials:
+    """Phase 0c.2 ``Repository.list_active_wallet_credentials`` coverage.
+
+    The dynamic per-wallet executor spawner consumes this list at boot
+    to discover the ``(exchange, wallet)`` pairs that need a dedicated
+    executor instance. The tests verify ordering, temporal filtering,
+    and the empty-list contract on a fresh DB.
+    """
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_list_when_no_credentials(
+        self,
+        repo: SQLAlchemyRepository,
+    ) -> None:
+        """Fresh DB returns no credentials.
+
+        Given: A SQLAlchemyRepository with the schema created but no
+            wallet_credentials rows,
+        When: ``list_active_wallet_credentials`` is called,
+        Then: An empty list is returned so the spawner skips dynamic
+            spawn entirely.
+        """
+        rows = await repo.list_active_wallet_credentials(as_of=datetime.now(UTC))
+        assert rows == []
+
+    @pytest.mark.asyncio
+    async def test_returns_active_rows_sorted_by_exchange_and_wallet(
+        self,
+        repo: SQLAlchemyRepository,
+        encryption: SettingsEncryptionService,
+    ) -> None:
+        """Active rows are returned ordered by (exchange, wallet_public_id).
+
+        Given: Three credential rows seeded out of order across two
+            exchanges and two wallets,
+        When: ``list_active_wallet_credentials`` is called,
+        Then: All three rows come back ordered by exchange then wallet
+            so the spawner produces deterministic process names.
+        """
+        await _seed_credential(
+            repo,
+            encryption,
+            wallet_public_id="00000000-0000-7000-8000-0000000000c2",
+            exchange="kraken",
+            payload={"api_key": "k2", "api_secret": "s2"},
+        )
+        await _seed_credential(
+            repo,
+            encryption,
+            wallet_public_id="00000000-0000-7000-8000-0000000000c1",
+            exchange="paper",
+            payload={"initial_balance": "5000.0"},
+            credential_type="paper",
+        )
+        await _seed_credential(
+            repo,
+            encryption,
+            wallet_public_id="00000000-0000-7000-8000-0000000000c1",
+            exchange="kraken",
+            payload={"api_key": "k1", "api_secret": "s1"},
+        )
+        rows = await repo.list_active_wallet_credentials(as_of=datetime.now(UTC))
+        assert len(rows) == 3
+        ordering = [(row["exchange"], row["wallet_public_id"]) for row in rows]
+        assert ordering == [
+            ("kraken", "00000000-0000-7000-8000-0000000000c1"),
+            ("kraken", "00000000-0000-7000-8000-0000000000c2"),
+            ("paper", "00000000-0000-7000-8000-0000000000c1"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_skips_closed_rows(
+        self,
+        repo: SQLAlchemyRepository,
+        encryption: SettingsEncryptionService,
+    ) -> None:
+        """SCD2-closed rows are excluded from the active list.
+
+        Given: One active credential and one credential whose
+            ``known_to`` has been closed (SCD2 historical row),
+        When: ``list_active_wallet_credentials`` is called at a time
+            after the close,
+        Then: Only the active row is returned, exercising the
+            ``where_active`` predicate on the bitemporal table.
+        """
+        await _seed_credential(
+            repo,
+            encryption,
+            wallet_public_id="00000000-0000-7000-8000-0000000000d1",
+            exchange="kraken",
+            payload={"api_key": "active", "api_secret": "active"},
+        )
+        async with repo.session() as s:
+            historical = WalletCredential(
+                wallet_public_id="00000000-0000-7000-8000-0000000000d2",
+                exchange="kraken",
+                credential_type="api_key_secret",
+                encrypted_payload=encryption.encrypt(
+                    json.dumps({"api_key": "old", "api_secret": "old"})
+                ),
+                encryption_key_id="test-master-key",
+                label=None,
+                session_id="test-session",
+                sequence_id=1,
+                timestamp=datetime.now(UTC) - timedelta(hours=2),
+                known_to=datetime.now(UTC) - timedelta(hours=1),
+            )
+            s.add(historical)
+            await s.commit()
+        rows = await repo.list_active_wallet_credentials(as_of=datetime.now(UTC))
+        assert len(rows) == 1
+        assert rows[0]["wallet_public_id"] == "00000000-0000-7000-8000-0000000000d1"

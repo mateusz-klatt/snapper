@@ -62,6 +62,7 @@ def _build_mock_process_factory(started_processes: dict[str, object]) -> MagicMo
     mock_factory.started_processes = started_processes
     mock_factory.sync_registry_to_database = AsyncMock()
     mock_factory.start_all_processes = AsyncMock()
+    mock_factory.spawn_per_wallet_executors = AsyncMock(return_value=0)
     mock_factory.stop_all_processes = AsyncMock()
     mock_factory.get_core_health = AsyncMock(return_value="healthy")
     return mock_factory
@@ -103,6 +104,7 @@ class TestLifespan:
             mock_factory = MagicMock()
             mock_factory.sync_registry_to_database = AsyncMock()
             mock_factory.start_all_processes = AsyncMock()
+            mock_factory.spawn_per_wallet_executors = AsyncMock(return_value=0)
             mock_factory.stop_all_processes = AsyncMock()
             mock_factory_cls.return_value = mock_factory
             async with lifespan(mock_app):
@@ -147,6 +149,7 @@ class TestLifespan:
             mock_factory = MagicMock()
             mock_factory.sync_registry_to_database = AsyncMock()
             mock_factory.start_all_processes = AsyncMock()
+            mock_factory.spawn_per_wallet_executors = AsyncMock(return_value=0)
             mock_factory.stop_all_processes = AsyncMock()
             mock_factory_cls.return_value = mock_factory
             async with lifespan(mock_app):
@@ -177,6 +180,7 @@ class TestLifespan:
             mock_factory = MagicMock()
             mock_factory.sync_registry_to_database = AsyncMock()
             mock_factory.start_all_processes = AsyncMock()
+            mock_factory.spawn_per_wallet_executors = AsyncMock(return_value=0)
             mock_factory.stop_all_processes = AsyncMock()
             mock_factory_cls.return_value = mock_factory
             with pytest.raises(Exception, match="Cleanup error"):
@@ -812,6 +816,7 @@ class TestLifespanCancellation:
             mock_factory = MagicMock()
             mock_factory.sync_registry_to_database = AsyncMock()
             mock_factory.start_all_processes = AsyncMock()
+            mock_factory.spawn_per_wallet_executors = AsyncMock(return_value=0)
             mock_factory.stop_all_processes = AsyncMock()
             mock_factory_cls.return_value = mock_factory
             with pytest.raises(asyncio.CancelledError):
@@ -855,6 +860,7 @@ class TestLifespanCancellation:
             mock_factory = MagicMock()
             mock_factory.sync_registry_to_database = AsyncMock()
             mock_factory.start_all_processes = AsyncMock()
+            mock_factory.spawn_per_wallet_executors = AsyncMock(return_value=0)
             mock_factory.stop_all_processes = AsyncMock()
             mock_factory_cls.return_value = mock_factory
             async with lifespan(mock_app):
@@ -901,6 +907,7 @@ class TestLifespanCancellation:
             mock_factory = MagicMock()
             mock_factory.sync_registry_to_database = AsyncMock()
             mock_factory.start_all_processes = AsyncMock()
+            mock_factory.spawn_per_wallet_executors = AsyncMock(return_value=0)
             mock_factory.stop_all_processes = AsyncMock()
             mock_factory_cls.return_value = mock_factory
             async with lifespan(mock_app):
