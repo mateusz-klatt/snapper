@@ -2794,7 +2794,7 @@ async def test_get_executions_for_recovery_filters_instrument(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_get_active_orders_for_recovery_filters_by_wallet(tmp_path: Path) -> None:
-    """Phase 0c.3: wallet_public_id filter scopes recovery to one wallet.
+    """``wallet_public_id`` filter scopes recovery to one wallet.
 
     Given: Two active orders on the same exchange tagged with two
         different ``wallet_public_id`` values via direct SCD2 update,
@@ -2802,7 +2802,7 @@ async def test_get_active_orders_for_recovery_filters_by_wallet(tmp_path: Path) 
         ``wallet_public_id=wallet_a``,
     Then: Only the order tagged ``wallet_a`` is returned, exercising
         the new ``Order.wallet_public_id == wallet_public_id`` clause
-        added in Phase 0c.3.
+        added.
     """
     r, _, inst_pid = await _seed_full_repo(tmp_path)
     now = datetime.now(UTC)
@@ -2861,7 +2861,7 @@ async def test_get_active_orders_for_recovery_filters_by_wallet(tmp_path: Path) 
 
 @pytest.mark.asyncio
 async def test_get_executions_for_recovery_filters_by_wallet(tmp_path: Path) -> None:
-    """Phase 0c.3: wallet_public_id filter scopes execution recovery.
+    """``wallet_public_id`` filter scopes execution recovery.
 
     Given: Two executions tagged with two different ``wallet_public_id``
         values via direct SCD2 update,
@@ -3716,14 +3716,14 @@ async def test_update_trade_command_status_carries_forward_multi_tenant_ids(
 ) -> None:
     """Verify SCD2 cycle preserves wallet/operator/user IDs across multiple transitions.
 
-    Given: A trade command inserted with all three Phase 0b multi-tenant IDs,
+    Given: A trade command inserted with all three multi-tenant IDs,
     When: update_trade_command_status cycles created → dispatched → accepted,
     Then: After both transitions get_active_commands_for_shard still returns
         the original wallet_public_id / operator_public_id / user_public_id,
         because update_trade_command_status copies them from the locked
         active row when constructing the replacement TradeCommand. Without
         this carry-forward, the very first status transition would silently
-        null out the audit identity, breaking the Phase 0b.4 outbox path.
+        null out the audit identity, breaking the outbox path.
     """
     db_path = tmp_path / "cmd_scd2_mt.db"
     r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")

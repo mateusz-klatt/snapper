@@ -5,8 +5,8 @@ Usage:
 
 Requires: database with ``wallet_credentials`` rows seeded for the
 live-money wallet(s). Credentials live in the ``wallet_credentials``
-table (post-0c cleanup item 0) — the script enumerates active rows
-via ``CredentialResolver`` and builds one exchange client per row.
+table — the script enumerates active rows via ``CredentialResolver``
+and builds one exchange client per row.
 """
 
 import asyncio
@@ -154,8 +154,8 @@ async def _load_live_credentials() -> CredentialEnvelopes:
     rows (paper wallets have no external exchange to query), and
     decrypts each envelope with the master-password Fernet key. When
     multiple live wallets have credentials for the same exchange, the
-    last one wins — post-0c single-user deployments typically have
-    exactly one live wallet so this degenerate case does not arise.
+    last one wins — single-user deployments typically have exactly
+    one live wallet so this degenerate case does not arise.
     """
     bootstrap = get_bootstrap_settings()
     repository = get_repository(bootstrap.db_url)

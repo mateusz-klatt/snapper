@@ -3135,7 +3135,7 @@ class StubUserService:
     async def build_auth_principal(self, user: UserProfile) -> AuthPrincipal:
         """Build a stub principal preserving the user's role and identity.
 
-        Phase 0b stub: returns an AuthPrincipal mirroring the user's
+        Stub: returns an AuthPrincipal mirroring the user's
         ``public_id`` so the login/refresh routes can populate token
         claims without hitting the multi-tenant repository methods.
         """

@@ -196,8 +196,8 @@ class TestGapDetector:
         gd.reset_topic("nonexistent.topic")
 
 
-class TestGapDetectorPhase0c7WalletPartitioning:
-    """Phase 0c.7: ``(topic, wallet_public_id)`` stream partitioning."""
+class TestGapDetectorWalletPartitioning:
+    """``(topic, wallet_public_id)`` stream partitioning."""
 
     def test_two_wallets_on_same_topic_do_not_collide(self) -> None:
         """Messages from two wallets on the same topic are tracked independently.

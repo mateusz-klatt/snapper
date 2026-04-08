@@ -322,7 +322,7 @@ class TestHeartbeatTopic:
         assert result == "system.heartbeats.strategy.macd_btc_1h"
 
     def test_executor_heartbeat_with_wallet_short_appends_5th_segment(self) -> None:
-        """Phase 0c.7: per-wallet executor heartbeat appends wallet_short.
+        """Per-wallet executor heartbeat appends wallet_short.
 
         Given: executor component + exchange + a 12-hex wallet_short,
         When: heartbeat_topic is built,

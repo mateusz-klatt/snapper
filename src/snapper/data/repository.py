@@ -188,8 +188,9 @@ class ScopeGrantNotFoundError(Exception):
 class ScopeGrantValidationError(Exception):
     """Raised when a scope grant request violates a structural invariant.
 
-    Maps to HTTP 400 at the API layer. Examples: scope_kind/public_id XOR
-    violation, self-handover (rule 2 of Section 3.7), or unknown scope_kind.
+    Maps to HTTP 400 at the API layer. Examples: scope_kind/public_id
+    XOR violation, self-handover (source operator equals target
+    operator), or unknown scope_kind.
     """
 
 
@@ -1283,12 +1284,14 @@ class Repository(ABC):
     ) -> tuple[ScopeGrantRow, ScopeGrantRow]:
         """Atomically transfer a scope grant to a different operator.
 
-        Single transaction: SCD2-close the source grant and
-        insert a new grant carrying the same ``scope_kind`` /
-        ``underlying_public_id`` / ``instrument_public_id`` under the new
-        operator. Validation rules 1, 2, 4 from Section 3.7 are enforced
-        here; rule 3 (caller permission) lives in the API layer once auth
-        propagation is wired.
+        Single transaction: SCD2-close the source grant and insert a
+        new grant carrying the same ``scope_kind`` /
+        ``underlying_public_id`` / ``instrument_public_id`` under the
+        new operator. Repository-layer validation enforces source-row
+        existence, non-self-handover, and overlap detection against
+        the target operator's existing grants. The caller-permission
+        check (the user must hold a grant on the source operator)
+        lives in the API layer.
 
         Args:
             from_grant_public_id: Public ID of the active source grant.
@@ -4063,12 +4066,12 @@ class SQLAlchemyRepository(Repository):
         For ``scope_kind == "instrument"`` this is the singleton set
         ``{instrument_public_id}``. For ``scope_kind == "underlying"`` this
         queries ``instrument_underlying_mappings`` (active at ``as_of``) and
-        returns every instrument currently linked to the underlying. The
-        dynamic-scope rule from Section 14.7.4 is honored — newly added
-        mappings expand the grant transparently. Callers MUST have already
-        validated the XOR invariant (either via ``_validate_scope_xor`` for
-        requests or via the DB ``ck_scope_grants_scope_kind_xor`` CHECK
-        constraint for grants loaded from the database).
+        returns every instrument currently linked to the underlying.
+        Underlying-scope grants are dynamic — newly added mappings
+        expand the grant transparently. Callers MUST have already
+        validated the XOR invariant (either via ``_validate_scope_xor``
+        for requests or via the DB ``ck_scope_grants_scope_kind_xor``
+        CHECK constraint for grants loaded from the database).
         """
         if scope_kind == "instrument":
             return {cast(str, instrument_public_id)}

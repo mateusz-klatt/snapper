@@ -687,7 +687,7 @@ class TestCheckpointRecovery:
     async def test_checkpoint_with_unknown_wallet_short_logs_warning(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Phase 0c.4: unknown wallet_short in checkpoint logs a warning.
+        """Unknown wallet_short in checkpoint logs a warning.
 
         Given: A checkpoint whose shard_key carries a ``w{wallet_short}``
             segment not present in ``self._wallet_short_to_id`` (e.g.

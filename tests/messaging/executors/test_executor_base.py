@@ -3543,7 +3543,7 @@ class TestExecutorWebSocketExecutions:
     def _create_mock_settings(self, with_credentials: bool = True) -> MagicMock:
         """Provide mocked AppSettings without per-exchange credential properties.
 
-        Post-0c cleanup: credentials live in wallet_credentials and are
+        Credentials live in wallet_credentials and are
         loaded by ``CredentialResolver`` at executor startup. Tests that
         need a credential-less executor path use ``with_credentials=False``
         to document intent; the field is otherwise unused because
@@ -5947,14 +5947,14 @@ def test_resolve_fee_zero_usd_equiv_falls_through() -> None:
     assert base_module.ExchangeExecutorService._resolve_fee(execution) == (1.5, "PLN")
 
 
-class TestPhase0cWalletScopedExecutor:
-    """Phase 0c per-wallet executor: credential resolver + message filter.
+class TestWalletScopedExecutor:
+    """Per-wallet executor: credential resolver + message filter.
 
     Covers the new ``wallet_public_id`` constructor parameter, the
     ``_resolve_credentials`` startup hook, and the ``_is_for_my_wallet``
     routing filter on incoming command messages. Both the legacy
     backwards-compat path (empty ``wallet_public_id``) and the
-    Phase 0c per-wallet path are exercised.
+    The per-wallet path is exercised.
     """
 
     def test_default_parameters_include_wallet_public_id(self) -> None:
@@ -5977,7 +5977,7 @@ class TestPhase0cWalletScopedExecutor:
         assert executor._credentials is None
 
     def test_init_stores_wallet_public_id_when_provided(self) -> None:
-        """Phase 0c constructor accepts an explicit wallet_public_id."""
+        """Constructor accepts an explicit wallet_public_id."""
         with patch("snapper.config.settings.get_settings") as mock_get_settings:
             mock_get_settings.return_value = MagicMock(db_url=TEST_DB_URL)
             executor = KrakenOrderExecutor(wallet_public_id="019d5a8b3c7d4e5f")
@@ -6005,7 +6005,7 @@ class TestPhase0cWalletScopedExecutor:
 
     @pytest.mark.asyncio
     async def test_resolve_credentials_raises_when_repository_missing(self) -> None:
-        """Phase 0c lookup fails fast when called before repository init.
+        """Lookup fails fast when called before repository init.
 
         Given: An executor with wallet_public_id but no repository,
         When: ``_resolve_credentials`` is called,
@@ -6055,7 +6055,7 @@ class TestPhase0cWalletScopedExecutor:
         assert executor._credentials == expected_envelope
 
     def test_is_for_my_wallet_accepts_everything_in_legacy_mode(self) -> None:
-        """Empty wallet_public_id never filters — pre-0c behaviour preserved.
+        """Empty wallet_public_id never filters — legacy behaviour preserved.
 
         Given: An executor with the default empty wallet_public_id,
         When: ``_is_for_my_wallet`` is called with any message,
@@ -6071,7 +6071,7 @@ class TestPhase0cWalletScopedExecutor:
         assert executor._is_for_my_wallet(msg_no_attr) is True
 
     def test_is_for_my_wallet_drops_messages_for_other_wallets(self) -> None:
-        """Phase 0c filter drops cross-wallet commands silently.
+        """Filter drops cross-wallet commands silently.
 
         Given: An executor bound to wallet ``aaa``,
         When: ``_is_for_my_wallet`` is called with a message tagged
@@ -6085,7 +6085,7 @@ class TestPhase0cWalletScopedExecutor:
         assert executor._is_for_my_wallet(msg) is False
 
     def test_is_for_my_wallet_accepts_messages_for_my_wallet(self) -> None:
-        """Phase 0c filter accepts commands matching its own wallet.
+        """Filter accepts commands matching its own wallet.
 
         Given: An executor bound to wallet ``aaa``,
         When: ``_is_for_my_wallet`` is called with a matching message,
@@ -6098,7 +6098,7 @@ class TestPhase0cWalletScopedExecutor:
         assert executor._is_for_my_wallet(msg) is True
 
     def test_is_for_my_wallet_drops_messages_with_no_wallet_field(self) -> None:
-        """Phase 0c filter rejects messages missing wallet_public_id.
+        """Filter rejects messages missing wallet_public_id.
 
         Given: An executor bound to wallet ``aaa``,
         When: ``_is_for_my_wallet`` is called with a message that has

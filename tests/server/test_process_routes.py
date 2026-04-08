@@ -1130,7 +1130,7 @@ class TestProcessRoutesEdgeCases:
 
 
 class TestEnforceStrategyScope:
-    """Tests for the Phase 0b.4 strategy permission helper."""
+    """Tests for the strategy permission helper."""
 
     @pytest.mark.asyncio
     async def test_non_strategy_role_skipped(self) -> None:
@@ -1144,7 +1144,7 @@ class TestEnforceStrategyScope:
 
     @pytest.mark.asyncio
     async def test_empty_defaults_allowed(self) -> None:
-        """Strategy with empty operator/wallet keeps Phase 0a behavior."""
+        """Strategy with empty operator/wallet keeps default behavior."""
         await _enforce_strategy_scope(
             parameters={"operator_public_id": "", "wallet_public_id": ""},
             role=ProcessRoleEnum.STRATEGY,
@@ -1260,8 +1260,8 @@ class TestGetRepositoryForProcesses:
             assert result is mock_get_repo.return_value
 
 
-class TestPhase0bScopeHelpers:
-    """Tests for the Phase 0b.4d / phase-close strategy scope helpers."""
+class TestScopeHelpers:
+    """Tests for the strategy scope helpers."""
 
     @pytest.mark.asyncio
     async def test_enforce_wallet_grant_exists_passes(self) -> None:
@@ -1364,7 +1364,7 @@ class TestPhase0bScopeHelpers:
 
 
 class TestStartProcessScopeRecheck:
-    """Tests for the Phase 0b phase-close start_process re-validation."""
+    """Tests for the start_process scope re-validation."""
 
     @pytest.mark.asyncio
     async def test_start_process_rejects_wallet_override(self) -> None:
@@ -1598,7 +1598,7 @@ class TestResolveRoleForClassPath:
     ) -> None:
         """Persisted ``parameters`` field that isn't a dict is treated as None.
 
-        Phase 0c.3 regression: covers the false branch of
+        Regression: covers the false branch of
         ``isinstance(raw_params, dict)`` inside ``start_process`` so the
         line 677 branch in ``process_routes.py`` stays at 100% even
         when test execution order shifts.

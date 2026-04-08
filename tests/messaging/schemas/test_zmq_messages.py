@@ -546,16 +546,16 @@ class TestMessages:
 
 
 class TestMultiTenantFields:
-    """Tests for the Phase 0b.3 multi-tenant identity surface on schemas.
+    """Tests for the multi-tenant identity surface on schemas.
 
-    The 7 command/event/signal schemas listed in
-    plan_multi_tenant_foundation.md Section 4.3 each gain optional
-    ``wallet_public_id`` / ``operator_public_id`` / ``user_public_id``
-    fields. These tests lock in the default values and verify a
-    non-default round trip survives JSON serialization on the
-    ``SignalData`` and ``ExecutionData`` shapes — the same field
-    semantics apply to OrderData, OrderRequestData, OrderCancelData,
-    OrderReplaceData, and OrderEventData.
+    The seven command/event/signal schemas (``SignalData``,
+    ``ExecutionData``, ``OrderData``, ``OrderRequestData``,
+    ``OrderCancelData``, ``OrderReplaceData``, ``OrderEventData``)
+    each carry optional ``wallet_public_id`` / ``operator_public_id``
+    / ``user_public_id`` fields. These tests lock in the default
+    values and verify a non-default round trip survives JSON
+    serialization on the ``SignalData`` and ``ExecutionData`` shapes
+    — the same field semantics apply to the other five.
     """
 
     def test_signal_default_multi_tenant_fields(self) -> None:
@@ -614,7 +614,7 @@ class TestMultiTenantFields:
 
         Given: An ExecutionData built without multi-tenant kwargs,
         When: The instance is constructed,
-        Then: All three Phase 0b.3 fields take their safe defaults so
+        Then: All three fields take their safe defaults so
             existing fixtures continue to work.
         """
         msg = ExecutionData(

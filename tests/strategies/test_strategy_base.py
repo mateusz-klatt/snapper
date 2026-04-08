@@ -3794,7 +3794,7 @@ class TestExecutorBasePhase4:
     """Test suite for executor base class edge cases."""
 
     def test_get_default_parameters_advertises_wallet_public_id(self) -> None:
-        """Phase 0c: ``get_default_parameters`` advertises wallet param.
+        """``get_default_parameters`` advertises wallet param.
 
         Given: ExchangeExecutorService,
         When: ``get_default_parameters`` called,

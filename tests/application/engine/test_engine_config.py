@@ -868,7 +868,7 @@ class TestTraderSignalHandling:
     async def test_on_signal_routes_wallet_tagged_signal_to_wallet_engine(
         self, mock_zmq_context: MagicMock, mock_get_settings: MagicMock, mock_get_repo: MagicMock
     ) -> None:
-        """Phase 0c.4: a signal with a populated wallet routes to its own engine.
+        """A signal with a populated wallet routes to its own engine.
 
         Given: A live signal whose wallet_public_id is populated AND a
             pre-existing flat-key engine entry for the same instrument
@@ -876,7 +876,7 @@ class TestTraderSignalHandling:
         When: ``_on_signal`` is invoked,
         Then: The flat-key engine is NOT touched, and the wallet
             filter routes the signal to a separate wallet-keyed engine
-            (``BTC-USD@kraken-live-w{wallet_short}``). The Phase 0b
+            (``BTC-USD@kraken-live-w{wallet_short}``). The
             fail-closed guard is gone — wallet identity is now
             first-class through the engine key.
         """
@@ -1664,7 +1664,7 @@ async def test_persist_checkpoint_writes_none_when_position_flat() -> None:
 
 @pytest.mark.asyncio
 async def test_persist_checkpoint_carries_operator_from_matching_engine() -> None:
-    """Post-0c cleanup item 2: operator_public_id persisted from engine.
+    """``operator_public_id`` persisted from engine.
 
     Given: A TraderCoordinator with an engine whose ``_shard_key``
         matches the shard being checkpointed and whose

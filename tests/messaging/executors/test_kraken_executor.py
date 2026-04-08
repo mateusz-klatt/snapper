@@ -12,7 +12,7 @@ from snapper.messaging.executors.kraken import KrakenOrderExecutor
 
 @pytest.fixture
 def mocked_settings(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
-    """Provide mocked AppSettings (post-0c: no per-exchange credential properties)."""
+    """Provide mocked AppSettings (no per-exchange credential properties)."""
     settings = SimpleNamespace(
         db_url="sqlite:///:memory:",
         zmq_broker_xpub="tcp://127.0.0.1:5555",
@@ -28,7 +28,7 @@ def mocked_settings(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
 @pytest.fixture
 def wallet_credential_envelope() -> SimpleNamespace:
-    """Phase 0c: per-wallet credential envelope used by tests below."""
+    """Per-wallet credential envelope used by tests below."""
     return SimpleNamespace(
         api_key_value="wallet-kraken-public-id",
         api_secret_value="wallet-kraken-signing-blob",
@@ -46,7 +46,7 @@ def test_create_exchange_client_uses_injected_credentials(
         envelope containing ``api_key`` / ``api_secret``,
     When: ``_create_exchange_client`` is called,
     Then: ``KrakenExchangeClient`` is constructed with the injected
-        credentials — post-0c cleanup removed the legacy
+        credentials — cleanup removed the legacy
         ``AppSettings.kraken_api_key`` fallback, so ``self._credentials``
         is now the sole source of truth.
     """
@@ -83,7 +83,7 @@ def test_create_exchange_client_raises_without_credentials(
     monkeypatch: pytest.MonkeyPatch,
     mocked_settings: SimpleNamespace,
 ) -> None:
-    """Post-0c: no credentials → fail-fast RuntimeError.
+    """No credentials → fail-fast RuntimeError.
 
     Given a ``KrakenOrderExecutor`` whose ``_credentials`` is still
         ``None`` (``_resolve_credentials`` has not run because the
@@ -120,7 +120,7 @@ def test_get_exchange_name_returns_literal(
 def test_get_default_parameters_advertises_wallet_public_id(
     mocked_settings: SimpleNamespace,
 ) -> None:
-    """Phase 0c: default kwargs advertises wallet_public_id.
+    """Default kwargs advertises wallet_public_id.
 
     Given the KrakenOrderExecutor class,
     When ``get_default_parameters`` is called,
@@ -136,7 +136,7 @@ def test_create_exchange_client_uses_credential_dict_when_wallet_set(
     mocked_settings: SimpleNamespace,
     wallet_credential_envelope: SimpleNamespace,
 ) -> None:
-    """Phase 0c: per-wallet credentials override AppSettings fallback.
+    """Per-wallet credentials override AppSettings fallback.
 
     Given a KrakenOrderExecutor with a non-empty wallet_public_id and
         a populated ``self._credentials`` dict,

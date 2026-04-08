@@ -2844,7 +2844,7 @@ class TestRecovery:
     async def test_recover_from_executions_groups_by_wallet(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Phase 0c.5 gap fill: wallet-aware ``_recover_from_executions`` grouping.
+        """Wallet-aware ``_recover_from_executions`` grouping.
 
         Given: Two executions on the same instrument and exchange but
             with different ``wallet_public_id`` values, plus one legacy
@@ -2948,7 +2948,7 @@ class TestRecovery:
     async def test_recover_from_executions_propagates_operator_from_row(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Post-0c cleanup item 2: execution recovery reads operator from row.
+        """Execution recovery reads operator from row.
 
         Given: A single execution row carrying both ``wallet_public_id``
             and ``operator_public_id`` (populated by the new
@@ -2956,7 +2956,7 @@ class TestRecovery:
         When: ``_recover_engine_state`` runs and replays the execution,
         Then: The recovered engine has the operator attribution from
             the execution row instead of empty string — closes the
-            Phase 0c.5 Medium residual where execution-sourced
+            residual where execution-sourced
             engines had empty operator.
         """
         _configure_settings(monkeypatch)
@@ -3004,7 +3004,7 @@ class TestRecovery:
     async def test_recover_active_order_propagates_operator_public_id(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Phase 0c.5 L1: recovery engines preserve ``operator_public_id``.
+        """Recovery engines preserve ``operator_public_id``.
 
         Given: An active order row carrying both ``wallet_public_id``
             and ``operator_public_id``,
@@ -3061,7 +3061,7 @@ class TestRecovery:
     async def test_recover_active_order_logs_warning_on_operator_conflict(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """Post-0c cleanup item 4: conflicting operators on same engine_key logs warning.
+        """Conflicting operators on same engine_key logs warning.
 
         Given: An execution row that creates the engine with one
             ``operator_public_id``, followed by an active order row on
@@ -3154,7 +3154,7 @@ class TestRecovery:
     async def test_recover_active_order_backfills_operator_on_existing_engine(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Phase 0c.5 phase-close: backfill operator on engines reused from earlier recovery phases.
+        """Backfill operator on engines reused from earlier recovery phases.
 
         When ``_recover_from_executions`` (or ``_recover_from_checkpoints``)
         creates an engine first, it has no source for ``operator_public_id``
@@ -3751,7 +3751,7 @@ class TestRecovery:
 def test_build_engine_key_flat_when_wallet_empty() -> None:
     """Verify empty wallet returns the legacy flat engine_key.
 
-    Given: An empty wallet_public_id (Phase 0b transitional default
+    Given: An empty wallet_public_id (transitional default
         and every recovery callsite),
     When: _build_engine_key is invoked,
     Then: The returned key has no ``-w<wallet_short>`` suffix so live
@@ -3762,7 +3762,7 @@ def test_build_engine_key_flat_when_wallet_empty() -> None:
 
 
 def test_build_engine_key_includes_wallet_short_when_populated() -> None:
-    """Phase 0c.4: ``_build_engine_key`` appends ``-w{wallet_short}`` segment.
+    """``_build_engine_key`` appends ``-w{wallet_short}`` segment.
 
     Given: A populated wallet_public_id (UUID7 with dashes and uppercase),
     When: ``_build_engine_key`` is invoked,
@@ -3781,25 +3781,25 @@ def test_build_engine_key_includes_wallet_short_when_populated() -> None:
 
 
 def test_build_engine_key_legacy_flat_key_when_wallet_empty() -> None:
-    """Empty ``wallet_public_id`` keeps the pre-0c.4 flat key shape.
+    """Empty ``wallet_public_id`` keeps the legacy flat key shape.
 
     Given: An empty ``wallet_public_id`` (legacy template path used by
-        the single-wallet bootstrap and pre-0c tests),
+        the single-wallet bootstrap and legacy tests),
     When: ``_build_engine_key`` is invoked,
     Then: The returned key omits the wallet_short suffix entirely so
-        the legacy backwards-compat path keeps working until 0c.5.
+        the legacy backwards-compat path keeps working.
     """
     key = TraderCoordinator._build_engine_key("BTC-USD", "kraken", "live", "")
     assert key == "BTC-USD@kraken-live"
 
 
-class TestPhase0cShardKeyParser:
-    """Phase 0c.4 ``_parse_shard_key`` static helper coverage."""
+class TestShardKeyParser:
+    """``_parse_shard_key`` static helper coverage."""
 
     def test_parse_legacy_three_segment_key(self) -> None:
         """Legacy 3-segment ``exchange.instrument.mode`` keys parse.
 
-        Given: A pre-0c.4 flat shard_key with no wallet and no tag,
+        Given: A legacy flat shard_key with no wallet and no tag,
         When: ``_parse_shard_key`` is invoked,
         Then: The tuple carries empty wallet_short and None strategy_tag.
         """
@@ -3809,7 +3809,7 @@ class TestPhase0cShardKeyParser:
     def test_parse_legacy_four_segment_key_with_strategy_tag(self) -> None:
         """Legacy 4-segment ``...{mode}.{strategy_tag}`` keys parse.
 
-        Given: A pre-0c.4 paper shard_key with a strategy_tag suffix,
+        Given: A legacy paper shard_key with a strategy_tag suffix,
         When: ``_parse_shard_key`` is invoked,
         Then: The strategy_tag populates the 5th tuple field and
             wallet_short stays empty.
@@ -3818,7 +3818,7 @@ class TestPhase0cShardKeyParser:
         assert parsed == ("paper", "BTC-USD", "paper", "", "scalp")
 
     def test_parse_wallet_aware_four_segment_key(self) -> None:
-        """Phase 0c.4 4-segment key with wallet_short suffix parses.
+        """4-segment key with wallet_short suffix parses.
 
         Given: A wallet-aware live shard_key
             ``exchange.instrument.mode.w{12hex}``,
@@ -3830,7 +3830,7 @@ class TestPhase0cShardKeyParser:
         assert parsed == ("kraken", "BTC-USD", "live", "01975a8b3c7d", None)
 
     def test_parse_wallet_aware_five_segment_key_with_tag(self) -> None:
-        """Phase 0c.4 5-segment key with wallet_short + strategy_tag.
+        """5-segment key with wallet_short + strategy_tag.
 
         Given: A wallet-aware paper shard_key
             ``exchange.instrument.mode.w{12hex}.{strategy_tag}``,
@@ -3867,7 +3867,7 @@ class TestPhase0cShardKeyParser:
             (13 chars, starts with ``w``, but contains non-hex chars),
         When: ``_parse_shard_key`` is invoked,
         Then: The tag stays in the strategy_tag slot and wallet_short
-            remains empty (Phase 0c.5 M1 fix from 0c.4 review).
+            remains empty.
         """
         parsed = TraderCoordinator._parse_shard_key("paper.BTC-USD.paper.wnotahexvalue")
         assert parsed == ("paper", "BTC-USD", "paper", "", "wnotahexvalue")
@@ -3883,8 +3883,8 @@ class TestPhase0cShardKeyParser:
         assert parsed == ("kraken", "BTC-USD", "live", "abcdef012345", None)
 
 
-class TestPhase0cBuildWalletShortCache:
-    """Phase 0c.4 ``_build_wallet_short_cache`` coverage."""
+class TestBuildWalletShortCache:
+    """``_build_wallet_short_cache`` coverage."""
 
     def _make_trader(self) -> TraderCoordinator:
         with patch("snapper.application.engine.trader.get_settings") as mock_settings:
@@ -4002,8 +4002,8 @@ class TestPhase0cBuildWalletShortCache:
         }
 
 
-class TestPhase0cEngineShardKeyWithWallet:
-    """Phase 0c.4 ``TradingEngineService._shard_key`` wallet segment."""
+class TestEngineShardKeyWithWallet:
+    """``TradingEngineService._shard_key`` wallet segment."""
 
     def test_shard_key_includes_wallet_short_for_live_mode(self) -> None:
         """Live engine with wallet produces ``...live.w{wallet_short}``.
@@ -4036,7 +4036,7 @@ class TestPhase0cEngineShardKeyWithWallet:
         When: ``_shard_key`` is read,
         Then: The key is ``paper.BTC-USD.paper.w{wallet_short}.{tag}``
             (wallet_short segment BEFORE strategy_tag) matching the
-            Phase 0c.4 parser contract.
+            parser contract.
         """
         mock_publisher = MagicMock()
         engine = TradingEngineService(

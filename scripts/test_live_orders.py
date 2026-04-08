@@ -120,13 +120,12 @@ def emit(exchange: str, scenario: str, step: str, data: Any) -> None:
 async def get_settings() -> Any:
     """Load decrypted exchange credentials from ``wallet_credentials``.
 
-    Post-0c cleanup item 0: wallet-scoped credentials live in the
-    ``wallet_credentials`` table rather than ``AppSettings``. This
-    helper queries every active live-money credential row, decrypts
-    the Fernet envelope with the master password, and returns a
-    ``SimpleNamespace`` with the legacy attribute names
-    (``kraken_api_key`` / ``kraken_api_secret`` / etc.) populated so
-    the per-exchange runners downstream do not need to change.
+    Wallet-scoped credentials live in the ``wallet_credentials`` table
+    rather than ``AppSettings``. This helper queries every active
+    live-money credential row, decrypts the Fernet envelope with the
+    master password, and returns a ``SimpleNamespace`` with the
+    attribute names (``kraken_api_key`` / ``kraken_api_secret`` /
+    etc.) the per-exchange runners downstream expect.
 
     Returns:
         ``SimpleNamespace`` with eight credential attributes (empty

@@ -165,7 +165,7 @@ class TestSignalService:
         """Verify store_signal persists wallet_public_id + operator_public_id.
 
         Given: Repository with BTCUSD instrument and a strategy that supplies
-            wallet/operator IDs (Phase 0b.4 contract),
+            wallet/operator IDs (contract),
         When: store_signal is called with wallet_public_id + operator_public_id,
         Then: The persisted Signal row carries both IDs verbatim. Empty strings
             collapse to NULL so the existing zero-value path stays unchanged.
@@ -212,7 +212,7 @@ class TestSignalService:
             passes an empty wallet_public_id (legacy no-tenant path from
             tests that have not migrated to passing a real wallet UUID),
         When: store_signal is called with ``wallet_public_id=""``,
-        Then: The persisted row stores the empty string (Phase 0c.6 NOT
+        Then: The persisted row stores the empty string (NOT
             NULL tightening forbids NULL; empty string is the legacy
             sentinel the runtime accepts). ``operator_public_id`` stays
             nullable per the ORM so it still collapses to NULL on empty.

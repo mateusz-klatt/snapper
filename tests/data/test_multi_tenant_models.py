@@ -1,7 +1,7 @@
-"""Tests for the multi-tenant ORM models added in Phase 0a step 1.
+"""Tests for the multi-tenant ORM models.
 
 Covers ORM construction, field assignment, and integration through
-``make migrate-dev`` round-trip for the 5 new tables introduced by Plan 0:
+``make migrate-dev`` round-trip for the 5 multi-tenant tables:
 
 - ``Wallet``
 - ``WalletCredential``
@@ -9,13 +9,10 @@ Covers ORM construction, field assignment, and integration through
 - ``UserOperatorMembership``
 - ``WalletOperatorScopeGrant``
 
-These tests are intentionally lightweight and only verify model construction
-and basic invariants. Repository-level tests for create/handover/overlap
-detection live in ``tests/data/test_scope_grants.py`` (added in a later
-Phase 0a step alongside the repository methods).
-
-Plan reference: ``proprietary/plans/plan_multi_tenant_foundation.md``
-Sections 3.1, 14.6 D1, 14.7.1.
+These tests are intentionally lightweight and only verify model
+construction and basic invariants. Repository-level tests for
+create/handover/overlap detection live in
+``tests/data/test_scope_grants.py``.
 """
 
 from datetime import UTC
@@ -182,7 +179,7 @@ class TestWalletOperatorScopeGrantModel:
 
     Note: cross-scope overlap detection and 409 conflict handling live in
     repository-level tests added alongside the create_scope_grant /
-    handover_grant methods in a later Phase 0a step. This file only verifies
+    handover_grant methods separately. This file only verifies
     that the ORM model accepts the two valid scope_kind shapes.
     """
 

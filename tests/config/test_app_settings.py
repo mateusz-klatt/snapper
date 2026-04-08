@@ -63,12 +63,12 @@ class MockSettingsService:
 class TestAppSettingsMarketDataProperties:
     """Tests for AppSettings market-data API property accessors.
 
-    Post-0c cleanup item 0 removed the per-exchange trading credential
-    properties (``kraken_api_key``, ``walutomat_api_key`` etc.) because
-    wallet-scoped credentials now live in the ``wallet_credentials``
-    table and are loaded by ``CredentialResolver`` during per-wallet
-    executor startup. ``polygon_api_key`` stays on ``AppSettings``
-    because Polygon is a shared market-data provider, not a wallet.
+    The per-exchange trading credential properties (``kraken_api_key``,
+    ``walutomat_api_key`` etc.) were removed because wallet-scoped
+    credentials live in the ``wallet_credentials`` table and are
+    loaded by ``CredentialResolver`` during per-wallet executor
+    startup. ``polygon_api_key`` stays on ``AppSettings`` because
+    Polygon is a shared market-data provider, not a wallet.
     """
 
     def test_polygon_api_key_returns_value(self) -> None:

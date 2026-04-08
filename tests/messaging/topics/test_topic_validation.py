@@ -1830,7 +1830,7 @@ class TestSystemTopicHeartbeatPaths:
         assert valid
 
     def test_system_heartbeats_executor_with_wallet_short_is_valid(self) -> None:
-        """Phase 0c.7: 5-segment per-wallet executor heartbeat is accepted.
+        """5-segment per-wallet executor heartbeat is accepted.
 
         Given: ``system.heartbeats.executor.{exchange}.{wallet_short}``
             where wallet_short is 12 lowercase hex chars,
@@ -1844,7 +1844,7 @@ class TestSystemTopicHeartbeatPaths:
     def test_system_heartbeats_executor_with_non_hex_wallet_short_is_rejected(
         self,
     ) -> None:
-        """Phase 0c.7: 5th segment must be hex (not strategy-tag-like).
+        """5th segment must be hex (not strategy-tag-like).
 
         Given: ``system.heartbeats.executor.kraken.notahexvalue`` — 12
             chars but non-hex,
@@ -1858,7 +1858,7 @@ class TestSystemTopicHeartbeatPaths:
     def test_system_heartbeats_executor_with_uppercase_hex_wallet_short_is_rejected(
         self,
     ) -> None:
-        """Phase 0c.7: uppercase hex is rejected (lowercase-only convention).
+        """Uppercase hex is rejected (lowercase-only convention).
 
         Given: ``system.heartbeats.executor.kraken.019D6CA45F2E`` — 12
             chars, valid hex, but uppercase,
@@ -1868,7 +1868,7 @@ class TestSystemTopicHeartbeatPaths:
             ``trader.py:_build_engine_key``) all ``.lower()`` before
             publishing, so an uppercase wallet_short in a topic segment
             indicates a typo or a stale tooling path that must be
-            caught at the first publish — matching the Phase 0c.5
+            caught at the first publish — matching the
             lowercase-only decision for ``_parse_shard_key``.
         """
         valid, _err = validate_topic("system.heartbeats.executor.kraken.019D6CA45F2E")
@@ -1878,7 +1878,7 @@ class TestSystemTopicHeartbeatPaths:
     def test_system_heartbeats_executor_with_wrong_length_wallet_short_is_rejected(
         self,
     ) -> None:
-        """Phase 0c.7: 5th segment must be exactly 12 characters.
+        """5th segment must be exactly 12 characters.
 
         Given: ``system.heartbeats.executor.kraken.deadbeef`` — hex but
             only 8 chars,
@@ -1890,7 +1890,7 @@ class TestSystemTopicHeartbeatPaths:
         assert "wallet_short" in _err
 
     def test_system_heartbeats_executor_with_6_segments_is_rejected(self) -> None:
-        """Phase 0c.7: executor heartbeat rejects >5 segments.
+        """Executor heartbeat rejects >5 segments.
 
         Given: A 6-segment executor heartbeat topic,
         When: Validated,

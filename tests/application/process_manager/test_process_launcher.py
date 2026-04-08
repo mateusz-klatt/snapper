@@ -4945,8 +4945,8 @@ def test_validate_parameters_with_model(monkeypatch: pytest.MonkeyPatch) -> None
     assert result == {"endpoint": "tcp://localhost:5555"}
 
 
-class TestPhase0cSpawnPerWalletExecutors:
-    """Phase 0c.2 dynamic per-wallet executor spawner coverage.
+class TestSpawnPerWalletExecutors:
+    """Dynamic per-wallet executor spawner coverage.
 
     The spawner queries ``wallet_credentials`` and starts one
     ``ProcessConfigModel`` per ``(exchange, wallet)`` pair via
@@ -5200,8 +5200,7 @@ class TestPhase0cSpawnPerWalletExecutors:
             credential (so a misconfigured wallet does not block all
             other wallets), and after the loop completes raises
             :class:`CoreProcessStartupError` listing the failed CORE
-            instance — matching :meth:`start_all_processes` semantics
-            (Phase 0c.5 M1 from 0c.2 review).
+            instance — matching :meth:`start_all_processes` semantics.
         """
         factory = self._make_factory()
         wallet_a = "00000000-0000-7000-8000-0000000000e1"
@@ -5259,8 +5258,7 @@ class TestPhase0cSpawnPerWalletExecutors:
         When: ``spawn_per_wallet_executors`` is called,
         Then: The spawner logs the failure, continues with the second
             credential, and returns the count of successful spawns
-            without raising — only LONG_RUNNING CORE failures escalate
-            (Phase 0c.5 M1 from 0c.2 review).
+            without raising — only LONG_RUNNING CORE failures escalate.
         """
         factory = self._make_factory()
         wallet_a = "00000000-0000-7000-8000-0000000000f1"

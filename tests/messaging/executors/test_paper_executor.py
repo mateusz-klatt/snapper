@@ -812,7 +812,7 @@ class TestPaperOrderExecutor:
     """Tests for PaperOrderExecutor service."""
 
     def test_get_default_parameters_advertises_wallet_public_id(self) -> None:
-        """``get_default_parameters`` advertises Phase 0c wallet param.
+        """``get_default_parameters`` advertises wallet param.
 
         Given: AppSettings instance,
         When: ``get_default_parameters`` is called,
@@ -829,15 +829,14 @@ class TestPaperOrderExecutor:
         mock_get_settings: MagicMock,
         mock_get_repository: MagicMock,
     ) -> None:
-        """Post-0c: PaperOrderExecutor without credentials raises RuntimeError.
+        """PaperOrderExecutor without credentials raises RuntimeError.
 
         Given: PaperOrderExecutor with the default empty wallet_public_id
             and ``self._credentials`` still ``None``,
         When: ``_create_exchange_client`` is called,
         Then: A ``RuntimeError`` surfaces with an actionable message.
-            The legacy hardcoded 10000.0 fallback was removed; every
-            paper wallet must carry an explicit ``initial_balance`` in
-            its credential envelope (post-0c cleanup item 1).
+            Every paper wallet must carry an explicit ``initial_balance``
+            in its credential envelope.
         """
         settings = SimpleNamespace(db_url="sqlite:///:memory:")
         mock_get_settings.return_value = settings
@@ -855,7 +854,7 @@ class TestPaperOrderExecutor:
         mock_get_repository: MagicMock,
         mock_paper_client: MagicMock,
     ) -> None:
-        """Phase 0c per-wallet path: initial balance comes from credential dict.
+        """Per-wallet path: initial balance comes from credential dict.
 
         Given: PaperOrderExecutor with a populated credential envelope
             (``initial_balance=2500.0`` as a stringified value),

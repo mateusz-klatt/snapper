@@ -15,6 +15,7 @@ Example:
     >>> users, settings = run_seed("dev")
 """
 
+import base64
 import json
 import tomllib
 from dataclasses import dataclass
@@ -376,7 +377,6 @@ def _build_credential_envelope(cred: SeedWalletCredential) -> str:
     if cred.credential_type == "api_key_secret":
         return json.dumps({"api_key": cred.api_key, "api_secret": cred.api_secret})
     if cred.credential_type == "rsa_pem":
-        import base64
 
         try:
             pem_bytes = base64.b64decode(cred.private_key_pem_base64)

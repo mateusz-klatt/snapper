@@ -852,7 +852,7 @@ class TestSeedDefaultMultiTenant:
             empty multi-tenant tables,
         When: ``seed_default_multi_tenant`` is invoked,
         Then: Default operator, paper wallet, primary admin membership,
-            and a paper-mode wallet credential row are inserted (Phase 0c
+            and a paper-mode wallet credential row are inserted (
             bootstrap so the dynamic per-wallet executor spawner finds at
             least one credential at boot).
         """

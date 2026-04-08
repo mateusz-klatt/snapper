@@ -402,7 +402,7 @@ class TestSettingsService:
 
         Given: A SettingsService with a working ZMQ publisher,
         When: _broadcast_change is called with a credential-shaped key
-            (Phase 0b.5 defense in depth — credentials live in
+            (defense in depth — credentials live in
             wallet_credentials, never in settings),
         Then: The publisher is NOT called and a warning is logged. Even
             if a regression reintroduces a credential row in the

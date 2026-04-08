@@ -1,6 +1,6 @@
 """Repository-level tests for wallet_operator_scope_grants methods.
 
-Covers Phase 0a step 3 of Plan 0 (multi-tenant foundation): the
+Covers the multi-tenant foundation: the
 ``create_scope_grant`` / ``handover_grant`` methods on
 ``SQLAlchemyRepository`` and the cross-scope overlap detection that
 enforces the instrument-exclusive rule (D2).
@@ -952,7 +952,7 @@ class TestListActiveScopeGrants:
 
 
 class TestListGrantCoveredInstrumentPublicIds:
-    """Tests for the new Phase 0b.4d coverage helper."""
+    """Tests for the new coverage helper."""
 
     @pytest.mark.asyncio
     async def test_underlying_grant_expands_to_all_mapped_instruments(
@@ -1018,7 +1018,7 @@ class TestListGrantCoveredInstrumentPublicIds:
 
 
 class TestGetInstrumentPublicIdBySymbol:
-    """Tests for the new Phase 0b.4d symbol-to-instrument resolver."""
+    """Tests for the new symbol-to-instrument resolver."""
 
     @pytest.mark.asyncio
     async def test_returns_none_when_symbol_unknown(self, repo: SQLAlchemyRepository) -> None:

@@ -1300,13 +1300,14 @@ class WalletCredential(TemporalMixin, Base):
         oauth           -> {"client_id": "...", "client_secret": "...", "refresh_token": "..."}
         paper           -> {"initial_balance": 10000.0}
 
-    The payload is encrypted with the same master-password-derived Fernet
-    key used by ``SettingsEncryptionService`` for sensitive settings.
-    Rotation semantics: rotate the master password → re-encrypt every
-    ``wallet_credentials`` row in lockstep → restart. There is no per-row
-    ``encryption_key_id``: the master password is the single source of
-    truth, and any multi-key overlap window would be a future enhancement
-    (plan Section 4.2 — YAGNI for now).
+    The payload is encrypted with the same master-password-derived
+    Fernet key used by ``SettingsEncryptionService`` for sensitive
+    settings. Rotation semantics: rotate the master password →
+    re-encrypt every ``wallet_credentials`` row in lockstep →
+    restart. There is no per-row ``encryption_key_id``: the master
+    password is the single source of truth. A multi-key overlap
+    window (envelope encryption with KMS-style data-encryption keys)
+    is intentionally deferred until a real use case appears.
 
     Encryption reuses the existing Setting encryption infrastructure (master
     key from env var, encrypted at rest). Credentials are pull-on-startup only

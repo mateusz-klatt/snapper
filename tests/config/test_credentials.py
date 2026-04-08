@@ -1,6 +1,6 @@
 """Tests for the per-wallet ``CredentialResolver``.
 
-Plan 0 Phase 0b Section 4.2. Verifies the resolver pulls an active
+Verifies the resolver pulls an active
 ``wallet_credentials`` row from the repository, decrypts the JSON
 envelope using the project's Fernet encryption service, and surfaces
 ``CredentialNotFoundError`` when no row matches.
@@ -249,7 +249,7 @@ class TestCredentialResolverErrors:
 
 
 class TestListActiveWalletCredentials:
-    """Phase 0c.2 ``Repository.list_active_wallet_credentials`` coverage.
+    """``Repository.list_active_wallet_credentials`` coverage.
 
     The dynamic per-wallet executor spawner consumes this list at boot
     to discover the ``(exchange, wallet)`` pairs that need a dedicated
