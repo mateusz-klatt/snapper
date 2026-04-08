@@ -19,7 +19,7 @@ from snapper.messaging.executors.base import ExchangeExecutorService
     priority=30,
     role=ProcessRoleEnum.CORE,
     tags=("execution", "orders", "walutomat"),
-    enabled=True,
+    enabled=False,
     mode=ProcessModeEnum.THREAD,
 )
 class WalutomatOrderExecutor(ExchangeExecutorService[WalutomatExchangeClient]):

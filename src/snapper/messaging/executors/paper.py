@@ -42,7 +42,7 @@ from snapper.messaging.executors.base import ExchangeExecutorService
     priority=30,
     role=ProcessRoleEnum.CORE,
     tags=("execution", "orders", "paper", "simulation"),
-    enabled=True,
+    enabled=False,
     mode=ProcessModeEnum.THREAD,
 )
 class PaperOrderExecutor(ExchangeExecutorService[PaperExchangeClient]):

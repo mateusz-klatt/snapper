@@ -488,6 +488,13 @@ class ProcessLauncherService:
             when no credentials exist (e.g. fresh DB before
             ``seed_default_multi_tenant`` runs) or when no exchange
             templates are registered.
+
+        Raises:
+            CoreProcessStartupError: If any LONG_RUNNING CORE per-wallet
+                executor instance fails to start. Mirrors
+                :meth:`start_all_processes` semantics so a missing
+                credential row or boot-time CORE failure does not
+                silently leave the system without a critical executor.
         """
         repository = get_repository(self.settings.db_url)
         try:
@@ -500,6 +507,7 @@ class ProcessLauncherService:
             return 0
         registry = get_registered_processes()
         spawned = 0
+        failed_core_names: list[str] = []
         for credential in credentials:
             template_name = f"executor_{credential['exchange']}"
             entry = registry.get(template_name)
@@ -545,7 +553,14 @@ class ProcessLauncherService:
                     f"Phase 0c.2 spawner: failed to start '{instance_name}' "
                     f"for wallet={credential['wallet_public_id']}: {exc}"
                 )
+                if (
+                    entry.role is ProcessRoleEnum.CORE
+                    and entry.lifecycle is ProcessLifecycleEnum.LONG_RUNNING
+                ):
+                    failed_core_names.append(instance_name)
         logger.info(f"Phase 0c.2 spawner: started {spawned} per-wallet executor(s)")
+        if failed_core_names:
+            raise CoreProcessStartupError(failed_core_names)
         return spawned
 
     async def stop_all_processes(self) -> None:

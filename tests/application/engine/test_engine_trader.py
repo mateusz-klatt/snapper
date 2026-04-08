@@ -2840,6 +2840,167 @@ class TestRecovery:
         assert "t1" in engine.seen_exec_ids
 
     @pytest.mark.asyncio
+    async def test_recover_from_executions_groups_by_wallet(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Phase 0c.5 gap fill: wallet-aware ``_recover_from_executions`` grouping.
+
+        Given: Two executions on the same instrument and exchange but
+            with different ``wallet_public_id`` values, plus one legacy
+            execution row with no wallet,
+        When: ``_recover_engine_state`` runs,
+        Then: Three separate engines are created — two wallet-keyed
+            (``...-w{wallet_short}``) and one legacy unkeyed — each
+            holding only its own fill, so cost basis never bleeds
+            across wallets.
+        """
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        coord.msg_publisher = cast(Any, MagicMock(tracker=Mock(session_id="s1")))
+        wallet_a = "01975a8b-3c7d-7000-8000-0000000000a1"
+        wallet_b = "01975a8b-aaaa-7000-8000-0000000000a2"
+        mock_repo = AsyncMock()
+        mock_repo.get_executions_for_recovery = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "exe-a",
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                    "trade_id": "t-a",
+                    "exchange_order_id": "ex-a",
+                    "client_order_id": "c-a",
+                    "instrument": "BTC-USD",
+                    "exchange": "kraken",
+                    "side": "buy",
+                    "size": 0.5,
+                    "price": 50000.0,
+                    "fee": 0.5,
+                    "fee_asset": "USD",
+                    "status": "filled",
+                    "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
+                    "wallet_public_id": wallet_a,
+                },
+                {
+                    "public_id": "exe-b",
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 2,
+                    "trade_id": "t-b",
+                    "exchange_order_id": "ex-b",
+                    "client_order_id": "c-b",
+                    "instrument": "BTC-USD",
+                    "exchange": "kraken",
+                    "side": "buy",
+                    "size": 0.25,
+                    "price": 60000.0,
+                    "fee": 0.25,
+                    "fee_asset": "USD",
+                    "status": "filled",
+                    "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
+                    "wallet_public_id": wallet_b,
+                },
+                {
+                    "public_id": "exe-legacy",
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 3,
+                    "trade_id": "t-legacy",
+                    "exchange_order_id": "ex-legacy",
+                    "client_order_id": "c-legacy",
+                    "instrument": "BTC-USD",
+                    "exchange": "kraken",
+                    "side": "buy",
+                    "size": 0.1,
+                    "price": 70000.0,
+                    "fee": 0.1,
+                    "fee_asset": "USD",
+                    "status": "filled",
+                    "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
+                    "wallet_public_id": None,
+                },
+            ]
+        )
+        mock_repo.get_active_orders_for_recovery = AsyncMock(return_value=[])
+        mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
+        coord.repository = mock_repo
+        await coord._recover_engine_state()
+        wallet_a_short = wallet_a.replace("-", "")[:12].lower()
+        wallet_b_short = wallet_b.replace("-", "")[:12].lower()
+        key_a = f"BTC-USD@kraken-live-w{wallet_a_short}"
+        key_b = f"BTC-USD@kraken-live-w{wallet_b_short}"
+        key_legacy = "BTC-USD@kraken-live"
+        assert key_a in coord.engines
+        assert key_b in coord.engines
+        assert key_legacy in coord.engines
+        assert coord.engines[key_a].position_qty == pytest.approx(0.5)
+        assert coord.engines[key_a].entry_price == pytest.approx(50000.0)
+        assert coord.engines[key_b].position_qty == pytest.approx(0.25)
+        assert coord.engines[key_b].entry_price == pytest.approx(60000.0)
+        assert coord.engines[key_legacy].position_qty == pytest.approx(0.1)
+        assert coord.engines[key_legacy].entry_price == pytest.approx(70000.0)
+        assert coord.engines[key_a].wallet_public_id == wallet_a
+        assert coord.engines[key_b].wallet_public_id == wallet_b
+        assert coord.engines[key_legacy].wallet_public_id == ""
+
+    @pytest.mark.asyncio
+    async def test_recover_active_order_propagates_operator_public_id(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Phase 0c.5 L1: recovery engines preserve ``operator_public_id``.
+
+        Given: An active order row carrying both ``wallet_public_id``
+            and ``operator_public_id``,
+        When: ``_recover_engine_state`` runs and creates the engine via
+            ``_create_engine_for_recovery``,
+        Then: The created engine has both attribution fields populated
+            (live and recovery paths must agree on operator attribution).
+        """
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        coord.msg_publisher = cast(Any, MagicMock(tracker=Mock(session_id="s1")))
+        wallet = "00000000-0000-7000-8000-0000000000b1"
+        operator = "00000000-0000-7000-8000-0000000000c1"
+        mock_repo = AsyncMock()
+        mock_repo.get_executions_for_recovery = AsyncMock(return_value=[])
+        mock_repo.get_active_orders_for_recovery = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "ord-op",
+                    "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
+                    "session_id": "s1",
+                    "sequence_id": 1,
+                    "instrument": "BTC-USD",
+                    "exchange": "kraken",
+                    "client_order_id": "c-op",
+                    "exchange_order_id": "ex-op",
+                    "status": "open",
+                    "side": "buy",
+                    "order_type": "market",
+                    "size": 0.5,
+                    "price": None,
+                    "filled_size": 0.0,
+                    "average_price": None,
+                    "time_in_force": None,
+                    "error": None,
+                    "created_at": datetime(2024, 1, 1, tzinfo=UTC),
+                    "updated_at": None,
+                    "wallet_public_id": wallet,
+                    "operator_public_id": operator,
+                }
+            ]
+        )
+        mock_repo.ensure_instrument = AsyncMock(return_value=(1, "inst-pid"))
+        coord.repository = mock_repo
+        await coord._recover_engine_state()
+        wallet_short = wallet.replace("-", "")[:12].lower()
+        key = f"BTC-USD@kraken-live-w{wallet_short}"
+        assert key in coord.engines
+        engine = coord.engines[key]
+        assert engine.wallet_public_id == wallet
+        assert engine.operator_public_id == operator
+
+    @pytest.mark.asyncio
     async def test_recover_with_open_order_sets_inflight(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -3459,6 +3620,31 @@ class TestPhase0cShardKeyParser:
         """
         parsed = TraderCoordinator._parse_shard_key("paper.BTC-USD.paper.wmain")
         assert parsed == ("paper", "BTC-USD", "paper", "", "wmain")
+
+    def test_parse_13_char_strategy_tag_with_non_hex_stays_as_strategy_tag(self) -> None:
+        """A 13-char ``w``-prefixed non-hex strategy_tag stays a strategy_tag.
+
+        A 13-char paper strategy_tag starting with ``w`` but containing
+        non-hex characters must NOT be misinterpreted as wallet_short.
+
+        Given: A paper-mode shard_key with strategy_tag ``wnotahexvalue``
+            (13 chars, starts with ``w``, but contains non-hex chars),
+        When: ``_parse_shard_key`` is invoked,
+        Then: The tag stays in the strategy_tag slot and wallet_short
+            remains empty (Phase 0c.5 M1 fix from 0c.4 review).
+        """
+        parsed = TraderCoordinator._parse_shard_key("paper.BTC-USD.paper.wnotahexvalue")
+        assert parsed == ("paper", "BTC-USD", "paper", "", "wnotahexvalue")
+
+    def test_parse_13_char_hex_segment_is_recognized_as_wallet_short(self) -> None:
+        """13-char ``w`` + 12 hex digits IS recognized as wallet_short.
+
+        Sanity counter-test to confirm the hex validation in
+        :meth:`_parse_shard_key` does not over-reject — a legitimate
+        ``w`` + 12 hex chars wallet segment must still parse.
+        """
+        parsed = TraderCoordinator._parse_shard_key("kraken.BTC-USD.live.wabcdef012345")
+        assert parsed == ("kraken", "BTC-USD", "live", "abcdef012345", None)
 
 
 class TestPhase0cBuildWalletShortCache:

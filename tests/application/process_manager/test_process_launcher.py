@@ -5191,16 +5191,21 @@ class TestPhase0cSpawnPerWalletExecutors:
         start_mock.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_spawn_continues_after_per_instance_failure(
+    async def test_spawn_continues_after_per_instance_failure_then_raises_for_core(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Per-instance startup failures are isolated.
+        """CORE per-instance failures are isolated AND propagated.
 
-        Given: Two credentials where the first fails ``start_process``
-            (e.g. exchange client crashes on init),
+        Given: Two credentials whose template is registered as
+            ``role=CORE`` + ``lifecycle=LONG_RUNNING`` and the first
+            credential fails ``start_process``,
         When: ``spawn_per_wallet_executors`` is called,
         Then: The spawner logs the failure, continues with the second
-            credential, and returns the count of successful spawns.
+            credential (so a misconfigured wallet does not block all
+            other wallets), and after the loop completes raises
+            :class:`CoreProcessStartupError` listing the failed CORE
+            instance — matching :meth:`start_all_processes` semantics
+            (Phase 0c.5 M1 from 0c.2 review).
         """
         factory = self._make_factory()
         wallet_a = "00000000-0000-7000-8000-0000000000e1"
@@ -5241,6 +5246,81 @@ class TestPhase0cSpawnPerWalletExecutors:
         monkeypatch.setattr(
             "snapper.application.process_manager.launcher.get_registered_processes",
             lambda: {"executor_kraken": self._make_entry()},
+        )
+        start_mock = AsyncMock(side_effect=[RuntimeError("client init"), None])
+        monkeypatch.setattr(factory, "start_process", start_mock)
+        with pytest.raises(CoreProcessStartupError) as exc_info:
+            await factory.spawn_per_wallet_executors()
+        assert start_mock.await_count == 2
+        assert "executor_kraken_w000000000000" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_spawn_continues_after_non_core_per_instance_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-CORE per-instance failures stay isolated and do NOT raise.
+
+        Given: A non-CORE template (e.g. ``role=TASK``) where the
+            first credential fails ``start_process``,
+        When: ``spawn_per_wallet_executors`` is called,
+        Then: The spawner logs the failure, continues with the second
+            credential, and returns the count of successful spawns
+            without raising — only LONG_RUNNING CORE failures escalate
+            (Phase 0c.5 M1 from 0c.2 review).
+        """
+        factory = self._make_factory()
+        wallet_a = "00000000-0000-7000-8000-0000000000f1"
+        wallet_b = "00000000-0000-7000-8000-0000000000f2"
+        repo = MagicMock()
+        repo.list_active_wallet_credentials = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "cred-f1",
+                    "wallet_public_id": wallet_a,
+                    "exchange": "kraken",
+                    "credential_type": "api_key_secret",
+                    "encrypted_payload": "enc",
+                    "encryption_key_id": "v1",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 1,
+                },
+                {
+                    "public_id": "cred-f2",
+                    "wallet_public_id": wallet_b,
+                    "exchange": "kraken",
+                    "credential_type": "api_key_secret",
+                    "encrypted_payload": "enc",
+                    "encryption_key_id": "v1",
+                    "label": None,
+                    "timestamp": datetime.now(UTC),
+                    "session_id": "s",
+                    "sequence_id": 2,
+                },
+            ]
+        )
+        non_core_entry = ProcessRegistryEntry(
+            class_ref=cast(Any, MagicMock()),
+            class_path="test.NonCoreExecutor",
+            method="start",
+            description="non-core executor template",
+            priority=30,
+            lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+            role=ProcessRoleEnum.TASK,
+            tags=("execution", "orders", "kraken"),
+            parameters_model=None,
+            parameters_schema=None,
+            enabled=True,
+            mode="thread",
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_repository",
+            lambda _url: repo,
+        )
+        monkeypatch.setattr(
+            "snapper.application.process_manager.launcher.get_registered_processes",
+            lambda: {"executor_kraken": non_core_entry},
         )
         start_mock = AsyncMock(side_effect=[RuntimeError("client init"), None])
         monkeypatch.setattr(factory, "start_process", start_mock)

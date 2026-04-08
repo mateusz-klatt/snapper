@@ -221,7 +221,12 @@ class TraderCoordinator(RegisterableProcess):
         wallet_short = ""
         strategy_tag: str | None = None
         remaining = parts[3:]
-        if remaining and remaining[0].startswith("w") and len(remaining[0]) == 13:
+        if (
+            remaining
+            and remaining[0].startswith("w")
+            and len(remaining[0]) == 13
+            and all(c in "0123456789abcdef" for c in remaining[0][1:])
+        ):
             wallet_short = remaining[0][1:]
             remaining = remaining[1:]
         if remaining:
@@ -348,7 +353,11 @@ class TraderCoordinator(RegisterableProcess):
             if wallet_short and not wallet_public_id:
                 logger.warning(
                     f"ZMQTrader: Checkpoint shard_key {shard_key} carries unknown "
-                    f"wallet_short '{wallet_short}'; recovering with empty wallet"
+                    f"wallet_short '{wallet_short}' (wallet credential rotated, "
+                    f"deactivated, or wallet_credentials cache stale). Recovering "
+                    f"with empty wallet attribution; consider clearing this stale "
+                    f"checkpoint via the recovery tooling once the wallet status "
+                    f"is confirmed."
                 )
 
             valid_exchanges = get_args(OrderExchange)
@@ -534,10 +543,14 @@ class TraderCoordinator(RegisterableProcess):
             instrument = db_order["instrument"]
             exchange_str = db_order["exchange"]
             order_wallet_public_id = db_order.get("wallet_public_id") or ""
+            order_operator_public_id = db_order.get("operator_public_id") or ""
             key = self._build_engine_key(instrument, exchange_str, "live", order_wallet_public_id)
             if key not in self.engines:
                 engine = await self._create_engine_for_recovery(
-                    instrument, exchange_str, wallet_public_id=order_wallet_public_id
+                    instrument,
+                    exchange_str,
+                    wallet_public_id=order_wallet_public_id,
+                    operator_public_id=order_operator_public_id,
                 )
                 if engine is None:
                     continue
@@ -573,6 +586,7 @@ class TraderCoordinator(RegisterableProcess):
         exchange_str: str,
         strategy_tag: str | None = None,
         wallet_public_id: str = "",
+        operator_public_id: str = "",
     ) -> TradingEngineService | None:
         """Create a TradingEngineService for recovery if exchange is valid."""
         valid_exchanges = get_args(OrderExchange)
@@ -605,6 +619,7 @@ class TraderCoordinator(RegisterableProcess):
             outbox=self.outbox,
             strategy_tag=strategy_tag,
             wallet_public_id=wallet_public_id,
+            operator_public_id=operator_public_id,
         )
 
     @staticmethod
