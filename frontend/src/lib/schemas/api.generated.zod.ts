@@ -522,6 +522,14 @@ export const HandoverScopeGrantBodySchema = z
   })
   .strict()
 
+export const CreateWalletBodySchema = z
+  .object({
+    label: z.string().min(1).max(128),
+    description: z.string().max(512).nullable().optional(),
+    is_paper: z.boolean().optional(),
+  })
+  .strict()
+
 export const ContinuousCandleListResponseSchema = z
   .object({
     type: z.literal('continuous_candle_list'),
@@ -830,6 +838,17 @@ export const WalletListResponseSchema = z
   })
   .strict()
 
+export const WalletResponseSchema = z
+  .object({
+    type: z.literal('wallet_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: WalletInfoSchema,
+  })
+  .strict()
+
 export const WsStatsDataSchema = z
   .object({
     type: z.literal('ws_stats'),
@@ -947,6 +966,17 @@ export const HandoverScopeGrantCommandSchema = z
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     payload: HandoverScopeGrantBodySchema,
+  })
+  .strict()
+
+export const CreateWalletCommandSchema = z
+  .object({
+    type: z.literal('create_wallet_command').optional(),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: CreateWalletBodySchema,
   })
   .strict()
 
@@ -1381,6 +1411,7 @@ export type SettingUpdateBody = z.infer<typeof SettingUpdateBodySchema>
 export type RemoveSettingBody = z.infer<typeof RemoveSettingBodySchema>
 export type CreateScopeGrantBody = z.infer<typeof CreateScopeGrantBodySchema>
 export type HandoverScopeGrantBody = z.infer<typeof HandoverScopeGrantBodySchema>
+export type CreateWalletBody = z.infer<typeof CreateWalletBodySchema>
 export type ContinuousCandleListResponse = z.infer<typeof ContinuousCandleListResponseSchema>
 export type ContractListResponse = z.infer<typeof ContractListResponseSchema>
 export type ExecutionListResponse = z.infer<typeof ExecutionListResponseSchema>
@@ -1411,6 +1442,7 @@ export type CreateUserBody = z.infer<typeof CreateUserBodySchema>
 export type UpdateUserBody = z.infer<typeof UpdateUserBodySchema>
 export type HTTPValidationError = z.infer<typeof HTTPValidationErrorSchema>
 export type WalletListResponse = z.infer<typeof WalletListResponseSchema>
+export type WalletResponse = z.infer<typeof WalletResponseSchema>
 export type WsStatsData = z.infer<typeof WsStatsDataSchema>
 export type ZmqHealthData = z.infer<typeof ZmqHealthDataSchema>
 export type LoginRequest = z.infer<typeof LoginRequestSchema>
@@ -1421,6 +1453,7 @@ export type SettingUpdate = z.infer<typeof SettingUpdateSchema>
 export type RemoveSettingRequest = z.infer<typeof RemoveSettingRequestSchema>
 export type CreateScopeGrantCommand = z.infer<typeof CreateScopeGrantCommandSchema>
 export type HandoverScopeGrantCommand = z.infer<typeof HandoverScopeGrantCommandSchema>
+export type CreateWalletCommand = z.infer<typeof CreateWalletCommandSchema>
 export type HealthCheckData = z.infer<typeof HealthCheckDataSchema>
 export type JsonObject = z.infer<typeof JsonObjectSchema>
 export type ProcessSummaryResponse = z.infer<typeof ProcessSummaryResponseSchema>

@@ -685,7 +685,36 @@ export type Paths = {
          */
         get: Operations["list_wallets_api_wallets_get"];
         put?: never;
-        post?: never;
+        /**
+         * Create Wallet
+         * @description Create a new active wallet.
+         *
+         *     Guarded by the ``MANAGE_WALLET_CREDENTIALS`` permission, which
+         *     is ADMIN-only at Phase 0d launch. A wallet is the container for
+         *     credentials, so the same permission that manages credential
+         *     rotation also creates the wallets that hold them.
+         *
+         *     The active-unique index on ``(label, is_paper)`` is enforced at
+         *     the DB layer and bubbles up as HTTP 409 via
+         *     ``WalletConflictError``. Paper and live wallets may share the
+         *     same label (e.g. ``default`` + ``default`` with different
+         *     ``is_paper`` values) because they are disambiguated by the
+         *     paper flag.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         _principal: Authenticated caller holding MANAGE_WALLET_CREDENTIALS.
+         *         command: Create command envelope.
+         *         repo: Repository dependency.
+         *
+         *     Returns:
+         *         ``WalletResponse`` wrapping the newly-inserted wallet row.
+         *
+         *     Raises:
+         *         HTTPException: 409 if a wallet with the same
+         *             ``(label, is_paper)`` already exists.
+         */
+        post: Operations["create_wallet_api_wallets_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -4505,6 +4534,30 @@ export type Components = {
             count: number;
         };
         /**
+         * WalletResponse
+         * @description Singleton wrapper returned by ``POST /api/wallets``.
+         */
+        WalletResponse: {
+            /**
+             * Type
+             * @default wallet_response
+             * @constant
+             */
+            type: "wallet_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["WalletInfo"];
+        };
+        /**
          * WebSocketStats
          * @description WebSocket connection statistics.
          *
@@ -5348,6 +5401,51 @@ export type Components = {
             /** Reason */
             reason?: string | null;
         };
+        /**
+         * CreateWalletCommand
+         * @description Request envelope for ``POST /api/wallets``.
+         */
+        CreateWalletCommand: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "create_wallet_command";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["CreateWalletBody"];
+        };
+        /**
+         * CreateWalletBody
+         * @description Request body for ``POST /api/wallets``.
+         *
+         *     Attributes:
+         *         label: Human-readable wallet name (1-128 chars). The
+         *             ``(label, is_paper)`` active-unique index enforces that
+         *             two wallets sharing both fields cannot be active at the
+         *             same time.
+         *         description: Optional free-form description.
+         *         is_paper: Paper-mode flag. Paper and live wallets may share
+         *             the same label (e.g. ``default`` + ``default-paper``)
+         *             provided they differ on ``is_paper``.
+         */
+        CreateWalletBody: {
+            /** Label */
+            label: string;
+            /** Description */
+            description?: string | null;
+            /** Is Paper */
+            is_paper?: boolean;
+        };
     };
     responses: never;
     parameters: never;
@@ -6054,6 +6152,30 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["WalletListResponse"];
+                };
+            };
+        };
+    };
+    create_wallet_api_wallets_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["CreateWalletCommand"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["WalletResponse"];
                 };
             };
         };

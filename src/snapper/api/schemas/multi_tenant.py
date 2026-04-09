@@ -49,6 +49,37 @@ class WalletListResponse(PayloadListResponse[Literal["wallet_list_response"], Wa
     type: Literal["wallet_list_response"] = "wallet_list_response"
 
 
+class WalletResponse(PayloadResponse[Literal["wallet_response"], WalletInfo]):
+    """Singleton wrapper returned by ``POST /api/wallets``."""
+
+    type: Literal["wallet_response"] = "wallet_response"
+
+
+class CreateWalletBody(StrictBody):
+    """Request body for ``POST /api/wallets``.
+
+    Attributes:
+        label: Human-readable wallet name (1-128 chars). The
+            ``(label, is_paper)`` active-unique index enforces that
+            two wallets sharing both fields cannot be active at the
+            same time.
+        description: Optional free-form description.
+        is_paper: Paper-mode flag. Paper and live wallets may share
+            the same label (e.g. ``default`` + ``default-paper``)
+            provided they differ on ``is_paper``.
+    """
+
+    label: str = Field(min_length=1, max_length=128)
+    description: str | None = Field(default=None, max_length=512)
+    is_paper: bool = False
+
+
+class CreateWalletCommand(PayloadRequest[Literal["create_wallet_command"], CreateWalletBody]):
+    """Request envelope for ``POST /api/wallets``."""
+
+    type: Literal["create_wallet_command"] = "create_wallet_command"
+
+
 class OperatorInfo(StrictDataSchema[Literal["operator_info"]]):
     """Read projection of a single ``operators`` SCD2 row.
 

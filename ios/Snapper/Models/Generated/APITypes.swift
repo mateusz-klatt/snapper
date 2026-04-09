@@ -2009,6 +2009,24 @@ struct WalletListResponse: Codable, Sendable {
     }
 }
 
+struct WalletResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: WalletInfo
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
 struct WebSocketStats: Codable, Sendable {
     /// Number of active WebSocket connections
     let activeConnections: Int
@@ -2517,5 +2535,35 @@ struct HandoverScopeGrantBody: Codable, Sendable {
         case fromGrantPublicId = "from_grant_public_id"
         case toOperatorPublicId = "to_operator_public_id"
         case reason
+    }
+}
+
+struct CreateWalletCommand: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: CreateWalletBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct CreateWalletBody: Codable, Sendable {
+    let label: String
+    let description: String?
+    let isPaper: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case label
+        case description
+        case isPaper = "is_paper"
     }
 }

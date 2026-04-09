@@ -16,14 +16,19 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Operator
 from snapper.data.models import Wallet
 from snapper.data.models import WalletOperatorScopeGrant
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import WalletConflictError
 
 
 async def _seed_wallets_and_grants(repo: SQLAlchemyRepository) -> dict[str, str]:
@@ -239,3 +244,135 @@ class TestListAccessibleWalletsForOperators:
         rows = await repo.list_accessible_wallets_for_operators([ids["carol"]], datetime.now(UTC))
 
         assert rows == []
+
+
+class TestCreateWallet:
+    """Behaviour of ``SQLAlchemyRepository.create_wallet``."""
+
+    @pytest.mark.asyncio
+    async def test_insert_new_wallet_returns_row(self, repo: SQLAlchemyRepository) -> None:
+        """A first wallet insert returns a populated ``WalletRow``.
+
+        Given: An empty wallets table,
+        When: ``create_wallet`` is called,
+        Then: The returned row carries the inserted label / flag and
+            a freshly-generated ``public_id``.
+        """
+        now = datetime.now(UTC)
+
+        row = await repo.create_wallet(
+            label="default",
+            description="firm wallet",
+            is_paper=False,
+            session_id="test-session",
+            sequence_id=1,
+            timestamp=now,
+        )
+
+        assert row["label"] == "default"
+        assert row["is_paper"] is False
+        assert row["description"] == "firm wallet"
+        assert row["public_id"]
+
+    @pytest.mark.asyncio
+    async def test_duplicate_label_is_paper_raises_conflict(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """A second active wallet with the same ``(label, is_paper)`` fails.
+
+        Given: An existing ``(default, False)`` wallet,
+        When: A second insert reuses both fields,
+        Then: ``WalletConflictError`` is raised.
+        """
+        base_ts = datetime.now(UTC)
+        await repo.create_wallet(
+            label="default",
+            description=None,
+            is_paper=False,
+            session_id="test-session",
+            sequence_id=1,
+            timestamp=base_ts,
+        )
+
+        with pytest.raises(WalletConflictError) as excinfo:
+            await repo.create_wallet(
+                label="default",
+                description=None,
+                is_paper=False,
+                session_id="test-session",
+                sequence_id=2,
+                timestamp=base_ts + timedelta(seconds=1),
+            )
+
+        assert excinfo.value.label == "default"
+        assert excinfo.value.is_paper is False
+
+    @pytest.mark.asyncio
+    async def test_paper_and_live_same_label_both_insert(self, repo: SQLAlchemyRepository) -> None:
+        """Paper and live wallets sharing a label are independent rows.
+
+        Given: No existing wallets,
+        When: Two inserts share ``label='default'`` but differ on
+            ``is_paper``,
+        Then: Both succeed and ``list_active_wallets`` returns both
+            rows ordered live-first.
+        """
+        base_ts = datetime.now(UTC) - timedelta(minutes=1)
+        await repo.create_wallet(
+            label="default",
+            description=None,
+            is_paper=False,
+            session_id="test-session",
+            sequence_id=1,
+            timestamp=base_ts,
+        )
+        await repo.create_wallet(
+            label="default",
+            description=None,
+            is_paper=True,
+            session_id="test-session",
+            sequence_id=2,
+            timestamp=base_ts + timedelta(microseconds=1),
+        )
+
+        rows = await repo.list_active_wallets(datetime.now(UTC))
+
+        assert len(rows) == 2
+        assert rows[0]["is_paper"] is False
+        assert rows[1]["is_paper"] is True
+
+    @pytest.mark.asyncio
+    async def test_non_unique_integrity_error_reraises_unhandled(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """An IntegrityError whose message does not mention 'unique' re-raises.
+
+        Given: A mocked session whose ``commit`` raises an
+            ``IntegrityError`` with a non-unique cause (e.g. NOT NULL
+            violation),
+        When: ``create_wallet`` is called,
+        Then: The error propagates as-is (not wrapped in
+            ``WalletConflictError``) so callers can distinguish true
+            conflicts from other DB-level invariant breaches.
+        """
+        mock_session = AsyncMock()
+        mock_session.add = MagicMock()
+        orig = Exception("NOT NULL constraint failed: wallets.label")
+        mock_session.commit = AsyncMock(
+            side_effect=IntegrityError(statement="INSERT", params={}, orig=orig)
+        )
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        with (
+            patch.object(repo, "session", return_value=mock_ctx),
+            pytest.raises(IntegrityError),
+        ):
+            await repo.create_wallet(
+                label="",
+                description=None,
+                is_paper=False,
+                session_id="test-session",
+                sequence_id=99,
+                timestamp=datetime.now(UTC),
+            )

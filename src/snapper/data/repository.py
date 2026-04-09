@@ -142,6 +142,7 @@ __all__ = [
     "ScopeGrantConflictError",
     "ScopeGrantNotFoundError",
     "ScopeGrantValidationError",
+    "WalletConflictError",
     "close_and_insert",
     "close_and_insert_sync",
     "get_repository",
@@ -194,6 +195,22 @@ class ScopeGrantValidationError(Exception):
     XOR violation, self-handover (source operator equals target
     operator), or unknown scope_kind.
     """
+
+
+class WalletConflictError(Exception):
+    """Raised when a wallet insert collides with an existing active row.
+
+    Maps to HTTP 409 at the API layer. The active-unique index on
+    ``(label, is_paper)`` enforces that two wallets sharing both
+    columns cannot be active at the same bus time.
+    """
+
+    def __init__(self, label: str, is_paper: bool, reason: str) -> None:
+        """Capture the conflicting (label, is_paper) tuple for the caller."""
+        super().__init__(f"Wallet insert failed for label={label!r} is_paper={is_paper}: {reason}")
+        self.label = label
+        self.is_paper = is_paper
+        self.reason = reason
 
 
 def where_active(model: type[Any], at: datetime) -> tuple[Any, Any]:
@@ -1330,6 +1347,43 @@ class Repository(ABC):
 
         Returns:
             Active operator rows ordered by ``label`` ascending.
+        """
+        ...
+
+    @abstractmethod
+    async def create_wallet(
+        self,
+        label: str,
+        description: str | None,
+        is_paper: bool,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+    ) -> WalletRow:
+        """Create a new active wallet row.
+
+        Enforces the ``(label, is_paper)`` active-unique index on
+        ``wallets``: two concurrent active rows sharing both columns
+        are rejected by the DB layer, which bubbles up as
+        ``WalletConflictError`` from this method.
+
+        Used by the Phase 0d admin wallet creation endpoint
+        (``POST /api/wallets``).
+
+        Args:
+            label: Human-readable wallet name.
+            description: Optional free-form description.
+            is_paper: Paper-mode flag.
+            session_id: Provenance session ID.
+            sequence_id: Provenance sequence number.
+            timestamp: Bus time for the insert.
+
+        Returns:
+            The newly-inserted ``WalletRow``.
+
+        Raises:
+            WalletConflictError: An active wallet with the same
+                ``(label, is_paper)`` already exists.
         """
         ...
 
@@ -4454,6 +4508,41 @@ class SQLAlchemyRepository(Repository):
             session_id=wallet.session_id,
             sequence_id=wallet.sequence_id,
         )
+
+    async def create_wallet(
+        self,
+        label: str,
+        description: str | None,
+        is_paper: bool,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+    ) -> WalletRow:
+        """Insert a new active wallet row."""
+        async with self.session() as s:
+            wallet = Wallet(
+                label=label,
+                description=description,
+                is_paper=is_paper,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=timestamp,
+                known_to=KNOWN_TO_MAX,
+            )
+            s.add(wallet)
+            try:
+                await s.commit()
+            except IntegrityError as exc:
+                err_msg = str(exc.orig).lower() if exc.orig else ""
+                if "unique" not in err_msg and "duplicate" not in err_msg:
+                    raise
+                raise WalletConflictError(
+                    label=label,
+                    is_paper=is_paper,
+                    reason="active wallet with the same (label, is_paper) already exists",
+                ) from exc
+            await s.refresh(wallet)
+            return self._wallet_row_from(wallet)
 
     async def list_active_wallets(self, as_of: datetime) -> list[WalletRow]:
         """Return every active wallet at the given bus time."""
