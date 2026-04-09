@@ -236,6 +236,46 @@ class TestRotateWalletCredential:
         assert new_row["label"] == "main key"
 
 
+class TestGetActiveCredentialById:
+    """Behaviour of ``get_active_credential_by_id``."""
+
+    @pytest.mark.asyncio
+    async def test_returns_row_when_active(self, repo: SQLAlchemyRepository) -> None:
+        """Active credential is returned by its public_id.
+
+        Given: An active credential row,
+        When: ``get_active_credential_by_id`` is called with its public_id,
+        Then: The matching ``WalletCredentialRow`` is returned.
+        """
+        wallet_id = await _seed_wallet(repo)
+        base_ts = datetime.now(UTC) - timedelta(minutes=1)
+        created = await repo.create_wallet_credential(
+            wallet_public_id=wallet_id,
+            exchange="kraken",
+            credential_type="api_key_secret",
+            encrypted_payload="gAAAAABfoo",
+            label="test key",
+            session_id="test-session",
+            sequence_id=10,
+            timestamp=base_ts,
+        )
+
+        result = await repo.get_active_credential_by_id(created["public_id"], datetime.now(UTC))
+
+        assert result is not None
+        assert result["public_id"] == created["public_id"]
+        assert result["exchange"] == "kraken"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_missing(self, repo: SQLAlchemyRepository) -> None:
+        """Non-existent public_id returns None."""
+        result = await repo.get_active_credential_by_id(
+            "00000000-0000-7000-8000-000000000000", datetime.now(UTC)
+        )
+
+        assert result is None
+
+
 class TestListWalletCredentialsForWallet:
     """Behaviour of ``list_wallet_credentials_for_wallet``."""
 

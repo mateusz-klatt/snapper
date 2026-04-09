@@ -298,6 +298,9 @@ class TestRotateCredential:
         """
         new_row = _cred_row(public_id="cred-2", label="rotated key")
         mock_repo = AsyncMock()
+        mock_repo.get_active_credential_by_id = AsyncMock(
+            return_value=_cred_row(credential_type="api_key_secret")
+        )
         mock_repo.rotate_wallet_credential = AsyncMock(return_value=new_row)
         mock_encryption = MagicMock()
         mock_encryption.encrypt.return_value = "gAAAAABnewciphertext"
@@ -334,11 +337,15 @@ class TestRotateCredential:
 
     @pytest.mark.asyncio
     async def test_missing_credential_maps_to_404(self) -> None:
-        """CredentialNotFoundError -> HTTP 404."""
+        """Missing credential -> HTTP 404 from the pre-check lookup.
+
+        Given: ``get_active_credential_by_id`` returns None,
+        When: ``rotate_credential`` is called,
+        Then: 404 is raised before the repo rotation is attempted.
+        """
         mock_repo = AsyncMock()
-        mock_repo.rotate_wallet_credential = AsyncMock(
-            side_effect=CredentialNotFoundError("not found")
-        )
+        mock_repo.get_active_credential_by_id = AsyncMock(return_value=None)
+        mock_repo.rotate_wallet_credential = AsyncMock()
         mock_encryption = MagicMock()
         mock_encryption.encrypt.return_value = "gAAAAABencrypted"
 
@@ -369,3 +376,140 @@ class TestRotateCredential:
             )
 
         assert excinfo.value.status_code == status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.asyncio
+    async def test_concurrent_close_during_rotation_maps_to_404(self) -> None:
+        """Race: pre-check passes but repo rotation raises CredentialNotFoundError.
+
+        Given: ``get_active_credential_by_id`` returns a row (pre-check passes)
+            but the credential is concurrently closed before the repo rotate,
+        When: ``rotate_credential`` is called,
+        Then: The CredentialNotFoundError from the repo is caught and mapped
+            to HTTP 404 (defense-in-depth for concurrent rotation).
+        """
+        mock_repo = AsyncMock()
+        mock_repo.get_active_credential_by_id = AsyncMock(
+            return_value=_cred_row(credential_type="api_key_secret")
+        )
+        mock_repo.rotate_wallet_credential = AsyncMock(
+            side_effect=CredentialNotFoundError("concurrently closed")
+        )
+        mock_encryption = MagicMock()
+        mock_encryption.encrypt.return_value = "gAAAAABencrypted"
+        command = RotateCredentialCommand(
+            session_id="test-sid",
+            sequence_id=1,
+            public_id="cmd-pid",
+            timestamp=datetime.now(UTC),
+            payload=RotateCredentialBody(
+                credential_payload={"api_key": "k", "api_secret": "s"},
+                label=None,
+            ),
+        )
+        with (
+            patch(
+                "snapper.server.credential_routes.get_encryption_service",
+                return_value=mock_encryption,
+            ),
+            pytest.raises(HTTPException) as excinfo,
+        ):
+            await rotate_credential(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                wallet_public_id="wallet-42",
+                credential_public_id="cred-1",
+                command=command,
+                repo=mock_repo,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_404_NOT_FOUND
+        mock_repo.rotate_wallet_credential.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_rotation_validates_payload_against_existing_type(self) -> None:
+        """Rotation rejects incomplete payload for the existing credential_type.
+
+        Given: An api_key_secret credential exists,
+        When: ``rotate_credential`` is called with a payload missing
+            ``api_secret``,
+        Then: HTTPException 400 is raised before the repo rotation is
+            attempted.
+        """
+        mock_repo = AsyncMock()
+        mock_repo.get_active_credential_by_id = AsyncMock(
+            return_value=_cred_row(credential_type="api_key_secret")
+        )
+        mock_repo.rotate_wallet_credential = AsyncMock()
+        mock_encryption = MagicMock()
+        command = RotateCredentialCommand(
+            session_id="test-sid",
+            sequence_id=1,
+            public_id="cmd-pid",
+            timestamp=datetime.now(UTC),
+            payload=RotateCredentialBody(
+                credential_payload={"api_key": "only-key"},
+                label=None,
+            ),
+        )
+        with (
+            patch(
+                "snapper.server.credential_routes.get_encryption_service",
+                return_value=mock_encryption,
+            ),
+            pytest.raises(HTTPException) as excinfo,
+        ):
+            await rotate_credential(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                wallet_public_id="wallet-42",
+                credential_public_id="cred-1",
+                command=command,
+                repo=mock_repo,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
+        assert "api_secret" in str(excinfo.value.detail)
+        mock_repo.rotate_wallet_credential.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rotation_validates_paper_credential_fields(self) -> None:
+        """Rotation rejects empty payload for a paper credential.
+
+        Given: A paper credential exists,
+        When: ``rotate_credential`` is called with an empty payload,
+        Then: HTTPException 400 is raised with ``initial_balance`` in detail.
+        """
+        mock_repo = AsyncMock()
+        mock_repo.get_active_credential_by_id = AsyncMock(
+            return_value=_cred_row(credential_type="paper")
+        )
+        mock_repo.rotate_wallet_credential = AsyncMock()
+        mock_encryption = MagicMock()
+        command = RotateCredentialCommand(
+            session_id="test-sid",
+            sequence_id=1,
+            public_id="cmd-pid",
+            timestamp=datetime.now(UTC),
+            payload=RotateCredentialBody(
+                credential_payload={},
+                label=None,
+            ),
+        )
+        with (
+            patch(
+                "snapper.server.credential_routes.get_encryption_service",
+                return_value=mock_encryption,
+            ),
+            pytest.raises(HTTPException) as excinfo,
+        ):
+            await rotate_credential(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                wallet_public_id="wallet-42",
+                credential_public_id="cred-1",
+                command=command,
+                repo=mock_repo,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
+        assert "initial_balance" in str(excinfo.value.detail)

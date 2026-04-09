@@ -26,7 +26,6 @@ from fastapi import HTTPException
 from fastapi import Request
 from fastapi import status
 
-from snapper.api.schemas.multi_tenant import CreateCredentialBody
 from snapper.api.schemas.multi_tenant import CreateCredentialCommand
 from snapper.api.schemas.multi_tenant import CredentialListResponse
 from snapper.api.schemas.multi_tenant import CredentialResponse
@@ -71,21 +70,27 @@ def _credential_summary(row: WalletCredentialRow) -> CredentialSummary:
     )
 
 
-def _validate_payload_fields(body: CreateCredentialBody) -> None:
-    """Reject payloads missing required keys for the declared credential_type.
+def _validate_payload_fields_for_type(
+    credential_type: str,
+    credential_payload: dict[str, str],
+) -> None:
+    """Reject payloads missing required keys for the given credential_type.
 
-    The ``credential_type`` is already validated by Pydantic's
-    ``Literal`` constraint so ``_REQUIRED_FIELDS[body.credential_type]``
-    is guaranteed to be present — no fallback needed.
+    Called by both create (where ``credential_type`` comes from the request
+    body and is already Pydantic-validated) and rotate (where it comes from
+    the existing DB row — string, not Literal). The fallback to an empty
+    required set avoids crashing on an unknown type; validation of the type
+    enum itself lives on the DB CHECK constraint + Pydantic Literal (create)
+    and on the existing row (rotate).
     """
-    required = _REQUIRED_FIELDS[body.credential_type]
-    provided = set(body.credential_payload.keys())
+    required = _REQUIRED_FIELDS.get(credential_type, set())
+    provided = set(credential_payload.keys())
     missing = required - provided
     if missing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"Missing required credential fields for {body.credential_type}: "
+                f"Missing required credential fields for {credential_type}: "
                 f"{', '.join(sorted(missing))}"
             ),
         )
@@ -168,7 +173,7 @@ async def create_credential(
             credential for the same ``(wallet, exchange)`` exists.
     """
     body = command.payload
-    _validate_payload_fields(body)
+    _validate_payload_fields_for_type(body.credential_type, body.credential_payload)
     encryption = get_encryption_service()
     encrypted = encryption.encrypt(json.dumps(body.credential_payload))
     tracker: SequenceTracker = request.app.state.rest_tracker
@@ -232,10 +237,19 @@ async def rotate_credential(
         ``CredentialResponse`` wrapping the newly-inserted credential.
 
     Raises:
-        HTTPException: 404 if the credential is not found or already
-            closed.
+        HTTPException: 400 if the rotation payload is missing required
+            fields for the existing credential's type; 404 if the
+            credential is not found or already closed.
     """
     body = command.payload
+    now = datetime.now(UTC)
+    existing = await repo.get_active_credential_by_id(credential_public_id, now)
+    if existing is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"active credential {credential_public_id} not found",
+        )
+    _validate_payload_fields_for_type(existing["credential_type"], body.credential_payload)
     encryption = get_encryption_service()
     encrypted = encryption.encrypt(json.dumps(body.credential_payload))
     tracker: SequenceTracker = request.app.state.rest_tracker

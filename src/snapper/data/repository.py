@@ -1517,6 +1517,21 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_active_credential_by_id(
+        self,
+        credential_public_id: str,
+        as_of: datetime,
+    ) -> WalletCredentialRow | None:
+        """Return the active credential row for the given ``public_id``.
+
+        Used by the rotation pre-check to load the existing row's
+        ``credential_type`` for payload validation before the SCD2
+        close+insert. Returns ``None`` when the credential does not
+        exist or is already closed at ``as_of``.
+        """
+        ...
+
+    @abstractmethod
     async def create_wallet_credential(
         self,
         wallet_public_id: str,
@@ -4750,6 +4765,24 @@ class SQLAlchemyRepository(Repository):
             session_id=cred.session_id,
             sequence_id=cred.sequence_id,
         )
+
+    async def get_active_credential_by_id(
+        self,
+        credential_public_id: str,
+        as_of: datetime,
+    ) -> WalletCredentialRow | None:
+        """Return the active credential row by its ``public_id``."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(WalletCredential).where(
+                    WalletCredential.public_id == credential_public_id,
+                    *where_active(WalletCredential, as_of),
+                )
+            )
+            row = result.scalars().first()
+            if row is None:
+                return None
+            return self._credential_row_from(row)
 
     async def create_wallet_credential(
         self,
