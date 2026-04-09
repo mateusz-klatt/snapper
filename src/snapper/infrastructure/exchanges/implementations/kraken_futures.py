@@ -673,9 +673,10 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
 
         Calls ``Market.get_historical_funding_rates(symbol)`` on the
         Kraken Futures SDK. The SDK returns **absolute** ``fundingRate``
-        and **relative** ``relativeFundingRate``; we store the relative
-        rate since it matches the ``max_funding_rate`` cap on
-        InstrumentSpec.
+        (price units per contract per hour) and **relative**
+        ``relativeFundingRate`` (fractional, e.g. 7e-05 ≈ 0.007%).
+        We store the relative rate since it matches the
+        ``max_funding_rate`` cap on InstrumentSpec.
 
         Args:
             symbol: Kraken WS symbol (e.g., ``PF_XBTUSD``).
@@ -689,13 +690,21 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             self._market_client.get_historical_funding_rates,
             symbol,
         )
-        raw_rates: list[dict[str, Any]] = result.get("rates", [])
+        if not isinstance(result, dict):
+            logger.warning(f"Unexpected SDK response type for historical funding: {type(result)}")
+            return []
+        raw_rates = result.get("rates", [])
+        if not isinstance(raw_rates, list):
+            logger.warning(f"Expected list for 'rates', got {type(raw_rates)}")
+            return []
         try:
             native_symbol = kraken_futures_ws_to_native(symbol.upper())
         except ValueError:
             native_symbol = symbol
         snapshots: list[FundingRateSnapshot] = []
         for entry in raw_rates:
+            if not isinstance(entry, dict):
+                continue
             ts_str = entry.get("timestamp", "")
             try:
                 effective = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
@@ -726,6 +735,13 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         ``symbol``. Returns None if no ticker found or funding rate is
         absent.
 
+        The REST ticker's ``fundingRate`` is already the **relative**
+        (fractional) rate, despite sharing its name with the absolute
+        rate field in the historical endpoint. Verified against live
+        Kraken API: values are ~1e-05 order of magnitude, matching
+        ``relativeFundingRate`` from the WS ticker feed. The REST
+        ticker does NOT carry a separate ``relativeFundingRate`` field.
+
         Args:
             symbol: Kraken WS symbol (e.g., ``PF_XBTUSD``).
 
@@ -735,9 +751,17 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         if not self._market_client:
             self._market_client = Market(sandbox=self.sandbox)
         result = await asyncio.to_thread(self._market_client.get_tickers)
-        tickers: list[dict[str, Any]] = result.get("tickers", [])
+        if not isinstance(result, dict):
+            logger.warning(f"Unexpected SDK response type for tickers: {type(result)}")
+            return None
+        tickers = result.get("tickers", [])
+        if not isinstance(tickers, list):
+            logger.warning(f"Expected list for 'tickers', got {type(tickers)}")
+            return None
         symbol_upper = symbol.upper()
         for t in tickers:
+            if not isinstance(t, dict):
+                continue
             if (t.get("symbol") or "").upper() != symbol_upper:
                 continue
             rate = t.get("fundingRate")

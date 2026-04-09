@@ -3518,6 +3518,73 @@ class TestGetHistoricalFundingRates:
         assert result == []
         assert client._market_client is mock_market
 
+    @pytest.mark.asyncio
+    async def test_non_dict_response_returns_empty(
+        self,
+        client: KrakenFuturesExchangeClient,
+    ) -> None:
+        """Non-dict SDK response returns empty list.
+
+        Given: SDK returns a non-dict value (e.g., string error),
+        When: get_historical_funding_rates is called,
+        Then: Returns empty list without crashing.
+        """
+        client._market_client = MagicMock()
+        client._market_client.get_historical_funding_rates = MagicMock(
+            return_value="error: invalid symbol",
+        )
+        result = await client.get_historical_funding_rates("PF_INVALID")
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_non_list_rates_returns_empty(
+        self,
+        client: KrakenFuturesExchangeClient,
+    ) -> None:
+        """Non-list rates field returns empty list.
+
+        Given: SDK returns dict with non-list rates value,
+        When: get_historical_funding_rates is called,
+        Then: Returns empty list.
+        """
+        client._market_client = MagicMock()
+        client._market_client.get_historical_funding_rates = MagicMock(
+            return_value={"rates": "not-a-list"},
+        )
+        result = await client.get_historical_funding_rates("PF_XBTUSD")
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_non_dict_entry_skipped(
+        self,
+        client: KrakenFuturesExchangeClient,
+    ) -> None:
+        """Non-dict entries in rates list are skipped.
+
+        Given: SDK returns rates list containing a non-dict element,
+        When: get_historical_funding_rates is called,
+        Then: Non-dict entry is skipped, valid ones are processed.
+        """
+        client._market_client = MagicMock()
+        client._market_client.get_historical_funding_rates = MagicMock(
+            return_value={
+                "rates": [
+                    "not-a-dict",
+                    {
+                        "timestamp": "2026-03-01T16:00:00.000Z",
+                        "fundingRate": 1.0e-08,
+                        "relativeFundingRate": 5.0e-05,
+                    },
+                ],
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            return_value="BTC-USD-PERP",
+        ):
+            result = await client.get_historical_funding_rates("PF_XBTUSD")
+        assert len(result) == 1
+
 
 class TestGetCurrentFundingRate:
     """Tests for get_current_funding_rate method."""
@@ -3710,3 +3777,71 @@ class TestGetCurrentFundingRate:
             result = await client.get_current_funding_rate("PF_XBTUSD")
         assert result is None
         assert client._market_client is mock_market
+
+    @pytest.mark.asyncio
+    async def test_non_dict_response_returns_none(
+        self,
+        client: KrakenFuturesExchangeClient,
+    ) -> None:
+        """Non-dict SDK response returns None.
+
+        Given: SDK returns a non-dict value,
+        When: get_current_funding_rate is called,
+        Then: Returns None without crashing.
+        """
+        client._market_client = MagicMock()
+        client._market_client.get_tickers = MagicMock(
+            return_value="error: service unavailable",
+        )
+        result = await client.get_current_funding_rate("PF_XBTUSD")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_non_list_tickers_returns_none(
+        self,
+        client: KrakenFuturesExchangeClient,
+    ) -> None:
+        """Non-list tickers field returns None.
+
+        Given: SDK returns dict with non-list tickers value,
+        When: get_current_funding_rate is called,
+        Then: Returns None.
+        """
+        client._market_client = MagicMock()
+        client._market_client.get_tickers = MagicMock(
+            return_value={"tickers": "not-a-list"},
+        )
+        result = await client.get_current_funding_rate("PF_XBTUSD")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_non_dict_ticker_entry_skipped(
+        self,
+        client: KrakenFuturesExchangeClient,
+    ) -> None:
+        """Non-dict entries in tickers list are skipped.
+
+        Given: SDK returns tickers list with non-dict element before match,
+        When: get_current_funding_rate is called,
+        Then: Non-dict entry is skipped, matching ticker is processed.
+        """
+        client._market_client = MagicMock()
+        client._market_client.get_tickers = MagicMock(
+            return_value={
+                "tickers": [
+                    "not-a-dict",
+                    {
+                        "symbol": "PF_XBTUSD",
+                        "fundingRate": 0.0001,
+                        "lastTime": "2026-04-04T00:07:33.690Z",
+                    },
+                ],
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            return_value="BTC-USD-PERP",
+        ):
+            result = await client.get_current_funding_rate("PF_XBTUSD")
+        assert result is not None
+        assert result.rate == pytest.approx(0.0001)

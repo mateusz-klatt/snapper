@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any
 
 from loguru import logger
+from sqlalchemy.exc import IntegrityError
 
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.process_parameters import SymbolUpdaterParameters
@@ -208,7 +209,7 @@ class KrakenFuturesFundingBackfillService(RegisterableProcess):
             try:
                 await self._db.insert_funding_rate(row)
                 inserted += 1
-            except Exception:
+            except IntegrityError:
                 skipped += 1
         logger.info(
             f"Funding backfill for {native_symbol}: {inserted} inserted, {skipped} duplicates"

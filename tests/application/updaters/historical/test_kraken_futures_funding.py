@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 from typer.testing import CliRunner
 
 from snapper.application.updaters.historical.kraken_futures_funding import (
@@ -291,7 +292,7 @@ class TestProcessSymbol:
         """
         service._db = AsyncMock()
         service._db.insert_funding_rate = AsyncMock(
-            side_effect=Exception("UNIQUE constraint failed"),
+            side_effect=IntegrityError("INSERT", {}, Exception("UNIQUE constraint failed")),
         )
         client = MagicMock()
         snapshots = [
