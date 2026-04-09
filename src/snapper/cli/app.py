@@ -27,6 +27,7 @@ Data Updates:
     - ``update-polygon-symbols``: Sync Polygon symbol mappings
     - ``polygon-backfill-aggregates``: Backfill historical data
     - ``kraken-futures-backfill-candles``: Backfill Kraken Futures OHLCV
+    - ``update-kraken-futures-funding-rates``: Backfill funding rates
 
 Example:
     Run the server::
@@ -64,6 +65,9 @@ from snapper.application.updaters.historical.aggregates import PolygonAggregates
 from snapper.application.updaters.historical.grouped import PolygonGroupedDailyBackfillService
 from snapper.application.updaters.historical.kraken_futures_aggregates import (
     KrakenFuturesAggregatesBackfillService,
+)
+from snapper.application.updaters.historical.kraken_futures_funding import (
+    KrakenFuturesFundingBackfillService,
 )
 from snapper.application.updaters.symbols.kraken import KrakenSymbolUpdaterService
 from snapper.application.updaters.symbols.kraken_equities import KrakenEquitiesSymbolUpdaterService
@@ -1094,6 +1098,50 @@ def kraken_futures_backfill_candles(
             raise typer.Exit(code=1) from e
 
     asyncio.run(run_backfill())
+
+
+@app.command(name="update-kraken-futures-funding-rates")
+def update_kraken_futures_funding_rates(
+    symbols: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--symbol",
+            "-s",
+            help="Native perpetual symbols (e.g., BTC-USD-PERP)",
+        ),
+    ] = None,
+    all_symbols: bool = typer.Option(
+        False,
+        "--all",
+        help="Backfill all Kraken Futures perpetuals",
+    ),
+) -> None:
+    """Backfill historical funding rates for Kraken Futures perpetuals.
+
+    Fetches all available historical rates from the Kraken Futures API
+    and persists them to the funding_rates table. Duplicates are
+    silently skipped via the partial unique index.
+
+    Args:
+        symbols: List of native perpetual symbols to backfill.
+        all_symbols: Backfill all mapped Kraken Futures perpetuals.
+    """
+
+    async def run_funding_backfill() -> None:
+        service = KrakenFuturesFundingBackfillService(
+            symbols=symbols,
+            all_symbols=all_symbols,
+        )
+        try:
+            symbol_source = "all mapped" if all_symbols else "specified/settings"
+            typer.echo(f"Starting Kraken Futures funding rate backfill ({symbol_source})...")
+            await service.start()
+            typer.echo("Kraken Futures funding rate backfill complete!")
+        except Exception as e:
+            typer.echo(f"Error during Kraken Futures funding rate backfill: {e}")
+            raise typer.Exit(code=1) from e
+
+    asyncio.run(run_funding_backfill())
 
 
 @app.command(name="polygon-backfill-grouped")

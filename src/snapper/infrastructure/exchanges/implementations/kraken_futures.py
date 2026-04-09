@@ -48,6 +48,7 @@ from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
+from snapper.infrastructure.exchanges.contracts import FundingRateSnapshot
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
@@ -663,6 +664,105 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                 ),
             )
         return positions
+
+    async def get_historical_funding_rates(
+        self,
+        symbol: str,
+    ) -> list[FundingRateSnapshot]:
+        """Fetch all historical funding rates for a perpetual contract.
+
+        Calls ``Market.get_historical_funding_rates(symbol)`` on the
+        Kraken Futures SDK. The SDK returns **absolute** ``fundingRate``
+        and **relative** ``relativeFundingRate``; we store the relative
+        rate since it matches the ``max_funding_rate`` cap on
+        InstrumentSpec.
+
+        Args:
+            symbol: Kraken WS symbol (e.g., ``PF_XBTUSD``).
+
+        Returns:
+            List of FundingRateSnapshot sorted by effective_from ascending.
+        """
+        if not self._market_client:
+            self._market_client = Market(sandbox=self.sandbox)
+        result = await asyncio.to_thread(
+            self._market_client.get_historical_funding_rates,
+            symbol,
+        )
+        raw_rates: list[dict[str, Any]] = result.get("rates", [])
+        try:
+            native_symbol = kraken_futures_ws_to_native(symbol.upper())
+        except ValueError:
+            native_symbol = symbol
+        snapshots: list[FundingRateSnapshot] = []
+        for entry in raw_rates:
+            ts_str = entry.get("timestamp", "")
+            try:
+                effective = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                continue
+            rate = entry.get("relativeFundingRate")
+            if rate is None:
+                continue
+            snapshots.append(
+                FundingRateSnapshot(
+                    symbol=native_symbol,
+                    exchange=ExchangeEnum.KRAKEN_FUTURES,
+                    rate_type="perpetual_funding",
+                    direction="both",
+                    rate=float(rate),
+                    effective_from=effective,
+                    notional_asset="USD",
+                    source="exchange_api",
+                ),
+            )
+        snapshots.sort(key=lambda s: s.effective_from)
+        return snapshots
+
+    async def get_current_funding_rate(self, symbol: str) -> FundingRateSnapshot | None:
+        """Extract the live funding rate from the ticker for a perpetual.
+
+        Calls ``Market.get_tickers()`` and finds the ticker matching
+        ``symbol``. Returns None if no ticker found or funding rate is
+        absent.
+
+        Args:
+            symbol: Kraken WS symbol (e.g., ``PF_XBTUSD``).
+
+        Returns:
+            FundingRateSnapshot with the current rate, or None.
+        """
+        if not self._market_client:
+            self._market_client = Market(sandbox=self.sandbox)
+        result = await asyncio.to_thread(self._market_client.get_tickers)
+        tickers: list[dict[str, Any]] = result.get("tickers", [])
+        symbol_upper = symbol.upper()
+        for t in tickers:
+            if (t.get("symbol") or "").upper() != symbol_upper:
+                continue
+            rate = t.get("fundingRate")
+            if rate is None:
+                return None
+            try:
+                native_symbol = kraken_futures_ws_to_native(symbol_upper)
+            except ValueError:
+                native_symbol = symbol
+            last_time_str = t.get("lastTime", "")
+            try:
+                effective = datetime.fromisoformat(last_time_str.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                effective = datetime.now(UTC)
+            return FundingRateSnapshot(
+                symbol=native_symbol,
+                exchange=ExchangeEnum.KRAKEN_FUTURES,
+                rate_type="perpetual_funding",
+                direction="both",
+                rate=float(rate),
+                effective_from=effective,
+                notional_asset="USD",
+                source="exchange_ws",
+            )
+        return None
 
     def _convert_sdk_order(self, data: dict[str, Any]) -> ExchangeOrderSnapshot:
         """Convert a Kraken Futures SDK order dict to ExchangeOrderSnapshot.

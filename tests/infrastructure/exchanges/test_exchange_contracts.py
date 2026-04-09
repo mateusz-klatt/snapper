@@ -6,6 +6,7 @@ from datetime import datetime
 import pytest
 
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
+from snapper.infrastructure.exchanges.contracts import FundingRateSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
@@ -150,3 +151,54 @@ class TestToFillStatus:
         """
         execution = self._make_execution(OrderStatusEnum.OPEN, cum_qty=None)
         assert to_fill_status(execution) == "filled"
+
+
+class TestFundingRateSnapshot:
+    """Tests for FundingRateSnapshot frozen dataclass."""
+
+    def test_creation_and_fields(self) -> None:
+        """FundingRateSnapshot stores all fields correctly.
+
+        Given: All required constructor arguments,
+        When: FundingRateSnapshot is created,
+        Then: All fields are accessible and correct.
+        """
+        effective = datetime(2026, 3, 1, 16, tzinfo=UTC)
+        snap = FundingRateSnapshot(
+            symbol="BTC-USD-PERP",
+            exchange="kraken_futures",
+            rate_type="perpetual_funding",
+            direction="both",
+            rate=7.182e-05,
+            effective_from=effective,
+            notional_asset="USD",
+            source="exchange_api",
+        )
+        assert snap.symbol == "BTC-USD-PERP"
+        assert snap.exchange == "kraken_futures"
+        assert snap.rate_type == "perpetual_funding"
+        assert snap.direction == "both"
+        assert snap.rate == pytest.approx(7.182e-05)
+        assert snap.effective_from == effective
+        assert snap.notional_asset == "USD"
+        assert snap.source == "exchange_api"
+
+    def test_frozen_raises_on_assignment(self) -> None:
+        """FundingRateSnapshot is frozen (immutable).
+
+        Given: An existing FundingRateSnapshot,
+        When: Attempting to change a field,
+        Then: Raises FrozenInstanceError.
+        """
+        snap = FundingRateSnapshot(
+            symbol="BTC-USD-PERP",
+            exchange="kraken_futures",
+            rate_type="perpetual_funding",
+            direction="both",
+            rate=7.182e-05,
+            effective_from=datetime(2026, 3, 1, 16, tzinfo=UTC),
+            notional_asset="USD",
+            source="exchange_api",
+        )
+        with pytest.raises(AttributeError):
+            snap.rate = 0.0

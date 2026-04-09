@@ -521,6 +521,90 @@ class TestUpdateDatabase:
             assert call_kwargs.kwargs["instrument_kind"] == "future"
             assert call_kwargs.kwargs["expiry_at"] is not None
 
+    @pytest.mark.asyncio
+    async def test_update_database_sets_funding_fields_for_perpetual(self) -> None:
+        """Set funding_type and funding_frequency_hours for perpetuals.
+
+        Given: A perpetual futures instrument (no lastTradingTime),
+        When: _update_database is called,
+        Then: _revise_instrument_spec receives perpetual_funding fields.
+        """
+        updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
+        mock_repo = MagicMock()
+        mock_session = MagicMock()
+        mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
+        mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
+        updater.repository = mock_repo
+
+        with (
+            patch.object(updater, "_upsert_symbol", return_value="pub-id-1"),
+            patch.object(updater, "_upsert_alias", return_value="created"),
+            patch.object(updater, "_upsert_capability", return_value="created"),
+            patch.object(updater, "_ensure_instrument_identity", return_value="inst-1"),
+            patch.object(updater, "_revise_instrument_spec") as mock_spec,
+            patch.object(updater, "_reconcile_capabilities", return_value=0),
+        ):
+            symbols = [
+                {
+                    "symbol": "PF_XBTUSD",
+                    "type": "futures_vanilla",
+                    "tickSize": 0.5,
+                    "contractSize": 1,
+                    "tradeable": True,
+                    "base": "XBT",
+                    "quote": "USD",
+                }
+            ]
+            await updater._update_database(symbols)
+            mock_spec.assert_called_once()
+            call_kwargs = mock_spec.call_args
+            assert call_kwargs.kwargs["instrument_kind"] == "perpetual"
+            assert call_kwargs.kwargs["funding_type"] == "perpetual_funding"
+            assert call_kwargs.kwargs["funding_frequency_hours"] == 1
+            assert call_kwargs.kwargs["max_funding_rate"] == pytest.approx(0.0025)
+
+    @pytest.mark.asyncio
+    async def test_update_database_no_funding_fields_for_dated_future(self) -> None:
+        """Dated futures do not receive funding fields.
+
+        Given: A dated futures instrument with lastTradingTime,
+        When: _update_database is called,
+        Then: _revise_instrument_spec does NOT receive funding_type.
+        """
+        updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
+        mock_repo = MagicMock()
+        mock_session = MagicMock()
+        mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
+        mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
+        updater.repository = mock_repo
+
+        with (
+            patch.object(updater, "_upsert_symbol", return_value="pub-id-1"),
+            patch.object(updater, "_upsert_alias", return_value="created"),
+            patch.object(updater, "_upsert_capability", return_value="created"),
+            patch.object(updater, "_ensure_instrument_identity", return_value="inst-1"),
+            patch.object(updater, "_revise_instrument_spec") as mock_spec,
+            patch.object(updater, "_reconcile_capabilities", return_value=0),
+        ):
+            symbols = [
+                {
+                    "symbol": "FI_XBTUSD_260620",
+                    "type": "futures_vanilla",
+                    "tickSize": 0.5,
+                    "contractSize": 1,
+                    "tradeable": True,
+                    "base": "XBT",
+                    "quote": "USD",
+                    "lastTradingTime": "2026-06-20T16:30:00.000Z",
+                }
+            ]
+            await updater._update_database(symbols)
+            mock_spec.assert_called_once()
+            call_kwargs = mock_spec.call_args
+            assert call_kwargs.kwargs["funding_type"] is None
+            assert call_kwargs.kwargs["funding_frequency_hours"] is None
+            assert call_kwargs.kwargs["max_funding_rate"] is None
+
 
 class TestBuildCcxtSymbol:
     """Tests for _build_ccxt_symbol helper."""

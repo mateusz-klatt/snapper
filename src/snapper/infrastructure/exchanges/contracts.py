@@ -165,6 +165,7 @@ __all__ = [
     "ExecType",
     "LiquidityIndicator",
     "ExchangeOrderSnapshot",
+    "FundingRateSnapshot",
     "OpenPositionSnapshot",
     "TickerUpdate",
     "CandleUpdate",
@@ -311,6 +312,35 @@ class InstrumentPairDescriptor:
     position_limit_long: int | None = None
     position_limit_short: int | None = None
     tick_size: float | None = None
+
+
+@dataclass(frozen=True)
+class FundingRateSnapshot:
+    """Funding or rollover rate fetched from an exchange.
+
+    Attributes:
+        symbol: Native symbol (e.g., ``BTC-USD-PERP``).
+        exchange: Exchange name (lowercase).
+        rate_type: Funding model identifier (``perpetual_funding``
+            or ``spot_margin_rollover``).
+        direction: Position direction the rate applies to
+            (``long``, ``short``, or ``both``).
+        rate: Per-boundary rate as a decimal fraction.
+        effective_from: Exchange-side timestamp when this rate
+            became effective.
+        notional_asset: Quote/settlement currency for the rate.
+        source: Provenance tag (``exchange_api``, ``exchange_ws``,
+            ``exchange_docs``).
+    """
+
+    symbol: str
+    exchange: str
+    rate_type: str
+    direction: str
+    rate: float
+    effective_from: datetime
+    notional_asset: str
+    source: str
 
 
 @dataclass

@@ -13,6 +13,7 @@ import snapper.infrastructure.exchanges.implementations.kraken_futures as mod
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
+from snapper.infrastructure.exchanges.contracts import FundingRateSnapshot
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
@@ -3334,3 +3335,378 @@ class TestKrakenFuturesLiveFixtures:
         assert snap.amount == pytest.approx(0.0005)
         assert snap.filled == pytest.approx(0.0)
         assert snap.remaining == pytest.approx(0.0005)
+
+
+class TestGetHistoricalFundingRates:
+    """Tests for get_historical_funding_rates method."""
+
+    @pytest.mark.asyncio
+    async def test_returns_snapshots_from_sdk(
+        self,
+        client: KrakenFuturesExchangeClient,
+    ) -> None:
+        """Historical funding rates are parsed into FundingRateSnapshot list.
+
+        Given: SDK returns rates with timestamp, fundingRate, relativeFundingRate,
+        When: get_historical_funding_rates is called,
+        Then: Returns list of FundingRateSnapshot sorted by effective_from.
+        """
+        client._market_client = MagicMock()
+        client._market_client.get_historical_funding_rates = MagicMock(
+            return_value={
+                "rates": [
+                    {
+                        "timestamp": "2026-03-01T16:00:00.000Z",
+                        "fundingRate": 1.0327e-08,
+                        "relativeFundingRate": 7.182e-05,
+                    },
+                    {
+                        "timestamp": "2026-03-01T20:00:00.000Z",
+                        "fundingRate": -1.2047e-08,
+                        "relativeFundingRate": -8.487e-05,
+                    },
+                ],
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            return_value="BTC-USD-PERP",
+        ):
+            result = await client.get_historical_funding_rates("PF_XBTUSD")
+        assert len(result) == 2
+        assert isinstance(result[0], FundingRateSnapshot)
+        assert result[0].symbol == "BTC-USD-PERP"
+        assert result[0].exchange == "kraken_futures"
+        assert result[0].rate_type == "perpetual_funding"
+        assert result[0].direction == "both"
+        assert result[0].rate == pytest.approx(7.182e-05)
+        assert result[0].notional_asset == "USD"
+        assert result[0].source == "exchange_api"
+        assert result[1].rate == pytest.approx(-8.487e-05)
+        assert result[0].effective_from < result[1].effective_from
+
+    @pytest.mark.asyncio
+    async def test_empty_rates_returns_empty_list(
+        self,
+        client: KrakenFuturesExchangeClient,
+    ) -> None:
+        """Empty rates list returns empty snapshot list.
+
+        Given: SDK returns empty rates,
+        When: get_historical_funding_rates is called,
+        Then: Returns empty list.
+        """
+        client._market_client = MagicMock()
+        client._market_client.get_historical_funding_rates = MagicMock(
+            return_value={"rates": []},
+        )
+        result = await client.get_historical_funding_rates("PF_XBTUSD")
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_skips_entries_with_missing_relative_rate(
+        self,
+        client: KrakenFuturesExchangeClient,
+    ) -> None:
+        """Entries without relativeFundingRate are skipped.
+
+        Given: SDK returns entries missing relativeFundingRate,
+        When: get_historical_funding_rates is called,
+        Then: Those entries are excluded from results.
+        """
+        client._market_client = MagicMock()
+        client._market_client.get_historical_funding_rates = MagicMock(
+            return_value={
+                "rates": [
+                    {
+                        "timestamp": "2026-03-01T16:00:00.000Z",
+                        "fundingRate": 1.0e-08,
+                    },
+                    {
+                        "timestamp": "2026-03-01T20:00:00.000Z",
+                        "fundingRate": -1.0e-08,
+                        "relativeFundingRate": -5.0e-05,
+                    },
+                ],
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            return_value="BTC-USD-PERP",
+        ):
+            result = await client.get_historical_funding_rates("PF_XBTUSD")
+        assert len(result) == 1
+
+    @pytest.mark.asyncio
+    async def test_skips_entries_with_bad_timestamp(
+        self,
+        client: KrakenFuturesExchangeClient,
+    ) -> None:
+        """Entries with unparseable timestamps are skipped.
+
+        Given: SDK returns entries with invalid timestamp string,
+        When: get_historical_funding_rates is called,
+        Then: Those entries are excluded from results.
+        """
+        client._market_client = MagicMock()
+        client._market_client.get_historical_funding_rates = MagicMock(
+            return_value={
+                "rates": [
+                    {
+                        "timestamp": "not-a-date",
+                        "fundingRate": 1.0e-08,
+                        "relativeFundingRate": 5.0e-05,
+                    },
+                ],
+            }
+        )
+        result = await client.get_historical_funding_rates("PF_XBTUSD")
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_unknown_symbol_fallback(
+        self,
+        client: KrakenFuturesExchangeClient,
+    ) -> None:
+        """Unknown symbol uses raw Kraken symbol as fallback.
+
+        Given: Symbol conversion raises ValueError,
+        When: get_historical_funding_rates is called,
+        Then: Uses raw symbol string.
+        """
+        client._market_client = MagicMock()
+        client._market_client.get_historical_funding_rates = MagicMock(
+            return_value={
+                "rates": [
+                    {
+                        "timestamp": "2026-03-01T16:00:00.000Z",
+                        "fundingRate": 1.0e-08,
+                        "relativeFundingRate": 5.0e-05,
+                    },
+                ],
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            side_effect=ValueError("Unknown"),
+        ):
+            result = await client.get_historical_funding_rates("PF_UNKNOWN")
+        assert len(result) == 1
+        assert result[0].symbol == "PF_UNKNOWN"
+
+    @pytest.mark.asyncio
+    async def test_initializes_market_client_if_none(
+        self,
+        client: KrakenFuturesExchangeClient,
+    ) -> None:
+        """Market client is lazily initialized when None.
+
+        Given: client._market_client is None,
+        When: get_historical_funding_rates is called,
+        Then: Market client is created and method succeeds.
+        """
+        client._market_client = None
+        mock_market = MagicMock()
+        mock_market.get_historical_funding_rates = MagicMock(
+            return_value={"rates": []},
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.Market",
+            return_value=mock_market,
+        ):
+            result = await client.get_historical_funding_rates("PF_XBTUSD")
+        assert result == []
+        assert client._market_client is mock_market
+
+
+class TestGetCurrentFundingRate:
+    """Tests for get_current_funding_rate method."""
+
+    @pytest.mark.asyncio
+    async def test_returns_snapshot_for_matching_ticker(
+        self,
+        client: KrakenFuturesExchangeClient,
+    ) -> None:
+        """Current funding rate extracts from matching ticker.
+
+        Given: SDK get_tickers returns ticker with fundingRate for symbol,
+        When: get_current_funding_rate is called,
+        Then: Returns FundingRateSnapshot with correct fields.
+        """
+        client._market_client = MagicMock()
+        client._market_client.get_tickers = MagicMock(
+            return_value={
+                "tickers": [
+                    {
+                        "symbol": "pf_xbtusd",
+                        "fundingRate": 0.000220714,
+                        "lastTime": "2026-04-04T00:07:33.690Z",
+                        "tag": "perpetual",
+                    },
+                    {
+                        "symbol": "pf_ethusd",
+                        "fundingRate": 0.000100000,
+                        "lastTime": "2026-04-04T00:07:34.000Z",
+                        "tag": "perpetual",
+                    },
+                ],
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            return_value="BTC-USD-PERP",
+        ):
+            result = await client.get_current_funding_rate("PF_XBTUSD")
+        assert result is not None
+        assert isinstance(result, FundingRateSnapshot)
+        assert result.symbol == "BTC-USD-PERP"
+        assert result.exchange == "kraken_futures"
+        assert result.rate_type == "perpetual_funding"
+        assert result.direction == "both"
+        assert result.rate == pytest.approx(0.000220714)
+        assert result.notional_asset == "USD"
+        assert result.source == "exchange_ws"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_for_unmatched_symbol(
+        self,
+        client: KrakenFuturesExchangeClient,
+    ) -> None:
+        """Returns None when ticker does not contain the requested symbol.
+
+        Given: SDK get_tickers returns tickers not matching the symbol,
+        When: get_current_funding_rate is called,
+        Then: Returns None.
+        """
+        client._market_client = MagicMock()
+        client._market_client.get_tickers = MagicMock(
+            return_value={
+                "tickers": [
+                    {"symbol": "pf_ethusd", "fundingRate": 0.0001},
+                ],
+            }
+        )
+        result = await client.get_current_funding_rate("PF_XBTUSD")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_funding_rate_is_none(
+        self,
+        client: KrakenFuturesExchangeClient,
+    ) -> None:
+        """Returns None when ticker has no fundingRate field.
+
+        Given: Matching ticker but fundingRate is None,
+        When: get_current_funding_rate is called,
+        Then: Returns None.
+        """
+        client._market_client = MagicMock()
+        client._market_client.get_tickers = MagicMock(
+            return_value={
+                "tickers": [
+                    {"symbol": "PF_XBTUSD", "fundingRate": None},
+                ],
+            }
+        )
+        result = await client.get_current_funding_rate("PF_XBTUSD")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_for_empty_tickers(
+        self,
+        client: KrakenFuturesExchangeClient,
+    ) -> None:
+        """Returns None when no tickers returned.
+
+        Given: SDK get_tickers returns empty list,
+        When: get_current_funding_rate is called,
+        Then: Returns None.
+        """
+        client._market_client = MagicMock()
+        client._market_client.get_tickers = MagicMock(
+            return_value={"tickers": []},
+        )
+        result = await client.get_current_funding_rate("PF_XBTUSD")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_fallback_datetime_when_lasttime_invalid(
+        self,
+        client: KrakenFuturesExchangeClient,
+    ) -> None:
+        """Falls back to now() when lastTime is not parseable.
+
+        Given: Matching ticker with invalid lastTime,
+        When: get_current_funding_rate is called,
+        Then: Returns snapshot with effective_from set to approximately now.
+        """
+        client._market_client = MagicMock()
+        client._market_client.get_tickers = MagicMock(
+            return_value={
+                "tickers": [
+                    {"symbol": "PF_XBTUSD", "fundingRate": 0.0001, "lastTime": "bad-date"},
+                ],
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            return_value="BTC-USD-PERP",
+        ):
+            result = await client.get_current_funding_rate("PF_XBTUSD")
+        assert result is not None
+        assert result.rate == pytest.approx(0.0001)
+
+    @pytest.mark.asyncio
+    async def test_unknown_symbol_fallback(
+        self,
+        client: KrakenFuturesExchangeClient,
+    ) -> None:
+        """Uses raw symbol when conversion fails.
+
+        Given: Symbol conversion raises ValueError,
+        When: get_current_funding_rate is called,
+        Then: Uses raw symbol string.
+        """
+        client._market_client = MagicMock()
+        client._market_client.get_tickers = MagicMock(
+            return_value={
+                "tickers": [
+                    {
+                        "symbol": "PF_UNKNOWN",
+                        "fundingRate": 0.0001,
+                        "lastTime": "2026-04-04T00:07:33.690Z",
+                    },
+                ],
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            side_effect=ValueError("Unknown"),
+        ):
+            result = await client.get_current_funding_rate("PF_UNKNOWN")
+        assert result is not None
+        assert result.symbol == "PF_UNKNOWN"
+
+    @pytest.mark.asyncio
+    async def test_initializes_market_client_if_none(
+        self,
+        client: KrakenFuturesExchangeClient,
+    ) -> None:
+        """Market client is lazily initialized when None.
+
+        Given: client._market_client is None,
+        When: get_current_funding_rate is called,
+        Then: Market client is created and method succeeds.
+        """
+        client._market_client = None
+        mock_market = MagicMock()
+        mock_market.get_tickers = MagicMock(
+            return_value={"tickers": []},
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.Market",
+            return_value=mock_market,
+        ):
+            result = await client.get_current_funding_rate("PF_XBTUSD")
+        assert result is None
+        assert client._market_client is mock_market

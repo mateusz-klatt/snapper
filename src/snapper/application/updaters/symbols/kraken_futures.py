@@ -213,6 +213,9 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
                         sequence_id=self._tracker.next_sequence("specs"),
                         expiry_at=expiry_dt,
                         instrument_kind=kind,
+                        funding_type="perpetual_funding" if kind == "perpetual" else None,
+                        funding_frequency_hours=1 if kind == "perpetual" else None,
+                        max_funding_rate=0.0025 if kind == "perpetual" else None,
                     )
                     created_count += 1
 
