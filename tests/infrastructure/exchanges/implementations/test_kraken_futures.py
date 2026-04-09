@@ -3739,6 +3739,8 @@ class TestGetCurrentFundingRate:
         When: get_current_funding_rate is called,
         Then: effective_from is the current hour boundary (minute=0, second=0).
         """
+        frozen_now = datetime(2026, 4, 9, 14, 37, 42, 123456, tzinfo=UTC)
+        expected_boundary = datetime(2026, 4, 9, 14, 0, 0, tzinfo=UTC)
         client._market_client = MagicMock()
         client._market_client.get_tickers = MagicMock(
             return_value={
@@ -3747,18 +3749,20 @@ class TestGetCurrentFundingRate:
                 ],
             }
         )
-        with patch(
-            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
-            return_value="BTC-USD-PERP",
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+                return_value="BTC-USD-PERP",
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.datetime",
+            ) as mock_dt,
         ):
+            mock_dt.now.return_value = frozen_now
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
             result = await client.get_current_funding_rate("PF_XBTUSD")
         assert result is not None
-        assert result.effective_from.minute == 0
-        assert result.effective_from.second == 0
-        assert result.effective_from.microsecond == 0
-        now = datetime.now(UTC)
-        assert result.effective_from.hour == now.hour
-        assert result.effective_from.date() == now.date()
+        assert result.effective_from == expected_boundary
 
     @pytest.mark.asyncio
     async def test_unknown_symbol_fallback(
