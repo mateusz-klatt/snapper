@@ -228,3 +228,106 @@ class HandoverScopeGrantCommand(
     """Request envelope for ``POST /api/scope-grants/handover``."""
 
     type: Literal["handover_scope_grant_command"] = "handover_scope_grant_command"
+
+
+class CredentialSummary(StrictDataSchema[Literal["credential_summary"]]):
+    """Read projection of a wallet credential WITHOUT the encrypted payload.
+
+    The ``encrypted_payload`` column is intentionally excluded so the
+    API never surfaces ciphertext. The frontend credential tab shows
+    label / exchange / credential_type and offers a "Rotate" action;
+    the actual secret never leaves the server.
+
+    Attributes:
+        type: Payload item type discriminator.
+        wallet_public_id: Owning wallet.
+        exchange: Exchange identifier (lowercase).
+        credential_type: One of ``api_key_secret`` / ``rsa_pem`` /
+            ``oauth`` / ``paper``.
+        label: Human-readable description (null when unset).
+    """
+
+    type: Literal["credential_summary"] = "credential_summary"
+    wallet_public_id: str
+    exchange: str
+    credential_type: str
+    label: str | None = None
+
+
+class CredentialListResponse(
+    PayloadListResponse[Literal["credential_list_response"], CredentialSummary]
+):
+    """List wrapper for ``GET /api/wallets/{id}/credentials``."""
+
+    type: Literal["credential_list_response"] = "credential_list_response"
+
+
+class CredentialResponse(PayloadResponse[Literal["credential_response"], CredentialSummary]):
+    """Singleton wrapper for create / rotate responses."""
+
+    type: Literal["credential_response"] = "credential_response"
+
+
+class CreateCredentialBody(StrictBody):
+    """Request body for ``POST /api/wallets/{id}/credentials``.
+
+    The ``payload`` field carries the plaintext credential JSON that
+    will be Fernet-encrypted server-side before DB insert. The shape
+    is polymorphic on ``credential_type``:
+
+    - ``api_key_secret`` → ``{"api_key": ..., "api_secret": ...}``
+    - ``rsa_pem`` → ``{"api_key": ..., "private_key_pem": ...}``
+    - ``paper`` → ``{"initial_balance": ...}``
+    - ``oauth`` → ``{"client_id": ..., "client_secret": ..., "refresh_token": ...}``
+
+    The server validates required keys per credential_type before
+    accepting the payload.
+
+    Attributes:
+        exchange: Exchange identifier (lowercase enforced server-side).
+        credential_type: One of the four supported types.
+        credential_payload: Plaintext JSON dict that will be encrypted.
+        label: Optional human-readable description.
+    """
+
+    exchange: str = Field(min_length=1, max_length=20)
+    credential_type: Literal["api_key_secret", "rsa_pem", "oauth", "paper"]
+    credential_payload: dict[str, str] = Field(
+        description="Plaintext credential fields, encrypted server-side"
+    )
+    label: str | None = Field(default=None, max_length=128)
+
+
+class CreateCredentialCommand(
+    PayloadRequest[Literal["create_credential_command"], CreateCredentialBody]
+):
+    """Request envelope for ``POST /api/wallets/{id}/credentials``."""
+
+    type: Literal["create_credential_command"] = "create_credential_command"
+
+
+class RotateCredentialBody(StrictBody):
+    """Request body for ``POST /api/wallets/{id}/credentials/{cid}/rotate``.
+
+    Same polymorphic payload as create — the new plaintext credential
+    fields replace the old ones. The old credential row is SCD2-closed
+    and a fresh row is inserted.
+
+    Attributes:
+        credential_payload: New plaintext credential fields.
+        label: Optional updated human-readable description (None
+            preserves the existing label).
+    """
+
+    credential_payload: dict[str, str] = Field(
+        description="New plaintext credential fields, encrypted server-side"
+    )
+    label: str | None = Field(default=None, max_length=128)
+
+
+class RotateCredentialCommand(
+    PayloadRequest[Literal["rotate_credential_command"], RotateCredentialBody]
+):
+    """Request envelope for ``POST /api/wallets/{id}/credentials/{cid}/rotate``."""
+
+    type: Literal["rotate_credential_command"] = "rotate_credential_command"

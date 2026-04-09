@@ -54,6 +54,20 @@ export const ContractDataSchema = z
   })
   .strict()
 
+export const CredentialSummarySchema = z
+  .object({
+    type: z.literal('credential_summary'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    wallet_public_id: z.string(),
+    exchange: z.string(),
+    credential_type: z.string(),
+    label: z.string().nullable().optional(),
+  })
+  .strict()
+
 export const ExchangeListResponseSchema = z
   .object({
     type: z.literal('exchange_list'),
@@ -503,6 +517,22 @@ export const SettingUpdateBodySchema = z
 
 export const RemoveSettingBodySchema = z.object({}).strict()
 
+export const CreateCredentialBodySchema = z
+  .object({
+    exchange: z.string().min(1).max(20),
+    credential_type: z.enum(['api_key_secret', 'rsa_pem', 'oauth', 'paper']),
+    credential_payload: z.record(z.string(), z.string()),
+    label: z.string().max(128).nullable().optional(),
+  })
+  .strict()
+
+export const RotateCredentialBodySchema = z
+  .object({
+    credential_payload: z.record(z.string(), z.string()),
+    label: z.string().max(128).nullable().optional(),
+  })
+  .strict()
+
 export const CreateScopeGrantBodySchema = z
   .object({
     operator_public_id: z.string().min(1).max(64),
@@ -551,6 +581,29 @@ export const ContractListResponseSchema = z
     session_id: z.string(),
     payload: z.array(ContractDataSchema),
     count: z.number().int(),
+  })
+  .strict()
+
+export const CredentialListResponseSchema = z
+  .object({
+    type: z.literal('credential_list_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: z.array(CredentialSummarySchema),
+    count: z.number().int(),
+  })
+  .strict()
+
+export const CredentialResponseSchema = z
+  .object({
+    type: z.literal('credential_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: CredentialSummarySchema,
   })
   .strict()
 
@@ -944,6 +997,28 @@ export const RemoveSettingRequestSchema = z
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     payload: RemoveSettingBodySchema,
+  })
+  .strict()
+
+export const CreateCredentialCommandSchema = z
+  .object({
+    type: z.literal('create_credential_command').optional(),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: CreateCredentialBodySchema,
+  })
+  .strict()
+
+export const RotateCredentialCommandSchema = z
+  .object({
+    type: z.literal('rotate_credential_command').optional(),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: RotateCredentialBodySchema,
   })
   .strict()
 
@@ -1368,6 +1443,7 @@ export const SystemStatusResponseSchema = z
 export type ConnectionStats = z.infer<typeof ConnectionStatsSchema>
 export type ContinuousCandleData = z.infer<typeof ContinuousCandleDataSchema>
 export type ContractData = z.infer<typeof ContractDataSchema>
+export type CredentialSummary = z.infer<typeof CredentialSummarySchema>
 export type ExchangeListResponse = z.infer<typeof ExchangeListResponseSchema>
 export type ExecutionData = z.infer<typeof ExecutionDataSchema>
 export type FrontMonthData = z.infer<typeof FrontMonthDataSchema>
@@ -1409,11 +1485,15 @@ export type ChangePasswordBody = z.infer<typeof ChangePasswordBodySchema>
 export type AdminResetPasswordBody = z.infer<typeof AdminResetPasswordBodySchema>
 export type SettingUpdateBody = z.infer<typeof SettingUpdateBodySchema>
 export type RemoveSettingBody = z.infer<typeof RemoveSettingBodySchema>
+export type CreateCredentialBody = z.infer<typeof CreateCredentialBodySchema>
+export type RotateCredentialBody = z.infer<typeof RotateCredentialBodySchema>
 export type CreateScopeGrantBody = z.infer<typeof CreateScopeGrantBodySchema>
 export type HandoverScopeGrantBody = z.infer<typeof HandoverScopeGrantBodySchema>
 export type CreateWalletBody = z.infer<typeof CreateWalletBodySchema>
 export type ContinuousCandleListResponse = z.infer<typeof ContinuousCandleListResponseSchema>
 export type ContractListResponse = z.infer<typeof ContractListResponseSchema>
+export type CredentialListResponse = z.infer<typeof CredentialListResponseSchema>
+export type CredentialResponse = z.infer<typeof CredentialResponseSchema>
 export type ExecutionListResponse = z.infer<typeof ExecutionListResponseSchema>
 export type FrontMonthResponse = z.infer<typeof FrontMonthResponseSchema>
 export type GapDetectionStats = z.infer<typeof GapDetectionStatsSchema>
@@ -1451,6 +1531,8 @@ export type ChangePasswordRequest = z.infer<typeof ChangePasswordRequestSchema>
 export type AdminResetPasswordRequest = z.infer<typeof AdminResetPasswordRequestSchema>
 export type SettingUpdate = z.infer<typeof SettingUpdateSchema>
 export type RemoveSettingRequest = z.infer<typeof RemoveSettingRequestSchema>
+export type CreateCredentialCommand = z.infer<typeof CreateCredentialCommandSchema>
+export type RotateCredentialCommand = z.infer<typeof RotateCredentialCommandSchema>
 export type CreateScopeGrantCommand = z.infer<typeof CreateScopeGrantCommandSchema>
 export type HandoverScopeGrantCommand = z.infer<typeof HandoverScopeGrantCommandSchema>
 export type CreateWalletCommand = z.infer<typeof CreateWalletCommandSchema>

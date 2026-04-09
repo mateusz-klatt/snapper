@@ -189,6 +189,13 @@ enum ZmqHealthDataStatus: String, Codable, Sendable {
     case error
 }
 
+enum CreateCredentialBodyCredentialType: String, Codable, Sendable {
+    case apiKeySecret = "api_key_secret"
+    case rsaPem = "rsa_pem"
+    case oauth
+    case paper
+}
+
 enum CreateScopeGrantBodyScopeKind: String, Codable, Sendable {
     case underlying
     case instrument
@@ -488,6 +495,69 @@ struct ContractListResponse: Codable, Sendable {
         case sessionId = "session_id"
         case payload
         case count
+    }
+}
+
+struct CredentialListResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: [CredentialSummary]
+    /// Number of items in payload
+    let count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+        case count
+    }
+}
+
+struct CredentialResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: CredentialSummary
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct CredentialSummary: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let walletPublicId: String
+    let exchange: String
+    let credentialType: String
+    let label: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case walletPublicId = "wallet_public_id"
+        case exchange
+        case credentialType = "credential_type"
+        case label
     }
 }
 
@@ -2412,6 +2482,68 @@ struct RemoveSettingRequest: Codable, Sendable {
 }
 
 struct RemoveSettingBody: Codable, Sendable {
+}
+
+struct CreateCredentialCommand: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: CreateCredentialBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct CreateCredentialBody: Codable, Sendable {
+    let exchange: String
+    let credentialType: String
+    /// Plaintext credential fields, encrypted server-side
+    let credentialPayload: [String: String]
+    let label: String?
+
+    enum CodingKeys: String, CodingKey {
+        case exchange
+        case credentialType = "credential_type"
+        case credentialPayload = "credential_payload"
+        case label
+    }
+}
+
+struct RotateCredentialCommand: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: RotateCredentialBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct RotateCredentialBody: Codable, Sendable {
+    /// New plaintext credential fields, encrypted server-side
+    let credentialPayload: [String: String]
+    let label: String?
+
+    enum CodingKeys: String, CodingKey {
+        case credentialPayload = "credential_payload"
+        case label
+    }
 }
 
 struct ProcessCreateRequest: Codable, Sendable {

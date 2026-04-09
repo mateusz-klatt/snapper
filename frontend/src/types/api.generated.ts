@@ -864,6 +864,100 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
+    "/api/wallets/{wallet_public_id}/credentials": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Credentials
+         * @description List active credentials on a wallet (summaries, no encrypted payload).
+         *
+         *     Args:
+         *         request: FastAPI request.
+         *         _principal: Authenticated caller holding READ_WALLET_CREDENTIALS.
+         *         wallet_public_id: Target wallet.
+         *         repo: Repository dependency.
+         *
+         *     Returns:
+         *         ``CredentialListResponse`` ordered by ``exchange``.
+         */
+        get: Operations["list_credentials_api_wallets__wallet_public_id__credentials_get"];
+        put?: never;
+        /**
+         * Create Credential
+         * @description Create a new wallet credential (encrypt + insert).
+         *
+         *     The plaintext ``credential_payload`` is validated against the
+         *     required-fields set for the declared ``credential_type`` and then
+         *     Fernet-encrypted before the DB insert. The ciphertext is stored;
+         *     the plaintext is discarded immediately. The response returns
+         *     ``CredentialSummary`` (no payload) so the secret never appears on
+         *     the wire response.
+         *
+         *     Args:
+         *         request: FastAPI request.
+         *         _principal: Authenticated caller holding MANAGE_WALLET_CREDENTIALS.
+         *         wallet_public_id: Target wallet (path param).
+         *         command: Create command envelope.
+         *         repo: Repository dependency.
+         *
+         *     Returns:
+         *         ``CredentialResponse`` wrapping a ``CredentialSummary``.
+         *
+         *     Raises:
+         *         HTTPException: 400 on missing payload fields; 409 if an active
+         *             credential for the same ``(wallet, exchange)`` exists.
+         */
+        post: Operations["create_credential_api_wallets__wallet_public_id__credentials_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/wallets/{wallet_public_id}/credentials/{credential_public_id}/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rotate Credential
+         * @description Rotate an existing credential (SCD2 close + insert).
+         *
+         *     The old credential row is closed and a new active row is inserted
+         *     with the provided encrypted payload. ``wallet_public_id`` in the
+         *     path is informational (for URL readability); the repository looks
+         *     up by ``credential_public_id`` only.
+         *
+         *     Args:
+         *         request: FastAPI request.
+         *         _principal: Authenticated caller holding MANAGE_WALLET_CREDENTIALS.
+         *         wallet_public_id: Informational path param (not used in query).
+         *         credential_public_id: Public ID of the credential to rotate.
+         *         command: Rotate command envelope.
+         *         repo: Repository dependency.
+         *
+         *     Returns:
+         *         ``CredentialResponse`` wrapping the newly-inserted credential.
+         *
+         *     Raises:
+         *         HTTPException: 404 if the credential is not found or already
+         *             closed.
+         */
+        post: Operations["rotate_credential_api_wallets__wallet_public_id__credentials__credential_public_id__rotate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/candles": {
         parameters: {
             query?: never;
@@ -1864,6 +1958,104 @@ export type Components = {
              * @description Number of items in payload
              */
             count: number;
+        };
+        /**
+         * CredentialListResponse
+         * @description List wrapper for ``GET /api/wallets/{id}/credentials``.
+         */
+        CredentialListResponse: {
+            /**
+             * Type
+             * @default credential_list_response
+             * @constant
+             */
+            type: "credential_list_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Payload */
+            payload: Components["schemas"]["CredentialSummary"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
+            count: number;
+        };
+        /**
+         * CredentialResponse
+         * @description Singleton wrapper for create / rotate responses.
+         */
+        CredentialResponse: {
+            /**
+             * Type
+             * @default credential_response
+             * @constant
+             */
+            type: "credential_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["CredentialSummary"];
+        };
+        /**
+         * CredentialSummary
+         * @description Read projection of a wallet credential WITHOUT the encrypted payload.
+         *
+         *     The ``encrypted_payload`` column is intentionally excluded so the
+         *     API never surfaces ciphertext. The frontend credential tab shows
+         *     label / exchange / credential_type and offers a "Rotate" action;
+         *     the actual secret never leaves the server.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         *         wallet_public_id: Owning wallet.
+         *         exchange: Exchange identifier (lowercase).
+         *         credential_type: One of ``api_key_secret`` / ``rsa_pem`` /
+         *             ``oauth`` / ``paper``.
+         *         label: Human-readable description (null when unset).
+         */
+        CredentialSummary: {
+            /**
+             * Type
+             * @default credential_summary
+             * @constant
+             */
+            type: "credential_summary";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Wallet Public Id */
+            wallet_public_id: string;
+            /** Exchange */
+            exchange: string;
+            /** Credential Type */
+            credential_type: string;
+            /** Label */
+            label?: string | null;
         };
         /**
          * ExchangeListResponse
@@ -5183,6 +5375,116 @@ export type Components = {
          */
         RemoveSettingBody: Record<string, never>;
         /**
+         * CreateCredentialCommand
+         * @description Request envelope for ``POST /api/wallets/{id}/credentials``.
+         */
+        CreateCredentialCommand: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "create_credential_command";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["CreateCredentialBody"];
+        };
+        /**
+         * CreateCredentialBody
+         * @description Request body for ``POST /api/wallets/{id}/credentials``.
+         *
+         *     The ``payload`` field carries the plaintext credential JSON that
+         *     will be Fernet-encrypted server-side before DB insert. The shape
+         *     is polymorphic on ``credential_type``:
+         *
+         *     - ``api_key_secret`` → ``{"api_key": ..., "api_secret": ...}``
+         *     - ``rsa_pem`` → ``{"api_key": ..., "private_key_pem": ...}``
+         *     - ``paper`` → ``{"initial_balance": ...}``
+         *     - ``oauth`` → ``{"client_id": ..., "client_secret": ..., "refresh_token": ...}``
+         *
+         *     The server validates required keys per credential_type before
+         *     accepting the payload.
+         *
+         *     Attributes:
+         *         exchange: Exchange identifier (lowercase enforced server-side).
+         *         credential_type: One of the four supported types.
+         *         credential_payload: Plaintext JSON dict that will be encrypted.
+         *         label: Optional human-readable description.
+         */
+        CreateCredentialBody: {
+            /** Exchange */
+            exchange: string;
+            /**
+             * Credential Type
+             * @enum {string}
+             */
+            credential_type: "api_key_secret" | "rsa_pem" | "oauth" | "paper";
+            /**
+             * Credential Payload
+             * @description Plaintext credential fields, encrypted server-side
+             */
+            credential_payload: {
+                [key: string]: string;
+            };
+            /** Label */
+            label?: string | null;
+        };
+        /**
+         * RotateCredentialCommand
+         * @description Request envelope for ``POST /api/wallets/{id}/credentials/{cid}/rotate``.
+         */
+        RotateCredentialCommand: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "rotate_credential_command";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["RotateCredentialBody"];
+        };
+        /**
+         * RotateCredentialBody
+         * @description Request body for ``POST /api/wallets/{id}/credentials/{cid}/rotate``.
+         *
+         *     Same polymorphic payload as create — the new plaintext credential
+         *     fields replace the old ones. The old credential row is SCD2-closed
+         *     and a fresh row is inserted.
+         *
+         *     Attributes:
+         *         credential_payload: New plaintext credential fields.
+         *         label: Optional updated human-readable description (None
+         *             preserves the existing label).
+         */
+        RotateCredentialBody: {
+            /**
+             * Credential Payload
+             * @description New plaintext credential fields, encrypted server-side
+             */
+            credential_payload: {
+                [key: string]: string;
+            };
+            /** Label */
+            label?: string | null;
+        };
+        /**
          * ProcessCreateRequest
          * @description Process creation request envelope.
          *
@@ -6276,6 +6578,108 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["HandoverScopeGrantResponse"];
+                };
+            };
+        };
+    };
+    list_credentials_api_wallets__wallet_public_id__credentials_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                wallet_public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["CredentialListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_credential_api_wallets__wallet_public_id__credentials_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                wallet_public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["CreateCredentialCommand"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["CredentialResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    rotate_credential_api_wallets__wallet_public_id__credentials__credential_public_id__rotate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                wallet_public_id: string;
+                credential_public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["RotateCredentialCommand"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["CredentialResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };

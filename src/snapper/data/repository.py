@@ -143,6 +143,8 @@ __all__ = [
     "ScopeGrantNotFoundError",
     "ScopeGrantValidationError",
     "WalletConflictError",
+    "CredentialConflictError",
+    "CredentialNotFoundError",
     "close_and_insert",
     "close_and_insert_sync",
     "get_repository",
@@ -194,6 +196,33 @@ class ScopeGrantValidationError(Exception):
     Maps to HTTP 400 at the API layer. Examples: scope_kind/public_id
     XOR violation, self-handover (source operator equals target
     operator), or unknown scope_kind.
+    """
+
+
+class CredentialConflictError(Exception):
+    """Raised when a credential insert collides with an existing active row.
+
+    Maps to HTTP 409. The active-unique index on
+    ``(wallet_public_id, exchange)`` enforces one active credential per
+    exchange per wallet.
+    """
+
+    def __init__(self, wallet_public_id: str, exchange: str, reason: str) -> None:
+        """Capture the conflicting key for the caller."""
+        super().__init__(
+            f"Credential insert failed for wallet={wallet_public_id} "
+            f"exchange={exchange}: {reason}"
+        )
+        self.wallet_public_id = wallet_public_id
+        self.exchange = exchange
+        self.reason = reason
+
+
+class CredentialNotFoundError(Exception):
+    """Raised when a referenced credential does not exist or is not active.
+
+    Maps to HTTP 404. Used by ``rotate_wallet_credential`` when the
+    source credential row is missing or already closed.
     """
 
 
@@ -1484,6 +1513,67 @@ class Repository(ABC):
             ``CredentialResolver`` translates ``None`` to its own
             ``CredentialNotFoundError`` so the executor startup
             failure surfaces with a clear cause.
+        """
+        ...
+
+    @abstractmethod
+    async def create_wallet_credential(
+        self,
+        wallet_public_id: str,
+        exchange: str,
+        credential_type: str,
+        encrypted_payload: str,
+        label: str | None,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+    ) -> WalletCredentialRow:
+        """Insert a new active wallet credential row.
+
+        The ``encrypted_payload`` is already Fernet-encrypted by the
+        caller (the route handler encrypts before calling). The
+        active-unique index on ``(wallet_public_id, exchange)`` is
+        enforced at the DB layer.
+
+        Raises:
+            CredentialConflictError: An active credential for the
+                same ``(wallet, exchange)`` already exists.
+        """
+        ...
+
+    @abstractmethod
+    async def rotate_wallet_credential(
+        self,
+        credential_public_id: str,
+        encrypted_payload: str,
+        label: str | None,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+    ) -> WalletCredentialRow:
+        """SCD2 close + insert rotation of a wallet credential.
+
+        Closes the existing active credential row (sets ``known_to``
+        to ``timestamp``) and inserts a new active row carrying the
+        same ``(wallet_public_id, exchange, credential_type)`` with
+        the new encrypted payload.
+
+        Raises:
+            CredentialNotFoundError: The credential_public_id does
+                not match an active row at ``timestamp``.
+        """
+        ...
+
+    @abstractmethod
+    async def list_wallet_credentials_for_wallet(
+        self,
+        wallet_public_id: str,
+        as_of: datetime,
+    ) -> list[WalletCredentialRow]:
+        """Active credentials on a single wallet at ``as_of``.
+
+        Returns every active ``wallet_credentials`` row where
+        ``wallet_public_id`` matches. Ordered by ``exchange``.
         """
         ...
 
@@ -4627,17 +4717,7 @@ class SQLAlchemyRepository(Repository):
             row = result.scalars().first()
             if row is None:
                 return None
-            return WalletCredentialRow(
-                public_id=row.public_id,
-                wallet_public_id=row.wallet_public_id,
-                exchange=row.exchange,
-                credential_type=row.credential_type,
-                encrypted_payload=row.encrypted_payload,
-                label=row.label,
-                timestamp=row.timestamp,
-                session_id=row.session_id,
-                sequence_id=row.sequence_id,
-            )
+            return self._credential_row_from(row)
 
     async def list_active_wallet_credentials(
         self,
@@ -4654,20 +4734,127 @@ class SQLAlchemyRepository(Repository):
                 .where(*where_active(WalletCredential, as_of))
                 .order_by(WalletCredential.exchange, WalletCredential.wallet_public_id)
             )
-            return [
-                WalletCredentialRow(
-                    public_id=row.public_id,
-                    wallet_public_id=row.wallet_public_id,
-                    exchange=row.exchange,
-                    credential_type=row.credential_type,
-                    encrypted_payload=row.encrypted_payload,
-                    label=row.label,
-                    timestamp=row.timestamp,
-                    session_id=row.session_id,
-                    sequence_id=row.sequence_id,
+            return [self._credential_row_from(row) for row in result.scalars().all()]
+
+    @staticmethod
+    def _credential_row_from(cred: WalletCredential) -> WalletCredentialRow:
+        """Project a ``WalletCredential`` ORM instance to its ``WalletCredentialRow``."""
+        return WalletCredentialRow(
+            public_id=cred.public_id,
+            wallet_public_id=cred.wallet_public_id,
+            exchange=cred.exchange,
+            credential_type=cred.credential_type,
+            encrypted_payload=cred.encrypted_payload,
+            label=cred.label,
+            timestamp=cred.timestamp,
+            session_id=cred.session_id,
+            sequence_id=cred.sequence_id,
+        )
+
+    async def create_wallet_credential(
+        self,
+        wallet_public_id: str,
+        exchange: str,
+        credential_type: str,
+        encrypted_payload: str,
+        label: str | None,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+    ) -> WalletCredentialRow:
+        """Insert a new active wallet credential row."""
+        async with self.session() as s:
+            cred = WalletCredential(
+                wallet_public_id=wallet_public_id,
+                exchange=exchange.lower(),
+                credential_type=credential_type,
+                encrypted_payload=encrypted_payload,
+                label=label,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=timestamp,
+                known_to=KNOWN_TO_MAX,
+            )
+            s.add(cred)
+            try:
+                await s.commit()
+            except IntegrityError as exc:
+                err_msg = str(exc.orig).lower() if exc.orig else ""
+                if "unique" not in err_msg and "duplicate" not in err_msg:
+                    raise
+                raise CredentialConflictError(
+                    wallet_public_id=wallet_public_id,
+                    exchange=exchange,
+                    reason="active credential for (wallet, exchange) already exists",
+                ) from exc
+            await s.refresh(cred)
+            return self._credential_row_from(cred)
+
+    async def rotate_wallet_credential(
+        self,
+        credential_public_id: str,
+        encrypted_payload: str,
+        label: str | None,
+        session_id: str,
+        sequence_id: int,
+        timestamp: datetime,
+    ) -> WalletCredentialRow:
+        """SCD2 close + insert rotation of a wallet credential."""
+        async with self.session() as s:
+            existing = (
+                (
+                    await s.execute(
+                        select(WalletCredential).where(
+                            WalletCredential.public_id == credential_public_id,
+                            *where_active(WalletCredential, timestamp),
+                        )
+                    )
                 )
-                for row in result.scalars().all()
-            ]
+                .scalars()
+                .first()
+            )
+            if existing is None:
+                raise CredentialNotFoundError(
+                    f"active credential {credential_public_id} not found at "
+                    f"{timestamp.isoformat()}"
+                )
+            await s.execute(
+                update(WalletCredential)
+                .where(WalletCredential.id == existing.id)
+                .values(known_to=timestamp)
+            )
+            new_cred = WalletCredential(
+                wallet_public_id=existing.wallet_public_id,
+                exchange=existing.exchange,
+                credential_type=existing.credential_type,
+                encrypted_payload=encrypted_payload,
+                label=label if label is not None else existing.label,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=timestamp,
+                known_to=KNOWN_TO_MAX,
+            )
+            s.add(new_cred)
+            await s.commit()
+            await s.refresh(new_cred)
+            return self._credential_row_from(new_cred)
+
+    async def list_wallet_credentials_for_wallet(
+        self,
+        wallet_public_id: str,
+        as_of: datetime,
+    ) -> list[WalletCredentialRow]:
+        """Active credentials on a single wallet at ``as_of``."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(WalletCredential)
+                .where(
+                    WalletCredential.wallet_public_id == wallet_public_id,
+                    *where_active(WalletCredential, as_of),
+                )
+                .order_by(WalletCredential.exchange)
+            )
+            return [self._credential_row_from(row) for row in result.scalars().all()]
 
 
 _repository_cache: dict[str, Repository] = {}
