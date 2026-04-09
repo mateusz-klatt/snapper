@@ -814,13 +814,15 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             native_symbol = kraken_futures_ws_to_native(symbol_upper)
         except ValueError:
             native_symbol = symbol
+        now = datetime.now(UTC)
+        effective = now.replace(minute=0, second=0, microsecond=0)
         return FundingRateSnapshot(
             symbol=native_symbol,
             exchange=ExchangeEnum.KRAKEN_FUTURES,
             rate_type="perpetual_funding",
             direction="both",
             rate=rate,
-            effective_from=datetime.now(UTC),
+            effective_from=effective,
             notional_asset="USD",
             source="exchange_api",
         )

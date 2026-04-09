@@ -3729,15 +3729,15 @@ class TestGetCurrentFundingRate:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_effective_from_is_approximately_now(
+    async def test_effective_from_is_current_hour_boundary(
         self,
         client: KrakenFuturesExchangeClient,
     ) -> None:
-        """Current funding rate uses datetime.now(UTC) for effective_from.
+        """Current funding rate uses the most recent hour boundary.
 
         Given: Matching ticker with valid fundingRate,
         When: get_current_funding_rate is called,
-        Then: effective_from is close to current UTC time (not lastTime).
+        Then: effective_from is the current hour boundary (minute=0, second=0).
         """
         client._market_client = MagicMock()
         client._market_client.get_tickers = MagicMock(
@@ -3747,15 +3747,18 @@ class TestGetCurrentFundingRate:
                 ],
             }
         )
-        before = datetime.now(UTC)
         with patch(
             "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
             return_value="BTC-USD-PERP",
         ):
             result = await client.get_current_funding_rate("PF_XBTUSD")
-        after = datetime.now(UTC)
         assert result is not None
-        assert before <= result.effective_from <= after
+        assert result.effective_from.minute == 0
+        assert result.effective_from.second == 0
+        assert result.effective_from.microsecond == 0
+        now = datetime.now(UTC)
+        assert result.effective_from.hour == now.hour
+        assert result.effective_from.date() == now.date()
 
     @pytest.mark.asyncio
     async def test_unknown_symbol_fallback(
