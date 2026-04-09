@@ -1941,4 +1941,223 @@ describe('cacheWsTicketFromResponse', () => {
       apiClient.setTimeTravelAsOf(null)
     })
   })
+  describe('getScopeGrants', () => {
+    it('fetches and validates scope grants for a wallet', async () => {
+      const payload = {
+        type: 'scope_grant_list_response',
+        session_id: 's',
+        sequence_id: 1,
+        public_id: 'p',
+        timestamp: '2026-01-01T00:00:00Z',
+        count: 1,
+        payload: [
+          {
+            type: 'scope_grant_info',
+            session_id: 's',
+            sequence_id: 1,
+            public_id: 'sg-1',
+            timestamp: '2026-01-01T00:00:00Z',
+            operator_public_id: 'op-1',
+            wallet_public_id: 'w-1',
+            granted_by_user_public_id: 'u-1',
+            scope_kind: 'underlying',
+            underlying_public_id: 'BTC',
+            instrument_public_id: null,
+            note: null,
+            known_to: '9999-12-31T23:59:59.999999Z',
+          },
+        ],
+      }
+
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => payload })
+      const result = await apiClient.getScopeGrants('w-1')
+
+      expect(result.payload).toHaveLength(1)
+      expect(result.payload[0].scope_kind).toBe('underlying')
+      const url = mockFetch.mock.calls[0][0] as string
+
+      expect(url).toContain('wallet_public_id=w-1')
+    })
+  })
+  describe('createScopeGrant', () => {
+    it('posts create scope grant command', async () => {
+      const grantInfo = {
+        type: 'scope_grant_info',
+        session_id: 's',
+        sequence_id: 1,
+        public_id: 'sg-new',
+        timestamp: '2026-01-01T00:00:00Z',
+        operator_public_id: 'op-1',
+        wallet_public_id: 'w-1',
+        granted_by_user_public_id: 'u-1',
+        scope_kind: 'underlying',
+        underlying_public_id: 'ETH',
+        instrument_public_id: null,
+        note: null,
+        known_to: '9999-12-31T23:59:59.999999Z',
+      }
+      const response = {
+        type: 'scope_grant_response',
+        session_id: 's',
+        sequence_id: 1,
+        public_id: 'p',
+        timestamp: '2026-01-01T00:00:00Z',
+        payload: grantInfo,
+      }
+
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => response })
+      const result = await apiClient.createScopeGrant({
+        operator_public_id: 'op-1',
+        wallet_public_id: 'w-1',
+        scope_kind: 'underlying',
+        underlying_public_id: 'ETH',
+      })
+
+      expect(result.payload.public_id).toBe('sg-new')
+    })
+  })
+  describe('handoverScopeGrant', () => {
+    it('posts handover command and returns both grants', async () => {
+      const closedGrant = {
+        type: 'scope_grant_info',
+        session_id: 's',
+        sequence_id: 1,
+        public_id: 'sg-old',
+        timestamp: '2026-01-01T00:00:00Z',
+        operator_public_id: 'op-1',
+        wallet_public_id: 'w-1',
+        granted_by_user_public_id: 'u-1',
+        scope_kind: 'underlying',
+        underlying_public_id: 'BTC',
+        instrument_public_id: null,
+        note: null,
+        known_to: '2026-01-02T00:00:00Z',
+      }
+      const newGrant = {
+        ...closedGrant,
+        public_id: 'sg-new',
+        operator_public_id: 'op-2',
+        known_to: '9999-12-31T23:59:59.999999Z',
+      }
+      const response = {
+        type: 'handover_scope_grant_response',
+        session_id: 's',
+        sequence_id: 1,
+        public_id: 'p',
+        timestamp: '2026-01-01T00:00:00Z',
+        payload: { closed_grant: closedGrant, new_grant: newGrant },
+      }
+
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => response })
+      const result = await apiClient.handoverScopeGrant({
+        from_grant_public_id: 'sg-old',
+        to_operator_public_id: 'op-2',
+        reason: 'shift change',
+      })
+
+      expect(result.payload.closed_grant.public_id).toBe('sg-old')
+      expect(result.payload.new_grant.operator_public_id).toBe('op-2')
+    })
+  })
+  describe('getCredentials', () => {
+    it('fetches credential summaries for a wallet', async () => {
+      const payload = {
+        type: 'credential_list_response',
+        session_id: 's',
+        sequence_id: 1,
+        public_id: 'p',
+        timestamp: '2026-01-01T00:00:00Z',
+        count: 1,
+        payload: [
+          {
+            type: 'credential_summary',
+            session_id: 's',
+            sequence_id: 1,
+            public_id: 'cred-1',
+            timestamp: '2026-01-01T00:00:00Z',
+            wallet_public_id: 'w-1',
+            exchange: 'kraken',
+            credential_type: 'api_key_secret',
+            label: 'main',
+          },
+        ],
+      }
+
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => payload })
+      const result = await apiClient.getCredentials('w-1')
+
+      expect(result.payload).toHaveLength(1)
+      expect(result.payload[0].exchange).toBe('kraken')
+      const url = mockFetch.mock.calls[0][0] as string
+
+      expect(url).toContain('/api/wallets/w-1/credentials')
+    })
+  })
+  describe('createCredential', () => {
+    it('posts create credential command', async () => {
+      const credInfo = {
+        type: 'credential_summary',
+        session_id: 's',
+        sequence_id: 1,
+        public_id: 'cred-new',
+        timestamp: '2026-01-01T00:00:00Z',
+        wallet_public_id: 'w-1',
+        exchange: 'kraken',
+        credential_type: 'api_key_secret',
+        label: 'new-key',
+      }
+      const response = {
+        type: 'credential_response',
+        session_id: 's',
+        sequence_id: 1,
+        public_id: 'p',
+        timestamp: '2026-01-01T00:00:00Z',
+        payload: credInfo,
+      }
+
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => response })
+      const result = await apiClient.createCredential('w-1', {
+        exchange: 'kraken',
+        credential_type: 'api_key_secret',
+        credential_payload: { api_key: 'k', api_secret: 's' },
+        label: 'new-key',
+      })
+
+      expect(result.payload.public_id).toBe('cred-new')
+    })
+  })
+  describe('rotateCredential', () => {
+    it('posts rotate command', async () => {
+      const credInfo = {
+        type: 'credential_summary',
+        session_id: 's',
+        sequence_id: 1,
+        public_id: 'cred-rotated',
+        timestamp: '2026-01-01T00:00:00Z',
+        wallet_public_id: 'w-1',
+        exchange: 'kraken',
+        credential_type: 'api_key_secret',
+        label: 'rotated-key',
+      }
+      const response = {
+        type: 'credential_response',
+        session_id: 's',
+        sequence_id: 1,
+        public_id: 'p',
+        timestamp: '2026-01-01T00:00:00Z',
+        payload: credInfo,
+      }
+
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => response })
+      const result = await apiClient.rotateCredential('w-1', 'cred-1', {
+        credential_payload: { api_key: 'new-k', api_secret: 'new-s' },
+        label: 'rotated-key',
+      })
+
+      expect(result.payload.public_id).toBe('cred-rotated')
+      const url = mockFetch.mock.calls[0][0] as string
+
+      expect(url).toContain('/api/wallets/w-1/credentials/cred-1/rotate')
+    })
+  })
 })

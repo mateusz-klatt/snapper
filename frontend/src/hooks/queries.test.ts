@@ -9,6 +9,12 @@ import {
   useExchangeInstruments,
   useOperators,
   useWallets,
+  useScopeGrants,
+  useCreateScopeGrant,
+  useHandoverScopeGrant,
+  useCredentials,
+  useCreateCredential,
+  useRotateCredential,
   useOrders,
   useExecutions,
   useAvailableProcesses,
@@ -159,6 +165,80 @@ vi.mock('../lib/apiClient', () => ({
         })
       )
     ),
+    getScopeGrants: vi.fn(() =>
+      Promise.resolve(envelope('scope_grant_list_response', { payload: [], count: 0 }))
+    ),
+    createScopeGrant: vi.fn(() =>
+      Promise.resolve(
+        envelope('scope_grant_response', {
+          payload: envelope('scope_grant_info', {
+            operator_public_id: 'op-1',
+            wallet_public_id: 'w-1',
+            granted_by_user_public_id: 'u-1',
+            scope_kind: 'underlying',
+            underlying_public_id: 'BTC',
+            instrument_public_id: null,
+            note: null,
+            known_to: '9999-12-31T23:59:59.999999Z',
+          }),
+        })
+      )
+    ),
+    handoverScopeGrant: vi.fn(() =>
+      Promise.resolve(
+        envelope('handover_scope_grant_response', {
+          payload: {
+            closed_grant: envelope('scope_grant_info', {
+              operator_public_id: 'op-1',
+              wallet_public_id: 'w-1',
+              granted_by_user_public_id: 'u-1',
+              scope_kind: 'underlying',
+              underlying_public_id: 'BTC',
+              instrument_public_id: null,
+              note: null,
+              known_to: '2026-01-01T00:00:00Z',
+            }),
+            new_grant: envelope('scope_grant_info', {
+              operator_public_id: 'op-2',
+              wallet_public_id: 'w-1',
+              granted_by_user_public_id: 'u-1',
+              scope_kind: 'underlying',
+              underlying_public_id: 'BTC',
+              instrument_public_id: null,
+              note: null,
+              known_to: '9999-12-31T23:59:59.999999Z',
+            }),
+          },
+        })
+      )
+    ),
+    getCredentials: vi.fn(() =>
+      Promise.resolve(envelope('credential_list_response', { payload: [], count: 0 }))
+    ),
+    createCredential: vi.fn(() =>
+      Promise.resolve(
+        envelope('credential_response', {
+          payload: envelope('credential_summary', {
+            wallet_public_id: 'w-1',
+            exchange: 'kraken',
+            credential_type: 'api_key_secret',
+            label: 'main',
+          }),
+        })
+      )
+    ),
+    rotateCredential: vi.fn(() =>
+      Promise.resolve(
+        envelope('credential_response', {
+          payload: envelope('credential_summary', {
+            wallet_public_id: 'w-1',
+            exchange: 'kraken',
+            credential_type: 'api_key_secret',
+            label: 'rotated',
+          }),
+        })
+      )
+    ),
   },
 }))
 vi.mock('../stores/auth', () => ({
@@ -201,6 +281,12 @@ const mockedApiClient = apiClient as unknown as {
   startProcessByName: Mock
   stopProcessByName: Mock
   createProcessConfig: Mock
+  getScopeGrants: Mock
+  createScopeGrant: Mock
+  handoverScopeGrant: Mock
+  getCredentials: Mock
+  createCredential: Mock
+  rotateCredential: Mock
 }
 const createQueryClient = () =>
   new QueryClient({
@@ -903,6 +989,113 @@ describe('queries', () => {
       })
       expect(mockedApiClient.getPositions).not.toHaveBeenCalled()
       vi.mocked(useAuth).mockReturnValue({ isAuthenticated: true } as ReturnType<typeof useAuth>)
+    })
+  })
+  describe('useScopeGrants', () => {
+    it('returns data when wallet is provided', async () => {
+      const { result } = renderHook(() => useScopeGrants('w-1'), { wrapper: createWrapper() })
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false))
+      expect(mockedApiClient.getScopeGrants).toHaveBeenCalledWith('w-1')
+    })
+    it('does not fetch with empty wallet id', async () => {
+      const { result } = renderHook(() => useScopeGrants(''), { wrapper: createWrapper() })
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false))
+      expect(mockedApiClient.getScopeGrants).not.toHaveBeenCalled()
+    })
+  })
+  describe('useCreateScopeGrant', () => {
+    it('calls createScopeGrant and invalidates cache', async () => {
+      const { queryClient, wrapper } = createWrapperWithClient()
+      const spy = vi.spyOn(queryClient, 'invalidateQueries')
+      const { result } = renderHook(() => useCreateScopeGrant(), { wrapper })
+
+      await act(async () => {
+        await result.current.mutateAsync({
+          operator_public_id: 'op-1',
+          wallet_public_id: 'w-1',
+          scope_kind: 'underlying',
+          underlying_public_id: 'BTC',
+        })
+      })
+      expect(mockedApiClient.createScopeGrant).toHaveBeenCalled()
+      expect(spy).toHaveBeenCalled()
+    })
+  })
+  describe('useHandoverScopeGrant', () => {
+    it('calls handoverScopeGrant and invalidates cache', async () => {
+      const { queryClient, wrapper } = createWrapperWithClient()
+      const spy = vi.spyOn(queryClient, 'invalidateQueries')
+      const { result } = renderHook(() => useHandoverScopeGrant(), { wrapper })
+
+      await act(async () => {
+        await result.current.mutateAsync({
+          from_grant_public_id: 'sg-1',
+          to_operator_public_id: 'op-2',
+        })
+      })
+      expect(mockedApiClient.handoverScopeGrant).toHaveBeenCalled()
+      expect(spy).toHaveBeenCalled()
+    })
+  })
+  describe('useCredentials', () => {
+    it('returns data when wallet is provided', async () => {
+      const { result } = renderHook(() => useCredentials('w-1'), { wrapper: createWrapper() })
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false))
+      expect(mockedApiClient.getCredentials).toHaveBeenCalledWith('w-1')
+    })
+    it('does not fetch with empty wallet id', async () => {
+      const { result } = renderHook(() => useCredentials(''), { wrapper: createWrapper() })
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false))
+      expect(mockedApiClient.getCredentials).not.toHaveBeenCalled()
+    })
+  })
+  describe('useCreateCredential', () => {
+    it('calls createCredential and invalidates cache', async () => {
+      const { queryClient, wrapper } = createWrapperWithClient()
+      const spy = vi.spyOn(queryClient, 'invalidateQueries')
+      const { result } = renderHook(() => useCreateCredential(), { wrapper })
+
+      await act(async () => {
+        await result.current.mutateAsync({
+          walletPublicId: 'w-1',
+          data: {
+            exchange: 'kraken',
+            credential_type: 'api_key_secret',
+            credential_payload: { api_key: 'k', api_secret: 's' },
+          },
+        })
+      })
+      expect(mockedApiClient.createCredential).toHaveBeenCalledWith('w-1', {
+        exchange: 'kraken',
+        credential_type: 'api_key_secret',
+        credential_payload: { api_key: 'k', api_secret: 's' },
+      })
+      expect(spy).toHaveBeenCalled()
+    })
+  })
+  describe('useRotateCredential', () => {
+    it('calls rotateCredential and invalidates cache', async () => {
+      const { queryClient, wrapper } = createWrapperWithClient()
+      const spy = vi.spyOn(queryClient, 'invalidateQueries')
+      const { result } = renderHook(() => useRotateCredential(), { wrapper })
+
+      await act(async () => {
+        await result.current.mutateAsync({
+          walletPublicId: 'w-1',
+          credentialPublicId: 'cred-1',
+          data: {
+            credential_payload: { api_key: 'new-k', api_secret: 'new-s' },
+          },
+        })
+      })
+      expect(mockedApiClient.rotateCredential).toHaveBeenCalledWith('w-1', 'cred-1', {
+        credential_payload: { api_key: 'new-k', api_secret: 'new-s' },
+      })
+      expect(spy).toHaveBeenCalled()
     })
   })
   describe('time-travel polling suppression', () => {

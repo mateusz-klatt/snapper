@@ -25,6 +25,15 @@ import type {
   CreateUserBody,
   UpdateUserBody,
   AdminResetPasswordBody,
+  ScopeGrantListResponse,
+  ScopeGrantResponse,
+  CreateScopeGrantBody,
+  HandoverScopeGrantBody,
+  HandoverScopeGrantResponse,
+  CredentialListResponse,
+  CredentialResponse,
+  CreateCredentialBody,
+  RotateCredentialBody,
 } from '../types/api'
 
 const queryKeys = {
@@ -67,6 +76,10 @@ const queryKeys = {
   ) => ['signals', strategyId, limit, instrument, hours, asOf, opId, walletId] as const,
   operators: (asOf: string | null) => ['operators', asOf] as const,
   wallets: (asOf: string | null, opId?: string | null) => ['wallets', asOf, opId] as const,
+  scopeGrants: (walletPublicId: string, asOf: string | null) =>
+    ['scope-grants', walletPublicId, asOf] as const,
+  credentials: (walletPublicId: string, asOf: string | null) =>
+    ['credentials', walletPublicId, asOf] as const,
   settings: (category?: string, asOf?: string | null) => ['settings', category, asOf] as const,
   settingCategories: (asOf: string | null) => ['settings', 'categories', asOf] as const,
   users: (includeInactive: boolean, asOf: string | null) =>
@@ -157,6 +170,85 @@ export const useWallets = () => {
     enabled: isAuthenticated,
     staleTime: 60 * 1000,
     throwOnError: false,
+  })
+}
+
+export const useScopeGrants = (walletPublicId: string) => {
+  const { isAuthenticated } = useAuth()
+  const asOf = useAppStore(s => s.asOf)
+
+  return useQuery<ScopeGrantListResponse>({
+    queryKey: queryKeys.scopeGrants(walletPublicId, asOf),
+    queryFn: () => apiClient.getScopeGrants(walletPublicId),
+    enabled: isAuthenticated && !!walletPublicId,
+    staleTime: 30 * 1000,
+    throwOnError: false,
+  })
+}
+
+export const useCreateScopeGrant = () => {
+  const queryClient = useQueryClient()
+
+  return useMutation<ScopeGrantResponse, Error, CreateScopeGrantBody>({
+    mutationFn: data => apiClient.createScopeGrant(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['scope-grants'] })
+    },
+  })
+}
+
+export const useHandoverScopeGrant = () => {
+  const queryClient = useQueryClient()
+
+  return useMutation<HandoverScopeGrantResponse, Error, HandoverScopeGrantBody>({
+    mutationFn: data => apiClient.handoverScopeGrant(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['scope-grants'] })
+    },
+  })
+}
+
+export const useCredentials = (walletPublicId: string) => {
+  const { isAuthenticated } = useAuth()
+  const asOf = useAppStore(s => s.asOf)
+
+  return useQuery<CredentialListResponse>({
+    queryKey: queryKeys.credentials(walletPublicId, asOf),
+    queryFn: () => apiClient.getCredentials(walletPublicId),
+    enabled: isAuthenticated && !!walletPublicId,
+    staleTime: 30 * 1000,
+    throwOnError: false,
+  })
+}
+
+export const useCreateCredential = () => {
+  const queryClient = useQueryClient()
+
+  return useMutation<
+    CredentialResponse,
+    Error,
+    { walletPublicId: string; data: CreateCredentialBody }
+  >({
+    mutationFn: ({ walletPublicId, data }) => apiClient.createCredential(walletPublicId, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+export const useRotateCredential = () => {
+  const queryClient = useQueryClient()
+
+  return useMutation<
+    CredentialResponse,
+    Error,
+    { walletPublicId: string; credentialPublicId: string; data: RotateCredentialBody }
+  >({
+    mutationFn: ({ walletPublicId, credentialPublicId, data }) =>
+      apiClient.rotateCredential(walletPublicId, credentialPublicId, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
   })
 }
 

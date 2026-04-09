@@ -4,6 +4,11 @@ import { storeWsTicket } from './wsTicketCache'
 import { validateResponse } from './schemas/api'
 import { getTracker } from './sequenceTracker'
 import {
+  ScopeGrantListResponseSchema,
+  ScopeGrantResponseSchema,
+  HandoverScopeGrantResponseSchema,
+  CredentialListResponseSchema,
+  CredentialResponseSchema,
   OperatorListResponseSchema,
   WalletListResponseSchema,
   SettingCategoriesResponseSchema,
@@ -31,6 +36,15 @@ import {
   SignalListResponseSchema,
 } from './schemas/api.generated.zod'
 import type {
+  ScopeGrantListResponse,
+  ScopeGrantResponse,
+  HandoverScopeGrantResponse,
+  CreateScopeGrantBody,
+  HandoverScopeGrantBody,
+  CredentialListResponse,
+  CredentialResponse,
+  CreateCredentialBody,
+  RotateCredentialBody,
   OperatorListResponse,
   WalletListResponse,
   CandleData,
@@ -418,6 +432,56 @@ class APIClient {
     const data = await this.getJSON('/api/wallets')
 
     return validateResponse(data, WalletListResponseSchema, '/wallets')
+  }
+  async getScopeGrants(walletPublicId: string): Promise<ScopeGrantListResponse> {
+    const params = new URLSearchParams({ wallet_public_id: walletPublicId })
+    const data = await this.getJSON(`/api/scope-grants?${params}`)
+
+    return validateResponse(data, ScopeGrantListResponseSchema, '/scope-grants')
+  }
+  async createScopeGrant(body: CreateScopeGrantBody): Promise<ScopeGrantResponse> {
+    const data = await this.postJSON('/api/scope-grants', body)
+
+    return validateResponse(data, ScopeGrantResponseSchema, '/scope-grants POST')
+  }
+  async handoverScopeGrant(body: HandoverScopeGrantBody): Promise<HandoverScopeGrantResponse> {
+    const data = await this.postJSON('/api/scope-grants/handover', body)
+
+    return validateResponse(data, HandoverScopeGrantResponseSchema, '/scope-grants/handover POST')
+  }
+  async getCredentials(walletPublicId: string): Promise<CredentialListResponse> {
+    const data = await this.getJSON(
+      `/api/wallets/${encodeURIComponent(walletPublicId)}/credentials`
+    )
+
+    return validateResponse(data, CredentialListResponseSchema, '/wallets/:id/credentials')
+  }
+  async createCredential(
+    walletPublicId: string,
+    body: CreateCredentialBody
+  ): Promise<CredentialResponse> {
+    const data = await this.postJSON(
+      `/api/wallets/${encodeURIComponent(walletPublicId)}/credentials`,
+      body
+    )
+
+    return validateResponse(data, CredentialResponseSchema, '/wallets/:id/credentials POST')
+  }
+  async rotateCredential(
+    walletPublicId: string,
+    credentialPublicId: string,
+    body: RotateCredentialBody
+  ): Promise<CredentialResponse> {
+    const data = await this.postJSON(
+      `/api/wallets/${encodeURIComponent(walletPublicId)}/credentials/${encodeURIComponent(credentialPublicId)}/rotate`,
+      body
+    )
+
+    return validateResponse(
+      data,
+      CredentialResponseSchema,
+      '/wallets/:id/credentials/:id/rotate POST'
+    )
   }
   async getSettings(category?: string): Promise<SettingListResponse> {
     const params = category ? new URLSearchParams({ category }) : ''
