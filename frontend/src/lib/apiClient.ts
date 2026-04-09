@@ -435,6 +435,11 @@ class APIClient {
   }
   async getScopeGrants(walletPublicId: string): Promise<ScopeGrantListResponse> {
     const params = new URLSearchParams({ wallet_public_id: walletPublicId })
+
+    if (this.timeTravelAsOf) {
+      params.set('as_of', this.timeTravelAsOf)
+    }
+
     const response = await this.request(`/api/scope-grants?${params}`, { method: 'GET' })
 
     if (!response.ok) {
@@ -456,7 +461,12 @@ class APIClient {
     return validateResponse(data, HandoverScopeGrantResponseSchema, '/scope-grants/handover POST')
   }
   async getCredentials(walletPublicId: string): Promise<CredentialListResponse> {
-    const url = `/api/wallets/${encodeURIComponent(walletPublicId)}/credentials`
+    let url = `/api/wallets/${encodeURIComponent(walletPublicId)}/credentials`
+
+    if (this.timeTravelAsOf) {
+      url = `${url}?as_of=${encodeURIComponent(this.timeTravelAsOf)}`
+    }
+
     const response = await this.request(url, { method: 'GET' })
 
     if (!response.ok) {

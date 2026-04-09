@@ -44,6 +44,7 @@ const CredentialManagement: React.FC<Readonly<CredentialManagementProps>> = ({ r
         credential={rotateCredential}
         open={rotateCredential !== null}
         onClose={() => setRotateCredential(null)}
+        readOnly={readOnly}
       />
     </div>
   )

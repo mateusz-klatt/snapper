@@ -27,9 +27,15 @@ interface RotateDialogProps {
   credential: CredentialSummary | null
   open: boolean
   onClose: () => void
+  readOnly?: boolean
 }
 
-const RotateDialog: React.FC<Readonly<RotateDialogProps>> = ({ credential, open, onClose }) => {
+const RotateDialog: React.FC<Readonly<RotateDialogProps>> = ({
+  credential,
+  open,
+  onClose,
+  readOnly,
+}) => {
   const [fields, setFields] = useState<Record<string, string>>({})
   const [label, setLabel] = useState('')
   const [errors, setErrors] = useState<Record<string, string>>({})
@@ -182,6 +188,7 @@ const RotateDialog: React.FC<Readonly<RotateDialogProps>> = ({ credential, open,
             variant='primary'
             size='sm'
             loading={rotateMutation.isPending}
+            disabled={readOnly}
             onClick={handleRotate}
           >
             <RotateCw className='w-3.5 h-3.5' />

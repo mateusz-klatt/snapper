@@ -11,9 +11,15 @@ interface HandoverDialogProps {
   grant: ScopeGrantInfo | null
   open: boolean
   onClose: () => void
+  readOnly?: boolean
 }
 
-const HandoverDialog: React.FC<Readonly<HandoverDialogProps>> = ({ grant, open, onClose }) => {
+const HandoverDialog: React.FC<Readonly<HandoverDialogProps>> = ({
+  grant,
+  open,
+  onClose,
+  readOnly,
+}) => {
   const [toOperatorId, setToOperatorId] = useState('')
   const [reason, setReason] = useState('')
   const { data: operatorsData } = useOperators()
@@ -136,7 +142,7 @@ const HandoverDialog: React.FC<Readonly<HandoverDialogProps>> = ({ grant, open, 
             variant='primary'
             size='sm'
             loading={handoverMutation.isPending}
-            disabled={!toOperatorId}
+            disabled={!toOperatorId || readOnly}
             onClick={handleHandover}
           >
             <ArrowRightLeft className='w-3.5 h-3.5' />

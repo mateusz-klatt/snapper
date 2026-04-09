@@ -44,6 +44,7 @@ const ScopeGrantManagement: React.FC<Readonly<ScopeGrantManagementProps>> = ({ r
         grant={handoverGrant}
         open={handoverGrant !== null}
         onClose={() => setHandoverGrant(null)}
+        readOnly={readOnly}
       />
     </div>
   )

@@ -245,6 +245,13 @@ describe('HandoverDialog', () => {
     renderWithQuery(<HandoverDialog grant={unknownOpGrant} open onClose={onClose} />)
     expect(screen.getByText('op-unknown')).toBeDefined()
   })
+  it('disables Handover button when readOnly', () => {
+    renderWithQuery(<HandoverDialog grant={testGrant} open onClose={onClose} readOnly />)
+    fireEvent.change(screen.getByTestId('handover-operator'), { target: { value: 'op-2' } })
+    const btn = screen.getByText('Handover').closest('button')
+
+    expect(btn?.disabled).toBe(true)
+  })
   it('omits reason when empty', async () => {
     renderWithQuery(<HandoverDialog grant={testGrant} open onClose={onClose} />)
     fireEvent.change(screen.getByTestId('handover-operator'), { target: { value: 'op-2' } })

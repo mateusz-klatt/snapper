@@ -235,6 +235,12 @@ describe('RotateDialog', () => {
     })
     expect(screen.queryByText('Private Key (PEM) is required')).toBeNull()
   })
+  it('disables Rotate button when readOnly', () => {
+    renderWithQuery(<RotateDialog credential={testCredential} open onClose={onClose} readOnly />)
+    const btn = screen.getByText('Rotate').closest('button')
+
+    expect(btn?.disabled).toBe(true)
+  })
   it('clears textarea field error when typing in rsa_pem field', () => {
     const rsaCred: CredentialSummary = { ...testCredential, credential_type: 'rsa_pem' }
 
