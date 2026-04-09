@@ -24,6 +24,8 @@ interface AppStore extends AppState {
   toggleDarkMode: () => void
   setAsOf: (asOf: string) => void
   clearAsOf: () => void
+  setCurrentOperatorPublicId: (id: string | null) => void
+  setCurrentWalletPublicId: (id: string | null) => void
 }
 
 export const useAppStore = create<AppStore>()(
@@ -35,6 +37,8 @@ export const useAppStore = create<AppStore>()(
     isDarkMode: loadDarkModePreference(),
     asOf: null,
     isTimeTraveling: false,
+    currentOperatorPublicId: null,
+    currentWalletPublicId: null,
     setConnected: connected => set({ isConnected: connected }),
     setConnectionLag: lag => set({ connectionLag: lag }),
     setSubscribedTopics: topics => set({ subscribedTopics: topics }),
@@ -54,6 +58,16 @@ export const useAppStore = create<AppStore>()(
     clearAsOf: () => {
       apiClient.setTimeTravelAsOf(null)
       set({ asOf: null, isTimeTraveling: false })
+      queryClient.invalidateQueries()
+    },
+    setCurrentOperatorPublicId: (id: string | null) => {
+      apiClient.setOperatorScope(id)
+      set({ currentOperatorPublicId: id, currentWalletPublicId: null })
+      queryClient.invalidateQueries()
+    },
+    setCurrentWalletPublicId: (id: string | null) => {
+      apiClient.setWalletScope(id)
+      set({ currentWalletPublicId: id })
       queryClient.invalidateQueries()
     },
   }))

@@ -1825,4 +1825,63 @@ describe('cacheWsTicketFromResponse', () => {
       expect(mockFetch).not.toHaveBeenCalled()
     })
   })
+  describe('multi-tenant scope query params', () => {
+    afterEach(() => {
+      apiClient.setOperatorScope(null)
+      apiClient.setWalletScope(null)
+    })
+    it('appends operator_public_id when operator scope is set', async () => {
+      apiClient.setOperatorScope('op-123')
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) })
+      await apiClient.get('/api/orders')
+      const url = mockFetch.mock.calls[0][0] as string
+
+      expect(url).toContain('operator_public_id=op-123')
+    })
+    it('appends wallet_public_id when wallet scope is set', async () => {
+      apiClient.setWalletScope('wallet-456')
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) })
+      await apiClient.get('/api/positions')
+      const url = mockFetch.mock.calls[0][0] as string
+
+      expect(url).toContain('wallet_public_id=wallet-456')
+    })
+    it('appends both scope params when both are set', async () => {
+      apiClient.setOperatorScope('op-123')
+      apiClient.setWalletScope('wallet-456')
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) })
+      await apiClient.get('/api/orders')
+      const url = mockFetch.mock.calls[0][0] as string
+
+      expect(url).toContain('operator_public_id=op-123')
+      expect(url).toContain('wallet_public_id=wallet-456')
+    })
+    it('does not append scope params when both are null', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) })
+      await apiClient.get('/api/orders')
+      const url = mockFetch.mock.calls[0][0] as string
+
+      expect(url).not.toContain('operator_public_id')
+      expect(url).not.toContain('wallet_public_id')
+    })
+    it('exposes current scope via getters', () => {
+      expect(apiClient.getOperatorScope()).toBeNull()
+      expect(apiClient.getWalletScope()).toBeNull()
+      apiClient.setOperatorScope('op-1')
+      apiClient.setWalletScope('w-1')
+      expect(apiClient.getOperatorScope()).toBe('op-1')
+      expect(apiClient.getWalletScope()).toBe('w-1')
+    })
+    it('combines with time-travel as_of when both are active', async () => {
+      apiClient.setTimeTravelAsOf('2026-03-15T10:00:00Z')
+      apiClient.setOperatorScope('op-99')
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) })
+      await apiClient.get('/api/orders')
+      const url = mockFetch.mock.calls[0][0] as string
+
+      expect(url).toContain('as_of=')
+      expect(url).toContain('operator_public_id=op-99')
+      apiClient.setTimeTravelAsOf(null)
+    })
+  })
 })

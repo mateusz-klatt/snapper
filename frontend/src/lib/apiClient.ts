@@ -74,12 +74,26 @@ class APIClient {
   private static instance: APIClient
   private isLoggingOut = false
   private timeTravelAsOf: string | null = null
+  private operatorPublicId: string | null = null
+  private walletPublicId: string | null = null
   private constructor() {}
   public setTimeTravelAsOf(asOf: string | null): void {
     this.timeTravelAsOf = asOf
   }
   public getTimeTravelAsOf(): string | null {
     return this.timeTravelAsOf
+  }
+  public setOperatorScope(id: string | null): void {
+    this.operatorPublicId = id
+  }
+  public setWalletScope(id: string | null): void {
+    this.walletPublicId = id
+  }
+  public getOperatorScope(): string | null {
+    return this.operatorPublicId
+  }
+  public getWalletScope(): string | null {
+    return this.walletPublicId
   }
   public static getInstance(): APIClient {
     if (!APIClient.instance) {
@@ -206,6 +220,18 @@ class APIClient {
       const separator = url.includes('?') ? '&' : '?'
 
       url = `${url}${separator}as_of=${encodeURIComponent(this.timeTravelAsOf)}`
+    }
+
+    if (this.operatorPublicId) {
+      const separator = url.includes('?') ? '&' : '?'
+
+      url = `${url}${separator}operator_public_id=${encodeURIComponent(this.operatorPublicId)}`
+    }
+
+    if (this.walletPublicId) {
+      const separator = url.includes('?') ? '&' : '?'
+
+      url = `${url}${separator}wallet_public_id=${encodeURIComponent(this.walletPublicId)}`
     }
 
     return this.request(url, { ...options, method: 'GET' })

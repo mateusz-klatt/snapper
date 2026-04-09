@@ -42,18 +42,29 @@ const queryKeys = {
   exchanges: (asOf: string | null) => ['exchanges', asOf] as const,
   exchangeInstruments: (exchange: string, asOf: string | null) =>
     ['exchanges', exchange, 'instruments', asOf] as const,
-  orders: (filters?: { symbol?: string; limit?: number; offset?: number }, asOf?: string | null) =>
-    ['orders', filters, asOf] as const,
-  executions: (filters?: { limit?: number }, asOf?: string | null) =>
-    ['executions', filters, asOf] as const,
-  positions: (asOf: string | null) => ['positions', asOf] as const,
+  orders: (
+    filters?: { symbol?: string; limit?: number; offset?: number },
+    asOf?: string | null,
+    opId?: string | null,
+    walletId?: string | null
+  ) => ['orders', filters, asOf, opId, walletId] as const,
+  executions: (
+    filters?: { limit?: number },
+    asOf?: string | null,
+    opId?: string | null,
+    walletId?: string | null
+  ) => ['executions', filters, asOf, opId, walletId] as const,
+  positions: (asOf: string | null, opId?: string | null, walletId?: string | null) =>
+    ['positions', asOf, opId, walletId] as const,
   signals: (
     strategyId?: string,
     limit?: number,
     instrument?: string,
     hours?: number,
-    asOf?: string | null
-  ) => ['signals', strategyId, limit, instrument, hours, asOf] as const,
+    asOf?: string | null,
+    opId?: string | null,
+    walletId?: string | null
+  ) => ['signals', strategyId, limit, instrument, hours, asOf, opId, walletId] as const,
   settings: (category?: string, asOf?: string | null) => ['settings', category, asOf] as const,
   settingCategories: (asOf: string | null) => ['settings', 'categories', asOf] as const,
   users: (includeInactive: boolean, asOf: string | null) =>
@@ -123,6 +134,8 @@ export const useExchangeInstruments = (exchange: string | null) => {
 export const useOrders = (filters?: { symbol?: string; limit?: number; offset?: number }) => {
   const { isAuthenticated } = useAuth()
   const asOf = useAppStore(s => s.asOf)
+  const opId = useAppStore(s => s.currentOperatorPublicId)
+  const walletId = useAppStore(s => s.currentWalletPublicId)
   const selectOrders = useCallback(
     (data: Awaited<ReturnType<typeof apiClient.getOrders>>) =>
       data.payload.map(safeOrderFromAPI).filter((o): o is NonNullable<typeof o> => o !== null),
@@ -130,7 +143,7 @@ export const useOrders = (filters?: { symbol?: string; limit?: number; offset?: 
   )
 
   return useQuery({
-    queryKey: queryKeys.orders(filters, asOf),
+    queryKey: queryKeys.orders(filters, asOf, opId, walletId),
     queryFn: () => apiClient.getOrders(filters?.symbol, filters?.limit, filters?.offset),
     select: selectOrders,
     enabled: isAuthenticated,
@@ -141,6 +154,8 @@ export const useOrders = (filters?: { symbol?: string; limit?: number; offset?: 
 export const useExecutions = (filters?: { limit?: number }) => {
   const { isAuthenticated } = useAuth()
   const asOf = useAppStore(s => s.asOf)
+  const opId = useAppStore(s => s.currentOperatorPublicId)
+  const walletId = useAppStore(s => s.currentWalletPublicId)
   const selectExecutions = useCallback(
     (data: Awaited<ReturnType<typeof apiClient.getExecutions>>) =>
       data.payload.map(safeExecutionFromAPI).filter((e): e is NonNullable<typeof e> => e !== null),
@@ -148,7 +163,7 @@ export const useExecutions = (filters?: { limit?: number }) => {
   )
 
   return useQuery({
-    queryKey: queryKeys.executions(filters, asOf),
+    queryKey: queryKeys.executions(filters, asOf, opId, walletId),
     queryFn: () => apiClient.getExecutions(filters?.limit),
     select: selectExecutions,
     enabled: isAuthenticated,
@@ -159,9 +174,11 @@ export const useExecutions = (filters?: { limit?: number }) => {
 export const usePositions = () => {
   const { isAuthenticated } = useAuth()
   const asOf = useAppStore(s => s.asOf)
+  const opId = useAppStore(s => s.currentOperatorPublicId)
+  const walletId = useAppStore(s => s.currentWalletPublicId)
 
   return useQuery({
-    queryKey: queryKeys.positions(asOf),
+    queryKey: queryKeys.positions(asOf, opId, walletId),
     queryFn: async () => {
       const data = await apiClient.getPositions()
 
@@ -181,6 +198,8 @@ export const useSignals = (
 ) => {
   const { isAuthenticated } = useAuth()
   const asOf = useAppStore(s => s.asOf)
+  const opId = useAppStore(s => s.currentOperatorPublicId)
+  const walletId = useAppStore(s => s.currentWalletPublicId)
   const selectSignals = useCallback(
     (data: Awaited<ReturnType<typeof apiClient.getSignals>>) =>
       data.payload.map(safeSignalFromAPI).filter((s): s is NonNullable<typeof s> => s !== null),
@@ -188,7 +207,7 @@ export const useSignals = (
   )
 
   return useQuery({
-    queryKey: queryKeys.signals(strategyId, limit, instrument, hours, asOf),
+    queryKey: queryKeys.signals(strategyId, limit, instrument, hours, asOf, opId, walletId),
     queryFn: () => apiClient.getSignals(strategyId, limit, instrument, hours),
     select: selectSignals,
     enabled: isAuthenticated,

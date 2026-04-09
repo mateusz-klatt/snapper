@@ -6,6 +6,8 @@ export interface AppState {
   connectionLag: number
   asOf: string | null
   isTimeTraveling: boolean
+  currentOperatorPublicId: string | null
+  currentWalletPublicId: string | null
 }
 export interface MarketDataState {
   selectedExchange: string | null

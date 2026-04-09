@@ -948,8 +948,9 @@ export type Paths = {
          *         ``CredentialResponse`` wrapping the newly-inserted credential.
          *
          *     Raises:
-         *         HTTPException: 404 if the credential is not found or already
-         *             closed.
+         *         HTTPException: 400 if the rotation payload is missing required
+         *             fields for the existing credential's type; 404 if the
+         *             credential is not found or already closed.
          */
         post: Operations["rotate_credential_api_wallets__wallet_public_id__credentials__credential_public_id__rotate_post"];
         delete?: never;
@@ -1014,6 +1015,8 @@ export type Paths = {
          *         hours: Hours of history to return.
          *         limit: Maximum number of signals to return.
          *         as_of: Optional point-in-time query timestamp.
+         *         operator_public_id: Optional operator scope (403 if foreign).
+         *         wallet_public_id: Optional wallet scope (403 if inaccessible).
          *
          *     Returns:
          *         SignalListResponse wrapping the signal data.
@@ -1291,6 +1294,8 @@ export type Paths = {
          *         limit: Maximum number of orders to return.
          *         offset: Number of orders to skip.
          *         as_of: Optional point-in-time query timestamp.
+         *         operator_public_id: Optional operator scope (403 if foreign).
+         *         wallet_public_id: Optional wallet scope (403 if inaccessible).
          *
          *     Returns:
          *         OrderListResponse wrapping the order data.
@@ -1322,6 +1327,8 @@ export type Paths = {
          *         repo: Database repository.
          *         limit: Maximum number of executions to return.
          *         as_of: Optional point-in-time query timestamp.
+         *         operator_public_id: Optional operator scope (403 if foreign).
+         *         wallet_public_id: Optional wallet scope (403 if inaccessible).
          *
          *     Returns:
          *         ExecutionListResponse wrapping the execution data.
@@ -1352,6 +1359,8 @@ export type Paths = {
          *         _csrf: CSRF token validation.
          *         repo: Database repository.
          *         as_of: Optional point-in-time query timestamp.
+         *         operator_public_id: Optional operator scope (403 if foreign).
+         *         wallet_public_id: Optional wallet scope (403 if inaccessible).
          *
          *     Returns:
          *         PositionListResponse wrapping the position data.
@@ -6746,6 +6755,10 @@ export interface Operations {
                 limit?: number;
                 /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
+                /** @description Scope to operator */
+                operator_public_id?: string | null;
+                /** @description Scope to wallet */
+                wallet_public_id?: string | null;
             };
             header?: never;
             path?: never;
@@ -7137,6 +7150,10 @@ export interface Operations {
                 offset?: number;
                 /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
+                /** @description Scope to operator */
+                operator_public_id?: string | null;
+                /** @description Scope to wallet */
+                wallet_public_id?: string | null;
             };
             header?: never;
             path?: never;
@@ -7178,6 +7195,10 @@ export interface Operations {
                 limit?: number;
                 /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
+                /** @description Scope to operator */
+                operator_public_id?: string | null;
+                /** @description Scope to wallet */
+                wallet_public_id?: string | null;
             };
             header?: never;
             path?: never;
@@ -7217,6 +7238,10 @@ export interface Operations {
             query?: {
                 /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
+                /** @description Scope to operator */
+                operator_public_id?: string | null;
+                /** @description Scope to wallet */
+                wallet_public_id?: string | null;
             };
             header?: never;
             path?: never;

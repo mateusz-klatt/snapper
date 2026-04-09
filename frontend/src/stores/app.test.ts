@@ -143,6 +143,36 @@ describe('useAppStore', () => {
       expect(useAppStore.getState().isTimeTraveling).toBe(false)
     })
   })
+  describe('setCurrentOperatorPublicId', () => {
+    it('sets operator ID and clears wallet ID', () => {
+      useAppStore.getState().setCurrentWalletPublicId('w-1')
+      useAppStore.getState().setCurrentOperatorPublicId('op-1')
+
+      expect(useAppStore.getState().currentOperatorPublicId).toBe('op-1')
+      expect(useAppStore.getState().currentWalletPublicId).toBeNull()
+    })
+    it('clears operator ID when set to null', () => {
+      useAppStore.getState().setCurrentOperatorPublicId('op-1')
+      useAppStore.getState().setCurrentOperatorPublicId(null)
+
+      expect(useAppStore.getState().currentOperatorPublicId).toBeNull()
+    })
+  })
+  describe('setCurrentWalletPublicId', () => {
+    it('sets wallet ID without clearing operator ID', () => {
+      useAppStore.getState().setCurrentOperatorPublicId('op-1')
+      useAppStore.getState().setCurrentWalletPublicId('w-1')
+
+      expect(useAppStore.getState().currentWalletPublicId).toBe('w-1')
+      expect(useAppStore.getState().currentOperatorPublicId).toBe('op-1')
+    })
+    it('clears wallet ID when set to null', () => {
+      useAppStore.getState().setCurrentWalletPublicId('w-1')
+      useAppStore.getState().setCurrentWalletPublicId(null)
+
+      expect(useAppStore.getState().currentWalletPublicId).toBeNull()
+    })
+  })
   describe('loadDarkModePreference', () => {
     it('reads dark mode preference from localStorage on module load', async () => {
       localStorage.setItem('snapper-dark-mode', 'true')
