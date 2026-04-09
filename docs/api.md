@@ -16,7 +16,11 @@ Authentication uses HTTP-only cookies. After login, the server sets
 | ---- | ------ |
 | `viewer` | Read-only market data, orders, positions, strategies, system status |
 | `operator` | Viewer permissions plus trade execution, process management |
-| `admin` | Full access including user management and system configuration |
+| `admin` | Full access including user management, system configuration, wallet/credential management, scope grant management, operator impersonation |
+
+Multi-tenant permissions (ADMIN only): ``read:wallet_credentials``,
+``manage:wallet_credentials``, ``manage:scope_grants``,
+``impersonate:operator``.
 
 ### POST /api/auth/login
 
@@ -127,9 +131,16 @@ GET /api/auth/me
     "email": "admin@example.com",
     "role": "admin",
     "is_active": true,
-    "created_at": "2026-01-10T08:00:00Z"
+    "created_at": "2026-01-10T08:00:00Z",
+    "operator_public_ids": ["019d6ca4-..."],
+    "primary_operator_public_id": "019d6ca4-..."
 }
 ```
+
+The ``operator_public_ids`` and ``primary_operator_public_id`` fields
+are populated from ``user_operator_memberships`` (ADMIN receives every
+active operator; OPERATOR/VIEWER receive only their explicit memberships).
+These fields power the frontend OperatorPicker without a second round trip.
 
 ### CSRF Protection
 
@@ -313,6 +324,8 @@ X-CSRF-Token: <csrf_token>
 | `limit` | int | no | Number of orders, 1-1000 (default 100) |
 | `offset` | int | no | Number of orders to skip (default 0) |
 | `as_of` | datetime | no | Point-in-time query, UTC (default: current time) |
+| `operator_public_id` | string | no | Scope to a single operator (403 if foreign) |
+| `wallet_public_id` | string | no | Scope to a single wallet (403 if inaccessible) |
 
 **Response (200):**
 
@@ -1081,6 +1094,70 @@ Query parameters:
 
 Returns `PayloadListResponse` with `ContractData` items. Each item includes
 `is_front_month` (true for nearest non-expired within same contract family).
+
+## Multi-Tenant (Wallets, Operators, Scope Grants, Credentials)
+
+All multi-tenant endpoints were added in Phase 0d. ADMIN principals
+see the full catalogue; VIEWER and OPERATOR principals see only the
+subset covered by their operator memberships and active scope grants.
+
+### GET /api/wallets
+
+List wallets accessible to the current principal. ADMIN sees all;
+OPERATOR/VIEWER sees only wallets covered by at least one active
+scope grant from their operator set.
+
+### GET /api/operators
+
+List operators accessible to the current principal. ADMIN sees all;
+OPERATOR/VIEWER sees only operators in ``principal.operator_public_ids``.
+
+### GET /api/scope-grants
+
+List active scope grants on a given wallet. Non-ADMIN callers must
+have visibility into the target wallet; otherwise 403. Required
+query parameter: ``wallet_public_id``.
+
+### POST /api/scope-grants
+
+Create a new scope grant. Requires ``manage:scope_grants`` (ADMIN only).
+Returns 409 on overlap conflict. Body fields: ``operator_public_id``,
+``wallet_public_id``, ``scope_kind`` (``underlying`` or ``instrument``),
+``underlying_public_id`` or ``instrument_public_id``, optional ``note``.
+
+### POST /api/scope-grants/handover
+
+Atomic SCD2 close + insert transfer of a scope grant to a different
+operator. Requires ``manage:scope_grants``. Body: ``from_grant_public_id``,
+``to_operator_public_id``, optional ``reason``. Returns 404 if source
+grant missing, 400 on self-handover, 409 on cross-scope overlap.
+
+### POST /api/wallets
+
+Create a new wallet. Requires ``manage:wallet_credentials`` (ADMIN only).
+Returns 409 if ``(label, is_paper)`` active-unique index is violated.
+Body: ``label``, optional ``description``, ``is_paper`` (default false).
+
+### GET /api/wallets/{wallet_public_id}/credentials
+
+List active credentials on a wallet as summaries (no encrypted payload
+on the wire). Requires ``read:wallet_credentials`` (ADMIN only).
+
+### POST /api/wallets/{wallet_public_id}/credentials
+
+Create a new wallet credential. Requires ``manage:wallet_credentials``.
+Plaintext ``credential_payload`` is Fernet-encrypted server-side before
+DB insert. Body: ``exchange``, ``credential_type`` (``api_key_secret``,
+``rsa_pem``, ``oauth``, ``paper``), ``credential_payload`` (dict),
+optional ``label``. Returns 409 if ``(wallet, exchange)`` already exists.
+
+### POST /api/wallets/{id}/credentials/{cid}/rotate
+
+SCD2 close + insert rotation. Old credential row closed, new row
+inserted with updated encrypted payload. Requires
+``manage:wallet_credentials``. Returns 404 if credential not found.
+Validates ``credential_payload`` against the existing credential type
+before encrypting.
 
 ## WebSocket
 
