@@ -7,6 +7,8 @@ import { AppRoutes } from './components/AppRoutes'
 import { ALL_TABS } from './components/tabs'
 import UserProfile from './components/auth/UserProfile'
 import { TimeTravelPicker } from './components/TimeTravelPicker'
+import { OperatorPicker } from './components/OperatorPicker'
+import { WalletPicker } from './components/WalletPicker'
 import { Menu, Wifi, WifiOff, X, Sun, Moon, Clock } from 'lucide-react'
 
 function App() {
@@ -92,6 +94,8 @@ function App() {
               <Menu size={20} />
             </button>
             <div className='ml-auto flex items-center gap-3'>
+              <OperatorPicker />
+              <WalletPicker />
               <TimeTravelPicker />
               {!isTimeTraveling && (
                 <span

@@ -42,6 +42,12 @@ vi.mock('./hooks/useWSDispatcher', () => ({
 vi.mock('./components/auth/UserProfile', () => ({
   default: () => <div data-testid='user-profile'>User Profile</div>,
 }))
+vi.mock('./components/OperatorPicker', () => ({
+  OperatorPicker: () => <div data-testid='operator-picker'>OperatorPicker</div>,
+}))
+vi.mock('./components/WalletPicker', () => ({
+  WalletPicker: () => <div data-testid='wallet-picker'>WalletPicker</div>,
+}))
 const createQueryClient = () =>
   new QueryClient({
     defaultOptions: {
@@ -68,6 +74,10 @@ const defaultAppState = {
   isTimeTraveling: false,
   setAsOf: vi.fn(),
   clearAsOf: vi.fn(),
+  currentOperatorPublicId: null as string | null,
+  currentWalletPublicId: null as string | null,
+  setCurrentOperatorPublicId: vi.fn(),
+  setCurrentWalletPublicId: vi.fn(),
 }
 
 type AppState = typeof defaultAppState
