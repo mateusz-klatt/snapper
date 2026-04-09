@@ -6,6 +6,12 @@ import { Admin } from './Admin'
 vi.mock('./UserManagement/UserManagement', () => ({
   default: () => <div data-testid='user-management'>User Management</div>,
 }))
+vi.mock('./ScopeGrantManagement/ScopeGrantManagement', () => ({
+  default: () => <div data-testid='scope-grant-management'>Scope Grants</div>,
+}))
+vi.mock('./CredentialManagement/CredentialManagement', () => ({
+  default: () => <div data-testid='credential-management'>Credentials</div>,
+}))
 describe('Admin', () => {
   it('renders admin page header', () => {
     render(<Admin />)
@@ -15,6 +21,14 @@ describe('Admin', () => {
   it('renders user management component', () => {
     render(<Admin />)
     expect(screen.getByTestId('user-management')).toBeInTheDocument()
+  })
+  it('renders scope grant management component', () => {
+    render(<Admin />)
+    expect(screen.getByTestId('scope-grant-management')).toBeInTheDocument()
+  })
+  it('renders credential management component', () => {
+    render(<Admin />)
+    expect(screen.getByTestId('credential-management')).toBeInTheDocument()
   })
   it('applies correct styling classes', () => {
     const { container } = render(<Admin />)

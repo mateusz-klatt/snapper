@@ -3,6 +3,8 @@ import { ChevronDown, ChevronUp, Shield, Users, Eye } from 'lucide-react'
 import { RESOURCE_ACCESS } from '../../types/permissions.generated'
 import { useIsReadOnly } from '../../hooks/useIsReadOnly'
 import UserManagement from './UserManagement/UserManagement'
+import ScopeGrantManagement from './ScopeGrantManagement/ScopeGrantManagement'
+import CredentialManagement from './CredentialManagement/CredentialManagement'
 
 const TAB_DISPLAY_NAMES: Record<string, string> = {
   overview: 'Overview',
@@ -129,6 +131,8 @@ export const Admin: React.FC = () => {
         )}
       </div>
       <UserManagement readOnly={readOnly} />
+      <ScopeGrantManagement readOnly={readOnly} />
+      <CredentialManagement readOnly={readOnly} />
     </div>
   )
 }
