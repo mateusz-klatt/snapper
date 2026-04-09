@@ -2185,3 +2185,61 @@ def test_build_strategy_payload_returns_none_for_non_dict() -> None:
     Then it returns None without raising.
     """
     assert _build_strategy_payload("not_a_dict") is None
+
+
+def _create_scoped_client(role: UserRole, operator_ids: list[str]) -> TestClient:
+    """Create a test client with a specific role and operator set."""
+    app = create_app()
+    app.router.lifespan_context = _noop_lifespan
+
+    def skip_csrf() -> None:
+        return None
+
+    def scoped_auth() -> AuthPrincipal:
+        return AuthPrincipal(
+            username="scoped_user",
+            role=role,
+            operator_public_ids=operator_ids,
+        )
+
+    app.dependency_overrides[validate_csrf_token] = skip_csrf
+    app.dependency_overrides[require_authentication] = scoped_auth
+    app.dependency_overrides[get_repository_dependency] = lambda: MockRepository()
+    return _track_test_client(TestClient(app))
+
+
+class TestScopedEndpoints403Propagation:
+    """HTTPException(403) from resolve_target_wallets must NOT be swallowed.
+
+    Before this fix, the broad ``except Exception`` in the signals /
+    orders / executions / positions handlers remapped the 403 to 500.
+    The ``except HTTPException: raise`` guard ensures the 403 propagates.
+    """
+
+    def test_signals_403_propagates(self) -> None:
+        """GET /signals with foreign operator_public_id returns 403."""
+        client = _create_scoped_client(UserRole.OPERATOR, ["op-1"])
+        response = client.get("/api/signals?operator_public_id=op-foreign")
+
+        assert response.status_code == 403
+
+    def test_orders_403_propagates(self) -> None:
+        """GET /orders with foreign operator_public_id returns 403."""
+        client = _create_scoped_client(UserRole.OPERATOR, ["op-1"])
+        response = client.get("/api/orders?operator_public_id=op-foreign")
+
+        assert response.status_code == 403
+
+    def test_executions_403_propagates(self) -> None:
+        """GET /executions with foreign operator_public_id returns 403."""
+        client = _create_scoped_client(UserRole.OPERATOR, ["op-1"])
+        response = client.get("/api/executions?operator_public_id=op-foreign")
+
+        assert response.status_code == 403
+
+    def test_positions_403_propagates(self) -> None:
+        """GET /positions with foreign operator_public_id returns 403."""
+        client = _create_scoped_client(UserRole.OPERATOR, ["op-1"])
+        response = client.get("/api/positions?operator_public_id=op-foreign")
+
+        assert response.status_code == 403

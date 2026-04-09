@@ -62,6 +62,7 @@ export const useAppStore = create<AppStore>()(
     },
     setCurrentOperatorPublicId: (id: string | null) => {
       apiClient.setOperatorScope(id)
+      apiClient.setWalletScope(null)
       set({ currentOperatorPublicId: id, currentWalletPublicId: null })
       queryClient.invalidateQueries()
     },

@@ -157,6 +157,14 @@ describe('useAppStore', () => {
 
       expect(useAppStore.getState().currentOperatorPublicId).toBeNull()
     })
+    it('clears apiClient wallet scope alongside zustand wallet state', async () => {
+      const { apiClient } = await import('../lib/apiClient')
+
+      apiClient.setWalletScope('w-stale')
+      useAppStore.getState().setCurrentOperatorPublicId('op-1')
+
+      expect(apiClient.getWalletScope()).toBeNull()
+    })
   })
   describe('setCurrentWalletPublicId', () => {
     it('sets wallet ID without clearing operator ID', () => {

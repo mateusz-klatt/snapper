@@ -614,6 +614,8 @@ def _create_candles_signals_router() -> APIRouter:
                 payload=items,
                 count=len(items),
             )
+        except HTTPException:
+            raise
         except Exception as exc:
             logger.error(f"Failed to fetch signals: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch signals") from exc
@@ -784,6 +786,8 @@ def _create_orders_executions_router() -> APIRouter:
                 payload=items,
                 count=len(items),
             )
+        except HTTPException:
+            raise
         except Exception as exc:
             logger.error(f"Failed to fetch orders: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch orders") from exc
@@ -845,6 +849,8 @@ def _create_orders_executions_router() -> APIRouter:
                 payload=items,
                 count=len(items),
             )
+        except HTTPException:
+            raise
         except Exception as exc:
             logger.error(f"Failed to fetch executions: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch executions") from exc
@@ -893,6 +899,8 @@ def _create_orders_executions_router() -> APIRouter:
                 payload=items,
                 count=len(items),
             )
+        except HTTPException:
+            raise
         except Exception as exc:
             logger.error(f"Failed to fetch positions: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch positions") from exc
