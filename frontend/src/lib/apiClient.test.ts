@@ -1825,6 +1825,63 @@ describe('cacheWsTicketFromResponse', () => {
       expect(mockFetch).not.toHaveBeenCalled()
     })
   })
+  describe('getOperators', () => {
+    it('fetches and validates operators list', async () => {
+      const payload = {
+        type: 'operator_list_response',
+        session_id: 's',
+        sequence_id: 1,
+        public_id: 'p',
+        timestamp: '2026-01-01T00:00:00Z',
+        count: 1,
+        payload: [
+          {
+            type: 'operator_info',
+            session_id: 's',
+            sequence_id: 1,
+            public_id: 'op-1',
+            timestamp: '2026-01-01T00:00:00Z',
+            label: 'alice',
+          },
+        ],
+      }
+
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => payload })
+      const result = await apiClient.getOperators()
+
+      expect(result.payload).toHaveLength(1)
+      expect(result.payload[0].label).toBe('alice')
+    })
+  })
+  describe('getWallets', () => {
+    it('fetches and validates wallets list', async () => {
+      const payload = {
+        type: 'wallet_list_response',
+        session_id: 's',
+        sequence_id: 1,
+        public_id: 'p',
+        timestamp: '2026-01-01T00:00:00Z',
+        count: 1,
+        payload: [
+          {
+            type: 'wallet_info',
+            session_id: 's',
+            sequence_id: 1,
+            public_id: 'w-1',
+            timestamp: '2026-01-01T00:00:00Z',
+            label: 'default',
+            is_paper: false,
+          },
+        ],
+      }
+
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => payload })
+      const result = await apiClient.getWallets()
+
+      expect(result.payload).toHaveLength(1)
+      expect(result.payload[0].is_paper).toBe(false)
+    })
+  })
   describe('multi-tenant scope query params', () => {
     afterEach(() => {
       apiClient.setOperatorScope(null)

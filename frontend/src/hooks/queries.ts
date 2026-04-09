@@ -65,6 +65,8 @@ const queryKeys = {
     opId?: string | null,
     walletId?: string | null
   ) => ['signals', strategyId, limit, instrument, hours, asOf, opId, walletId] as const,
+  operators: (asOf: string | null) => ['operators', asOf] as const,
+  wallets: (asOf: string | null, opId?: string | null) => ['wallets', asOf, opId] as const,
   settings: (category?: string, asOf?: string | null) => ['settings', category, asOf] as const,
   settingCategories: (asOf: string | null) => ['settings', 'categories', asOf] as const,
   users: (includeInactive: boolean, asOf: string | null) =>
@@ -127,6 +129,33 @@ export const useExchangeInstruments = (exchange: string | null) => {
     queryFn: () => apiClient.getExchangeInstruments(exchangeKey),
     enabled: isAuthenticated && !!exchange,
     staleTime: 5 * 60 * 1000,
+    throwOnError: false,
+  })
+}
+
+export const useOperators = () => {
+  const { isAuthenticated } = useAuth()
+  const asOf = useAppStore(s => s.asOf)
+
+  return useQuery({
+    queryKey: queryKeys.operators(asOf),
+    queryFn: () => apiClient.getOperators(),
+    enabled: isAuthenticated,
+    staleTime: 60 * 1000,
+    throwOnError: false,
+  })
+}
+
+export const useWallets = () => {
+  const { isAuthenticated } = useAuth()
+  const asOf = useAppStore(s => s.asOf)
+  const opId = useAppStore(s => s.currentOperatorPublicId)
+
+  return useQuery({
+    queryKey: queryKeys.wallets(asOf, opId),
+    queryFn: () => apiClient.getWallets(),
+    enabled: isAuthenticated,
+    staleTime: 60 * 1000,
     throwOnError: false,
   })
 }

@@ -7,6 +7,8 @@ import {
   useCandles,
   useExchanges,
   useExchangeInstruments,
+  useOperators,
+  useWallets,
   useOrders,
   useExecutions,
   useAvailableProcesses,
@@ -62,6 +64,10 @@ vi.mock('../lib/apiClient', () => ({
     getExchangeInstruments: vi.fn(() =>
       Promise.resolve(envelope('instrument_list', { payload: ['BTC/USD', 'ETH/USD'], count: 2 }))
     ),
+    getOperators: vi.fn(() =>
+      Promise.resolve(envelope('operator_list', { payload: [], count: 0 }))
+    ),
+    getWallets: vi.fn(() => Promise.resolve(envelope('wallet_list', { payload: [], count: 0 }))),
     getOrders: vi.fn(() => Promise.resolve(envelope('order_list', { payload: [], count: 0 }))),
     getExecutions: vi.fn(() =>
       Promise.resolve(envelope('execution_list', { payload: [], count: 0 }))
@@ -180,6 +186,8 @@ const mockedApiClient = apiClient as unknown as {
   getCandles: Mock
   getExchanges: Mock
   getExchangeInstruments: Mock
+  getOperators: Mock
+  getWallets: Mock
   getOrders: Mock
   getExecutions: Mock
   getPositions: Mock
@@ -284,6 +292,35 @@ describe('queries', () => {
       })
       expect(result.current.data).toBeUndefined()
       expect(mockedApiClient.getExchangeInstruments).not.toHaveBeenCalled()
+    })
+  })
+  describe('useOperators', () => {
+    it('returns data when authenticated', async () => {
+      mockedApiClient.getOperators.mockResolvedValueOnce(
+        envelope('operator_list', { payload: [{ public_id: 'op-1', label: 'alice' }], count: 1 })
+      )
+      const { result } = renderHook(() => useOperators(), { wrapper: createWrapper() })
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false)
+      })
+      expect(result.current.data).toBeDefined()
+    })
+  })
+  describe('useWallets', () => {
+    it('returns data when authenticated', async () => {
+      mockedApiClient.getWallets.mockResolvedValueOnce(
+        envelope('wallet_list', {
+          payload: [{ public_id: 'w-1', label: 'default', is_paper: false }],
+          count: 1,
+        })
+      )
+      const { result } = renderHook(() => useWallets(), { wrapper: createWrapper() })
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false)
+      })
+      expect(result.current.data).toBeDefined()
     })
   })
   describe('useOrders', () => {

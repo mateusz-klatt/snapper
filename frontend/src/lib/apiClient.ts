@@ -4,6 +4,8 @@ import { storeWsTicket } from './wsTicketCache'
 import { validateResponse } from './schemas/api'
 import { getTracker } from './sequenceTracker'
 import {
+  OperatorListResponseSchema,
+  WalletListResponseSchema,
   SettingCategoriesResponseSchema,
   SettingListResponseSchema,
   SettingResponseSchema,
@@ -29,6 +31,8 @@ import {
   SignalListResponseSchema,
 } from './schemas/api.generated.zod'
 import type {
+  OperatorListResponse,
+  WalletListResponse,
   CandleData,
   SystemStatusResponse,
   SettingListResponse,
@@ -404,6 +408,16 @@ class APIClient {
       InstrumentListResponseSchema,
       `/exchanges/${exchange}/instruments`
     )
+  }
+  async getOperators(): Promise<OperatorListResponse> {
+    const data = await this.getJSON('/api/operators')
+
+    return validateResponse(data, OperatorListResponseSchema, '/operators')
+  }
+  async getWallets(): Promise<WalletListResponse> {
+    const data = await this.getJSON('/api/wallets')
+
+    return validateResponse(data, WalletListResponseSchema, '/wallets')
   }
   async getSettings(category?: string): Promise<SettingListResponse> {
     const params = category ? new URLSearchParams({ category }) : ''
