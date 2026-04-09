@@ -107,6 +107,14 @@ describe('RotateDialog', () => {
     expect(screen.getByLabelText('Client Secret')).toBeDefined()
     expect(screen.getByLabelText('Refresh Token')).toBeDefined()
   })
+  it('masks refresh_token as password field', () => {
+    const oauthCred: CredentialSummary = { ...testCredential, credential_type: 'oauth' }
+
+    renderWithQuery(<RotateDialog credential={oauthCred} open onClose={onClose} />)
+    const tokenField = screen.getByLabelText('Refresh Token') as HTMLInputElement
+
+    expect(tokenField.type).toBe('password')
+  })
   it('shows validation errors when rotating with empty fields', () => {
     renderWithQuery(<RotateDialog credential={testCredential} open onClose={onClose} />)
     fireEvent.click(screen.getByText('Rotate'))

@@ -196,6 +196,13 @@ describe('CredentialForm', () => {
     expect(screen.getByLabelText('Client Secret')).toBeDefined()
     expect(screen.getByLabelText('Refresh Token')).toBeDefined()
   })
+  it('masks refresh_token as password field', () => {
+    renderWithQuery(<CredentialForm open onClose={onClose} />)
+    fireEvent.change(screen.getByTestId('cred-type'), { target: { value: 'oauth' } })
+    const tokenField = screen.getByLabelText('Refresh Token') as HTMLInputElement
+
+    expect(tokenField.type).toBe('password')
+  })
   it('includes label when provided', async () => {
     renderWithQuery(<CredentialForm open onClose={onClose} />)
     fireEvent.change(screen.getByTestId('cred-wallet'), { target: { value: 'w-1' } })
