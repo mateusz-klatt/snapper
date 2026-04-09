@@ -1581,6 +1581,71 @@ class TestResourcePermissions:
         assert RESOURCE_PERMISSIONS["settings"] == Permission.CONFIGURE_SYSTEM
 
 
+class TestMultiTenantPermissions:
+    """Tests for the Phase 0d multi-tenant permission additions.
+
+    These four permissions guard frontend admin tabs and impersonation
+    flows. They are ADMIN-only (VIEWER + OPERATOR must NOT receive
+    them), and their presence in ``ROLE_PERMISSIONS[ADMIN]`` is
+    derived automatically from ``set(Permission)`` — the assertions
+    below are behavioural pinning so an accidental change to the
+    ADMIN set (e.g. hand-picking permissions) does not silently drop
+    any of the four new entries.
+    """
+
+    def test_admin_holds_all_multi_tenant_permissions(self) -> None:
+        """ADMIN receives every new multi-tenant permission.
+
+        Given: ``ROLE_PERMISSIONS[ADMIN]``,
+        When: Checking for the four Phase 0d permissions,
+        Then: All four are present in the ADMIN set.
+        """
+        admin_perms = ROLE_PERMISSIONS[UserRole.ADMIN]
+        assert Permission.READ_WALLET_CREDENTIALS in admin_perms
+        assert Permission.MANAGE_WALLET_CREDENTIALS in admin_perms
+        assert Permission.MANAGE_SCOPE_GRANTS in admin_perms
+        assert Permission.IMPERSONATE_OPERATOR in admin_perms
+
+    def test_viewer_does_not_receive_multi_tenant_permissions(self) -> None:
+        """VIEWER must never hold any multi-tenant permission.
+
+        Given: ``ROLE_PERMISSIONS[VIEWER]``,
+        When: Checking for the four Phase 0d permissions,
+        Then: None of them are present.
+        """
+        viewer_perms = ROLE_PERMISSIONS[UserRole.VIEWER]
+        assert Permission.READ_WALLET_CREDENTIALS not in viewer_perms
+        assert Permission.MANAGE_WALLET_CREDENTIALS not in viewer_perms
+        assert Permission.MANAGE_SCOPE_GRANTS not in viewer_perms
+        assert Permission.IMPERSONATE_OPERATOR not in viewer_perms
+
+    def test_operator_does_not_receive_multi_tenant_permissions(self) -> None:
+        """OPERATOR must never hold any multi-tenant permission.
+
+        Given: ``ROLE_PERMISSIONS[OPERATOR]``,
+        When: Checking for the four Phase 0d permissions,
+        Then: None of them are present (multi-tenant administration
+            is reserved for ADMIN).
+        """
+        operator_perms = ROLE_PERMISSIONS[UserRole.OPERATOR]
+        assert Permission.READ_WALLET_CREDENTIALS not in operator_perms
+        assert Permission.MANAGE_WALLET_CREDENTIALS not in operator_perms
+        assert Permission.MANAGE_SCOPE_GRANTS not in operator_perms
+        assert Permission.IMPERSONATE_OPERATOR not in operator_perms
+
+    def test_permission_values_follow_resource_action_pattern(self) -> None:
+        """New permission values follow the ``resource:action`` convention.
+
+        Given: The four Phase 0d permission enum values,
+        When: Comparing them to the established naming,
+        Then: Each is a colon-separated ``resource:action`` string.
+        """
+        assert Permission.READ_WALLET_CREDENTIALS.value == "read:wallet_credentials"
+        assert Permission.MANAGE_WALLET_CREDENTIALS.value == "manage:wallet_credentials"
+        assert Permission.MANAGE_SCOPE_GRANTS.value == "manage:scope_grants"
+        assert Permission.IMPERSONATE_OPERATOR.value == "impersonate:operator"
+
+
 class TestRequireRole:
     """Tests for require_role dependency."""
 

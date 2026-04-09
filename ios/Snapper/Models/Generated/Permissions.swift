@@ -18,12 +18,16 @@ enum Permission: String, CaseIterable, Codable, Sendable {
     case manageProcesses = "manage:processes"
     case configureSystem = "configure:system"
     case manageUsers = "manage:users"
+    case readWalletCredentials = "read:wallet_credentials"
+    case manageWalletCredentials = "manage:wallet_credentials"
+    case manageScopeGrants = "manage:scope_grants"
+    case impersonateOperator = "impersonate:operator"
 }
 
 let rolePermissions: [UserRole: [Permission]] = [
     .viewer: [.readMarketData, .readOrders, .readPositions, .readStrategies, .readSystemStatus],
     .operatorRole: [.cancelOrders, .createOrders, .managePositions, .manageProcesses, .readMarketData, .readOrders, .readPositions, .readStrategies, .readSystemStatus, .startStrategies, .stopStrategies],
-    .admin: [.cancelOrders, .configureStrategies, .configureSystem, .createOrders, .managePositions, .manageProcesses, .manageUsers, .readMarketData, .readOrders, .readPositions, .readStrategies, .readSystemStatus, .startStrategies, .stopStrategies],
+    .admin: [.cancelOrders, .configureStrategies, .configureSystem, .createOrders, .impersonateOperator, .managePositions, .manageProcesses, .manageScopeGrants, .manageUsers, .manageWalletCredentials, .readMarketData, .readOrders, .readPositions, .readStrategies, .readSystemStatus, .readWalletCredentials, .startStrategies, .stopStrategies],
 ]
 
 let resourceAccess: [String: [UserRole]] = [

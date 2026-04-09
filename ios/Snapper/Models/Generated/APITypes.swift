@@ -1776,6 +1776,8 @@ struct UserProfile: Codable, Sendable {
     let role: UserRole
     let isActive: Bool?
     let createdAt: Date
+    let operatorPublicIds: [String]?
+    let primaryOperatorPublicId: String?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -1788,6 +1790,8 @@ struct UserProfile: Codable, Sendable {
         case role
         case isActive = "is_active"
         case createdAt = "created_at"
+        case operatorPublicIds = "operator_public_ids"
+        case primaryOperatorPublicId = "primary_operator_public_id"
     }
 }
 

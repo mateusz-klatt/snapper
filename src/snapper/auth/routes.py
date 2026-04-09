@@ -300,7 +300,7 @@ async def get_current_user_profile(
         HTTPException: 404 if user not found in database.
     """
     user_service = get_user_service()
-    user = await user_service.get_user_by_id(current_user.username)
+    user = await user_service.get_user_with_operators(current_user.username)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

@@ -38,6 +38,10 @@ class Permission(StrEnum):
     MANAGE_PROCESSES = "manage:processes"
     CONFIGURE_SYSTEM = "configure:system"
     MANAGE_USERS = "manage:users"
+    READ_WALLET_CREDENTIALS = "read:wallet_credentials"
+    MANAGE_WALLET_CREDENTIALS = "manage:wallet_credentials"
+    MANAGE_SCOPE_GRANTS = "manage:scope_grants"
+    IMPERSONATE_OPERATOR = "impersonate:operator"
 
 
 RESOURCE_PERMISSIONS: dict[str, Permission | None] = {

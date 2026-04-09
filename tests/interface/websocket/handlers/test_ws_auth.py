@@ -3132,6 +3132,17 @@ class StubUserService:
         """Get user by ID."""
         return self.user_by_id
 
+    async def get_user_with_operators(self, user_id: str) -> UserProfile | None:
+        """Get user by ID with operator fields populated.
+
+        Stub: the base ``user_by_id`` value is returned verbatim,
+        because tests that exercise the enrichment behaviour set
+        ``operator_public_ids`` / ``primary_operator_public_id``
+        directly on the profile fixture. Tests that do not care about
+        those fields get the defaults (empty list, empty string).
+        """
+        return self.user_by_id
+
     async def build_auth_principal(self, user: UserProfile) -> AuthPrincipal:
         """Build a stub principal preserving the user's role and identity.
 
@@ -3404,6 +3415,38 @@ def test_get_current_user_profile_returns_user(
     assert payload["type"] == "user_response"
     assert payload["payload"]["username"] == "alice"
     assert payload["payload"]["role"] == "admin"
+    user_service.user_by_id = None
+
+
+def test_get_current_user_profile_exposes_operator_fields(
+    auth_app: AuthAppFixture,
+) -> None:
+    """``/auth/me`` returns populated operator fields on the user payload.
+
+    Given: A stub profile carrying ``operator_public_ids`` and
+        ``primary_operator_public_id``,
+    When: ``GET /auth/me`` is called,
+    Then: The response payload echoes both multi-tenant fields so the
+        frontend operator picker can render the accessible set without
+        a second round trip.
+    """
+    client, user_service, _token_manager, _csrf_manager = auth_app
+    user_service.user_by_id = UserProfile(
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        username="alice",
+        role=UserRole.ADMIN,
+        created_at=datetime.now(UTC),
+        operator_public_ids=["op-1", "op-2"],
+        primary_operator_public_id="op-1",
+    )
+    response = client.get("/auth/me")
+    assert response.status_code == 200
+    payload = response.json()["payload"]
+    assert payload["operator_public_ids"] == ["op-1", "op-2"]
+    assert payload["primary_operator_public_id"] == "op-1"
     user_service.user_by_id = None
 
 

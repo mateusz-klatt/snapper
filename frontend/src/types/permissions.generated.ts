@@ -18,6 +18,10 @@ export const Permission = {
   MANAGE_PROCESSES: 'manage:processes',
   CONFIGURE_SYSTEM: 'configure:system',
   MANAGE_USERS: 'manage:users',
+  READ_WALLET_CREDENTIALS: 'read:wallet_credentials',
+  MANAGE_WALLET_CREDENTIALS: 'manage:wallet_credentials',
+  MANAGE_SCOPE_GRANTS: 'manage:scope_grants',
+  IMPERSONATE_OPERATOR: 'impersonate:operator',
 } as const
 
 export type Permission = (typeof Permission)[keyof typeof Permission]
@@ -27,7 +31,7 @@ type UserRole = 'viewer' | 'operator' | 'admin'
 export const ROLE_PERMISSIONS: Record<UserRole, readonly Permission[]> = {
   viewer: ['read:market_data', 'read:orders', 'read:positions', 'read:strategies', 'read:system_status'],
   operator: ['cancel:orders', 'create:orders', 'manage:positions', 'manage:processes', 'read:market_data', 'read:orders', 'read:positions', 'read:strategies', 'read:system_status', 'start:strategies', 'stop:strategies'],
-  admin: ['cancel:orders', 'configure:strategies', 'configure:system', 'create:orders', 'manage:positions', 'manage:processes', 'manage:users', 'read:market_data', 'read:orders', 'read:positions', 'read:strategies', 'read:system_status', 'start:strategies', 'stop:strategies'],
+  admin: ['cancel:orders', 'configure:strategies', 'configure:system', 'create:orders', 'impersonate:operator', 'manage:positions', 'manage:processes', 'manage:scope_grants', 'manage:users', 'manage:wallet_credentials', 'read:market_data', 'read:orders', 'read:positions', 'read:strategies', 'read:system_status', 'read:wallet_credentials', 'start:strategies', 'stop:strategies'],
 } as const
 
 export const RESOURCE_ACCESS: Record<string, readonly UserRole[]> = {

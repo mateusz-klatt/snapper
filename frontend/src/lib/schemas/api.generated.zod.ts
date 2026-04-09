@@ -685,6 +685,8 @@ export const UserProfileSchema = z
     role: UserRoleSchema,
     is_active: z.boolean(),
     created_at: z.iso.datetime(),
+    operator_public_ids: z.array(z.string()).optional(),
+    primary_operator_public_id: z.string().nullable().optional(),
   })
   .strict()
 

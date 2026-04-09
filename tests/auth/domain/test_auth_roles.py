@@ -55,7 +55,7 @@ async def test_get_current_user_profile_returns_user_from_db() -> None:
         created_at=datetime.now(UTC),
     )
     mock_service = AsyncMock()
-    mock_service.get_user_by_id = AsyncMock(return_value=expected_profile)
+    mock_service.get_user_with_operators = AsyncMock(return_value=expected_profile)
     with patch("snapper.auth.routes.get_user_service", return_value=mock_service):
         result = await get_current_user_profile(
             request=_make_rest_request(), current_user=principal
@@ -63,7 +63,7 @@ async def test_get_current_user_profile_returns_user_from_db() -> None:
     assert result.payload is expected_profile
     assert result.payload.username == "testuser"
     assert result.payload.role == UserRole.VIEWER
-    mock_service.get_user_by_id.assert_awaited_once_with("testuser")
+    mock_service.get_user_with_operators.assert_awaited_once_with("testuser")
 
 
 @pytest.mark.asyncio
@@ -79,7 +79,7 @@ async def test_get_current_user_profile_user_deleted_returns_404() -> None:
         role=UserRole.VIEWER,
     )
     mock_service = AsyncMock()
-    mock_service.get_user_by_id = AsyncMock(return_value=None)
+    mock_service.get_user_with_operators = AsyncMock(return_value=None)
     with (
         patch("snapper.auth.routes.get_user_service", return_value=mock_service),
         pytest.raises(HTTPException) as exc_info,
@@ -1059,3 +1059,193 @@ class TestBuildAuthPrincipal:
         assert principal.operator_public_ids == []
         assert principal.primary_operator_public_id == ""
         assert principal.user_public_id == "user-public-id-1"
+
+
+class TestGetUserWithOperators:
+    """Tests for ``UserService.get_user_with_operators`` enrichment.
+
+    The enrichment layer is consumed by ``/auth/me`` so the frontend
+    operator picker can render the accessible operator set without a
+    second round trip. It mirrors the resolution rules from
+    ``build_auth_principal``: ADMIN receives every active operator,
+    OPERATOR / VIEWER receive only their explicit memberships, and
+    ``primary_operator_public_id`` is taken from the membership row
+    flagged ``is_primary``.
+    """
+
+    def _make_db_user(self, role: UserRole) -> User:
+        now = datetime.now(UTC)
+        return User(
+            public_id="user-public-id-1",
+            timestamp=now,
+            known_to=KNOWN_TO_MAX,
+            session_id="seed-session",
+            sequence_id=1,
+            username="alice",
+            email="alice@example.com",
+            password_hash="hash",
+            role=role.value,
+            is_active=True,
+            created_at=now,
+        )
+
+    @pytest.fixture
+    def user_service_with_repo(self) -> Generator[UserService]:
+        """Yield a UserService whose repository + session are mocked."""
+        with patch("snapper.auth.user_service.get_repository") as mock_get_repo:
+            mock_repo = MagicMock()
+            mock_repo.list_active_operators = AsyncMock()
+            mock_repo.get_user_operator_memberships = AsyncMock()
+            mock_session = AsyncMock()
+            mock_repo.session = MagicMock()
+            mock_repo.session.return_value = AsyncMock()
+            mock_repo.session.return_value.__aenter__.return_value = mock_session
+            mock_get_repo.return_value = mock_repo
+            UserService.clear_instance()
+            service = UserService()
+            yield service
+            UserService.clear_instance()
+
+    def _wire_session_user(self, user_service: UserService, db_user: User | None) -> None:
+        """Configure the mocked session to return ``db_user`` from its select."""
+        mock_session = user_service.repository.session.return_value.__aenter__.return_value
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = db_user
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+    @pytest.mark.asyncio
+    async def test_admin_enrichment_includes_every_operator(
+        self, user_service_with_repo: UserService
+    ) -> None:
+        """ADMIN: enriched profile contains every active operator's public_id.
+
+        Given: Three active operators and one primary membership row,
+        When: ``get_user_with_operators`` is called,
+        Then: ``operator_public_ids`` lists all three and
+            ``primary_operator_public_id`` comes from the membership row.
+        """
+        self._wire_session_user(user_service_with_repo, self._make_db_user(UserRole.ADMIN))
+        repo = user_service_with_repo.repository
+        repo.list_active_operators.return_value = [
+            {
+                "public_id": "op-1",
+                "label": "alpha",
+                "description": None,
+                "timestamp": datetime.now(UTC),
+                "session_id": "s",
+                "sequence_id": 1,
+            },
+            {
+                "public_id": "op-2",
+                "label": "beta",
+                "description": None,
+                "timestamp": datetime.now(UTC),
+                "session_id": "s",
+                "sequence_id": 2,
+            },
+            {
+                "public_id": "op-3",
+                "label": "gamma",
+                "description": None,
+                "timestamp": datetime.now(UTC),
+                "session_id": "s",
+                "sequence_id": 3,
+            },
+        ]
+        repo.get_user_operator_memberships.return_value = [
+            {
+                "public_id": "m-1",
+                "user_public_id": "user-public-id-1",
+                "operator_public_id": "op-2",
+                "is_primary": True,
+                "timestamp": datetime.now(UTC),
+                "session_id": "s",
+                "sequence_id": 10,
+            }
+        ]
+
+        enriched = await user_service_with_repo.get_user_with_operators("alice")
+
+        assert enriched is not None
+        assert enriched.role == UserRole.ADMIN
+        assert enriched.operator_public_ids == ["op-1", "op-2", "op-3"]
+        assert enriched.primary_operator_public_id == "op-2"
+
+    @pytest.mark.asyncio
+    async def test_operator_enrichment_limits_to_memberships(
+        self, user_service_with_repo: UserService
+    ) -> None:
+        """OPERATOR: enrichment lists only explicit membership operators.
+
+        Given: Two membership rows and no ADMIN expansion,
+        When: ``get_user_with_operators`` is called,
+        Then: ``operator_public_ids`` contains only the memberships and
+            ``list_active_operators`` is never awaited.
+        """
+        self._wire_session_user(user_service_with_repo, self._make_db_user(UserRole.OPERATOR))
+        repo = user_service_with_repo.repository
+        repo.get_user_operator_memberships.return_value = [
+            {
+                "public_id": "m-1",
+                "user_public_id": "user-public-id-1",
+                "operator_public_id": "op-77",
+                "is_primary": False,
+                "timestamp": datetime.now(UTC),
+                "session_id": "s",
+                "sequence_id": 11,
+            },
+            {
+                "public_id": "m-2",
+                "user_public_id": "user-public-id-1",
+                "operator_public_id": "op-99",
+                "is_primary": True,
+                "timestamp": datetime.now(UTC),
+                "session_id": "s",
+                "sequence_id": 12,
+            },
+        ]
+
+        enriched = await user_service_with_repo.get_user_with_operators("alice")
+
+        assert enriched is not None
+        repo.list_active_operators.assert_not_awaited()
+        assert enriched.operator_public_ids == ["op-77", "op-99"]
+        assert enriched.primary_operator_public_id == "op-99"
+
+    @pytest.mark.asyncio
+    async def test_viewer_without_memberships_yields_empty(
+        self, user_service_with_repo: UserService
+    ) -> None:
+        """VIEWER with zero memberships: empty list + None primary sentinel.
+
+        Given: No membership rows,
+        When: ``get_user_with_operators`` is called,
+        Then: Enriched profile has an empty operator list and a
+            ``primary_operator_public_id`` of ``None``.
+        """
+        self._wire_session_user(user_service_with_repo, self._make_db_user(UserRole.VIEWER))
+        repo = user_service_with_repo.repository
+        repo.get_user_operator_memberships.return_value = []
+
+        enriched = await user_service_with_repo.get_user_with_operators("alice")
+
+        assert enriched is not None
+        assert enriched.operator_public_ids == []
+        assert enriched.primary_operator_public_id is None
+
+    @pytest.mark.asyncio
+    async def test_missing_user_returns_none(self, user_service_with_repo: UserService) -> None:
+        """Unknown user: enrichment short-circuits to None.
+
+        Given: ``get_user_by_id`` resolves to None,
+        When: ``get_user_with_operators`` is called,
+        Then: Returns None without consulting the multi-tenant lookups.
+        """
+        self._wire_session_user(user_service_with_repo, None)
+        repo = user_service_with_repo.repository
+
+        result = await user_service_with_repo.get_user_with_operators("ghost")
+
+        assert result is None
+        repo.get_user_operator_memberships.assert_not_awaited()
+        repo.list_active_operators.assert_not_awaited()

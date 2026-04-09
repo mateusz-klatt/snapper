@@ -196,6 +196,48 @@ class UserService:
                 return None
             return self._db_user_to_auth_user(db_user)
 
+    async def get_user_with_operators(self, user_id: str) -> UserProfile | None:
+        """Get active user enriched with operator membership fields.
+
+        Applies the same resolution rule as
+        ``build_auth_principal``: ADMIN receives every active
+        operator's ``public_id``, while OPERATOR / VIEWER receive only
+        their explicit ``user_operator_memberships`` entries. The
+        ``primary_operator_public_id`` is taken from the membership row
+        marked ``is_primary=TRUE`` when present.
+
+        Used by ``/auth/me`` so the frontend OperatorPicker can render
+        the accessible operator set without a second round trip.
+
+        Args:
+            user_id: User's unique identifier (username).
+
+        Returns:
+            UserProfile with operator fields populated, or None.
+        """
+        profile = await self.get_user_by_id(user_id)
+        if profile is None:
+            return None
+        now = datetime.now(UTC)
+        memberships = await self.repository.get_user_operator_memberships(
+            user_public_id=profile.public_id, as_of=now
+        )
+        if profile.role == UserRole.ADMIN:
+            operators = await self.repository.list_active_operators(now)
+            operator_public_ids = [op["public_id"] for op in operators]
+        else:
+            operator_public_ids = [m["operator_public_id"] for m in memberships]
+        primary_match = next((m for m in memberships if m["is_primary"]), None)
+        primary_operator_public_id = (
+            primary_match["operator_public_id"] if primary_match is not None else None
+        )
+        return profile.model_copy(
+            update={
+                "operator_public_ids": operator_public_ids,
+                "primary_operator_public_id": primary_operator_public_id,
+            }
+        )
+
     async def get_user_by_username(self, username: str) -> UserProfile | None:
         """Get active user by username.
 
