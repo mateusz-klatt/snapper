@@ -3585,6 +3585,36 @@ class TestGetHistoricalFundingRates:
             result = await client.get_historical_funding_rates("PF_XBTUSD")
         assert len(result) == 1
 
+    @pytest.mark.asyncio
+    async def test_non_numeric_rate_skipped(
+        self,
+        client: KrakenFuturesExchangeClient,
+    ) -> None:
+        """Entries with non-numeric relativeFundingRate are skipped.
+
+        Given: SDK returns entry with string rate value,
+        When: get_historical_funding_rates is called,
+        Then: Entry is excluded from results.
+        """
+        client._market_client = MagicMock()
+        client._market_client.get_historical_funding_rates = MagicMock(
+            return_value={
+                "rates": [
+                    {
+                        "timestamp": "2026-03-01T16:00:00.000Z",
+                        "fundingRate": 1.0e-08,
+                        "relativeFundingRate": "N/A",
+                    },
+                ],
+            }
+        )
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
+            return_value="BTC-USD-PERP",
+        ):
+            result = await client.get_historical_funding_rates("PF_XBTUSD")
+        assert result == []
+
 
 class TestGetCurrentFundingRate:
     """Tests for get_current_funding_rate method."""
@@ -3845,3 +3875,25 @@ class TestGetCurrentFundingRate:
             result = await client.get_current_funding_rate("PF_XBTUSD")
         assert result is not None
         assert result.rate == pytest.approx(0.0001)
+
+    @pytest.mark.asyncio
+    async def test_non_numeric_rate_returns_none(
+        self,
+        client: KrakenFuturesExchangeClient,
+    ) -> None:
+        """Non-numeric fundingRate returns None.
+
+        Given: Matching ticker with non-numeric fundingRate string,
+        When: get_current_funding_rate is called,
+        Then: Returns None instead of crashing.
+        """
+        client._market_client = MagicMock()
+        client._market_client.get_tickers = MagicMock(
+            return_value={
+                "tickers": [
+                    {"symbol": "PF_XBTUSD", "fundingRate": "N/A"},
+                ],
+            }
+        )
+        result = await client.get_current_funding_rate("PF_XBTUSD")
+        assert result is None
