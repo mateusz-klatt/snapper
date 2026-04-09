@@ -814,20 +814,15 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             native_symbol = kraken_futures_ws_to_native(symbol_upper)
         except ValueError:
             native_symbol = symbol
-        last_time_str = ticker.get("lastTime", "")
-        try:
-            effective = datetime.fromisoformat(last_time_str.replace("Z", "+00:00"))
-        except (ValueError, AttributeError):
-            effective = datetime.now(UTC)
         return FundingRateSnapshot(
             symbol=native_symbol,
             exchange=ExchangeEnum.KRAKEN_FUTURES,
             rate_type="perpetual_funding",
             direction="both",
             rate=rate,
-            effective_from=effective,
+            effective_from=datetime.now(UTC),
             notional_asset="USD",
-            source="exchange_ws",
+            source="exchange_api",
         )
 
     def _convert_sdk_order(self, data: dict[str, Any]) -> ExchangeOrderSnapshot:

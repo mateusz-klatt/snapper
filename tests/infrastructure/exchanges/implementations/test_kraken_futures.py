@@ -2,6 +2,8 @@
 
 import asyncio
 from collections.abc import Generator
+from datetime import UTC
+from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -3662,7 +3664,7 @@ class TestGetCurrentFundingRate:
         assert result.direction == "both"
         assert result.rate == pytest.approx(0.000220714)
         assert result.notional_asset == "USD"
-        assert result.source == "exchange_ws"
+        assert result.source == "exchange_api"
 
     @pytest.mark.asyncio
     async def test_returns_none_for_unmatched_symbol(
@@ -3727,31 +3729,33 @@ class TestGetCurrentFundingRate:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_fallback_datetime_when_lasttime_invalid(
+    async def test_effective_from_is_approximately_now(
         self,
         client: KrakenFuturesExchangeClient,
     ) -> None:
-        """Falls back to now() when lastTime is not parseable.
+        """Current funding rate uses datetime.now(UTC) for effective_from.
 
-        Given: Matching ticker with invalid lastTime,
+        Given: Matching ticker with valid fundingRate,
         When: get_current_funding_rate is called,
-        Then: Returns snapshot with effective_from set to approximately now.
+        Then: effective_from is close to current UTC time (not lastTime).
         """
         client._market_client = MagicMock()
         client._market_client.get_tickers = MagicMock(
             return_value={
                 "tickers": [
-                    {"symbol": "PF_XBTUSD", "fundingRate": 0.0001, "lastTime": "bad-date"},
+                    {"symbol": "PF_XBTUSD", "fundingRate": 0.0001},
                 ],
             }
         )
+        before = datetime.now(UTC)
         with patch(
             "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
             return_value="BTC-USD-PERP",
         ):
             result = await client.get_current_funding_rate("PF_XBTUSD")
+        after = datetime.now(UTC)
         assert result is not None
-        assert result.rate == pytest.approx(0.0001)
+        assert before <= result.effective_from <= after
 
     @pytest.mark.asyncio
     async def test_unknown_symbol_fallback(
