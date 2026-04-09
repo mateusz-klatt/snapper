@@ -189,6 +189,11 @@ enum ZmqHealthDataStatus: String, Codable, Sendable {
     case error
 }
 
+enum CreateScopeGrantBodyScopeKind: String, Codable, Sendable {
+    case underlying
+    case instrument
+}
+
 struct AvailableProcess: Codable, Sendable {
     let type: String?
     let sequenceId: Int
@@ -661,6 +666,34 @@ struct HTTPValidationError: Codable, Sendable {
     let detail: [ValidationError]?
 }
 
+struct HandoverScopeGrantResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: HandoverScopeGrantResult
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct HandoverScopeGrantResult: Codable, Sendable {
+    let closedGrant: ScopeGrantInfo
+    let newGrant: ScopeGrantInfo
+
+    enum CodingKeys: String, CodingKey {
+        case closedGrant = "closed_grant"
+        case newGrant = "new_grant"
+    }
+}
+
 struct HealthCheckData: Codable, Sendable {
     let type: String?
     let sequenceId: Int
@@ -794,6 +827,47 @@ struct MessageResponse: Codable, Sendable {
         case timestamp
         case sessionId = "session_id"
         case payload
+    }
+}
+
+struct OperatorInfo: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let label: String
+    let description: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case label
+        case description
+    }
+}
+
+struct OperatorListResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: [OperatorInfo]
+    /// Number of items in payload
+    let count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+        case count
     }
 }
 
@@ -1324,6 +1398,77 @@ struct RollPointDetail: Codable, Sendable {
     }
 }
 
+struct ScopeGrantInfo: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let operatorPublicId: String
+    let walletPublicId: String
+    let grantedByUserPublicId: String
+    let scopeKind: String
+    let underlyingPublicId: String?
+    let instrumentPublicId: String?
+    let note: String?
+    let knownTo: Date
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case operatorPublicId = "operator_public_id"
+        case walletPublicId = "wallet_public_id"
+        case grantedByUserPublicId = "granted_by_user_public_id"
+        case scopeKind = "scope_kind"
+        case underlyingPublicId = "underlying_public_id"
+        case instrumentPublicId = "instrument_public_id"
+        case note
+        case knownTo = "known_to"
+    }
+}
+
+struct ScopeGrantListResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: [ScopeGrantInfo]
+    /// Number of items in payload
+    let count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+        case count
+    }
+}
+
+struct ScopeGrantResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: ScopeGrantInfo
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
 struct SettingCategoriesResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
@@ -1821,6 +1966,49 @@ struct ValidationError: Codable, Sendable {
     let ctx: [String: AnyCodable]?
 }
 
+struct WalletInfo: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let label: String
+    let description: String?
+    let isPaper: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case label
+        case description
+        case isPaper = "is_paper"
+    }
+}
+
+struct WalletListResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: [WalletInfo]
+    /// Number of items in payload
+    let count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+        case count
+    }
+}
+
 struct WebSocketStats: Codable, Sendable {
     /// Number of active WebSocket connections
     let activeConnections: Int
@@ -2264,4 +2452,70 @@ struct ProcessStartBody: Codable, Sendable {
     let mode: String?
     /// Constructor parameters override for this run
     let parameters: JsonObject?
+}
+
+struct CreateScopeGrantCommand: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: CreateScopeGrantBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct CreateScopeGrantBody: Codable, Sendable {
+    let operatorPublicId: String
+    let walletPublicId: String
+    let scopeKind: String
+    let underlyingPublicId: String?
+    let instrumentPublicId: String?
+    let note: String?
+
+    enum CodingKeys: String, CodingKey {
+        case operatorPublicId = "operator_public_id"
+        case walletPublicId = "wallet_public_id"
+        case scopeKind = "scope_kind"
+        case underlyingPublicId = "underlying_public_id"
+        case instrumentPublicId = "instrument_public_id"
+        case note
+    }
+}
+
+struct HandoverScopeGrantCommand: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: HandoverScopeGrantBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct HandoverScopeGrantBody: Codable, Sendable {
+    let fromGrantPublicId: String
+    let toOperatorPublicId: String
+    let reason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case fromGrantPublicId = "from_grant_public_id"
+        case toOperatorPublicId = "to_operator_public_id"
+        case reason
+    }
 }

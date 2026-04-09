@@ -656,6 +656,185 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
+    "/api/wallets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Wallets
+         * @description List wallets accessible to the current principal.
+         *
+         *     ADMIN sees every active wallet. VIEWER and OPERATOR see only the
+         *     wallets covered by at least one active scope grant from the
+         *     principal's operator set — matching the Phase 0d wallet picker
+         *     contract that the picker is filtered server-side.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         principal: Authenticated caller — the wallet visibility scope
+         *             is derived from its role and ``operator_public_ids``.
+         *         repo: Repository dependency.
+         *
+         *     Returns:
+         *         ``WalletListResponse`` with one ``WalletInfo`` entry per
+         *         accessible active wallet, ordered deterministically by
+         *         ``(is_paper, label)``.
+         */
+        get: Operations["list_wallets_api_wallets_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/operators": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Operators
+         * @description List operators accessible to the current principal.
+         *
+         *     ADMIN sees every active operator. VIEWER and OPERATOR see only
+         *     the operators in ``principal.operator_public_ids``, resolved to
+         *     ``OperatorInfo`` projections via ``list_active_operators`` so
+         *     the label / description fields are populated for the picker UI.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         principal: Authenticated caller.
+         *         repo: Repository dependency.
+         *
+         *     Returns:
+         *         ``OperatorListResponse`` ordered by ``label`` ascending.
+         *         Empty payload when the principal has no operator memberships.
+         */
+        get: Operations["list_operators_api_operators_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/scope-grants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Scope Grants
+         * @description List active scope grants on a given wallet.
+         *
+         *     Non-ADMIN callers must have visibility into the target wallet
+         *     through their operator set; otherwise the request is rejected
+         *     with 403 so the existence of the wallet is not leaked through
+         *     an empty payload vs. a 404.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         principal: Authenticated caller.
+         *         repo: Repository dependency.
+         *         wallet_public_id: Public ID of the wallet to query.
+         *
+         *     Returns:
+         *         ``ScopeGrantListResponse`` ordered by ``timestamp`` ascending.
+         *
+         *     Raises:
+         *         HTTPException: 403 if the caller cannot see the target wallet.
+         */
+        get: Operations["list_scope_grants_api_scope_grants_get"];
+        put?: never;
+        /**
+         * Create Scope Grant
+         * @description Create a new active scope grant.
+         *
+         *     The XOR invariant between ``scope_kind`` and
+         *     ``underlying_public_id`` / ``instrument_public_id`` is validated
+         *     before the repository call so the client gets a 400 with a clear
+         *     message rather than opaque DB constraint errors. Overlap
+         *     conflicts (same-scope or cross-scope) bubble up as 409; the
+         *     underlying repository method holds an advisory lock on
+         *     PostgreSQL to prevent races.
+         *
+         *     ``granted_by_user_public_id`` is taken from the principal so
+         *     the client cannot spoof an audit identity.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         _principal: Authenticated caller holding MANAGE_SCOPE_GRANTS.
+         *         command: Create command envelope.
+         *         repo: Repository dependency.
+         *
+         *     Returns:
+         *         ``ScopeGrantResponse`` wrapping the newly-inserted grant row.
+         *
+         *     Raises:
+         *         HTTPException: 400 on XOR violation; 409 on overlap; 404 if
+         *             the target operator / wallet does not exist (bubbles up
+         *             via ``ScopeGrantNotFoundError`` from the repository).
+         */
+        post: Operations["create_scope_grant_api_scope_grants_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/scope-grants/handover": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Handover Scope Grant
+         * @description Atomically transfer an active scope grant to a different operator.
+         *
+         *     Single transaction: SCD2-close the source grant and insert a new
+         *     grant under the destination operator carrying the same
+         *     ``scope_kind`` + public IDs. ``granted_by_user_public_id`` is
+         *     taken from the principal. Cross-scope overlap against the
+         *     destination operator's existing grants raises 409 and the
+         *     transaction is rolled back.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         _principal: Authenticated caller holding MANAGE_SCOPE_GRANTS.
+         *         command: Handover command envelope.
+         *         repo: Repository dependency.
+         *
+         *     Returns:
+         *         ``HandoverScopeGrantResponse`` wrapping both the closed
+         *         source grant and the new active grant so the client can
+         *         update caches without a second round trip.
+         *
+         *     Raises:
+         *         HTTPException: 400 on self-handover or other validation;
+         *             404 when the source grant or destination operator is
+         *             missing; 409 on cross-scope overlap.
+         */
+        post: Operations["handover_scope_grant_api_scope_grants_handover_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/candles": {
         parameters: {
             query?: never;
@@ -1970,6 +2149,50 @@ export type Components = {
             detail?: Components["schemas"]["ValidationError"][];
         };
         /**
+         * HandoverScopeGrantResponse
+         * @description Envelope wrapper for the handover result.
+         */
+        HandoverScopeGrantResponse: {
+            /**
+             * Type
+             * @default handover_scope_grant_response
+             * @constant
+             */
+            type: "handover_scope_grant_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["HandoverScopeGrantResult"];
+        };
+        /**
+         * HandoverScopeGrantResult
+         * @description Payload returned by ``POST /api/scope-grants/handover``.
+         *
+         *     The handover is an atomic SCD2 close + insert: the source grant
+         *     is closed (``known_to`` set to the handover timestamp) and a new
+         *     active grant is inserted under the destination operator. Both
+         *     rows are returned so the client can update caches without a
+         *     second fetch.
+         *
+         *     Attributes:
+         *         closed_grant: The source grant with ``known_to`` stamped at
+         *             the handover timestamp.
+         *         new_grant: The newly-inserted active grant under the
+         *             destination operator.
+         */
+        HandoverScopeGrantResult: {
+            closed_grant: Components["schemas"]["ScopeGrantInfo"];
+            new_grant: Components["schemas"]["ScopeGrantInfo"];
+        };
+        /**
          * HealthCheckData
          * @description Domain data for the main health check endpoint.
          *
@@ -2196,6 +2419,68 @@ export type Components = {
             session_id: string;
             /** Payload */
             payload: string;
+        };
+        /**
+         * OperatorInfo
+         * @description Read projection of a single ``operators`` SCD2 row.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         *         label: Human-readable operator name.
+         *         description: Optional free-form description.
+         */
+        OperatorInfo: {
+            /**
+             * Type
+             * @default operator_info
+             * @constant
+             */
+            type: "operator_info";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Label */
+            label: string;
+            /** Description */
+            description?: string | null;
+        };
+        /**
+         * OperatorListResponse
+         * @description List wrapper for ``GET /api/operators``.
+         */
+        OperatorListResponse: {
+            /**
+             * Type
+             * @default operator_list_response
+             * @constant
+             */
+            type: "operator_list_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Payload */
+            payload: Components["schemas"]["OperatorInfo"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
+            count: number;
         };
         /**
          * OrderData
@@ -3132,6 +3417,118 @@ export type Components = {
             roll_at: string;
         };
         /**
+         * ScopeGrantInfo
+         * @description Read projection of a single ``wallet_operator_scope_grants`` SCD2 row.
+         *
+         *     Exactly one of ``underlying_public_id`` / ``instrument_public_id``
+         *     is non-null, matching ``scope_kind``, enforced by the CHECK
+         *     constraint on the source table.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         *         operator_public_id: Operator holding the grant.
+         *         wallet_public_id: Wallet covered by the grant.
+         *         granted_by_user_public_id: Audit identity that created the grant.
+         *         scope_kind: Either ``"underlying"`` or ``"instrument"``.
+         *         underlying_public_id: Set iff ``scope_kind == "underlying"``.
+         *         instrument_public_id: Set iff ``scope_kind == "instrument"``.
+         *         note: Free-form audit note (null when unset).
+         *         known_to: SCD2 end-of-validity timestamp — the sentinel
+         *             ``9999-12-31 23:59:59`` indicates an active grant.
+         */
+        ScopeGrantInfo: {
+            /**
+             * Type
+             * @default scope_grant_info
+             * @constant
+             */
+            type: "scope_grant_info";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Operator Public Id */
+            operator_public_id: string;
+            /** Wallet Public Id */
+            wallet_public_id: string;
+            /** Granted By User Public Id */
+            granted_by_user_public_id: string;
+            /** Scope Kind */
+            scope_kind: string;
+            /** Underlying Public Id */
+            underlying_public_id?: string | null;
+            /** Instrument Public Id */
+            instrument_public_id?: string | null;
+            /** Note */
+            note?: string | null;
+            /**
+             * Known To
+             * Format: date-time
+             */
+            known_to: string;
+        };
+        /**
+         * ScopeGrantListResponse
+         * @description List wrapper for ``GET /api/scope-grants``.
+         */
+        ScopeGrantListResponse: {
+            /**
+             * Type
+             * @default scope_grant_list_response
+             * @constant
+             */
+            type: "scope_grant_list_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Payload */
+            payload: Components["schemas"]["ScopeGrantInfo"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
+            count: number;
+        };
+        /**
+         * ScopeGrantResponse
+         * @description Singleton wrapper returned by ``POST /api/scope-grants``.
+         */
+        ScopeGrantResponse: {
+            /**
+             * Type
+             * @default scope_grant_response
+             * @constant
+             */
+            type: "scope_grant_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["ScopeGrantInfo"];
+        };
+        /**
          * SettingCategoriesResponse
          * @description Setting categories list response.
          *
@@ -4040,6 +4437,74 @@ export type Components = {
             ctx?: Record<string, never>;
         };
         /**
+         * WalletInfo
+         * @description Read projection of a single ``wallets`` SCD2 row.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         *         label: Human-readable wallet name (``default``, ``firm``...).
+         *         description: Optional free-form description.
+         *         is_paper: Paper-mode flag. Paper and live wallets sharing the
+         *             same label are disambiguated by this boolean because the
+         *             wallets table's active-unique index is
+         *             ``(label, is_paper)``.
+         */
+        WalletInfo: {
+            /**
+             * Type
+             * @default wallet_info
+             * @constant
+             */
+            type: "wallet_info";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Label */
+            label: string;
+            /** Description */
+            description?: string | null;
+            /** Is Paper */
+            is_paper: boolean;
+        };
+        /**
+         * WalletListResponse
+         * @description List wrapper for ``GET /api/wallets``.
+         */
+        WalletListResponse: {
+            /**
+             * Type
+             * @default wallet_list_response
+             * @constant
+             */
+            type: "wallet_list_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Payload */
+            payload: Components["schemas"]["WalletInfo"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
+            count: number;
+        };
+        /**
          * WebSocketStats
          * @description WebSocket connection statistics.
          *
@@ -4784,6 +5249,105 @@ export type Components = {
              */
             parameters?: Record<string, unknown> | null;
         };
+        /**
+         * CreateScopeGrantCommand
+         * @description Request envelope for ``POST /api/scope-grants``.
+         */
+        CreateScopeGrantCommand: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "create_scope_grant_command";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["CreateScopeGrantBody"];
+        };
+        /**
+         * CreateScopeGrantBody
+         * @description Request body for ``POST /api/scope-grants``.
+         *
+         *     Exactly one of ``underlying_public_id`` / ``instrument_public_id``
+         *     must be supplied, matching the chosen ``scope_kind``. The server
+         *     fills in ``granted_by_user_public_id`` from
+         *     ``principal.user_public_id`` so the client never supplies an
+         *     audit identity it could spoof.
+         *
+         *     Attributes:
+         *         operator_public_id: The operator being granted scope.
+         *         wallet_public_id: The wallet covered by the grant.
+         *         scope_kind: Either ``"underlying"`` or ``"instrument"``.
+         *         underlying_public_id: Set iff ``scope_kind == "underlying"``.
+         *         instrument_public_id: Set iff ``scope_kind == "instrument"``.
+         *         note: Optional free-form audit note.
+         */
+        CreateScopeGrantBody: {
+            /** Operator Public Id */
+            operator_public_id: string;
+            /** Wallet Public Id */
+            wallet_public_id: string;
+            /**
+             * Scope Kind
+             * @enum {string}
+             */
+            scope_kind: "underlying" | "instrument";
+            /** Underlying Public Id */
+            underlying_public_id?: string | null;
+            /** Instrument Public Id */
+            instrument_public_id?: string | null;
+            /** Note */
+            note?: string | null;
+        };
+        /**
+         * HandoverScopeGrantCommand
+         * @description Request envelope for ``POST /api/scope-grants/handover``.
+         */
+        HandoverScopeGrantCommand: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "handover_scope_grant_command";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["HandoverScopeGrantBody"];
+        };
+        /**
+         * HandoverScopeGrantBody
+         * @description Request body for ``POST /api/scope-grants/handover``.
+         *
+         *     Attributes:
+         *         from_grant_public_id: Public ID of the active source grant.
+         *         to_operator_public_id: Public ID of the destination operator.
+         *         reason: Optional free-form audit note recorded on the new
+         *             grant's ``note`` column.
+         */
+        HandoverScopeGrantBody: {
+            /** From Grant Public Id */
+            from_grant_public_id: string;
+            /** To Operator Public Id */
+            to_operator_public_id: string;
+            /** Reason */
+            reason?: string | null;
+        };
     };
     responses: never;
     parameters: never;
@@ -5470,6 +6034,126 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["StrategyListResponse"];
+                };
+            };
+        };
+    };
+    list_wallets_api_wallets_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["WalletListResponse"];
+                };
+            };
+        };
+    };
+    list_operators_api_operators_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["OperatorListResponse"];
+                };
+            };
+        };
+    };
+    list_scope_grants_api_scope_grants_get: {
+        parameters: {
+            query: {
+                /** @description Public ID of the wallet whose active grants to list */
+                wallet_public_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["ScopeGrantListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_scope_grant_api_scope_grants_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["CreateScopeGrantCommand"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["ScopeGrantResponse"];
+                };
+            };
+        };
+    };
+    handover_scope_grant_api_scope_grants_handover_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["HandoverScopeGrantCommand"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HandoverScopeGrantResponse"];
                 };
             };
         };

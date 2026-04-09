@@ -15,7 +15,12 @@ REST stream stays uniform with the rest of the API.
 from datetime import datetime
 from typing import Literal
 
+from pydantic import Field
+
 from snapper.api.schemas.base import PayloadListResponse
+from snapper.api.schemas.base import PayloadRequest
+from snapper.api.schemas.base import PayloadResponse
+from snapper.api.schemas.base import StrictBody
 from snapper.api.schemas.base import StrictDataSchema
 
 
@@ -101,3 +106,94 @@ class ScopeGrantListResponse(
     """List wrapper for ``GET /api/scope-grants``."""
 
     type: Literal["scope_grant_list_response"] = "scope_grant_list_response"
+
+
+class ScopeGrantResponse(PayloadResponse[Literal["scope_grant_response"], ScopeGrantInfo]):
+    """Singleton wrapper returned by ``POST /api/scope-grants``."""
+
+    type: Literal["scope_grant_response"] = "scope_grant_response"
+
+
+class HandoverScopeGrantResult(StrictBody):
+    """Payload returned by ``POST /api/scope-grants/handover``.
+
+    The handover is an atomic SCD2 close + insert: the source grant
+    is closed (``known_to`` set to the handover timestamp) and a new
+    active grant is inserted under the destination operator. Both
+    rows are returned so the client can update caches without a
+    second fetch.
+
+    Attributes:
+        closed_grant: The source grant with ``known_to`` stamped at
+            the handover timestamp.
+        new_grant: The newly-inserted active grant under the
+            destination operator.
+    """
+
+    closed_grant: ScopeGrantInfo
+    new_grant: ScopeGrantInfo
+
+
+class HandoverScopeGrantResponse(
+    PayloadResponse[Literal["handover_scope_grant_response"], HandoverScopeGrantResult]
+):
+    """Envelope wrapper for the handover result."""
+
+    type: Literal["handover_scope_grant_response"] = "handover_scope_grant_response"
+
+
+class CreateScopeGrantBody(StrictBody):
+    """Request body for ``POST /api/scope-grants``.
+
+    Exactly one of ``underlying_public_id`` / ``instrument_public_id``
+    must be supplied, matching the chosen ``scope_kind``. The server
+    fills in ``granted_by_user_public_id`` from
+    ``principal.user_public_id`` so the client never supplies an
+    audit identity it could spoof.
+
+    Attributes:
+        operator_public_id: The operator being granted scope.
+        wallet_public_id: The wallet covered by the grant.
+        scope_kind: Either ``"underlying"`` or ``"instrument"``.
+        underlying_public_id: Set iff ``scope_kind == "underlying"``.
+        instrument_public_id: Set iff ``scope_kind == "instrument"``.
+        note: Optional free-form audit note.
+    """
+
+    operator_public_id: str = Field(min_length=1, max_length=64)
+    wallet_public_id: str = Field(min_length=1, max_length=64)
+    scope_kind: Literal["underlying", "instrument"]
+    underlying_public_id: str | None = Field(default=None, max_length=64)
+    instrument_public_id: str | None = Field(default=None, max_length=64)
+    note: str | None = Field(default=None, max_length=512)
+
+
+class CreateScopeGrantCommand(
+    PayloadRequest[Literal["create_scope_grant_command"], CreateScopeGrantBody]
+):
+    """Request envelope for ``POST /api/scope-grants``."""
+
+    type: Literal["create_scope_grant_command"] = "create_scope_grant_command"
+
+
+class HandoverScopeGrantBody(StrictBody):
+    """Request body for ``POST /api/scope-grants/handover``.
+
+    Attributes:
+        from_grant_public_id: Public ID of the active source grant.
+        to_operator_public_id: Public ID of the destination operator.
+        reason: Optional free-form audit note recorded on the new
+            grant's ``note`` column.
+    """
+
+    from_grant_public_id: str = Field(min_length=1, max_length=64)
+    to_operator_public_id: str = Field(min_length=1, max_length=64)
+    reason: str | None = Field(default=None, max_length=512)
+
+
+class HandoverScopeGrantCommand(
+    PayloadRequest[Literal["handover_scope_grant_command"], HandoverScopeGrantBody]
+):
+    """Request envelope for ``POST /api/scope-grants/handover``."""
+
+    type: Literal["handover_scope_grant_command"] = "handover_scope_grant_command"

@@ -150,6 +150,18 @@ export const MessageResponseSchema = z
   })
   .strict()
 
+export const OperatorInfoSchema = z
+  .object({
+    type: z.literal('operator_info'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    label: z.string(),
+    description: z.string().nullable().optional(),
+  })
+  .strict()
+
 export const OrderDataSchema = z
   .object({
     type: z.literal('order'),
@@ -258,6 +270,24 @@ export const RollPointDetailSchema = z
     from_contract: z.string(),
     to_contract: z.string(),
     roll_at: z.string(),
+  })
+  .strict()
+
+export const ScopeGrantInfoSchema = z
+  .object({
+    type: z.literal('scope_grant_info'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    operator_public_id: z.string(),
+    wallet_public_id: z.string(),
+    granted_by_user_public_id: z.string(),
+    scope_kind: z.string(),
+    underlying_public_id: z.string().nullable().optional(),
+    instrument_public_id: z.string().nullable().optional(),
+    note: z.string().nullable().optional(),
+    known_to: z.iso.datetime(),
   })
   .strict()
 
@@ -390,6 +420,19 @@ export const ValidationErrorSchema = z
   })
   .strict()
 
+export const WalletInfoSchema = z
+  .object({
+    type: z.literal('wallet_info'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    label: z.string(),
+    description: z.string().nullable().optional(),
+    is_paper: z.boolean(),
+  })
+  .strict()
+
 export const WebSocketStatsSchema = z
   .object({
     active_connections: z.number().int(),
@@ -460,6 +503,25 @@ export const SettingUpdateBodySchema = z
 
 export const RemoveSettingBodySchema = z.object({}).strict()
 
+export const CreateScopeGrantBodySchema = z
+  .object({
+    operator_public_id: z.string().min(1).max(64),
+    wallet_public_id: z.string().min(1).max(64),
+    scope_kind: z.enum(['underlying', 'instrument']),
+    underlying_public_id: z.string().max(64).nullable().optional(),
+    instrument_public_id: z.string().max(64).nullable().optional(),
+    note: z.string().max(512).nullable().optional(),
+  })
+  .strict()
+
+export const HandoverScopeGrantBodySchema = z
+  .object({
+    from_grant_public_id: z.string().min(1).max(64),
+    to_operator_public_id: z.string().min(1).max(64),
+    reason: z.string().max(512).nullable().optional(),
+  })
+  .strict()
+
 export const ContinuousCandleListResponseSchema = z
   .object({
     type: z.literal('continuous_candle_list'),
@@ -515,6 +577,18 @@ export const GapDetectionStatsSchema = z
   .strict()
 
 export const JsonValueSchema = z.unknown()
+
+export const OperatorListResponseSchema = z
+  .object({
+    type: z.literal('operator_list_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: z.array(OperatorInfoSchema),
+    count: z.number().int(),
+  })
+  .strict()
 
 export const OrderListResponseSchema = z
   .object({
@@ -599,6 +673,36 @@ export const ContinuousSeriesPartialResponseSchema = z
     count: z.number().int(),
     failed_roll: RollPointDetailSchema,
     message: z.string(),
+  })
+  .strict()
+
+export const HandoverScopeGrantResultSchema = z
+  .object({
+    closed_grant: ScopeGrantInfoSchema,
+    new_grant: ScopeGrantInfoSchema,
+  })
+  .strict()
+
+export const ScopeGrantListResponseSchema = z
+  .object({
+    type: z.literal('scope_grant_list_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: z.array(ScopeGrantInfoSchema),
+    count: z.number().int(),
+  })
+  .strict()
+
+export const ScopeGrantResponseSchema = z
+  .object({
+    type: z.literal('scope_grant_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: ScopeGrantInfoSchema,
   })
   .strict()
 
@@ -714,6 +818,18 @@ export const HTTPValidationErrorSchema = z
   })
   .strict()
 
+export const WalletListResponseSchema = z
+  .object({
+    type: z.literal('wallet_list_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: z.array(WalletInfoSchema),
+    count: z.number().int(),
+  })
+  .strict()
+
 export const WsStatsDataSchema = z
   .object({
     type: z.literal('ws_stats'),
@@ -812,6 +928,28 @@ export const RemoveSettingRequestSchema = z
   })
   .strict()
 
+export const CreateScopeGrantCommandSchema = z
+  .object({
+    type: z.literal('create_scope_grant_command').optional(),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: CreateScopeGrantBodySchema,
+  })
+  .strict()
+
+export const HandoverScopeGrantCommandSchema = z
+  .object({
+    type: z.literal('handover_scope_grant_command').optional(),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: HandoverScopeGrantBodySchema,
+  })
+  .strict()
+
 export const HealthCheckDataSchema = z
   .object({
     type: z.literal('health_check'),
@@ -848,6 +986,17 @@ export const ProcessCreateResponseSchema = z
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     payload: ProcessCreateDataSchema,
+  })
+  .strict()
+
+export const HandoverScopeGrantResponseSchema = z
+  .object({
+    type: z.literal('handover_scope_grant_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: HandoverScopeGrantResultSchema,
   })
   .strict()
 
@@ -1197,6 +1346,7 @@ export type HealthTopics = z.infer<typeof HealthTopicsSchema>
 export type InstrumentListResponse = z.infer<typeof InstrumentListResponseSchema>
 export type JsonPrimitive = z.infer<typeof JsonPrimitiveSchema>
 export type MessageResponse = z.infer<typeof MessageResponseSchema>
+export type OperatorInfo = z.infer<typeof OperatorInfoSchema>
 export type OrderData = z.infer<typeof OrderDataSchema>
 export type PositionData = z.infer<typeof PositionDataSchema>
 export type ProcessCategoryCount = z.infer<typeof ProcessCategoryCountSchema>
@@ -1206,6 +1356,7 @@ export type ProcessStatus = z.infer<typeof ProcessStatusSchema>
 export type ProcessStopData = z.infer<typeof ProcessStopDataSchema>
 export type RelationshipTypeEnum = z.infer<typeof RelationshipTypeEnumSchema>
 export type RollPointDetail = z.infer<typeof RollPointDetailSchema>
+export type ScopeGrantInfo = z.infer<typeof ScopeGrantInfoSchema>
 export type SettingCategoriesResponse = z.infer<typeof SettingCategoriesResponseSchema>
 export type SettingRead = z.infer<typeof SettingReadSchema>
 export type SignalData = z.infer<typeof SignalDataSchema>
@@ -1216,6 +1367,7 @@ export type UnderlyingAssetData = z.infer<typeof UnderlyingAssetDataSchema>
 export type UnderlyingInstrumentData = z.infer<typeof UnderlyingInstrumentDataSchema>
 export type UserRole = z.infer<typeof UserRoleSchema>
 export type ValidationError = z.infer<typeof ValidationErrorSchema>
+export type WalletInfo = z.infer<typeof WalletInfoSchema>
 export type WebSocketStats = z.infer<typeof WebSocketStatsSchema>
 export type WsStatsConfig = z.infer<typeof WsStatsConfigSchema>
 export type ZmqBridgeStats = z.infer<typeof ZmqBridgeStatsSchema>
@@ -1227,12 +1379,15 @@ export type ChangePasswordBody = z.infer<typeof ChangePasswordBodySchema>
 export type AdminResetPasswordBody = z.infer<typeof AdminResetPasswordBodySchema>
 export type SettingUpdateBody = z.infer<typeof SettingUpdateBodySchema>
 export type RemoveSettingBody = z.infer<typeof RemoveSettingBodySchema>
+export type CreateScopeGrantBody = z.infer<typeof CreateScopeGrantBodySchema>
+export type HandoverScopeGrantBody = z.infer<typeof HandoverScopeGrantBodySchema>
 export type ContinuousCandleListResponse = z.infer<typeof ContinuousCandleListResponseSchema>
 export type ContractListResponse = z.infer<typeof ContractListResponseSchema>
 export type ExecutionListResponse = z.infer<typeof ExecutionListResponseSchema>
 export type FrontMonthResponse = z.infer<typeof FrontMonthResponseSchema>
 export type GapDetectionStats = z.infer<typeof GapDetectionStatsSchema>
 export type JsonValue = z.infer<typeof JsonValueSchema>
+export type OperatorListResponse = z.infer<typeof OperatorListResponseSchema>
 export type OrderListResponse = z.infer<typeof OrderListResponseSchema>
 export type PositionListResponse = z.infer<typeof PositionListResponseSchema>
 export type ProcessSummaryData = z.infer<typeof ProcessSummaryDataSchema>
@@ -1240,6 +1395,9 @@ export type ProcessCreateData = z.infer<typeof ProcessCreateDataSchema>
 export type ProcessStartResponse = z.infer<typeof ProcessStartResponseSchema>
 export type ProcessStopResponse = z.infer<typeof ProcessStopResponseSchema>
 export type ContinuousSeriesPartialResponse = z.infer<typeof ContinuousSeriesPartialResponseSchema>
+export type HandoverScopeGrantResult = z.infer<typeof HandoverScopeGrantResultSchema>
+export type ScopeGrantListResponse = z.infer<typeof ScopeGrantListResponseSchema>
+export type ScopeGrantResponse = z.infer<typeof ScopeGrantResponseSchema>
 export type SettingListResponse = z.infer<typeof SettingListResponseSchema>
 export type SettingResponse = z.infer<typeof SettingResponseSchema>
 export type SignalListResponse = z.infer<typeof SignalListResponseSchema>
@@ -1252,6 +1410,7 @@ export type UserProfile = z.infer<typeof UserProfileSchema>
 export type CreateUserBody = z.infer<typeof CreateUserBodySchema>
 export type UpdateUserBody = z.infer<typeof UpdateUserBodySchema>
 export type HTTPValidationError = z.infer<typeof HTTPValidationErrorSchema>
+export type WalletListResponse = z.infer<typeof WalletListResponseSchema>
 export type WsStatsData = z.infer<typeof WsStatsDataSchema>
 export type ZmqHealthData = z.infer<typeof ZmqHealthDataSchema>
 export type LoginRequest = z.infer<typeof LoginRequestSchema>
@@ -1260,10 +1419,13 @@ export type ChangePasswordRequest = z.infer<typeof ChangePasswordRequestSchema>
 export type AdminResetPasswordRequest = z.infer<typeof AdminResetPasswordRequestSchema>
 export type SettingUpdate = z.infer<typeof SettingUpdateSchema>
 export type RemoveSettingRequest = z.infer<typeof RemoveSettingRequestSchema>
+export type CreateScopeGrantCommand = z.infer<typeof CreateScopeGrantCommandSchema>
+export type HandoverScopeGrantCommand = z.infer<typeof HandoverScopeGrantCommandSchema>
 export type HealthCheckData = z.infer<typeof HealthCheckDataSchema>
 export type JsonObject = z.infer<typeof JsonObjectSchema>
 export type ProcessSummaryResponse = z.infer<typeof ProcessSummaryResponseSchema>
 export type ProcessCreateResponse = z.infer<typeof ProcessCreateResponseSchema>
+export type HandoverScopeGrantResponse = z.infer<typeof HandoverScopeGrantResponseSchema>
 export type LoginData = z.infer<typeof LoginDataSchema>
 export type RefreshData = z.infer<typeof RefreshDataSchema>
 export type UserListResponse = z.infer<typeof UserListResponseSchema>

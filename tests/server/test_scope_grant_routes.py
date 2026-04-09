@@ -1,10 +1,22 @@
-"""Tests for the Phase 0d scope grant read route.
+"""Tests for the Phase 0d scope grant read + write routes.
 
-Exercises the wallet-visibility authorization gate on
-``list_scope_grants``: ADMIN may query any wallet, non-ADMIN
-principals must have the target wallet in their accessible set or
-they receive 403. The 403 path is important so the existence of a
-wallet is not leaked via an empty payload.
+Exercises:
+
+- The wallet-visibility authorization gate on
+  ``list_scope_grants`` — ADMIN may query any wallet, non-ADMIN
+  principals must have the target wallet in their accessible set
+  or they receive 403 so the wallet's existence is not leaked via
+  an empty payload.
+- The create-grant path including XOR pre-validation (400),
+  overlap conflict bubbling (409), and granted_by_user_public_id
+  audit stamping from the principal.
+- The handover path including successful close-and-insert,
+  cross-scope overlap (409), self-handover rejection (400), and
+  missing source grant (404).
+
+All tests invoke the handler functions directly with a mocked
+``Repository`` so the authorization branches are exercised without
+booting a FastAPI TestClient.
 """
 
 from datetime import UTC
@@ -17,12 +29,21 @@ from fastapi import HTTPException
 from fastapi import Request
 from fastapi import status
 
+from snapper.api.schemas.multi_tenant import CreateScopeGrantBody
+from snapper.api.schemas.multi_tenant import CreateScopeGrantCommand
+from snapper.api.schemas.multi_tenant import HandoverScopeGrantBody
+from snapper.api.schemas.multi_tenant import HandoverScopeGrantCommand
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.repository import ScopeGrantConflictError
+from snapper.data.repository import ScopeGrantNotFoundError
+from snapper.data.repository import ScopeGrantValidationError
 from snapper.data.repository_types import ScopeGrantRow
 from snapper.data.repository_types import WalletRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.server.scope_grant_routes import create_scope_grant
+from snapper.server.scope_grant_routes import handover_scope_grant
 from snapper.server.scope_grant_routes import list_scope_grants
 
 
@@ -172,3 +193,288 @@ class TestListScopeGrants:
 
         assert excinfo.value.status_code == status.HTTP_403_FORBIDDEN
         mock_repo.list_active_scope_grants_for_wallet.assert_not_awaited()
+
+
+def _make_create_command(
+    *,
+    scope_kind: str = "underlying",
+    underlying_public_id: str | None = "00000000-0000-7000-8000-0000000000aa",
+    instrument_public_id: str | None = None,
+) -> CreateScopeGrantCommand:
+    """Return a minimal valid create command envelope."""
+    return CreateScopeGrantCommand(
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="00000000-0000-7000-8000-000000000500",
+        timestamp=datetime.now(UTC),
+        payload=CreateScopeGrantBody(
+            operator_public_id="00000000-0000-7000-8000-000000000100",
+            wallet_public_id="00000000-0000-7000-8000-000000000200",
+            scope_kind=scope_kind,
+            underlying_public_id=underlying_public_id,
+            instrument_public_id=instrument_public_id,
+            note="audit note",
+        ),
+    )
+
+
+def _admin_principal() -> AuthPrincipal:
+    """Return an ADMIN principal with a non-empty user_public_id."""
+    return AuthPrincipal(
+        username="admin",
+        role=UserRole.ADMIN,
+        user_public_id="00000000-0000-7000-8000-000000000099",
+    )
+
+
+class TestCreateScopeGrant:
+    """Behaviour of ``create_scope_grant`` POST handler."""
+
+    @pytest.mark.asyncio
+    async def test_successful_create_stamps_audit_identity_from_principal(
+        self,
+    ) -> None:
+        """Successful create returns the new row with audit fields from the principal.
+
+        Given: An ADMIN principal and a valid underlying-scoped command,
+        When: ``create_scope_grant`` is called,
+        Then: The repository receives the principal's ``user_public_id``
+            as ``granted_by_user_public_id`` (not anything from the
+            client payload) and the response wraps the new row.
+        """
+        mock_repo = AsyncMock()
+        returned_row = _grant_row("grant-new", "op-1", "wallet-42", "underlying")
+        mock_repo.create_scope_grant = AsyncMock(return_value=returned_row)
+
+        result = await create_scope_grant(
+            request=_make_request(),
+            _principal=_admin_principal(),
+            command=_make_create_command(),
+            repo=mock_repo,
+        )
+
+        assert result.payload.operator_public_id == "op-1"
+        assert result.payload.scope_kind == "underlying"
+        mock_repo.create_scope_grant.assert_awaited_once()
+        call_kwargs = mock_repo.create_scope_grant.await_args.args[0]
+        assert call_kwargs["granted_by_user_public_id"] == "00000000-0000-7000-8000-000000000099"
+
+    @pytest.mark.asyncio
+    async def test_xor_mismatch_rejected_with_400_before_repo_call(self) -> None:
+        """XOR pre-validation prevents malformed inputs from reaching the repo.
+
+        Given: A command with ``scope_kind='underlying'`` but
+            ``underlying_public_id=None``,
+        When: ``create_scope_grant`` is called,
+        Then: HTTPException 400 is raised and the repository is
+            never consulted.
+        """
+        mock_repo = AsyncMock()
+        command = _make_create_command(
+            scope_kind="underlying",
+            underlying_public_id=None,
+        )
+
+        with pytest.raises(HTTPException) as excinfo:
+            await create_scope_grant(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                command=command,
+                repo=mock_repo,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
+        mock_repo.create_scope_grant.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_xor_mismatch_both_ids_rejected(self) -> None:
+        """Providing BOTH underlying and instrument IDs also fails pre-validation."""
+        mock_repo = AsyncMock()
+        command = _make_create_command(
+            scope_kind="instrument",
+            underlying_public_id="00000000-0000-7000-8000-0000000000aa",
+            instrument_public_id="00000000-0000-7000-8000-0000000000bb",
+        )
+
+        with pytest.raises(HTTPException) as excinfo:
+            await create_scope_grant(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                command=command,
+                repo=mock_repo,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
+        mock_repo.create_scope_grant.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_overlap_conflict_bubbles_up_as_409(self) -> None:
+        """Repository ``ScopeGrantConflictError`` maps to HTTP 409.
+
+        Given: The repository raises ``ScopeGrantConflictError``,
+        When: ``create_scope_grant`` is called,
+        Then: HTTPException 409 is raised with the conflict detail.
+        """
+        mock_repo = AsyncMock()
+        mock_repo.create_scope_grant = AsyncMock(
+            side_effect=ScopeGrantConflictError(
+                wallet_public_id="wallet-42",
+                conflicting_grant_public_id="grant-existing",
+                conflicting_operator_public_id="op-2",
+                reason="overlap",
+            )
+        )
+
+        with pytest.raises(HTTPException) as excinfo:
+            await create_scope_grant(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                command=_make_create_command(),
+                repo=mock_repo,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_409_CONFLICT
+
+    @pytest.mark.asyncio
+    async def test_validation_error_maps_to_400(self) -> None:
+        """Repository ``ScopeGrantValidationError`` maps to HTTP 400."""
+        mock_repo = AsyncMock()
+        mock_repo.create_scope_grant = AsyncMock(
+            side_effect=ScopeGrantValidationError("bad scope_kind")
+        )
+
+        with pytest.raises(HTTPException) as excinfo:
+            await create_scope_grant(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                command=_make_create_command(),
+                repo=mock_repo,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
+
+    @pytest.mark.asyncio
+    async def test_not_found_error_maps_to_404(self) -> None:
+        """Repository ``ScopeGrantNotFoundError`` maps to HTTP 404."""
+        mock_repo = AsyncMock()
+        mock_repo.create_scope_grant = AsyncMock(
+            side_effect=ScopeGrantNotFoundError("operator not found")
+        )
+
+        with pytest.raises(HTTPException) as excinfo:
+            await create_scope_grant(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                command=_make_create_command(),
+                repo=mock_repo,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_404_NOT_FOUND
+
+
+def _make_handover_command() -> HandoverScopeGrantCommand:
+    """Return a minimal valid handover command envelope."""
+    return HandoverScopeGrantCommand(
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="00000000-0000-7000-8000-000000000600",
+        timestamp=datetime.now(UTC),
+        payload=HandoverScopeGrantBody(
+            from_grant_public_id="00000000-0000-7000-8000-0000000000c1",
+            to_operator_public_id="00000000-0000-7000-8000-000000000102",
+            reason="vacation cover",
+        ),
+    )
+
+
+class TestHandoverScopeGrant:
+    """Behaviour of ``handover_scope_grant`` POST handler."""
+
+    @pytest.mark.asyncio
+    async def test_successful_handover_returns_both_rows(self) -> None:
+        """Successful handover wraps closed + new grant in the response.
+
+        Given: An ADMIN principal and a repository that returns a
+            ``(closed, new)`` tuple,
+        When: ``handover_scope_grant`` is called,
+        Then: Both rows appear in the response payload and the
+            repository received the principal's ``user_public_id`` as
+            ``granted_by_user_public_id``.
+        """
+        mock_repo = AsyncMock()
+        closed_row = _grant_row("grant-old", "op-1", "wallet-42", "underlying")
+        new_row = _grant_row("grant-new", "op-2", "wallet-42", "underlying")
+        mock_repo.handover_grant = AsyncMock(return_value=(closed_row, new_row))
+
+        result = await handover_scope_grant(
+            request=_make_request(),
+            _principal=_admin_principal(),
+            command=_make_handover_command(),
+            repo=mock_repo,
+        )
+
+        assert result.payload.closed_grant.operator_public_id == "op-1"
+        assert result.payload.new_grant.operator_public_id == "op-2"
+        mock_repo.handover_grant.assert_awaited_once()
+        call_kwargs = mock_repo.handover_grant.await_args.kwargs
+        assert call_kwargs["granted_by_user_public_id"] == "00000000-0000-7000-8000-000000000099"
+        assert call_kwargs["reason"] == "vacation cover"
+
+    @pytest.mark.asyncio
+    async def test_missing_source_grant_maps_to_404(self) -> None:
+        """A missing source grant surfaces as HTTP 404."""
+        mock_repo = AsyncMock()
+        mock_repo.handover_grant = AsyncMock(
+            side_effect=ScopeGrantNotFoundError("source grant not found")
+        )
+
+        with pytest.raises(HTTPException) as excinfo:
+            await handover_scope_grant(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                command=_make_handover_command(),
+                repo=mock_repo,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.asyncio
+    async def test_self_handover_validation_maps_to_400(self) -> None:
+        """Self-handover (source operator == target operator) fails with 400."""
+        mock_repo = AsyncMock()
+        mock_repo.handover_grant = AsyncMock(
+            side_effect=ScopeGrantValidationError("self-handover rejected")
+        )
+
+        with pytest.raises(HTTPException) as excinfo:
+            await handover_scope_grant(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                command=_make_handover_command(),
+                repo=mock_repo,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_400_BAD_REQUEST
+
+    @pytest.mark.asyncio
+    async def test_cross_scope_conflict_maps_to_409(self) -> None:
+        """Overlap against the destination operator's grants fails with 409."""
+        mock_repo = AsyncMock()
+        mock_repo.handover_grant = AsyncMock(
+            side_effect=ScopeGrantConflictError(
+                wallet_public_id="wallet-42",
+                conflicting_grant_public_id="grant-other",
+                conflicting_operator_public_id="op-2",
+                reason="target operator already has overlapping grant",
+            )
+        )
+
+        with pytest.raises(HTTPException) as excinfo:
+            await handover_scope_grant(
+                request=_make_request(),
+                _principal=_admin_principal(),
+                command=_make_handover_command(),
+                repo=mock_repo,
+            )
+
+        assert excinfo.value.status_code == status.HTTP_409_CONFLICT
