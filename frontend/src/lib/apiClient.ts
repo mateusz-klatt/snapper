@@ -435,7 +435,13 @@ class APIClient {
   }
   async getScopeGrants(walletPublicId: string): Promise<ScopeGrantListResponse> {
     const params = new URLSearchParams({ wallet_public_id: walletPublicId })
-    const data = await this.getJSON(`/api/scope-grants?${params}`)
+    const response = await this.request(`/api/scope-grants?${params}`, { method: 'GET' })
+
+    if (!response.ok) {
+      throw new Error(await this.extractErrorMessage(response))
+    }
+
+    const data = await response.json()
 
     return validateResponse(data, ScopeGrantListResponseSchema, '/scope-grants')
   }
@@ -450,9 +456,14 @@ class APIClient {
     return validateResponse(data, HandoverScopeGrantResponseSchema, '/scope-grants/handover POST')
   }
   async getCredentials(walletPublicId: string): Promise<CredentialListResponse> {
-    const data = await this.getJSON(
-      `/api/wallets/${encodeURIComponent(walletPublicId)}/credentials`
-    )
+    const url = `/api/wallets/${encodeURIComponent(walletPublicId)}/credentials`
+    const response = await this.request(url, { method: 'GET' })
+
+    if (!response.ok) {
+      throw new Error(await this.extractErrorMessage(response))
+    }
+
+    const data = await response.json()
 
     return validateResponse(data, CredentialListResponseSchema, '/wallets/:id/credentials')
   }

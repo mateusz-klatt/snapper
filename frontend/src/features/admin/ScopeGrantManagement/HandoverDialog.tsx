@@ -49,7 +49,11 @@ const HandoverDialog: React.FC<Readonly<HandoverDialogProps>> = ({ grant, open, 
           handleClose()
         },
         onError: (err: Error) => {
-          if (err.message.includes('409') || err.message.toLowerCase().includes('conflict')) {
+          if (
+            err.message.includes('409') ||
+            err.message.toLowerCase().includes('conflict') ||
+            err.message.toLowerCase().includes('already')
+          ) {
             toast.error('Conflict: the destination operator already holds a conflicting grant')
           } else {
             toast.error(err.message || 'Error handing over scope grant')

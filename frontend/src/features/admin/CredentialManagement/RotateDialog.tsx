@@ -133,7 +133,11 @@ const RotateDialog: React.FC<Readonly<RotateDialogProps>> = ({ credential, open,
               />
             ) : (
               <input
-                type={field.includes('secret') || field.includes('key') ? 'password' : 'text'}
+                type={
+                  field.includes('secret') || field.includes('key') || field.includes('token')
+                    ? 'password'
+                    : 'text'
+                }
                 id={`rotate-field-${field}`}
                 value={fields[field] ?? ''}
                 onChange={e => {

@@ -73,7 +73,11 @@ const ScopeGrantForm: React.FC<Readonly<ScopeGrantFormProps>> = ({ open, onClose
           handleClose()
         },
         onError: (err: Error) => {
-          if (err.message.includes('409') || err.message.toLowerCase().includes('conflict')) {
+          if (
+            err.message.includes('409') ||
+            err.message.toLowerCase().includes('conflict') ||
+            err.message.toLowerCase().includes('already')
+          ) {
             toast.error('Conflict: another operator already holds a grant on this scope')
           } else {
             toast.error(err.message || 'Error creating scope grant')

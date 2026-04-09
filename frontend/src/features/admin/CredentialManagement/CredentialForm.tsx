@@ -115,7 +115,7 @@ const CredentialForm: React.FC<Readonly<CredentialFormProps>> = ({ open, onClose
           handleClose()
         },
         onError: (err: Error) => {
-          if (err.message.includes('409') || err.message.toLowerCase().includes('conflict')) {
+          if (err.message.includes('409') || err.message.toLowerCase().includes('already exists')) {
             toast.error('Conflict: this wallet already has an active credential for this exchange')
           } else {
             toast.error(err.message || 'Error creating credential')
@@ -204,7 +204,11 @@ const CredentialForm: React.FC<Readonly<CredentialFormProps>> = ({ open, onClose
                 />
               ) : (
                 <input
-                  type={field.includes('secret') || field.includes('key') ? 'password' : 'text'}
+                  type={
+                    field.includes('secret') || field.includes('key') || field.includes('token')
+                      ? 'password'
+                      : 'text'
+                  }
                   id={`cred-field-${field}`}
                   value={fields[field] ?? ''}
                   onChange={e => {

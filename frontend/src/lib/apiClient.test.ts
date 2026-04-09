@@ -1978,6 +1978,41 @@ describe('cacheWsTicketFromResponse', () => {
 
       expect(url).toContain('wallet_public_id=w-1')
     })
+    it('throws on non-ok response', async () => {
+      const jsonFn = async () => ({ detail: 'Wallet not found' })
+
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+        json: jsonFn,
+        clone: () => ({ json: jsonFn }),
+      })
+      await expect(apiClient.getScopeGrants('w-missing')).rejects.toThrow('Wallet not found')
+    })
+    it('does not append global scope params', async () => {
+      apiClient.setOperatorScope('op-global')
+      apiClient.setWalletScope('w-global')
+      const payload = {
+        type: 'scope_grant_list_response',
+        session_id: 's',
+        sequence_id: 1,
+        public_id: 'p',
+        timestamp: '2026-01-01T00:00:00Z',
+        count: 0,
+        payload: [],
+      }
+
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => payload })
+      await apiClient.getScopeGrants('w-admin')
+      const url = mockFetch.mock.calls[0][0] as string
+
+      expect(url).toContain('wallet_public_id=w-admin')
+      expect(url).not.toContain('w-global')
+      expect(url).not.toContain('op-global')
+      apiClient.setOperatorScope(null)
+      apiClient.setWalletScope(null)
+    })
   })
   describe('createScopeGrant', () => {
     it('posts create scope grant command', async () => {
@@ -2091,6 +2126,41 @@ describe('cacheWsTicketFromResponse', () => {
       const url = mockFetch.mock.calls[0][0] as string
 
       expect(url).toContain('/api/wallets/w-1/credentials')
+    })
+    it('throws on non-ok response', async () => {
+      const jsonFn = async () => ({ detail: 'Wallet not found' })
+
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+        json: jsonFn,
+        clone: () => ({ json: jsonFn }),
+      })
+      await expect(apiClient.getCredentials('w-missing')).rejects.toThrow('Wallet not found')
+    })
+    it('does not append global scope params', async () => {
+      apiClient.setOperatorScope('op-global')
+      apiClient.setWalletScope('w-global')
+      const payload = {
+        type: 'credential_list_response',
+        session_id: 's',
+        sequence_id: 1,
+        public_id: 'p',
+        timestamp: '2026-01-01T00:00:00Z',
+        count: 0,
+        payload: [],
+      }
+
+      mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => payload })
+      await apiClient.getCredentials('w-admin')
+      const url = mockFetch.mock.calls[0][0] as string
+
+      expect(url).toContain('/api/wallets/w-admin/credentials')
+      expect(url).not.toContain('w-global')
+      expect(url).not.toContain('op-global')
+      apiClient.setOperatorScope(null)
+      apiClient.setWalletScope(null)
     })
   })
   describe('createCredential', () => {
