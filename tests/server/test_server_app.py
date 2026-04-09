@@ -267,7 +267,7 @@ class TestCreateApiRouter:
             assert router is not None
 
     @patch("snapper.server.app.get_settings")
-    @patch("snapper.server.app.get_repository")
+    @patch("snapper.server.dependencies.get_repository")
     def test_health_check_endpoint(
         self, mock_get_repo: MagicMock, mock_get_settings: MagicMock
     ) -> None:
@@ -490,7 +490,7 @@ class TestMainAppIntegration:
         self.client = TestClient(self.app)
 
     @patch("snapper.server.app.get_settings")
-    @patch("snapper.server.app.get_repository")
+    @patch("snapper.server.dependencies.get_repository")
     def test_app_creation_and_basic_endpoints(
         self, mock_get_repo: MagicMock, mock_get_settings: MagicMock
     ) -> None:
@@ -511,7 +511,7 @@ class TestMainAppIntegration:
 class TestDependencyFunctions:
     """Tests for FastAPI dependency injection functions."""
 
-    @patch("snapper.server.app.get_repository")
+    @patch("snapper.server.dependencies.get_repository")
     def test_get_repository_dependency(self, mock_get_repo: MagicMock) -> None:
         """Test repository dependency injection function.
 

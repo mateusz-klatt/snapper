@@ -96,6 +96,7 @@ from snapper.data.models import TradeProjectionCheckpoint
 from snapper.data.models import UnderlyingAsset
 from snapper.data.models import UserOperatorMembership
 from snapper.data.models import VenueEvent
+from snapper.data.models import Wallet
 from snapper.data.models import WalletCredential
 from snapper.data.models import WalletOperatorScopeGrant
 from snapper.data.repository_types import AccrualLedgerInsertRow
@@ -131,6 +132,7 @@ from snapper.data.repository_types import UserOperatorMembershipRow
 from snapper.data.repository_types import VenueEventInsertRow
 from snapper.data.repository_types import VenueEventRow
 from snapper.data.repository_types import WalletCredentialRow
+from snapper.data.repository_types import WalletRow
 
 __all__ = [
     "Repository",
@@ -1328,6 +1330,53 @@ class Repository(ABC):
 
         Returns:
             Active operator rows ordered by ``label`` ascending.
+        """
+        ...
+
+    @abstractmethod
+    async def list_active_wallets(self, as_of: datetime) -> list[WalletRow]:
+        """Return every active wallet at the given bus time.
+
+        Used by the Phase 0d wallet catalogue endpoint (ADMIN only —
+        non-admin callers must go through
+        ``list_accessible_wallets_for_operators`` so they only see
+        wallets covered by at least one of their active scope grants).
+
+        Args:
+            as_of: Bus time for the temporal query.
+
+        Returns:
+            Active wallet rows ordered by ``(is_paper, label)`` so the
+            default seed — one paper + one live wallet sharing the
+            ``default`` label — renders deterministically.
+        """
+        ...
+
+    @abstractmethod
+    async def list_accessible_wallets_for_operators(
+        self,
+        operator_public_ids: list[str],
+        as_of: datetime,
+    ) -> list[WalletRow]:
+        """Wallets covered by at least one active grant from the given operators.
+
+        Scoped variant of ``list_active_wallets`` for VIEWER / OPERATOR
+        principals. The result is the set union over all operator IDs:
+        a wallet is accessible if ANY of the principal's operators
+        holds an active ``wallet_operator_scope_grants`` row on it.
+        This matches the Phase 0d wallet picker contract: the picker
+        is filtered server-side to the wallets the current operator
+        can act on.
+
+        Args:
+            operator_public_ids: Principal's full operator ID set.
+                When empty, the method returns an empty list without
+                querying.
+            as_of: Bus time for the temporal query.
+
+        Returns:
+            Active wallet rows, deduplicated, ordered by
+            ``(is_paper, label)``. Empty list when no grants match.
         """
         ...
 
@@ -4392,6 +4441,56 @@ class SQLAlchemyRepository(Repository):
                 )
                 for row in result.scalars().all()
             ]
+
+    @staticmethod
+    def _wallet_row_from(wallet: Wallet) -> WalletRow:
+        """Project a ``Wallet`` ORM instance to its ``WalletRow`` TypedDict."""
+        return WalletRow(
+            public_id=wallet.public_id,
+            label=wallet.label,
+            description=wallet.description,
+            is_paper=bool(wallet.is_paper),
+            timestamp=wallet.timestamp,
+            session_id=wallet.session_id,
+            sequence_id=wallet.sequence_id,
+        )
+
+    async def list_active_wallets(self, as_of: datetime) -> list[WalletRow]:
+        """Return every active wallet at the given bus time."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(Wallet)
+                .where(*where_active(Wallet, as_of))
+                .order_by(Wallet.is_paper.asc(), Wallet.label.asc())
+            )
+            return [self._wallet_row_from(row) for row in result.scalars().all()]
+
+    async def list_accessible_wallets_for_operators(
+        self,
+        operator_public_ids: list[str],
+        as_of: datetime,
+    ) -> list[WalletRow]:
+        """Wallets covered by at least one active grant from the given operators."""
+        if not operator_public_ids:
+            return []
+        async with self.session() as s:
+            subquery = (
+                select(WalletOperatorScopeGrant.wallet_public_id)
+                .where(
+                    WalletOperatorScopeGrant.operator_public_id.in_(operator_public_ids),
+                    *where_active(WalletOperatorScopeGrant, as_of),
+                )
+                .distinct()
+            )
+            result = await s.execute(
+                select(Wallet)
+                .where(
+                    Wallet.public_id.in_(subquery),
+                    *where_active(Wallet, as_of),
+                )
+                .order_by(Wallet.is_paper.asc(), Wallet.label.asc())
+            )
+            return [self._wallet_row_from(row) for row in result.scalars().all()]
 
     async def get_user_operator_memberships(
         self,

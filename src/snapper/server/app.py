@@ -122,7 +122,6 @@ from snapper.core.types import RelationshipTypeEnum
 from snapper.core.types import SpawnerProcessStatus
 from snapper.data.repository import Repository
 from snapper.data.repository import dispose_repositories
-from snapper.data.repository import get_repository
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
 from snapper.interface.websocket.helpers import build_allowed_origins
 from snapper.messaging.infrastructure.gap_detector import GapDetectorStats
@@ -140,11 +139,15 @@ from snapper.messaging.schemas.data import SignalData
 from snapper.messaging.schemas.data import UnderlyingAssetData
 from snapper.messaging.schemas.data import UnderlyingInstrumentData
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
+from snapper.server.dependencies import get_repository_dependency
 from snapper.server.json_body import patch_openapi
+from snapper.server.operator_routes import router as operator_router
 from snapper.server.process_routes import router as process_router
 from snapper.server.provenance_middleware import ClientProvenanceMiddleware
 from snapper.server.rate_limiting import limiter
+from snapper.server.scope_grant_routes import router as scope_grant_router
 from snapper.server.strategy_routes import router as strategy_router
+from snapper.server.wallet_routes import router as wallet_router
 from snapper.utils.logging import set_log_context
 
 API_PREFIX = "/api"
@@ -175,16 +178,6 @@ def get_settings_dependency() -> AppSettings:
         Cached AppSettings instance (bootstrap only, no DB access).
     """
     return get_settings()
-
-
-def get_repository_dependency() -> Repository:
-    """FastAPI dependency for database repository.
-
-    Returns:
-        Repository instance for the configured database.
-    """
-    settings = get_settings()
-    return get_repository(settings.db_url)
 
 
 async def _initialize_settings_service(settings: AppSettings) -> SettingsService:
@@ -345,6 +338,9 @@ def create_app() -> FastAPI:
     app.include_router(settings_router, prefix=API_PREFIX)
     app.include_router(process_router, prefix=API_PREFIX)
     app.include_router(strategy_router, prefix=API_PREFIX)
+    app.include_router(wallet_router, prefix=API_PREFIX)
+    app.include_router(operator_router, prefix=API_PREFIX)
+    app.include_router(scope_grant_router, prefix=API_PREFIX)
     app.include_router(create_api_router(manager), prefix=API_PREFIX)
     app.include_router(create_authenticated_websocket_router(manager), prefix=API_PREFIX)
 

@@ -707,6 +707,26 @@ class OperatorRow(TypedDict):
     sequence_id: int
 
 
+class WalletRow(TypedDict):
+    """Row dict returned by wallet queries.
+
+    One row per active ``wallets`` SCD2 version. Exposes the label,
+    description, and paper flag so Phase 0d frontend pickers can
+    render the accessible wallet catalogue without a second lookup.
+    The encrypted credential payload lives on a separate table
+    (``wallet_credentials``) and is never co-returned with WalletRow
+    to keep the read surface free of sensitive data.
+    """
+
+    public_id: str
+    label: str
+    description: str | None
+    is_paper: bool
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+
+
 class UserOperatorMembershipRow(TypedDict):
     """Row dict returned by user-operator membership queries.
 
