@@ -722,6 +722,7 @@ class Repository(ABC):
         instrument: str | None = None,
         strategy: str | None = None,
         exchange: str | None = None,
+        wallet_public_ids: list[str] | None = None,
     ) -> list[SignalRow]:
         """Retrieve signals with optional filters.
 
@@ -732,6 +733,7 @@ class Repository(ABC):
             instrument: Optional native symbol filter.
             strategy: Optional strategy name filter.
             exchange: Optional exchange filter.
+            wallet_public_ids: Optional wallet scope filter.
 
         Returns:
             Signal dicts ordered by fired_at DESC, denormalized with
@@ -747,6 +749,7 @@ class Repository(ABC):
         as_of: datetime,
         symbol: str | None = None,
         exchange: str | None = None,
+        wallet_public_ids: list[str] | None = None,
     ) -> list[OrderRow]:
         """Retrieve orders with optional filters and pagination.
 
@@ -756,6 +759,10 @@ class Repository(ABC):
             as_of: Point-in-time for temporal query.
             symbol: Optional native symbol filter.
             exchange: Optional exchange filter.
+            wallet_public_ids: Optional wallet scope filter for Phase 0d
+                multi-tenant scoping. When ``None``, no wallet filter is
+                applied (ADMIN sees all). When a non-empty list, only
+                orders on the listed wallets are returned.
 
         Returns:
             Order dicts ordered by created_at DESC, denormalized with
@@ -764,12 +771,18 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    async def get_executions(self, limit: int, as_of: datetime) -> list[ExecutionRow]:
+    async def get_executions(
+        self,
+        limit: int,
+        as_of: datetime,
+        wallet_public_ids: list[str] | None = None,
+    ) -> list[ExecutionRow]:
         """Retrieve executions with order/instrument/symbol info.
 
         Args:
             limit: Maximum number of executions to return.
             as_of: Point-in-time for temporal query.
+            wallet_public_ids: Optional wallet scope filter.
 
         Returns:
             Execution dicts ordered by timestamp DESC, denormalized with
@@ -840,11 +853,16 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    async def get_positions(self, as_of: datetime) -> list[PositionRow]:
+    async def get_positions(
+        self,
+        as_of: datetime,
+        wallet_public_ids: list[str] | None = None,
+    ) -> list[PositionRow]:
         """Retrieve active positions with instrument/symbol info.
 
         Args:
             as_of: Point-in-time for temporal query.
+            wallet_public_ids: Optional wallet scope filter.
 
         Returns:
             Position dicts denormalized with instrument and symbol info.
@@ -2526,6 +2544,7 @@ class SQLAlchemyRepository(Repository):
         instrument: str | None = None,
         strategy: str | None = None,
         exchange: str | None = None,
+        wallet_public_ids: list[str] | None = None,
     ) -> list[SignalRow]:
         """Retrieve signals with optional filters."""
         async with self.session() as s:
@@ -2550,6 +2569,8 @@ class SQLAlchemyRepository(Repository):
                     *where_active(Signal, as_of),
                 )
             )
+            if wallet_public_ids is not None:
+                query = query.where(Signal.wallet_public_id.in_(wallet_public_ids))
             if instrument:
                 s_ts, s_kt = where_active(Symbol, as_of)
                 sym_subq = (
@@ -2591,6 +2612,7 @@ class SQLAlchemyRepository(Repository):
         as_of: datetime,
         symbol: str | None = None,
         exchange: str | None = None,
+        wallet_public_ids: list[str] | None = None,
     ) -> list[OrderRow]:
         """Retrieve orders with optional filters and pagination."""
         async with self.session() as s:
@@ -2612,6 +2634,8 @@ class SQLAlchemyRepository(Repository):
                 )
                 .where(*where_active(Order, as_of))
             )
+            if wallet_public_ids is not None:
+                query = query.where(Order.wallet_public_id.in_(wallet_public_ids))
             if symbol:
                 s_ts, s_kt = where_active(Symbol, as_of)
                 sym_subq = (
@@ -2654,7 +2678,12 @@ class SQLAlchemyRepository(Repository):
                 for order, inst, sym in result.all()
             ]
 
-    async def get_executions(self, limit: int, as_of: datetime) -> list[ExecutionRow]:
+    async def get_executions(
+        self,
+        limit: int,
+        as_of: datetime,
+        wallet_public_ids: list[str] | None = None,
+    ) -> list[ExecutionRow]:
         """Retrieve executions with order/instrument/symbol info."""
         async with self.session() as s:
             query = (
@@ -2681,9 +2710,10 @@ class SQLAlchemyRepository(Repository):
                     ),
                 )
                 .where(*where_active(Execution, as_of))
-                .order_by(desc(Execution.timestamp))
-                .limit(limit)
             )
+            if wallet_public_ids is not None:
+                query = query.where(Execution.wallet_public_id.in_(wallet_public_ids))
+            query = query.order_by(desc(Execution.timestamp)).limit(limit)
             result = await s.execute(query)
             return [
                 {
@@ -2847,7 +2877,11 @@ class SQLAlchemyRepository(Repository):
                 for exe, order, inst, sym in result.all()
             ]
 
-    async def get_positions(self, as_of: datetime) -> list[PositionRow]:
+    async def get_positions(
+        self,
+        as_of: datetime,
+        wallet_public_ids: list[str] | None = None,
+    ) -> list[PositionRow]:
         """Retrieve active positions with instrument/symbol info."""
         async with self.session() as s:
             query = (
@@ -2868,6 +2902,8 @@ class SQLAlchemyRepository(Repository):
                 )
                 .where(*where_active(Position, as_of))
             )
+            if wallet_public_ids is not None:
+                query = query.where(Position.wallet_public_id.in_(wallet_public_ids))
             result = await s.execute(query)
             return [
                 {

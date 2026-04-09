@@ -147,6 +147,7 @@ from snapper.server.process_routes import router as process_router
 from snapper.server.provenance_middleware import ClientProvenanceMiddleware
 from snapper.server.rate_limiting import limiter
 from snapper.server.scope_grant_routes import router as scope_grant_router
+from snapper.server.scoping import resolve_target_wallets
 from snapper.server.strategy_routes import router as strategy_router
 from snapper.server.wallet_routes import router as wallet_router
 from snapper.utils.logging import set_log_context
@@ -562,6 +563,8 @@ def _create_candles_signals_router() -> APIRouter:
         hours: Annotated[int, Query(le=168, description="Hours of history to return")] = 24,
         limit: Annotated[int, Query(le=1000, description="Number of signals to return")] = 100,
         as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
+        operator_public_id: Annotated[str | None, Query(description="Scope to operator")] = None,
+        wallet_public_id: Annotated[str | None, Query(description="Scope to wallet")] = None,
     ) -> SignalListResponse:
         """Fetch trading signals with optional filters.
 
@@ -576,12 +579,17 @@ def _create_candles_signals_router() -> APIRouter:
             hours: Hours of history to return.
             limit: Maximum number of signals to return.
             as_of: Optional point-in-time query timestamp.
+            operator_public_id: Optional operator scope (403 if foreign).
+            wallet_public_id: Optional wallet scope (403 if inaccessible).
 
         Returns:
             SignalListResponse wrapping the signal data.
         """
         processing_date = as_of or datetime.now(UTC)
         try:
+            target_wallets = await resolve_target_wallets(
+                _auth, repo, operator_public_id, wallet_public_id
+            )
             since = processing_date - timedelta(hours=hours)
             rows = await repo.get_signals(
                 since=since,
@@ -590,6 +598,7 @@ def _create_candles_signals_router() -> APIRouter:
                 instrument=instrument,
                 strategy=strategy,
                 exchange=exchange,
+                wallet_public_ids=target_wallets,
             )
             items = [SignalData(**cast(dict[str, Any], r)) for r in rows]
             tracker: SequenceTracker = request.app.state.rest_tracker
@@ -727,6 +736,8 @@ def _create_orders_executions_router() -> APIRouter:
         limit: Annotated[int, Query(ge=1, le=1000, description="Number of orders to return")] = 100,
         offset: Annotated[int, Query(ge=0, description="Number of orders to skip")] = 0,
         as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
+        operator_public_id: Annotated[str | None, Query(description="Scope to operator")] = None,
+        wallet_public_id: Annotated[str | None, Query(description="Scope to wallet")] = None,
     ) -> OrderListResponse:
         """Fetch orders with optional filters.
 
@@ -740,18 +751,24 @@ def _create_orders_executions_router() -> APIRouter:
             limit: Maximum number of orders to return.
             offset: Number of orders to skip.
             as_of: Optional point-in-time query timestamp.
+            operator_public_id: Optional operator scope (403 if foreign).
+            wallet_public_id: Optional wallet scope (403 if inaccessible).
 
         Returns:
             OrderListResponse wrapping the order data.
         """
         processing_date = as_of or datetime.now(UTC)
         try:
+            target_wallets = await resolve_target_wallets(
+                _auth, repo, operator_public_id, wallet_public_id
+            )
             rows = await repo.get_orders(
                 limit=limit,
                 offset=offset,
                 as_of=processing_date,
                 symbol=symbol,
                 exchange=exchange,
+                wallet_public_ids=target_wallets,
             )
             items = [OrderData(**cast(dict[str, Any], r)) for r in rows]
             tracker: SequenceTracker = request.app.state.rest_tracker
@@ -779,6 +796,8 @@ def _create_orders_executions_router() -> APIRouter:
         repo: Annotated[Repository, Depends(get_repository_dependency)],
         limit: Annotated[int, Query(le=1000, description="Number of executions to return")] = 100,
         as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
+        operator_public_id: Annotated[str | None, Query(description="Scope to operator")] = None,
+        wallet_public_id: Annotated[str | None, Query(description="Scope to wallet")] = None,
     ) -> ExecutionListResponse:
         """Fetch execution (fill) records.
 
@@ -789,13 +808,20 @@ def _create_orders_executions_router() -> APIRouter:
             repo: Database repository.
             limit: Maximum number of executions to return.
             as_of: Optional point-in-time query timestamp.
+            operator_public_id: Optional operator scope (403 if foreign).
+            wallet_public_id: Optional wallet scope (403 if inaccessible).
 
         Returns:
             ExecutionListResponse wrapping the execution data.
         """
         processing_date = as_of or datetime.now(UTC)
         try:
-            rows = await repo.get_executions(limit=limit, as_of=processing_date)
+            target_wallets = await resolve_target_wallets(
+                _auth, repo, operator_public_id, wallet_public_id
+            )
+            rows = await repo.get_executions(
+                limit=limit, as_of=processing_date, wallet_public_ids=target_wallets
+            )
             items = [
                 ExecutionData(
                     **{
@@ -830,6 +856,8 @@ def _create_orders_executions_router() -> APIRouter:
         _csrf: Annotated[None, Depends(validate_csrf_token)],
         repo: Annotated[Repository, Depends(get_repository_dependency)],
         as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
+        operator_public_id: Annotated[str | None, Query(description="Scope to operator")] = None,
+        wallet_public_id: Annotated[str | None, Query(description="Scope to wallet")] = None,
     ) -> PositionListResponse:
         """Fetch current portfolio positions.
 
@@ -839,13 +867,18 @@ def _create_orders_executions_router() -> APIRouter:
             _csrf: CSRF token validation.
             repo: Database repository.
             as_of: Optional point-in-time query timestamp.
+            operator_public_id: Optional operator scope (403 if foreign).
+            wallet_public_id: Optional wallet scope (403 if inaccessible).
 
         Returns:
             PositionListResponse wrapping the position data.
         """
         processing_date = as_of or datetime.now(UTC)
         try:
-            rows = await repo.get_positions(as_of=processing_date)
+            target_wallets = await resolve_target_wallets(
+                _auth, repo, operator_public_id, wallet_public_id
+            )
+            rows = await repo.get_positions(as_of=processing_date, wallet_public_ids=target_wallets)
             items = [PositionData(**cast(dict[str, Any], r)) for r in rows]
             tracker: SequenceTracker = request.app.state.rest_tracker
             sid = tracker.session_id

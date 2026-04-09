@@ -4830,3 +4830,179 @@ async def test_get_accruals_strict_lower_bound(tmp_path: Path) -> None:
         range_end=t2,
     )
     assert [row["accrued_at"] for row in rows] == [t2]
+
+
+@pytest.mark.asyncio
+async def test_get_orders_filters_by_wallet_public_ids(tmp_path: Path) -> None:
+    """Verify ``get_orders`` applies the ``wallet_public_ids`` filter.
+
+    Given: An order with ``wallet_public_id='w-1'``,
+    When: ``get_orders(wallet_public_ids=['w-other'])`` is called,
+    Then: The order is excluded from the result.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    await r.insert_order(
+        instrument_public_id=inst_pid,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
+        client_order_id="c1",
+        exchange_order_id="e1",
+        created_at=now,
+        side="buy",
+        order_type="limit",
+        price=50000.0,
+        size=1.0,
+        status="open",
+        session_id="s1",
+        sequence_id=20,
+        timestamp=now,
+    )
+    result = await r.get_orders(
+        limit=10,
+        offset=0,
+        as_of=now,
+        wallet_public_ids=["00000000-0000-7000-8000-fffffffffff9"],
+    )
+    assert len(result) == 0
+    result_matching = await r.get_orders(
+        limit=10,
+        offset=0,
+        as_of=now,
+        wallet_public_ids=["00000000-0000-7000-8000-000000000001"],
+    )
+    assert len(result_matching) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_signals_filters_by_wallet_public_ids(tmp_path: Path) -> None:
+    """Verify ``get_signals`` applies the ``wallet_public_ids`` filter.
+
+    Given: A signal inserted for a known wallet,
+    When: ``get_signals(wallet_public_ids=['other'])`` is called,
+    Then: The signal is excluded.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    async with r.session() as s:
+        s.add(
+            Signal(
+                instrument_public_id=inst_pid,
+                wallet_public_id="00000000-0000-7000-8000-000000000001",
+                strategy_name="test_strategy",
+                side="buy",
+                strength=0.8,
+                reason="test",
+                price=50000.0,
+                fired_at=now,
+                timestamp=now,
+                session_id="s1",
+                sequence_id=30,
+            )
+        )
+        await s.commit()
+    result = await r.get_signals(
+        since=now - timedelta(hours=1),
+        limit=10,
+        as_of=now,
+        wallet_public_ids=["00000000-0000-7000-8000-fffffffffff9"],
+    )
+    assert len(result) == 0
+    result_matching = await r.get_signals(
+        since=now - timedelta(hours=1),
+        limit=10,
+        as_of=now,
+        wallet_public_ids=["00000000-0000-7000-8000-000000000001"],
+    )
+    assert len(result_matching) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_executions_filters_by_wallet_public_ids(tmp_path: Path) -> None:
+    """Verify ``get_executions`` applies the ``wallet_public_ids`` filter.
+
+    Given: An execution for wallet w-1,
+    When: ``get_executions(wallet_public_ids=['other'])`` is called,
+    Then: The execution is excluded.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    await r.insert_order(
+        instrument_public_id=inst_pid,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
+        client_order_id="c-exec",
+        exchange_order_id="e-exec",
+        created_at=now,
+        side="buy",
+        order_type="limit",
+        price=50000.0,
+        size=1.0,
+        status="filled",
+        session_id="s1",
+        sequence_id=40,
+        timestamp=now,
+    )
+    orders = await r.get_orders(limit=1, offset=0, as_of=now)
+    order_pid = orders[0]["public_id"]
+    await r.insert_execution(
+        order_public_id=order_pid,
+        trade_id="t1",
+        side="buy",
+        size=1.0,
+        price=50000.0,
+        fee=0.1,
+        fee_asset="USD",
+        status="filled",
+        session_id="s1",
+        sequence_id=41,
+        timestamp=now,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
+    )
+    result = await r.get_executions(
+        limit=10,
+        as_of=now,
+        wallet_public_ids=["00000000-0000-7000-8000-fffffffffff9"],
+    )
+    assert len(result) == 0
+    result_matching = await r.get_executions(
+        limit=10,
+        as_of=now,
+        wallet_public_ids=["00000000-0000-7000-8000-000000000001"],
+    )
+    assert len(result_matching) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_positions_filters_by_wallet_public_ids(tmp_path: Path) -> None:
+    """Verify ``get_positions`` applies the ``wallet_public_ids`` filter.
+
+    Given: A position for wallet w-1,
+    When: ``get_positions(wallet_public_ids=['other'])`` is called,
+    Then: The position is excluded.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    async with r.session() as s:
+        s.add(
+            Position(
+                instrument_public_id=inst_pid,
+                wallet_public_id="00000000-0000-7000-8000-000000000001",
+                quantity=1.0,
+                average_price=50000.0,
+                unrealized_pnl=0.0,
+                realized_pnl=0.0,
+                timestamp=now,
+                session_id="s1",
+                sequence_id=50,
+            )
+        )
+        await s.commit()
+    result = await r.get_positions(
+        as_of=now,
+        wallet_public_ids=["00000000-0000-7000-8000-fffffffffff9"],
+    )
+    assert len(result) == 0
+    result_matching = await r.get_positions(
+        as_of=now,
+        wallet_public_ids=["00000000-0000-7000-8000-000000000001"],
+    )
+    assert len(result_matching) == 1
