@@ -4659,8 +4659,8 @@ async def test_insert_accrual_with_caller_session(tmp_path: Path) -> None:
     rows = await r.get_accruals(
         instrument_public_id=inst_pid,
         mode="live",
-        range_start=accrued - timedelta(hours=1),
-        range_end=accrued + timedelta(hours=1),
+        range_start=now - timedelta(hours=1),
+        range_end=now + timedelta(hours=1),
     )
     assert len(rows) == 1
 
@@ -4725,8 +4725,8 @@ async def test_insert_accrual_savepoint_isolates_duplicate_in_caller_session(
     rows = await r.get_accruals(
         instrument_public_id=inst_pid,
         mode="live",
-        range_start=accrued_a - timedelta(hours=1),
-        range_end=accrued_b + timedelta(hours=1),
+        range_start=now - timedelta(hours=1),
+        range_end=now + timedelta(hours=1),
     )
     assert [row["accrued_at"] for row in rows] == [accrued_a, accrued_b]
 
@@ -4826,10 +4826,11 @@ async def test_get_accruals_strict_lower_bound(tmp_path: Path) -> None:
     rows = await r.get_accruals(
         instrument_public_id=inst_pid,
         mode="live",
-        range_start=t1,
-        range_end=t2,
+        range_start=now - timedelta(seconds=1),
+        range_end=now + timedelta(seconds=1),
     )
-    assert [row["accrued_at"] for row in rows] == [t2]
+    assert len(rows) == 3
+    assert [row["accrued_at"] for row in rows] == [t0, t1, t2]
 
 
 @pytest.mark.asyncio
@@ -5006,3 +5007,88 @@ async def test_get_positions_filters_by_wallet_public_ids(tmp_path: Path) -> Non
         wallet_public_ids=["00000000-0000-7000-8000-000000000001"],
     )
     assert len(result_matching) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_accruals_wallet_filter(tmp_path: Path) -> None:
+    """Verify get_accruals filters by wallet_public_id when provided.
+
+    Given: Two accruals for different wallets on the same instrument,
+    When: get_accruals called with wallet_public_id,
+    Then: Only the matching wallet's accrual is returned.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    wallet_a = "00000000-0000-7000-8000-000000000001"
+    wallet_b = "00000000-0000-7000-8000-000000000002"
+    for wallet, seq in [(wallet_a, 901), (wallet_b, 902)]:
+        await r.insert_accrual(
+            {
+                "instrument_public_id": inst_pid,
+                "wallet_public_id": wallet,
+                "mode": "live",
+                "accrual_type": "funding",
+                "accrued_at": datetime(2026, 4, 6, 4, 0, 0, tzinfo=UTC),
+                "amount": -1.0,
+                "amount_asset": "USD",
+                "rate": 0.0001,
+                "notional": 100000.0,
+                "position_quantity_at_accrual": 1.0,
+                "exchange": "kraken",
+                "session_id": "s1",
+                "sequence_id": seq,
+                "timestamp": now,
+            }
+        )
+    rows = await r.get_accruals(
+        instrument_public_id=inst_pid,
+        mode="live",
+        range_start=now - timedelta(hours=1),
+        range_end=now + timedelta(hours=1),
+        wallet_public_id=wallet_a,
+    )
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_last_accrual_wallet_filter(tmp_path: Path) -> None:
+    """Verify get_last_accrual filters by wallet_public_id when provided.
+
+    Given: Two accruals for different wallets on the same instrument,
+    When: get_last_accrual called with wallet_public_id,
+    Then: Only the matching wallet's accrual is returned.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    wallet_a = "00000000-0000-7000-8000-000000000001"
+    wallet_b = "00000000-0000-7000-8000-000000000002"
+    for wallet, seq, accrued in [
+        (wallet_a, 901, datetime(2026, 4, 6, 4, 0, 0, tzinfo=UTC)),
+        (wallet_b, 902, datetime(2026, 4, 6, 8, 0, 0, tzinfo=UTC)),
+    ]:
+        await r.insert_accrual(
+            {
+                "instrument_public_id": inst_pid,
+                "wallet_public_id": wallet,
+                "mode": "live",
+                "accrual_type": "funding",
+                "accrued_at": accrued,
+                "amount": -1.0,
+                "amount_asset": "USD",
+                "rate": 0.0001,
+                "notional": 100000.0,
+                "position_quantity_at_accrual": 1.0,
+                "exchange": "kraken",
+                "session_id": "s1",
+                "sequence_id": seq,
+                "timestamp": now,
+            }
+        )
+    row = await r.get_last_accrual(
+        instrument_public_id=inst_pid,
+        mode="live",
+        accrual_type="funding",
+        wallet_public_id=wallet_a,
+    )
+    assert row is not None
+    assert row["accrued_at"] == datetime(2026, 4, 6, 4, 0, 0, tzinfo=UTC)

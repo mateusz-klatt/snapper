@@ -477,6 +477,7 @@ class TraderCoordinator(RegisterableProcess):
                             mode=mode_str,
                             range_start=checkpoint_at,
                             range_end=now,
+                            wallet_public_id=wallet_public_id,
                         )
                         if pending_accruals:
                             self.trade_service.replay_funding_accruals(shard_key, pending_accruals)
@@ -1424,7 +1425,10 @@ class TraderCoordinator(RegisterableProcess):
             return
         frequency_hours = spec["funding_frequency_hours"] or 4
         last_accrual = await self.repository.get_last_accrual(
-            instrument_public_id, engine.mode, accrual_type
+            instrument_public_id,
+            engine.mode,
+            accrual_type,
+            wallet_public_id=engine.wallet_public_id,
         )
         last_boundary = last_accrual["accrued_at"] if last_accrual else None
         boundaries = _compute_pending_boundaries(

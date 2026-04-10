@@ -1223,20 +1223,22 @@ class Repository(ABC):
         mode: str,
         range_start: datetime,
         range_end: datetime,
+        wallet_public_id: str = "",
     ) -> list[AccrualLedgerRow]:
         """Return accrual ledger rows in a half-open recovery window.
 
         Used by the funding accrual recovery path. The lower bound is
-        STRICT (``accrued_at > range_start``) so the boundary already
-        captured by the most recent checkpoint snapshot is not
-        re-applied; the upper bound is INCLUSIVE
-        (``accrued_at <= range_end``).
+        STRICT on ``timestamp`` (insertion bus-time, NOT ``accrued_at``)
+        so that late-arriving accruals inserted after a fill-triggered
+        checkpoint are still replayed. The upper bound is INCLUSIVE
+        (``timestamp <= range_end``).
 
         Args:
             instrument_public_id: Public ID of the instrument.
             mode: Trading mode (``live``, ``paper``, ``backtest``).
-            range_start: Strict lower bound on ``accrued_at``.
-            range_end: Inclusive upper bound on ``accrued_at``.
+            range_start: Strict lower bound on ``timestamp``.
+            range_end: Inclusive upper bound on ``timestamp``.
+            wallet_public_id: Wallet filter. Empty string matches all.
 
         Returns:
             Rows ordered by ``accrued_at`` ascending.
@@ -1249,6 +1251,7 @@ class Repository(ABC):
         instrument_public_id: str,
         mode: str,
         accrual_type: str,
+        wallet_public_id: str = "",
     ) -> AccrualLedgerRow | None:
         """Return the most recent accrual for an instrument and type.
 
@@ -1260,6 +1263,7 @@ class Repository(ABC):
             instrument_public_id: Public ID of the instrument.
             mode: Trading mode (``live``, ``paper``, ``backtest``).
             accrual_type: One of ``funding``, ``rollover``, ``borrow``.
+            wallet_public_id: Wallet filter. Empty string matches all.
 
         Returns:
             Most recent accrual row, or ``None`` if no accrual has been
@@ -3500,21 +3504,21 @@ class SQLAlchemyRepository(Repository):
         mode: str,
         range_start: datetime,
         range_end: datetime,
+        wallet_public_id: str = "",
     ) -> list[AccrualLedgerRow]:
-        """Replay-window query for accrual recovery (strict lower bound)."""
+        """Replay-window query keyed on insertion timestamp, not accrued_at."""
         async with self.session() as s:
             now = datetime.now(UTC)
-            stmt = (
-                select(AccrualLedger)
-                .where(
-                    AccrualLedger.instrument_public_id == instrument_public_id,
-                    AccrualLedger.mode == mode,
-                    AccrualLedger.accrued_at > range_start,
-                    AccrualLedger.accrued_at <= range_end,
-                    *where_active(AccrualLedger, now),
-                )
-                .order_by(AccrualLedger.accrued_at)
-            )
+            filters = [
+                AccrualLedger.instrument_public_id == instrument_public_id,
+                AccrualLedger.mode == mode,
+                AccrualLedger.timestamp > range_start,
+                AccrualLedger.timestamp <= range_end,
+                *where_active(AccrualLedger, now),
+            ]
+            if wallet_public_id:
+                filters.append(AccrualLedger.wallet_public_id == wallet_public_id)
+            stmt = select(AccrualLedger).where(*filters).order_by(AccrualLedger.accrued_at)
             result = await s.execute(stmt)
             return [self._accrual_row_to_dict(al) for al in result.scalars().all()]
 
@@ -3523,18 +3527,22 @@ class SQLAlchemyRepository(Repository):
         instrument_public_id: str,
         mode: str,
         accrual_type: str,
+        wallet_public_id: str = "",
     ) -> AccrualLedgerRow | None:
         """Return the most recent accrual for catch-up boundary computation."""
         async with self.session() as s:
             now = datetime.now(UTC)
+            filters = [
+                AccrualLedger.instrument_public_id == instrument_public_id,
+                AccrualLedger.mode == mode,
+                AccrualLedger.accrual_type == accrual_type,
+                *where_active(AccrualLedger, now),
+            ]
+            if wallet_public_id:
+                filters.append(AccrualLedger.wallet_public_id == wallet_public_id)
             stmt = (
                 select(AccrualLedger)
-                .where(
-                    AccrualLedger.instrument_public_id == instrument_public_id,
-                    AccrualLedger.mode == mode,
-                    AccrualLedger.accrual_type == accrual_type,
-                    *where_active(AccrualLedger, now),
-                )
+                .where(*filters)
                 .order_by(AccrualLedger.accrued_at.desc())
                 .limit(1)
             )
