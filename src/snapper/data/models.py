@@ -1530,7 +1530,7 @@ class InstrumentOrderCapability(TemporalMixin, Base):
     )
     instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     exchange: Mapped[str] = mapped_column(String(32), index=True)
-    supported_order_types: Mapped[JsonObject] = mapped_column(JSON)
+    supported_order_types: Mapped[list[str]] = mapped_column(JSON)
     supports_post_only: Mapped[bool] = mapped_column(Boolean, default=False)
     supports_reduce_only: Mapped[bool] = mapped_column(Boolean, default=False)
     supports_amend_in_place: Mapped[bool] = mapped_column(Boolean, default=False)

@@ -84,6 +84,11 @@ def upgrade() -> None:
         "instrument_order_capabilities",
         ["instrument_public_id"],
     )
+    op.create_index(
+        "ix_ioc_exchange",
+        "instrument_order_capabilities",
+        ["exchange"],
+    )
 
     op.create_table(
         "venue_fee_schedules",
