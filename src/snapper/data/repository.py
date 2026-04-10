@@ -4946,6 +4946,7 @@ class SQLAlchemyRepository(Repository):
                         )
                         .order_by(ExecutionPlanCheckpoint.checkpoint_at.desc())
                         .limit(1)
+                        .with_for_update()
                     )
                 )
                 .scalars()

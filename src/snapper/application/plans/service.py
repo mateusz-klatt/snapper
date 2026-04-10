@@ -66,6 +66,8 @@ class PlanExecutorService(RegisterableProcess):
         self.tracker = SequenceTracker()
         self.plans: dict[str, ExecutionPlanRow] = {}
         self.evaluators: dict[str, PlanEvaluator] = {}
+        self._watermarks: dict[str, int] = {}
+        self._last_tick_timestamps: dict[str, datetime | None] = {}
         self._running = False
 
     async def start(self) -> None:
@@ -101,6 +103,8 @@ class PlanExecutorService(RegisterableProcess):
             checkpoint = await self.repository.get_latest_plan_checkpoint(row["public_id"])
             if checkpoint is not None:
                 evaluator.restore_from_checkpoint(row, checkpoint["state"])
+                self._watermarks[row["public_id"]] = checkpoint["last_venue_event_id"]
+                self._last_tick_timestamps[row["public_id"]] = checkpoint["last_tick_timestamp"]
             self.plans[row["public_id"]] = row
             self.evaluators[row["public_id"]] = evaluator
         logger.info("Recovered {} plans from DB", len(self.plans))
@@ -128,11 +132,12 @@ class PlanExecutorService(RegisterableProcess):
                 await self.repository.insert_execution_plan_checkpoint(
                     plan_public_id=public_id,
                     state=state,
-                    last_venue_event_id=0,
+                    last_venue_event_id=self._watermarks.get(public_id, 0),
                     checkpoint_at=now,
                     session_id=self.tracker.session_id,
                     sequence_id=self.tracker.next_sequence("plan_checkpoints"),
                     bus_time=now,
+                    last_tick_timestamp=self._last_tick_timestamps.get(public_id),
                 )
             except Exception as exc:
                 logger.error("Failed to checkpoint plan {}: {}", public_id, exc)

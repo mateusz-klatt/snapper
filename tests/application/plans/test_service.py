@@ -154,6 +154,8 @@ class TestPlanExecutorService:
         service = PlanExecutorService()
         await service._recover_plans()
         assert "plan-1" in service.plans
+        assert service._watermarks["plan-1"] == 42
+        assert service._last_tick_timestamps["plan-1"] is None
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
