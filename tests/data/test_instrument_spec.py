@@ -9,6 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from snapper.application.updaters.symbols.base import PRESERVE_EXISTING
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
@@ -645,3 +646,66 @@ class TestUpdaterReviseHelper:
         assert row.rollover_rate_long is None
         assert row.rollover_rate_short is None
         assert row.max_funding_rate is None
+
+    def test_explicit_none_clears_existing_funding_fields(
+        self, sync_repo: tuple[DatabaseRepository, str]
+    ) -> None:
+        """Given seeded funding fields, When called with explicit None, Then cleared.
+
+        Verifies the sentinel protocol: ``PRESERVE_EXISTING`` (the
+        default) carries forward, but passing ``None`` explicitly
+        writes NULL, allowing the owning updater to revoke funding
+        metadata when the instrument loses its margin eligibility.
+        """
+        repo, ipid = sync_repo
+        ts1 = _ts()
+        ts2 = ts1 + timedelta(hours=1)
+        with repo.get_session() as session:
+            SymbolUpdaterService._revise_instrument_spec(
+                session=session,
+                instrument_public_id=ipid,
+                now=ts1,
+                session_id="s1",
+                sequence_id=1,
+                funding_type="spot_margin_rollover",
+                funding_frequency_hours=4,
+                rollover_rate_long=0.00025,
+                rollover_rate_short=0.00010,
+            )
+            session.commit()
+        with repo.get_session() as session:
+            SymbolUpdaterService._revise_instrument_spec(
+                session=session,
+                instrument_public_id=ipid,
+                now=ts2,
+                session_id="s1",
+                sequence_id=2,
+                instrument_kind="spot",
+                funding_type=None,
+                funding_frequency_hours=None,
+                rollover_rate_long=None,
+                rollover_rate_short=None,
+            )
+            session.commit()
+        with repo.get_session() as session:
+            row = DatabaseRepository.get_instrument_spec_sync(
+                session, ipid, ts2 + timedelta(seconds=1)
+            )
+        assert row is not None
+        assert row.funding_type is None
+        assert row.funding_frequency_hours is None
+        assert row.rollover_rate_long is None
+        assert row.rollover_rate_short is None
+        assert row.instrument_kind == "spot"
+
+
+class TestPreserveExistingSentinel:
+    """Tests for the PRESERVE_EXISTING sentinel object."""
+
+    def test_repr(self) -> None:
+        """Verify repr returns a readable string for debugging."""
+        assert repr(PRESERVE_EXISTING) == "PRESERVE_EXISTING"
+
+    def test_is_falsy_guard(self) -> None:
+        """Verify sentinel is truthy so it is distinguishable from None."""
+        assert PRESERVE_EXISTING

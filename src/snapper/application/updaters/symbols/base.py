@@ -50,6 +50,23 @@ from snapper.messaging.topics.builders import system_topic
 from snapper.utils.logging import set_log_context
 
 
+class _Preserve:
+    """Sentinel indicating a funding field should carry forward its existing value.
+
+    Use the module-level ``PRESERVE_EXISTING`` instance as the default
+    parameter value in ``_revise_instrument_spec``. Callers that omit a
+    funding field get carry-forward (safe for unaware updaters). Callers
+    that explicitly pass ``None`` clear the field to NULL.
+    """
+
+    def __repr__(self) -> str:
+        """Return a human-readable representation for debugging."""
+        return "PRESERVE_EXISTING"
+
+
+PRESERVE_EXISTING = _Preserve()
+
+
 class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
     """Base service for updating exchange symbol mappings in the database."""
 
@@ -411,48 +428,59 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         return str(inst.public_id)
 
     @staticmethod
+    def _resolve_one_funding_field[V](
+        value: V | _Preserve,
+        existing_value: V | None,
+    ) -> V | None:
+        """Resolve a single funding field using the sentinel protocol.
+
+        ``PRESERVE_EXISTING`` → carry forward the existing value.
+        ``None`` → write NULL (clear the field).
+        Any other value → write that value.
+
+        When there is no existing row, ``PRESERVE_EXISTING`` resolves
+        to ``None`` (no value to carry forward).
+        """
+        if isinstance(value, _Preserve):
+            return existing_value
+        return value
+
+    @staticmethod
     def _resolve_funding_fields(
         existing: InstrumentSpec | None,
-        funding_type: str | None,
-        funding_frequency_hours: int | None,
-        rollover_rate_long: float | None,
-        rollover_rate_short: float | None,
-        max_funding_rate: float | None,
+        funding_type: str | None | _Preserve,
+        funding_frequency_hours: int | None | _Preserve,
+        rollover_rate_long: float | None | _Preserve,
+        rollover_rate_short: float | None | _Preserve,
+        max_funding_rate: float | None | _Preserve,
     ) -> tuple[str | None, int | None, float | None, float | None, float | None]:
-        """Conditional carry-forward resolver for funding metadata fields.
+        """Resolve funding metadata fields using the sentinel protocol.
 
-        For each field the caller-provided value wins when not None;
-        otherwise the existing row's value is carried forward. This
-        lets one updater (e.g. Kraken Spot) seed funding metadata
-        without a later refresh by an unaware updater (e.g. Polygon
-        equities) clearing it on the next SCD2 revision. Each return
-        slot is statically typed to the underlying column type — no
-        dynamic ``getattr`` or ``Any`` slips into the carry-forward.
+        Three-way semantics per field:
+
+        - ``PRESERVE_EXISTING`` (the default for callers that omit the
+          argument): carry forward the existing row's value. Safe for
+          unaware updaters that should not clobber data seeded by
+          another updater.
+        - ``None``: write NULL — explicitly clears the field. Used
+          when the owning updater knows the instrument no longer has
+          this funding characteristic.
+        - Any concrete value: write that value.
 
         Returns a 5-tuple in the same order as the parameters.
         """
-        if existing is None:
-            return (
-                funding_type,
-                funding_frequency_hours,
-                rollover_rate_long,
-                rollover_rate_short,
-                max_funding_rate,
-            )
+        resolve = SymbolUpdaterService._resolve_one_funding_field
+        ex_funding_type = existing.funding_type if existing else None
+        ex_freq = existing.funding_frequency_hours if existing else None
+        ex_long = existing.rollover_rate_long if existing else None
+        ex_short = existing.rollover_rate_short if existing else None
+        ex_max = existing.max_funding_rate if existing else None
         return (
-            funding_type if funding_type is not None else existing.funding_type,
-            (
-                funding_frequency_hours
-                if funding_frequency_hours is not None
-                else existing.funding_frequency_hours
-            ),
-            (rollover_rate_long if rollover_rate_long is not None else existing.rollover_rate_long),
-            (
-                rollover_rate_short
-                if rollover_rate_short is not None
-                else existing.rollover_rate_short
-            ),
-            (max_funding_rate if max_funding_rate is not None else existing.max_funding_rate),
+            resolve(funding_type, ex_funding_type),
+            resolve(funding_frequency_hours, ex_freq),
+            resolve(rollover_rate_long, ex_long),
+            resolve(rollover_rate_short, ex_short),
+            resolve(max_funding_rate, ex_max),
         )
 
     @staticmethod
@@ -464,11 +492,11 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         sequence_id: int,
         expiry_at: datetime | None = None,
         instrument_kind: str | None = None,
-        funding_type: str | None = None,
-        funding_frequency_hours: int | None = None,
-        rollover_rate_long: float | None = None,
-        rollover_rate_short: float | None = None,
-        max_funding_rate: float | None = None,
+        funding_type: str | None | _Preserve = PRESERVE_EXISTING,
+        funding_frequency_hours: int | None | _Preserve = PRESERVE_EXISTING,
+        rollover_rate_long: float | None | _Preserve = PRESERVE_EXISTING,
+        rollover_rate_short: float | None | _Preserve = PRESERVE_EXISTING,
+        max_funding_rate: float | None | _Preserve = PRESERVE_EXISTING,
     ) -> None:
         """Merge spec fields into InstrumentSpec (sync).
 
@@ -481,10 +509,11 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
           them as parameters.
         - **Direct assignment** (``expiry_at``, ``instrument_kind``):
           always overwritten with the parameter value, even when None.
-        - **Conditional carry-forward** (the funding fields): resolved
-          via :meth:`_resolve_funding_fields` so that each field's
-          provided value wins when not None and the existing value is
-          carried forward otherwise.
+        - **Sentinel carry-forward** (the funding fields): resolved
+          via :meth:`_resolve_funding_fields`. ``PRESERVE_EXISTING``
+          (the default) carries forward the existing value;
+          ``None`` explicitly clears the field to NULL; any concrete
+          value overwrites.
 
         Args:
             session: SQLAlchemy sync session.
@@ -494,16 +523,20 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             sequence_id: Per-topic monotonic counter.
             expiry_at: Contract expiry timestamp (UTC), or None.
             instrument_kind: Product type string, or None.
-            funding_type: Funding model identifier, or None to keep
-                whatever the existing row carried.
+            funding_type: Funding model identifier, ``None`` to clear,
+                or ``PRESERVE_EXISTING`` to carry forward.
             funding_frequency_hours: Hours between accrual boundaries,
-                or None to carry forward.
+                ``None`` to clear, or ``PRESERVE_EXISTING`` to carry
+                forward.
             rollover_rate_long: Spot margin rollover rate per boundary
-                for long positions, or None to carry forward.
+                for long positions, ``None`` to clear, or
+                ``PRESERVE_EXISTING`` to carry forward.
             rollover_rate_short: Spot margin rollover rate per boundary
-                for short positions, or None to carry forward.
+                for short positions, ``None`` to clear, or
+                ``PRESERVE_EXISTING`` to carry forward.
             max_funding_rate: Per-boundary cap on perpetual funding
-                rate magnitude, or None to carry forward.
+                rate magnitude, ``None`` to clear, or
+                ``PRESERVE_EXISTING`` to carry forward.
         """
         existing = DatabaseRepository.get_instrument_spec_sync(
             session,

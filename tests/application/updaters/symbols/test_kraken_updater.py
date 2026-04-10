@@ -3356,7 +3356,6 @@ class TestKrakenSeedSpotRolloverRates:
             session.commit()
 
         with db_session_factory() as session:
-
             sym_row = session.query(Symbol).filter_by(native_symbol="ETH-USD").one()
             instrument_public_id = SymbolUpdaterService._ensure_instrument_identity(
                 session, sym_row.public_id, "kraken", now, session_id="test", sequence_id=2
@@ -3367,3 +3366,207 @@ class TestKrakenSeedSpotRolloverRates:
         with db_session_factory() as session:
             rates = session.query(FundingRate).filter(FundingRate.known_to == KNOWN_TO_MAX).all()
             assert len(rates) == 2
+
+
+class TestKrakenMarginToNonMarginTransition:
+    """Regression tests for margin=true -> margin=false updater transition.
+
+    Verifies that the sentinel carry-forward protocol and the
+    ``_deactivate_spot_rollover_rates`` helper work together to
+    cleanly revoke funding metadata when Kraken stops reporting a
+    pair as marginable.
+    """
+
+    @pytest.fixture
+    def updater(self) -> KrakenSymbolUpdaterService:
+        """Create updater instance for transition tests."""
+        with patch("snapper.config.settings.get_settings", return_value=_create_mock_settings()):
+            return KrakenSymbolUpdaterService()
+
+    @pytest.fixture
+    def db_session_factory(self) -> Generator[sessionmaker]:
+        """Create in-memory SQLite session factory with schema."""
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        try:
+            yield sessionmaker(bind=engine)
+        finally:
+            engine.dispose()
+
+    def test_margin_to_non_margin_clears_funding_spec(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
+    ) -> None:
+        """Verify InstrumentSpec funding fields are cleared on margin->non-margin.
+
+        Given: Pair was previously seeded as marginable,
+        When: _persist_rest_symbol called with margin='false',
+        Then: InstrumentSpec funding fields are NULL.
+        """
+        now = datetime.now(UTC)
+        with db_session_factory() as session:
+            sym = Symbol(
+                native_symbol="BTC-USD",
+                base="BTC",
+                quote="USD",
+                asset_type="crypto",
+                created_at=now,
+                timestamp=now,
+                session_id="test",
+                sequence_id=1,
+            )
+            session.add(sym)
+            session.flush()
+            margin_data: dict[str, Any] = {
+                "native_symbol": "BTC-USD",
+                "base_currency": "BTC",
+                "quote_currency": "USD",
+                "kraken_websocket_symbol": "BTC/USD",
+                "kraken_rest_symbol": "XXBTZUSD",
+                "ccxt_symbol": "BTC/USD",
+                "margin": "true",
+            }
+            updater._persist_rest_symbol(session, margin_data, sym.public_id, now)
+            session.commit()
+
+        with db_session_factory() as session:
+            spec = (
+                session.query(InstrumentSpec).filter(InstrumentSpec.known_to == KNOWN_TO_MAX).one()
+            )
+            assert spec.funding_type == "spot_margin_rollover"
+
+        later = datetime(2026, 6, 1, tzinfo=UTC)
+        with db_session_factory() as session:
+            sym_row = session.query(Symbol).filter_by(native_symbol="BTC-USD").one()
+            non_margin_data: dict[str, Any] = {
+                "native_symbol": "BTC-USD",
+                "base_currency": "BTC",
+                "quote_currency": "USD",
+                "kraken_websocket_symbol": "BTC/USD",
+                "kraken_rest_symbol": "XXBTZUSD",
+                "ccxt_symbol": "BTC/USD",
+                "margin": "false",
+            }
+            updater._persist_rest_symbol(session, non_margin_data, sym_row.public_id, later)
+            session.commit()
+
+        with db_session_factory() as session:
+            spec = (
+                session.query(InstrumentSpec).filter(InstrumentSpec.known_to == KNOWN_TO_MAX).one()
+            )
+            assert spec.funding_type is None
+            assert spec.funding_frequency_hours is None
+            assert spec.rollover_rate_long is None
+            assert spec.rollover_rate_short is None
+
+    def test_margin_to_non_margin_deactivates_funding_rate_rows(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
+    ) -> None:
+        """Verify FundingRate rows are closed on margin->non-margin transition.
+
+        Given: Pair was seeded with two active FundingRate rows,
+        When: _persist_rest_symbol called with margin='false',
+        Then: Active FundingRate rows closed, historical rows preserved.
+        """
+        now = datetime.now(UTC)
+        with db_session_factory() as session:
+            sym = Symbol(
+                native_symbol="ETH-USD",
+                base="ETH",
+                quote="USD",
+                asset_type="crypto",
+                created_at=now,
+                timestamp=now,
+                session_id="test",
+                sequence_id=1,
+            )
+            session.add(sym)
+            session.flush()
+            margin_data: dict[str, Any] = {
+                "native_symbol": "ETH-USD",
+                "base_currency": "ETH",
+                "quote_currency": "USD",
+                "kraken_websocket_symbol": "ETH/USD",
+                "kraken_rest_symbol": "XETHZUSD",
+                "ccxt_symbol": "ETH/USD",
+                "margin": "true",
+            }
+            updater._persist_rest_symbol(session, margin_data, sym.public_id, now)
+            session.commit()
+
+        with db_session_factory() as session:
+            active_rates = (
+                session.query(FundingRate).filter(FundingRate.known_to == KNOWN_TO_MAX).all()
+            )
+            assert len(active_rates) == 2
+
+        later = datetime(2026, 6, 1, tzinfo=UTC)
+        with db_session_factory() as session:
+            sym_row = session.query(Symbol).filter_by(native_symbol="ETH-USD").one()
+            non_margin_data: dict[str, Any] = {
+                "native_symbol": "ETH-USD",
+                "base_currency": "ETH",
+                "quote_currency": "USD",
+                "kraken_websocket_symbol": "ETH/USD",
+                "kraken_rest_symbol": "XETHZUSD",
+                "ccxt_symbol": "ETH/USD",
+                "margin": "false",
+            }
+            updater._persist_rest_symbol(session, non_margin_data, sym_row.public_id, later)
+            session.commit()
+
+        with db_session_factory() as session:
+            active_rates = (
+                session.query(FundingRate).filter(FundingRate.known_to == KNOWN_TO_MAX).all()
+            )
+            assert len(active_rates) == 0
+            all_rates = session.query(FundingRate).all()
+            assert len(all_rates) == 2
+
+    def test_non_margin_to_non_margin_is_noop(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
+    ) -> None:
+        """Verify repeated non-margin runs do not create spurious state.
+
+        Given: Pair was never marginable,
+        When: _persist_rest_symbol called with margin='false',
+        Then: No FundingRate rows, no funding spec fields.
+        """
+        now = datetime.now(UTC)
+        with db_session_factory() as session:
+            sym = Symbol(
+                native_symbol="FOO-USD",
+                base="FOO",
+                quote="USD",
+                asset_type="crypto",
+                created_at=now,
+                timestamp=now,
+                session_id="test",
+                sequence_id=1,
+            )
+            session.add(sym)
+            session.flush()
+            data: dict[str, Any] = {
+                "native_symbol": "FOO-USD",
+                "base_currency": "FOO",
+                "quote_currency": "USD",
+                "kraken_websocket_symbol": "FOO/USD",
+                "kraken_rest_symbol": "FOOUSD",
+                "ccxt_symbol": "FOO/USD",
+                "margin": "false",
+            }
+            updater._persist_rest_symbol(session, data, sym.public_id, now)
+            session.commit()
+
+        with db_session_factory() as session:
+            spec = (
+                session.query(InstrumentSpec).filter(InstrumentSpec.known_to == KNOWN_TO_MAX).one()
+            )
+            assert spec.funding_type is None
+            rates = session.query(FundingRate).all()
+            assert len(rates) == 0

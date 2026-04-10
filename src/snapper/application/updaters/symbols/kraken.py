@@ -13,6 +13,7 @@ from typing import Any
 from typing import cast
 
 from loguru import logger
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from snapper.application.process_manager.process_parameters import SymbolUpdaterParameters
@@ -768,7 +769,48 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             self._seed_spot_rollover_rates(
                 session, instrument_public_id, symbol_data["quote_currency"], now
             )
+        else:
+            self._deactivate_spot_rollover_rates(session, instrument_public_id, now)
         return created, updated
+
+    @staticmethod
+    def _deactivate_spot_rollover_rates(
+        session: Any,
+        instrument_public_id: str,
+        now: datetime,
+    ) -> int:
+        """Close active FundingRate rows for a pair that is no longer marginable.
+
+        Sets ``known_to = now`` on any active spot_margin_rollover rows
+        for this instrument. Returns the count of deactivated rows (0
+        when the pair was never marginable).
+
+        Args:
+            session: SQLAlchemy sync session.
+            instrument_public_id: Public ID of the instrument.
+            now: Current UTC timestamp used to close active rows.
+
+        Returns:
+            Number of rows deactivated.
+        """
+        stmt = select(FundingRate).where(
+            FundingRate.instrument_public_id == instrument_public_id,
+            FundingRate.exchange == ExchangeEnum.KRAKEN,
+            FundingRate.rate_type == "spot_margin_rollover",
+            FundingRate.timestamp <= now,
+            FundingRate.known_to > now,
+        )
+        active_rows = session.execute(stmt).scalars().all()
+        for row in active_rows:
+            row.known_to = now
+        if active_rows:
+            session.flush()
+            logger.debug(
+                "Deactivated {} spot rollover rate(s) for {}",
+                len(active_rows),
+                instrument_public_id,
+            )
+        return len(active_rows)
 
     def _seed_spot_rollover_rates(
         self,
