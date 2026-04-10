@@ -56,10 +56,13 @@ class KrakenSymbolRecord(_KrakenSymbolRequired, total=False):
 
     ccxt_symbol is str | None because tokenized asset pairs
     produce None from _extract_tokenized_pair().
+    margin is "true"/"false" string — present only for REST pairs
+    where CCXT market data exposes leverage_buy/leverage_sell.
     """
 
     asset_class: str
     ws_only: str
+    margin: str
     kraken_websocket_symbol: str
     kraken_rest_symbol: str
     ccxt_symbol: str | None

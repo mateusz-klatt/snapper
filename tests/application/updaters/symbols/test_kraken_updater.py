@@ -18,11 +18,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 
+from snapper.application.updaters.symbols.base import SymbolUpdaterService
+from snapper.application.updaters.symbols.kraken import SPOT_ROLLOVER_RATES_EPOCH
 from snapper.application.updaters.symbols.kraken import KrakenSymbolUpdaterService
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
+from snapper.data.models import FundingRate
+from snapper.data.models import InstrumentSpec
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
@@ -2974,3 +2978,392 @@ class TestKrakenPersistHelpers:
             assert cap.can_trade is True
             assert cap.can_market_data is True
             assert cap.reason is None
+
+
+class TestKrakenExtractCcxtMarginField:
+    """Test that _extract_ccxt_market_pair propagates margin flag from CCXT data."""
+
+    def test_margin_true_when_market_has_margin(self) -> None:
+        """Verify margin field is 'true' when CCXT market reports margin=True.
+
+        Given: CCXT market entry with margin=True,
+        When: _extract_ccxt_market_pair called,
+        Then: Result includes margin='true'.
+        """
+        market: dict[str, Any] = {
+            "id": "XXBTZUSD",
+            "info": {"base": "XXBT", "quote": "ZUSD"},
+            "margin": True,
+        }
+        result = KrakenSymbolUpdaterService._extract_ccxt_market_pair("BTC/USD", market)
+        assert result is not None
+        assert result["margin"] == "true"
+
+    def test_margin_false_when_market_has_no_margin(self) -> None:
+        """Verify margin field is 'false' when CCXT market reports margin=False.
+
+        Given: CCXT market entry with margin=False,
+        When: _extract_ccxt_market_pair called,
+        Then: Result includes margin='false'.
+        """
+        market: dict[str, Any] = {
+            "id": "FOOUSD",
+            "info": {"base": "FOO", "quote": "USD"},
+            "margin": False,
+        }
+        result = KrakenSymbolUpdaterService._extract_ccxt_market_pair("FOO/USD", market)
+        assert result is not None
+        assert result["margin"] == "false"
+
+    def test_margin_false_when_field_absent(self) -> None:
+        """Verify margin defaults to 'false' when CCXT market omits margin key.
+
+        Given: CCXT market entry without margin key,
+        When: _extract_ccxt_market_pair called,
+        Then: Result includes margin='false'.
+        """
+        market: dict[str, Any] = {
+            "id": "BARUSD",
+            "info": {"base": "BAR", "quote": "USD"},
+        }
+        result = KrakenSymbolUpdaterService._extract_ccxt_market_pair("BAR/USD", market)
+        assert result is not None
+        assert result["margin"] == "false"
+
+
+class TestKrakenBuildMappingsMarginField:
+    """Test that _build_mappings_from_rest threads margin through to mappings."""
+
+    @pytest.fixture
+    def updater(self) -> KrakenSymbolUpdaterService:
+        """Create updater for mapping tests."""
+        with patch("snapper.config.settings.get_settings", return_value=_create_mock_settings()):
+            return KrakenSymbolUpdaterService()
+
+    def test_margin_field_propagated_to_mapping(self, updater: KrakenSymbolUpdaterService) -> None:
+        """Verify margin field flows from pair_info into the final mapping dict.
+
+        Given: REST pair data with margin='true',
+        When: _build_mappings_from_rest called,
+        Then: Resulting mapping contains margin='true'.
+        """
+        rest_data: dict[str, dict[str, str]] = {
+            "XXBTZUSD": {
+                "base": "XXBT",
+                "quote": "ZUSD",
+                "ccxt_symbol": "BTC/USD",
+                "asset_class": "currency",
+                "margin": "true",
+            },
+        }
+        mappings, _ = updater._build_mappings_from_rest(rest_data)
+        assert "BTC-USD" in mappings
+        assert mappings["BTC-USD"]["margin"] == "true"
+
+    def test_margin_defaults_false_when_missing(self, updater: KrakenSymbolUpdaterService) -> None:
+        """Verify margin defaults to 'false' when absent from pair_info.
+
+        Given: REST pair data without margin key,
+        When: _build_mappings_from_rest called,
+        Then: Resulting mapping contains margin='false'.
+        """
+        rest_data: dict[str, dict[str, str]] = {
+            "FOOUSD": {
+                "base": "FOO",
+                "quote": "USD",
+                "ccxt_symbol": "FOO/USD",
+                "asset_class": "currency",
+            },
+        }
+        mappings, _ = updater._build_mappings_from_rest(rest_data)
+        assert "FOO-USD" in mappings
+        assert mappings["FOO-USD"]["margin"] == "false"
+
+
+class TestKrakenSpotMarginFunding:
+    """Test funding field propagation and FundingRate seeding for marginable pairs."""
+
+    @pytest.fixture
+    def updater(self) -> KrakenSymbolUpdaterService:
+        """Create updater instance for margin funding tests."""
+        with patch("snapper.config.settings.get_settings", return_value=_create_mock_settings()):
+            return KrakenSymbolUpdaterService()
+
+    @pytest.fixture
+    def db_session_factory(self) -> Generator[sessionmaker]:
+        """Create in-memory SQLite session factory with schema."""
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        try:
+            yield sessionmaker(bind=engine)
+        finally:
+            engine.dispose()
+
+    def _create_symbol_and_get_id(
+        self, session: Any, native_symbol: str, base: str, quote: str
+    ) -> str:
+        """Insert a Symbol row and return its public_id."""
+        now = datetime.now(UTC)
+        sym = Symbol(
+            native_symbol=native_symbol,
+            base=base,
+            quote=quote,
+            asset_type="crypto",
+            created_at=now,
+            timestamp=now,
+            session_id="test-session",
+            sequence_id=1,
+        )
+        session.add(sym)
+        session.flush()
+        return str(sym.public_id)
+
+    def test_persist_rest_margin_pair_sets_funding_spec(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
+    ) -> None:
+        """Verify _persist_rest_symbol sets funding metadata on InstrumentSpec for margin pairs.
+
+        Given: REST symbol data with margin='true',
+        When: _persist_rest_symbol called,
+        Then: InstrumentSpec has spot_margin_rollover funding fields populated.
+        """
+        now = datetime.now(UTC)
+        with db_session_factory() as session:
+            symbol_public_id = self._create_symbol_and_get_id(session, "BTC-USD", "BTC", "USD")
+            symbol_data: dict[str, Any] = {
+                "native_symbol": "BTC-USD",
+                "base_currency": "BTC",
+                "quote_currency": "USD",
+                "kraken_websocket_symbol": "BTC/USD",
+                "kraken_rest_symbol": "XXBTZUSD",
+                "ccxt_symbol": "BTC/USD",
+                "margin": "true",
+            }
+            updater._persist_rest_symbol(session, symbol_data, symbol_public_id, now)
+            session.commit()
+
+        with db_session_factory() as session:
+            spec = (
+                session.query(InstrumentSpec).filter(InstrumentSpec.known_to == KNOWN_TO_MAX).one()
+            )
+            assert spec.funding_type == "spot_margin_rollover"
+            assert spec.funding_frequency_hours == 4
+            assert spec.rollover_rate_long == pytest.approx(0.00025)
+            assert spec.rollover_rate_short == pytest.approx(0.00010)
+            assert spec.instrument_kind == "spot"
+
+    def test_persist_rest_margin_pair_seeds_funding_rate_rows(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
+    ) -> None:
+        """Verify _persist_rest_symbol seeds two FundingRate rows for margin pairs.
+
+        Given: REST symbol data with margin='true',
+        When: _persist_rest_symbol called,
+        Then: Two FundingRate rows created (long + short) with stable epoch.
+        """
+        now = datetime.now(UTC)
+        with db_session_factory() as session:
+            symbol_public_id = self._create_symbol_and_get_id(session, "BTC-USD", "BTC", "USD")
+            symbol_data: dict[str, Any] = {
+                "native_symbol": "BTC-USD",
+                "base_currency": "BTC",
+                "quote_currency": "USD",
+                "kraken_websocket_symbol": "BTC/USD",
+                "kraken_rest_symbol": "XXBTZUSD",
+                "ccxt_symbol": "BTC/USD",
+                "margin": "true",
+            }
+            updater._persist_rest_symbol(session, symbol_data, symbol_public_id, now)
+            session.commit()
+
+        with db_session_factory() as session:
+            rates = session.query(FundingRate).filter(FundingRate.known_to == KNOWN_TO_MAX).all()
+            assert len(rates) == 2
+            by_direction = {r.direction: r for r in rates}
+            assert "long" in by_direction
+            assert "short" in by_direction
+            long_rate = by_direction["long"]
+            assert long_rate.rate == pytest.approx(0.00025)
+            assert long_rate.rate_type == "spot_margin_rollover"
+            assert long_rate.source == "exchange_docs"
+            assert long_rate.effective_from == SPOT_ROLLOVER_RATES_EPOCH
+            assert long_rate.notional_asset == "USD"
+            short_rate = by_direction["short"]
+            assert short_rate.rate == pytest.approx(0.00010)
+
+    def test_persist_rest_non_margin_pair_no_funding(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
+    ) -> None:
+        """Verify _persist_rest_symbol does not set funding for non-margin pairs.
+
+        Given: REST symbol data with margin='false',
+        When: _persist_rest_symbol called,
+        Then: InstrumentSpec has no funding fields, no FundingRate rows.
+        """
+        now = datetime.now(UTC)
+        with db_session_factory() as session:
+            symbol_public_id = self._create_symbol_and_get_id(session, "FOO-USD", "FOO", "USD")
+            symbol_data: dict[str, Any] = {
+                "native_symbol": "FOO-USD",
+                "base_currency": "FOO",
+                "quote_currency": "USD",
+                "kraken_websocket_symbol": "FOO/USD",
+                "kraken_rest_symbol": "FOOUSD",
+                "ccxt_symbol": "FOO/USD",
+                "margin": "false",
+            }
+            updater._persist_rest_symbol(session, symbol_data, symbol_public_id, now)
+            session.commit()
+
+        with db_session_factory() as session:
+            spec = (
+                session.query(InstrumentSpec).filter(InstrumentSpec.known_to == KNOWN_TO_MAX).one()
+            )
+            assert spec.funding_type is None
+            assert spec.funding_frequency_hours is None
+            assert spec.rollover_rate_long is None
+            assert spec.rollover_rate_short is None
+            rates = session.query(FundingRate).all()
+            assert len(rates) == 0
+
+    def test_persist_rest_margin_absent_no_funding(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
+    ) -> None:
+        """Verify _persist_rest_symbol treats missing margin key as non-margin.
+
+        Given: REST symbol data without margin key,
+        When: _persist_rest_symbol called,
+        Then: No funding fields or FundingRate rows created.
+        """
+        now = datetime.now(UTC)
+        with db_session_factory() as session:
+            symbol_public_id = self._create_symbol_and_get_id(session, "BAR-USD", "BAR", "USD")
+            symbol_data: dict[str, Any] = {
+                "native_symbol": "BAR-USD",
+                "base_currency": "BAR",
+                "quote_currency": "USD",
+                "kraken_websocket_symbol": "BAR/USD",
+                "kraken_rest_symbol": "BARUSD",
+                "ccxt_symbol": "BAR/USD",
+            }
+            updater._persist_rest_symbol(session, symbol_data, symbol_public_id, now)
+            session.commit()
+
+        with db_session_factory() as session:
+            spec = (
+                session.query(InstrumentSpec).filter(InstrumentSpec.known_to == KNOWN_TO_MAX).one()
+            )
+            assert spec.funding_type is None
+            rates = session.query(FundingRate).all()
+            assert len(rates) == 0
+
+
+class TestKrakenSeedSpotRolloverRates:
+    """Test _seed_spot_rollover_rates idempotency and correctness."""
+
+    @pytest.fixture
+    def updater(self) -> KrakenSymbolUpdaterService:
+        """Create updater instance for seed tests."""
+        with patch("snapper.config.settings.get_settings", return_value=_create_mock_settings()):
+            return KrakenSymbolUpdaterService()
+
+    @pytest.fixture
+    def db_session_factory(self) -> Generator[sessionmaker]:
+        """Create in-memory SQLite session factory with schema."""
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        try:
+            yield sessionmaker(bind=engine)
+        finally:
+            engine.dispose()
+
+    def test_seed_creates_two_rows(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
+    ) -> None:
+        """Verify _seed_spot_rollover_rates creates exactly two FundingRate rows.
+
+        Given: Empty funding_rates table,
+        When: _seed_spot_rollover_rates called,
+        Then: One long and one short row inserted with stable epoch.
+        """
+        now = datetime.now(UTC)
+        with db_session_factory() as session:
+            sym = Symbol(
+                native_symbol="ETH-USD",
+                base="ETH",
+                quote="USD",
+                asset_type="crypto",
+                created_at=now,
+                timestamp=now,
+                session_id="test",
+                sequence_id=1,
+            )
+            session.add(sym)
+            session.flush()
+
+            instrument_public_id = SymbolUpdaterService._ensure_instrument_identity(
+                session, sym.public_id, "kraken", now, session_id="test", sequence_id=1
+            )
+            updater._seed_spot_rollover_rates(session, instrument_public_id, "USD", now)
+            session.commit()
+
+        with db_session_factory() as session:
+            rates = session.query(FundingRate).filter(FundingRate.known_to == KNOWN_TO_MAX).all()
+            assert len(rates) == 2
+            directions = {r.direction for r in rates}
+            assert directions == {"long", "short"}
+
+    def test_seed_idempotent_on_rerun(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
+    ) -> None:
+        """Verify _seed_spot_rollover_rates is idempotent on duplicate runs.
+
+        Given: FundingRate rows already seeded,
+        When: _seed_spot_rollover_rates called again,
+        Then: No new rows inserted (IntegrityError silently swallowed).
+        """
+        now = datetime.now(UTC)
+        with db_session_factory() as session:
+            sym = Symbol(
+                native_symbol="ETH-USD",
+                base="ETH",
+                quote="USD",
+                asset_type="crypto",
+                created_at=now,
+                timestamp=now,
+                session_id="test",
+                sequence_id=1,
+            )
+            session.add(sym)
+            session.flush()
+
+            instrument_public_id = SymbolUpdaterService._ensure_instrument_identity(
+                session, sym.public_id, "kraken", now, session_id="test", sequence_id=1
+            )
+            updater._seed_spot_rollover_rates(session, instrument_public_id, "USD", now)
+            session.commit()
+
+        with db_session_factory() as session:
+
+            sym_row = session.query(Symbol).filter_by(native_symbol="ETH-USD").one()
+            instrument_public_id = SymbolUpdaterService._ensure_instrument_identity(
+                session, sym_row.public_id, "kraken", now, session_id="test", sequence_id=2
+            )
+            updater._seed_spot_rollover_rates(session, instrument_public_id, "USD", now)
+            session.commit()
+
+        with db_session_factory() as session:
+            rates = session.query(FundingRate).filter(FundingRate.known_to == KNOWN_TO_MAX).all()
+            assert len(rates) == 2

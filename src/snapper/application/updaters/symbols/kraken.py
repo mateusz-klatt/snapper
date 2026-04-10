@@ -13,6 +13,7 @@ from typing import Any
 from typing import cast
 
 from loguru import logger
+from sqlalchemy.exc import IntegrityError
 
 from snapper.application.process_manager.process_parameters import SymbolUpdaterParameters
 from snapper.application.process_manager.registry import register_process
@@ -25,10 +26,16 @@ from snapper.core.types import ExchangeEnum
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
+from snapper.data.models import FundingRate
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.symbols.mapper import make_native_symbol
 
 _SEQ_KEY_CAPABILITIES = "capabilities"
+_SEQ_KEY_FUNDING = "funding_rates"
+
+_SPOT_ROLLOVER_RATE_LONG = 0.00025
+_SPOT_ROLLOVER_RATE_SHORT = 0.00010
+SPOT_ROLLOVER_RATES_EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 @register_process(
@@ -124,6 +131,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             "quote": quote,
             "ccxt_symbol": symbol,
             "asset_class": "currency",
+            "margin": "true" if market.get("margin") else "false",
         }
 
     @staticmethod
@@ -500,6 +508,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                 "base_currency": base_currency,
                 "quote_currency": quote_currency,
                 "asset_class": pair_info.get("asset_class", "currency"),
+                "margin": pair_info.get("margin", "false"),
             }
         return mappings, ws_symbols_to_verify
 
@@ -742,6 +751,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             session_id=sid,
             sequence_id=self._tracker.next_sequence("instruments"),
         )
+        is_margin = symbol_data.get("margin") == "true"
         self._revise_instrument_spec(
             session,
             instrument_public_id,
@@ -749,8 +759,65 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             session_id=sid,
             sequence_id=self._tracker.next_sequence("specs"),
             instrument_kind="spot",
+            funding_type="spot_margin_rollover" if is_margin else None,
+            funding_frequency_hours=4 if is_margin else None,
+            rollover_rate_long=_SPOT_ROLLOVER_RATE_LONG if is_margin else None,
+            rollover_rate_short=_SPOT_ROLLOVER_RATE_SHORT if is_margin else None,
         )
+        if is_margin:
+            self._seed_spot_rollover_rates(
+                session, instrument_public_id, symbol_data["quote_currency"], now
+            )
         return created, updated
+
+    def _seed_spot_rollover_rates(
+        self,
+        session: Any,
+        instrument_public_id: str,
+        quote_currency: str,
+        now: datetime,
+    ) -> None:
+        """Seed FundingRate rows for a marginable Kraken Spot pair.
+
+        Inserts one row per direction (long/short) with source
+        ``exchange_docs`` and a stable ``effective_from`` epoch so
+        re-runs are idempotent (the partial unique index catches
+        duplicates, which are silently swallowed via SAVEPOINT).
+
+        Args:
+            session: SQLAlchemy sync session.
+            instrument_public_id: Public ID of the instrument.
+            quote_currency: Quote asset for the notional_asset field.
+            now: Current UTC timestamp for the SCD2 temporal envelope.
+        """
+        sid = self._tracker.session_id
+        for direction, rate in (
+            ("long", _SPOT_ROLLOVER_RATE_LONG),
+            ("short", _SPOT_ROLLOVER_RATE_SHORT),
+        ):
+            obj = FundingRate(
+                instrument_public_id=instrument_public_id,
+                exchange=ExchangeEnum.KRAKEN,
+                rate_type="spot_margin_rollover",
+                direction=direction,
+                rate=rate,
+                notional_asset=quote_currency,
+                effective_from=SPOT_ROLLOVER_RATES_EPOCH,
+                source="exchange_docs",
+                session_id=sid,
+                sequence_id=self._tracker.next_sequence(_SEQ_KEY_FUNDING),
+                timestamp=now,
+            )
+            try:
+                with session.begin_nested():
+                    session.add(obj)
+                    session.flush()
+            except IntegrityError:
+                logger.debug(
+                    "Spot rollover rate already seeded for {} direction={}",
+                    instrument_public_id,
+                    direction,
+                )
 
     async def _update_database(self, symbols: list[dict[str, Any]]) -> None:
         """Persist symbol catalog and alias rows to the database.
