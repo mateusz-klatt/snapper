@@ -10,6 +10,8 @@ from datetime import datetime
 from typing import NotRequired
 from typing import TypedDict
 
+from snapper.core.json_types import JsonObject
+
 
 class CandleUpsertRow(TypedDict, total=False):
     """Row dict for upsert_candles.
@@ -788,6 +790,81 @@ class VenueFeeScheduleRow(TypedDict):
     taker_bps: float
     min_volume_30d: float | None
     currency: str
+
+
+class ExecutionPlanRow(TypedDict):
+    """Read projection for execution_plans queries."""
+
+    public_id: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+    plan_type: str
+    created_by_user_id: str | None
+    created_by_strategy: str | None
+    created_via: str
+    instrument_public_id: str
+    exchange: str
+    mode: str
+    shard_key: str
+    wallet_public_id: str
+    operator_public_id: str | None
+    total_quantity: float
+    filled_quantity: float
+    side: str
+    parent_plan_public_id: str | None
+    position_cycle_public_id: str | None
+    params: JsonObject
+    status: str
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    expires_at: datetime | None
+    cancel_requested_at: datetime | None
+    last_evaluated_at: datetime | None
+    last_error: str | None
+    idempotency_key: str | None
+
+
+class ExecutionPlanInsertRow(TypedDict, total=False):
+    """Insert params for insert_execution_plan."""
+
+    plan_type: str
+    created_by_user_id: str | None
+    created_by_strategy: str | None
+    created_via: str
+    instrument_public_id: str
+    exchange: str
+    mode: str
+    shard_key: str
+    wallet_public_id: str
+    operator_public_id: str | None
+    total_quantity: float
+    side: str
+    params: JsonObject
+    status: str
+    created_at: datetime
+    parent_plan_public_id: str | None
+    position_cycle_public_id: str | None
+    expires_at: datetime | None
+    idempotency_key: str | None
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+
+
+class ExecutionPlanCheckpointRow(TypedDict):
+    """Read projection for execution_plan_checkpoints queries."""
+
+    public_id: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+    plan_public_id: str
+    state: JsonObject
+    last_venue_event_id: int
+    last_tick_timestamp: datetime | None
+    checkpoint_at: datetime
 
 
 class CreateScopeGrantRequest(TypedDict):

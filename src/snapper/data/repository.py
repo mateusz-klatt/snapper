@@ -70,6 +70,7 @@ from sqlalchemy.orm import sessionmaker as sync_sessionmaker
 from sqlalchemy.pool import NullPool
 from sqlalchemy.pool import StaticPool
 
+from snapper.core.json_types import JsonObject
 from snapper.core.types import AllExchange
 from snapper.data.archive_symbols import resolve_archive_symbols
 from snapper.data.models import KNOWN_TO_MAX
@@ -77,6 +78,8 @@ from snapper.data.models import AccrualLedger
 from snapper.data.models import Base
 from snapper.data.models import Candle
 from snapper.data.models import Execution
+from snapper.data.models import ExecutionPlan
+from snapper.data.models import ExecutionPlanCheckpoint
 from snapper.data.models import FundingRate
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentOrderCapability
@@ -107,6 +110,9 @@ from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import CheckpointUpsertRow
 from snapper.data.repository_types import CreateScopeGrantRequest
+from snapper.data.repository_types import ExecutionPlanCheckpointRow
+from snapper.data.repository_types import ExecutionPlanInsertRow
+from snapper.data.repository_types import ExecutionPlanRow
 from snapper.data.repository_types import ExecutionRow
 from snapper.data.repository_types import FundingRateInsertRow
 from snapper.data.repository_types import FundingRateRow
@@ -1310,6 +1316,158 @@ class Repository(ABC):
 
         Returns:
             Fee schedule rows ordered by exchange, fee_tier.
+        """
+        ...
+
+    @abstractmethod
+    async def insert_execution_plan(
+        self,
+        row: ExecutionPlanInsertRow,
+    ) -> tuple[int, str]:
+        """Insert a new execution plan row.
+
+        Args:
+            row: Plan insert payload.
+
+        Returns:
+            Tuple of (id, public_id) for the new plan.
+        """
+        ...
+
+    @abstractmethod
+    async def get_execution_plan(
+        self,
+        public_id: str,
+        as_of: datetime,
+    ) -> ExecutionPlanRow | None:
+        """Retrieve a single execution plan by public_id.
+
+        Args:
+            public_id: Plan public identifier.
+            as_of: Point-in-time for temporal query.
+
+        Returns:
+            Plan row or None if not found.
+        """
+        ...
+
+    @abstractmethod
+    async def get_execution_plans(
+        self,
+        as_of: datetime,
+        status: str | None = None,
+        exchange: str | None = None,
+        mode: str | None = None,
+        wallet_public_ids: list[str] | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[ExecutionPlanRow]:
+        """Retrieve execution plans with optional filters.
+
+        Args:
+            as_of: Point-in-time for temporal query.
+            status: Optional status filter.
+            exchange: Optional exchange filter.
+            mode: Optional mode filter (live/paper).
+            wallet_public_ids: Optional wallet scope filter.
+            limit: Maximum number of plans to return.
+            offset: Number of plans to skip.
+
+        Returns:
+            Plan rows ordered by created_at DESC.
+        """
+        ...
+
+    @abstractmethod
+    async def update_execution_plan_status(
+        self,
+        public_id: str,
+        new_status: str,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+        filled_quantity: float | None = None,
+        last_error: str | None = None,
+        started_at: datetime | None = None,
+        completed_at: datetime | None = None,
+        cancel_requested_at: datetime | None = None,
+        last_evaluated_at: datetime | None = None,
+    ) -> int | None:
+        """SCD2 close-and-insert for plan status transition.
+
+        Args:
+            public_id: Plan public identifier.
+            new_status: New status value.
+            bus_time: Timestamp for SCD2 close and new row.
+            session_id: Producer session identifier.
+            sequence_id: Monotonic sequence counter.
+            filled_quantity: Updated fill quantity (if changed).
+            last_error: Error message (if failed).
+            started_at: When plan started evaluating.
+            completed_at: When plan completed.
+            cancel_requested_at: When cancel was requested.
+            last_evaluated_at: Last evaluation timestamp.
+
+        Returns:
+            New row id, or None if no active row found.
+        """
+        ...
+
+    @abstractmethod
+    async def get_active_execution_plans(
+        self,
+    ) -> list[ExecutionPlanRow]:
+        """Retrieve all plans with actionable status for executor startup.
+
+        Returns plans where status is one of: pending, armed, active,
+        paused, cancel_requested. Used by PlanExecutorService recovery.
+
+        Returns:
+            Plan rows ordered by created_at ASC.
+        """
+        ...
+
+    @abstractmethod
+    async def insert_execution_plan_checkpoint(
+        self,
+        plan_public_id: str,
+        state: JsonObject,
+        last_venue_event_id: int,
+        checkpoint_at: datetime,
+        session_id: str,
+        sequence_id: int,
+        bus_time: datetime,
+        last_tick_timestamp: datetime | None = None,
+    ) -> tuple[int, str]:
+        """Insert a new checkpoint for a plan (SCD2 close previous).
+
+        Args:
+            plan_public_id: Plan this checkpoint belongs to.
+            state: Evaluator-specific state snapshot.
+            last_venue_event_id: Watermark for replay.
+            checkpoint_at: When the checkpoint was taken.
+            session_id: Producer session identifier.
+            sequence_id: Monotonic sequence counter.
+            bus_time: Timestamp for SCD2 operations.
+            last_tick_timestamp: Most recent tick seen.
+
+        Returns:
+            Tuple of (id, public_id) for the new checkpoint.
+        """
+        ...
+
+    @abstractmethod
+    async def get_latest_plan_checkpoint(
+        self,
+        plan_public_id: str,
+    ) -> ExecutionPlanCheckpointRow | None:
+        """Return the most recent active checkpoint for a plan.
+
+        Args:
+            plan_public_id: Plan to query.
+
+        Returns:
+            Checkpoint row or None if no checkpoint exists.
         """
         ...
 
@@ -4544,6 +4702,307 @@ class SQLAlchemyRepository(Repository):
                 )
                 for row in result.scalars().all()
             ]
+
+    @staticmethod
+    def _plan_row_to_dict(p: ExecutionPlan) -> ExecutionPlanRow:
+        """Project an ExecutionPlan ORM row into the TypedDict shape."""
+        return ExecutionPlanRow(
+            public_id=p.public_id,
+            timestamp=p.timestamp,
+            session_id=p.session_id,
+            sequence_id=p.sequence_id,
+            plan_type=p.plan_type,
+            created_by_user_id=p.created_by_user_id,
+            created_by_strategy=p.created_by_strategy,
+            created_via=p.created_via,
+            instrument_public_id=p.instrument_public_id,
+            exchange=p.exchange,
+            mode=p.mode,
+            shard_key=p.shard_key,
+            wallet_public_id=p.wallet_public_id,
+            operator_public_id=p.operator_public_id,
+            total_quantity=p.total_quantity,
+            filled_quantity=p.filled_quantity,
+            side=p.side,
+            parent_plan_public_id=p.parent_plan_public_id,
+            position_cycle_public_id=p.position_cycle_public_id,
+            params=p.params,
+            status=p.status,
+            created_at=p.created_at,
+            started_at=p.started_at,
+            completed_at=p.completed_at,
+            expires_at=p.expires_at,
+            cancel_requested_at=p.cancel_requested_at,
+            last_evaluated_at=p.last_evaluated_at,
+            last_error=p.last_error,
+            idempotency_key=p.idempotency_key,
+        )
+
+    async def insert_execution_plan(
+        self,
+        row: ExecutionPlanInsertRow,
+    ) -> tuple[int, str]:
+        """Insert a new execution plan row."""
+        async with self.session() as s:
+            plan = ExecutionPlan(
+                plan_type=row["plan_type"],
+                created_by_user_id=row.get("created_by_user_id"),
+                created_by_strategy=row.get("created_by_strategy"),
+                created_via=row["created_via"],
+                instrument_public_id=row["instrument_public_id"],
+                exchange=row["exchange"],
+                mode=row["mode"],
+                shard_key=row["shard_key"],
+                wallet_public_id=row["wallet_public_id"],
+                operator_public_id=row.get("operator_public_id"),
+                total_quantity=row["total_quantity"],
+                side=row["side"],
+                params=row["params"],
+                status=row["status"],
+                created_at=row["created_at"],
+                parent_plan_public_id=row.get("parent_plan_public_id"),
+                position_cycle_public_id=row.get("position_cycle_public_id"),
+                expires_at=row.get("expires_at"),
+                idempotency_key=row.get("idempotency_key"),
+                session_id=row["session_id"],
+                sequence_id=row["sequence_id"],
+                timestamp=row["timestamp"],
+            )
+            s.add(plan)
+            await s.commit()
+            await s.refresh(plan)
+            return plan.id, plan.public_id
+
+    async def get_execution_plan(
+        self,
+        public_id: str,
+        as_of: datetime,
+    ) -> ExecutionPlanRow | None:
+        """Retrieve a single execution plan by public_id."""
+        async with self.session() as s:
+            stmt = select(ExecutionPlan).where(
+                ExecutionPlan.public_id == public_id,
+                *where_active(ExecutionPlan, as_of),
+            )
+            result = await s.execute(stmt)
+            row = result.scalars().first()
+            if row is None:
+                return None
+            return self._plan_row_to_dict(row)
+
+    async def get_execution_plans(
+        self,
+        as_of: datetime,
+        status: str | None = None,
+        exchange: str | None = None,
+        mode: str | None = None,
+        wallet_public_ids: list[str] | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[ExecutionPlanRow]:
+        """Retrieve execution plans with optional filters."""
+        async with self.session() as s:
+            filters: list[Any] = [*where_active(ExecutionPlan, as_of)]
+            if status is not None:
+                filters.append(ExecutionPlan.status == status)
+            if exchange is not None:
+                filters.append(ExecutionPlan.exchange == exchange)
+            if mode is not None:
+                filters.append(ExecutionPlan.mode == mode)
+            if wallet_public_ids is not None:
+                filters.append(ExecutionPlan.wallet_public_id.in_(wallet_public_ids))
+            stmt = (
+                select(ExecutionPlan)
+                .where(*filters)
+                .order_by(ExecutionPlan.created_at.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+            result = await s.execute(stmt)
+            return [self._plan_row_to_dict(p) for p in result.scalars().all()]
+
+    async def update_execution_plan_status(
+        self,
+        public_id: str,
+        new_status: str,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+        filled_quantity: float | None = None,
+        last_error: str | None = None,
+        started_at: datetime | None = None,
+        completed_at: datetime | None = None,
+        cancel_requested_at: datetime | None = None,
+        last_evaluated_at: datetime | None = None,
+    ) -> int | None:
+        """SCD2 close-and-insert for plan status transition."""
+        async with self.session() as s:
+            existing = (
+                (
+                    await s.execute(
+                        select(ExecutionPlan)
+                        .where(
+                            ExecutionPlan.public_id == public_id,
+                            *where_active(ExecutionPlan, bus_time),
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if existing is None:
+                return None
+            await s.execute(
+                update(ExecutionPlan)
+                .where(ExecutionPlan.id == existing.id)
+                .values(known_to=bus_time)
+            )
+            new_plan = ExecutionPlan(
+                public_id=existing.public_id,
+                plan_type=existing.plan_type,
+                created_by_user_id=existing.created_by_user_id,
+                created_by_strategy=existing.created_by_strategy,
+                created_via=existing.created_via,
+                instrument_public_id=existing.instrument_public_id,
+                exchange=existing.exchange,
+                mode=existing.mode,
+                shard_key=existing.shard_key,
+                wallet_public_id=existing.wallet_public_id,
+                operator_public_id=existing.operator_public_id,
+                total_quantity=existing.total_quantity,
+                filled_quantity=(
+                    filled_quantity if filled_quantity is not None else existing.filled_quantity
+                ),
+                side=existing.side,
+                parent_plan_public_id=existing.parent_plan_public_id,
+                position_cycle_public_id=existing.position_cycle_public_id,
+                params=existing.params,
+                status=new_status,
+                created_at=existing.created_at,
+                started_at=(started_at if started_at is not None else existing.started_at),
+                completed_at=(completed_at if completed_at is not None else existing.completed_at),
+                expires_at=existing.expires_at,
+                cancel_requested_at=(
+                    cancel_requested_at
+                    if cancel_requested_at is not None
+                    else existing.cancel_requested_at
+                ),
+                last_evaluated_at=(
+                    last_evaluated_at
+                    if last_evaluated_at is not None
+                    else existing.last_evaluated_at
+                ),
+                last_error=last_error,
+                idempotency_key=existing.idempotency_key,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=bus_time,
+            )
+            s.add(new_plan)
+            await s.commit()
+            await s.refresh(new_plan)
+            return new_plan.id
+
+    _ACTIONABLE_STATUSES = ("pending", "armed", "active", "paused", "cancel_requested")
+
+    async def get_active_execution_plans(
+        self,
+    ) -> list[ExecutionPlanRow]:
+        """Retrieve all plans with actionable status for executor startup."""
+        async with self.session() as s:
+            now = datetime.now(UTC)
+            stmt = (
+                select(ExecutionPlan)
+                .where(
+                    ExecutionPlan.status.in_(self._ACTIONABLE_STATUSES),
+                    *where_active(ExecutionPlan, now),
+                )
+                .order_by(ExecutionPlan.created_at)
+            )
+            result = await s.execute(stmt)
+            return [self._plan_row_to_dict(p) for p in result.scalars().all()]
+
+    async def insert_execution_plan_checkpoint(
+        self,
+        plan_public_id: str,
+        state: JsonObject,
+        last_venue_event_id: int,
+        checkpoint_at: datetime,
+        session_id: str,
+        sequence_id: int,
+        bus_time: datetime,
+        last_tick_timestamp: datetime | None = None,
+    ) -> tuple[int, str]:
+        """Insert a new checkpoint for a plan (SCD2 close previous)."""
+        async with self.session() as s:
+            prev = (
+                (
+                    await s.execute(
+                        select(ExecutionPlanCheckpoint)
+                        .where(
+                            ExecutionPlanCheckpoint.plan_public_id == plan_public_id,
+                            *where_active(ExecutionPlanCheckpoint, bus_time),
+                        )
+                        .order_by(ExecutionPlanCheckpoint.checkpoint_at.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if prev is not None:
+                await s.execute(
+                    update(ExecutionPlanCheckpoint)
+                    .where(ExecutionPlanCheckpoint.id == prev.id)
+                    .values(known_to=bus_time)
+                )
+            cp = ExecutionPlanCheckpoint(
+                plan_public_id=plan_public_id,
+                state=state,
+                last_venue_event_id=last_venue_event_id,
+                last_tick_timestamp=last_tick_timestamp,
+                checkpoint_at=checkpoint_at,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=bus_time,
+            )
+            s.add(cp)
+            await s.commit()
+            await s.refresh(cp)
+            return cp.id, cp.public_id
+
+    async def get_latest_plan_checkpoint(
+        self,
+        plan_public_id: str,
+    ) -> ExecutionPlanCheckpointRow | None:
+        """Return the most recent active checkpoint for a plan."""
+        async with self.session() as s:
+            now = datetime.now(UTC)
+            stmt = (
+                select(ExecutionPlanCheckpoint)
+                .where(
+                    ExecutionPlanCheckpoint.plan_public_id == plan_public_id,
+                    *where_active(ExecutionPlanCheckpoint, now),
+                )
+                .order_by(ExecutionPlanCheckpoint.checkpoint_at.desc())
+                .limit(1)
+            )
+            result = await s.execute(stmt)
+            row = result.scalars().first()
+            if row is None:
+                return None
+            return ExecutionPlanCheckpointRow(
+                public_id=row.public_id,
+                timestamp=row.timestamp,
+                session_id=row.session_id,
+                sequence_id=row.sequence_id,
+                plan_public_id=row.plan_public_id,
+                state=row.state,
+                last_venue_event_id=row.last_venue_event_id,
+                last_tick_timestamp=row.last_tick_timestamp,
+                checkpoint_at=row.checkpoint_at,
+            )
 
     async def create_scope_grant(self, request: CreateScopeGrantRequest) -> ScopeGrantRow:
         """Create a new scope grant with advisory-locked overlap detection."""

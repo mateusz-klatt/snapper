@@ -5399,3 +5399,283 @@ async def test_get_venue_fee_schedules_temporal_filter(tmp_path: Path) -> None:
     rows = await r.get_venue_fee_schedules(as_of=t2)
     assert len(rows) == 1
     assert rows[0]["fee_tier"] == "current"
+
+
+@pytest.mark.asyncio
+async def test_insert_and_get_execution_plan(tmp_path: Path) -> None:
+    """Given an inserted plan, When querying by public_id, Then row returned."""
+    db_path = tmp_path / "plans.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _id, pid = await r.insert_execution_plan(
+        {
+            "plan_type": "manual_once",
+            "created_by_user_id": "user-1",
+            "created_via": "ui",
+            "instrument_public_id": "inst-1",
+            "exchange": "kraken",
+            "mode": "live",
+            "shard_key": "kraken:BTC-USD:live",
+            "wallet_public_id": "wallet-1",
+            "total_quantity": 0.5,
+            "side": "buy",
+            "params": {"order_type": "limit", "price": 50000.0},
+            "status": "pending",
+            "created_at": now,
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+        }
+    )
+    assert _id > 0
+    assert pid
+    row = await r.get_execution_plan(pid, as_of=now)
+    assert row is not None
+    assert row["plan_type"] == "manual_once"
+    assert row["status"] == "pending"
+    assert row["total_quantity"] == 0.5
+
+
+@pytest.mark.asyncio
+async def test_get_execution_plans_with_filters(tmp_path: Path) -> None:
+    """Given multiple plans, When filtering, Then correct subset returned."""
+    db_path = tmp_path / "plans_filter.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    for i, status in enumerate(("pending", "active", "completed")):
+        await r.insert_execution_plan(
+            {
+                "plan_type": "manual_once",
+                "created_by_user_id": "user-1",
+                "created_via": "ui",
+                "instrument_public_id": "inst-1",
+                "exchange": "kraken",
+                "mode": "live",
+                "shard_key": "kraken:BTC-USD:live",
+                "wallet_public_id": "wallet-1",
+                "total_quantity": 1.0,
+                "side": "buy",
+                "params": {},
+                "status": status,
+                "created_at": now,
+                "session_id": "s1",
+                "sequence_id": i + 1,
+                "timestamp": now,
+            }
+        )
+    rows = await r.get_execution_plans(as_of=now, status="active")
+    assert len(rows) == 1
+    assert rows[0]["status"] == "active"
+    all_rows = await r.get_execution_plans(as_of=now)
+    assert len(all_rows) == 3
+
+
+@pytest.mark.asyncio
+async def test_update_execution_plan_status_scd2(tmp_path: Path) -> None:
+    """Given an active plan, When updating status, Then SCD2 versioning applied."""
+    db_path = tmp_path / "plans_scd2.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _id, pid = await r.insert_execution_plan(
+        {
+            "plan_type": "manual_once",
+            "created_by_user_id": "user-1",
+            "created_via": "ui",
+            "instrument_public_id": "inst-1",
+            "exchange": "kraken",
+            "mode": "live",
+            "shard_key": "kraken:BTC-USD:live",
+            "wallet_public_id": "wallet-1",
+            "total_quantity": 1.0,
+            "side": "buy",
+            "params": {},
+            "status": "pending",
+            "created_at": now,
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+        }
+    )
+    later = datetime(2026, 6, 1, tzinfo=UTC)
+    new_id = await r.update_execution_plan_status(
+        public_id=pid,
+        new_status="active",
+        bus_time=later,
+        session_id="s2",
+        sequence_id=2,
+        started_at=later,
+    )
+    assert new_id is not None
+    assert new_id != _id
+    row = await r.get_execution_plan(pid, as_of=later)
+    assert row is not None
+    assert row["status"] == "active"
+    assert row["started_at"] == later
+
+
+@pytest.mark.asyncio
+async def test_update_execution_plan_status_not_found(tmp_path: Path) -> None:
+    """Given no matching plan, When updating, Then None returned."""
+    db_path = tmp_path / "plans_notfound.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    result = await r.update_execution_plan_status(
+        public_id="nonexistent",
+        new_status="active",
+        bus_time=datetime.now(UTC),
+        session_id="s1",
+        sequence_id=1,
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_active_execution_plans(tmp_path: Path) -> None:
+    """Given plans with various statuses, When querying active, Then only actionable returned."""
+    db_path = tmp_path / "plans_active.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    for i, status in enumerate(("pending", "active", "completed", "cancelled", "armed")):
+        await r.insert_execution_plan(
+            {
+                "plan_type": "manual_once",
+                "created_by_user_id": "user-1",
+                "created_via": "ui",
+                "instrument_public_id": "inst-1",
+                "exchange": "kraken",
+                "mode": "live",
+                "shard_key": "kraken:BTC-USD:live",
+                "wallet_public_id": "wallet-1",
+                "total_quantity": 1.0,
+                "side": "buy",
+                "params": {},
+                "status": status,
+                "created_at": now,
+                "session_id": "s1",
+                "sequence_id": i + 1,
+                "timestamp": now,
+            }
+        )
+    rows = await r.get_active_execution_plans()
+    statuses = {row["status"] for row in rows}
+    assert statuses == {"pending", "active", "armed"}
+    assert "completed" not in statuses
+    assert "cancelled" not in statuses
+
+
+@pytest.mark.asyncio
+async def test_insert_and_get_plan_checkpoint(tmp_path: Path) -> None:
+    """Given a plan, When inserting checkpoints, Then latest is returned."""
+    db_path = tmp_path / "plans_cp.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _id, pid = await r.insert_execution_plan(
+        {
+            "plan_type": "manual_once",
+            "created_by_user_id": "user-1",
+            "created_via": "ui",
+            "instrument_public_id": "inst-1",
+            "exchange": "kraken",
+            "mode": "live",
+            "shard_key": "kraken:BTC-USD:live",
+            "wallet_public_id": "wallet-1",
+            "total_quantity": 1.0,
+            "side": "buy",
+            "params": {},
+            "status": "active",
+            "created_at": now,
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+        }
+    )
+    t1 = datetime(2026, 4, 10, 12, 0, 0, tzinfo=UTC)
+    t2 = datetime(2026, 4, 10, 12, 0, 10, tzinfo=UTC)
+    await r.insert_execution_plan_checkpoint(
+        plan_public_id=pid,
+        state={"version": 1},
+        last_venue_event_id=10,
+        checkpoint_at=t1,
+        session_id="s1",
+        sequence_id=2,
+        bus_time=t1,
+    )
+    await r.insert_execution_plan_checkpoint(
+        plan_public_id=pid,
+        state={"version": 2},
+        last_venue_event_id=20,
+        checkpoint_at=t2,
+        session_id="s1",
+        sequence_id=3,
+        bus_time=t2,
+    )
+    cp = await r.get_latest_plan_checkpoint(pid)
+    assert cp is not None
+    assert cp["state"]["version"] == 2
+    assert cp["last_venue_event_id"] == 20
+
+
+@pytest.mark.asyncio
+async def test_get_latest_plan_checkpoint_none(tmp_path: Path) -> None:
+    """Given no checkpoints, When querying, Then None returned."""
+    db_path = tmp_path / "plans_cp_none.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    result = await r.get_latest_plan_checkpoint("nonexistent-plan")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_execution_plan_not_found(tmp_path: Path) -> None:
+    """Given no matching plan, When querying by public_id, Then None returned."""
+    db_path = tmp_path / "plans_notfound2.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    result = await r.get_execution_plan("nonexistent", as_of=datetime.now(UTC))
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_execution_plans_exchange_mode_wallet_filters(tmp_path: Path) -> None:
+    """Given plans, When filtering by exchange/mode/wallet, Then branches covered."""
+    db_path = tmp_path / "plans_branches.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    await r.insert_execution_plan(
+        {
+            "plan_type": "manual_once",
+            "created_by_user_id": "user-1",
+            "created_via": "ui",
+            "instrument_public_id": "inst-1",
+            "exchange": "kraken",
+            "mode": "live",
+            "shard_key": "kraken:BTC-USD:live",
+            "wallet_public_id": "wallet-1",
+            "total_quantity": 1.0,
+            "side": "buy",
+            "params": {},
+            "status": "active",
+            "created_at": now,
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+        }
+    )
+    rows = await r.get_execution_plans(as_of=now, exchange="kraken")
+    assert len(rows) == 1
+    rows = await r.get_execution_plans(as_of=now, exchange="zonda")
+    assert len(rows) == 0
+    rows = await r.get_execution_plans(as_of=now, mode="live")
+    assert len(rows) == 1
+    rows = await r.get_execution_plans(as_of=now, mode="paper")
+    assert len(rows) == 0
+    rows = await r.get_execution_plans(as_of=now, wallet_public_ids=["wallet-1"])
+    assert len(rows) == 1
+    rows = await r.get_execution_plans(as_of=now, wallet_public_ids=["wallet-other"])
+    assert len(rows) == 0
