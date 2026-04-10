@@ -116,6 +116,9 @@ __all__ = [
     "WalletOperatorScopeGrant",
     "InstrumentOrderCapability",
     "VenueFeeSchedule",
+    "ExecutionPlan",
+    "ExecutionPlanCheckpoint",
+    "ExecutionPlanDecision",
 ]
 
 
@@ -1692,7 +1695,7 @@ class ExecutionPlanCheckpoint(TemporalMixin, Base):
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
     )
-    plan_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    plan_public_id: Mapped[str] = mapped_column(UUIDColumn())
     state: Mapped[JsonObject] = mapped_column(JSON)
     last_venue_event_id: Mapped[int] = mapped_column(Integer)
     last_tick_timestamp: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
@@ -1723,9 +1726,9 @@ class ExecutionPlanDecision(TemporalMixin, Base):
             name="ck_epd_importance",
         ),
     )
-    plan_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    plan_public_id: Mapped[str] = mapped_column(UUIDColumn())
     decision_type: Mapped[str] = mapped_column(String(32))
-    decided_at: Mapped[datetime] = mapped_column(TZDateTime(), index=True)
+    decided_at: Mapped[datetime] = mapped_column(TZDateTime())
     trigger_type: Mapped[str] = mapped_column(String(16))
     evidence: Mapped[JsonObject] = mapped_column(JSON)
     emitted_command_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
