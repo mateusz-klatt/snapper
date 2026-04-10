@@ -2,7 +2,7 @@
 
 Provides POST /api/orders for creating manual_once execution plans
 that emit a single TradeCommand through the existing executor pipeline.
-Cancel and replace operations transition the plan status via SCD2.
+Cancel operations transition the plan status via SCD2.
 
 All mutations require CREATE_ORDERS or CANCEL_ORDERS permissions
 and are scoped to the caller's accessible wallets.
@@ -43,6 +43,13 @@ from snapper.server.scoping import resolve_target_wallets
 
 _REST_STREAM = "rest.orders"
 _EVALUATOR = ManualOnceEvaluator()
+
+_ORDER_TYPE_MAP: dict[str, str] = {
+    "market": "market",
+    "limit": "limit",
+    "stop": "stop-loss",
+    "stop_limit": "stop-loss-limit",
+}
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -93,8 +100,10 @@ async def create_order(
 ) -> ExecutionPlanResponse:
     """Create a manual order via a manual_once execution plan.
 
-    The endpoint validates order parameters, creates an ExecutionPlan row,
-    inserts a TradeCommand for the outbox dispatcher, and returns the plan.
+    Creates the plan with status=pending, inserts the TradeCommand,
+    then transitions to active. On command insert failure the plan
+    is marked failed. This two-phase approach prevents orphaned
+    active plans without commands.
 
     Args:
         request: FastAPI request (provides REST tracker for provenance).
@@ -107,7 +116,7 @@ async def create_order(
         ExecutionPlanResponse wrapping the newly-created plan.
 
     Raises:
-        HTTPException: 400 if params invalid, 403 if wallet not accessible,
+        HTTPException: 422 if params invalid, 403 if wallet not accessible,
             409 if idempotency key already used.
     """
     tracker: SequenceTracker = request.app.state.rest_tracker
@@ -124,10 +133,7 @@ async def create_order(
             }
         )
     except ValueError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail=str(exc),
-        ) from exc
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     await resolve_target_wallets(
         principal=principal,
@@ -135,11 +141,12 @@ async def create_order(
         wallet_public_id=body.wallet_public_id,
     )
 
-    shard_key = f"{body.exchange}:{body.instrument}:{body.mode}"
+    shard_key = f"{body.exchange}.{body.instrument}.{body.mode}"
     sid = tracker.session_id
     seq = tracker.next_sequence(_REST_STREAM)
     ts = dt.datetime.now(dt.UTC)
     pid = str(uuid7())
+    user_pid = principal.user_public_id or principal.username
 
     plan_params: dict[str, Any] = {
         "order_type": body.order_type,
@@ -157,7 +164,7 @@ async def create_order(
     try:
         plan_row: ExecutionPlanInsertRow = {
             "plan_type": "manual_once",
-            "created_by_user_id": principal.username,
+            "created_by_user_id": user_pid,
             "created_via": "api",
             "instrument_public_id": body.instrument_public_id,
             "exchange": body.exchange,
@@ -168,7 +175,7 @@ async def create_order(
             "total_quantity": body.quantity,
             "side": body.side,
             "params": plan_params,
-            "status": "active",
+            "status": "pending",
             "created_at": now,
             "idempotency_key": body.idempotency_key,
             "session_id": sid,
@@ -189,6 +196,7 @@ async def create_order(
             detail="Failed to create order",
         ) from exc
 
+    venue_order_type = _ORDER_TYPE_MAP.get(body.order_type, body.order_type)
     client_order_id = str(uuid7())
     cmd_seq = tracker.next_sequence(_REST_STREAM)
     try:
@@ -202,7 +210,7 @@ async def create_order(
             "client_order_id": client_order_id,
             "venue_client_id": client_order_id,
             "side": body.side,
-            "order_type": body.order_type,
+            "order_type": venue_order_type,
             "quantity": body.quantity,
             "price": body.price,
             "leverage": body.leverage,
@@ -215,7 +223,7 @@ async def create_order(
             "timestamp": ts,
             "wallet_public_id": body.wallet_public_id,
             "operator_public_id": body.operator_public_id,
-            "user_public_id": principal.username,
+            "user_public_id": user_pid,
             "plan_public_id": plan_public_id,
         }
         await repo.insert_trade_command(cmd_row)
@@ -233,6 +241,15 @@ async def create_order(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create order command",
         ) from exc
+
+    await repo.update_execution_plan_status(
+        public_id=plan_public_id,
+        new_status="active",
+        bus_time=ts,
+        session_id=sid,
+        sequence_id=tracker.next_sequence(_REST_STREAM),
+        started_at=now,
+    )
 
     plan = await repo.get_execution_plan(plan_public_id, as_of=ts)
     if plan is None:
@@ -268,8 +285,8 @@ async def cancel_order(
 ) -> ExecutionPlanResponse:
     """Cancel an active execution plan.
 
-    Transitions the plan to cancel_requested status. The PlanExecutorService
-    picks up the transition and cancels any in-flight child commands.
+    Verifies the caller has access to the plan's wallet before
+    transitioning the plan to cancel_requested status.
 
     Args:
         request: FastAPI request (provides REST tracker for provenance).
@@ -283,7 +300,8 @@ async def cancel_order(
         ExecutionPlanResponse wrapping the updated plan.
 
     Raises:
-        HTTPException: 404 if plan not found, 409 if already terminal.
+        HTTPException: 404 if plan not found, 403 if wallet not accessible,
+            409 if already terminal.
     """
     tracker: SequenceTracker = request.app.state.rest_tracker
     now = datetime.now(UTC)
@@ -296,6 +314,12 @@ async def cancel_order(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Execution plan not found",
         )
+
+    await resolve_target_wallets(
+        principal=principal,
+        repo=repo,
+        wallet_public_id=plan["wallet_public_id"],
+    )
 
     terminal = {"completed", "cancelled", "failed", "expired"}
     if plan["status"] in terminal:
@@ -314,8 +338,8 @@ async def cancel_order(
     )
     if new_id is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Plan not found or already closed",
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Plan status changed concurrently",
         )
 
     updated = await repo.get_execution_plan(plan_public_id, as_of=ts)

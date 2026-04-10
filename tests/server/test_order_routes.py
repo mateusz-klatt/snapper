@@ -121,6 +121,7 @@ class TestCreateOrder:
         repo = AsyncMock()
         repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-1"))
         repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
+        repo.update_execution_plan_status = AsyncMock(return_value=2)
         repo.get_execution_plan = AsyncMock(return_value=_make_plan_row())
         repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
         client = _create_client(repo)
@@ -321,12 +322,13 @@ class TestCancelOrder:
         assert response.status_code == 500
         client.close()
 
-    def test_cancel_update_returns_none(self) -> None:
-        """Given race condition (plan closed between read and update), Then 404."""
+    def test_cancel_update_returns_none_concurrent(self) -> None:
+        """Given race condition (plan closed between read and update), Then 409."""
         repo = AsyncMock()
         repo.get_execution_plan = AsyncMock(return_value=_make_plan_row(status="active"))
         repo.update_execution_plan_status = AsyncMock(return_value=None)
+        repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
         client = _create_client(repo)
         response = client.post("/api/orders/plan-1/cancel", json=_cancel_order_body())
-        assert response.status_code == 404
+        assert response.status_code == 409
         client.close()
