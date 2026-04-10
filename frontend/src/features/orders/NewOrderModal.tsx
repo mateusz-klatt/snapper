@@ -106,14 +106,37 @@ export const NewOrderModal: React.FC<NewOrderModalProps> = ({ open, onClose }) =
       return
     }
 
+    const qty = Number.parseFloat(quantity)
+
+    if (Number.isNaN(qty) || qty <= 0) {
+      setError('Quantity must be a positive number')
+
+      return
+    }
+
     if (needsPrice && !price) {
       setError('Price is required for this order type')
 
       return
     }
 
+    if (needsPrice && (Number.isNaN(Number.parseFloat(price)) || Number.parseFloat(price) <= 0)) {
+      setError('Price must be a positive number')
+
+      return
+    }
+
     if (needsStopPrice && !stopPrice) {
       setError('Stop price is required for this order type')
+
+      return
+    }
+
+    if (
+      needsStopPrice &&
+      (Number.isNaN(Number.parseFloat(stopPrice)) || Number.parseFloat(stopPrice) <= 0)
+    ) {
+      setError('Stop price must be a positive number')
 
       return
     }
@@ -138,10 +161,11 @@ export const NewOrderModal: React.FC<NewOrderModalProps> = ({ open, onClose }) =
         mode,
         side,
         order_type: orderType,
-        quantity: parseFloat(quantity),
-        price: needsPrice ? parseFloat(price) : null,
-        stop_price: needsStopPrice ? parseFloat(stopPrice) : null,
+        quantity: Number.parseFloat(quantity),
+        price: needsPrice ? Number.parseFloat(price) : null,
+        stop_price: needsStopPrice ? Number.parseFloat(stopPrice) : null,
         wallet_public_id: walletPublicId,
+        idempotency_key: publicId,
       },
     }
 

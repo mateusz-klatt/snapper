@@ -186,6 +186,30 @@ describe('NewOrderModal', () => {
     expect(screen.getByText('Stop Price')).toBeTruthy()
   })
 
+  it('shows error for zero quantity', async () => {
+    render(<NewOrderModal open={true} onClose={vi.fn()} />, {
+      wrapper: createWrapper(),
+    })
+    const inputs = screen.getAllByPlaceholderText('0.00')
+
+    fireEvent.change(inputs[0], { target: { value: '0' } })
+    fireEvent.change(inputs[1], { target: { value: '50000' } })
+    await userEvent.click(screen.getByText('Review Order'))
+    expect(screen.getByText('Quantity must be a positive number')).toBeTruthy()
+  })
+
+  it('shows error for negative price', async () => {
+    render(<NewOrderModal open={true} onClose={vi.fn()} />, {
+      wrapper: createWrapper(),
+    })
+    const inputs = screen.getAllByPlaceholderText('0.00')
+
+    fireEvent.change(inputs[0], { target: { value: '1' } })
+    fireEvent.change(inputs[1], { target: { value: '-5' } })
+    await userEvent.click(screen.getByText('Review Order'))
+    expect(screen.getByText('Price must be a positive number')).toBeTruthy()
+  })
+
   it('shows price required error for limit without price', async () => {
     render(<NewOrderModal open={true} onClose={vi.fn()} />, {
       wrapper: createWrapper(),
