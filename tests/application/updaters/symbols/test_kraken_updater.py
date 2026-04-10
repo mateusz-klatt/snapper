@@ -3570,3 +3570,71 @@ class TestKrakenMarginToNonMarginTransition:
             assert spec.funding_type is None
             rates = session.query(FundingRate).all()
             assert len(rates) == 0
+
+    def test_margin_rest_to_ws_only_clears_funding(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        db_session_factory: sessionmaker,
+    ) -> None:
+        """Verify WS-only path clears funding metadata from prior margin REST run.
+
+        Given: Pair was previously seeded as marginable via REST,
+        When: _persist_ws_only_symbol called (pair became WS-only),
+        Then: InstrumentSpec funding fields cleared, FundingRate rows deactivated.
+        """
+        now = datetime.now(UTC)
+        with db_session_factory() as session:
+            sym = Symbol(
+                native_symbol="XYZ-USD",
+                base="XYZ",
+                quote="USD",
+                asset_type="crypto",
+                created_at=now,
+                timestamp=now,
+                session_id="test",
+                sequence_id=1,
+            )
+            session.add(sym)
+            session.flush()
+            margin_data: dict[str, Any] = {
+                "native_symbol": "XYZ-USD",
+                "base_currency": "XYZ",
+                "quote_currency": "USD",
+                "kraken_websocket_symbol": "XYZ/USD",
+                "kraken_rest_symbol": "XYZUSD",
+                "ccxt_symbol": "XYZ/USD",
+                "margin": "true",
+            }
+            updater._persist_rest_symbol(session, margin_data, sym.public_id, now)
+            session.commit()
+
+        with db_session_factory() as session:
+            spec = (
+                session.query(InstrumentSpec).filter(InstrumentSpec.known_to == KNOWN_TO_MAX).one()
+            )
+            assert spec.funding_type == "spot_margin_rollover"
+            active_rates = (
+                session.query(FundingRate).filter(FundingRate.known_to == KNOWN_TO_MAX).all()
+            )
+            assert len(active_rates) == 2
+
+        later = datetime(2026, 6, 1, tzinfo=UTC)
+        with db_session_factory() as session:
+            sym_row = session.query(Symbol).filter_by(native_symbol="XYZ-USD").one()
+            ws_only_data: dict[str, Any] = {
+                "native_symbol": "XYZ-USD",
+                "kraken_websocket_symbol": "XYZ/USD",
+            }
+            updater._persist_ws_only_symbol(session, ws_only_data, sym_row.public_id, later)
+            session.commit()
+
+        with db_session_factory() as session:
+            spec = (
+                session.query(InstrumentSpec).filter(InstrumentSpec.known_to == KNOWN_TO_MAX).one()
+            )
+            assert spec.funding_type is None
+            assert spec.rollover_rate_long is None
+            active_rates = (
+                session.query(FundingRate).filter(FundingRate.known_to == KNOWN_TO_MAX).all()
+            )
+            assert len(active_rates) == 0

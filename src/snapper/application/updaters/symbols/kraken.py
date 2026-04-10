@@ -689,7 +689,12 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             session_id=sid,
             sequence_id=self._tracker.next_sequence("specs"),
             instrument_kind="spot",
+            funding_type=None,
+            funding_frequency_hours=None,
+            rollover_rate_long=None,
+            rollover_rate_short=None,
         )
+        self._deactivate_spot_rollover_rates(session, instrument_public_id, now)
         return created, updated
 
     def _persist_rest_symbol(
