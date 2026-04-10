@@ -334,6 +334,19 @@ class AppSettings:
         return self._get_db_setting("risk_r_per_trade", 0.005)
 
     @property
+    def allow_manual_orders(self) -> bool:
+        """Return whether manual order creation via the UI is enabled.
+
+        When False (default), the POST /api/orders endpoint rejects requests.
+        When True, authenticated users with CREATE_ORDERS permission can
+        submit manual orders through the frontend ManualOrderForm.
+
+        Returns:
+            True if manual orders are enabled.
+        """
+        return self._get_db_setting("allow_manual_orders", False)
+
+    @property
     def allow_short_selling(self) -> bool:
         """Return whether short selling is enabled.
 

@@ -292,6 +292,17 @@ export const useExecutions = (filters?: { limit?: number }) => {
   })
 }
 
+export const useCreateOrder = () => {
+  const queryClient = useQueryClient()
+
+  return useMutation<Record<string, unknown>, Error, Record<string, unknown>>({
+    mutationFn: body => apiClient.createOrder(body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['orders'] })
+    },
+  })
+}
+
 export const usePositions = () => {
   const { isAuthenticated } = useAuth()
   const asOf = useAppStore(s => s.asOf)

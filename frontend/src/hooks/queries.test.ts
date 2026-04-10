@@ -17,6 +17,7 @@ import {
   useRotateCredential,
   useOrders,
   useExecutions,
+  useCreateOrder,
   useAvailableProcesses,
   useConfiguredProcesses,
   useProcessSummary,
@@ -74,6 +75,7 @@ vi.mock('../lib/apiClient', () => ({
       Promise.resolve(envelope('operator_list', { payload: [], count: 0 }))
     ),
     getWallets: vi.fn(() => Promise.resolve(envelope('wallet_list', { payload: [], count: 0 }))),
+    createOrder: vi.fn(() => Promise.resolve({ type: 'execution_plan_response', payload: {} })),
     getOrders: vi.fn(() => Promise.resolve(envelope('order_list', { payload: [], count: 0 }))),
     getExecutions: vi.fn(() =>
       Promise.resolve(envelope('execution_list', { payload: [], count: 0 }))
@@ -1136,6 +1138,24 @@ describe('queries', () => {
       const { result } = renderHook(() => useProcessRuns(), { wrapper: createWrapper() })
 
       await waitFor(() => expect(result.current.isLoading).toBe(false))
+    })
+  })
+
+  describe('useCreateOrder', () => {
+    it('calls apiClient.createOrder and invalidates orders', async () => {
+      const responseBody = { type: 'execution_plan_response', payload: {} }
+
+      vi.mocked(apiClient.createOrder).mockResolvedValueOnce(responseBody)
+
+      const { result } = renderHook(() => useCreateOrder(), { wrapper: createWrapper() })
+
+      await act(async () => {
+        await result.current.mutateAsync({ type: 'create_order_command' })
+      })
+
+      expect(apiClient.createOrder).toHaveBeenCalledWith({
+        type: 'create_order_command',
+      })
     })
   })
 })

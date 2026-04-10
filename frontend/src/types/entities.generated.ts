@@ -108,6 +108,33 @@ export interface Execution {
   walletPublicId?: string
   operatorPublicId?: string | null
   userPublicId?: string | null
+  liquidityRole?: string
+}
+
+/**
+ * Canonical ExecutionPlan entity.
+ * From WebSocket ExecutionPlanData.
+ */
+export interface ExecutionPlan {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  planType: string
+  status: string
+  instrumentPublicId: string
+  exchange: string
+  mode: string
+  side: string
+  totalQuantity: number
+  filledQuantity: number
+  createdAt: Date
+  createdVia: string
+  walletPublicId: string
+  operatorPublicId: string | null
+  params: Record<string, unknown>
+  lastError: string | null
+  idempotencyKey: string | null
 }
 
 /**
@@ -128,6 +155,27 @@ export interface FrontMonth {
 }
 
 /**
+ * Canonical FundingAccrual entity.
+ * From WebSocket FundingAccrualData.
+ */
+export interface FundingAccrual {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  instrument: string
+  exchange: Exchange2
+  mode: Mode
+  accrualType: 'funding' | 'rollover' | 'borrow'
+  accruedAt: Date
+  amount: number
+  amountAsset: string
+  rate: number
+  notional: number
+  positionQuantity: number
+}
+
+/**
  * Canonical Heartbeat entity.
  * From WebSocket HeartbeatData.
  */
@@ -141,6 +189,34 @@ export interface Heartbeat {
   status: 'healthy' | 'warning' | 'error'
   lagMs: number
   meta?: Record<string, unknown>
+}
+
+/**
+ * Canonical InstrumentCapability entity.
+ * From WebSocket InstrumentCapabilityData.
+ */
+export interface InstrumentCapability {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  instrumentPublicId: string
+  exchange: string
+  supportedOrderTypes: string[]
+  supportsPostOnly: boolean
+  supportsReduceOnly: boolean
+  supportsAmendInPlace: boolean
+  supportsNativeStopLoss: boolean
+  supportsNativeTakeProfit: boolean
+  supportsTrailingStopClientSide: boolean
+  supportsMarketMaking: boolean
+  supportsShortSelling: boolean
+  supportsLeverage: boolean
+  maxLeverageLong: number
+  maxLeverageShort: number
+  minNotional: number | null
+  maxOrderSize: number | null
+  topOfBookQuality: string
 }
 
 /**
@@ -418,6 +494,24 @@ export interface UnderlyingInstrument {
   assetType: string
   relationshipType: string
   contractFamily: string | null
+}
+
+/**
+ * Canonical VenueFeeSchedule entity.
+ * From WebSocket VenueFeeScheduleData.
+ */
+export interface VenueFeeSchedule {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  exchange: string
+  instrumentPublicId: string | null
+  feeTier: string
+  makerBps: number
+  takerBps: number
+  minVolume30d: number | null
+  currency: string
 }
 
 /**

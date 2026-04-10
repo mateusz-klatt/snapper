@@ -685,6 +685,7 @@ describe('domain API methods', () => {
             exchange: 'kraken',
             status: 'filled',
             wallet_public_id: 'wallet-1',
+            liquidity_role: 'unknown',
           },
         ],
         count: 1,
@@ -725,6 +726,7 @@ describe('domain API methods', () => {
             exchange: 'kraken',
             status: 'filled',
             wallet_public_id: 'wallet-1',
+            liquidity_role: 'unknown',
           },
         ],
         count: 1,
@@ -734,6 +736,22 @@ describe('domain API methods', () => {
 
     expect(result.payload).toHaveLength(1)
     expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining('limit=100'), expect.any(Object))
+  })
+  it('createOrder posts order body', async () => {
+    const responseBody = { type: 'execution_plan_response', payload: {} }
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => responseBody,
+    })
+    const result = await apiClient.createOrder({ type: 'create_order_command' })
+
+    expect(result).toEqual(responseBody)
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/orders'),
+      expect.objectContaining({ method: 'POST' })
+    )
   })
   it('getPositions returns positions', async () => {
     mockFetch.mockResolvedValueOnce({

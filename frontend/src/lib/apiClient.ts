@@ -536,6 +536,9 @@ class APIClient {
 
     return validateResponse(data, ProcessCreateResponseSchema, '/processes')
   }
+  async createOrder(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.postJSON('/api/orders', body)
+  }
   async getConfiguredProcesses(): Promise<ConfiguredProcessesResponse> {
     const data = await this.getJSON('/api/processes/configured')
 

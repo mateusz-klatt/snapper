@@ -959,6 +959,103 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
+    "/api/orders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Orders
+         * @description Fetch orders with optional filters.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         _auth: Authenticated user with READ_ORDERS permission.
+         *         _csrf: CSRF token validation.
+         *         repo: Database repository.
+         *         symbol: Optional symbol filter.
+         *         exchange: Optional exchange filter.
+         *         limit: Maximum number of orders to return.
+         *         offset: Number of orders to skip.
+         *         as_of: Optional point-in-time query timestamp.
+         *         operator_public_id: Optional operator scope (403 if foreign).
+         *         wallet_public_id: Optional wallet scope (403 if inaccessible).
+         *
+         *     Returns:
+         *         OrderListResponse wrapping the order data.
+         */
+        get: Operations["get_orders_api_orders_get"];
+        put?: never;
+        /**
+         * Create Order
+         * @description Create a manual order via a manual_once execution plan.
+         *
+         *     Creates the plan with status=pending, inserts the TradeCommand,
+         *     then transitions to active. On command insert failure the plan
+         *     is marked failed. This two-phase approach prevents orphaned
+         *     active plans without commands.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         principal: Authenticated caller holding CREATE_ORDERS.
+         *         _csrf: CSRF token validation.
+         *         command: Create order command envelope.
+         *         repo: Repository dependency.
+         *
+         *     Returns:
+         *         ExecutionPlanResponse wrapping the newly-created plan.
+         *
+         *     Raises:
+         *         HTTPException: 422 if params invalid, 403 if wallet not accessible,
+         *             409 if idempotency key already used.
+         */
+        post: Operations["create_order_api_orders_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/orders/{plan_public_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel Order
+         * @description Cancel an active execution plan.
+         *
+         *     Verifies the caller has access to the plan's wallet before
+         *     transitioning the plan to cancel_requested status.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         plan_public_id: Plan to cancel (path parameter).
+         *         principal: Authenticated caller holding CANCEL_ORDERS.
+         *         _csrf: CSRF token validation.
+         *         command: Cancel command envelope.
+         *         repo: Repository dependency.
+         *
+         *     Returns:
+         *         ExecutionPlanResponse wrapping the updated plan.
+         *
+         *     Raises:
+         *         HTTPException: 404 if plan not found, 403 if wallet not accessible,
+         *             409 if already terminal.
+         */
+        post: Operations["cancel_order_api_orders__plan_public_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/candles": {
         parameters: {
             query?: never;
@@ -1273,42 +1370,6 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
-    "/api/orders": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Orders
-         * @description Fetch orders with optional filters.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         _auth: Authenticated user with READ_ORDERS permission.
-         *         _csrf: CSRF token validation.
-         *         repo: Database repository.
-         *         symbol: Optional symbol filter.
-         *         exchange: Optional exchange filter.
-         *         limit: Maximum number of orders to return.
-         *         offset: Number of orders to skip.
-         *         as_of: Optional point-in-time query timestamp.
-         *         operator_public_id: Optional operator scope (403 if foreign).
-         *         wallet_public_id: Optional wallet scope (403 if inaccessible).
-         *
-         *     Returns:
-         *         OrderListResponse wrapping the order data.
-         */
-        get: Operations["get_orders_api_orders_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/executions": {
         parameters: {
             query?: never;
@@ -1366,6 +1427,69 @@ export type Paths = {
          *         PositionListResponse wrapping the position data.
          */
         get: Operations["get_positions_api_positions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/instrument-capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Instrument Capabilities
+         * @description Fetch instrument order capability matrix.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         _auth: Authenticated user with READ_MARKET_DATA permission.
+         *         _csrf: CSRF token validation.
+         *         repo: Database repository.
+         *         exchange: Optional exchange name filter.
+         *         instrument_public_id: Optional instrument UUID filter.
+         *         as_of: Optional point-in-time query timestamp.
+         *
+         *     Returns:
+         *         InstrumentCapabilityListResponse wrapping capability rows.
+         */
+        get: Operations["get_instrument_capabilities_api_instrument_capabilities_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/venue-fee-schedules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Venue Fee Schedules
+         * @description Fetch venue fee schedules.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         _auth: Authenticated user with READ_MARKET_DATA permission.
+         *         _csrf: CSRF token validation.
+         *         repo: Database repository.
+         *         exchange: Optional exchange name filter.
+         *         as_of: Optional point-in-time query timestamp.
+         *
+         *     Returns:
+         *         VenueFeeScheduleListResponse wrapping fee schedule rows.
+         */
+        get: Operations["get_venue_fee_schedules_api_venue_fee_schedules_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2195,6 +2319,11 @@ export type Components = {
             operator_public_id?: string | null;
             /** User Public Id */
             user_public_id?: string | null;
+            /**
+             * Liquidity Role
+             * @default unknown
+             */
+            liquidity_role: string;
         };
         /**
          * ExecutionListResponse
@@ -2232,6 +2361,105 @@ export type Components = {
              * @description Number of items in payload
              */
             count: number;
+        };
+        /**
+         * ExecutionPlanData
+         * @description Execution plan state for REST API responses.
+         *
+         *     Attributes:
+         *         plan_type: Plan type discriminator.
+         *         status: Current plan lifecycle status.
+         *         instrument_public_id: Target instrument UUID.
+         *         exchange: Target exchange.
+         *         mode: Execution mode (live/paper).
+         *         side: Order side (buy/sell).
+         *         total_quantity: Total intended quantity.
+         *         filled_quantity: Quantity filled so far.
+         *         created_at: Plan creation timestamp.
+         *         created_via: Creation channel (ui/api/cli/strategy).
+         *         wallet_public_id: Owning wallet UUID.
+         *         operator_public_id: Operator identity (nullable).
+         *         params: Plan-type-specific parameters.
+         *         last_error: Most recent error message (nullable).
+         *         idempotency_key: Client-provided dedup key (nullable).
+         */
+        ExecutionPlanData: {
+            /**
+             * Type
+             * @default execution_plan
+             * @constant
+             */
+            type: "execution_plan";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Plan Type */
+            plan_type: string;
+            /** Status */
+            status: string;
+            /** Instrument Public Id */
+            instrument_public_id: string;
+            /** Exchange */
+            exchange: string;
+            /** Mode */
+            mode: string;
+            /** Side */
+            side: string;
+            /** Total Quantity */
+            total_quantity: number;
+            /** Filled Quantity */
+            filled_quantity: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Created Via */
+            created_via: string;
+            /** Wallet Public Id */
+            wallet_public_id: string;
+            /** Operator Public Id */
+            operator_public_id: string | null;
+            /** Params */
+            params: {
+                [key: string]: unknown;
+            };
+            /** Last Error */
+            last_error: string | null;
+            /** Idempotency Key */
+            idempotency_key: string | null;
+        };
+        /**
+         * ExecutionPlanResponse
+         * @description Singleton wrapper returned by order creation and plan endpoints.
+         */
+        ExecutionPlanResponse: {
+            /**
+             * Type
+             * @default execution_plan_response
+             * @constant
+             */
+            type: "execution_plan_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["ExecutionPlanData"];
         };
         /**
          * FrontMonthData
@@ -5494,6 +5722,128 @@ export type Components = {
             label?: string | null;
         };
         /**
+         * CreateOrderCommand
+         * @description Request envelope for POST /api/orders.
+         */
+        CreateOrderCommand: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "create_order_command";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["CreateOrderBody"];
+        };
+        /**
+         * CreateOrderBody
+         * @description Request body for POST /api/orders (manual order creation).
+         *
+         *     Attributes:
+         *         instrument: Native symbol (e.g. BTC-USD, ETH/USD).
+         *         instrument_public_id: Target instrument UUID.
+         *         exchange: Exchange to route the order to.
+         *         mode: Execution mode (live or paper).
+         *         side: Order side (buy or sell).
+         *         order_type: Order type (market, limit, stop, stop_limit).
+         *         quantity: Order quantity (must be positive).
+         *         price: Limit price (required for limit and stop_limit).
+         *         stop_price: Stop trigger price (required for stop and stop_limit).
+         *         time_in_force: Time-in-force policy (default GTC).
+         *         post_only: Post-only flag for maker orders.
+         *         leverage: Optional leverage multiplier.
+         *         reduce_only: Reduce-only flag for closing positions.
+         *         wallet_public_id: Target wallet UUID.
+         *         operator_public_id: Optional operator identity.
+         *         idempotency_key: Optional idempotency key for dedup.
+         */
+        CreateOrderBody: {
+            /** Instrument */
+            instrument: string;
+            /** Instrument Public Id */
+            instrument_public_id: string;
+            /** Exchange */
+            exchange: string;
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode?: "live" | "paper";
+            /**
+             * Side
+             * @enum {string}
+             */
+            side: "buy" | "sell";
+            /**
+             * Order Type
+             * @enum {string}
+             */
+            order_type: "market" | "limit" | "stop" | "stop_limit";
+            /** Quantity */
+            quantity: number;
+            /** Price */
+            price?: number | null;
+            /** Stop Price */
+            stop_price?: number | null;
+            /** Time In Force */
+            time_in_force?: string;
+            /** Post Only */
+            post_only?: boolean;
+            /** Leverage */
+            leverage?: number | null;
+            /** Reduce Only */
+            reduce_only?: boolean;
+            /** Wallet Public Id */
+            wallet_public_id: string;
+            /** Operator Public Id */
+            operator_public_id?: string | null;
+            /** Idempotency Key */
+            idempotency_key?: string | null;
+        };
+        /**
+         * CancelOrderCommand
+         * @description Request envelope for POST /api/orders/{id}/cancel.
+         */
+        CancelOrderCommand: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "cancel_order_command";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["CancelOrderBody"];
+        };
+        /**
+         * CancelOrderBody
+         * @description Request body for POST /api/orders/{id}/cancel.
+         *
+         *     Attributes:
+         *         reason: Optional human-readable cancellation reason.
+         */
+        CancelOrderBody: {
+            /** Reason */
+            reason?: string | null;
+        };
+        /**
          * ProcessCreateRequest
          * @description Process creation request envelope.
          *
@@ -6693,6 +7043,116 @@ export interface Operations {
             };
         };
     };
+    get_orders_api_orders_get: {
+        parameters: {
+            query?: {
+                /** @description Symbol to filter by */
+                symbol?: string | null;
+                /** @description Filter by exchange */
+                exchange?: ("paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat") | null;
+                /** @description Number of orders to return */
+                limit?: number;
+                /** @description Number of orders to skip */
+                offset?: number;
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
+                /** @description Scope to operator */
+                operator_public_id?: string | null;
+                /** @description Scope to wallet */
+                wallet_public_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["OrderListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_order_api_orders_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["CreateOrderCommand"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["ExecutionPlanResponse"];
+                };
+            };
+        };
+    };
+    cancel_order_api_orders__plan_public_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                plan_public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["CancelOrderCommand"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["ExecutionPlanResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_candles_api_candles_get: {
         parameters: {
             query: {
@@ -7137,57 +7597,6 @@ export interface Operations {
             };
         };
     };
-    get_orders_api_orders_get: {
-        parameters: {
-            query?: {
-                /** @description Symbol to filter by */
-                symbol?: string | null;
-                /** @description Filter by exchange */
-                exchange?: ("paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat") | null;
-                /** @description Number of orders to return */
-                limit?: number;
-                /** @description Number of orders to skip */
-                offset?: number;
-                /** @description Point-in-time query (UTC) */
-                as_of?: string | null;
-                /** @description Scope to operator */
-                operator_public_id?: string | null;
-                /** @description Scope to wallet */
-                wallet_public_id?: string | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": Components["schemas"]["OrderListResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": Components["schemas"]["HTTPValidationError"];
-                };
-            };
-            /** @description Internal server error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
     get_executions_api_executions_get: {
         parameters: {
             query?: {
@@ -7256,6 +7665,90 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["PositionListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_instrument_capabilities_api_instrument_capabilities_get: {
+        parameters: {
+            query?: {
+                /** @description Filter by exchange name */
+                exchange?: string | null;
+                /** @description Filter by instrument public ID */
+                instrument_public_id?: string | null;
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_venue_fee_schedules_api_venue_fee_schedules_get: {
+        parameters: {
+            query?: {
+                /** @description Filter by exchange name */
+                exchange?: string | null;
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

@@ -106,6 +106,32 @@ export const ExecutionDataSchema = z
     wallet_public_id: z.string(),
     operator_public_id: z.string().nullable(),
     user_public_id: z.string().nullable(),
+    liquidity_role: z.string(),
+  })
+  .strict()
+
+export const ExecutionPlanDataSchema = z
+  .object({
+    type: z.literal('execution_plan'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    plan_type: z.string(),
+    status: z.string(),
+    instrument_public_id: z.string(),
+    exchange: z.string(),
+    mode: z.string(),
+    side: z.string(),
+    total_quantity: z.number(),
+    filled_quantity: z.number(),
+    created_at: z.iso.datetime(),
+    created_via: z.string(),
+    wallet_public_id: z.string(),
+    operator_public_id: z.string().nullable(),
+    params: z.record(z.string(), z.unknown()),
+    last_error: z.string().nullable(),
+    idempotency_key: z.string().nullable(),
   })
   .strict()
 
@@ -125,7 +151,54 @@ export const FrontMonthDataSchema = z
   })
   .strict()
 
+export const FundingAccrualDataSchema = z
+  .object({
+    type: z.literal('funding_accrual'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    instrument: z.string(),
+    exchange: z.enum(['paper', 'kraken', 'kraken_futures', 'zonda', 'walutomat']),
+    mode: z.enum(['live', 'paper']),
+    accrual_type: z.enum(['funding', 'rollover', 'borrow']),
+    accrued_at: z.iso.datetime(),
+    amount: z.number(),
+    amount_asset: z.string(),
+    rate: z.number(),
+    notional: z.number(),
+    position_quantity: z.number(),
+  })
+  .strict()
+
 export const JsonPrimitiveSchema = z.unknown()
+
+export const InstrumentCapabilityDataSchema = z
+  .object({
+    type: z.literal('instrument_capability'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    instrument_public_id: z.string(),
+    exchange: z.string(),
+    supported_order_types: z.array(z.string()),
+    supports_post_only: z.boolean(),
+    supports_reduce_only: z.boolean(),
+    supports_amend_in_place: z.boolean(),
+    supports_native_stop_loss: z.boolean(),
+    supports_native_take_profit: z.boolean(),
+    supports_trailing_stop_client_side: z.boolean(),
+    supports_market_making: z.boolean(),
+    supports_short_selling: z.boolean(),
+    supports_leverage: z.boolean(),
+    max_leverage_long: z.number(),
+    max_leverage_short: z.number(),
+    min_notional: z.number().nullable(),
+    max_order_size: z.number().nullable(),
+    top_of_book_quality: z.string(),
+  })
+  .strict()
 
 export const OrderCancelDataSchema = z
   .object({
@@ -400,6 +473,23 @@ export const UnderlyingInstrumentDataSchema = z
     asset_type: z.string(),
     relationship_type: z.string(),
     contract_family: z.string().nullable(),
+  })
+  .strict()
+
+export const VenueFeeScheduleDataSchema = z
+  .object({
+    type: z.literal('venue_fee_schedule'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    exchange: z.string(),
+    instrument_public_id: z.string().nullable(),
+    fee_tier: z.string(),
+    maker_bps: z.number(),
+    taker_bps: z.number(),
+    min_volume_30d: z.number().nullable(),
+    currency: z.string(),
   })
   .strict()
 

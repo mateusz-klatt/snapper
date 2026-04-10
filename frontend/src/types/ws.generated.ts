@@ -13,8 +13,11 @@ export type WebSocketMessages =
   | ContinuousCandleData
   | ContractData
   | ExecutionData
+  | ExecutionPlanData
   | FrontMonthData
+  | FundingAccrualData
   | HeartbeatData
+  | InstrumentCapabilityData
   | OrderCancelData
   | OrderData
   | OrderEventData
@@ -30,6 +33,7 @@ export type WebSocketMessages =
   | TradeData
   | UnderlyingAssetData
   | UnderlyingInstrumentData
+  | VenueFeeScheduleData
   | WSAuthCompleteResponse
   | WSAuthExpiredResponse
   | WSAuthFailedResponse
@@ -67,9 +71,17 @@ export type Side = "buy" | "sell";
 export type Status = "filled" | "partial";
 export type OperatorPublicId = string | null;
 export type UserPublicId = string | null;
-export type Type4 = "front_month";
+export type Type4 = "execution_plan";
+export type OperatorPublicId1 = string | null;
+export type LastError = string | null;
+export type IdempotencyKey = string | null;
+export type Type5 = "front_month";
 export type ContractFamily1 = string | null;
-export type Type5 = "heartbeat";
+export type Type6 = "funding_accrual";
+export type Exchange2 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
+export type Mode = "live" | "paper";
+export type AccrualType = "funding" | "rollover" | "borrow";
+export type Type7 = "heartbeat";
 export type Status1 = "healthy" | "warning" | "error";
 export type JsonValue =
   | JsonPrimitive
@@ -78,14 +90,18 @@ export type JsonValue =
       [k: string]: JsonValue;
     };
 export type JsonPrimitive = string | number | boolean | null;
-export type Type6 = "order_cancel";
-export type Exchange2 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
-export type OperatorPublicId1 = string | null;
-export type UserPublicId1 = string | null;
-export type Type7 = "order";
-export type ExchangeOrderId1 = string | null;
+export type Type8 = "instrument_capability";
+export type SupportedOrderTypes = string[];
+export type MinNotional = number | null;
+export type MaxOrderSize = number | null;
+export type Type9 = "order_cancel";
 export type Exchange3 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
-export type Mode = "live" | "paper";
+export type OperatorPublicId2 = string | null;
+export type UserPublicId1 = string | null;
+export type Type10 = "order";
+export type ExchangeOrderId1 = string | null;
+export type Exchange4 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
+export type Mode1 = "live" | "paper";
 export type Side1 = "buy" | "sell";
 export type OrderType = "market" | "limit" | "stop" | "stop_limit";
 export type Price = number | null;
@@ -95,67 +111,70 @@ export type TimeInForce = string | null;
 export type Error = string | null;
 export type UpdatedAt = string | null;
 export type Leverage = number | null;
-export type OperatorPublicId2 = string | null;
+export type OperatorPublicId3 = string | null;
 export type UserPublicId2 = string | null;
-export type Type8 = "order_event";
-export type Exchange4 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
+export type Type11 = "order_event";
+export type Exchange5 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
 export type Event = "submitted" | "accepted" | "rejected" | "cancelled" | "expired" | "replaced";
 export type Reason1 = string | null;
-export type OperatorPublicId3 = string | null;
+export type OperatorPublicId4 = string | null;
 export type UserPublicId3 = string | null;
-export type Type9 = "order_replace";
-export type Exchange5 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
+export type Type12 = "order_replace";
+export type Exchange6 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
 export type NewQuantity = number | null;
 export type NewPrice = number | null;
-export type OperatorPublicId4 = string | null;
+export type OperatorPublicId5 = string | null;
 export type UserPublicId4 = string | null;
-export type Type10 = "order_request";
-export type Exchange6 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
-export type Mode1 = "live" | "paper";
+export type Type13 = "order_request";
+export type Exchange7 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
+export type Mode2 = "live" | "paper";
 export type Side2 = "buy" | "sell";
 export type OrderType1 = "market" | "limit" | "stop" | "stop_limit";
 export type Price1 = number | null;
 export type SignaledAt = string | null;
 export type StrategyTag = string | null;
 export type Leverage1 = number | null;
-export type OperatorPublicId5 = string | null;
+export type OperatorPublicId6 = string | null;
 export type UserPublicId5 = string | null;
-export type Type11 = "position";
-export type Exchange7 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
-export type Mode2 = "live" | "paper";
-export type Type12 = "replay_end";
-export type Type13 = "replay_start";
-export type StartedAt = string | null;
-export type Type14 = "setting_changed";
-export type UpdatedBy = string | null;
-export type Type15 = "signal";
+export type Type14 = "position";
 export type Exchange8 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
+export type Mode3 = "live" | "paper";
+export type Type15 = "replay_end";
+export type Type16 = "replay_start";
+export type StartedAt = string | null;
+export type Type17 = "setting_changed";
+export type UpdatedBy = string | null;
+export type Type18 = "signal";
+export type Exchange9 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
 export type Side3 = "buy" | "sell";
 export type Price2 = number | null;
 export type StrategyName = string | null;
-export type OperatorPublicId6 = string | null;
+export type OperatorPublicId7 = string | null;
 export type UserPublicId6 = string | null;
-export type Type16 = "symbol_alias_update";
+export type Type19 = "symbol_alias_update";
 export type Event1 = "symbol_aliases_updated";
 export type Action = "clear_cache";
-export type Type17 = "tick";
-export type Exchange9 = "kraken" | "kraken_futures" | "kraken_equities" | "zonda" | "walutomat" | "polygon";
+export type Type20 = "tick";
+export type Exchange10 = "kraken" | "kraken_futures" | "kraken_equities" | "zonda" | "walutomat" | "polygon";
 export type Bid = number | null;
 export type Ask = number | null;
 export type Last = number | null;
-export type Type18 = "trade";
-export type Exchange10 = "kraken" | "kraken_futures" | "kraken_equities" | "zonda" | "walutomat" | "polygon";
+export type Type21 = "trade";
+export type Exchange11 = "kraken" | "kraken_futures" | "kraken_equities" | "zonda" | "walutomat" | "polygon";
 export type ExecutedAt = string | null;
 export type Side4 = string | null;
 export type TradeId1 = string | null;
-export type Type19 = "underlying_asset";
+export type Type22 = "underlying_asset";
 export type Sector = string | null;
-export type Type20 = "underlying_instrument";
+export type Type23 = "underlying_instrument";
 export type ContractFamily2 = string | null;
+export type Type24 = "venue_fee_schedule";
+export type InstrumentPublicId = string | null;
+export type MinVolume30D = number | null;
 /**
  * Message type discriminator
  */
-export type Type21 = "auth_complete";
+export type Type25 = "auth_complete";
 /**
  * Topics available for subscription
  */
@@ -171,11 +190,11 @@ export type SessionExpiresAt = string | null;
 /**
  * Message type discriminator
  */
-export type Type22 = "auth_expired";
+export type Type26 = "auth_expired";
 /**
  * Message type discriminator
  */
-export type Type23 = "auth_failed";
+export type Type27 = "auth_failed";
 /**
  * Failure reason
  */
@@ -183,47 +202,47 @@ export type Reason2 = string | null;
 /**
  * Message type discriminator
  */
-export type Type24 = "auth_ok";
+export type Type28 = "auth_ok";
 /**
  * Message type discriminator
  */
-export type Type25 = "auth_required";
+export type Type29 = "auth_required";
 /**
  * Message type discriminator
  */
-export type Type26 = "authenticate";
+export type Type30 = "authenticate";
 /**
  * Message type discriminator
  */
-export type Type27 = "error";
+export type Type31 = "error";
 /**
  * Message type discriminator
  */
-export type Type28 = "get_subscriptions";
+export type Type32 = "get_subscriptions";
 /**
  * Message type discriminator
  */
-export type Type29 = "ping";
+export type Type33 = "ping";
 /**
  * Message type discriminator
  */
-export type Type30 = "pong";
+export type Type34 = "pong";
 /**
  * Message type discriminator
  */
-export type Type31 = "reauth_ok";
+export type Type35 = "reauth_ok";
 /**
  * Message type discriminator
  */
-export type Type32 = "reauth";
+export type Type36 = "reauth";
 /**
  * Message type discriminator
  */
-export type Type33 = "reauth_required";
+export type Type37 = "reauth_required";
 /**
  * Message type discriminator
  */
-export type Type34 = "subscribe";
+export type Type38 = "subscribe";
 /**
  * Topics to subscribe to
  */
@@ -231,7 +250,7 @@ export type Topics = string[];
 /**
  * Message type discriminator
  */
-export type Type35 = "subscription_success";
+export type Type39 = "subscription_success";
 /**
  * The subscription action performed
  */
@@ -259,7 +278,7 @@ export type Message = string | null;
 /**
  * Message type discriminator
  */
-export type Type36 = "subscriptions_list";
+export type Type40 = "subscriptions_list";
 /**
  * Current active subscriptions
  */
@@ -271,7 +290,7 @@ export type AvailableTopics1 = string[];
 /**
  * Message type discriminator
  */
-export type Type37 = "unsubscribe";
+export type Type41 = "unsubscribe";
 /**
  * Topics to unsubscribe from
  */
@@ -458,6 +477,52 @@ export interface ExecutionData {
   wallet_public_id?: string;
   operator_public_id?: OperatorPublicId;
   user_public_id?: UserPublicId;
+  liquidity_role?: string;
+}
+/**
+ * Execution plan state for REST API responses.
+ *
+ * Attributes:
+ *     plan_type: Plan type discriminator.
+ *     status: Current plan lifecycle status.
+ *     instrument_public_id: Target instrument UUID.
+ *     exchange: Target exchange.
+ *     mode: Execution mode (live/paper).
+ *     side: Order side (buy/sell).
+ *     total_quantity: Total intended quantity.
+ *     filled_quantity: Quantity filled so far.
+ *     created_at: Plan creation timestamp.
+ *     created_via: Creation channel (ui/api/cli/strategy).
+ *     wallet_public_id: Owning wallet UUID.
+ *     operator_public_id: Operator identity (nullable).
+ *     params: Plan-type-specific parameters.
+ *     last_error: Most recent error message (nullable).
+ *     idempotency_key: Client-provided dedup key (nullable).
+ */
+export interface ExecutionPlanData {
+  type: Type4;
+  sequence_id: number;
+  public_id: string;
+  timestamp: string;
+  session_id: string;
+  plan_type: string;
+  status: string;
+  instrument_public_id: string;
+  exchange: string;
+  mode: string;
+  side: string;
+  total_quantity: number;
+  filled_quantity: number;
+  created_at: string;
+  created_via: string;
+  wallet_public_id: string;
+  operator_public_id: OperatorPublicId1;
+  params: Params;
+  last_error: LastError;
+  idempotency_key: IdempotencyKey;
+}
+export interface Params {
+  [k: string]: unknown;
 }
 /**
  * Front-month futures contract for an underlying.
@@ -474,7 +539,7 @@ export interface ExecutionData {
  *     contract_family: Futures product root (nullable).
  */
 export interface FrontMonthData {
-  type: Type4;
+  type: Type5;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -485,6 +550,42 @@ export interface FrontMonthData {
   expiry_at: string;
   relationship_type: string;
   contract_family: ContractFamily1;
+}
+/**
+ * Funding/rollover accrual event published to ZMQ for UI observability.
+ *
+ * Emitted by the trader's funding accrual loop after a charge is
+ * persisted to the AccrualLedger and applied to the in-memory
+ * TradeService and PortfolioTracker state.
+ *
+ * Attributes:
+ *     instrument: Native symbol of the charged instrument.
+ *     exchange: Exchange where the position is held.
+ *     mode: Execution mode (live, paper).
+ *     accrual_type: Kind of periodic charge applied.
+ *     accrued_at: Boundary timestamp the charge covers.
+ *     amount: Signed charge in the notional asset.
+ *     amount_asset: Currency of the charge (e.g., USD).
+ *     rate: Per-boundary rate used for the charge.
+ *     notional: Absolute notional value of the position at charge time.
+ *     position_quantity: Signed position size at charge time.
+ */
+export interface FundingAccrualData {
+  type: Type6;
+  sequence_id: number;
+  public_id: string;
+  timestamp: string;
+  session_id: string;
+  instrument: string;
+  exchange: Exchange2;
+  mode: Mode;
+  accrual_type: AccrualType;
+  accrued_at: string;
+  amount: number;
+  amount_asset: string;
+  rate: number;
+  notional: number;
+  position_quantity: number;
 }
 /**
  * Component health heartbeat message.
@@ -500,7 +601,7 @@ export interface FrontMonthData {
  *     meta: Optional metadata dictionary for extensions.
  */
 export interface HeartbeatData {
-  type: Type5;
+  type: Type7;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -515,6 +616,55 @@ export interface JsonObject {
   [k: string]: JsonValue;
 }
 /**
+ * Instrument order capability matrix row for REST API responses.
+ *
+ * Describes which order types, features, and limits are available
+ * for a given instrument on a given exchange.
+ *
+ * Attributes:
+ *     instrument_public_id: UUID of the instrument.
+ *     exchange: Exchange identifier.
+ *     supported_order_types: List of supported order type strings.
+ *     supports_post_only: Whether post-only orders are supported.
+ *     supports_reduce_only: Whether reduce-only orders are supported.
+ *     supports_amend_in_place: Whether in-place order amendment is supported.
+ *     supports_native_stop_loss: Whether the exchange supports native SL.
+ *     supports_native_take_profit: Whether the exchange supports native TP.
+ *     supports_trailing_stop_client_side: Whether client-side trailing stop is viable.
+ *     supports_market_making: Whether MM strategy is viable.
+ *     supports_short_selling: Whether short selling is supported.
+ *     supports_leverage: Whether leverage is supported.
+ *     max_leverage_long: Maximum leverage for long positions.
+ *     max_leverage_short: Maximum leverage for short positions.
+ *     min_notional: Minimum notional order value.
+ *     max_order_size: Maximum order size.
+ *     top_of_book_quality: Book data quality hint for pegs/MM.
+ */
+export interface InstrumentCapabilityData {
+  type: Type8;
+  sequence_id: number;
+  public_id: string;
+  timestamp: string;
+  session_id: string;
+  instrument_public_id: string;
+  exchange: string;
+  supported_order_types: SupportedOrderTypes;
+  supports_post_only: boolean;
+  supports_reduce_only: boolean;
+  supports_amend_in_place: boolean;
+  supports_native_stop_loss: boolean;
+  supports_native_take_profit: boolean;
+  supports_trailing_stop_client_side: boolean;
+  supports_market_making: boolean;
+  supports_short_selling: boolean;
+  supports_leverage: boolean;
+  max_leverage_long: number;
+  max_leverage_short: number;
+  min_notional: MinNotional;
+  max_order_size: MaxOrderSize;
+  top_of_book_quality: string;
+}
+/**
  * Order cancel request from strategy to executor.
  *
  * Sent to request cancellation of an existing order.
@@ -527,17 +677,17 @@ export interface JsonObject {
  *     client_order_id: Our generated order ID.
  */
 export interface OrderCancelData {
-  type: Type6;
+  type: Type9;
   sequence_id: number;
   public_id: string;
   timestamp: string;
   session_id: string;
-  exchange: Exchange2;
+  exchange: Exchange3;
   instrument: string;
   exchange_order_id: string;
   client_order_id: string;
   wallet_public_id?: string;
-  operator_public_id?: OperatorPublicId1;
+  operator_public_id?: OperatorPublicId2;
   user_public_id?: UserPublicId1;
 }
 /**
@@ -570,7 +720,7 @@ export interface OrderCancelData {
  *     reduce_only: True when the order may only reduce an existing position.
  */
 export interface OrderData {
-  type: Type7;
+  type: Type10;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -578,8 +728,8 @@ export interface OrderData {
   exchange_order_id?: ExchangeOrderId1;
   client_order_id: string;
   instrument: string;
-  exchange: Exchange3;
-  mode?: Mode;
+  exchange: Exchange4;
+  mode?: Mode1;
   side: Side1;
   status: string;
   order_type: OrderType;
@@ -595,7 +745,7 @@ export interface OrderData {
   leverage?: Leverage;
   reduce_only?: boolean;
   wallet_public_id?: string;
-  operator_public_id?: OperatorPublicId2;
+  operator_public_id?: OperatorPublicId3;
   user_public_id?: UserPublicId2;
 }
 /**
@@ -618,19 +768,19 @@ export interface OrderData {
  *     reason: Optional rejection/cancellation reason.
  */
 export interface OrderEventData {
-  type: Type8;
+  type: Type11;
   sequence_id: number;
   public_id: string;
   timestamp: string;
   session_id: string;
   exchange_order_id: string;
   client_order_id: string;
-  exchange: Exchange4;
+  exchange: Exchange5;
   instrument: string;
   event: Event;
   reason?: Reason1;
   wallet_public_id?: string;
-  operator_public_id?: OperatorPublicId3;
+  operator_public_id?: OperatorPublicId4;
   user_public_id?: UserPublicId3;
 }
 /**
@@ -648,19 +798,19 @@ export interface OrderEventData {
  *     new_price: New limit price (optional).
  */
 export interface OrderReplaceData {
-  type: Type9;
+  type: Type12;
   sequence_id: number;
   public_id: string;
   timestamp: string;
   session_id: string;
-  exchange: Exchange5;
+  exchange: Exchange6;
   instrument: string;
   exchange_order_id: string;
   client_order_id: string;
   new_quantity?: NewQuantity;
   new_price?: NewPrice;
   wallet_public_id?: string;
-  operator_public_id?: OperatorPublicId4;
+  operator_public_id?: OperatorPublicId5;
   user_public_id?: UserPublicId4;
 }
 /**
@@ -685,15 +835,15 @@ export interface OrderReplaceData {
  *     reduce_only: True when closing an existing position.
  */
 export interface OrderRequestData {
-  type: Type10;
+  type: Type13;
   sequence_id: number;
   public_id: string;
   timestamp: string;
   session_id: string;
   strategy_id: string;
-  exchange: Exchange6;
+  exchange: Exchange7;
   instrument: string;
-  mode: Mode1;
+  mode: Mode2;
   side: Side2;
   order_type: OrderType1;
   quantity: number;
@@ -704,7 +854,7 @@ export interface OrderRequestData {
   leverage?: Leverage1;
   reduce_only?: boolean;
   wallet_public_id?: string;
-  operator_public_id?: OperatorPublicId5;
+  operator_public_id?: OperatorPublicId6;
   user_public_id?: UserPublicId5;
 }
 /**
@@ -723,14 +873,14 @@ export interface OrderRequestData {
  *     realized_pnl: Realized profit/loss.
  */
 export interface PositionData {
-  type: Type11;
+  type: Type14;
   sequence_id: number;
   public_id: string;
   timestamp: string;
   session_id: string;
   instrument: string;
-  exchange: Exchange7;
-  mode?: Mode2;
+  exchange: Exchange8;
+  mode?: Mode3;
   quantity: number;
   average_price: number;
   unrealized_pnl: number;
@@ -743,7 +893,7 @@ export interface PositionData {
  * Strategies use this to finalize analysis and generate reports.
  */
 export interface ReplayEndData {
-  type: Type12;
+  type: Type15;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -759,7 +909,7 @@ export interface ReplayEndData {
  *     started_at: Replay start timestamp (optional).
  */
 export interface ReplayStartData {
-  type: Type13;
+  type: Type16;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -779,7 +929,7 @@ export interface ReplayStartData {
  *     updated_by: User who made the change (optional).
  */
 export interface SettingChangedData {
-  type: Type14;
+  type: Type17;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -806,13 +956,13 @@ export interface SettingChangedData {
  *     fired_at: Domain timestamp when the signal was generated.
  */
 export interface SignalData {
-  type: Type15;
+  type: Type18;
   sequence_id: number;
   public_id: string;
   timestamp: string;
   session_id: string;
   instrument: string;
-  exchange: Exchange8;
+  exchange: Exchange9;
   side: Side3;
   strength: number;
   reason: string;
@@ -820,7 +970,7 @@ export interface SignalData {
   strategy_name?: StrategyName;
   fired_at: string;
   wallet_public_id?: string;
-  operator_public_id?: OperatorPublicId6;
+  operator_public_id?: OperatorPublicId7;
   user_public_id?: UserPublicId6;
 }
 /**
@@ -834,7 +984,7 @@ export interface SignalData {
  *     action: Required action (always 'clear_cache').
  */
 export interface SymbolAliasUpdateData {
-  type: Type16;
+  type: Type19;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -857,13 +1007,13 @@ export interface SymbolAliasUpdateData {
  *     last: Last traded price.
  */
 export interface TickData {
-  type: Type17;
+  type: Type20;
   sequence_id: number;
   public_id: string;
   timestamp: string;
   session_id: string;
   instrument: string;
-  exchange: Exchange9;
+  exchange: Exchange10;
   volume: number;
   bid?: Bid;
   ask?: Ask;
@@ -885,13 +1035,13 @@ export interface TickData {
  *     trade_id: Exchange-provided trade identifier for deduplication.
  */
 export interface TradeData {
-  type: Type18;
+  type: Type21;
   sequence_id: number;
   public_id: string;
   timestamp: string;
   session_id: string;
   instrument: string;
-  exchange: Exchange10;
+  exchange: Exchange11;
   executed_at?: ExecutedAt;
   price: number;
   volume: number;
@@ -912,7 +1062,7 @@ export interface TradeData {
  *     instrument_count: Number of instruments mapped to this underlying.
  */
 export interface UnderlyingAssetData {
-  type: Type19;
+  type: Type22;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -937,7 +1087,7 @@ export interface UnderlyingAssetData {
  *     contract_family: Futures product root (nullable).
  */
 export interface UnderlyingInstrumentData {
-  type: Type20;
+  type: Type23;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -948,6 +1098,35 @@ export interface UnderlyingInstrumentData {
   asset_type: string;
   relationship_type: string;
   contract_family: ContractFamily2;
+}
+/**
+ * Venue fee schedule row for REST API responses.
+ *
+ * Used by market-making evaluators to estimate profitability and
+ * by the UI to display fee tiers.
+ *
+ * Attributes:
+ *     exchange: Exchange identifier.
+ *     instrument_public_id: Instrument UUID (null = exchange-wide default).
+ *     fee_tier: Fee tier name.
+ *     maker_bps: Maker fee in basis points (negative = rebate).
+ *     taker_bps: Taker fee in basis points.
+ *     min_volume_30d: Minimum 30-day volume for this tier.
+ *     currency: Fee denomination currency.
+ */
+export interface VenueFeeScheduleData {
+  type: Type24;
+  sequence_id: number;
+  public_id: string;
+  timestamp: string;
+  session_id: string;
+  exchange: string;
+  instrument_public_id: InstrumentPublicId;
+  fee_tier: string;
+  maker_bps: number;
+  taker_bps: number;
+  min_volume_30d: MinVolume30D;
+  currency: string;
 }
 /**
  * Authentication complete message with session info.
@@ -962,7 +1141,7 @@ export interface UnderlyingInstrumentData {
  *     ws_token_exp: WebSocket token expiration (ISO 8601).
  */
 export interface WSAuthCompleteResponse {
-  type: Type21;
+  type: Type25;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -984,7 +1163,7 @@ export interface WSAuthCompleteResponse {
  *     type: Message type discriminator ('auth_expired').
  */
 export interface WSAuthExpiredResponse {
-  type: Type22;
+  type: Type26;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1000,7 +1179,7 @@ export interface WSAuthExpiredResponse {
  *     reason: Optional failure reason code.
  */
 export interface WSAuthFailedResponse {
-  type: Type23;
+  type: Type27;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1017,7 +1196,7 @@ export interface WSAuthFailedResponse {
  *     exp: Token expiration timestamp (ISO 8601).
  */
 export interface WSAuthOkResponse {
-  type: Type24;
+  type: Type28;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1037,7 +1216,7 @@ export interface WSAuthOkResponse {
  *     timeout: Seconds until authentication timeout.
  */
 export interface WSAuthRequiredResponse {
-  type: Type25;
+  type: Type29;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1057,7 +1236,7 @@ export interface WSAuthRequiredResponse {
  *     ws_token: WebSocket authentication token.
  */
 export interface WSAuthenticateRequest {
-  type: Type26;
+  type: Type30;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1077,7 +1256,7 @@ export interface WSAuthenticateRequest {
  *     message: Human-readable error description.
  */
 export interface WSErrorResponse {
-  type: Type27;
+  type: Type31;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1094,7 +1273,7 @@ export interface WSErrorResponse {
  *     type: Message type discriminator ('get_subscriptions').
  */
 export interface WSGetSubscriptionsRequest {
-  type: Type28;
+  type: Type32;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1109,7 +1288,7 @@ export interface WSGetSubscriptionsRequest {
  *     type: Message type discriminator ('ping').
  */
 export interface WSPingRequest {
-  type: Type29;
+  type: Type33;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1126,7 +1305,7 @@ export interface WSPingRequest {
  *     active_connections: Number of active WebSocket connections.
  */
 export interface WSPongResponse {
-  type: Type30;
+  type: Type34;
   sequence_id: number;
   public_id: string;
   /**
@@ -1149,7 +1328,7 @@ export interface WSPongResponse {
  *     exp: New token expiration timestamp (ISO 8601).
  */
 export interface WSReauthOkResponse {
-  type: Type31;
+  type: Type35;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1169,7 +1348,7 @@ export interface WSReauthOkResponse {
  *     ws_token: New WebSocket authentication token.
  */
 export interface WSReauthRequest {
-  type: Type32;
+  type: Type36;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1189,7 +1368,7 @@ export interface WSReauthRequest {
  *     deadline: Deadline for reauthentication (ISO 8601).
  */
 export interface WSReauthRequiredResponse {
-  type: Type33;
+  type: Type37;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1207,7 +1386,7 @@ export interface WSReauthRequiredResponse {
  *     topics: List of topics to subscribe to.
  */
 export interface WSSubscribeRequest {
-  type: Type34;
+  type: Type38;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1229,7 +1408,7 @@ export interface WSSubscribeRequest {
  *     message: Optional additional details.
  */
 export interface WSSubscriptionSuccessResponse {
-  type: Type35;
+  type: Type39;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1253,7 +1432,7 @@ export interface WSSubscriptionSuccessResponse {
  *     total_available: Total number of available topics.
  */
 export interface WSSubscriptionsListResponse {
-  type: Type36;
+  type: Type40;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1273,7 +1452,7 @@ export interface WSSubscriptionsListResponse {
  *     topics: List of topics to unsubscribe from.
  */
 export interface WSUnsubscribeRequest {
-  type: Type37;
+  type: Type41;
   sequence_id: number;
   public_id: string;
   timestamp: string;

@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
-import { Download } from 'lucide-react'
+import { Download, Plus } from 'lucide-react'
 import { useOrders, useExecutions } from '../../hooks/queries'
+import { NewOrderModal } from './NewOrderModal'
 import type { Order, Execution } from '../../types/entities'
 import { OrderCardSkeleton } from '../../components/Skeleton'
 import { ThemeSelect } from '../../components/ThemeSelect'
@@ -146,6 +147,7 @@ const ExecutionCard: React.FC<{ execution: Execution }> = ({ execution }) => {
 export const Orders: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'orders' | 'executions'>('orders')
   const [statusFilter, setStatusFilter] = useState<string>('all')
+  const [showNewOrder, setShowNewOrder] = useState(false)
   const { data: orders = [], isLoading: ordersLoading } = useOrders({ limit: 50 })
   const { data: executions = [], isLoading: executionsLoading } = useExecutions({ limit: 50 })
   const filteredOrders = orders.filter(
@@ -218,16 +220,28 @@ export const Orders: React.FC = () => {
 
   return (
     <div className='space-y-6'>
+      <NewOrderModal open={showNewOrder} onClose={() => setShowNewOrder(false)} />
       <div className='flex items-center justify-between'>
         <h2 className='text-xl font-semibold text-alpine-900'>Orders & Executions</h2>
-        <button
-          onClick={activeTab === 'orders' ? handleExportOrders : handleExportExecutions}
-          disabled={activeTab === 'orders' ? filteredOrders.length === 0 : executions.length === 0}
-          className='flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-dark-600 bg-alpine-50 hover:bg-muted-200 disabled:opacity-50 disabled:cursor-not-allowed text-alpine-900 rounded-lg transition-colors'
-        >
-          <Download size={14} />
-          Export CSV
-        </button>
+        <div className='flex items-center gap-2'>
+          <button
+            onClick={() => setShowNewOrder(true)}
+            className='flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-brand-600 text-white hover:bg-brand-500 rounded-lg transition-colors'
+          >
+            <Plus size={14} />
+            New Order
+          </button>
+          <button
+            onClick={activeTab === 'orders' ? handleExportOrders : handleExportExecutions}
+            disabled={
+              activeTab === 'orders' ? filteredOrders.length === 0 : executions.length === 0
+            }
+            className='flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-dark-600 bg-alpine-50 hover:bg-muted-200 disabled:opacity-50 disabled:cursor-not-allowed text-alpine-900 rounded-lg transition-colors'
+          >
+            <Download size={14} />
+            Export CSV
+          </button>
+        </div>
       </div>
       <div className='flex space-x-1 rounded-xl border border-dark-600 bg-dark-700 p-1'>
         <button

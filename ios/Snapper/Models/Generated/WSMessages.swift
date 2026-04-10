@@ -12,6 +12,25 @@ enum CandleDataExchange: String, Codable, Sendable {
     case polygon
 }
 
+enum FundingAccrualDataExchange: String, Codable, Sendable {
+    case paper
+    case kraken
+    case krakenFutures = "kraken_futures"
+    case zonda
+    case walutomat
+}
+
+enum FundingAccrualDataMode: String, Codable, Sendable {
+    case live
+    case paper
+}
+
+enum FundingAccrualDataAccrualType: String, Codable, Sendable {
+    case funding
+    case rollover
+    case borrow
+}
+
 enum HeartbeatDataStatus: String, Codable, Sendable {
     case healthy
     case warning
@@ -161,6 +180,42 @@ struct CandleData: Codable, Sendable {
     }
 }
 
+struct FundingAccrualData: Codable, Sendable {
+    let type: String
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let instrument: String
+    let exchange: String
+    let mode: String
+    let accrualType: String
+    let accruedAt: Date
+    let amount: Double
+    let amountAsset: String
+    let rate: Double
+    let notional: Double
+    let positionQuantity: Double
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case instrument
+        case exchange
+        case mode
+        case accrualType = "accrual_type"
+        case accruedAt = "accrued_at"
+        case amount
+        case amountAsset = "amount_asset"
+        case rate
+        case notional
+        case positionQuantity = "position_quantity"
+    }
+}
+
 struct HeartbeatData: Codable, Sendable {
     let type: String
     let sequenceId: Int
@@ -184,6 +239,56 @@ struct HeartbeatData: Codable, Sendable {
         case status
         case lagMs = "lag_ms"
         case meta
+    }
+}
+
+struct InstrumentCapabilityData: Codable, Sendable {
+    let type: String
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let instrumentPublicId: String
+    let exchange: String
+    let supportedOrderTypes: [String]
+    let supportsPostOnly: Bool
+    let supportsReduceOnly: Bool
+    let supportsAmendInPlace: Bool
+    let supportsNativeStopLoss: Bool
+    let supportsNativeTakeProfit: Bool
+    let supportsTrailingStopClientSide: Bool
+    let supportsMarketMaking: Bool
+    let supportsShortSelling: Bool
+    let supportsLeverage: Bool
+    let maxLeverageLong: Double
+    let maxLeverageShort: Double
+    let minNotional: Double?
+    let maxOrderSize: Double?
+    let topOfBookQuality: String
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case instrumentPublicId = "instrument_public_id"
+        case exchange
+        case supportedOrderTypes = "supported_order_types"
+        case supportsPostOnly = "supports_post_only"
+        case supportsReduceOnly = "supports_reduce_only"
+        case supportsAmendInPlace = "supports_amend_in_place"
+        case supportsNativeStopLoss = "supports_native_stop_loss"
+        case supportsNativeTakeProfit = "supports_native_take_profit"
+        case supportsTrailingStopClientSide = "supports_trailing_stop_client_side"
+        case supportsMarketMaking = "supports_market_making"
+        case supportsShortSelling = "supports_short_selling"
+        case supportsLeverage = "supports_leverage"
+        case maxLeverageLong = "max_leverage_long"
+        case maxLeverageShort = "max_leverage_short"
+        case minNotional = "min_notional"
+        case maxOrderSize = "max_order_size"
+        case topOfBookQuality = "top_of_book_quality"
     }
 }
 
@@ -466,6 +571,36 @@ struct TradeData: Codable, Sendable {
         case volume
         case side
         case tradeId = "trade_id"
+    }
+}
+
+struct VenueFeeScheduleData: Codable, Sendable {
+    let type: String
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let exchange: String
+    let instrumentPublicId: String?
+    let feeTier: String
+    let makerBps: Double
+    let takerBps: Double
+    let minVolume30D: Double?
+    let currency: String
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case exchange
+        case instrumentPublicId = "instrument_public_id"
+        case feeTier = "fee_tier"
+        case makerBps = "maker_bps"
+        case takerBps = "taker_bps"
+        case minVolume30D = "min_volume_30d"
+        case currency
     }
 }
 

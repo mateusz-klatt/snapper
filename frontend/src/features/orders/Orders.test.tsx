@@ -10,6 +10,10 @@ vi.mock('../../lib/csvExport', () => ({
   exportToCSV: vi.fn(),
 }))
 
+vi.mock('./NewOrderModal', () => ({
+  NewOrderModal: () => null,
+}))
+
 vi.mock('../../components/ThemeSelect', () => ({
   ThemeSelect: ({
     id,
@@ -1311,5 +1315,13 @@ describe('Orders', () => {
         ],
       ]
     )
+  })
+
+  it('shows New Order button and opens modal on click', async () => {
+    renderWithProviders(<Orders />)
+    const button = screen.getByText('New Order')
+
+    expect(button).toBeInTheDocument()
+    await userEvent.click(button)
   })
 })

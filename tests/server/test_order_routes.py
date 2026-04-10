@@ -5,6 +5,7 @@ from datetime import UTC
 from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -96,10 +97,24 @@ def _cancel_order_body() -> dict[str, Any]:
     }
 
 
-def _create_client(mock_repo: Any) -> TestClient:
-    """Create test client with auth bypassed and mock repository injected."""
+def _create_client(
+    mock_repo: Any,
+    allow_manual_orders: bool = True,
+) -> TestClient:
+    """Create test client with auth bypassed and mock repository injected.
+
+    Args:
+        mock_repo: AsyncMock repository.
+        allow_manual_orders: Value for the settings flag.
+
+    Returns:
+        TestClient with overrides applied.
+    """
     app = create_app()
     app.router.lifespan_context = _noop_lifespan
+    mock_settings = MagicMock()
+    mock_settings.allow_manual_orders = allow_manual_orders
+    app.state.settings = mock_settings
 
     def skip_csrf() -> None:
         return None
@@ -115,6 +130,15 @@ def _create_client(mock_repo: Any) -> TestClient:
 
 class TestCreateOrder:
     """Tests for POST /api/orders."""
+
+    def test_create_order_disabled_returns_403(self) -> None:
+        """Given allow_manual_orders=False, When creating, Then 403."""
+        repo = AsyncMock()
+        client = _create_client(repo, allow_manual_orders=False)
+        response = client.post("/api/orders", json=_create_order_body())
+        assert response.status_code == 403
+        assert "disabled" in response.json()["detail"].lower()
+        client.close()
 
     def test_create_order_success(self) -> None:
         """Given valid order params, When creating, Then 200 with plan."""
@@ -178,6 +202,9 @@ class TestCreateOrder:
 
         app = create_app()
         app.router.lifespan_context = _noop_lifespan
+        mock_settings = MagicMock()
+        mock_settings.allow_manual_orders = True
+        app.state.settings = mock_settings
 
         def skip_csrf() -> None:
             return None

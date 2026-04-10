@@ -300,6 +300,18 @@ class TestAppSettingsRiskProperties:
         settings = AppSettings(bootstrap, settings_service=service)
         assert settings.has_db_access is True
 
+    def test_allow_manual_orders_default_false(self) -> None:
+        """Verify allow_manual_orders defaults to False.
+
+        Given service with no allow_manual_orders setting,
+        When accessing settings.allow_manual_orders,
+        Then False is returned.
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        service = MockSettingsService({})
+        settings = AppSettings(bootstrap, settings_service=service)
+        assert settings.allow_manual_orders is False
+
     def test_allow_short_selling_default_false(self) -> None:
         """Verify allow_short_selling defaults to False.
 

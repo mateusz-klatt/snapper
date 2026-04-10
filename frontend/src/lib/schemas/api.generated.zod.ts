@@ -104,6 +104,32 @@ export const ExecutionDataSchema = z
     wallet_public_id: z.string(),
     operator_public_id: z.string().nullable().optional(),
     user_public_id: z.string().nullable().optional(),
+    liquidity_role: z.string(),
+  })
+  .strict()
+
+export const ExecutionPlanDataSchema = z
+  .object({
+    type: z.literal('execution_plan'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    plan_type: z.string(),
+    status: z.string(),
+    instrument_public_id: z.string(),
+    exchange: z.string(),
+    mode: z.string(),
+    side: z.string(),
+    total_quantity: z.number(),
+    filled_quantity: z.number(),
+    created_at: z.iso.datetime(),
+    created_via: z.string(),
+    wallet_public_id: z.string(),
+    operator_public_id: z.string().nullable(),
+    params: z.record(z.string(), z.unknown()),
+    last_error: z.string().nullable(),
+    idempotency_key: z.string().nullable(),
   })
   .strict()
 
@@ -533,6 +559,33 @@ export const RotateCredentialBodySchema = z
   })
   .strict()
 
+export const CreateOrderBodySchema = z
+  .object({
+    instrument: z.string(),
+    instrument_public_id: z.string(),
+    exchange: z.string(),
+    mode: z.enum(['live', 'paper']).optional(),
+    side: z.enum(['buy', 'sell']),
+    order_type: z.enum(['market', 'limit', 'stop', 'stop_limit']),
+    quantity: z.number(),
+    price: z.number().nullable().optional(),
+    stop_price: z.number().nullable().optional(),
+    time_in_force: z.string().optional(),
+    post_only: z.boolean().optional(),
+    leverage: z.number().int().nullable().optional(),
+    reduce_only: z.boolean().optional(),
+    wallet_public_id: z.string(),
+    operator_public_id: z.string().nullable().optional(),
+    idempotency_key: z.string().nullable().optional(),
+  })
+  .strict()
+
+export const CancelOrderBodySchema = z
+  .object({
+    reason: z.string().nullable().optional(),
+  })
+  .strict()
+
 export const CreateScopeGrantBodySchema = z
   .object({
     operator_public_id: z.string().min(1).max(64),
@@ -616,6 +669,17 @@ export const ExecutionListResponseSchema = z
     session_id: z.string(),
     payload: z.array(ExecutionDataSchema),
     count: z.number().int(),
+  })
+  .strict()
+
+export const ExecutionPlanResponseSchema = z
+  .object({
+    type: z.literal('execution_plan_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: ExecutionPlanDataSchema,
   })
   .strict()
 
@@ -1019,6 +1083,28 @@ export const RotateCredentialCommandSchema = z
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     payload: RotateCredentialBodySchema,
+  })
+  .strict()
+
+export const CreateOrderCommandSchema = z
+  .object({
+    type: z.literal('create_order_command').optional(),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: CreateOrderBodySchema,
+  })
+  .strict()
+
+export const CancelOrderCommandSchema = z
+  .object({
+    type: z.literal('cancel_order_command').optional(),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: CancelOrderBodySchema,
   })
   .strict()
 
@@ -1446,6 +1532,7 @@ export type ContractData = z.infer<typeof ContractDataSchema>
 export type CredentialSummary = z.infer<typeof CredentialSummarySchema>
 export type ExchangeListResponse = z.infer<typeof ExchangeListResponseSchema>
 export type ExecutionData = z.infer<typeof ExecutionDataSchema>
+export type ExecutionPlanData = z.infer<typeof ExecutionPlanDataSchema>
 export type FrontMonthData = z.infer<typeof FrontMonthDataSchema>
 export type GapStats = z.infer<typeof GapStatsSchema>
 export type HealthTopics = z.infer<typeof HealthTopicsSchema>
@@ -1487,6 +1574,8 @@ export type SettingUpdateBody = z.infer<typeof SettingUpdateBodySchema>
 export type RemoveSettingBody = z.infer<typeof RemoveSettingBodySchema>
 export type CreateCredentialBody = z.infer<typeof CreateCredentialBodySchema>
 export type RotateCredentialBody = z.infer<typeof RotateCredentialBodySchema>
+export type CreateOrderBody = z.infer<typeof CreateOrderBodySchema>
+export type CancelOrderBody = z.infer<typeof CancelOrderBodySchema>
 export type CreateScopeGrantBody = z.infer<typeof CreateScopeGrantBodySchema>
 export type HandoverScopeGrantBody = z.infer<typeof HandoverScopeGrantBodySchema>
 export type CreateWalletBody = z.infer<typeof CreateWalletBodySchema>
@@ -1495,6 +1584,7 @@ export type ContractListResponse = z.infer<typeof ContractListResponseSchema>
 export type CredentialListResponse = z.infer<typeof CredentialListResponseSchema>
 export type CredentialResponse = z.infer<typeof CredentialResponseSchema>
 export type ExecutionListResponse = z.infer<typeof ExecutionListResponseSchema>
+export type ExecutionPlanResponse = z.infer<typeof ExecutionPlanResponseSchema>
 export type FrontMonthResponse = z.infer<typeof FrontMonthResponseSchema>
 export type GapDetectionStats = z.infer<typeof GapDetectionStatsSchema>
 export type JsonValue = z.infer<typeof JsonValueSchema>
@@ -1533,6 +1623,8 @@ export type SettingUpdate = z.infer<typeof SettingUpdateSchema>
 export type RemoveSettingRequest = z.infer<typeof RemoveSettingRequestSchema>
 export type CreateCredentialCommand = z.infer<typeof CreateCredentialCommandSchema>
 export type RotateCredentialCommand = z.infer<typeof RotateCredentialCommandSchema>
+export type CreateOrderCommand = z.infer<typeof CreateOrderCommandSchema>
+export type CancelOrderCommand = z.infer<typeof CancelOrderCommandSchema>
 export type CreateScopeGrantCommand = z.infer<typeof CreateScopeGrantCommandSchema>
 export type HandoverScopeGrantCommand = z.infer<typeof HandoverScopeGrantCommandSchema>
 export type CreateWalletCommand = z.infer<typeof CreateWalletCommandSchema>

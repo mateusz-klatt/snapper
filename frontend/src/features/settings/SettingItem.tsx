@@ -19,6 +19,9 @@ const SETTING_HELP_TEXT: Record<string, string> = {
   allow_short_selling:
     'Allow the engine to open short positions. SELL signals will produce ' +
     'negative desired_units; clamps to 0 when disabled.',
+  allow_manual_orders:
+    'Enable the New Order button on the Orders tab. When disabled, ' +
+    'POST /api/orders returns 403.',
 }
 
 const JSON_TOKEN_COLORS: Record<JsonTokenType, string> = {

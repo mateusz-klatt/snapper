@@ -196,6 +196,23 @@ enum CreateCredentialBodyCredentialType: String, Codable, Sendable {
     case paper
 }
 
+enum CreateOrderBodyMode: String, Codable, Sendable {
+    case live
+    case paper
+}
+
+enum CreateOrderBodySide: String, Codable, Sendable {
+    case buy
+    case sell
+}
+
+enum CreateOrderBodyOrderType: String, Codable, Sendable {
+    case market
+    case limit
+    case stop
+    case stopLimit = "stop_limit"
+}
+
 enum CreateScopeGrantBodyScopeKind: String, Codable, Sendable {
     case underlying
     case instrument
@@ -605,6 +622,7 @@ struct ExecutionData: Codable, Sendable {
     let walletPublicId: String?
     let operatorPublicId: String?
     let userPublicId: String?
+    let liquidityRole: String?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -629,6 +647,7 @@ struct ExecutionData: Codable, Sendable {
         case walletPublicId = "wallet_public_id"
         case operatorPublicId = "operator_public_id"
         case userPublicId = "user_public_id"
+        case liquidityRole = "liquidity_role"
     }
 }
 
@@ -650,6 +669,70 @@ struct ExecutionListResponse: Codable, Sendable {
         case sessionId = "session_id"
         case payload
         case count
+    }
+}
+
+struct ExecutionPlanData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let planType: String
+    let status: String
+    let instrumentPublicId: String
+    let exchange: String
+    let mode: String
+    let side: String
+    let totalQuantity: Double
+    let filledQuantity: Double
+    let createdAt: Date
+    let createdVia: String
+    let walletPublicId: String
+    let operatorPublicId: String?
+    let params: [String: AnyCodable]
+    let lastError: String?
+    let idempotencyKey: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case planType = "plan_type"
+        case status
+        case instrumentPublicId = "instrument_public_id"
+        case exchange
+        case mode
+        case side
+        case totalQuantity = "total_quantity"
+        case filledQuantity = "filled_quantity"
+        case createdAt = "created_at"
+        case createdVia = "created_via"
+        case walletPublicId = "wallet_public_id"
+        case operatorPublicId = "operator_public_id"
+        case params
+        case lastError = "last_error"
+        case idempotencyKey = "idempotency_key"
+    }
+}
+
+struct ExecutionPlanResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: ExecutionPlanData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
     }
 }
 
@@ -2544,6 +2627,84 @@ struct RotateCredentialBody: Codable, Sendable {
         case credentialPayload = "credential_payload"
         case label
     }
+}
+
+struct CreateOrderCommand: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: CreateOrderBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct CreateOrderBody: Codable, Sendable {
+    let instrument: String
+    let instrumentPublicId: String
+    let exchange: String
+    let mode: String?
+    let side: String
+    let orderType: String
+    let quantity: Double
+    let price: Double?
+    let stopPrice: Double?
+    let timeInForce: String?
+    let postOnly: Bool?
+    let leverage: Int?
+    let reduceOnly: Bool?
+    let walletPublicId: String
+    let operatorPublicId: String?
+    let idempotencyKey: String?
+
+    enum CodingKeys: String, CodingKey {
+        case instrument
+        case instrumentPublicId = "instrument_public_id"
+        case exchange
+        case mode
+        case side
+        case orderType = "order_type"
+        case quantity
+        case price
+        case stopPrice = "stop_price"
+        case timeInForce = "time_in_force"
+        case postOnly = "post_only"
+        case leverage
+        case reduceOnly = "reduce_only"
+        case walletPublicId = "wallet_public_id"
+        case operatorPublicId = "operator_public_id"
+        case idempotencyKey = "idempotency_key"
+    }
+}
+
+struct CancelOrderCommand: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: CancelOrderBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct CancelOrderBody: Codable, Sendable {
+    let reason: String?
 }
 
 struct ProcessCreateRequest: Codable, Sendable {
