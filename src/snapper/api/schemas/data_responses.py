@@ -15,11 +15,13 @@ from snapper.messaging.schemas.data import ContinuousCandleData
 from snapper.messaging.schemas.data import ContractData
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import FrontMonthData
+from snapper.messaging.schemas.data import InstrumentCapabilityData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import PositionData
 from snapper.messaging.schemas.data import SignalData
 from snapper.messaging.schemas.data import UnderlyingAssetData
 from snapper.messaging.schemas.data import UnderlyingInstrumentData
+from snapper.messaging.schemas.data import VenueFeeScheduleData
 
 
 class CandleListResponse(PayloadListResponse[Literal["candle_list"], CandleData]):
@@ -189,16 +191,46 @@ class ContractListResponse(
     type: Literal["contract_list"] = "contract_list"
 
 
+class InstrumentCapabilityListResponse(
+    PayloadListResponse[Literal["instrument_capability_list"], InstrumentCapabilityData],
+):
+    """Instrument order capability list response wrapper.
+
+    Attributes:
+        type: Payload item type discriminator.
+        payload: List of instrument capability data items.
+        count: Total number of capabilities in the response.
+    """
+
+    type: Literal["instrument_capability_list"] = "instrument_capability_list"
+
+
+class VenueFeeScheduleListResponse(
+    PayloadListResponse[Literal["venue_fee_schedule_list"], VenueFeeScheduleData],
+):
+    """Venue fee schedule list response wrapper.
+
+    Attributes:
+        type: Payload item type discriminator.
+        payload: List of fee schedule data items.
+        count: Total number of fee schedules in the response.
+    """
+
+    type: Literal["venue_fee_schedule_list"] = "venue_fee_schedule_list"
+
+
 __all__ = [
     "CandleListResponse",
     "ContractListResponse",
     "ExecutionListResponse",
     "ExchangeListResponse",
     "FrontMonthResponse",
+    "InstrumentCapabilityListResponse",
     "InstrumentListResponse",
     "OrderListResponse",
     "PositionListResponse",
     "SignalListResponse",
     "UnderlyingAssetListResponse",
     "UnderlyingInstrumentListResponse",
+    "VenueFeeScheduleListResponse",
 ]

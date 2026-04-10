@@ -79,6 +79,7 @@ from snapper.data.models import Candle
 from snapper.data.models import Execution
 from snapper.data.models import FundingRate
 from snapper.data.models import Instrument
+from snapper.data.models import InstrumentOrderCapability
 from snapper.data.models import InstrumentSpec
 from snapper.data.models import InstrumentUnderlyingMapping
 from snapper.data.models import MarketSnapshot
@@ -96,6 +97,7 @@ from snapper.data.models import TradeProjectionCheckpoint
 from snapper.data.models import UnderlyingAsset
 from snapper.data.models import UserOperatorMembership
 from snapper.data.models import VenueEvent
+from snapper.data.models import VenueFeeSchedule
 from snapper.data.models import Wallet
 from snapper.data.models import WalletCredential
 from snapper.data.models import WalletOperatorScopeGrant
@@ -110,6 +112,7 @@ from snapper.data.repository_types import FundingRateInsertRow
 from snapper.data.repository_types import FundingRateRow
 from snapper.data.repository_types import InstrumentContractRow
 from snapper.data.repository_types import InstrumentFrontMonthRow
+from snapper.data.repository_types import InstrumentOrderCapabilityRow
 from snapper.data.repository_types import InstrumentSpecRow
 from snapper.data.repository_types import InstrumentUnderlyingRow
 from snapper.data.repository_types import MarketSnapshotRow
@@ -131,6 +134,7 @@ from snapper.data.repository_types import UnderlyingAssetRow
 from snapper.data.repository_types import UserOperatorMembershipRow
 from snapper.data.repository_types import VenueEventInsertRow
 from snapper.data.repository_types import VenueEventRow
+from snapper.data.repository_types import VenueFeeScheduleRow
 from snapper.data.repository_types import WalletCredentialRow
 from snapper.data.repository_types import WalletRow
 
@@ -1270,6 +1274,42 @@ class Repository(ABC):
         Returns:
             Most recent accrual row, or ``None`` if no accrual has been
             applied yet for the given key.
+        """
+        ...
+
+    @abstractmethod
+    async def get_instrument_capabilities(
+        self,
+        as_of: datetime,
+        exchange: str | None = None,
+        instrument_public_id: str | None = None,
+    ) -> list[InstrumentOrderCapabilityRow]:
+        """Retrieve active instrument order capability rows.
+
+        Args:
+            as_of: Point-in-time for temporal query.
+            exchange: Optional exchange filter.
+            instrument_public_id: Optional instrument filter.
+
+        Returns:
+            Capability rows ordered by exchange, instrument.
+        """
+        ...
+
+    @abstractmethod
+    async def get_venue_fee_schedules(
+        self,
+        as_of: datetime,
+        exchange: str | None = None,
+    ) -> list[VenueFeeScheduleRow]:
+        """Retrieve active venue fee schedule rows.
+
+        Args:
+            as_of: Point-in-time for temporal query.
+            exchange: Optional exchange filter.
+
+        Returns:
+            Fee schedule rows ordered by exchange, fee_tier.
         """
         ...
 
@@ -4418,6 +4458,90 @@ class SQLAlchemyRepository(Repository):
                 )
         else:
             raise ScopeGrantValidationError(f"unknown scope_kind={kind!r}")
+
+    async def get_instrument_capabilities(
+        self,
+        as_of: datetime,
+        exchange: str | None = None,
+        instrument_public_id: str | None = None,
+    ) -> list[InstrumentOrderCapabilityRow]:
+        """Retrieve active instrument order capability rows."""
+        async with self.session() as s:
+            filters: list[Any] = [*where_active(InstrumentOrderCapability, as_of)]
+            if exchange is not None:
+                filters.append(InstrumentOrderCapability.exchange == exchange)
+            if instrument_public_id is not None:
+                filters.append(
+                    InstrumentOrderCapability.instrument_public_id == instrument_public_id
+                )
+            stmt = (
+                select(InstrumentOrderCapability)
+                .where(*filters)
+                .order_by(
+                    InstrumentOrderCapability.exchange,
+                    InstrumentOrderCapability.instrument_public_id,
+                )
+            )
+            result = await s.execute(stmt)
+            return [
+                InstrumentOrderCapabilityRow(
+                    public_id=row.public_id,
+                    timestamp=row.timestamp,
+                    session_id=row.session_id,
+                    sequence_id=row.sequence_id,
+                    instrument_public_id=row.instrument_public_id,
+                    exchange=row.exchange,
+                    supported_order_types=row.supported_order_types,
+                    supports_post_only=row.supports_post_only,
+                    supports_reduce_only=row.supports_reduce_only,
+                    supports_amend_in_place=row.supports_amend_in_place,
+                    supports_native_stop_loss=row.supports_native_stop_loss,
+                    supports_native_take_profit=row.supports_native_take_profit,
+                    supports_trailing_stop_client_side=row.supports_trailing_stop_client_side,
+                    supports_market_making=row.supports_market_making,
+                    supports_short_selling=row.supports_short_selling,
+                    supports_leverage=row.supports_leverage,
+                    max_leverage_long=row.max_leverage_long,
+                    max_leverage_short=row.max_leverage_short,
+                    min_notional=row.min_notional,
+                    max_order_size=row.max_order_size,
+                    top_of_book_quality=row.top_of_book_quality,
+                )
+                for row in result.scalars().all()
+            ]
+
+    async def get_venue_fee_schedules(
+        self,
+        as_of: datetime,
+        exchange: str | None = None,
+    ) -> list[VenueFeeScheduleRow]:
+        """Retrieve active venue fee schedule rows."""
+        async with self.session() as s:
+            filters: list[Any] = [*where_active(VenueFeeSchedule, as_of)]
+            if exchange is not None:
+                filters.append(VenueFeeSchedule.exchange == exchange)
+            stmt = (
+                select(VenueFeeSchedule)
+                .where(*filters)
+                .order_by(VenueFeeSchedule.exchange, VenueFeeSchedule.fee_tier)
+            )
+            result = await s.execute(stmt)
+            return [
+                VenueFeeScheduleRow(
+                    public_id=row.public_id,
+                    timestamp=row.timestamp,
+                    session_id=row.session_id,
+                    sequence_id=row.sequence_id,
+                    exchange=row.exchange,
+                    instrument_public_id=row.instrument_public_id,
+                    fee_tier=row.fee_tier,
+                    maker_bps=row.maker_bps,
+                    taker_bps=row.taker_bps,
+                    min_volume_30d=row.min_volume_30d,
+                    currency=row.currency,
+                )
+                for row in result.scalars().all()
+            ]
 
     async def create_scope_grant(self, request: CreateScopeGrantRequest) -> ScopeGrantRow:
         """Create a new scope grant with advisory-locked overlap detection."""

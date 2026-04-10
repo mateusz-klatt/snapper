@@ -31,12 +31,14 @@ import snapper.data.repository as repo
 import snapper.data.repository as repository
 from snapper.data import repository as repo_module
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import InstrumentOrderCapability
 from snapper.data.models import MarketSnapshot
 from snapper.data.models import Position
 from snapper.data.models import Setting
 from snapper.data.models import Signal
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
+from snapper.data.models import VenueFeeSchedule
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import InstrumentSpecInput
 from snapper.data.repository import Repository
@@ -5092,3 +5094,308 @@ async def test_get_last_accrual_wallet_filter(tmp_path: Path) -> None:
     )
     assert row is not None
     assert row["accrued_at"] == datetime(2026, 4, 6, 4, 0, 0, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_get_instrument_capabilities_returns_active_rows(tmp_path: Path) -> None:
+    """Given seeded capability rows, When querying, Then active rows returned."""
+    db_path = tmp_path / "cap.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    async with r.session() as s:
+        s.add(
+            InstrumentOrderCapability(
+                instrument_public_id="inst-1",
+                exchange="kraken",
+                supported_order_types=["market", "limit"],
+                supports_post_only=True,
+                supports_reduce_only=False,
+                supports_amend_in_place=False,
+                supports_native_stop_loss=True,
+                supports_native_take_profit=True,
+                supports_trailing_stop_client_side=True,
+                supports_market_making=False,
+                supports_short_selling=True,
+                supports_leverage=True,
+                max_leverage_long=5.0,
+                max_leverage_short=3.0,
+                min_notional=10.0,
+                max_order_size=1000.0,
+                top_of_book_quality="realtime",
+                timestamp=now,
+                session_id="s1",
+                sequence_id=1,
+            )
+        )
+        s.add(
+            InstrumentOrderCapability(
+                instrument_public_id="inst-2",
+                exchange="zonda",
+                supported_order_types=["limit"],
+                supports_post_only=False,
+                supports_reduce_only=False,
+                supports_amend_in_place=False,
+                supports_native_stop_loss=False,
+                supports_native_take_profit=False,
+                supports_trailing_stop_client_side=True,
+                supports_market_making=False,
+                supports_short_selling=False,
+                supports_leverage=False,
+                max_leverage_long=1.0,
+                max_leverage_short=0.0,
+                min_notional=None,
+                max_order_size=None,
+                top_of_book_quality="polled",
+                timestamp=now,
+                session_id="s1",
+                sequence_id=2,
+            )
+        )
+        await s.commit()
+    rows = await r.get_instrument_capabilities(as_of=now)
+    assert len(rows) == 2
+    assert rows[0]["exchange"] == "kraken"
+    assert rows[0]["supported_order_types"] == ["market", "limit"]
+    assert rows[0]["supports_post_only"] is True
+    assert rows[0]["max_leverage_long"] == 5.0
+    assert rows[1]["exchange"] == "zonda"
+
+
+@pytest.mark.asyncio
+async def test_get_instrument_capabilities_exchange_filter(tmp_path: Path) -> None:
+    """Given rows for multiple exchanges, When filtering, Then only matching returned."""
+    db_path = tmp_path / "cap_filter.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    async with r.session() as s:
+        for ex in ("kraken", "zonda"):
+            s.add(
+                InstrumentOrderCapability(
+                    instrument_public_id=f"inst-{ex}",
+                    exchange=ex,
+                    supported_order_types=["limit"],
+                    timestamp=now,
+                    session_id="s1",
+                    sequence_id=1,
+                )
+            )
+        await s.commit()
+    rows = await r.get_instrument_capabilities(as_of=now, exchange="kraken")
+    assert len(rows) == 1
+    assert rows[0]["exchange"] == "kraken"
+
+
+@pytest.mark.asyncio
+async def test_get_instrument_capabilities_instrument_filter(tmp_path: Path) -> None:
+    """Given rows, When filtering by instrument, Then only matching returned."""
+    db_path = tmp_path / "cap_inst.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    async with r.session() as s:
+        for idx in (1, 2):
+            s.add(
+                InstrumentOrderCapability(
+                    instrument_public_id=f"inst-{idx}",
+                    exchange="kraken",
+                    supported_order_types=["limit"],
+                    timestamp=now,
+                    session_id="s1",
+                    sequence_id=idx,
+                )
+            )
+        await s.commit()
+    rows = await r.get_instrument_capabilities(as_of=now, instrument_public_id="inst-2")
+    assert len(rows) == 1
+    assert rows[0]["instrument_public_id"] == "inst-2"
+
+
+@pytest.mark.asyncio
+async def test_get_instrument_capabilities_empty(tmp_path: Path) -> None:
+    """Given no rows, When querying, Then empty list returned."""
+    db_path = tmp_path / "cap_empty.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    rows = await r.get_instrument_capabilities(as_of=datetime.now(UTC))
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_get_venue_fee_schedules_returns_active_rows(tmp_path: Path) -> None:
+    """Given seeded fee schedule rows, When querying, Then active rows returned."""
+    db_path = tmp_path / "fees.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    async with r.session() as s:
+        s.add(
+            VenueFeeSchedule(
+                exchange="kraken",
+                instrument_public_id=None,
+                fee_tier="default",
+                maker_bps=16.0,
+                taker_bps=26.0,
+                min_volume_30d=None,
+                currency="USD",
+                timestamp=now,
+                session_id="s1",
+                sequence_id=1,
+            )
+        )
+        s.add(
+            VenueFeeSchedule(
+                exchange="kraken",
+                instrument_public_id=None,
+                fee_tier="vip_1",
+                maker_bps=12.0,
+                taker_bps=22.0,
+                min_volume_30d=50000.0,
+                currency="USD",
+                timestamp=now,
+                session_id="s1",
+                sequence_id=2,
+            )
+        )
+        await s.commit()
+    rows = await r.get_venue_fee_schedules(as_of=now)
+    assert len(rows) == 2
+    assert rows[0]["fee_tier"] == "default"
+    assert rows[0]["maker_bps"] == 16.0
+    assert rows[0]["taker_bps"] == 26.0
+    assert rows[1]["fee_tier"] == "vip_1"
+    assert rows[1]["min_volume_30d"] == 50000.0
+
+
+@pytest.mark.asyncio
+async def test_get_venue_fee_schedules_exchange_filter(tmp_path: Path) -> None:
+    """Given rows for multiple exchanges, When filtering, Then only matching returned."""
+    db_path = tmp_path / "fees_filter.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    async with r.session() as s:
+        for ex in ("kraken", "zonda"):
+            s.add(
+                VenueFeeSchedule(
+                    exchange=ex,
+                    instrument_public_id=None,
+                    fee_tier="default",
+                    maker_bps=16.0,
+                    taker_bps=26.0,
+                    min_volume_30d=None,
+                    currency="USD",
+                    timestamp=now,
+                    session_id="s1",
+                    sequence_id=1,
+                )
+            )
+        await s.commit()
+    rows = await r.get_venue_fee_schedules(as_of=now, exchange="zonda")
+    assert len(rows) == 1
+    assert rows[0]["exchange"] == "zonda"
+
+
+@pytest.mark.asyncio
+async def test_get_venue_fee_schedules_empty(tmp_path: Path) -> None:
+    """Given no rows, When querying, Then empty list returned."""
+    db_path = tmp_path / "fees_empty.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    rows = await r.get_venue_fee_schedules(as_of=datetime.now(UTC))
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_get_instrument_capabilities_temporal_filter(tmp_path: Path) -> None:
+    """Closed rows (known_to <= as_of) are excluded; future rows excluded too."""
+    db_path = tmp_path / "cap_temporal.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    t1 = datetime(2026, 1, 1, tzinfo=UTC)
+    t2 = datetime(2026, 6, 1, tzinfo=UTC)
+    t3 = datetime(2026, 12, 1, tzinfo=UTC)
+    async with r.session() as s:
+        s.add(
+            InstrumentOrderCapability(
+                instrument_public_id="inst-closed",
+                exchange="kraken",
+                supported_order_types=["limit"],
+                timestamp=t1,
+                known_to=t2,
+                session_id="s1",
+                sequence_id=1,
+            )
+        )
+        s.add(
+            InstrumentOrderCapability(
+                instrument_public_id="inst-active",
+                exchange="kraken",
+                supported_order_types=["market"],
+                timestamp=t1,
+                known_to=KNOWN_TO_MAX,
+                session_id="s1",
+                sequence_id=2,
+            )
+        )
+        s.add(
+            InstrumentOrderCapability(
+                instrument_public_id="inst-future",
+                exchange="kraken",
+                supported_order_types=["limit"],
+                timestamp=t3,
+                known_to=KNOWN_TO_MAX,
+                session_id="s1",
+                sequence_id=3,
+            )
+        )
+        await s.commit()
+    rows = await r.get_instrument_capabilities(as_of=t2)
+    assert len(rows) == 1
+    assert rows[0]["instrument_public_id"] == "inst-active"
+
+
+@pytest.mark.asyncio
+async def test_get_venue_fee_schedules_temporal_filter(tmp_path: Path) -> None:
+    """Closed rows excluded; only active-at-as_of rows returned."""
+    db_path = tmp_path / "fees_temporal.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    t1 = datetime(2026, 1, 1, tzinfo=UTC)
+    t2 = datetime(2026, 6, 1, tzinfo=UTC)
+    async with r.session() as s:
+        s.add(
+            VenueFeeSchedule(
+                exchange="kraken",
+                instrument_public_id=None,
+                fee_tier="old",
+                maker_bps=20.0,
+                taker_bps=30.0,
+                min_volume_30d=None,
+                currency="USD",
+                timestamp=t1,
+                known_to=t2,
+                session_id="s1",
+                sequence_id=1,
+            )
+        )
+        s.add(
+            VenueFeeSchedule(
+                exchange="kraken",
+                instrument_public_id=None,
+                fee_tier="current",
+                maker_bps=16.0,
+                taker_bps=26.0,
+                min_volume_30d=None,
+                currency="USD",
+                timestamp=t1,
+                known_to=KNOWN_TO_MAX,
+                session_id="s1",
+                sequence_id=2,
+            )
+        )
+        await s.commit()
+    rows = await r.get_venue_fee_schedules(as_of=t2)
+    assert len(rows) == 1
+    assert rows[0]["fee_tier"] == "current"

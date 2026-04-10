@@ -71,12 +71,14 @@ from snapper.api.schemas.data_responses import ContractListResponse
 from snapper.api.schemas.data_responses import ExchangeListResponse
 from snapper.api.schemas.data_responses import ExecutionListResponse
 from snapper.api.schemas.data_responses import FrontMonthResponse
+from snapper.api.schemas.data_responses import InstrumentCapabilityListResponse
 from snapper.api.schemas.data_responses import InstrumentListResponse
 from snapper.api.schemas.data_responses import OrderListResponse
 from snapper.api.schemas.data_responses import PositionListResponse
 from snapper.api.schemas.data_responses import SignalListResponse
 from snapper.api.schemas.data_responses import UnderlyingAssetListResponse
 from snapper.api.schemas.data_responses import UnderlyingInstrumentListResponse
+from snapper.api.schemas.data_responses import VenueFeeScheduleListResponse
 from snapper.api.schemas.health import ConnectionStats
 from snapper.api.schemas.health import GapDetectionStats
 from snapper.api.schemas.health import GapStats
@@ -132,12 +134,14 @@ from snapper.messaging.schemas.data import ContinuousSeriesPartialResponse
 from snapper.messaging.schemas.data import ContractData
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import FrontMonthData
+from snapper.messaging.schemas.data import InstrumentCapabilityData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import PositionData
 from snapper.messaging.schemas.data import RollPointDetail
 from snapper.messaging.schemas.data import SignalData
 from snapper.messaging.schemas.data import UnderlyingAssetData
 from snapper.messaging.schemas.data import UnderlyingInstrumentData
+from snapper.messaging.schemas.data import VenueFeeScheduleData
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
 from snapper.server.credential_routes import router as credential_router
 from snapper.server.dependencies import get_repository_dependency
@@ -1621,6 +1625,130 @@ def _create_underlying_router() -> APIRouter:
     return router
 
 
+def _create_capabilities_router() -> APIRouter:
+    """Create router for instrument capabilities and venue fee schedule endpoints.
+
+    Returns:
+        APIRouter with capability matrix and fee schedule query endpoints.
+    """
+    router = APIRouter()
+
+    @router.get(
+        "/instrument-capabilities",
+        response_model=None,
+        responses={500: {"description": "Internal server error"}},
+    )
+    async def get_instrument_capabilities(
+        request: Request,
+        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
+        _csrf: Annotated[None, Depends(validate_csrf_token)],
+        repo: Annotated[Repository, Depends(get_repository_dependency)],
+        exchange: Annotated[str | None, Query(description="Filter by exchange name")] = None,
+        instrument_public_id: Annotated[
+            str | None, Query(description="Filter by instrument public ID")
+        ] = None,
+        as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
+    ) -> InstrumentCapabilityListResponse:
+        """Fetch instrument order capability matrix.
+
+        Args:
+            request: FastAPI request (provides REST tracker for provenance).
+            _auth: Authenticated user with READ_MARKET_DATA permission.
+            _csrf: CSRF token validation.
+            repo: Database repository.
+            exchange: Optional exchange name filter.
+            instrument_public_id: Optional instrument UUID filter.
+            as_of: Optional point-in-time query timestamp.
+
+        Returns:
+            InstrumentCapabilityListResponse wrapping capability rows.
+        """
+        processing_date = as_of or datetime.now(UTC)
+        try:
+            rows = await repo.get_instrument_capabilities(
+                as_of=processing_date,
+                exchange=exchange,
+                instrument_public_id=instrument_public_id,
+            )
+            items = [InstrumentCapabilityData(**cast(dict[str, Any], r)) for r in rows]
+            tracker: SequenceTracker = request.app.state.rest_tracker
+            sid = tracker.session_id
+            seq = tracker.next_sequence(_REST_DATA_STREAM)
+            ts = dt.datetime.now(dt.UTC)
+            pid = str(uuid7())
+            return InstrumentCapabilityListResponse(
+                session_id=sid,
+                sequence_id=seq,
+                public_id=pid,
+                timestamp=ts,
+                payload=items,
+                count=len(items),
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error(f"Failed to fetch instrument capabilities: {exc}")
+            raise HTTPException(
+                status_code=500, detail="Failed to fetch instrument capabilities"
+            ) from exc
+
+    @router.get(
+        "/venue-fee-schedules",
+        response_model=None,
+        responses={500: {"description": "Internal server error"}},
+    )
+    async def get_venue_fee_schedules(
+        request: Request,
+        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
+        _csrf: Annotated[None, Depends(validate_csrf_token)],
+        repo: Annotated[Repository, Depends(get_repository_dependency)],
+        exchange: Annotated[str | None, Query(description="Filter by exchange name")] = None,
+        as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
+    ) -> VenueFeeScheduleListResponse:
+        """Fetch venue fee schedules.
+
+        Args:
+            request: FastAPI request (provides REST tracker for provenance).
+            _auth: Authenticated user with READ_MARKET_DATA permission.
+            _csrf: CSRF token validation.
+            repo: Database repository.
+            exchange: Optional exchange name filter.
+            as_of: Optional point-in-time query timestamp.
+
+        Returns:
+            VenueFeeScheduleListResponse wrapping fee schedule rows.
+        """
+        processing_date = as_of or datetime.now(UTC)
+        try:
+            rows = await repo.get_venue_fee_schedules(
+                as_of=processing_date,
+                exchange=exchange,
+            )
+            items = [VenueFeeScheduleData(**cast(dict[str, Any], r)) for r in rows]
+            tracker: SequenceTracker = request.app.state.rest_tracker
+            sid = tracker.session_id
+            seq = tracker.next_sequence(_REST_DATA_STREAM)
+            ts = dt.datetime.now(dt.UTC)
+            pid = str(uuid7())
+            return VenueFeeScheduleListResponse(
+                session_id=sid,
+                sequence_id=seq,
+                public_id=pid,
+                timestamp=ts,
+                payload=items,
+                count=len(items),
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error(f"Failed to fetch venue fee schedules: {exc}")
+            raise HTTPException(
+                status_code=500, detail="Failed to fetch venue fee schedules"
+            ) from exc
+
+    return router
+
+
 def create_api_router(
     manager: WebSocketConnectionManager,
 ) -> APIRouter:
@@ -1640,6 +1768,7 @@ def create_api_router(
     router.include_router(_create_exchange_router())
     router.include_router(_create_underlying_router())
     router.include_router(_create_orders_executions_router())
+    router.include_router(_create_capabilities_router())
     router.include_router(_create_monitoring_endpoints_router(manager))
     return router
 

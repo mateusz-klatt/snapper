@@ -695,3 +695,75 @@ class FundingAccrualData(StrictDataSchema[Literal["funding_accrual"]]):
     rate: float
     notional: float
     position_quantity: float
+
+
+class InstrumentCapabilityData(StrictDataSchema[Literal["instrument_capability"]]):
+    """Instrument order capability matrix row for REST API responses.
+
+    Describes which order types, features, and limits are available
+    for a given instrument on a given exchange.
+
+    Attributes:
+        instrument_public_id: UUID of the instrument.
+        exchange: Exchange identifier.
+        supported_order_types: List of supported order type strings.
+        supports_post_only: Whether post-only orders are supported.
+        supports_reduce_only: Whether reduce-only orders are supported.
+        supports_amend_in_place: Whether in-place order amendment is supported.
+        supports_native_stop_loss: Whether the exchange supports native SL.
+        supports_native_take_profit: Whether the exchange supports native TP.
+        supports_trailing_stop_client_side: Whether client-side trailing stop is viable.
+        supports_market_making: Whether MM strategy is viable.
+        supports_short_selling: Whether short selling is supported.
+        supports_leverage: Whether leverage is supported.
+        max_leverage_long: Maximum leverage for long positions.
+        max_leverage_short: Maximum leverage for short positions.
+        min_notional: Minimum notional order value.
+        max_order_size: Maximum order size.
+        top_of_book_quality: Book data quality hint for pegs/MM.
+    """
+
+    type: Literal["instrument_capability"] = "instrument_capability"
+    instrument_public_id: str
+    exchange: str
+    supported_order_types: list[str]
+    supports_post_only: bool
+    supports_reduce_only: bool
+    supports_amend_in_place: bool
+    supports_native_stop_loss: bool
+    supports_native_take_profit: bool
+    supports_trailing_stop_client_side: bool
+    supports_market_making: bool
+    supports_short_selling: bool
+    supports_leverage: bool
+    max_leverage_long: float
+    max_leverage_short: float
+    min_notional: float | None
+    max_order_size: float | None
+    top_of_book_quality: str
+
+
+class VenueFeeScheduleData(StrictDataSchema[Literal["venue_fee_schedule"]]):
+    """Venue fee schedule row for REST API responses.
+
+    Used by market-making evaluators to estimate profitability and
+    by the UI to display fee tiers.
+
+    Attributes:
+        exchange: Exchange identifier.
+        instrument_public_id: Instrument UUID (null = exchange-wide default).
+        fee_tier: Fee tier name.
+        maker_bps: Maker fee in basis points (negative = rebate).
+        taker_bps: Taker fee in basis points.
+        min_volume_30d: Minimum 30-day volume for this tier.
+        currency: Fee denomination currency.
+    """
+
+    type: Literal["venue_fee_schedule"] = "venue_fee_schedule"
+    exchange: str
+    instrument_public_id: str | None
+    fee_tier: str
+    maker_bps: float
+    taker_bps: float
+    min_volume_30d: float | None
+    currency: str

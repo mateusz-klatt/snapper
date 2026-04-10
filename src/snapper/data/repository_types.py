@@ -748,6 +748,48 @@ class UserOperatorMembershipRow(TypedDict):
     sequence_id: int
 
 
+class InstrumentOrderCapabilityRow(TypedDict):
+    """Read projection for instrument_order_capabilities queries."""
+
+    public_id: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+    instrument_public_id: str
+    exchange: str
+    supported_order_types: list[str]
+    supports_post_only: bool
+    supports_reduce_only: bool
+    supports_amend_in_place: bool
+    supports_native_stop_loss: bool
+    supports_native_take_profit: bool
+    supports_trailing_stop_client_side: bool
+    supports_market_making: bool
+    supports_short_selling: bool
+    supports_leverage: bool
+    max_leverage_long: float
+    max_leverage_short: float
+    min_notional: float | None
+    max_order_size: float | None
+    top_of_book_quality: str
+
+
+class VenueFeeScheduleRow(TypedDict):
+    """Read projection for venue_fee_schedules queries."""
+
+    public_id: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+    exchange: str
+    instrument_public_id: str | None
+    fee_tier: str
+    maker_bps: float
+    taker_bps: float
+    min_volume_30d: float | None
+    currency: str
+
+
 class CreateScopeGrantRequest(TypedDict):
     """Insert params for create_scope_grant.
 
