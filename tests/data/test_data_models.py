@@ -11,6 +11,7 @@ import pytest
 from snapper.data.models import Candle
 from snapper.data.models import Execution
 from snapper.data.models import Instrument
+from snapper.data.models import InstrumentOrderCapability
 from snapper.data.models import Order
 from snapper.data.models import Position
 from snapper.data.models import Signal
@@ -20,6 +21,7 @@ from snapper.data.models import SymbolExchangeCapability
 from snapper.data.models import Trade
 from snapper.data.models import TZDateTime
 from snapper.data.models import UUIDColumn
+from snapper.data.models import VenueFeeSchedule
 
 
 class TestInstrumentModel:
@@ -806,3 +808,115 @@ class TestUUIDColumn:
         mock_dialect = MagicMock()
         result = col.process_bind_param(None, mock_dialect)
         assert result is None
+
+
+class TestInstrumentOrderCapabilityModel:
+    """Tests for InstrumentOrderCapability ORM model."""
+
+    def test_creation_with_required_fields(self) -> None:
+        """Verify model creation with all required fields.
+
+        Given: Required field values for capability matrix,
+        When: InstrumentOrderCapability instantiated,
+        Then: All fields set correctly with expected defaults.
+        """
+        now = datetime.now(UTC)
+        cap = InstrumentOrderCapability(
+            instrument_public_id="inst-1",
+            exchange="kraken",
+            supported_order_types=["market", "limit"],
+            session_id="s1",
+            sequence_id=1,
+            timestamp=now,
+        )
+        assert cap.instrument_public_id == "inst-1"
+        assert cap.exchange == "kraken"
+        assert cap.supported_order_types == ["market", "limit"]
+        assert cap.min_notional is None
+        assert hasattr(cap, "supports_post_only")
+        assert hasattr(cap, "top_of_book_quality")
+
+    def test_creation_with_full_capabilities(self) -> None:
+        """Verify model creation with all capability flags enabled.
+
+        Given: Full capability values for a liquid exchange,
+        When: InstrumentOrderCapability instantiated,
+        Then: All flags reflect the provided values.
+        """
+        now = datetime.now(UTC)
+        cap = InstrumentOrderCapability(
+            instrument_public_id="inst-2",
+            exchange="kraken_futures",
+            supported_order_types=["market", "limit", "stop", "trailing_stop"],
+            supports_post_only=True,
+            supports_reduce_only=True,
+            supports_amend_in_place=True,
+            supports_native_stop_loss=True,
+            supports_native_take_profit=True,
+            supports_market_making=True,
+            supports_short_selling=True,
+            supports_leverage=True,
+            max_leverage_long=10.0,
+            max_leverage_short=10.0,
+            min_notional=5.0,
+            max_order_size=1000.0,
+            top_of_book_quality="realtime",
+            session_id="s1",
+            sequence_id=1,
+            timestamp=now,
+        )
+        assert cap.supports_post_only is True
+        assert cap.supports_leverage is True
+        assert cap.max_leverage_long == 10.0
+        assert cap.top_of_book_quality == "realtime"
+
+
+class TestVenueFeeScheduleModel:
+    """Tests for VenueFeeSchedule ORM model."""
+
+    def test_creation_with_required_fields(self) -> None:
+        """Verify model creation with required fee schedule fields.
+
+        Given: Default tier fee values,
+        When: VenueFeeSchedule instantiated,
+        Then: All fields set correctly.
+        """
+        now = datetime.now(UTC)
+        fee = VenueFeeSchedule(
+            exchange="kraken",
+            fee_tier="default",
+            maker_bps=16.0,
+            taker_bps=26.0,
+            currency="USD",
+            session_id="s1",
+            sequence_id=1,
+            timestamp=now,
+        )
+        assert fee.exchange == "kraken"
+        assert fee.fee_tier == "default"
+        assert fee.maker_bps == 16.0
+        assert fee.taker_bps == 26.0
+        assert fee.instrument_public_id is None
+        assert fee.min_volume_30d is None
+
+    def test_creation_with_rebate(self) -> None:
+        """Verify negative maker_bps (rebate) is accepted.
+
+        Given: Market maker tier with negative maker fee,
+        When: VenueFeeSchedule instantiated,
+        Then: maker_bps is negative (rebate).
+        """
+        now = datetime.now(UTC)
+        fee = VenueFeeSchedule(
+            exchange="kraken_futures",
+            fee_tier="market_maker",
+            maker_bps=-2.0,
+            taker_bps=5.0,
+            min_volume_30d=1_000_000.0,
+            currency="USD",
+            session_id="s1",
+            sequence_id=1,
+            timestamp=now,
+        )
+        assert fee.maker_bps == -2.0
+        assert fee.min_volume_30d == 1_000_000.0

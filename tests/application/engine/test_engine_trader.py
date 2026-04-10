@@ -4570,8 +4570,6 @@ class TestAccrueOneBoundaryPerpetual:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Verify perpetual funding long+positive rate produces positive charge."""
-        from snapper.application.portfolio.models import PortfolioTracker
-
         _configure_settings(monkeypatch)
         coord = TraderCoordinator()
         engine = MagicMock()

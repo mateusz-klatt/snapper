@@ -114,6 +114,8 @@ __all__ = [
     "Operator",
     "UserOperatorMembership",
     "WalletOperatorScopeGrant",
+    "InstrumentOrderCapability",
+    "VenueFeeSchedule",
 ]
 
 
@@ -1492,3 +1494,90 @@ class WalletOperatorScopeGrant(TemporalMixin, Base):
     underlying_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
     instrument_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
     note: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+
+class InstrumentOrderCapability(TemporalMixin, Base):
+    """Per-instrument order capability matrix for execution plan evaluators.
+
+    Describes which order types, features, and limits are available
+    for a given instrument on a given exchange. Seeded by symbol
+    updaters and reference data; consumed by PlanExecutorService to
+    gate plan creation and evaluator behavior.
+    """
+
+    __tablename__ = "instrument_order_capabilities"
+    __table_args__ = (
+        Index(
+            "ix_ioc_instrument_exchange_active",
+            "instrument_public_id",
+            "exchange",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_ioc_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_ioc_exchange_lower"),
+        CheckConstraint(
+            "top_of_book_quality IN ('realtime', 'polled', 'thin', 'unknown')",
+            name="ck_ioc_tob_quality",
+        ),
+    )
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    exchange: Mapped[str] = mapped_column(String(32), index=True)
+    supported_order_types: Mapped[JsonObject] = mapped_column(JSON)
+    supports_post_only: Mapped[bool] = mapped_column(Boolean, default=False)
+    supports_reduce_only: Mapped[bool] = mapped_column(Boolean, default=False)
+    supports_amend_in_place: Mapped[bool] = mapped_column(Boolean, default=False)
+    supports_native_stop_loss: Mapped[bool] = mapped_column(Boolean, default=False)
+    supports_native_take_profit: Mapped[bool] = mapped_column(Boolean, default=False)
+    supports_trailing_stop_client_side: Mapped[bool] = mapped_column(Boolean, default=True)
+    supports_market_making: Mapped[bool] = mapped_column(Boolean, default=False)
+    supports_short_selling: Mapped[bool] = mapped_column(Boolean, default=False)
+    supports_leverage: Mapped[bool] = mapped_column(Boolean, default=False)
+    max_leverage_long: Mapped[float] = mapped_column(Float, default=1.0)
+    max_leverage_short: Mapped[float] = mapped_column(Float, default=0.0)
+    min_notional: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_order_size: Mapped[float | None] = mapped_column(Float, nullable=True)
+    top_of_book_quality: Mapped[str] = mapped_column(String(16), default="unknown")
+
+
+class VenueFeeSchedule(TemporalMixin, Base):
+    """Exchange fee schedule for maker/taker cost estimation.
+
+    Used by market-making and peg evaluators to estimate profitability
+    before placing orders. Tiers are seeded from public exchange fee
+    pages; user-specific tier overrides are applied via admin settings.
+    """
+
+    __tablename__ = "venue_fee_schedules"
+    __table_args__ = (
+        Index(
+            "ix_vfs_exchange_tier_active",
+            "exchange",
+            "fee_tier",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_vfs_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_vfs_exchange_lower"),
+    )
+    exchange: Mapped[str] = mapped_column(String(32), index=True)
+    instrument_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    fee_tier: Mapped[str] = mapped_column(String(32))
+    maker_bps: Mapped[float] = mapped_column(Float)
+    taker_bps: Mapped[float] = mapped_column(Float)
+    min_volume_30d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    currency: Mapped[str] = mapped_column(String(8))
