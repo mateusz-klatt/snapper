@@ -17,17 +17,23 @@ from unittest.mock import patch
 
 import pytest
 from loguru import logger
+from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
 import snapper.application.engine.trader as trader_module
 from snapper.application.engine.config import EngineConfigModel
 from snapper.application.engine.service import TradingEngineService
 from snapper.application.engine.trader import TraderCoordinator
+from snapper.application.engine.trader import _compute_pending_boundaries
 from snapper.application.engine.trader import run_zmq_trader
+from snapper.application.portfolio.models import PortfolioTracker
 from snapper.application.portfolio.models import PositionStateModel
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
+from snapper.application.trade.trade_service import PositionProjection
 from snapper.config.app import AppSettings
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import FundingRateRow
+from snapper.data.repository_types import InstrumentSpecRow
 from snapper.messaging.infrastructure.gap_detector import GapDetector
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ExecutionData
@@ -2092,9 +2098,14 @@ async def test_run_trading_loop_cancels_pending_tasks(monkeypatch: pytest.Monkey
 
     created_tasks: list[asyncio.Task[Any]] = []
     original_create_task = asyncio.create_task
+
+    async def _stub_accrual() -> None:
+        await asyncio.Event().wait()
+
     coord_any = cast(Any, coord)
     coord_any._listen_signals = _stub_listener
     coord_any._signal_health_monitor = _stub_monitor
+    coord_any._funding_accrual_loop = _stub_accrual
 
     def _fake_create_task(coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
         task = original_create_task(coro)
@@ -2108,7 +2119,7 @@ async def test_run_trading_loop_cancels_pending_tasks(monkeypatch: pytest.Monkey
     monkeypatch.setattr(asyncio, "gather", _fake_gather, raising=False)
     with pytest.raises(asyncio.CancelledError):
         await cast(Any, coord)._run_trading_loop()
-    assert [task.cancelled() for task in created_tasks] == [True, True]
+    assert [task.cancelled() for task in created_tasks] == [True, True, True]
 
 
 @pytest.mark.asyncio
@@ -2138,13 +2149,17 @@ async def test_run_trading_loop_skips_cancelling_completed_tasks(
         created_tasks.append(task)
         return task
 
+    async def _stub_accrual() -> None:
+        return None
+
     coord_any = cast(Any, coord)
     coord_any._listen_signals = _stub_listener
     coord_any._signal_health_monitor = _stub_monitor
+    coord_any._funding_accrual_loop = _stub_accrual
     monkeypatch.setattr(asyncio, "create_task", _tracking_create_task, raising=False)
     await cast(Any, coord)._run_trading_loop()
-    assert [task.done() for task in created_tasks] == [True, True]
-    assert [task.cancelled() for task in created_tasks] == [False, False]
+    assert [task.done() for task in created_tasks] == [True, True, True]
+    assert [task.cancelled() for task in created_tasks] == [False, False, False]
 
 
 @pytest.mark.asyncio
@@ -4048,3 +4063,788 @@ class TestEngineShardKeyWithWallet:
             wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
         )
         assert engine._shard_key == "paper.BTC-USD.paper.w01975a8b3c7d.scalp"
+
+
+class TestComputePendingBoundaries:
+    """Tests for _compute_pending_boundaries pure function."""
+
+    def test_one_boundary_due(self) -> None:
+        """Verify single pending boundary is returned.
+
+        Given: Position opened 5h ago, 4h frequency, no prior accrual,
+        When: _compute_pending_boundaries called,
+        Then: Exactly one boundary returned (the 4h mark).
+        """
+        opened = datetime(2026, 1, 1, 4, 30, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 9, 30, tzinfo=UTC)
+        result = _compute_pending_boundaries(
+            frequency_hours=4,
+            position_opened_at=opened,
+            last_accrued_at=None,
+            now=now,
+        )
+        assert len(result) == 1
+        assert result[0] == datetime(2026, 1, 1, 8, 0, tzinfo=UTC)
+
+    def test_no_boundary_when_too_early(self) -> None:
+        """Verify no boundaries when position is younger than one interval.
+
+        Given: Position opened 2h ago, 4h frequency,
+        When: _compute_pending_boundaries called,
+        Then: Empty list (no boundary crossed yet).
+        """
+        opened = datetime(2026, 1, 1, 6, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 7, 59, tzinfo=UTC)
+        result = _compute_pending_boundaries(
+            frequency_hours=4,
+            position_opened_at=opened,
+            last_accrued_at=None,
+            now=now,
+        )
+        assert result == []
+
+    def test_multiple_boundaries_catch_up(self) -> None:
+        """Verify catch-up returns multiple boundaries.
+
+        Given: Position opened 10h ago, 4h frequency, no prior accrual,
+        When: _compute_pending_boundaries called,
+        Then: Two boundaries returned (at 4h and 8h marks).
+        """
+        opened = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 9, 0, tzinfo=UTC)
+        result = _compute_pending_boundaries(
+            frequency_hours=4,
+            position_opened_at=opened,
+            last_accrued_at=None,
+            now=now,
+        )
+        assert len(result) == 2
+        assert result[0] == datetime(2026, 1, 1, 4, 0, tzinfo=UTC)
+        assert result[1] == datetime(2026, 1, 1, 8, 0, tzinfo=UTC)
+
+    def test_last_accrual_skips_already_applied(self) -> None:
+        """Verify boundaries before last_accrued_at are excluded.
+
+        Given: last_accrued_at at 4h, now at 9h,
+        When: _compute_pending_boundaries called,
+        Then: Only the 8h boundary returned (4h already applied).
+        """
+        opened = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+        last = datetime(2026, 1, 1, 4, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 9, 0, tzinfo=UTC)
+        result = _compute_pending_boundaries(
+            frequency_hours=4,
+            position_opened_at=opened,
+            last_accrued_at=last,
+            now=now,
+        )
+        assert len(result) == 1
+        assert result[0] == datetime(2026, 1, 1, 8, 0, tzinfo=UTC)
+
+    def test_clamps_to_position_opened_at(self) -> None:
+        """Verify boundaries before position_opened_at are excluded.
+
+        Given: Reopened position (opened_at > last_accrued_at),
+        When: _compute_pending_boundaries called,
+        Then: Boundaries clamped to position_opened_at, not last_accrued_at.
+        """
+        opened = datetime(2026, 1, 1, 6, 0, tzinfo=UTC)
+        last = datetime(2026, 1, 1, 4, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 9, 0, tzinfo=UTC)
+        result = _compute_pending_boundaries(
+            frequency_hours=4,
+            position_opened_at=opened,
+            last_accrued_at=last,
+            now=now,
+        )
+        assert len(result) == 1
+        assert result[0] == datetime(2026, 1, 1, 8, 0, tzinfo=UTC)
+
+    def test_hourly_frequency(self) -> None:
+        """Verify 1-hour frequency for perpetual funding.
+
+        Given: Position opened 2.5h ago, 1h frequency,
+        When: _compute_pending_boundaries called,
+        Then: Two boundaries at 1h and 2h marks.
+        """
+        opened = datetime(2026, 1, 1, 10, 30, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 13, 0, tzinfo=UTC)
+        result = _compute_pending_boundaries(
+            frequency_hours=1,
+            position_opened_at=opened,
+            last_accrued_at=None,
+            now=now,
+        )
+        assert len(result) == 2
+        assert result[0] == datetime(2026, 1, 1, 11, 0, tzinfo=UTC)
+        assert result[1] == datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+
+    def test_boundary_at_now_excluded(self) -> None:
+        """Verify boundary exactly at now is not included.
+
+        Given: Now is exactly at a boundary,
+        When: _compute_pending_boundaries called,
+        Then: That boundary is excluded (applied next iteration).
+        """
+        opened = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 4, 0, tzinfo=UTC)
+        result = _compute_pending_boundaries(
+            frequency_hours=4,
+            position_opened_at=opened,
+            last_accrued_at=None,
+            now=now,
+        )
+        assert result == []
+
+
+def _make_spec(
+    funding_type: str | None = "spot_margin_rollover",
+    frequency: int = 4,
+) -> InstrumentSpecRow:
+    """Create a minimal InstrumentSpecRow for accrual tests."""
+    return InstrumentSpecRow(
+        instrument_public_id="inst-1",
+        tick_size=None,
+        lot_size=None,
+        min_order_size=None,
+        max_order_size=None,
+        cost_decimals=None,
+        qty_decimals=None,
+        margin_initial=None,
+        position_limit_long=None,
+        position_limit_short=None,
+        status=None,
+        expiry_at=None,
+        instrument_kind="spot",
+        funding_type=funding_type,
+        funding_frequency_hours=frequency,
+        rollover_rate_long=0.00025,
+        rollover_rate_short=0.00010,
+        max_funding_rate=None,
+    )
+
+
+def _make_rate_row(rate: float = 0.00025) -> FundingRateRow:
+    """Create a minimal FundingRateRow for accrual tests."""
+    return FundingRateRow(
+        public_id="rate-1",
+        instrument_public_id="inst-1",
+        exchange="kraken",
+        rate_type="spot_margin_rollover",
+        direction="long",
+        rate=rate,
+        notional_asset="USD",
+        effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+        source="exchange_docs",
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        session_id="s",
+        sequence_id=1,
+    )
+
+
+class TestAccrueEngine:
+    """Tests for TraderCoordinator._accrue_engine method."""
+
+    @pytest.fixture
+    def coord(self, monkeypatch: pytest.MonkeyPatch) -> TraderCoordinator:
+        """Create TraderCoordinator with mocked dependencies."""
+        _configure_settings(monkeypatch)
+        return TraderCoordinator()
+
+    @pytest.mark.asyncio
+    async def test_skips_when_no_instrument(self, coord: TraderCoordinator) -> None:
+        """Verify _accrue_engine returns early when instrument not found."""
+        engine = MagicMock()
+        engine.instrument = "UNKNOWN"
+        engine.exchange = "kraken"
+        coord.repository = AsyncMock()
+        coord.repository.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+        await cast(Any, coord)._accrue_engine("key1", engine, datetime.now(UTC))
+
+    @pytest.mark.asyncio
+    async def test_skips_when_no_funding_type(self, coord: TraderCoordinator) -> None:
+        """Verify _accrue_engine returns early when spec has no funding_type."""
+        engine = MagicMock()
+        engine.instrument = "BTC-USD"
+        engine.exchange = "kraken"
+        coord.repository = AsyncMock()
+        coord.repository.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
+        coord.repository.get_instrument_spec = AsyncMock(return_value=_make_spec(funding_type=None))
+        await cast(Any, coord)._accrue_engine("key1", engine, datetime.now(UTC))
+
+    @pytest.mark.asyncio
+    async def test_skips_when_flat_position(self, coord: TraderCoordinator) -> None:
+        """Verify _accrue_engine skips when position_qty is zero."""
+        engine = MagicMock()
+        engine.instrument = "BTC-USD"
+        engine.exchange = "kraken"
+        engine._shard_key = "kraken.BTC-USD.live"
+        engine.mode = "live"
+        coord.repository = AsyncMock()
+        coord.repository.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
+        coord.repository.get_instrument_spec = AsyncMock(return_value=_make_spec())
+        coord.trade_service.add_funding_accrual = MagicMock()
+        now = datetime.now(UTC)
+        await cast(Any, coord)._accrue_engine("key1", engine, now)
+
+    @pytest.mark.asyncio
+    async def test_applies_boundary_when_due(self, coord: TraderCoordinator) -> None:
+        """Verify _accrue_engine calls _accrue_one_boundary when boundary is due."""
+        engine = MagicMock()
+        engine.instrument = "BTC-USD"
+        engine.exchange = "kraken"
+        engine._shard_key = "kraken.BTC-USD.live"
+        engine.mode = "live"
+        opened_at = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 5, 0, tzinfo=UTC)
+        coord.repository = AsyncMock()
+        coord.repository.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
+        coord.repository.get_instrument_spec = AsyncMock(return_value=_make_spec())
+        coord.repository.get_last_accrual = AsyncMock(return_value=None)
+        pos = PositionProjection(
+            position_qty=1.0, entry_price=50000.0, position_opened_at=opened_at
+        )
+        coord.trade_service._shards["kraken.BTC-USD.live"] = MagicMock(position=pos)
+        coord_any = cast(Any, coord)
+        coord_any._accrue_one_boundary = AsyncMock()
+        await coord_any._accrue_engine("key1", engine, now)
+        coord_any._accrue_one_boundary.assert_called_once()
+
+
+class TestAccrueOneBoundary:
+    """Tests for TraderCoordinator._accrue_one_boundary method."""
+
+    @pytest.fixture
+    def coord(self, monkeypatch: pytest.MonkeyPatch) -> TraderCoordinator:
+        """Create TraderCoordinator with mocked dependencies."""
+        _configure_settings(monkeypatch)
+        return TraderCoordinator()
+
+    @pytest.mark.asyncio
+    async def test_skips_when_no_rate(self, coord: TraderCoordinator) -> None:
+        """Verify _accrue_one_boundary returns when no rates found."""
+        engine = MagicMock()
+        engine.exchange = "kraken"
+        coord.repository = AsyncMock()
+        coord.repository.get_funding_rates = AsyncMock(return_value=[])
+        pos = PositionProjection(
+            position_qty=1.0,
+            entry_price=50000.0,
+            position_opened_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        await cast(Any, coord)._accrue_one_boundary(
+            engine=engine,
+            instrument_public_id="inst-1",
+            spec=_make_spec(),
+            accrual_type="rollover",
+            boundary=datetime(2026, 1, 1, 4, 0, tzinfo=UTC),
+            position=pos,
+            now=datetime(2026, 1, 1, 5, 0, tzinfo=UTC),
+        )
+        coord.repository.insert_accrual.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_applies_rollover_charge(self, coord: TraderCoordinator) -> None:
+        """Verify rollover charge is computed and applied correctly."""
+        engine = MagicMock()
+        engine.instrument = "BTC-USD"
+        engine.exchange = "kraken"
+        engine._shard_key = "kraken.BTC-USD.live"
+        engine.mode = "live"
+        engine.wallet_public_id = "w1"
+        engine.operator_public_id = ""
+        engine.portfolio = PortfolioTracker(cash=10_000.0)
+        coord.repository = AsyncMock()
+        rate_row = _make_rate_row(rate=0.00025)
+        coord.repository.get_funding_rates = AsyncMock(return_value=[rate_row])
+        coord.repository.insert_accrual = AsyncMock()
+        coord_any = cast(Any, coord)
+        coord_any._persist_checkpoint = AsyncMock()
+        coord.msg_publisher = None
+        pos = PositionProjection(
+            position_qty=1.0,
+            entry_price=50000.0,
+            position_opened_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        boundary = datetime(2026, 1, 1, 4, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 5, 0, tzinfo=UTC)
+        await coord_any._accrue_one_boundary(
+            engine=engine,
+            instrument_public_id="inst-1",
+            spec=_make_spec(),
+            accrual_type="rollover",
+            boundary=boundary,
+            position=pos,
+            now=now,
+        )
+        coord.repository.insert_accrual.assert_called_once()
+        insert_call = coord.repository.insert_accrual.call_args[0][0]
+        expected_charge = 50000.0 * 0.00025
+        assert insert_call["amount"] == pytest.approx(expected_charge)
+        assert insert_call["accrual_type"] == "rollover"
+        assert insert_call["wallet_public_id"] == "w1"
+
+    @pytest.mark.asyncio
+    async def test_duplicate_boundary_swallowed(self, coord: TraderCoordinator) -> None:
+        """Verify IntegrityError on duplicate insert is silently swallowed."""
+        engine = MagicMock()
+        engine.instrument = "BTC-USD"
+        engine.exchange = "kraken"
+        engine._shard_key = "kraken.BTC-USD.live"
+        engine.mode = "live"
+        engine.wallet_public_id = "w1"
+        engine.operator_public_id = ""
+        coord.repository = AsyncMock()
+        coord.repository.get_funding_rates = AsyncMock(return_value=[_make_rate_row()])
+        coord.repository.insert_accrual = AsyncMock(
+            side_effect=SAIntegrityError("dup", {}, Exception())
+        )
+        coord.msg_publisher = None
+        pos = PositionProjection(
+            position_qty=1.0,
+            entry_price=50000.0,
+            position_opened_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        await cast(Any, coord)._accrue_one_boundary(
+            engine=engine,
+            instrument_public_id="inst-1",
+            spec=_make_spec(),
+            accrual_type="rollover",
+            boundary=datetime(2026, 1, 1, 4, 0, tzinfo=UTC),
+            position=pos,
+            now=datetime(2026, 1, 1, 5, 0, tzinfo=UTC),
+        )
+
+    @pytest.mark.asyncio
+    async def test_publishes_zmq_event(self, coord: TraderCoordinator) -> None:
+        """Verify FundingAccrualData is published after successful accrual."""
+        engine = MagicMock()
+        engine.instrument = "BTC-USD"
+        engine.exchange = "kraken"
+        engine._shard_key = "kraken.BTC-USD.live"
+        engine.mode = "live"
+        engine.wallet_public_id = "w1"
+        engine.operator_public_id = ""
+        engine.portfolio = PortfolioTracker(cash=10_000.0)
+        coord.repository = AsyncMock()
+        coord.repository.get_funding_rates = AsyncMock(return_value=[_make_rate_row()])
+        coord.repository.insert_accrual = AsyncMock()
+        coord.msg_publisher = AsyncMock()
+        coord.msg_publisher.send = AsyncMock()
+        coord_any = cast(Any, coord)
+        coord_any._persist_checkpoint = AsyncMock()
+        pos = PositionProjection(
+            position_qty=1.0,
+            entry_price=50000.0,
+            position_opened_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        await coord_any._accrue_one_boundary(
+            engine=engine,
+            instrument_public_id="inst-1",
+            spec=_make_spec(),
+            accrual_type="rollover",
+            boundary=datetime(2026, 1, 1, 4, 0, tzinfo=UTC),
+            position=pos,
+            now=datetime(2026, 1, 1, 5, 0, tzinfo=UTC),
+        )
+        coord.msg_publisher.send.assert_called_once()
+        topic_arg = coord.msg_publisher.send.call_args[0][0]
+        assert topic_arg == "accruals.kraken.BTC-USD.rollover"
+
+
+class TestAccrueAllDueBoundaries:
+    """Tests for TraderCoordinator._accrue_all_due_boundaries."""
+
+    @pytest.fixture
+    def coord(self, monkeypatch: pytest.MonkeyPatch) -> TraderCoordinator:
+        """Create TraderCoordinator with mocked dependencies."""
+        _configure_settings(monkeypatch)
+        return TraderCoordinator()
+
+    @pytest.mark.asyncio
+    async def test_iterates_all_engines(self, coord: TraderCoordinator) -> None:
+        """Verify all engines are processed."""
+        coord_any = cast(Any, coord)
+        coord_any._accrue_engine = AsyncMock()
+        e1, e2 = MagicMock(), MagicMock()
+        coord.engines = {"e1": e1, "e2": e2}
+        await coord_any._accrue_all_due_boundaries()
+        assert coord_any._accrue_engine.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_engine_error_does_not_abort_loop(self, coord: TraderCoordinator) -> None:
+        """Verify one engine failure does not prevent processing others."""
+        coord_any = cast(Any, coord)
+        coord_any._accrue_engine = AsyncMock(side_effect=[RuntimeError("boom"), None])
+        coord.engines = {"e1": MagicMock(), "e2": MagicMock()}
+        await coord_any._accrue_all_due_boundaries()
+        assert coord_any._accrue_engine.call_count == 2
+
+
+class TestFundingAccrualLoop:
+    """Tests for TraderCoordinator._funding_accrual_loop."""
+
+    @pytest.mark.asyncio
+    async def test_loop_calls_accrue_then_sleeps(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify the loop sleeps, calls _accrue_all_due_boundaries, then cancels."""
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        coord_any = cast(Any, coord)
+        call_count = 0
+
+        async def _fake_accrue() -> None:
+            nonlocal call_count
+            call_count += 1
+            raise asyncio.CancelledError()
+
+        coord_any._accrue_all_due_boundaries = _fake_accrue
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+        with pytest.raises(asyncio.CancelledError):
+            await coord_any._funding_accrual_loop()
+        assert call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_loop_catches_non_cancel_exceptions(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify non-CancelledError exceptions are caught and loop continues."""
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        coord_any = cast(Any, coord)
+        call_count = 0
+
+        async def _failing_accrue() -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("transient failure")
+            raise asyncio.CancelledError()
+
+        coord_any._accrue_all_due_boundaries = _failing_accrue
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+        with pytest.raises(asyncio.CancelledError):
+            await coord_any._funding_accrual_loop()
+        assert call_count == 2
+
+
+class TestAccrueEngineCancelledError:
+    """Tests for CancelledError propagation in _accrue_all_due_boundaries."""
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify CancelledError is re-raised, not swallowed."""
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        coord_any = cast(Any, coord)
+        coord_any._accrue_engine = AsyncMock(side_effect=asyncio.CancelledError())
+        coord.engines = {"e1": MagicMock()}
+        with pytest.raises(asyncio.CancelledError):
+            await coord_any._accrue_all_due_boundaries()
+
+
+class TestAccrueEngineUnknownFundingType:
+    """Test that unknown funding_type is skipped."""
+
+    @pytest.mark.asyncio
+    async def test_unknown_funding_type_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify _accrue_engine returns early for unknown funding_type."""
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        engine = MagicMock()
+        engine.instrument = "BTC-USD"
+        engine.exchange = "kraken"
+        coord.repository = AsyncMock()
+        coord.repository.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
+        coord.repository.get_instrument_spec = AsyncMock(
+            return_value=_make_spec(funding_type="exotic_swap")
+        )
+        await cast(Any, coord)._accrue_engine("key1", engine, datetime.now(UTC))
+        coord.repository.get_last_accrual.assert_not_called()
+
+
+class TestAccrueOneBoundaryPerpetual:
+    """Test perpetual funding charge computation."""
+
+    @pytest.mark.asyncio
+    async def test_perpetual_long_positive_rate_charges(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify perpetual funding long+positive rate produces positive charge."""
+        from snapper.application.portfolio.models import PortfolioTracker
+
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        engine = MagicMock()
+        engine.instrument = "PF_XBTUSD"
+        engine.exchange = "kraken_futures"
+        engine._shard_key = "kraken_futures.PF_XBTUSD.live"
+        engine.mode = "live"
+        engine.wallet_public_id = "w1"
+        engine.operator_public_id = ""
+        engine.portfolio = PortfolioTracker(cash=10_000.0)
+        coord.repository = AsyncMock()
+        perp_rate = FundingRateRow(
+            public_id="r1",
+            instrument_public_id="inst-1",
+            exchange="kraken_futures",
+            rate_type="perpetual_funding",
+            direction="both",
+            rate=0.00001,
+            notional_asset="USD",
+            effective_from=datetime(2026, 1, 1, 4, 0, tzinfo=UTC),
+            source="exchange_api",
+            timestamp=datetime(2026, 1, 1, 4, 0, tzinfo=UTC),
+            session_id="s",
+            sequence_id=1,
+        )
+        coord.repository.get_funding_rates = AsyncMock(return_value=[perp_rate])
+        coord.repository.insert_accrual = AsyncMock()
+        coord_any = cast(Any, coord)
+        coord_any._persist_checkpoint = AsyncMock()
+        coord.msg_publisher = None
+        pos = PositionProjection(
+            position_qty=1.0,
+            entry_price=60000.0,
+            position_opened_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        spec = _make_spec(funding_type="perpetual_funding", frequency=1)
+        await coord_any._accrue_one_boundary(
+            engine=engine,
+            instrument_public_id="inst-1",
+            spec=spec,
+            accrual_type="funding",
+            boundary=datetime(2026, 1, 1, 4, 0, tzinfo=UTC),
+            position=pos,
+            now=datetime(2026, 1, 1, 5, 0, tzinfo=UTC),
+        )
+        insert_call = coord.repository.insert_accrual.call_args[0][0]
+        expected = 60000.0 * 0.00001 * 1
+        assert insert_call["amount"] == pytest.approx(expected)
+        assert insert_call["accrual_type"] == "funding"
+
+
+class TestRecoveryAccrualReplayError:
+    """Test accrual replay error handling in _recover_from_checkpoints."""
+
+    @pytest.mark.asyncio
+    async def test_accrual_replay_exception_logged_not_fatal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify accrual replay failure does not abort checkpoint recovery.
+
+        Given: get_accruals raises an error during recovery,
+        When: _recover_from_checkpoints runs,
+        Then: Recovery continues (balance_service restore still executes).
+        """
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        repo_mock = AsyncMock(spec=SQLAlchemyRepository)
+        checkpoint_at = datetime(2026, 1, 1, tzinfo=UTC)
+        repo_mock.get_all_checkpoints = AsyncMock(
+            return_value=[
+                {
+                    "shard_key": "kraken.BTC-USD.live",
+                    "position_qty": 1.0,
+                    "entry_price": 50000.0,
+                    "cash": 10000.0,
+                    "peak_equity": 10000.0,
+                    "realized_pnl": 0.0,
+                    "turnover": 0.0,
+                    "last_venue_event_id": 10,
+                    "open_command_ids": "[]",
+                    "seen_exec_ids": "[]",
+                    "position_opened_at": checkpoint_at,
+                    "checkpoint_at": checkpoint_at,
+                    "wallet_public_id": "",
+                    "operator_public_id": "",
+                },
+            ]
+        )
+        repo_mock.get_venue_events_after = AsyncMock(return_value=[])
+        repo_mock.get_instrument_public_id_by_symbol = AsyncMock(
+            side_effect=RuntimeError("DB connection lost")
+        )
+        repo_mock.list_active_wallet_credentials = AsyncMock(return_value=[])
+        coord.repository = repo_mock
+        coord_any = cast(Any, coord)
+        mock_engine = MagicMock()
+        mock_engine.position_qty = 1.0
+        mock_engine.entry_price = 50000.0
+        mock_engine.instrument = "BTC-USD"
+        mock_engine.mode = "live"
+        mock_engine.portfolio.cash = 10000.0
+        coord_any._create_engine_for_recovery = AsyncMock(return_value=mock_engine)
+        coord_any._restore_engine_from_shard = MagicMock()
+        now = datetime(2026, 1, 2, tzinfo=UTC)
+        recovered = await coord_any._recover_from_checkpoints(now)
+        assert isinstance(recovered, set)
+        repo_mock.get_instrument_public_id_by_symbol.assert_called_once()
+
+
+class TestRecoveryAccrualReplayBranches:
+    """Cover recovery accrual replay branches (inst_pid=None, empty accruals)."""
+
+    @pytest.mark.asyncio
+    async def test_recovery_skips_when_instrument_not_found(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify recovery continues when instrument is not resolvable."""
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        repo_mock = AsyncMock(spec=SQLAlchemyRepository)
+        checkpoint_at = datetime(2026, 1, 1, tzinfo=UTC)
+        repo_mock.get_all_checkpoints = AsyncMock(
+            return_value=[
+                {
+                    "shard_key": "kraken.BTC-USD.live",
+                    "position_qty": 1.0,
+                    "entry_price": 50000.0,
+                    "cash": 10000.0,
+                    "peak_equity": 10000.0,
+                    "realized_pnl": 0.0,
+                    "turnover": 0.0,
+                    "last_venue_event_id": 10,
+                    "open_command_ids": "[]",
+                    "seen_exec_ids": "[]",
+                    "position_opened_at": checkpoint_at,
+                    "checkpoint_at": checkpoint_at,
+                    "wallet_public_id": "",
+                    "operator_public_id": "",
+                },
+            ]
+        )
+        repo_mock.get_venue_events_after = AsyncMock(return_value=[])
+        repo_mock.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+        repo_mock.list_active_wallet_credentials = AsyncMock(return_value=[])
+        coord.repository = repo_mock
+        mock_engine = MagicMock()
+        mock_engine.position_qty = 1.0
+        mock_engine.entry_price = 50000.0
+        mock_engine.instrument = "BTC-USD"
+        mock_engine.mode = "live"
+        mock_engine.portfolio.cash = 10000.0
+        coord_any = cast(Any, coord)
+        coord_any._create_engine_for_recovery = AsyncMock(return_value=mock_engine)
+        coord_any._restore_engine_from_shard = MagicMock()
+        now = datetime(2026, 1, 2, tzinfo=UTC)
+        recovered = await coord_any._recover_from_checkpoints(now)
+        assert "BTC-USD@kraken-live" in recovered
+        repo_mock.get_accruals.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_recovery_skips_when_no_pending_accruals(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify recovery continues when get_accruals returns empty list."""
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        repo_mock = AsyncMock(spec=SQLAlchemyRepository)
+        checkpoint_at = datetime(2026, 1, 1, tzinfo=UTC)
+        repo_mock.get_all_checkpoints = AsyncMock(
+            return_value=[
+                {
+                    "shard_key": "kraken.BTC-USD.live",
+                    "position_qty": 1.0,
+                    "entry_price": 50000.0,
+                    "cash": 10000.0,
+                    "peak_equity": 10000.0,
+                    "realized_pnl": 0.0,
+                    "turnover": 0.0,
+                    "last_venue_event_id": 10,
+                    "open_command_ids": "[]",
+                    "seen_exec_ids": "[]",
+                    "position_opened_at": checkpoint_at,
+                    "checkpoint_at": checkpoint_at,
+                    "wallet_public_id": "",
+                    "operator_public_id": "",
+                },
+            ]
+        )
+        repo_mock.get_venue_events_after = AsyncMock(return_value=[])
+        repo_mock.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
+        repo_mock.get_accruals = AsyncMock(return_value=[])
+        repo_mock.list_active_wallet_credentials = AsyncMock(return_value=[])
+        coord.repository = repo_mock
+        mock_engine = MagicMock()
+        mock_engine.position_qty = 1.0
+        mock_engine.entry_price = 50000.0
+        mock_engine.instrument = "BTC-USD"
+        mock_engine.mode = "live"
+        mock_engine.portfolio.cash = 10000.0
+        coord_any = cast(Any, coord)
+        coord_any._create_engine_for_recovery = AsyncMock(return_value=mock_engine)
+        coord_any._restore_engine_from_shard = MagicMock()
+        now = datetime(2026, 1, 2, tzinfo=UTC)
+        recovered = await coord_any._recover_from_checkpoints(now)
+        assert "BTC-USD@kraken-live" in recovered
+        repo_mock.get_accruals.assert_called_once()
+
+
+class TestRecoveryNoCheckpointAt:
+    """Cover the checkpoint_at is None branch in accrual replay."""
+
+    @pytest.mark.asyncio
+    async def test_recovery_skips_accrual_when_checkpoint_at_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify accrual replay is skipped when checkpoint has no checkpoint_at."""
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        repo_mock = AsyncMock(spec=SQLAlchemyRepository)
+        repo_mock.get_all_checkpoints = AsyncMock(
+            return_value=[
+                {
+                    "shard_key": "kraken.BTC-USD.live",
+                    "position_qty": 1.0,
+                    "entry_price": 50000.0,
+                    "cash": 10000.0,
+                    "peak_equity": 10000.0,
+                    "realized_pnl": 0.0,
+                    "turnover": 0.0,
+                    "last_venue_event_id": 10,
+                    "open_command_ids": "[]",
+                    "seen_exec_ids": "[]",
+                    "position_opened_at": None,
+                    "checkpoint_at": None,
+                    "wallet_public_id": "",
+                    "operator_public_id": "",
+                },
+            ]
+        )
+        repo_mock.get_venue_events_after = AsyncMock(return_value=[])
+        repo_mock.list_active_wallet_credentials = AsyncMock(return_value=[])
+        coord.repository = repo_mock
+        mock_engine = MagicMock()
+        mock_engine.position_qty = 1.0
+        mock_engine.entry_price = 50000.0
+        mock_engine.instrument = "BTC-USD"
+        mock_engine.mode = "live"
+        mock_engine.portfolio.cash = 10000.0
+        coord_any = cast(Any, coord)
+        coord_any._create_engine_for_recovery = AsyncMock(return_value=mock_engine)
+        coord_any._restore_engine_from_shard = MagicMock()
+        now = datetime(2026, 1, 2, tzinfo=UTC)
+        recovered = await coord_any._recover_from_checkpoints(now)
+        assert "BTC-USD@kraken-live" in recovered
+        repo_mock.get_instrument_public_id_by_symbol.assert_not_called()
+
+
+class TestComputeBoundariesLimit:
+    """Test the 100-boundary safety limit in _compute_pending_boundaries."""
+
+    def test_caps_at_101_boundaries(self) -> None:
+        """Verify no more than 101 boundaries are returned.
+
+        Given: Position opened far in the past with 1h frequency,
+        When: _compute_pending_boundaries called with now far in the future,
+        Then: At most 101 boundaries returned (safety cap).
+        """
+        opened = datetime(2020, 1, 1, 0, 0, tzinfo=UTC)
+        now = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+        result = _compute_pending_boundaries(
+            frequency_hours=1,
+            position_opened_at=opened,
+            last_accrued_at=None,
+            now=now,
+        )
+        assert len(result) == 101

@@ -16,6 +16,7 @@ from snapper.messaging.topics import validation
 from snapper.messaging.topics.builders import market_topic
 from snapper.messaging.topics.validation import TopicValidationError
 from snapper.messaging.topics.validation import _is_valid_timeframe
+from snapper.messaging.topics.validation import _validate_accruals_topic
 from snapper.messaging.topics.validation import _validate_admin_topic
 from snapper.messaging.topics.validation import _validate_candle_timeframe
 from snapper.messaging.topics.validation import _validate_exchange
@@ -3624,3 +3625,79 @@ def test_validate_subscription_unknown_category() -> None:
     is_valid, message = validation.validate_subscription_pattern("unknown.")
     assert is_valid is False
     assert "Unknown topic category" in message
+
+
+class TestAccrualsTopicValidation:
+    """Tests for _validate_accruals_topic validator."""
+
+    def test_valid_rollover_topic(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify valid rollover accrual topic passes validation."""
+        _patch_env(monkeypatch, {"kraken"}, {"BTC-USD"})
+        valid, _err = _validate_accruals_topic("accruals.kraken.BTC-USD.rollover")
+        assert valid
+
+    def test_valid_funding_topic(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify valid funding accrual topic passes validation."""
+        _patch_env(monkeypatch, {"kraken_futures"}, {"PF_XBTUSD"})
+        valid, _err = _validate_accruals_topic("accruals.kraken_futures.PF_XBTUSD.funding")
+        assert valid
+
+    def test_valid_borrow_topic(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify valid borrow accrual topic passes validation."""
+        _patch_env(monkeypatch, {"kraken"}, {"ETH-USD"})
+        valid, _err = _validate_accruals_topic("accruals.kraken.ETH-USD.borrow")
+        assert valid
+
+    def test_trailing_dot_rejected(self) -> None:
+        """Verify trailing dot is rejected."""
+        valid, err = _validate_accruals_topic("accruals.kraken.BTC-USD.rollover.")
+        assert not valid
+        assert "4 segments" in err
+
+    def test_too_few_segments(self) -> None:
+        """Verify topic with too few segments is rejected."""
+        valid, err = _validate_accruals_topic("accruals.kraken.BTC-USD")
+        assert not valid
+        assert "4 segments" in err
+
+    def test_too_many_segments(self) -> None:
+        """Verify topic with too many segments is rejected."""
+        valid, err = _validate_accruals_topic("accruals.kraken.BTC-USD.rollover.extra")
+        assert not valid
+        assert "4 segments" in err
+
+    def test_wrong_category(self) -> None:
+        """Verify wrong category prefix is rejected."""
+        valid, err = _validate_accruals_topic("market.kraken.BTC-USD.rollover")
+        assert not valid
+        assert "accruals" in err.lower()
+
+    def test_invalid_exchange(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify unknown exchange is rejected."""
+        _patch_env(monkeypatch, {"kraken"}, {"BTC-USD"})
+        valid, err = _validate_accruals_topic("accruals.unknown_ex.BTC-USD.rollover")
+        assert not valid
+
+    def test_invalid_instrument(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify unknown instrument is rejected."""
+        _patch_env(monkeypatch, {"kraken"}, {"ETH-USD"})
+        valid, err = _validate_accruals_topic("accruals.kraken.UNKNOWN-PAIR.rollover")
+        assert not valid
+
+    def test_invalid_accrual_type(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify unknown accrual_type is rejected."""
+        _patch_env(monkeypatch, {"kraken"}, {"BTC-USD"})
+        valid, err = _validate_accruals_topic("accruals.kraken.BTC-USD.interest")
+        assert not valid
+        assert "accrual_type" in err.lower()
+
+    def test_via_validate_topic(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify accruals topic routes through validate_topic dispatcher."""
+        _patch_env(monkeypatch, {"kraken"}, {"BTC-USD"})
+        valid, _err = validate_topic("accruals.kraken.BTC-USD.rollover")
+        assert valid
+
+    def test_subscription_pattern_accepted(self) -> None:
+        """Verify 'accruals.' is an accepted subscription pattern."""
+        valid, _err = validate_subscription_pattern("accruals.")
+        assert valid

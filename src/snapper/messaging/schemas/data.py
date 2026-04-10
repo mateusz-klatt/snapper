@@ -661,3 +661,36 @@ class ContinuousSeriesPartialResponse(StrictDataSchema[Literal["continuous_parti
     count: int
     failed_roll: RollPointDetail
     message: str
+
+
+class FundingAccrualData(StrictDataSchema[Literal["funding_accrual"]]):
+    """Funding/rollover accrual event published to ZMQ for UI observability.
+
+    Emitted by the trader's funding accrual loop after a charge is
+    persisted to the AccrualLedger and applied to the in-memory
+    TradeService and PortfolioTracker state.
+
+    Attributes:
+        instrument: Native symbol of the charged instrument.
+        exchange: Exchange where the position is held.
+        mode: Execution mode (live, paper).
+        accrual_type: Kind of periodic charge applied.
+        accrued_at: Boundary timestamp the charge covers.
+        amount: Signed charge in the notional asset.
+        amount_asset: Currency of the charge (e.g., USD).
+        rate: Per-boundary rate used for the charge.
+        notional: Absolute notional value of the position at charge time.
+        position_quantity: Signed position size at charge time.
+    """
+
+    type: Literal["funding_accrual"] = "funding_accrual"
+    instrument: str
+    exchange: OrderExchange
+    mode: ExecutionMode
+    accrual_type: Literal["funding", "rollover", "borrow"]
+    accrued_at: datetime
+    amount: float
+    amount_asset: str
+    rate: float
+    notional: float
+    position_quantity: float

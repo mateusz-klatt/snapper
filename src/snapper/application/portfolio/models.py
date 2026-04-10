@@ -112,6 +112,24 @@ class PortfolioTracker:
         elif self.cash < 0 and self.cash > -EPSILON_NANO:
             self.cash = 0.0
 
+    def accrue_funding(self, instrument: str, amount: float) -> None:
+        """Apply a funding/rollover charge to in-memory portfolio state.
+
+        Mirrors the mutation performed by ``TradeService.add_funding_accrual``
+        so the engine's local cash view stays consistent between checkpoint
+        writes. This is NOT the durable source of truth — the
+        ``AccrualLedger`` table and ``TradeService`` shards are.
+
+        Args:
+            instrument: Native symbol of the charged instrument.
+            amount: Signed charge. Positive reduces cash (holder pays),
+                negative increases cash (holder receives).
+        """
+        pos = self.positions.setdefault(instrument, PositionStateModel())
+        self.cash -= amount
+        pos.realized_pnl -= amount
+        self._clamp_cash()
+
     def update_fill(
         self, instrument: str, side: str, size: float, price: float, fee: float
     ) -> None:

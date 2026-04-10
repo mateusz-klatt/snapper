@@ -37,6 +37,7 @@ TOPIC_REGISTRY: tuple[TopicSchema, ...] = (
     TopicSchema(pattern="admin.", category="admin", throttle_ms=1000),
     TopicSchema(pattern="orders.commands.", category="trade", throttle_ms=0),
     TopicSchema(pattern="orders.events.", category="trade", throttle_ms=0),
+    TopicSchema(pattern="accruals.", category="accruals", throttle_ms=1000),
 )
 
 

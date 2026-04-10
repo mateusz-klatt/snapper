@@ -91,6 +91,7 @@ def _get_topic_prefix_validators() -> list[tuple[str, Callable[[str], tuple[bool
         ("signals.", _validate_signal_topic),
         ("system.", _validate_system_topic),
         ("admin.", _validate_admin_topic),
+        ("accruals.", _validate_accruals_topic),
     ]
 
 
@@ -627,6 +628,46 @@ def _validate_admin_topic(topic: str) -> tuple[bool, str]:
     return True, ""
 
 
+_ACCRUAL_TYPES: frozenset[str] = frozenset({"funding", "rollover", "borrow"})
+
+_ACCRUAL_TOPIC_FORMAT_MSG = (
+    "Accrual topics must have 4 segments: accruals.{exchange}.{instrument}.{accrual_type}"
+)
+
+
+def _validate_accruals_topic(topic: str) -> tuple[bool, str]:
+    """Validate accrual ledger topic structure.
+
+    Expected format: accruals.{exchange}.{instrument}.{accrual_type}
+    where accrual_type is one of: funding, rollover, borrow.
+
+    Args:
+        topic: Topic string starting with "accruals.".
+
+    Returns:
+        Tuple of (is_valid, error_message).
+    """
+    segments = topic.split(".")
+    if topic.endswith(".") or len(segments) != 4:
+        return False, _ACCRUAL_TOPIC_FORMAT_MSG
+    if segments[0] != "accruals":
+        return False, f"Expected 'accruals' category, got '{segments[0]}'"
+    exchange, instrument, accrual_type = segments[1], segments[2], segments[3]
+    valid, msg = _validate_exchange(exchange)
+    if not valid:
+        return False, msg
+    valid, msg = _validate_instrument(instrument)
+    if not valid:
+        return False, msg
+    if accrual_type not in _ACCRUAL_TYPES:
+        return (
+            False,
+            f"Invalid accrual_type '{accrual_type}'. Must be one of: "
+            f"{', '.join(sorted(_ACCRUAL_TYPES))}",
+        )
+    return True, ""
+
+
 _ExchangeValidatorType = Callable[[str], tuple[bool, str]]
 
 
@@ -731,7 +772,7 @@ def _validate_prefix_pattern(pattern: str) -> tuple[bool, str]:
     if any(not segment for segment in segments):
         return False, "Prefix segments cannot be empty"
     category = segments[0]
-    valid_categories = {"market", "orders", "signals", "strategy", "system", "admin"}
+    valid_categories = {"market", "orders", "signals", "strategy", "system", "admin", "accruals"}
     if category not in valid_categories:
         return False, f"Unknown topic category: {category}"
     if category == "orders":

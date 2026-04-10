@@ -17,13 +17,16 @@ import json
 import time
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from typing import Any
 from typing import cast
 from typing import get_args
+from uuid import uuid7
 
 import zmq
 import zmq.asyncio
 from loguru import logger
+from sqlalchemy.exc import IntegrityError
 
 from snapper.application.engine.config import EngineConfigModel
 from snapper.application.engine.service import TradingEngineService
@@ -53,6 +56,7 @@ from snapper.core.types import ProcessRoleEnum
 from snapper.core.types import TradeSideEnum
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import get_repository
+from snapper.data.repository_types import AccrualLedgerInsertRow
 from snapper.data.repository_types import ExecutionRow
 from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import VenueEventRow
@@ -69,6 +73,7 @@ from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.data import ExecutionData
+from snapper.messaging.schemas.data import FundingAccrualData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import OrderEventData
 from snapper.messaging.schemas.data import OrderRequestData
@@ -76,11 +81,69 @@ from snapper.messaging.schemas.data import SettingChangedData
 from snapper.messaging.schemas.data import SignalData
 from snapper.messaging.schemas.messages import MessageParseError
 from snapper.messaging.schemas.messages import parse_message
+from snapper.messaging.topics.builders import accrual_topic
 from snapper.messaging.topics.builders import order_command_topic
 from snapper.messaging.topics.builders import parse_order_event_topic
 from snapper.messaging.topics.builders import parse_signal_topic
 
 _bootstrap_settings = get_bootstrap_settings()
+
+
+def _compute_pending_boundaries(
+    frequency_hours: int,
+    position_opened_at: datetime,
+    last_accrued_at: datetime | None,
+    now: datetime,
+) -> list[datetime]:
+    """Compute accrual boundary timestamps that are due but not yet applied.
+
+    Boundaries are absolute UTC times aligned to ``frequency_hours``
+    epochs (e.g., every 4 hours from midnight: 00:00, 04:00, 08:00,
+    ...). The list is clamped so that the earliest boundary is after
+    ``position_opened_at`` (a reopened position must not retro-charge
+    boundaries from a previous open cycle) and after
+    ``last_accrued_at`` (boundaries already persisted are not
+    replayed).
+
+    Args:
+        frequency_hours: Hours between accrual boundaries.
+        position_opened_at: Timestamp when the current position was
+            opened. Boundaries before this time are excluded.
+        last_accrued_at: Most recent accrued boundary (from the
+            ledger), or None if no accrual has ever been applied.
+        now: Current UTC time. Boundaries strictly before ``now`` are
+            included; the boundary AT ``now`` is excluded (it will be
+            applied on the next iteration).
+
+    Returns:
+        Sorted list of boundary datetimes to be applied.
+    """
+    interval = timedelta(hours=frequency_hours)
+    interval_seconds = interval.total_seconds()
+    start_after = max(
+        position_opened_at,
+        last_accrued_at if last_accrued_at is not None else position_opened_at,
+    )
+    epoch = datetime(2020, 1, 1, tzinfo=UTC)
+    start_elapsed = (start_after - epoch).total_seconds()
+    first_n = int(start_elapsed // interval_seconds) + 1
+    boundaries: list[datetime] = []
+    n = first_n
+    while len(boundaries) <= 100:
+        boundary = epoch + timedelta(seconds=n * interval_seconds)
+        if boundary >= now:
+            break
+        boundaries.append(boundary)
+        n += 1
+    return boundaries
+
+
+_ACCRUAL_POLL_SECONDS: float = 60.0
+
+_FUNDING_TYPE_TO_ACCRUAL_TYPE: dict[str, str] = {
+    "spot_margin_rollover": "rollover",
+    "perpetual_funding": "funding",
+}
 
 
 @register_process(
@@ -401,6 +464,31 @@ class TraderCoordinator(RegisterableProcess):
                 self.trade_service.apply_venue_event(event)
             if delta_events:
                 logger.info(f"ZMQTrader: Replayed {len(delta_events)} delta events for {shard_key}")
+
+            checkpoint_at = cp.get("checkpoint_at")
+            if checkpoint_at is not None:
+                try:
+                    inst_pid = await self.repository.get_instrument_public_id_by_symbol(
+                        native_symbol=instrument, exchange=exchange_str, as_of=now
+                    )
+                    if inst_pid is not None:
+                        pending_accruals = await self.repository.get_accruals(
+                            instrument_public_id=inst_pid,
+                            mode=mode_str,
+                            range_start=checkpoint_at,
+                            range_end=now,
+                        )
+                        if pending_accruals:
+                            self.trade_service.replay_funding_accruals(shard_key, pending_accruals)
+                            logger.info(
+                                "ZMQTrader: Replayed {} accruals for {}",
+                                len(pending_accruals),
+                                shard_key,
+                            )
+                except Exception:
+                    logger.opt(exception=True).warning(
+                        "ZMQTrader: Accrual replay failed for {}", shard_key
+                    )
 
             shard = self.trade_service._shards[shard_key]
             self.balance_service.restore_from_checkpoint(
@@ -1285,6 +1373,155 @@ class TraderCoordinator(RegisterableProcess):
         )
         await self.msg_publisher.send(topic, order)
 
+    async def _funding_accrual_loop(self) -> None:
+        """Periodically charge funding/rollover fees to open positions.
+
+        Runs as a coroutine inside the trading loop task list. On each
+        iteration: for every engine with a funding-enabled instrument,
+        computes missed accrual boundaries since the last applied
+        charge, inserts an AccrualLedger row, mutates in-memory state,
+        persists a checkpoint, and publishes a ZMQ event.
+        """
+        while True:
+            await asyncio.sleep(_ACCRUAL_POLL_SECONDS)
+            try:
+                await self._accrue_all_due_boundaries()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.opt(exception=True).warning("Accrual loop iteration failed")
+
+    async def _accrue_all_due_boundaries(self) -> None:
+        """Scan all engines and apply any missed accrual boundaries."""
+        now = datetime.now(UTC)
+        for engine_key, engine in list(self.engines.items()):
+            try:
+                await self._accrue_engine(engine_key, engine, now)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.opt(exception=True).debug("Accrual check failed for {}", engine_key)
+
+    async def _accrue_engine(
+        self, engine_key: str, engine: TradingEngineService, now: datetime
+    ) -> None:
+        """Apply pending accrual boundaries for a single engine."""
+        instrument_public_id = await self.repository.get_instrument_public_id_by_symbol(
+            native_symbol=engine.instrument,
+            exchange=engine.exchange,
+            as_of=now,
+        )
+        if instrument_public_id is None:
+            return
+        spec = await self.repository.get_instrument_spec(instrument_public_id, as_of=now)
+        if spec is None or spec["funding_type"] is None:
+            return
+        accrual_type = _FUNDING_TYPE_TO_ACCRUAL_TYPE.get(spec["funding_type"])
+        if accrual_type is None:
+            return
+        position = self.trade_service.get_position(engine._shard_key)
+        if position.position_qty == 0 or position.position_opened_at is None:
+            return
+        frequency_hours = spec["funding_frequency_hours"] or 4
+        last_accrual = await self.repository.get_last_accrual(
+            instrument_public_id, engine.mode, accrual_type
+        )
+        last_boundary = last_accrual["accrued_at"] if last_accrual else None
+        boundaries = _compute_pending_boundaries(
+            frequency_hours=frequency_hours,
+            position_opened_at=position.position_opened_at,
+            last_accrued_at=last_boundary,
+            now=now,
+        )
+        for boundary in boundaries:
+            await self._accrue_one_boundary(
+                engine=engine,
+                instrument_public_id=instrument_public_id,
+                spec=spec,
+                accrual_type=accrual_type,
+                boundary=boundary,
+                position=position,
+                now=now,
+            )
+
+    async def _accrue_one_boundary(
+        self,
+        engine: TradingEngineService,
+        instrument_public_id: str,
+        spec: Any,
+        accrual_type: str,
+        boundary: datetime,
+        position: Any,
+        now: datetime,
+    ) -> None:
+        """Compute and apply a single accrual boundary charge."""
+        direction = "long" if position.position_qty > 0 else "short"
+        rate_direction = "both" if spec["funding_type"] == "perpetual_funding" else direction
+        rate_rows = await self.repository.get_funding_rates(
+            instrument_public_id=instrument_public_id,
+            exchange=engine.exchange,
+            rate_type=spec["funding_type"],
+            direction=rate_direction,
+            as_of=(
+                boundary
+                if spec["funding_type"] == "perpetual_funding"
+                else position.position_opened_at
+            ),
+            range_end=boundary,
+        )
+        if not rate_rows:
+            return
+        rate_row = rate_rows[-1]
+        mark_price = position.entry_price or 0.0
+        notional = abs(position.position_qty) * mark_price
+        if spec["funding_type"] == "perpetual_funding":
+            signed_charge = notional * rate_row["rate"] * (1 if position.position_qty > 0 else -1)
+        else:
+            signed_charge = notional * rate_row["rate"]
+        row: AccrualLedgerInsertRow = {
+            "instrument_public_id": instrument_public_id,
+            "mode": engine.mode,
+            "accrual_type": accrual_type,
+            "accrued_at": boundary,
+            "amount": signed_charge,
+            "amount_asset": rate_row["notional_asset"],
+            "rate": rate_row["rate"],
+            "notional": notional,
+            "position_quantity_at_accrual": position.position_qty,
+            "exchange": engine.exchange,
+            "session_id": self._tracker.session_id,
+            "sequence_id": self._tracker.next_sequence("accruals"),
+            "timestamp": now,
+            "wallet_public_id": engine.wallet_public_id,
+            "operator_public_id": engine.operator_public_id or None,
+        }
+        try:
+            await self.repository.insert_accrual(row)
+        except IntegrityError:
+            return
+        self.trade_service.add_funding_accrual(engine._shard_key, signed_charge)
+        engine.portfolio.accrue_funding(engine.instrument, signed_charge)
+        await self._persist_checkpoint(engine._shard_key)
+        if self.msg_publisher:
+            topic = accrual_topic(engine.exchange, engine.instrument, accrual_type)
+            envelope = FundingAccrualData(
+                public_id=str(uuid7()),
+                timestamp=now,
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence("accruals"),
+                instrument=engine.instrument,
+                exchange=engine.exchange,
+                mode=engine.mode,
+                accrual_type=cast(Any, accrual_type),
+                accrued_at=boundary,
+                amount=signed_charge,
+                amount_asset=rate_row["notional_asset"],
+                rate=rate_row["rate"],
+                notional=notional,
+                position_quantity=position.position_qty,
+            )
+            await self.msg_publisher.send(topic, envelope)
+
     async def _run_trading_loop(self) -> None:
         """Run the main trading loop.
 
@@ -1294,6 +1531,7 @@ class TraderCoordinator(RegisterableProcess):
         tasks = [
             asyncio.create_task(self._listen_signals()),
             asyncio.create_task(self._signal_health_monitor()),
+            asyncio.create_task(self._funding_accrual_loop()),
         ]
         if self.outbox is not None:
             tasks.append(asyncio.create_task(self.outbox.run()))

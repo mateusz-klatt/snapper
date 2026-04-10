@@ -13,6 +13,7 @@ Topic Hierarchy Contract
 - system.heartbeats.{component}.{name}
 - system.{type}
 - admin.{resource}
+- accruals.{exchange}.{instrument}.{accrual_type}
 
 Builder Functions:
     market_topic: Build market data topic string.
@@ -22,6 +23,7 @@ Builder Functions:
     heartbeat_topic: Build heartbeat topic string.
     system_topic: Build system topic string.
     admin_topic: Build admin topic string.
+    accrual_topic: Build accrual ledger topic string.
 
 Parser Functions:
     parse_market_topic: Parse market.* topic into components.
@@ -240,6 +242,31 @@ def admin_topic(resource: str) -> str:
         'admin.command'
     """
     return f"admin.{resource}"
+
+
+def accrual_topic(
+    exchange: OrderExchange,
+    instrument: str,
+    accrual_type: str,
+) -> str:
+    """Build an accrual ledger topic string.
+
+    Args:
+        exchange: Exchange name (OrderExchange literal).
+        instrument: Trading instrument symbol (e.g., 'BTC-USD').
+        accrual_type: One of 'funding', 'rollover', or 'borrow'.
+
+    Returns:
+        Formatted topic string like 'accruals.kraken.BTC-USD.rollover'.
+
+    Examples:
+        >>> accrual_topic("kraken", "BTC-USD", "rollover")
+        'accruals.kraken.BTC-USD.rollover'
+        >>> accrual_topic("kraken_futures", "PF_XBTUSD", "funding")
+        'accruals.kraken_futures.PF_XBTUSD.funding'
+    """
+    exchange_str = exchange
+    return f"accruals.{exchange_str}.{instrument}.{accrual_type}"
 
 
 def order_commands_prefix(exchange: OrderExchange) -> str:

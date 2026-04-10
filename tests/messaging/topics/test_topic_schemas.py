@@ -120,3 +120,21 @@ class TestTopicUtilities:
         Then: Returns empty list.
         """
         assert get_topics_by_category("nonexistent") == []
+
+    def test_accruals_registry_entry_exists(self) -> None:
+        """Verify accruals entry exists in TOPIC_REGISTRY.
+
+        Given: TOPIC_REGISTRY,
+        When: Filtering for accruals pattern,
+        Then: One entry with throttle_ms=1000 and category=accruals.
+        """
+        accrual_schemas = [s for s in TOPIC_REGISTRY if s.pattern == "accruals."]
+        assert len(accrual_schemas) == 1
+        assert accrual_schemas[0].category == "accruals"
+        assert accrual_schemas[0].throttle_ms == 1000
+
+    def test_accruals_category_query(self) -> None:
+        """Verify get_topics_by_category finds accruals entry."""
+        results = get_topics_by_category("accruals")
+        assert len(results) == 1
+        assert results[0].pattern == "accruals."

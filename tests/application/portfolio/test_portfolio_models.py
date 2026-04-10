@@ -411,3 +411,54 @@ class TestPortfolioShortSelling:
         pos = PositionStateModel(quantity=1.0, average_price=0.0)
         PortfolioTracker._decrease_position(pos, 0.5, 100.0)
         assert pos.realized_pnl == pytest.approx(0.0)
+
+
+class TestAccrueFunding:
+    """Tests for PortfolioTracker.accrue_funding mirror method."""
+
+    def test_positive_charge_reduces_cash_and_pnl(self) -> None:
+        """Verify positive amount reduces cash and per-position realized_pnl.
+
+        Given: Portfolio with default cash,
+        When: accrue_funding called with positive amount,
+        Then: Cash and position pnl decrease.
+        """
+        tracker = PortfolioTracker(cash=10_000.0)
+        tracker.accrue_funding("BTC-USD", 25.0)
+        assert tracker.cash == pytest.approx(9_975.0)
+        assert tracker.positions["BTC-USD"].realized_pnl == pytest.approx(-25.0)
+
+    def test_negative_amount_credits_cash_and_pnl(self) -> None:
+        """Verify negative amount increases cash and per-position realized_pnl.
+
+        Given: Portfolio with default cash,
+        When: accrue_funding called with negative amount,
+        Then: Cash and position pnl increase.
+        """
+        tracker = PortfolioTracker(cash=10_000.0)
+        tracker.accrue_funding("BTC-USD", -10.0)
+        assert tracker.cash == pytest.approx(10_010.0)
+        assert tracker.positions["BTC-USD"].realized_pnl == pytest.approx(10.0)
+
+    def test_creates_position_if_absent(self) -> None:
+        """Verify accrue_funding creates position entry via setdefault.
+
+        Given: Empty positions dict,
+        When: accrue_funding called,
+        Then: Position entry created for the instrument.
+        """
+        tracker = PortfolioTracker(cash=1000.0)
+        tracker.accrue_funding("NEW-INST", 5.0)
+        assert "NEW-INST" in tracker.positions
+        assert tracker.positions["NEW-INST"].realized_pnl == pytest.approx(-5.0)
+
+    def test_clamp_cash_applied(self) -> None:
+        """Verify _clamp_cash is called to prevent floating point issues.
+
+        Given: Portfolio with cash near zero,
+        When: accrue_funding brings cash to near-zero,
+        Then: Cash is clamped.
+        """
+        tracker = PortfolioTracker(cash=1e-7)
+        tracker.accrue_funding("BTC-USD", 0.0)
+        assert tracker.cash == pytest.approx(1e-6)

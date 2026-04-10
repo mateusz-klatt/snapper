@@ -4,6 +4,7 @@ import pytest
 
 from snapper.messaging.topics.builders import ParsedOrderTopic
 from snapper.messaging.topics.builders import ParsedSignalTopic
+from snapper.messaging.topics.builders import accrual_topic
 from snapper.messaging.topics.builders import admin_topic
 from snapper.messaging.topics.builders import heartbeat_topic
 from snapper.messaging.topics.builders import is_order_topic
@@ -735,3 +736,22 @@ class TestParseSignalTopic:
         assert parse_signal_topic("signals.kraken.BTC-USD") is None
         assert parse_signal_topic("market.kraken.BTC-USD.ticks") is None
         assert parse_signal_topic("signals..BTC-USD.live") is None
+
+
+class TestAccrualTopicBuilder:
+    """Tests for accrual_topic builder function."""
+
+    def test_rollover_topic(self) -> None:
+        """Verify rollover accrual topic format."""
+        result = accrual_topic("kraken", "BTC-USD", "rollover")
+        assert result == "accruals.kraken.BTC-USD.rollover"
+
+    def test_funding_topic(self) -> None:
+        """Verify funding accrual topic format."""
+        result = accrual_topic("kraken_futures", "PF_XBTUSD", "funding")
+        assert result == "accruals.kraken_futures.PF_XBTUSD.funding"
+
+    def test_borrow_topic(self) -> None:
+        """Verify borrow accrual topic format."""
+        result = accrual_topic("kraken", "ETH-USD", "borrow")
+        assert result == "accruals.kraken.ETH-USD.borrow"

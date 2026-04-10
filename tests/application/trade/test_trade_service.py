@@ -6,6 +6,7 @@ from datetime import datetime
 import pytest
 
 from snapper.application.trade.trade_service import TradeService
+from snapper.data.repository_types import AccrualLedgerRow
 from snapper.data.repository_types import VenueEventRow
 
 _USE_DEFAULT_EXEC_ID = "__default__"
@@ -1020,3 +1021,104 @@ def test_restore_then_delta_close_resets_position_opened_at() -> None:
     pos = svc.get_position("kraken.BTC-USD.live")
     assert pos.position_qty == 0.0
     assert pos.position_opened_at is None
+
+
+class TestAddFundingAccrual:
+    """Tests for TradeService.add_funding_accrual."""
+
+    def test_positive_charge_reduces_cash_and_pnl(self) -> None:
+        """Verify positive amount reduces both cash and realized_pnl.
+
+        Given: Shard with default cash (10000),
+        When: add_funding_accrual called with positive amount,
+        Then: Cash and realized_pnl decrease by amount.
+        """
+        svc = TradeService()
+        svc.add_funding_accrual("s1", 25.0)
+        shard = svc._shards["s1"]
+        assert shard.cash == pytest.approx(10_000.0 - 25.0)
+        assert shard.position.realized_pnl == pytest.approx(-25.0)
+
+    def test_negative_amount_credits_cash_and_pnl(self) -> None:
+        """Verify negative amount increases both cash and realized_pnl.
+
+        Given: Shard with default cash,
+        When: add_funding_accrual called with negative amount,
+        Then: Cash and realized_pnl increase (charge is a credit).
+        """
+        svc = TradeService()
+        svc.add_funding_accrual("s1", -10.0)
+        shard = svc._shards["s1"]
+        assert shard.cash == pytest.approx(10_010.0)
+        assert shard.position.realized_pnl == pytest.approx(10.0)
+
+    def test_accrual_propagates_to_snapshot(self) -> None:
+        """Verify accrual mutation is visible in snapshot_for_checkpoint.
+
+        Given: Shard with applied accrual,
+        When: snapshot_for_checkpoint called,
+        Then: Snapshot reflects the post-accrual cash and pnl.
+        """
+        svc = TradeService()
+        svc.add_funding_accrual("s1", 50.0)
+        snap = svc.snapshot_for_checkpoint("s1")
+        assert snap["cash"] == pytest.approx(9_950.0)
+        assert snap["realized_pnl"] == pytest.approx(-50.0)
+
+
+class TestReplayFundingAccruals:
+    """Tests for TradeService.replay_funding_accruals."""
+
+    def test_replays_multiple_accruals(self) -> None:
+        """Verify replay applies all accrual rows in order.
+
+        Given: Two accrual rows,
+        When: replay_funding_accruals called,
+        Then: Cumulative effect on cash and pnl.
+        """
+        svc = TradeService()
+        now = datetime.now(UTC)
+        rows: list[AccrualLedgerRow] = [
+            AccrualLedgerRow(
+                public_id="a1",
+                instrument_public_id="inst1",
+                mode="live",
+                accrual_type="rollover",
+                accrued_at=now,
+                amount=10.0,
+                amount_asset="USD",
+                rate=0.00025,
+                notional=40000.0,
+                position_quantity_at_accrual=1.0,
+                exchange="kraken",
+                timestamp=now,
+                session_id="s",
+                sequence_id=1,
+            ),
+            AccrualLedgerRow(
+                public_id="a2",
+                instrument_public_id="inst1",
+                mode="live",
+                accrual_type="rollover",
+                accrued_at=now,
+                amount=5.0,
+                amount_asset="USD",
+                rate=0.00025,
+                notional=20000.0,
+                position_quantity_at_accrual=0.5,
+                exchange="kraken",
+                timestamp=now,
+                session_id="s",
+                sequence_id=2,
+            ),
+        ]
+        svc.replay_funding_accruals("s1", rows)
+        shard = svc._shards["s1"]
+        assert shard.cash == pytest.approx(10_000.0 - 15.0)
+        assert shard.position.realized_pnl == pytest.approx(-15.0)
+
+    def test_empty_list_is_noop(self) -> None:
+        """Verify empty accrual list does not create shard."""
+        svc = TradeService()
+        svc.replay_funding_accruals("s1", [])
+        assert "s1" not in svc._shards

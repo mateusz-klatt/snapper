@@ -20,6 +20,7 @@ from typing import Final
 from loguru import logger
 
 from snapper.core.types import TradeSideEnum
+from snapper.data.repository_types import AccrualLedgerRow
 from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import VenueEventRow
 
@@ -119,6 +120,40 @@ class TradeService:
             realized PnL.
         """
         return self._get_or_create_shard(shard_key).position
+
+    def add_funding_accrual(self, shard_key: str, amount: float) -> None:
+        """Apply a funding/rollover charge to shard state.
+
+        Deducts ``amount`` from cash and realized PnL. Positive values
+        represent charges (reduce cash), negative values represent
+        credits (increase cash). The caller is responsible for
+        persisting the ``AccrualLedger`` row before calling this method
+        so that crash recovery can replay from the ledger.
+
+        Args:
+            shard_key: Unique identifier for the trading shard.
+            amount: Signed charge in the notional asset. Positive
+                means the position holder pays, negative means the
+                holder receives.
+        """
+        shard = self._get_or_create_shard(shard_key)
+        shard.cash -= amount
+        shard.position.realized_pnl -= amount
+
+    def replay_funding_accruals(self, shard_key: str, accruals: list[AccrualLedgerRow]) -> None:
+        """Replay persisted accrual rows into shard state for crash recovery.
+
+        Called during ``_recover_from_checkpoints`` to re-apply accrual
+        charges that were committed to the ledger but not yet captured
+        in the most recent checkpoint snapshot.
+
+        Args:
+            shard_key: Unique identifier for the trading shard.
+            accruals: Ordered list of accrual rows from the recovery
+                window (checkpoint_at, now].
+        """
+        for row in accruals:
+            self.add_funding_accrual(shard_key, row["amount"])
 
     def get_command_state(self, shard_key: str) -> CommandState:
         """Read model: current command state for engine in-flight guard.

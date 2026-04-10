@@ -8,6 +8,7 @@ import pytest
 
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import ExecutionData
+from snapper.messaging.schemas.data import FundingAccrualData
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import OrderCancelData
 from snapper.messaging.schemas.data import OrderEventData
@@ -638,3 +639,54 @@ class TestMultiTenantFields:
         assert msg.wallet_public_id == ""
         assert msg.operator_public_id is None
         assert msg.user_public_id is None
+
+
+class TestFundingAccrualData:
+    """Tests for FundingAccrualData Pydantic schema."""
+
+    def test_construction_with_all_fields(self) -> None:
+        """Verify FundingAccrualData can be constructed with all fields."""
+        now = datetime.now(UTC)
+        msg = FundingAccrualData(
+            public_id="test-id",
+            timestamp=now,
+            session_id="sess1",
+            sequence_id=1,
+            instrument="BTC-USD",
+            exchange="kraken",
+            mode="live",
+            accrual_type="rollover",
+            accrued_at=now,
+            amount=25.0,
+            amount_asset="USD",
+            rate=0.00025,
+            notional=100_000.0,
+            position_quantity=1.0,
+        )
+        assert msg.type == "funding_accrual"
+        assert msg.instrument == "BTC-USD"
+        assert msg.exchange == "kraken"
+        assert msg.accrual_type == "rollover"
+        assert msg.amount == pytest.approx(25.0)
+
+    def test_funding_accrual_type(self) -> None:
+        """Verify funding accrual_type is accepted."""
+        now = datetime.now(UTC)
+        msg = FundingAccrualData(
+            public_id="test-id",
+            timestamp=now,
+            session_id="sess1",
+            sequence_id=1,
+            instrument="PF_XBTUSD",
+            exchange="kraken_futures",
+            mode="live",
+            accrual_type="funding",
+            accrued_at=now,
+            amount=-5.0,
+            amount_asset="USD",
+            rate=0.00001,
+            notional=50_000.0,
+            position_quantity=-0.5,
+        )
+        assert msg.accrual_type == "funding"
+        assert msg.amount == pytest.approx(-5.0)
