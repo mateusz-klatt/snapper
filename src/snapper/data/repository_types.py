@@ -363,6 +363,7 @@ class RecordVenueEventParams(TypedDict, total=False):
     error: str | None
     venue_timestamp: datetime | None
     strategy_tag: str | None
+    liquidity_role: str | None
 
 
 class TradeCommandInsertRow(TypedDict, total=False):
@@ -432,6 +433,7 @@ class VenueEventInsertRow(TypedDict, total=False):
     venue_timestamp: datetime | None
     payload_json: str | None
     wallet_public_id: str
+    liquidity_role: str
 
 
 class InstrumentSpecRow(TypedDict):

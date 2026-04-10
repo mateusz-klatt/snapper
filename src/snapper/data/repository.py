@@ -613,6 +613,7 @@ class Repository(ABC):
         exec_id: str | None = None,
         trade_id: str | None = None,
         operator_public_id: str | None = None,
+        liquidity_role: str = "unknown",
     ) -> int:
         """Insert execution record, returning execution ID.
 
@@ -620,6 +621,7 @@ class Repository(ABC):
         group fills into the correct per-wallet engine.
         ``operator_public_id`` is nullable so strategy-
         emitted fills without a human operator still persist.
+        ``liquidity_role`` indicates maker/taker/unknown.
         """
         ...
 
@@ -2194,6 +2196,7 @@ class SQLAlchemyRepository(Repository):
         exec_id: str | None = None,
         trade_id: str | None = None,
         operator_public_id: str | None = None,
+        liquidity_role: str = "unknown",
     ) -> int:
         """Insert execution record and return generated ID."""
         async with self.session() as s:
@@ -2212,6 +2215,7 @@ class SQLAlchemyRepository(Repository):
                 fee_asset=fee_asset,
                 session_id=session_id,
                 sequence_id=sequence_id,
+                liquidity_role=liquidity_role,
             )
             s.add(execution)
             await s.commit()

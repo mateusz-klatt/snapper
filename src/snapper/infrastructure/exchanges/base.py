@@ -493,6 +493,8 @@ class ExchangeClientBase(ABC):
         resolved_fee = fee if fee is not None else (execution.fee_usd_equiv or 0.0)
         resolved_fee_asset = fee_asset if fee_asset is not None else "USD"
         resolved_status = status if status is not None else to_fill_status(execution)
+        liq_map = {"m": "maker", "t": "taker"}
+        resolved_liquidity = liq_map.get(getattr(execution, "liquidity_ind", None) or "", "unknown")
         try:
             seq = self._tracker.next_sequence("executions")
             await self.repository.insert_execution(
@@ -510,6 +512,7 @@ class ExchangeClientBase(ABC):
                 trade_id=str(execution.trade_id) if execution.trade_id is not None else None,
                 session_id=self._tracker.session_id,
                 sequence_id=seq,
+                liquidity_role=resolved_liquidity,
             )
         except SQLAlchemyError as e:
             logger.error(f"Failed to log execution to database: {e}")

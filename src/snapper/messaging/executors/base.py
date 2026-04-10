@@ -998,6 +998,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     "trade_id": params.get("trade_id"),
                     "error": params.get("error"),
                     "venue_timestamp": params.get("venue_timestamp"),
+                    "liquidity_role": params.get("liquidity_role") or "unknown",
                 }
             )
         except Exception:
@@ -1461,6 +1462,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             fee_asset=fee_asset,
             status=status,
             executed_at=execution.timestamp,
+            liquidity_role={"m": "maker", "t": "taker"}.get(
+                getattr(execution, "liquidity_ind", None) or "", "unknown"
+            ),
         )
 
     async def _process_execution(self, execution: ExecutionUpdate) -> None:
@@ -1509,6 +1513,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     "trade_id": str(raw_tid) if raw_tid else None,
                     "venue_timestamp": getattr(execution, "timestamp", None),
                     "strategy_tag": original_order.strategy_tag,
+                    "liquidity_role": fill.liquidity_role,
                 }
             )
             await self._publish_execution(topic, fill)
