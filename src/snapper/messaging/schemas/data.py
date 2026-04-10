@@ -767,3 +767,42 @@ class VenueFeeScheduleData(StrictDataSchema[Literal["venue_fee_schedule"]]):
     taker_bps: float
     min_volume_30d: float | None
     currency: str
+
+
+class ExecutionPlanData(StrictDataSchema[Literal["execution_plan"]]):
+    """Execution plan state for REST API responses.
+
+    Attributes:
+        plan_type: Plan type discriminator.
+        status: Current plan lifecycle status.
+        instrument_public_id: Target instrument UUID.
+        exchange: Target exchange.
+        mode: Execution mode (live/paper).
+        side: Order side (buy/sell).
+        total_quantity: Total intended quantity.
+        filled_quantity: Quantity filled so far.
+        created_at: Plan creation timestamp.
+        created_via: Creation channel (ui/api/cli/strategy).
+        wallet_public_id: Owning wallet UUID.
+        operator_public_id: Operator identity (nullable).
+        params: Plan-type-specific parameters.
+        last_error: Most recent error message (nullable).
+        idempotency_key: Client-provided dedup key (nullable).
+    """
+
+    type: Literal["execution_plan"] = "execution_plan"
+    plan_type: str
+    status: str
+    instrument_public_id: str
+    exchange: str
+    mode: str
+    side: str
+    total_quantity: float
+    filled_quantity: float
+    created_at: datetime
+    created_via: str
+    wallet_public_id: str
+    operator_public_id: str | None
+    params: dict[str, object]
+    last_error: str | None
+    idempotency_key: str | None

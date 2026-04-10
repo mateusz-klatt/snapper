@@ -1472,6 +1472,21 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def insert_trade_command(
+        self,
+        row: TradeCommandInsertRow,
+    ) -> tuple[int, str]:
+        """Insert a new trade command row.
+
+        Args:
+            row: Trade command insert payload.
+
+        Returns:
+            Tuple of (id, public_id) for the new command.
+        """
+        ...
+
+    @abstractmethod
     async def create_scope_grant(self, request: CreateScopeGrantRequest) -> ScopeGrantRow:
         """Create a new ``wallet_operator_scope_grants`` row.
 

@@ -147,6 +147,7 @@ from snapper.server.credential_routes import router as credential_router
 from snapper.server.dependencies import get_repository_dependency
 from snapper.server.json_body import patch_openapi
 from snapper.server.operator_routes import router as operator_router
+from snapper.server.order_routes import router as order_router
 from snapper.server.process_routes import router as process_router
 from snapper.server.provenance_middleware import ClientProvenanceMiddleware
 from snapper.server.rate_limiting import limiter
@@ -348,6 +349,7 @@ def create_app() -> FastAPI:
     app.include_router(operator_router, prefix=API_PREFIX)
     app.include_router(scope_grant_router, prefix=API_PREFIX)
     app.include_router(credential_router, prefix=API_PREFIX)
+    app.include_router(order_router, prefix=API_PREFIX)
     app.include_router(create_api_router(manager), prefix=API_PREFIX)
     app.include_router(create_authenticated_websocket_router(manager), prefix=API_PREFIX)
 

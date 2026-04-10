@@ -400,6 +400,7 @@ class TradeCommandInsertRow(TypedDict, total=False):
     wallet_public_id: str
     operator_public_id: str | None
     user_public_id: str | None
+    plan_public_id: str | None
 
 
 class VenueEventInsertRow(TypedDict, total=False):
