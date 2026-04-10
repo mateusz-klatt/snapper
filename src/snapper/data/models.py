@@ -319,6 +319,7 @@ class Order(TemporalMixin, Base):
     reduce_only: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="0"
     )
+    plan_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True, index=True)
 
 
 class Execution(TemporalMixin, Base):
@@ -913,6 +914,7 @@ class TradeCommand(TemporalMixin, Base):
     exchange_order_id: Mapped[str | None] = mapped_column(String(64))
     supersedes_command_id: Mapped[str | None] = mapped_column(UUIDColumn())
     correlation_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
+    plan_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True, index=True)
 
 
 class VenueEvent(TemporalMixin, Base):
@@ -1583,3 +1585,150 @@ class VenueFeeSchedule(TemporalMixin, Base):
     taker_bps: Mapped[float] = mapped_column(Float)
     min_volume_30d: Mapped[float | None] = mapped_column(Float, nullable=True)
     currency: Mapped[str] = mapped_column(String(8))
+
+
+class ExecutionPlan(TemporalMixin, Base):
+    """Unified execution plan controlling all manual and algorithmic orders.
+
+    Every user trading action (manual orders, SL/TP brackets, trailing stops,
+    market making, scheduled orders) becomes an ExecutionPlan instance
+    evaluated by a pluggable PlanEvaluator. Child TradeCommand rows flow
+    through the existing executor pipeline.
+    """
+
+    __tablename__ = "execution_plans"
+    __table_args__ = (
+        Index("ix_ep_status_exchange_mode", "status", "exchange", "mode"),
+        Index("ix_ep_instrument_status", "instrument_public_id", "status"),
+        Index("ix_ep_shard_status", "shard_key", "status"),
+        Index(
+            "uq_ep_idempotency_key",
+            "idempotency_key",
+            unique=True,
+            sqlite_where=text(
+                "idempotency_key IS NOT NULL AND known_to = '9999-12-31 23:59:59.000000'"
+            ),
+            postgresql_where=text(
+                "idempotency_key IS NOT NULL AND known_to = '9999-12-31T23:59:59+00:00'"
+            ),
+        ),
+        Index(
+            "ix_ep_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_ep_exchange_lower"),
+        CheckConstraint(
+            "plan_type IN ('manual_once', 'bracket', 'trailing_stop', "
+            "'passive_mm', 'peg', 'scheduler')",
+            name="ck_ep_plan_type",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'armed', 'active', 'paused', 'completed', "
+            "'cancel_requested', 'cancelled', 'failed', 'expired')",
+            name="ck_ep_status",
+        ),
+        CheckConstraint(
+            "side IN ('buy', 'sell')",
+            name="ck_ep_side",
+        ),
+        CheckConstraint(
+            "mode IN ('live', 'paper')",
+            name="ck_ep_mode",
+        ),
+        CheckConstraint(
+            "created_via IN ('ui', 'api', 'cli', 'strategy')",
+            name="ck_ep_created_via",
+        ),
+    )
+    plan_type: Mapped[str] = mapped_column(String(32), index=True)
+    created_by_user_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True, index=True)
+    created_by_strategy: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_via: Mapped[str] = mapped_column(String(16))
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    exchange: Mapped[str] = mapped_column(String(32), index=True)
+    mode: Mapped[str] = mapped_column(String(8))
+    shard_key: Mapped[str] = mapped_column(String(128), index=True)
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    operator_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    total_quantity: Mapped[float] = mapped_column(Float)
+    filled_quantity: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    side: Mapped[str] = mapped_column(String(8))
+    parent_plan_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    position_cycle_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    params: Mapped[JsonObject] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(20), index=True)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime())
+    started_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    last_evaluated_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class ExecutionPlanCheckpoint(TemporalMixin, Base):
+    """High-churn evaluator state snapshot, separate from the plan row.
+
+    Plan params change rarely, but evaluator state (trailing peak, current
+    quote, next wake time) changes on every tick. Separating high-churn state
+    avoids SCD2 row explosion on the main plan table.
+    """
+
+    __tablename__ = "execution_plan_checkpoints"
+    __table_args__ = (
+        Index(
+            "ix_epc_plan_public_id",
+            "plan_public_id",
+        ),
+        Index(
+            "ix_epc_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+    )
+    plan_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    state: Mapped[JsonObject] = mapped_column(JSON)
+    last_venue_event_id: Mapped[int] = mapped_column(Integer)
+    last_tick_timestamp: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    checkpoint_at: Mapped[datetime] = mapped_column(TZDateTime())
+
+
+class ExecutionPlanDecision(TemporalMixin, Base):
+    """Decision log for time-travel debugging of plan evaluator behavior.
+
+    Records why a plan did or did not emit a command at a given moment.
+    Uses tiered importance for volume control: action (always logged),
+    transition (state changes), routine (sampled every 60th tick-skip).
+    """
+
+    __tablename__ = "execution_plan_decisions"
+    __table_args__ = (
+        Index("ix_epd_plan_public_id", "plan_public_id"),
+        Index("ix_epd_decided_at", "decided_at"),
+        Index(
+            "ix_epd_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        CheckConstraint(
+            "decision_importance IN ('action', 'transition', 'routine')",
+            name="ck_epd_importance",
+        ),
+    )
+    plan_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    decision_type: Mapped[str] = mapped_column(String(32))
+    decided_at: Mapped[datetime] = mapped_column(TZDateTime(), index=True)
+    trigger_type: Mapped[str] = mapped_column(String(16))
+    evidence: Mapped[JsonObject] = mapped_column(JSON)
+    emitted_command_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    new_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    reason: Mapped[str] = mapped_column(String(512))
+    decision_importance: Mapped[str] = mapped_column(String(16))

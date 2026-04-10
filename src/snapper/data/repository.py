@@ -2212,6 +2212,7 @@ class SQLAlchemyRepository(Repository):
                 error=error,
                 leverage=old_order.leverage,
                 reduce_only=old_order.reduce_only,
+                plan_public_id=old_order.plan_public_id,
                 session_id=session_id,
                 sequence_id=sequence_id,
             )
@@ -3112,6 +3113,7 @@ class SQLAlchemyRepository(Repository):
                 ),
                 supersedes_command_id=existing.supersedes_command_id,
                 correlation_id=existing.correlation_id,
+                plan_public_id=existing.plan_public_id,
                 session_id=session_id,
                 sequence_id=sequence_id,
                 timestamp=bus_time,

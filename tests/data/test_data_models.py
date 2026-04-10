@@ -10,6 +10,9 @@ import pytest
 
 from snapper.data.models import Candle
 from snapper.data.models import Execution
+from snapper.data.models import ExecutionPlan
+from snapper.data.models import ExecutionPlanCheckpoint
+from snapper.data.models import ExecutionPlanDecision
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentOrderCapability
 from snapper.data.models import Order
@@ -920,3 +923,200 @@ class TestVenueFeeScheduleModel:
         )
         assert fee.maker_bps == -2.0
         assert fee.min_volume_30d == 1_000_000.0
+
+
+class TestExecutionPlanModel:
+    """Tests for ExecutionPlan ORM model."""
+
+    def test_creation_manual_once(self) -> None:
+        """Verify manual_once plan creation with required fields.
+
+        Given: Manual order plan parameters,
+        When: ExecutionPlan instantiated,
+        Then: All fields set correctly with defaults.
+        """
+        now = datetime.now(UTC)
+        plan = ExecutionPlan(
+            plan_type="manual_once",
+            created_by_user_id="user-1",
+            created_via="ui",
+            instrument_public_id="inst-1",
+            exchange="kraken",
+            mode="live",
+            shard_key="kraken:BTC-USD:live",
+            wallet_public_id="wallet-1",
+            total_quantity=0.5,
+            side="buy",
+            params={"order_type": "limit", "price": 50000.0},
+            status="pending",
+            created_at=now,
+            session_id="s1",
+            sequence_id=1,
+            timestamp=now,
+        )
+        assert plan.plan_type == "manual_once"
+        assert plan.created_by_user_id == "user-1"
+        assert plan.created_via == "ui"
+        assert plan.total_quantity == 0.5
+        assert plan.side == "buy"
+        assert plan.status == "pending"
+        assert plan.operator_public_id is None
+        assert plan.parent_plan_public_id is None
+        assert plan.last_error is None
+        assert plan.idempotency_key is None
+
+    def test_creation_strategy_plan(self) -> None:
+        """Verify strategy-originated plan with operator set.
+
+        Given: Strategy-originated bracket plan,
+        When: ExecutionPlan instantiated,
+        Then: created_by_strategy and operator fields set.
+        """
+        now = datetime.now(UTC)
+        plan = ExecutionPlan(
+            plan_type="bracket",
+            created_by_strategy="mean_revert_v3",
+            created_via="strategy",
+            instrument_public_id="inst-2",
+            exchange="kraken_futures",
+            mode="paper",
+            shard_key="kraken_futures:ETH-USD:paper",
+            wallet_public_id="wallet-2",
+            operator_public_id="op-1",
+            total_quantity=10.0,
+            side="sell",
+            params={"stop_loss": 2000.0, "take_profit": 1500.0},
+            status="armed",
+            created_at=now,
+            parent_plan_public_id="parent-1",
+            idempotency_key="idem-123",
+            session_id="s1",
+            sequence_id=1,
+            timestamp=now,
+        )
+        assert plan.created_by_strategy == "mean_revert_v3"
+        assert plan.operator_public_id == "op-1"
+        assert plan.parent_plan_public_id == "parent-1"
+        assert plan.idempotency_key == "idem-123"
+
+
+class TestExecutionPlanCheckpointModel:
+    """Tests for ExecutionPlanCheckpoint ORM model."""
+
+    def test_creation(self) -> None:
+        """Verify checkpoint creation with evaluator state.
+
+        Given: Evaluator state snapshot,
+        When: ExecutionPlanCheckpoint instantiated,
+        Then: All fields set correctly.
+        """
+        now = datetime.now(UTC)
+        cp = ExecutionPlanCheckpoint(
+            plan_public_id="plan-1",
+            state={"peak_price": 51000.0, "current_stop": 49000.0},
+            last_venue_event_id=42,
+            last_tick_timestamp=now,
+            checkpoint_at=now,
+            session_id="s1",
+            sequence_id=1,
+            timestamp=now,
+        )
+        assert cp.plan_public_id == "plan-1"
+        assert cp.state["peak_price"] == 51000.0
+        assert cp.last_venue_event_id == 42
+        assert cp.checkpoint_at == now
+
+
+class TestExecutionPlanDecisionModel:
+    """Tests for ExecutionPlanDecision ORM model."""
+
+    def test_creation_action(self) -> None:
+        """Verify action-level decision log entry.
+
+        Given: Command emission decision,
+        When: ExecutionPlanDecision instantiated,
+        Then: All fields set correctly with action importance.
+        """
+        now = datetime.now(UTC)
+        dec = ExecutionPlanDecision(
+            plan_public_id="plan-1",
+            decision_type="emitted_command",
+            decided_at=now,
+            trigger_type="tick",
+            evidence={"bid": 50000.0, "ask": 50001.0, "mid": 50000.5},
+            emitted_command_public_id="cmd-1",
+            reason="Price crossed threshold, emitting limit buy",
+            decision_importance="action",
+            session_id="s1",
+            sequence_id=1,
+            timestamp=now,
+        )
+        assert dec.decision_type == "emitted_command"
+        assert dec.trigger_type == "tick"
+        assert dec.emitted_command_public_id == "cmd-1"
+        assert dec.decision_importance == "action"
+        assert dec.new_status is None
+
+    def test_creation_routine(self) -> None:
+        """Verify routine-level sampled skip decision.
+
+        Given: Sampled tick-skip summary,
+        When: ExecutionPlanDecision instantiated,
+        Then: importance is routine with aggregated evidence.
+        """
+        now = datetime.now(UTC)
+        dec = ExecutionPlanDecision(
+            plan_public_id="plan-2",
+            decision_type="skipped_tick",
+            decided_at=now,
+            trigger_type="tick",
+            evidence={"skip_count": 60, "min_price": 49900.0, "max_price": 50100.0},
+            reason="60 ticks skipped, condition not met (bid < threshold)",
+            decision_importance="routine",
+            session_id="s1",
+            sequence_id=1,
+            timestamp=now,
+        )
+        assert dec.decision_importance == "routine"
+        assert dec.evidence["skip_count"] == 60
+
+
+class TestOrderPlanPublicId:
+    """Tests for Order.plan_public_id back-reference."""
+
+    def test_order_with_plan(self) -> None:
+        """Order can reference an execution plan."""
+        now = datetime.now(UTC)
+        order = Order(
+            instrument_public_id="inst-1",
+            wallet_public_id="wallet-1",
+            side="buy",
+            order_type="limit",
+            price=50000.0,
+            size=0.5,
+            status="open",
+            created_at=now,
+            plan_public_id="plan-1",
+            session_id="s1",
+            sequence_id=1,
+            timestamp=now,
+        )
+        assert order.plan_public_id == "plan-1"
+
+    def test_order_without_plan(self) -> None:
+        """Legacy orders have null plan_public_id."""
+        now = datetime.now(UTC)
+        order = Order(
+            instrument_public_id="inst-1",
+            wallet_public_id="wallet-1",
+            side="buy",
+            order_type="limit",
+            price=50000.0,
+            size=0.5,
+            status="open",
+            created_at=now,
+            session_id="s1",
+            sequence_id=1,
+            timestamp=now,
+        )
+        assert order.plan_public_id is None
