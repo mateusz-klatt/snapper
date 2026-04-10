@@ -215,6 +215,7 @@ class ExecutionRow(TypedDict):
     executed_at: datetime
     wallet_public_id: str | None
     operator_public_id: str | None
+    liquidity_role: NotRequired[str]
 
 
 class PositionRow(TypedDict):
@@ -313,6 +314,7 @@ class VenueEventRow(TypedDict):
     error: str | None
     venue_timestamp: datetime | None
     received_at: datetime
+    liquidity_role: NotRequired[str]
 
 
 class TradeProjectionCheckpointRow(TypedDict):

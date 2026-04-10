@@ -2739,6 +2739,7 @@ class SQLAlchemyRepository(Repository):
                     "executed_at": exe.executed_at or exe.timestamp,
                     "wallet_public_id": exe.wallet_public_id,
                     "operator_public_id": exe.operator_public_id,
+                    "liquidity_role": getattr(exe, "liquidity_role", "unknown"),
                 }
                 for exe, order, inst, sym in result.all()
             ]
@@ -2877,6 +2878,7 @@ class SQLAlchemyRepository(Repository):
                     "executed_at": exe.executed_at or exe.timestamp,
                     "wallet_public_id": exe.wallet_public_id,
                     "operator_public_id": exe.operator_public_id,
+                    "liquidity_role": getattr(exe, "liquidity_role", "unknown"),
                 }
                 for exe, order, inst, sym in result.all()
             ]
@@ -3305,6 +3307,7 @@ class SQLAlchemyRepository(Repository):
                         "error": ve.error,
                         "venue_timestamp": ve.venue_timestamp,
                         "received_at": ve.received_at,
+                        "liquidity_role": getattr(ve, "liquidity_role", "unknown"),
                     }
                 )
             return rows

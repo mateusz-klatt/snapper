@@ -360,6 +360,7 @@ class Execution(TemporalMixin, Base):
     fee: Mapped[float] = mapped_column(Float)
     fee_asset: Mapped[str] = mapped_column(String(16))
     executed_at: Mapped[datetime | None] = mapped_column(TZDateTime())
+    liquidity_role: Mapped[str] = mapped_column(String(16), default="unknown")
 
 
 class Position(TemporalMixin, Base):
@@ -961,6 +962,7 @@ class VenueEvent(TemporalMixin, Base):
     venue_timestamp: Mapped[datetime | None] = mapped_column(TZDateTime())
     received_at: Mapped[datetime] = mapped_column(TZDateTime())
     payload_json: Mapped[str | None] = mapped_column(Text)
+    liquidity_role: Mapped[str] = mapped_column(String(16), default="unknown")
 
 
 class TradeProjectionCheckpoint(TemporalMixin, Base):

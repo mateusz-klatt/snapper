@@ -690,6 +690,36 @@ class TraderCoordinator(RegisterableProcess):
                     f"with fresh timeout window"
                 )
 
+    async def _resolve_instrument_specs(
+        self, instrument: str, exchange: str
+    ) -> dict[str, dict[str, float]]:
+        """Resolve tick_size and lot_size from InstrumentSpec repository.
+
+        Falls back to conservative defaults if the lookup fails or the
+        instrument has no spec row yet.
+        """
+        fallback: dict[str, dict[str, float]] = {
+            instrument: {"tick_size": 0.01, "lot_size": 0.0001}
+        }
+        try:
+            now = datetime.now(UTC)
+            inst_pid = await self.repository.get_instrument_public_id_by_symbol(
+                native_symbol=instrument, exchange=exchange, as_of=now
+            )
+            if inst_pid is None:
+                return fallback
+            spec = await self.repository.get_instrument_spec(inst_pid, as_of=now)
+            if spec is None:
+                return fallback
+            tick = spec["tick_size"] if spec["tick_size"] is not None else 0.01
+            lot = spec["lot_size"] if spec["lot_size"] is not None else 0.0001
+            return {instrument: {"tick_size": tick, "lot_size": lot}}
+        except Exception:
+            logger.opt(exception=True).debug(
+                "InstrumentSpec lookup failed for {}/{}, using defaults", instrument, exchange
+            )
+            return fallback
+
     async def _create_engine_for_recovery(
         self,
         instrument: str,
@@ -712,9 +742,7 @@ class TraderCoordinator(RegisterableProcess):
                 max_drawdown=self.settings.risk_max_drawdown,
             )
         )
-        specs_map: dict[str, dict[str, float]] = {
-            instrument: {"tick_size": 0.01, "lot_size": 0.0001}
-        }
+        specs_map = await self._resolve_instrument_specs(instrument, exchange)
         repo_for_engine = (
             self.repository if isinstance(self.repository, SQLAlchemyRepository) else None
         )
@@ -1651,9 +1679,7 @@ class TraderCoordinator(RegisterableProcess):
                     max_drawdown=self.settings.risk_max_drawdown,
                 )
             )
-            specs_map: dict[str, dict[str, float]] = {
-                instrument: {"tick_size": 0.01, "lot_size": 0.0001}
-            }
+            specs_map = await self._resolve_instrument_specs(instrument, exchange)
             assert self.msg_publisher is not None, "MessagePublisher not initialized"
 
             repo_for_engine = (

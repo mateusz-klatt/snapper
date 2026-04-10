@@ -223,6 +223,7 @@ class ExecutionData(StrictDataSchema[Literal["execution"]]):
     wallet_public_id: str = ""
     operator_public_id: str | None = None
     user_public_id: str | None = None
+    liquidity_role: str = "unknown"
 
 
 class OrderData(StrictDataSchema[Literal["order"]]):

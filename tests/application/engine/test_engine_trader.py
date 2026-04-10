@@ -4846,3 +4846,58 @@ class TestComputeBoundariesLimit:
             now=now,
         )
         assert len(result) == 101
+
+
+class TestResolveInstrumentSpecs:
+    """Tests for TraderCoordinator._resolve_instrument_specs."""
+
+    @pytest.mark.asyncio
+    async def test_returns_fallback_when_instrument_not_found(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify fallback returned when instrument_public_id is None."""
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        coord.repository = AsyncMock()
+        coord.repository.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+        result = await cast(Any, coord)._resolve_instrument_specs("UNKNOWN", "kraken")
+        assert result == {"UNKNOWN": {"tick_size": 0.01, "lot_size": 0.0001}}
+
+    @pytest.mark.asyncio
+    async def test_returns_fallback_when_spec_is_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify fallback returned when InstrumentSpec is None."""
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        coord.repository = AsyncMock()
+        coord.repository.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
+        coord.repository.get_instrument_spec = AsyncMock(return_value=None)
+        result = await cast(Any, coord)._resolve_instrument_specs("BTC-USD", "kraken")
+        assert result == {"BTC-USD": {"tick_size": 0.01, "lot_size": 0.0001}}
+
+    @pytest.mark.asyncio
+    async def test_returns_real_values_from_spec(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify real tick_size and lot_size from InstrumentSpec."""
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        coord.repository = AsyncMock()
+        coord.repository.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-1")
+        coord.repository.get_instrument_spec = AsyncMock(return_value=_make_spec(funding_type=None))
+        coord.repository.get_instrument_spec.return_value["tick_size"] = 0.5
+        coord.repository.get_instrument_spec.return_value["lot_size"] = 1.0
+        result = await cast(Any, coord)._resolve_instrument_specs("BTC-USD", "kraken")
+        assert result["BTC-USD"]["tick_size"] == 0.5
+        assert result["BTC-USD"]["lot_size"] == 1.0
+
+    @pytest.mark.asyncio
+    async def test_returns_fallback_on_exception(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Verify fallback returned when repository raises."""
+        _configure_settings(monkeypatch)
+        coord = TraderCoordinator()
+        coord.repository = AsyncMock()
+        coord.repository.get_instrument_public_id_by_symbol = AsyncMock(
+            side_effect=RuntimeError("DB down")
+        )
+        result = await cast(Any, coord)._resolve_instrument_specs("BTC-USD", "kraken")
+        assert result == {"BTC-USD": {"tick_size": 0.01, "lot_size": 0.0001}}
