@@ -429,6 +429,24 @@ ZMQ-WebSocket bridge still starts, so the frontend receives live data from
 a separately-running engine.  Useful for multi-worker uvicorn or when
 broker/strategies/executors run on different hosts.
 
+## Execution Plans
+
+The Execution Plans framework provides a unified control plane above the
+existing TradeCommand spine. All manual and algorithmic trading actions
+become `ExecutionPlan` instances evaluated by pluggable `PlanEvaluator`
+classes running inside `PlanExecutorService`.
+
+**Tables:** `execution_plans` (plan state + lifecycle), `execution_plan_checkpoints`
+(high-churn evaluator state), `execution_plan_decisions` (tiered decision log),
+`instrument_order_capabilities` (capability matrix), `venue_fee_schedules` (fee tiers).
+
+**Plan types:** `manual_once` (Phase 1, shipped), `bracket` (Phase 2),
+`trailing_stop` (Phase 3), `peg` (Phase 4), `scheduler` (Phase 5).
+
+**Manual order flow:** `POST /api/orders` creates a `manual_once` plan
+(pending), inserts a `TradeCommand` for the outbox dispatcher, transitions
+to active. `PlanExecutorService` monitors fills and transitions to completed.
+
 ## Security
 
 ### Settings Encryption

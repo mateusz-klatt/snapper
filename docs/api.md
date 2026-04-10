@@ -355,6 +355,114 @@ X-CSRF-Token: <csrf_token>
 ]
 ```
 
+### POST /api/orders
+
+Create a manual order via a `manual_once` execution plan. Requires
+`create:orders` permission and `allow_manual_orders` setting enabled.
+
+**Request:**
+
+```http
+POST /api/orders
+Content-Type: application/json
+X-CSRF-Token: <csrf_token>
+
+{
+    "type": "create_order_command",
+    "session_id": "ui",
+    "sequence_id": 0,
+    "public_id": "<uuid7>",
+    "timestamp": "2026-04-10T12:00:00Z",
+    "payload": {
+        "instrument": "BTC-USD",
+        "instrument_public_id": "<uuid>",
+        "exchange": "kraken",
+        "mode": "live",
+        "side": "buy",
+        "order_type": "limit",
+        "quantity": 0.5,
+        "price": 50000.0,
+        "wallet_public_id": "<uuid>",
+        "idempotency_key": "<uuid7>"
+    }
+}
+```
+
+**Payload fields:**
+
+| Field | Type | Required | Description |
+| ----- | ---- | -------- | ----------- |
+| `instrument` | string | yes | Native symbol (e.g., BTC-USD) |
+| `instrument_public_id` | string | yes | Instrument UUID |
+| `exchange` | string | yes | Exchange name |
+| `mode` | string | no | `live` (default) or `paper` |
+| `side` | string | yes | `buy` or `sell` |
+| `order_type` | string | yes | `market`, `limit`, `stop`, `stop_limit` |
+| `quantity` | float | yes | Order size (must be > 0) |
+| `price` | float | cond | Required for `limit` and `stop_limit` |
+| `stop_price` | float | cond | Required for `stop` and `stop_limit` |
+| `wallet_public_id` | string | yes | Target wallet UUID |
+| `operator_public_id` | string | no | Operator identity |
+| `idempotency_key` | string | no | Dedup key (409 on duplicate) |
+
+**Response (200):** `ExecutionPlanResponse` envelope with plan details.
+
+**Errors:** 403 (disabled/forbidden), 409 (idempotency conflict), 422 (validation).
+
+### POST /api/orders/{plan_public_id}/cancel
+
+Cancel an active execution plan. Requires `cancel:orders` permission.
+
+**Request:**
+
+```http
+POST /api/orders/<plan_public_id>/cancel
+Content-Type: application/json
+X-CSRF-Token: <csrf_token>
+
+{
+    "type": "cancel_order_command",
+    "session_id": "ui",
+    "sequence_id": 0,
+    "public_id": "<uuid7>",
+    "timestamp": "2026-04-10T12:01:00Z",
+    "payload": {
+        "reason": "changed mind"
+    }
+}
+```
+
+**Response (200):** `ExecutionPlanResponse` with status `cancel_requested`.
+
+**Errors:** 404 (not found), 409 (already terminal or concurrent change).
+
+### GET /api/instrument-capabilities
+
+Fetch instrument order capability matrix. Requires `read:market_data`.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+| --------- | ---- | -------- | ----------- |
+| `exchange` | string | no | Filter by exchange |
+| `instrument_public_id` | string | no | Filter by instrument |
+| `as_of` | datetime | no | Point-in-time query |
+
+**Response (200):** `InstrumentCapabilityListResponse` with capability flags.
+
+### GET /api/venue-fee-schedules
+
+Fetch venue fee schedules. Requires `read:market_data`.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+| --------- | ---- | -------- | ----------- |
+| `exchange` | string | no | Filter by exchange |
+| `as_of` | datetime | no | Point-in-time query |
+
+**Response (200):** `VenueFeeScheduleListResponse` with fee tiers.
+
 ### GET /api/signals
 
 Fetch trading signals with optional filtering. Requires `read:market_data`
