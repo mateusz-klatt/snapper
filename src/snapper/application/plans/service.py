@@ -88,10 +88,16 @@ class PlanExecutorService(RegisterableProcess):
         self._subscriber: ValidatedSubscriber | None = None
 
     async def start(self) -> None:
-        """Start the plan executor: recover plans, set up subscriber, run loops."""
+        """Start the plan executor: set up subscriber, recover plans, run loops.
+
+        The subscriber is wired up **before** recovery so that any
+        venue events triggered by the recovery path (e.g., re-emitted
+        stranded cancels from ``_reemit_stranded_cancel``) cannot be
+        lost on the "subscriber not connected yet" race window.
+        """
         logger.info("PlanExecutorService starting")
-        await self._recover_plans()
         self._setup_subscriber()
+        await self._recover_plans()
         self._running = True
         logger.info(
             "PlanExecutorService started with {} active plans",
@@ -177,8 +183,16 @@ class PlanExecutorService(RegisterableProcess):
         compensating ``failed`` transition also failed). On startup we
         re-emit the cancel so the venue adapter still sees it.
 
-        If the plan has no child ``client_order_id`` stamped (legacy or
-        test-only rows) this is a no-op.
+        Guards:
+            - Skipped if ``child_client_order_id`` / ``native_instrument``
+              are not stamped in plan params (legacy or test rows).
+            - Skipped if the repository lookup maps the child id to a
+              different plan than the one we recovered (corrupt /
+              misstamped child id — do not emit a cancel for the wrong
+              plan).
+            - Skipped if a non-terminal cancel command already exists
+              for this child id, so this is idempotent across restarts
+              while the plan is still ``cancel_requested``.
 
         Args:
             plan: Recovered plan row in ``cancel_requested`` status.
@@ -189,15 +203,39 @@ class PlanExecutorService(RegisterableProcess):
         if not isinstance(child_client_order_id, str) or not isinstance(native_instrument, str):
             return
         try:
-            existing = await self.repository.get_plan_public_id_for_client_order_id(
+            linked_plan_id = await self.repository.get_plan_public_id_for_client_order_id(
                 child_client_order_id
             )
         except Exception as exc:
             logger.error("Stranded cancel lookup failed for {}: {}", plan["public_id"], exc)
             return
-        if existing is None:
+        if linked_plan_id is None or linked_plan_id != plan["public_id"]:
+            logger.warning(
+                "PlanExecutorService: stranded cancel skipped for plan {} "
+                "(child {} links to plan {})",
+                plan["public_id"],
+                child_client_order_id,
+                linked_plan_id,
+            )
             return
         now = datetime.now(UTC)
+        try:
+            already_pending = await self.repository.has_pending_cancel_command(
+                child_client_order_id, as_of=now
+            )
+        except Exception as exc:
+            logger.error(
+                "Stranded cancel dedup lookup failed for plan {}: {}",
+                plan["public_id"],
+                exc,
+            )
+            return
+        if already_pending:
+            logger.info(
+                "PlanExecutorService: cancel already pending for plan {}, skipping re-emit",
+                plan["public_id"],
+            )
+            return
         try:
             exchange_order_id = await self.repository.get_exchange_order_id_for_client_order_id(
                 child_client_order_id, as_of=now

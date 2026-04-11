@@ -1533,6 +1533,31 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def has_pending_cancel_command(
+        self,
+        client_order_id: str,
+        as_of: datetime,
+    ) -> bool:
+        """Return True when a non-terminal cancel command already exists.
+
+        PlanExecutorService recovery uses this to avoid re-emitting a
+        cancel ``TradeCommand`` for a plan in ``cancel_requested`` that
+        already has a pending or dispatched cancel command. Without
+        this guard, every restart while the plan is
+        ``cancel_requested`` would enqueue a duplicate venue cancel.
+
+        Args:
+            client_order_id: Child client id of the cancel target.
+            as_of: Temporal point for SCD2 active-version selection.
+
+        Returns:
+            True if an active ``command_type='cancel'`` row with a
+            non-terminal status (``created``/``dispatched``/``acked``)
+            exists, False otherwise.
+        """
+        ...
+
+    @abstractmethod
     async def create_scope_grant(self, request: CreateScopeGrantRequest) -> ScopeGrantRow:
         """Create a new ``wallet_operator_scope_grants`` row.
 
@@ -3333,6 +3358,40 @@ class SQLAlchemyRepository(Repository):
             if row is None:
                 return None
             return cast(str | None, row[0])
+
+    async def has_pending_cancel_command(
+        self,
+        client_order_id: str,
+        as_of: datetime,
+    ) -> bool:
+        """Return True when a non-terminal cancel command exists for the cid.
+
+        Looks for an active SCD2 ``trade_commands`` row with
+        ``command_type='cancel'`` whose status is not in a terminal
+        set (``filled``/``cancelled``/``expired``/``rejected``/``failed``).
+        PlanExecutorService recovery uses this as a dedup guard when
+        re-emitting stranded cancels.
+
+        Args:
+            client_order_id: Child client id to search.
+            as_of: Temporal point for active-version selection.
+
+        Returns:
+            True iff a live cancel command already exists.
+        """
+        terminal_statuses = ("filled", "cancelled", "expired", "rejected", "failed")
+        async with self.session() as s:
+            result = await s.execute(
+                select(TradeCommand.id)
+                .where(
+                    TradeCommand.client_order_id == client_order_id,
+                    TradeCommand.command_type == "cancel",
+                    TradeCommand.status.notin_(terminal_statuses),
+                    *where_active(TradeCommand, as_of),
+                )
+                .limit(1)
+            )
+            return result.first() is not None
 
     async def update_trade_command_status(
         self,

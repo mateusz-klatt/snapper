@@ -3583,6 +3583,88 @@ async def test_get_exchange_order_id_for_client_order_id_returns_none_without_ro
 
 
 @pytest.mark.asyncio
+async def test_has_pending_cancel_command_false_for_unknown(tmp_path: Path) -> None:
+    """Returns False when no cancel command exists for the client_order_id."""
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'pend_none.db'}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    result = await r.has_pending_cancel_command("none", as_of=now)
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_has_pending_cancel_command_true_for_pending(tmp_path: Path) -> None:
+    """Returns True when a non-terminal cancel command row is present.
+
+    Given: an active trade_commands row with ``command_type='cancel'``
+        and status ``created``,
+    When: has_pending_cancel_command is called for that client_order_id,
+    Then: True is returned so recovery can dedupe.
+    """
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'pend_yes.db'}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    await r.insert_trade_command(
+        {
+            "command_type": "cancel",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "manual",
+            "client_order_id": "cid-pend-1",
+            "venue_client_id": "cid-pend-1",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.5,
+            "price": None,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-pend",
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+            "wallet_public_id": "wallet-1",
+        }
+    )
+    result = await r.has_pending_cancel_command("cid-pend-1", as_of=now)
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_has_pending_cancel_command_ignores_create_commands(tmp_path: Path) -> None:
+    """Only ``command_type='cancel'`` rows are counted."""
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'pend_create.db'}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    await r.insert_trade_command(
+        {
+            "command_type": "create",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "manual",
+            "client_order_id": "cid-pend-2",
+            "venue_client_id": "cid-pend-2",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.5,
+            "price": None,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr",
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+            "wallet_public_id": "wallet-1",
+        }
+    )
+    result = await r.has_pending_cancel_command("cid-pend-2", as_of=now)
+    assert result is False
+
+
+@pytest.mark.asyncio
 async def test_get_plan_public_id_for_client_order_id_skips_null_plan(
     tmp_path: Path,
 ) -> None:

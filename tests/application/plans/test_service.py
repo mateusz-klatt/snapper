@@ -3,6 +3,7 @@
 import asyncio
 from datetime import UTC
 from datetime import datetime
+from typing import cast as _cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -14,6 +15,7 @@ from snapper.application.plans.service import PlanExecutorService
 from snapper.data.repository_types import ExecutionPlanRow
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderData
+from snapper.messaging.schemas.data import SignalData
 from snapper.messaging.schemas.data import TickData
 
 
@@ -216,6 +218,7 @@ class TestPlanExecutorService:
         )
         mock_repo.get_latest_plan_checkpoint = AsyncMock(return_value=None)
         mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value="plan-stranded")
+        mock_repo.has_pending_cancel_command = AsyncMock(return_value=False)
         mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-77")
         mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-77"))
         mock_repo_fn.return_value = mock_repo
@@ -287,6 +290,7 @@ class TestPlanExecutorService:
         """Venue-id lookup failure falls back to None exchange_order_id."""
         mock_repo = AsyncMock()
         mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value="plan-x")
+        mock_repo.has_pending_cancel_command = AsyncMock(return_value=False)
         mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(side_effect=Exception("DB"))
         mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd"))
         mock_repo_fn.return_value = mock_repo
@@ -310,6 +314,7 @@ class TestPlanExecutorService:
         """A failing re-emit insert is logged and does not crash recovery."""
         mock_repo = AsyncMock()
         mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value="plan-y")
+        mock_repo.has_pending_cancel_command = AsyncMock(return_value=False)
         mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-9")
         mock_repo.insert_trade_command = AsyncMock(side_effect=Exception("DB"))
         mock_repo_fn.return_value = mock_repo
@@ -341,6 +346,116 @@ class TestPlanExecutorService:
         )
         await service._reemit_stranded_cancel(plan)
         mock_repo.insert_trade_command.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_reemit_stranded_cancel_skips_on_plan_id_mismatch(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """A corrupt child_client_order_id linking to a different plan is skipped.
+
+        Round 3 fix: verify the lookup result matches the recovered
+        plan's public_id before emitting a cancel so a mis-stamped child
+        id does not cause a cancel to be emitted for the wrong plan.
+        """
+        mock_repo = AsyncMock()
+        mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value="plan-OTHER")
+        mock_repo.insert_trade_command = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(
+            public_id="plan-mine",
+            status="cancel_requested",
+            native_instrument="BTC-USD",
+            venue_order_type="limit",
+        )
+        await service._reemit_stranded_cancel(plan)
+        mock_repo.insert_trade_command.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_reemit_stranded_cancel_dedupes_when_pending_cancel_exists(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Recovery does not re-emit a cancel if one is already pending.
+
+        Round 3 fix: every restart while a plan is still in
+        cancel_requested would otherwise enqueue a duplicate venue
+        cancel. ``has_pending_cancel_command`` is the idempotency
+        guard.
+        """
+        mock_repo = AsyncMock()
+        mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value="plan-dedup")
+        mock_repo.has_pending_cancel_command = AsyncMock(return_value=True)
+        mock_repo.insert_trade_command = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(
+            public_id="plan-dedup",
+            status="cancel_requested",
+            native_instrument="BTC-USD",
+            venue_order_type="limit",
+        )
+        await service._reemit_stranded_cancel(plan)
+        mock_repo.insert_trade_command.assert_not_called()
+        mock_repo.has_pending_cancel_command.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_reemit_stranded_cancel_swallows_dedup_lookup_failure(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """A failing dedup lookup does not crash recovery and skips emission."""
+        mock_repo = AsyncMock()
+        mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value="plan-err")
+        mock_repo.has_pending_cancel_command = AsyncMock(side_effect=Exception("DB"))
+        mock_repo.insert_trade_command = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(
+            public_id="plan-err",
+            status="cancel_requested",
+            native_instrument="BTC-USD",
+            venue_order_type="limit",
+        )
+        await service._reemit_stranded_cancel(plan)
+        mock_repo.insert_trade_command.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_start_sets_up_subscriber_before_recovery(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """``start()`` wires the ZMQ subscriber BEFORE recovery runs.
+
+        Round 3 fix: if a stranded cancel is re-emitted during
+        recovery, the venue can publish the cancelled event before the
+        service's subscriber is ready. Subscriber must be up first.
+        """
+        mock_repo = AsyncMock()
+        mock_repo.get_active_execution_plans = AsyncMock(return_value=[])
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        order: list[str] = []
+
+        def _setup() -> None:
+            order.append("setup")
+
+        async def _recover() -> None:
+            order.append("recover")
+
+        async def _stop_after_start() -> None:
+            service._running = False
+
+        service._setup_subscriber = _setup
+        service._recover_plans = _recover
+        with patch.object(service, "_run_loop", side_effect=_stop_after_start):
+            await service.start()
+        assert order == ["setup", "recover"]
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
@@ -822,7 +937,6 @@ class TestPlanExecutorService:
         service._handle_tick = AsyncMock()
         subscriber = AsyncMock()
         order_msg = _make_order_status(status="cancelled")
-        from typing import cast as _cast
 
         order = _cast(OrderData, order_msg)
         subscriber.recv_multipart = AsyncMock(
@@ -1049,8 +1163,6 @@ class TestPlanExecutorService:
         self, mock_repo_fn: MagicMock, mock_settings: MagicMock
     ) -> None:
         """When an evaluator is missing the fill still propagates into the plan."""
-        from typing import cast as _cast
-
         mock_repo = AsyncMock()
         mock_repo.update_execution_plan_status = AsyncMock(return_value=2)
         mock_repo_fn.return_value = mock_repo
@@ -1257,8 +1369,6 @@ class TestPlanExecutorService:
         self, mock_repo_fn: MagicMock, mock_settings: MagicMock
     ) -> None:
         """Messages that parse but do not match fill/status/tick are skipped."""
-        from snapper.messaging.schemas.data import SignalData
-
         mock_repo_fn.return_value = AsyncMock()
         service = PlanExecutorService()
         service._handle_execution = AsyncMock()
@@ -1335,8 +1445,6 @@ class TestPlanExecutorService:
         self, mock_repo_fn: MagicMock, mock_settings: MagicMock
     ) -> None:
         """Plans without an evaluator do not receive tick dispatches."""
-        from typing import cast as _cast
-
         mock_repo_fn.return_value = AsyncMock()
         service = PlanExecutorService()
         plan = _make_plan_row()
