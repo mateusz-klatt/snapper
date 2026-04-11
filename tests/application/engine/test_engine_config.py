@@ -2264,3 +2264,327 @@ async def test_sync_cycle_scale_up_cache_miss_db_miss_skips() -> None:
     engine = _make_cycle_engine()
     await coord._sync_position_cycle_on_fill(engine, 1.5, 3.0, _make_cycle_fill())
     repo.update_position_cycle_max_qty.assert_not_called()
+
+
+def _make_reconcile_coord(
+    repository: AsyncMock | None = None,
+) -> TraderCoordinator:
+    """Minimal TraderCoordinator for _reconcile_position_cycles unit tests.
+
+    Initializes self.engines, self.trade_service, self.repository, and
+    self._tracker so the reconciliation helper can run in isolation
+    without going through ``_recover_engine_state``.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.trade_service = TradeService()
+    coord.repository = repository or AsyncMock()
+    coord.engines = {}
+    coord._tracker = SequenceTracker()
+    return coord
+
+
+@pytest.mark.asyncio
+async def test_reconcile_no_engines_is_noop() -> None:
+    """Given: zero engines, When: reconcile called, Then: no repo calls."""
+    repo = AsyncMock()
+    coord = _make_reconcile_coord(repo)
+    await coord._reconcile_position_cycles()
+    repo.get_open_position_cycle.assert_not_called()
+    repo.insert_position_cycle.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_flat_engine_without_stale_row_is_noop() -> None:
+    """Given: engine position_qty=0 + no open cycle in DB, When: reconcile, Then: no writes."""
+    repo = AsyncMock()
+    repo.get_open_position_cycle = AsyncMock(return_value=None)
+    coord = _make_reconcile_coord(repo)
+    engine = _make_cycle_engine()
+    engine.position_qty = 0.0
+    coord.engines["BTC-USD@kraken-live"] = engine
+    await coord._reconcile_position_cycles()
+    repo.get_open_position_cycle.assert_called_once()
+    repo.close_position_cycle.assert_not_called()
+    repo.insert_position_cycle.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_flat_engine_with_stale_row_closes_cycle() -> None:
+    """Given: engine recovered flat + DB has stale open row, When: reconcile, Then: close stale.
+
+    Coordinator was down when the position closed; the open cycle row
+    never got its SCD2 close. Reconcile must close it so the next
+    live fill does not reuse a stale public_id via DB fallback.
+    """
+    repo = AsyncMock()
+    repo.get_open_position_cycle = AsyncMock(
+        return_value={"public_id": "cycle-stale", "direction": "long", "max_qty": 2.0}
+    )
+    repo.close_position_cycle = AsyncMock(return_value=3)
+    coord = _make_reconcile_coord(repo)
+    engine = _make_cycle_engine()
+    engine.position_qty = 0.0
+    coord.engines["BTC-USD@kraken-live"] = engine
+    await coord._reconcile_position_cycles()
+    repo.close_position_cycle.assert_called_once()
+    assert repo.close_position_cycle.call_args.kwargs["cycle_public_id"] == "cycle-stale"
+    shard = coord.trade_service._get_or_create_shard(engine._shard_key)
+    assert shard.active_cycle_public_id is None
+    assert shard.active_cycle_max_qty == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_degraded_identity_engine_is_skipped() -> None:
+    """Given: engine with empty wallet_public_id, When: reconcile, Then: skip fail-closed."""
+    repo = AsyncMock()
+    coord = _make_reconcile_coord(repo)
+    engine = _make_cycle_engine(wallet_public_id="")
+    engine.position_qty = 1.5
+    coord.engines["BTC-USD@kraken-live"] = engine
+    await coord._reconcile_position_cycles()
+    repo.get_open_position_cycle.assert_not_called()
+    repo.insert_position_cycle.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_existing_cycle_matching_direction_hydrates_cache() -> None:
+    """Given: non-flat long + DB has long cycle with matching peak, Then: hydrate, no writes."""
+    repo = AsyncMock()
+    repo.get_open_position_cycle = AsyncMock(
+        return_value={"public_id": "cycle-existing", "direction": "long", "max_qty": 2.5}
+    )
+    coord = _make_reconcile_coord(repo)
+    engine = _make_cycle_engine()
+    engine.position_qty = 1.5
+    coord.engines["BTC-USD@kraken-live"] = engine
+    await coord._reconcile_position_cycles()
+    repo.insert_position_cycle.assert_not_called()
+    repo.update_position_cycle_max_qty.assert_not_called()
+    repo.flip_position_cycle.assert_not_called()
+    shard = coord.trade_service._get_or_create_shard(engine._shard_key)
+    assert shard.active_cycle_public_id == "cycle-existing"
+    assert shard.active_cycle_max_qty == pytest.approx(2.5)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_existing_cycle_understated_max_qty_bumps_peak() -> None:
+    """Given: non-flat long abs=3 + DB cycle max_qty=1.5, Then: bump max_qty to 3 (downtime scale-up).
+
+    The position scaled up during downtime beyond the last checkpointed
+    peak. Reconcile must bring the DB peak up to the recovered size
+    so the next live fill's scale_up guard is monotonic.
+    """
+    repo = AsyncMock()
+    repo.get_open_position_cycle = AsyncMock(
+        return_value={"public_id": "cycle-old", "direction": "long", "max_qty": 1.5}
+    )
+    repo.update_position_cycle_max_qty = AsyncMock(return_value=7)
+    coord = _make_reconcile_coord(repo)
+    engine = _make_cycle_engine()
+    engine.position_qty = 3.0
+    coord.engines["BTC-USD@kraken-live"] = engine
+    await coord._reconcile_position_cycles()
+    repo.update_position_cycle_max_qty.assert_called_once()
+    kwargs = repo.update_position_cycle_max_qty.call_args.kwargs
+    assert kwargs["cycle_public_id"] == "cycle-old"
+    assert kwargs["new_max_qty"] == pytest.approx(3.0)
+    shard = coord.trade_service._get_or_create_shard(engine._shard_key)
+    assert shard.active_cycle_public_id == "cycle-old"
+    assert shard.active_cycle_max_qty == pytest.approx(3.0)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_direction_mismatch_flips_cycle() -> None:
+    """Given: recovered short + DB has long open cycle, Then: atomic flip to short cycle.
+
+    The position flipped during downtime. Reconcile must close the
+    stale long cycle and open a new short cycle in one transaction
+    via flip_position_cycle.
+    """
+    repo = AsyncMock()
+    repo.get_open_position_cycle = AsyncMock(
+        return_value={"public_id": "cycle-long", "direction": "long", "max_qty": 2.0}
+    )
+    repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
+    repo.flip_position_cycle = AsyncMock(return_value=(8, "cycle-new-short"))
+    coord = _make_reconcile_coord(repo)
+    engine = _make_cycle_engine()
+    engine.position_qty = -1.5
+    coord.engines["BTC-USD@kraken-live"] = engine
+    await coord._reconcile_position_cycles()
+    repo.flip_position_cycle.assert_called_once()
+    kwargs = repo.flip_position_cycle.call_args.kwargs
+    assert kwargs["close_cycle_public_id"] == "cycle-long"
+    new_row = kwargs["new_open_row"]
+    assert new_row["direction"] == "short"
+    assert new_row["max_qty"] == pytest.approx(1.5)
+    shard = coord.trade_service._get_or_create_shard(engine._shard_key)
+    assert shard.active_cycle_public_id == "cycle-new-short"
+    assert shard.active_cycle_max_qty == pytest.approx(1.5)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_direction_mismatch_unresolved_instrument_degrades_to_close_only() -> None:
+    """Given: direction mismatch + unresolved instrument, Then: close stale + clear cache.
+
+    Mirrors the fill-path degrade-to-close-only behavior: we cannot
+    open a new cycle without an instrument_public_id, but the old
+    one is objectively dead, so close it so subsequent fails-soft
+    paths handle the uncovered leg.
+    """
+    repo = AsyncMock()
+    repo.get_open_position_cycle = AsyncMock(
+        return_value={"public_id": "cycle-long", "direction": "long", "max_qty": 2.0}
+    )
+    repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+    repo.close_position_cycle = AsyncMock(return_value=8)
+    coord = _make_reconcile_coord(repo)
+    engine = _make_cycle_engine()
+    engine.position_qty = -1.5
+    coord.engines["BTC-USD@kraken-live"] = engine
+    await coord._reconcile_position_cycles()
+    repo.flip_position_cycle.assert_not_called()
+    repo.close_position_cycle.assert_called_once()
+    assert repo.close_position_cycle.call_args.kwargs["cycle_public_id"] == "cycle-long"
+    shard = coord.trade_service._get_or_create_shard(engine._shard_key)
+    assert shard.active_cycle_public_id is None
+    assert shard.active_cycle_max_qty == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_non_flat_missing_cycle_bootstraps() -> None:
+    """Given: non-flat engine + DB has no cycle, When: reconcile, Then: bootstrap + hydrate."""
+    repo = AsyncMock()
+    repo.get_open_position_cycle = AsyncMock(return_value=None)
+    repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
+    repo.insert_position_cycle = AsyncMock(return_value=(5, "cycle-bootstrap"))
+    coord = _make_reconcile_coord(repo)
+    engine = _make_cycle_engine()
+    engine.position_qty = 1.5
+    coord.engines["BTC-USD@kraken-live"] = engine
+    await coord._reconcile_position_cycles()
+    repo.insert_position_cycle.assert_called_once()
+    inserted = repo.insert_position_cycle.call_args.args[0]
+    assert inserted["direction"] == "long"
+    assert inserted["max_qty"] == pytest.approx(1.5)
+    assert inserted["status"] == "open"
+    assert inserted["instrument_public_id"] == "inst-btc"
+    assert inserted["wallet_public_id"] == "wallet-1"
+    assert inserted["operator_public_id"] == "op-1"
+    shard = coord.trade_service._get_or_create_shard(engine._shard_key)
+    assert shard.active_cycle_public_id == "cycle-bootstrap"
+    assert shard.active_cycle_max_qty == pytest.approx(1.5)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_short_position_bootstraps_short_direction() -> None:
+    """Given: engine.position_qty = -2.0, When: bootstrap, Then: direction='short'."""
+    repo = AsyncMock()
+    repo.get_open_position_cycle = AsyncMock(return_value=None)
+    repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
+    repo.insert_position_cycle = AsyncMock(return_value=(5, "cycle-short"))
+    coord = _make_reconcile_coord(repo)
+    engine = _make_cycle_engine()
+    engine.position_qty = -2.0
+    coord.engines["BTC-USD@kraken-live"] = engine
+    await coord._reconcile_position_cycles()
+    inserted = repo.insert_position_cycle.call_args.args[0]
+    assert inserted["direction"] == "short"
+    assert inserted["max_qty"] == pytest.approx(2.0)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_bootstrap_uses_checkpoint_opened_at_if_available() -> None:
+    """Given: TradeService has position_opened_at from checkpoint restore, Then: used as opened_at."""
+    repo = AsyncMock()
+    repo.get_open_position_cycle = AsyncMock(return_value=None)
+    repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
+    repo.insert_position_cycle = AsyncMock(return_value=(5, "cycle-new"))
+    coord = _make_reconcile_coord(repo)
+    engine = _make_cycle_engine()
+    engine.position_qty = 1.5
+    coord.engines["BTC-USD@kraken-live"] = engine
+    checkpoint_ts = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
+    shard = coord.trade_service._get_or_create_shard(engine._shard_key)
+    shard.position.position_opened_at = checkpoint_ts
+    await coord._reconcile_position_cycles()
+    inserted = repo.insert_position_cycle.call_args.args[0]
+    assert inserted["opened_at"] == checkpoint_ts
+
+
+@pytest.mark.asyncio
+async def test_reconcile_bootstrap_fallback_opened_at_when_no_checkpoint() -> None:
+    """Given: full replay shard (position_opened_at=None), Then: opened_at = now()."""
+    repo = AsyncMock()
+    repo.get_open_position_cycle = AsyncMock(return_value=None)
+    repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
+    repo.insert_position_cycle = AsyncMock(return_value=(5, "cycle-new"))
+    coord = _make_reconcile_coord(repo)
+    engine = _make_cycle_engine()
+    engine.position_qty = 1.5
+    coord.engines["BTC-USD@kraken-live"] = engine
+    before = datetime.now(UTC)
+    await coord._reconcile_position_cycles()
+    after = datetime.now(UTC)
+    inserted = repo.insert_position_cycle.call_args.args[0]
+    assert before <= inserted["opened_at"] <= after
+
+
+@pytest.mark.asyncio
+async def test_reconcile_unresolved_instrument_skips_bootstrap() -> None:
+    """Given: non-flat engine + no DB cycle + unresolved instrument, Then: skip bootstrap."""
+    repo = AsyncMock()
+    repo.get_open_position_cycle = AsyncMock(return_value=None)
+    repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+    coord = _make_reconcile_coord(repo)
+    engine = _make_cycle_engine()
+    engine.position_qty = 1.5
+    coord.engines["BTC-USD@kraken-live"] = engine
+    await coord._reconcile_position_cycles()
+    repo.insert_position_cycle.assert_not_called()
+    shard = coord.trade_service._get_or_create_shard(engine._shard_key)
+    assert shard.active_cycle_public_id is None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_mixed_engines_processes_each_independently() -> None:
+    """Given: mix of flat+no_row, degraded, existing, bootstrap-needed engines.
+
+    Verifies each engine is processed independently per its own state.
+    Degraded identity is skipped before DB query; the other three
+    non-skipped engines all query DB, and only the bootstrap one
+    hits insert_position_cycle.
+    """
+    repo = AsyncMock()
+    repo.get_open_position_cycle = AsyncMock(
+        side_effect=[
+            None,
+            {"public_id": "cycle-existing", "direction": "long", "max_qty": 2.0},
+            None,
+        ]
+    )
+    repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
+    repo.insert_position_cycle = AsyncMock(return_value=(5, "cycle-new"))
+    coord = _make_reconcile_coord(repo)
+    engine_flat = _make_cycle_engine(shard_key="kraken.FLAT-USD.live.waa")
+    engine_flat.position_qty = 0.0
+    coord.engines["flat"] = engine_flat
+    engine_degraded = _make_cycle_engine(
+        wallet_public_id="", shard_key="kraken.DEGRADED-USD.live.wbb"
+    )
+    engine_degraded.position_qty = 1.0
+    coord.engines["degraded"] = engine_degraded
+    engine_existing = _make_cycle_engine(shard_key="kraken.BTC-USD.live.wcc")
+    engine_existing.position_qty = 1.5
+    coord.engines["existing"] = engine_existing
+    engine_bootstrap = _make_cycle_engine(shard_key="kraken.ETH-USD.live.wdd")
+    engine_bootstrap.position_qty = 3.0
+    coord.engines["bootstrap"] = engine_bootstrap
+    await coord._reconcile_position_cycles()
+    assert repo.insert_position_cycle.call_count == 1
+    inserted = repo.insert_position_cycle.call_args.args[0]
+    assert inserted["shard_key"] == "kraken.ETH-USD.live.wdd"
+    shard_existing = coord.trade_service._get_or_create_shard("kraken.BTC-USD.live.wcc")
+    assert shard_existing.active_cycle_public_id == "cycle-existing"
+    shard_bootstrap = coord.trade_service._get_or_create_shard("kraken.ETH-USD.live.wdd")
+    assert shard_bootstrap.active_cycle_public_id == "cycle-new"
