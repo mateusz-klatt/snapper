@@ -30,8 +30,19 @@ def _ts() -> datetime:
 def _make_plan_row(
     public_id: str = "plan-1",
     status: str = "active",
+    *,
+    with_child_order: bool = False,
 ) -> dict[str, Any]:
     now = _ts()
+    params: dict[str, Any] = {"order_type": "limit", "side": "buy", "price": 50000.0}
+    if with_child_order:
+        params.update(
+            {
+                "child_client_order_id": "cid-child-1",
+                "native_instrument": "BTC-USD",
+                "venue_order_type": "limit",
+            }
+        )
     return {
         "public_id": public_id,
         "timestamp": now,
@@ -52,7 +63,7 @@ def _make_plan_row(
         "side": "buy",
         "parent_plan_public_id": None,
         "position_cycle_public_id": None,
-        "params": {"order_type": "limit", "side": "buy", "price": 50000.0},
+        "params": params,
         "status": status,
         "created_at": now,
         "started_at": None,
@@ -358,4 +369,79 @@ class TestCancelOrder:
         client = _create_client(repo)
         response = client.post("/api/orders/plan-1/cancel", json=_cancel_order_body())
         assert response.status_code == 409
+        client.close()
+
+    def test_cancel_with_child_order_emits_cancel_command(self) -> None:
+        """Given plan with child_client_order_id, Then cancel TradeCommand is inserted.
+
+        Verifies the cancel flow emits a venue-facing cancel command with
+        ``command_type='cancel'`` and the child order's ``client_order_id``
+        so the outbox dispatcher publishes OrderCancelData to the venue.
+        """
+        repo = AsyncMock()
+        repo.get_execution_plan = AsyncMock(
+            side_effect=[
+                _make_plan_row(status="active", with_child_order=True),
+                _make_plan_row(status="cancel_requested", with_child_order=True),
+            ]
+        )
+        repo.update_execution_plan_status = AsyncMock(return_value=2)
+        repo.insert_trade_command = AsyncMock(return_value=(42, "cmd-cancel"))
+        client = _create_client(repo)
+        response = client.post("/api/orders/plan-1/cancel", json=_cancel_order_body())
+        assert response.status_code == 200
+        repo.insert_trade_command.assert_called_once()
+        inserted = repo.insert_trade_command.call_args[0][0]
+        assert inserted["command_type"] == "cancel"
+        assert inserted["client_order_id"] == "cid-child-1"
+        assert inserted["plan_public_id"] == "plan-1"
+        client.close()
+
+    def test_cancel_by_client_order_id_resolves_plan(self) -> None:
+        """Given a child client_order_id, When cancelling, Then lookup + cancel."""
+        repo = AsyncMock()
+        repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value="plan-1")
+        repo.get_execution_plan = AsyncMock(
+            side_effect=[
+                _make_plan_row(status="active", with_child_order=True),
+                _make_plan_row(status="cancel_requested", with_child_order=True),
+            ]
+        )
+        repo.update_execution_plan_status = AsyncMock(return_value=2)
+        repo.insert_trade_command = AsyncMock(return_value=(42, "cmd-cancel"))
+        client = _create_client(repo)
+        response = client.post(
+            "/api/orders/by-client-order-id/cid-child-1/cancel",
+            json=_cancel_order_body(),
+        )
+        assert response.status_code == 200
+        repo.get_plan_public_id_for_client_order_id.assert_awaited_once_with("cid-child-1")
+        client.close()
+
+    def test_cancel_by_client_order_id_not_found(self) -> None:
+        """Given unknown client_order_id, Then 404."""
+        repo = AsyncMock()
+        repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value=None)
+        client = _create_client(repo)
+        response = client.post(
+            "/api/orders/by-client-order-id/unknown-cid/cancel",
+            json=_cancel_order_body(),
+        )
+        assert response.status_code == 404
+        client.close()
+
+    def test_cancel_with_child_order_insert_failure_swallowed(self) -> None:
+        """Given cancel TradeCommand insert fails, Then the response is still 200."""
+        repo = AsyncMock()
+        repo.get_execution_plan = AsyncMock(
+            side_effect=[
+                _make_plan_row(status="active", with_child_order=True),
+                _make_plan_row(status="cancel_requested", with_child_order=True),
+            ]
+        )
+        repo.update_execution_plan_status = AsyncMock(return_value=2)
+        repo.insert_trade_command = AsyncMock(side_effect=Exception("DB error"))
+        client = _create_client(repo)
+        response = client.post("/api/orders/plan-1/cancel", json=_cancel_order_body())
+        assert response.status_code == 200
         client.close()

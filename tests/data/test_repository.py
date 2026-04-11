@@ -3491,6 +3491,92 @@ async def test_insert_trade_command(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_plan_public_id_for_client_order_id_found(tmp_path: Path) -> None:
+    """Resolving by client_order_id returns the plan linked on the create command.
+
+    Given: a database with a ``create`` trade command linked to a plan,
+    When: get_plan_public_id_for_client_order_id is called,
+    Then: the linked plan public_id is returned.
+    """
+    db_path = tmp_path / "plan_cid.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    await r.insert_trade_command(
+        {
+            "command_type": "create",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "manual",
+            "client_order_id": "cid-7",
+            "venue_client_id": "vcid-7",
+            "side": "buy",
+            "order_type": "limit",
+            "quantity": 0.5,
+            "price": 50000.0,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-7",
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+            "plan_public_id": "plan-42",
+            "wallet_public_id": "wallet-1",
+        }
+    )
+    found = await r.get_plan_public_id_for_client_order_id("cid-7")
+    assert found == "plan-42"
+
+
+@pytest.mark.asyncio
+async def test_get_plan_public_id_for_client_order_id_missing(tmp_path: Path) -> None:
+    """Resolving by an unknown client_order_id returns None."""
+    db_path = tmp_path / "plan_cid_miss.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    found = await r.get_plan_public_id_for_client_order_id("does-not-exist")
+    assert found is None
+
+
+@pytest.mark.asyncio
+async def test_get_plan_public_id_for_client_order_id_skips_null_plan(
+    tmp_path: Path,
+) -> None:
+    """Commands without a plan_public_id do not shadow plan-linked commands."""
+    db_path = tmp_path / "plan_cid_null.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    await r.insert_trade_command(
+        {
+            "command_type": "create",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "engine-buy",
+            "client_order_id": "cid-8",
+            "venue_client_id": "vcid-8",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.5,
+            "price": None,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-8",
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+            "wallet_public_id": "wallet-1",
+        }
+    )
+    found = await r.get_plan_public_id_for_client_order_id("cid-8")
+    assert found is None
+
+
+@pytest.mark.asyncio
 async def test_get_undispatched_commands(tmp_path: Path) -> None:
     """Get undispatched commands returns only commands with status created.
 

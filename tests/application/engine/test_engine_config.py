@@ -25,6 +25,7 @@ from snapper.application.trade.trade_service import TradeService
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ExecutionData
+from snapper.messaging.schemas.data import OrderCancelData
 from snapper.messaging.schemas.data import SignalData
 
 
@@ -1474,6 +1475,7 @@ async def test_outbox_publish_sends_to_zmq() -> None:
     cmd: dict[str, Any] = {
         "public_id": "cmd-1",
         "client_order_id": "cid-1",
+        "command_type": "create",
         "shard_key": "kraken.BTC-USD.live",
         "exchange": "kraken",
         "instrument": "BTC-USD",
@@ -1493,6 +1495,51 @@ async def test_outbox_publish_sends_to_zmq() -> None:
 
 
 @pytest.mark.asyncio
+async def test_outbox_publish_cancel_sends_order_cancel_data() -> None:
+    """Outbox publish for command_type='cancel' sends OrderCancelData.
+
+    Given: a TraderCoordinator with a mocked msg_publisher and a
+        TradeCommandRow whose ``command_type`` is ``cancel``,
+    When: ``_outbox_publish`` is invoked,
+    Then: the publisher receives an ``OrderCancelData`` frame routed to
+        the ``.cancel`` topic, so the executor can forward the cancel to
+        the venue adapter.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.msg_publisher = AsyncMock()
+    cmd: dict[str, Any] = {
+        "public_id": "cmd-cancel",
+        "client_order_id": "cid-cancel",
+        "command_type": "cancel",
+        "shard_key": "kraken.BTC-USD.live",
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "strategy_id": "manual",
+        "side": "buy",
+        "order_type": "market",
+        "quantity": 0.5,
+        "price": None,
+        "leverage": None,
+        "reduce_only": False,
+        "session_id": "s1",
+        "sequence_id": 3,
+        "exchange_order_id": "ex-1",
+        "wallet_public_id": "wallet-1",
+        "operator_public_id": None,
+        "user_public_id": None,
+    }
+    await coord._outbox_publish(cmd)
+    coord.msg_publisher.send.assert_called_once()
+    sent_topic = coord.msg_publisher.send.call_args[0][0]
+    sent_msg = coord.msg_publisher.send.call_args[0][1]
+    assert sent_topic.endswith(".cancel")
+    assert isinstance(sent_msg, OrderCancelData)
+    assert sent_msg.client_order_id == "cid-cancel"
+    assert sent_msg.exchange_order_id == "ex-1"
+
+
+@pytest.mark.asyncio
 async def test_outbox_publish_propagates_leverage_and_reduce_only() -> None:
     """Outbox publish forwards leverage and reduce_only into OrderRequestData.
 
@@ -1509,6 +1556,7 @@ async def test_outbox_publish_propagates_leverage_and_reduce_only() -> None:
     cmd: dict[str, Any] = {
         "public_id": "cmd-lev",
         "client_order_id": "cid-lev",
+        "command_type": "create",
         "shard_key": "kraken.BTC-USD.live",
         "exchange": "kraken",
         "instrument": "BTC-USD",

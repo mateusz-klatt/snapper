@@ -1487,6 +1487,28 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_plan_public_id_for_client_order_id(
+        self,
+        client_order_id: str,
+    ) -> str | None:
+        """Look up the plan public id that a client_order_id belongs to.
+
+        Joins ``trade_commands`` where ``command_type='create'`` and
+        ``plan_public_id IS NOT NULL``, returning the most recent
+        ``plan_public_id`` for the matching ``client_order_id``. Used by
+        UI cancel-by-client-order-id flows to resolve the active plan
+        from an Order row.
+
+        Args:
+            client_order_id: Child order client id stamped on a plan.
+
+        Returns:
+            The linked plan public id, or None if no plan-linked command
+            exists for this client_order_id.
+        """
+        ...
+
+    @abstractmethod
     async def create_scope_grant(self, request: CreateScopeGrantRequest) -> ScopeGrantRow:
         """Create a new ``wallet_operator_scope_grants`` row.
 
@@ -3214,6 +3236,40 @@ class SQLAlchemyRepository(Repository):
             await s.commit()
             await s.refresh(cmd)
             return (cmd.id, cmd.public_id)
+
+    async def get_plan_public_id_for_client_order_id(
+        self,
+        client_order_id: str,
+    ) -> str | None:
+        """Resolve the plan public id linked to a child client_order_id.
+
+        Selects the most recently created ``trade_commands`` row whose
+        ``client_order_id`` matches and whose ``plan_public_id`` is
+        non-null, preferring ``command_type='create'`` so cancel rows
+        on the same ``client_order_id`` do not hide the original plan.
+
+        Args:
+            client_order_id: Child order client id stamped by the plan.
+
+        Returns:
+            The resolved plan public id, or None if no plan-linked
+            trade command exists for this client_order_id.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(TradeCommand.plan_public_id)
+                .where(
+                    TradeCommand.client_order_id == client_order_id,
+                    TradeCommand.plan_public_id.is_not(None),
+                    TradeCommand.command_type == "create",
+                )
+                .order_by(TradeCommand.created_at.desc())
+                .limit(1)
+            )
+            row = result.first()
+            if row is None:
+                return None
+            return cast(str | None, row[0])
 
     async def update_trade_command_status(
         self,

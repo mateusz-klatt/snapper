@@ -74,6 +74,7 @@ from snapper.messaging.infrastructure.validated_socket import ValidatedSubscribe
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import FundingAccrualData
+from snapper.messaging.schemas.data import OrderCancelData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import OrderEventData
 from snapper.messaging.schemas.data import OrderRequestData
@@ -1368,14 +1369,37 @@ class TraderCoordinator(RegisterableProcess):
     async def _outbox_publish(self, cmd: TradeCommandRow) -> None:
         """Publish a trade command from outbox to ZMQ.
 
-        Converts a TradeCommandRow dict to OrderRequestData and publishes
-        to the order command topic.
+        Branches on ``command_type``:
+
+        - ``create`` / ``submit``: publishes an ``OrderRequestData`` to
+          the ``.submit`` topic for the exchange executor to place.
+        - ``cancel``: publishes an ``OrderCancelData`` to the ``.cancel``
+          topic, carrying the original order's ``client_order_id`` and
+          (optionally) ``exchange_order_id`` so the executor can match.
 
         Args:
             cmd: TradeCommandRow dict from the outbox dispatcher.
         """
         assert self.msg_publisher is not None
         exchange = cast(OrderExchange, cmd["exchange"])
+        command_type = cmd["command_type"]
+        if command_type == OrderCommandEnum.CANCEL.value:
+            topic = order_command_topic(exchange, cmd["instrument"], OrderCommandEnum.CANCEL)
+            cancel = OrderCancelData(
+                public_id=cmd["client_order_id"],
+                timestamp=datetime.now(UTC),
+                session_id=cmd["session_id"],
+                sequence_id=cmd["sequence_id"],
+                exchange=exchange,
+                instrument=cmd["instrument"],
+                exchange_order_id=cmd.get("exchange_order_id") or "",
+                client_order_id=cmd["client_order_id"],
+                wallet_public_id=cmd.get("wallet_public_id") or "",
+                operator_public_id=cmd.get("operator_public_id"),
+                user_public_id=cmd.get("user_public_id"),
+            )
+            await self.msg_publisher.send(topic, cancel)
+            return
         topic = order_command_topic(exchange, cmd["instrument"], OrderCommandEnum.SUBMIT)
         parsed_shard = self._parse_shard_key(cmd["shard_key"])
         tag = parsed_shard[4] if parsed_shard else None

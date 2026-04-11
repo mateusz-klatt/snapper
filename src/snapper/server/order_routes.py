@@ -156,11 +156,16 @@ async def create_order(
     pid = str(uuid7())
     user_pid = principal.user_public_id or principal.username
 
+    client_order_id = str(uuid7())
+    venue_order_type = _ORDER_TYPE_MAP.get(body.order_type, body.order_type)
     plan_params: dict[str, Any] = {
         "order_type": body.order_type,
         "side": body.side,
         "time_in_force": body.time_in_force,
         "post_only": body.post_only,
+        "child_client_order_id": client_order_id,
+        "native_instrument": body.instrument,
+        "venue_order_type": venue_order_type,
     }
     if body.price is not None:
         plan_params["price"] = body.price
@@ -204,8 +209,6 @@ async def create_order(
             detail="Failed to create order",
         ) from exc
 
-    venue_order_type = _ORDER_TYPE_MAP.get(body.order_type, body.order_type)
-    client_order_id = str(uuid7())
     cmd_seq = tracker.next_sequence(_REST_STREAM)
     try:
         cmd_row: TradeCommandInsertRow = {
@@ -276,42 +279,31 @@ async def create_order(
     )
 
 
-@router.post(
-    "/{plan_public_id}/cancel",
-    openapi_extra=openapi_schema(CancelOrderCommand),
-)
-async def cancel_order(
-    request: Request,
+async def _cancel_plan(
+    repo: Repository,
+    tracker: SequenceTracker,
+    principal: AuthPrincipal,
     plan_public_id: str,
-    principal: Annotated[
-        AuthPrincipal,
-        Depends(require_permission(Permission.CANCEL_ORDERS)),
-    ],
-    _csrf: Annotated[None, Depends(validate_csrf_token)],
-    command: Annotated[CancelOrderCommand, Depends(json_body(CancelOrderCommand))],
-    repo: Annotated[Repository, Depends(get_repository_dependency)],
 ) -> ExecutionPlanResponse:
-    """Cancel an active execution plan.
+    """Shared cancel-plan logic used by the by-id and by-client-order-id routes.
 
-    Verifies the caller has access to the plan's wallet before
-    transitioning the plan to cancel_requested status.
+    Transitions the plan to ``cancel_requested`` (SCD2), inserts a
+    matching cancel ``TradeCommand`` for the active child order, and
+    returns the updated plan as a response envelope.
 
     Args:
-        request: FastAPI request (provides REST tracker for provenance).
-        plan_public_id: Plan to cancel (path parameter).
-        principal: Authenticated caller holding CANCEL_ORDERS.
-        _csrf: CSRF token validation.
-        command: Cancel command envelope.
         repo: Repository dependency.
+        tracker: REST provenance tracker.
+        principal: Authenticated caller.
+        plan_public_id: Plan to cancel.
 
     Returns:
         ExecutionPlanResponse wrapping the updated plan.
 
     Raises:
         HTTPException: 404 if plan not found, 403 if wallet not accessible,
-            409 if already terminal.
+            409 if already terminal or a concurrent status change lost the race.
     """
-    tracker: SequenceTracker = request.app.state.rest_tracker
     now = datetime.now(UTC)
     ts = dt.datetime.now(dt.UTC)
     sid = tracker.session_id
@@ -350,6 +342,45 @@ async def cancel_order(
             detail="Plan status changed concurrently",
         )
 
+    params = cast(dict[str, Any], plan["params"])
+    child_client_order_id = cast(str | None, params.get("child_client_order_id"))
+    native_instrument = cast(str | None, params.get("native_instrument"))
+    if child_client_order_id is not None and native_instrument is not None:
+        cancel_cmd: TradeCommandInsertRow = {
+            "command_type": "cancel",
+            "shard_key": plan["shard_key"],
+            "exchange": plan["exchange"],
+            "instrument": native_instrument,
+            "mode": plan["mode"],
+            "strategy_id": "manual",
+            "client_order_id": child_client_order_id,
+            "venue_client_id": child_client_order_id,
+            "side": plan["side"],
+            "order_type": cast(str, params.get("venue_order_type", "market")),
+            "quantity": plan["total_quantity"],
+            "price": cast(float | None, params.get("price")),
+            "leverage": cast(int | None, params.get("leverage")),
+            "reduce_only": False,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": plan_public_id,
+            "session_id": sid,
+            "sequence_id": tracker.next_sequence(_REST_STREAM),
+            "timestamp": ts,
+            "wallet_public_id": plan["wallet_public_id"] or "",
+            "operator_public_id": plan["operator_public_id"],
+            "user_public_id": principal.user_public_id or principal.username,
+            "plan_public_id": plan_public_id,
+        }
+        try:
+            await repo.insert_trade_command(cancel_cmd)
+        except Exception as exc:
+            logger.error(
+                "Failed to insert cancel command for plan {}: {}",
+                plan_public_id,
+                exc,
+            )
+
     updated = await repo.get_execution_plan(plan_public_id, as_of=ts)
     if updated is None:
         raise HTTPException(
@@ -364,4 +395,103 @@ async def cancel_order(
         public_id=str(uuid7()),
         timestamp=ts,
         payload=plan_data,
+    )
+
+
+@router.post(
+    "/{plan_public_id}/cancel",
+    openapi_extra=openapi_schema(CancelOrderCommand),
+)
+async def cancel_order(
+    request: Request,
+    plan_public_id: str,
+    principal: Annotated[
+        AuthPrincipal,
+        Depends(require_permission(Permission.CANCEL_ORDERS)),
+    ],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
+    command: Annotated[CancelOrderCommand, Depends(json_body(CancelOrderCommand))],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
+) -> ExecutionPlanResponse:
+    """Cancel an active execution plan.
+
+    Verifies the caller has access to the plan's wallet before
+    transitioning the plan to cancel_requested status and emitting a
+    venue-facing cancel ``TradeCommand`` for the active child order.
+
+    Args:
+        request: FastAPI request (provides REST tracker for provenance).
+        plan_public_id: Plan to cancel (path parameter).
+        principal: Authenticated caller holding CANCEL_ORDERS.
+        _csrf: CSRF token validation.
+        command: Cancel command envelope.
+        repo: Repository dependency.
+
+    Returns:
+        ExecutionPlanResponse wrapping the updated plan.
+
+    Raises:
+        HTTPException: 404 if plan not found, 403 if wallet not accessible,
+            409 if already terminal.
+    """
+    del command
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    return await _cancel_plan(
+        repo=repo,
+        tracker=tracker,
+        principal=principal,
+        plan_public_id=plan_public_id,
+    )
+
+
+@router.post(
+    "/by-client-order-id/{client_order_id}/cancel",
+    openapi_extra=openapi_schema(CancelOrderCommand),
+)
+async def cancel_order_by_client_order_id(
+    request: Request,
+    client_order_id: str,
+    principal: Annotated[
+        AuthPrincipal,
+        Depends(require_permission(Permission.CANCEL_ORDERS)),
+    ],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
+    command: Annotated[CancelOrderCommand, Depends(json_body(CancelOrderCommand))],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
+) -> ExecutionPlanResponse:
+    """Cancel an order by its ``client_order_id``.
+
+    Convenience endpoint for the Orders UI that only knows the child
+    order's ``client_order_id``. Resolves to the owning execution plan
+    via ``trade_commands.plan_public_id`` and then delegates to the
+    shared cancel flow.
+
+    Args:
+        request: FastAPI request (provides REST tracker for provenance).
+        client_order_id: Child order client id to cancel.
+        principal: Authenticated caller holding CANCEL_ORDERS.
+        _csrf: CSRF token validation.
+        command: Cancel command envelope.
+        repo: Repository dependency.
+
+    Returns:
+        ExecutionPlanResponse wrapping the updated plan.
+
+    Raises:
+        HTTPException: 404 if no plan linked to this client_order_id,
+            403 if wallet not accessible, 409 if already terminal.
+    """
+    del command
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    plan_public_id = await repo.get_plan_public_id_for_client_order_id(client_order_id)
+    if plan_public_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No execution plan found for this client_order_id",
+        )
+    return await _cancel_plan(
+        repo=repo,
+        tracker=tracker,
+        principal=principal,
+        plan_public_id=plan_public_id,
     )
