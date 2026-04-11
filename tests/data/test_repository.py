@@ -3541,6 +3541,48 @@ async def test_get_plan_public_id_for_client_order_id_missing(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_get_exchange_order_id_for_client_order_id_returns_value(
+    tmp_path: Path,
+) -> None:
+    """Resolving by client_order_id returns the venue-assigned exchange id.
+
+    Given: an ``orders`` row with a non-null ``exchange_order_id``,
+    When: get_exchange_order_id_for_client_order_id is called,
+    Then: the venue-assigned id is returned.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    await r.insert_order(
+        instrument_public_id=inst_pid,
+        wallet_public_id="00000000-0000-7000-8000-000000000001",
+        client_order_id="cid-xo-1",
+        exchange_order_id="ex-123",
+        created_at=now,
+        side="buy",
+        order_type="limit",
+        price=50000.0,
+        size=0.5,
+        status="open",
+        session_id="s1",
+        sequence_id=1,
+        timestamp=now,
+    )
+    found = await r.get_exchange_order_id_for_client_order_id("cid-xo-1", as_of=now)
+    assert found == "ex-123"
+
+
+@pytest.mark.asyncio
+async def test_get_exchange_order_id_for_client_order_id_returns_none_without_row(
+    tmp_path: Path,
+) -> None:
+    """Returns None when no active order exists for the client_order_id."""
+    r, _, _ = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    found = await r.get_exchange_order_id_for_client_order_id("nope", as_of=now)
+    assert found is None
+
+
+@pytest.mark.asyncio
 async def test_get_plan_public_id_for_client_order_id_skips_null_plan(
     tmp_path: Path,
 ) -> None:

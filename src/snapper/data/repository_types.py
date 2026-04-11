@@ -401,6 +401,7 @@ class TradeCommandInsertRow(TypedDict, total=False):
     operator_public_id: str | None
     user_public_id: str | None
     plan_public_id: str | None
+    exchange_order_id: str | None
 
 
 class VenueEventInsertRow(TypedDict, total=False):

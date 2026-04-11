@@ -1495,9 +1495,9 @@ class Repository(ABC):
 
         Joins ``trade_commands`` where ``command_type='create'`` and
         ``plan_public_id IS NOT NULL``, returning the most recent
-        ``plan_public_id`` for the matching ``client_order_id``. Used by
-        UI cancel-by-client-order-id flows to resolve the active plan
-        from an Order row.
+        active-version ``plan_public_id`` for the matching
+        ``client_order_id``. Used by UI cancel-by-client-order-id flows
+        to resolve the active plan from an Order row.
 
         Args:
             client_order_id: Child order client id stamped on a plan.
@@ -1505,6 +1505,30 @@ class Repository(ABC):
         Returns:
             The linked plan public id, or None if no plan-linked command
             exists for this client_order_id.
+        """
+        ...
+
+    @abstractmethod
+    async def get_exchange_order_id_for_client_order_id(
+        self,
+        client_order_id: str,
+        as_of: datetime,
+    ) -> str | None:
+        """Fetch the active exchange_order_id for a given client_order_id.
+
+        Used by the cancel pipeline to hydrate ``OrderCancelData`` with
+        the venue-assigned order id so that venue adapters that cancel
+        by exchange id (Kraken, Zonda, Walutomat) can actually cancel.
+        Returns ``None`` if no active order row exists yet (e.g., the
+        venue has not ACKed the submit), or if it exists but has not
+        been assigned an ``exchange_order_id`` yet.
+
+        Args:
+            client_order_id: Client-side order id.
+            as_of: Temporal point for SCD2 active-version selection.
+
+        Returns:
+            The exchange-assigned order id, or None if unavailable.
         """
         ...
 
@@ -3244,9 +3268,12 @@ class SQLAlchemyRepository(Repository):
         """Resolve the plan public id linked to a child client_order_id.
 
         Selects the most recently created ``trade_commands`` row whose
-        ``client_order_id`` matches and whose ``plan_public_id`` is
-        non-null, preferring ``command_type='create'`` so cancel rows
-        on the same ``client_order_id`` do not hide the original plan.
+        ``client_order_id`` matches, whose ``plan_public_id`` is
+        non-null, and whose ``command_type`` is ``create`` so cancel
+        rows on the same ``client_order_id`` do not hide the original
+        plan. Restricted to the active SCD2 version, ordered by
+        ``created_at`` desc with ``id`` as a deterministic tie-breaker
+        so callers always see the same answer across invocations.
 
         Args:
             client_order_id: Child order client id stamped by the plan.
@@ -3262,8 +3289,44 @@ class SQLAlchemyRepository(Repository):
                     TradeCommand.client_order_id == client_order_id,
                     TradeCommand.plan_public_id.is_not(None),
                     TradeCommand.command_type == "create",
+                    *where_active(TradeCommand, datetime.now(UTC)),
                 )
-                .order_by(TradeCommand.created_at.desc())
+                .order_by(TradeCommand.created_at.desc(), TradeCommand.id.desc())
+                .limit(1)
+            )
+            row = result.first()
+            if row is None:
+                return None
+            return cast(str | None, row[0])
+
+    async def get_exchange_order_id_for_client_order_id(
+        self,
+        client_order_id: str,
+        as_of: datetime,
+    ) -> str | None:
+        """Return the venue-assigned order id for a client_order_id, if any.
+
+        Picks the active SCD2 ``orders`` row with a non-null
+        ``exchange_order_id``, ordered by ``created_at`` desc and ``id``
+        desc as a deterministic tie-breaker.
+
+        Args:
+            client_order_id: Client-side order id.
+            as_of: Temporal point for active-version selection.
+
+        Returns:
+            The venue-assigned order id, or None if no active order row
+            has been ACKed yet.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(Order.exchange_order_id)
+                .where(
+                    Order.client_order_id == client_order_id,
+                    Order.exchange_order_id.is_not(None),
+                    *where_active(Order, as_of),
+                )
+                .order_by(Order.created_at.desc(), Order.id.desc())
                 .limit(1)
             )
             row = result.first()

@@ -328,6 +328,15 @@ async def _cancel_plan(
             detail=f"Plan already in terminal status: {plan['status']}",
         )
 
+    params = cast(dict[str, Any], plan["params"])
+    child_client_order_id = cast(str | None, params.get("child_client_order_id"))
+    native_instrument = cast(str | None, params.get("native_instrument"))
+    exchange_order_id: str | None = None
+    if child_client_order_id is not None:
+        exchange_order_id = await repo.get_exchange_order_id_for_client_order_id(
+            child_client_order_id, as_of=now
+        )
+
     new_id = await repo.update_execution_plan_status(
         public_id=plan_public_id,
         new_status="cancel_requested",
@@ -342,9 +351,6 @@ async def _cancel_plan(
             detail="Plan status changed concurrently",
         )
 
-    params = cast(dict[str, Any], plan["params"])
-    child_client_order_id = cast(str | None, params.get("child_client_order_id"))
-    native_instrument = cast(str | None, params.get("native_instrument"))
     if child_client_order_id is not None and native_instrument is not None:
         cancel_cmd: TradeCommandInsertRow = {
             "command_type": "cancel",
@@ -371,6 +377,7 @@ async def _cancel_plan(
             "operator_public_id": plan["operator_public_id"],
             "user_public_id": principal.user_public_id or principal.username,
             "plan_public_id": plan_public_id,
+            "exchange_order_id": exchange_order_id,
         }
         try:
             await repo.insert_trade_command(cancel_cmd)
@@ -380,6 +387,18 @@ async def _cancel_plan(
                 plan_public_id,
                 exc,
             )
+            await repo.update_execution_plan_status(
+                public_id=plan_public_id,
+                new_status="failed",
+                bus_time=ts,
+                session_id=sid,
+                sequence_id=tracker.next_sequence(_REST_STREAM),
+                last_error=f"Cancel command insert failed: {exc}",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to emit cancel command",
+            ) from exc
 
     updated = await repo.get_execution_plan(plan_public_id, as_of=ts)
     if updated is None:

@@ -381,6 +381,47 @@ class TestPlanExecutorService:
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
     @patch("snapper.application.plans.service.get_repository")
+    async def test_handle_execution_skips_duplicate_cumulative_fill(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Duplicate/stale cumulative fills do not advance plan state.
+
+        ``ExecutionData.size`` is the cumulative filled quantity. If a
+        duplicate frame arrives with ``size == current filled``, the
+        service must short-circuit rather than emit another SCD2 write
+        (which would log a redundant transition and advance
+        ``last_evaluated_at`` for no reason).
+        """
+        mock_repo = AsyncMock()
+        mock_repo.update_execution_plan_status = AsyncMock(return_value=2)
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(total_quantity=2.0, filled_quantity=1.0)
+        service._register_plan(plan, ManualOnceEvaluator())
+        execution = _make_execution(size=1.0, last_size=1.0, status="partial")
+        await service._handle_execution(execution)
+        mock_repo.update_execution_plan_status.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_handle_execution_skips_stale_cumulative_fill(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Out-of-order cumulative frames (smaller than already-seen) are skipped."""
+        mock_repo = AsyncMock()
+        mock_repo.update_execution_plan_status = AsyncMock(return_value=2)
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(total_quantity=2.0, filled_quantity=1.5)
+        service._register_plan(plan, ManualOnceEvaluator())
+        execution = _make_execution(size=1.0, last_size=1.0, status="partial")
+        await service._handle_execution(execution)
+        mock_repo.update_execution_plan_status.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
     async def test_handle_execution_ignores_unknown_client_order_id(
         self, mock_repo_fn: MagicMock, mock_settings: MagicMock
     ) -> None:
@@ -704,14 +745,27 @@ class TestPlanExecutorService:
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
     @patch("snapper.application.plans.service.get_repository")
-    async def test_listen_loop_recovers_from_handler_error(
+    async def test_listen_loop_continues_after_handler_error(
         self, mock_repo_fn: MagicMock, mock_settings: MagicMock
     ) -> None:
-        """A runtime error in the dispatch path is logged and the loop exits cleanly."""
+        """A per-message handler exception is logged and the loop keeps running.
+
+        Previously a raised exception was caught only by the outer
+        ``except Exception`` handler, which killed the loop while
+        ``_running`` stayed ``True`` — making the service look healthy
+        while silently stopping to consume events. The loop now wraps
+        each message in a try/except so a single bad frame cannot take
+        the service down (Phase 1.5 review fix).
+        """
         mock_repo_fn.return_value = AsyncMock()
         service = PlanExecutorService()
+        handler_calls = 0
 
         async def _boom(_execution: ExecutionData) -> None:
+            nonlocal handler_calls
+            handler_calls += 1
+            if handler_calls >= 2:
+                service._running = False
             raise RuntimeError("boom")
 
         service._handle_execution = _boom
@@ -726,7 +780,66 @@ class TestPlanExecutorService:
         service._subscriber = subscriber
         service._running = True
         await service._listen_loop()
-        assert service._running is True
+        assert handler_calls >= 2
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_listen_loop_handler_cancelled_error_unwinds(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """A CancelledError from a handler must propagate, not be caught."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+
+        async def _cancelled(_execution: ExecutionData) -> None:
+            raise asyncio.CancelledError()
+
+        service._handle_execution = _cancelled
+        subscriber = AsyncMock()
+        execution = _make_execution()
+        subscriber.recv_multipart = AsyncMock(
+            return_value=(
+                b"orders.events.kraken.BTC-USD.executed",
+                execution.to_json().encode(),
+            )
+        )
+        service._subscriber = subscriber
+        service._running = True
+        with pytest.raises(asyncio.CancelledError):
+            await service._listen_loop()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_listen_loop_recovers_from_socket_error(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """A transient socket recv failure is logged and the loop retries.
+
+        Phase 1.5 review fix: previously an exception from ``recv_multipart``
+        fell out of the outer handler and silently exited the loop.
+        """
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        service._handle_execution = AsyncMock()
+        call_count = 0
+
+        async def _recv() -> tuple[bytes, bytes]:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("transient socket failure")
+            service._running = False
+            execution = _make_execution()
+            return b"orders.events.kraken.BTC-USD.executed", execution.to_json().encode()
+
+        subscriber = AsyncMock()
+        subscriber.recv_multipart = _recv
+        service._subscriber = subscriber
+        service._running = True
+        await service._listen_loop()
+        assert call_count == 2
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")

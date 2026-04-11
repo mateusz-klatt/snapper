@@ -203,14 +203,27 @@ class PlanExecutorService(RegisterableProcess):
                     await task
 
     async def _listen_loop(self) -> None:
-        """Main ZMQ dispatch loop routing events to handlers."""
+        """Main ZMQ dispatch loop routing events to handlers.
+
+        Per-message failures (parse errors, handler exceptions, socket
+        recv errors) are caught and logged so a single bad frame can
+        never silently stop the service. Only ``asyncio.CancelledError``
+        (from shutdown) unwinds the loop.
+        """
         if self._subscriber is None:
             logger.info("PlanExecutorService: no subscriber, listen loop inactive")
             return
         logger.info("PlanExecutorService: starting listen loop")
         try:
             while self._running:
-                topic_bytes, msg_bytes = await self._subscriber.recv_multipart()
+                try:
+                    topic_bytes, msg_bytes = await self._subscriber.recv_multipart()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.error("PlanExecutorService: socket recv failed: {}", exc)
+                    await asyncio.sleep(0.1)
+                    continue
                 topic = topic_bytes.decode() if isinstance(topic_bytes, bytes) else str(topic_bytes)
                 payload = msg_bytes.decode() if isinstance(msg_bytes, bytes) else str(msg_bytes)
                 try:
@@ -218,17 +231,24 @@ class PlanExecutorService(RegisterableProcess):
                 except MessageParseError as exc:
                     logger.debug("PlanExecutorService: cannot parse message on {}: {}", topic, exc)
                     continue
-                if isinstance(msg, ExecutionData):
-                    await self._handle_execution(msg)
-                elif isinstance(msg, OrderData):
-                    await self._handle_order_status(msg)
-                elif isinstance(msg, TickData):
-                    await self._handle_tick(topic, msg)
+                try:
+                    if isinstance(msg, ExecutionData):
+                        await self._handle_execution(msg)
+                    elif isinstance(msg, OrderData):
+                        await self._handle_order_status(msg)
+                    elif isinstance(msg, TickData):
+                        await self._handle_tick(topic, msg)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.error(
+                        "PlanExecutorService: handler failed for topic {}: {}",
+                        topic,
+                        exc,
+                    )
         except asyncio.CancelledError:
             logger.info("PlanExecutorService: listen loop cancelled")
             raise
-        except Exception as exc:
-            logger.error("PlanExecutorService: listen loop error: {}", exc)
 
     async def _checkpoint_loop(self) -> None:
         """Persist evaluator state every ``_CHECKPOINT_INTERVAL_S`` seconds."""
@@ -259,11 +279,15 @@ class PlanExecutorService(RegisterableProcess):
             return
         if plan["status"] in _TERMINAL_STATUSES:
             return
+        existing_filled = float(plan.get("filled_quantity", 0.0))
+        incoming_cumulative = float(execution.size)
+        if incoming_cumulative <= existing_filled + 1e-12:
+            return
         evaluator = self.evaluators.get(plan_public_id)
         if evaluator is not None:
             with contextlib.suppress(Exception):
                 await evaluator.on_execution(plan, execution)
-        new_filled = max(float(plan.get("filled_quantity", 0.0)), float(execution.size))
+        new_filled = incoming_cumulative
         total = float(plan["total_quantity"])
         is_complete = new_filled + 1e-9 >= total
         new_status = "completed" if is_complete else "active"

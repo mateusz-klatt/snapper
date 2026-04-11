@@ -377,6 +377,8 @@ class TestCancelOrder:
         Verifies the cancel flow emits a venue-facing cancel command with
         ``command_type='cancel'`` and the child order's ``client_order_id``
         so the outbox dispatcher publishes OrderCancelData to the venue.
+        Also asserts the command hydrates the venue-assigned
+        ``exchange_order_id`` looked up via the repository.
         """
         repo = AsyncMock()
         repo.get_execution_plan = AsyncMock(
@@ -386,6 +388,7 @@ class TestCancelOrder:
             ]
         )
         repo.update_execution_plan_status = AsyncMock(return_value=2)
+        repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-42")
         repo.insert_trade_command = AsyncMock(return_value=(42, "cmd-cancel"))
         client = _create_client(repo)
         response = client.post("/api/orders/plan-1/cancel", json=_cancel_order_body())
@@ -395,6 +398,32 @@ class TestCancelOrder:
         assert inserted["command_type"] == "cancel"
         assert inserted["client_order_id"] == "cid-child-1"
         assert inserted["plan_public_id"] == "plan-1"
+        assert inserted["exchange_order_id"] == "ex-42"
+        client.close()
+
+    def test_cancel_before_venue_ack_emits_command_with_null_exchange_id(self) -> None:
+        """Cancel before venue ACK passes a null exchange_order_id through.
+
+        When the active Order row has not yet been assigned an exchange
+        id the repository lookup returns ``None``; the cancel command
+        must still be inserted so the venue adapter (paper/Kraken) can
+        fall back to cancelling by ``client_order_id``.
+        """
+        repo = AsyncMock()
+        repo.get_execution_plan = AsyncMock(
+            side_effect=[
+                _make_plan_row(status="active", with_child_order=True),
+                _make_plan_row(status="cancel_requested", with_child_order=True),
+            ]
+        )
+        repo.update_execution_plan_status = AsyncMock(return_value=2)
+        repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value=None)
+        repo.insert_trade_command = AsyncMock(return_value=(42, "cmd-cancel"))
+        client = _create_client(repo)
+        response = client.post("/api/orders/plan-1/cancel", json=_cancel_order_body())
+        assert response.status_code == 200
+        inserted = repo.insert_trade_command.call_args[0][0]
+        assert inserted["exchange_order_id"] is None
         client.close()
 
     def test_cancel_by_client_order_id_resolves_plan(self) -> None:
@@ -430,8 +459,16 @@ class TestCancelOrder:
         assert response.status_code == 404
         client.close()
 
-    def test_cancel_with_child_order_insert_failure_swallowed(self) -> None:
-        """Given cancel TradeCommand insert fails, Then the response is still 200."""
+    def test_cancel_with_child_order_insert_failure_marks_plan_failed(self) -> None:
+        """When the cancel TradeCommand insert fails, plan transitions to failed.
+
+        Previously the insert exception was silently swallowed and the
+        plan was left stuck in ``cancel_requested`` with no venue
+        cancel ever sent. Phase 1.5 review fix: on insert failure the
+        service now transitions the plan to ``failed`` with a
+        ``last_error`` and returns HTTP 500 so the caller learns the
+        cancel did not reach the venue.
+        """
         repo = AsyncMock()
         repo.get_execution_plan = AsyncMock(
             side_effect=[
@@ -440,8 +477,14 @@ class TestCancelOrder:
             ]
         )
         repo.update_execution_plan_status = AsyncMock(return_value=2)
+        repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-42")
         repo.insert_trade_command = AsyncMock(side_effect=Exception("DB error"))
         client = _create_client(repo)
         response = client.post("/api/orders/plan-1/cancel", json=_cancel_order_body())
-        assert response.status_code == 200
+        assert response.status_code == 500
+        statuses = [
+            call.kwargs["new_status"] for call in repo.update_execution_plan_status.await_args_list
+        ]
+        assert "cancel_requested" in statuses
+        assert "failed" in statuses
         client.close()
