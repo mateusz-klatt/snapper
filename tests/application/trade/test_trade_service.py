@@ -1122,3 +1122,110 @@ class TestReplayFundingAccruals:
         svc = TradeService()
         svc.replay_funding_accruals("s1", [])
         assert "s1" not in svc._shards
+
+
+class TestDetectCycleTransition:
+    """Tests for TradeService._detect_cycle_transition pure classifier."""
+
+    def test_flat_to_flat_is_none(self) -> None:
+        """Given 0 -> 0, When classified, Then None (no-op)."""
+        assert TradeService._detect_cycle_transition(0.0, 0.0) is None
+
+    def test_flat_to_long_is_open(self) -> None:
+        """Given 0 -> +, When classified, Then 'open'."""
+        assert TradeService._detect_cycle_transition(0.0, 1.5) == "open"
+
+    def test_flat_to_short_is_open(self) -> None:
+        """Given 0 -> -, When classified, Then 'open' (sign-agnostic)."""
+        assert TradeService._detect_cycle_transition(0.0, -2.0) == "open"
+
+    def test_long_to_flat_is_close(self) -> None:
+        """Given + -> 0, When classified, Then 'close'."""
+        assert TradeService._detect_cycle_transition(1.5, 0.0) == "close"
+
+    def test_short_to_flat_is_close(self) -> None:
+        """Given - -> 0, When classified, Then 'close'."""
+        assert TradeService._detect_cycle_transition(-2.0, 0.0) == "close"
+
+    def test_long_to_short_is_flip(self) -> None:
+        """Given + -> -, When classified, Then 'flip'."""
+        assert TradeService._detect_cycle_transition(1.5, -2.0) == "flip"
+
+    def test_short_to_long_is_flip(self) -> None:
+        """Given - -> +, When classified, Then 'flip'."""
+        assert TradeService._detect_cycle_transition(-2.0, 1.5) == "flip"
+
+    def test_long_scale_up_is_scale_up(self) -> None:
+        """Given +1 -> +2, When classified, Then 'scale_up'."""
+        assert TradeService._detect_cycle_transition(1.0, 2.0) == "scale_up"
+
+    def test_short_scale_up_is_scale_up(self) -> None:
+        """Given -1 -> -2 (more negative), When classified, Then 'scale_up'."""
+        assert TradeService._detect_cycle_transition(-1.0, -2.0) == "scale_up"
+
+    def test_long_scale_down_is_none(self) -> None:
+        """Given +2 -> +1, When classified, Then None (no DB write needed)."""
+        assert TradeService._detect_cycle_transition(2.0, 1.0) is None
+
+    def test_short_scale_down_is_none(self) -> None:
+        """Given -2 -> -1, When classified, Then None."""
+        assert TradeService._detect_cycle_transition(-2.0, -1.0) is None
+
+    def test_same_qty_same_sign_is_none(self) -> None:
+        """Given +1.5 -> +1.5, When classified, Then None (equal holds)."""
+        assert TradeService._detect_cycle_transition(1.5, 1.5) is None
+
+    def test_epsilon_old_qty_treated_as_flat(self) -> None:
+        """Given |old| below 1e-12, When classified, Then open (treated as flat)."""
+        assert TradeService._detect_cycle_transition(1e-13, 1.5) == "open"
+
+    def test_epsilon_new_qty_treated_as_flat(self) -> None:
+        """Given |new| below 1e-12, When classified, Then close (treated as flat)."""
+        assert TradeService._detect_cycle_transition(1.5, 1e-13) == "close"
+
+    def test_negative_epsilon_also_flat(self) -> None:
+        """Given old = -1e-13, When classified, Then open (sign doesn't matter near zero)."""
+        assert TradeService._detect_cycle_transition(-1e-13, -2.0) == "open"
+
+
+class TestShardStateCycleCache:
+    """Tests for ShardState.active_cycle_* cache fields."""
+
+    def test_default_cache_is_unset(self) -> None:
+        """Freshly-created shard has no active cycle cached."""
+        svc = TradeService()
+        shard = svc._get_or_create_shard("kraken.BTC-USD.live")
+        assert shard.active_cycle_public_id is None
+        assert shard.active_cycle_max_qty == pytest.approx(0.0)
+
+    def test_cache_is_writable(self) -> None:
+        """Trader can set + clear the cache fields on ShardState directly.
+
+        This validates ShardState carries the cache but TradeService does
+        not mutate it -- the trader is responsible for hydration.
+        """
+        svc = TradeService()
+        shard = svc._get_or_create_shard("kraken.BTC-USD.live")
+        shard.active_cycle_public_id = "cycle-1"
+        shard.active_cycle_max_qty = 2.5
+        assert shard.active_cycle_public_id == "cycle-1"
+        assert shard.active_cycle_max_qty == pytest.approx(2.5)
+        shard.active_cycle_public_id = None
+        shard.active_cycle_max_qty = 0.0
+        assert shard.active_cycle_public_id is None
+
+    def test_apply_fill_does_not_touch_cache(self) -> None:
+        """Position fills mutate position_qty but leave cycle cache untouched.
+
+        The cache is trader-owned; TradeService stays in-memory-only and
+        does not know about position_cycles.
+        """
+        svc = TradeService()
+        shard = svc._get_or_create_shard("kraken.BTC-USD.live")
+        shard.active_cycle_public_id = "cycle-existing"
+        shard.active_cycle_max_qty = 1.0
+        event = _make_venue_event(1, side="buy", fill_size=0.5, fill_price=50000.0)
+        svc.apply_venue_event(event)
+        assert shard.position.position_qty == pytest.approx(0.5)
+        assert shard.active_cycle_public_id == "cycle-existing"
+        assert shard.active_cycle_max_qty == pytest.approx(1.0)

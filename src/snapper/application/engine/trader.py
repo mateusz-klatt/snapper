@@ -58,6 +58,7 @@ from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import AccrualLedgerInsertRow
 from snapper.data.repository_types import ExecutionRow
+from snapper.data.repository_types import PositionCycleInsertRow
 from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import VenueEventRow
 from snapper.infrastructure.symbols.functions import is_tradeable
@@ -1017,14 +1018,19 @@ class TraderCoordinator(RegisterableProcess):
         """Shadow-write fill to TradeService and persist checkpoint.
 
         Constructs a VenueEventRow-like dict from the ZMQ ExecutionData,
-        applies it to TradeService, updates BalanceService, and writes
-        a checkpoint to DB for durable recovery.
+        applies it to TradeService, updates BalanceService, syncs the
+        position cycle lifecycle to DB, and writes a checkpoint for
+        durable recovery. ``old_qty`` is sampled BEFORE
+        :meth:`TradeService.apply_venue_event` and ``new_qty`` AFTER so
+        that :meth:`_sync_position_cycle_on_fill` can classify the
+        transition via :meth:`TradeService._detect_cycle_transition`.
 
         Args:
             fill: Execution fill data from ZMQ.
             engine: Engine that processed the fill (for shard_key).
         """
         shard_key = engine._shard_key
+        old_qty = self.trade_service.get_position(shard_key).position_qty
         venue_event: VenueEventRow = {
             "id": int(time.monotonic_ns()),
             "public_id": "",
@@ -1055,6 +1061,7 @@ class TraderCoordinator(RegisterableProcess):
         }
         self.trade_service.apply_venue_event(venue_event)
         pos = self.trade_service.get_position(shard_key)
+        new_qty = pos.position_qty
         self.balance_service.on_position_changed(
             shard_key=shard_key,
             position_qty=pos.position_qty,
@@ -1063,7 +1070,244 @@ class TraderCoordinator(RegisterableProcess):
             peak_equity=self.trade_service.get_peak_equity(shard_key),
             realized_pnl=pos.realized_pnl,
         )
+        await self._sync_position_cycle_on_fill(engine, old_qty, new_qty, fill)
         await self._persist_checkpoint(shard_key)
+
+    async def _sync_position_cycle_on_fill(
+        self,
+        engine: TradingEngineService,
+        old_qty: float,
+        new_qty: float,
+        fill: ExecutionData,
+    ) -> None:
+        """Sync the position_cycles DB row for a single shadow-written fill.
+
+        Classifies the transition via
+        :meth:`TradeService._detect_cycle_transition` and issues the
+        matching repository call, hydrating
+        :attr:`ShardState.active_cycle_public_id` and
+        :attr:`ShardState.active_cycle_max_qty` on success. TradeService
+        itself stays pure — it does not know about position_cycles;
+        cache hydration lives on the trader side.
+
+        **Degraded identity**: if ``engine.wallet_public_id`` is falsy
+        (recovery path where ``wallet_short`` could not be resolved in
+        ``_recover_from_checkpoints``), all cycle writes are skipped
+        fail-closed and a warning is logged. Pre-existing orphan open
+        cycles may be left unclosed; see the follow-up memory runbook.
+
+        **Symmetric DB fallback (close/flip/scale_up)**: if the shard
+        cache is empty on a non-open transition, the trader re-queries
+        ``get_open_position_cycle`` to avoid reusing a stale open row
+        from a prior life of the shard. Without this, a degraded
+        reconciliation leaves ``active_cycle_public_id=None``; a later
+        close is silently skipped; a later open would then hydrate the
+        cache to the still-open DB row, mixing two logical cycles into
+        one ``public_id``.
+
+        **Idempotency (open)**: ``insert_position_cycle`` is preceded
+        by a ``get_open_position_cycle`` check so a restart that
+        missed the flat->non-flat transition in memory (but not in
+        DB) becomes a cache-hydration no-op instead of a unique index
+        violation.
+
+        Args:
+            engine: Engine owning the shard; source of wallet/operator
+                and shard_key identity.
+            old_qty: Signed position quantity before the fill.
+            new_qty: Signed position quantity after the fill.
+            fill: Execution payload providing timestamps and session
+                provenance.
+        """
+        shard_key = engine._shard_key
+        if not engine.wallet_public_id:
+            logger.warning(
+                "ZMQTrader: position_cycle write skipped (degraded identity) shard={}",
+                shard_key,
+            )
+            return
+        transition = TradeService._detect_cycle_transition(old_qty, new_qty)
+        if transition is None:
+            return
+        shard = self.trade_service._get_or_create_shard(shard_key)
+        now = datetime.now(UTC)
+        operator_pid: str | None = engine.operator_public_id or None
+        exchange_str = str(engine.exchange)
+        mode_str = str(engine.mode)
+
+        if transition == "open":
+            existing = await self.repository.get_open_position_cycle(shard_key, as_of=now)
+            if existing is not None:
+                shard.active_cycle_public_id = existing["public_id"]
+                shard.active_cycle_max_qty = existing["max_qty"]
+                return
+            inst_pid = await self.repository.get_instrument_public_id_by_symbol(
+                native_symbol=engine.instrument,
+                exchange=exchange_str,
+                as_of=now,
+            )
+            if inst_pid is None:
+                logger.warning(
+                    "ZMQTrader: position_cycle open skipped "
+                    "(unresolved instrument) shard={} symbol={}",
+                    shard_key,
+                    engine.instrument,
+                )
+                return
+            open_row: PositionCycleInsertRow = {
+                "instrument_public_id": inst_pid,
+                "exchange": exchange_str,
+                "mode": mode_str,
+                "shard_key": shard_key,
+                "wallet_public_id": engine.wallet_public_id,
+                "operator_public_id": operator_pid,
+                "direction": "long" if new_qty > 0 else "short",
+                "max_qty": abs(new_qty),
+                "status": "open",
+                "opened_at": fill.executed_at,
+                "opening_command_public_id": None,
+                "session_id": fill.session_id,
+                "sequence_id": fill.sequence_id,
+                "timestamp": now,
+            }
+            _id, new_pid = await self.repository.insert_position_cycle(open_row)
+            shard.active_cycle_public_id = new_pid
+            shard.active_cycle_max_qty = abs(new_qty)
+            return
+
+        if transition == "close":
+            cycle_id = shard.active_cycle_public_id
+            if cycle_id is None:
+                fallback = await self.repository.get_open_position_cycle(shard_key, as_of=now)
+                if fallback is not None:
+                    cycle_id = fallback["public_id"]
+                    logger.warning(
+                        "ZMQTrader: position_cycle close recovered via DB fallback "
+                        "(cache miss) shard={} cycle={}",
+                        shard_key,
+                        cycle_id,
+                    )
+            if cycle_id is None:
+                logger.warning(
+                    "ZMQTrader: position_cycle close skipped "
+                    "(no open cycle in cache or DB) shard={}",
+                    shard_key,
+                )
+                return
+            await self.repository.close_position_cycle(
+                cycle_public_id=cycle_id,
+                closed_at=fill.executed_at,
+                closing_command_public_id=None,
+                bus_time=now,
+                session_id=fill.session_id,
+                sequence_id=fill.sequence_id,
+            )
+            shard.active_cycle_public_id = None
+            shard.active_cycle_max_qty = 0.0
+            return
+
+        if transition == "flip":
+            cycle_id = shard.active_cycle_public_id
+            if cycle_id is None:
+                fallback = await self.repository.get_open_position_cycle(shard_key, as_of=now)
+                if fallback is not None:
+                    cycle_id = fallback["public_id"]
+                    logger.warning(
+                        "ZMQTrader: position_cycle flip recovered via DB fallback "
+                        "(cache miss) shard={} cycle={}",
+                        shard_key,
+                        cycle_id,
+                    )
+            if cycle_id is None:
+                logger.warning(
+                    "ZMQTrader: position_cycle flip skipped "
+                    "(no open cycle in cache or DB) shard={}",
+                    shard_key,
+                )
+                return
+            inst_pid = await self.repository.get_instrument_public_id_by_symbol(
+                native_symbol=engine.instrument,
+                exchange=exchange_str,
+                as_of=now,
+            )
+            if inst_pid is None:
+                logger.warning(
+                    "ZMQTrader: position_cycle flip degraded to close-only "
+                    "(unresolved instrument) shard={} symbol={} closing cycle={}",
+                    shard_key,
+                    engine.instrument,
+                    cycle_id,
+                )
+                await self.repository.close_position_cycle(
+                    cycle_public_id=cycle_id,
+                    closed_at=fill.executed_at,
+                    closing_command_public_id=None,
+                    bus_time=now,
+                    session_id=fill.session_id,
+                    sequence_id=fill.sequence_id,
+                )
+                shard.active_cycle_public_id = None
+                shard.active_cycle_max_qty = 0.0
+                return
+            new_open_row: PositionCycleInsertRow = {
+                "instrument_public_id": inst_pid,
+                "exchange": exchange_str,
+                "mode": mode_str,
+                "shard_key": shard_key,
+                "wallet_public_id": engine.wallet_public_id,
+                "operator_public_id": operator_pid,
+                "direction": "long" if new_qty > 0 else "short",
+                "max_qty": abs(new_qty),
+                "status": "open",
+                "opened_at": fill.executed_at,
+                "opening_command_public_id": None,
+                "session_id": fill.session_id,
+                "sequence_id": fill.sequence_id,
+                "timestamp": now,
+            }
+            _id, new_pid = await self.repository.flip_position_cycle(
+                close_cycle_public_id=cycle_id,
+                new_open_row=new_open_row,
+                bus_time=now,
+                session_id=fill.session_id,
+                sequence_id=fill.sequence_id,
+            )
+            shard.active_cycle_public_id = new_pid
+            shard.active_cycle_max_qty = abs(new_qty)
+            return
+
+        if transition == "scale_up":
+            cycle_id = shard.active_cycle_public_id
+            if cycle_id is None:
+                fallback = await self.repository.get_open_position_cycle(shard_key, as_of=now)
+                if fallback is not None:
+                    cycle_id = fallback["public_id"]
+                    shard.active_cycle_public_id = cycle_id
+                    shard.active_cycle_max_qty = fallback["max_qty"]
+                    logger.warning(
+                        "ZMQTrader: position_cycle scale_up recovered via DB fallback "
+                        "(cache miss) shard={} cycle={}",
+                        shard_key,
+                        cycle_id,
+                    )
+            if cycle_id is None:
+                logger.warning(
+                    "ZMQTrader: position_cycle scale_up skipped "
+                    "(no open cycle in cache or DB) shard={}",
+                    shard_key,
+                )
+                return
+            new_max = abs(new_qty)
+            if new_max > shard.active_cycle_max_qty:
+                await self.repository.update_position_cycle_max_qty(
+                    cycle_public_id=cycle_id,
+                    new_max_qty=new_max,
+                    bus_time=now,
+                    session_id=fill.session_id,
+                    sequence_id=fill.sequence_id,
+                )
+                shard.active_cycle_max_qty = new_max
+            return
 
     def _sync_status_to_trade_service(self, order_status: OrderData, parsed: Any) -> None:
         """Shadow-write order status to TradeService.

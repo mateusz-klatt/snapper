@@ -2361,7 +2361,14 @@ def _make_engine_with_inflight(
     position_qty: float = 0.0,
     entry_price: float | None = None,
 ) -> tuple[TraderCoordinator, Any]:
-    """Create a coordinator with an engine that has an in-flight order."""
+    """Create a coordinator with an engine that has an in-flight order.
+
+    ``wallet_public_id`` is set to the empty string so that
+    :meth:`TraderCoordinator._sync_position_cycle_on_fill` takes the
+    degraded-identity fail-closed branch and never reaches the
+    repository. Tests that want to exercise cycle persistence should
+    override this explicitly and mock the repository accordingly.
+    """
     _configure_settings(monkeypatch)
     coord = TraderCoordinator()
     engine = MagicMock()
@@ -2371,6 +2378,7 @@ def _make_engine_with_inflight(
     engine.order_in_flight = True
     engine.position_qty = position_qty
     engine.entry_price = entry_price
+    engine.wallet_public_id = ""
     engine.apply_fill = MagicMock(return_value=True)
     engine.clear_pending_intent = MagicMock(return_value=True)
     coord.engines[f"{instrument}@{exchange}-live"] = engine

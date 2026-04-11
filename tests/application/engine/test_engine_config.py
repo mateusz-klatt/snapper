@@ -1909,3 +1909,358 @@ async def test_run_trading_loop_with_recon_task() -> None:
     coord.signal_subscriber = mock_sub
     with pytest.raises(asyncio.CancelledError):
         await coord._run_trading_loop()
+
+
+def _make_cycle_engine(
+    instrument: str = "BTC-USD",
+    exchange: str = "kraken",
+    wallet_public_id: str = "wallet-1",
+    operator_public_id: str = "op-1",
+    shard_key: str = "kraken.BTC-USD.live.w0000000000aa",
+) -> MagicMock:
+    """Minimal engine stub for _sync_position_cycle_on_fill unit tests."""
+    engine = MagicMock()
+    engine.instrument = instrument
+    engine.exchange = exchange
+    engine.mode = "live"
+    engine.wallet_public_id = wallet_public_id
+    engine.operator_public_id = operator_public_id
+    engine._shard_key = shard_key
+    return engine
+
+
+def _make_cycle_fill(
+    client_order_id: str = "cid-1",
+    executed_at: datetime | None = None,
+    session_id: str = "s-test",
+    sequence_id: int = 1,
+) -> ExecutionData:
+    """Minimal ExecutionData for _sync_position_cycle_on_fill unit tests."""
+    return ExecutionData(
+        type="execution",
+        public_id="fill-1",
+        timestamp=datetime.now(UTC),
+        session_id=session_id,
+        sequence_id=sequence_id,
+        exchange="kraken",
+        instrument="BTC-USD",
+        side="buy",
+        size=1.0,
+        price=50000.0,
+        last_size=1.0,
+        last_price=50000.0,
+        fee=0.5,
+        fee_asset="USD",
+        status="filled",
+        client_order_id=client_order_id,
+        exchange_order_id="ex-1",
+        trade_id="t-1",
+        executed_at=executed_at or datetime.now(UTC),
+    )
+
+
+def _make_cycle_coord(
+    repository: AsyncMock | None = None,
+) -> TraderCoordinator:
+    """Minimal TraderCoordinator for _sync_position_cycle_on_fill unit tests."""
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.trade_service = TradeService()
+    coord.repository = repository or AsyncMock()
+    return coord
+
+
+@pytest.mark.asyncio
+async def test_sync_cycle_degraded_identity_skips_write() -> None:
+    """Given: engine.wallet_public_id is empty, When: sync called, Then: no repo write."""
+    repo = AsyncMock()
+    coord = _make_cycle_coord(repo)
+    engine = _make_cycle_engine(wallet_public_id="")
+    await coord._sync_position_cycle_on_fill(engine, 0.0, 1.5, _make_cycle_fill())
+    repo.get_open_position_cycle.assert_not_called()
+    repo.insert_position_cycle.assert_not_called()
+    repo.close_position_cycle.assert_not_called()
+    repo.flip_position_cycle.assert_not_called()
+    repo.update_position_cycle_max_qty.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sync_cycle_transition_none_is_noop() -> None:
+    """Given: old_qty == new_qty (None transition), When: sync called, Then: no repo write."""
+    repo = AsyncMock()
+    coord = _make_cycle_coord(repo)
+    engine = _make_cycle_engine()
+    await coord._sync_position_cycle_on_fill(engine, 1.5, 1.5, _make_cycle_fill())
+    repo.get_open_position_cycle.assert_not_called()
+    repo.insert_position_cycle.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sync_cycle_open_inserts_and_hydrates_cache() -> None:
+    """Given: flat->long, When: sync called, Then: insert_position_cycle + cache hydrated."""
+    repo = AsyncMock()
+    repo.get_open_position_cycle = AsyncMock(return_value=None)
+    repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
+    repo.insert_position_cycle = AsyncMock(return_value=(1, "cycle-new"))
+    coord = _make_cycle_coord(repo)
+    engine = _make_cycle_engine()
+    fill = _make_cycle_fill()
+    await coord._sync_position_cycle_on_fill(engine, 0.0, 1.5, fill)
+    repo.insert_position_cycle.assert_called_once()
+    inserted = repo.insert_position_cycle.call_args.args[0]
+    assert inserted["direction"] == "long"
+    assert inserted["max_qty"] == pytest.approx(1.5)
+    assert inserted["status"] == "open"
+    assert inserted["instrument_public_id"] == "inst-btc"
+    assert inserted["wallet_public_id"] == "wallet-1"
+    assert inserted["operator_public_id"] == "op-1"
+    shard = coord.trade_service._get_or_create_shard(engine._shard_key)
+    assert shard.active_cycle_public_id == "cycle-new"
+    assert shard.active_cycle_max_qty == pytest.approx(1.5)
+
+
+@pytest.mark.asyncio
+async def test_sync_cycle_open_short_direction_and_operator_none() -> None:
+    """Given: flat->short + engine.operator_public_id empty, Then: direction='short' + operator=None."""
+    repo = AsyncMock()
+    repo.get_open_position_cycle = AsyncMock(return_value=None)
+    repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
+    repo.insert_position_cycle = AsyncMock(return_value=(1, "cycle-new"))
+    coord = _make_cycle_coord(repo)
+    engine = _make_cycle_engine(operator_public_id="")
+    await coord._sync_position_cycle_on_fill(engine, 0.0, -2.0, _make_cycle_fill())
+    inserted = repo.insert_position_cycle.call_args.args[0]
+    assert inserted["direction"] == "short"
+    assert inserted["max_qty"] == pytest.approx(2.0)
+    assert inserted["operator_public_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_sync_cycle_open_existing_cycle_hydrates_cache_only() -> None:
+    """Given: flat->long but DB has active cycle, When: sync called, Then: cache hydrated, no insert."""
+    repo = AsyncMock()
+    existing_row = {"public_id": "cycle-existing", "max_qty": 3.0}
+    repo.get_open_position_cycle = AsyncMock(return_value=existing_row)
+    coord = _make_cycle_coord(repo)
+    engine = _make_cycle_engine()
+    await coord._sync_position_cycle_on_fill(engine, 0.0, 1.5, _make_cycle_fill())
+    repo.insert_position_cycle.assert_not_called()
+    shard = coord.trade_service._get_or_create_shard(engine._shard_key)
+    assert shard.active_cycle_public_id == "cycle-existing"
+    assert shard.active_cycle_max_qty == pytest.approx(3.0)
+
+
+@pytest.mark.asyncio
+async def test_sync_cycle_open_unresolved_instrument_skips() -> None:
+    """Given: flat->long but instrument lookup returns None, When: sync called, Then: skip + no insert."""
+    repo = AsyncMock()
+    repo.get_open_position_cycle = AsyncMock(return_value=None)
+    repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+    coord = _make_cycle_coord(repo)
+    engine = _make_cycle_engine()
+    await coord._sync_position_cycle_on_fill(engine, 0.0, 1.5, _make_cycle_fill())
+    repo.insert_position_cycle.assert_not_called()
+    shard = coord.trade_service._get_or_create_shard(engine._shard_key)
+    assert shard.active_cycle_public_id is None
+
+
+@pytest.mark.asyncio
+async def test_sync_cycle_close_happy_path_clears_cache() -> None:
+    """Given: long->flat + cache hit, When: sync called, Then: close_position_cycle + cache cleared."""
+    repo = AsyncMock()
+    repo.close_position_cycle = AsyncMock(return_value=2)
+    coord = _make_cycle_coord(repo)
+    engine = _make_cycle_engine()
+    shard = coord.trade_service._get_or_create_shard(engine._shard_key)
+    shard.active_cycle_public_id = "cycle-abc"
+    shard.active_cycle_max_qty = 2.5
+    await coord._sync_position_cycle_on_fill(engine, 1.5, 0.0, _make_cycle_fill())
+    repo.close_position_cycle.assert_called_once()
+    kwargs = repo.close_position_cycle.call_args.kwargs
+    assert kwargs["cycle_public_id"] == "cycle-abc"
+    assert shard.active_cycle_public_id is None
+    assert shard.active_cycle_max_qty == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_sync_cycle_close_cache_miss_db_fallback_succeeds() -> None:
+    """Given: long->flat + cache empty + DB has open row, Then: DB fallback + close."""
+    repo = AsyncMock()
+    repo.get_open_position_cycle = AsyncMock(return_value={"public_id": "cycle-db", "max_qty": 2.0})
+    repo.close_position_cycle = AsyncMock(return_value=2)
+    coord = _make_cycle_coord(repo)
+    engine = _make_cycle_engine()
+    await coord._sync_position_cycle_on_fill(engine, 1.5, 0.0, _make_cycle_fill())
+    repo.close_position_cycle.assert_called_once()
+    assert repo.close_position_cycle.call_args.kwargs["cycle_public_id"] == "cycle-db"
+
+
+@pytest.mark.asyncio
+async def test_sync_cycle_close_cache_miss_db_miss_skips() -> None:
+    """Given: long->flat + cache empty + DB empty, When: sync called, Then: skip (no close)."""
+    repo = AsyncMock()
+    repo.get_open_position_cycle = AsyncMock(return_value=None)
+    coord = _make_cycle_coord(repo)
+    engine = _make_cycle_engine()
+    await coord._sync_position_cycle_on_fill(engine, 1.5, 0.0, _make_cycle_fill())
+    repo.close_position_cycle.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sync_cycle_flip_happy_path_hydrates_new_cache() -> None:
+    """Given: long->short + cache hit, When: sync called, Then: flip + cache carries new pid."""
+    repo = AsyncMock()
+    repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
+    repo.flip_position_cycle = AsyncMock(return_value=(2, "cycle-new"))
+    coord = _make_cycle_coord(repo)
+    engine = _make_cycle_engine()
+    shard = coord.trade_service._get_or_create_shard(engine._shard_key)
+    shard.active_cycle_public_id = "cycle-long"
+    shard.active_cycle_max_qty = 1.5
+    await coord._sync_position_cycle_on_fill(engine, 1.5, -2.0, _make_cycle_fill())
+    repo.flip_position_cycle.assert_called_once()
+    kwargs = repo.flip_position_cycle.call_args.kwargs
+    assert kwargs["close_cycle_public_id"] == "cycle-long"
+    assert kwargs["new_open_row"]["direction"] == "short"
+    assert kwargs["new_open_row"]["max_qty"] == pytest.approx(2.0)
+    assert shard.active_cycle_public_id == "cycle-new"
+    assert shard.active_cycle_max_qty == pytest.approx(2.0)
+
+
+@pytest.mark.asyncio
+async def test_sync_cycle_flip_cache_miss_db_fallback_succeeds() -> None:
+    """Given: flip + cache empty + DB has open row, Then: DB fallback cycle_id used in flip."""
+    repo = AsyncMock()
+    repo.get_open_position_cycle = AsyncMock(return_value={"public_id": "cycle-db", "max_qty": 1.0})
+    repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
+    repo.flip_position_cycle = AsyncMock(return_value=(2, "cycle-new"))
+    coord = _make_cycle_coord(repo)
+    engine = _make_cycle_engine()
+    await coord._sync_position_cycle_on_fill(engine, 1.5, -2.0, _make_cycle_fill())
+    repo.flip_position_cycle.assert_called_once()
+    assert repo.flip_position_cycle.call_args.kwargs["close_cycle_public_id"] == "cycle-db"
+
+
+@pytest.mark.asyncio
+async def test_sync_cycle_flip_cache_miss_db_miss_skips() -> None:
+    """Given: flip + cache empty + DB empty, When: sync called, Then: skip (no flip)."""
+    repo = AsyncMock()
+    repo.get_open_position_cycle = AsyncMock(return_value=None)
+    coord = _make_cycle_coord(repo)
+    engine = _make_cycle_engine()
+    await coord._sync_position_cycle_on_fill(engine, 1.5, -2.0, _make_cycle_fill())
+    repo.flip_position_cycle.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sync_cycle_flip_unresolved_instrument_degrades_to_close_only() -> None:
+    """Given: flip + cache hit + unresolved instrument, When: sync called, Then: close old + clear cache.
+
+    The position has objectively flipped in TradeService, so leaving the
+    old cycle live in the cache/DB would cause subsequent short-leg
+    scale_up/close calls to corrupt the wrong row. Instead we degrade
+    to close-only: shut the long cycle cleanly, leave the short leg
+    uncovered (no cycle row), and clear the cache. A later fill that
+    brings the position back to flat will hit the close branch with
+    cache None + DB miss and correctly fail-soft.
+    """
+    repo = AsyncMock()
+    repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+    repo.close_position_cycle = AsyncMock(return_value=2)
+    coord = _make_cycle_coord(repo)
+    engine = _make_cycle_engine()
+    shard = coord.trade_service._get_or_create_shard(engine._shard_key)
+    shard.active_cycle_public_id = "cycle-long"
+    shard.active_cycle_max_qty = 1.5
+    await coord._sync_position_cycle_on_fill(engine, 1.5, -2.0, _make_cycle_fill())
+    repo.flip_position_cycle.assert_not_called()
+    repo.close_position_cycle.assert_called_once()
+    kwargs = repo.close_position_cycle.call_args.kwargs
+    assert kwargs["cycle_public_id"] == "cycle-long"
+    assert shard.active_cycle_public_id is None
+    assert shard.active_cycle_max_qty == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_sync_cycle_flip_db_fallback_unresolved_instrument_closes_fallback_cycle() -> None:
+    """Given: flip + cache miss + DB fallback + unresolved instrument, Then: close fallback cycle.
+
+    Covers the same degraded-close-only path but originating from a cache
+    miss (e.g. after degraded startup reconciliation). The DB-fallback
+    cycle_id is used as the close target. Without this fix, a
+    subsequent short-leg fill would DB-fallback to the same long cycle
+    and corrupt it.
+    """
+    repo = AsyncMock()
+    repo.get_open_position_cycle = AsyncMock(
+        return_value={"public_id": "cycle-db-long", "max_qty": 2.0}
+    )
+    repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+    repo.close_position_cycle = AsyncMock(return_value=2)
+    coord = _make_cycle_coord(repo)
+    engine = _make_cycle_engine()
+    await coord._sync_position_cycle_on_fill(engine, 1.5, -2.0, _make_cycle_fill())
+    repo.flip_position_cycle.assert_not_called()
+    repo.close_position_cycle.assert_called_once()
+    assert repo.close_position_cycle.call_args.kwargs["cycle_public_id"] == "cycle-db-long"
+    shard = coord.trade_service._get_or_create_shard(engine._shard_key)
+    assert shard.active_cycle_public_id is None
+    assert shard.active_cycle_max_qty == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_sync_cycle_scale_up_updates_max() -> None:
+    """Given: scale_up with new_max > cached_max, When: sync called, Then: update_max_qty + cache."""
+    repo = AsyncMock()
+    repo.update_position_cycle_max_qty = AsyncMock(return_value=3)
+    coord = _make_cycle_coord(repo)
+    engine = _make_cycle_engine()
+    shard = coord.trade_service._get_or_create_shard(engine._shard_key)
+    shard.active_cycle_public_id = "cycle-long"
+    shard.active_cycle_max_qty = 1.5
+    await coord._sync_position_cycle_on_fill(engine, 1.5, 3.0, _make_cycle_fill())
+    repo.update_position_cycle_max_qty.assert_called_once()
+    kwargs = repo.update_position_cycle_max_qty.call_args.kwargs
+    assert kwargs["cycle_public_id"] == "cycle-long"
+    assert kwargs["new_max_qty"] == pytest.approx(3.0)
+    assert shard.active_cycle_max_qty == pytest.approx(3.0)
+
+
+@pytest.mark.asyncio
+async def test_sync_cycle_scale_up_below_peak_is_noop() -> None:
+    """Given: scale_up where new_max <= cached peak, When: sync, Then: no update call."""
+    repo = AsyncMock()
+    coord = _make_cycle_coord(repo)
+    engine = _make_cycle_engine()
+    shard = coord.trade_service._get_or_create_shard(engine._shard_key)
+    shard.active_cycle_public_id = "cycle-long"
+    shard.active_cycle_max_qty = 5.0
+    await coord._sync_position_cycle_on_fill(engine, 1.5, 3.0, _make_cycle_fill())
+    repo.update_position_cycle_max_qty.assert_not_called()
+    assert shard.active_cycle_max_qty == pytest.approx(5.0)
+
+
+@pytest.mark.asyncio
+async def test_sync_cycle_scale_up_cache_miss_db_fallback_hydrates_and_may_update() -> None:
+    """Given: scale_up + cache empty + DB has cycle with max=1, Then: hydrate cache + update."""
+    repo = AsyncMock()
+    repo.get_open_position_cycle = AsyncMock(return_value={"public_id": "cycle-db", "max_qty": 1.0})
+    repo.update_position_cycle_max_qty = AsyncMock(return_value=3)
+    coord = _make_cycle_coord(repo)
+    engine = _make_cycle_engine()
+    await coord._sync_position_cycle_on_fill(engine, 1.5, 3.0, _make_cycle_fill())
+    repo.update_position_cycle_max_qty.assert_called_once()
+    assert repo.update_position_cycle_max_qty.call_args.kwargs["cycle_public_id"] == "cycle-db"
+    shard = coord.trade_service._get_or_create_shard(engine._shard_key)
+    assert shard.active_cycle_public_id == "cycle-db"
+    assert shard.active_cycle_max_qty == pytest.approx(3.0)
+
+
+@pytest.mark.asyncio
+async def test_sync_cycle_scale_up_cache_miss_db_miss_skips() -> None:
+    """Given: scale_up + cache empty + DB empty, When: sync, Then: skip (no update)."""
+    repo = AsyncMock()
+    repo.get_open_position_cycle = AsyncMock(return_value=None)
+    coord = _make_cycle_coord(repo)
+    engine = _make_cycle_engine()
+    await coord._sync_position_cycle_on_fill(engine, 1.5, 3.0, _make_cycle_fill())
+    repo.update_position_cycle_max_qty.assert_not_called()

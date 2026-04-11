@@ -69,7 +69,17 @@ class CommandState:
 
 @dataclass
 class ShardState:
-    """Aggregate in-memory state for a single shard_key."""
+    """Aggregate in-memory state for a single shard_key.
+
+    ``active_cycle_public_id`` and ``active_cycle_max_qty`` cache the
+    public_id and peak absolute quantity of the current open
+    ``position_cycles`` row for this shard. The trader (not TradeService)
+    hydrates these fields at fill-sync time and at startup reconciliation
+    so the hot path can issue close/flip/update_max_qty calls without
+    an extra DB lookup. The cache is authoritative while live; on
+    process restart the trader re-reads DB to rebuild it, because
+    checkpoint persistence does not cover these two fields.
+    """
 
     position: PositionProjection = field(default_factory=PositionProjection)
     command: CommandState = field(default_factory=CommandState)
@@ -80,6 +90,8 @@ class ShardState:
     seen_exec_ids: set[str] = field(default_factory=set)
     halted: bool = False
     recon_failure_count: int = 0
+    active_cycle_public_id: str | None = None
+    active_cycle_max_qty: float = 0.0
 
 
 class TradeService:
@@ -291,6 +303,60 @@ class TradeService:
         if trade_id:
             shard.seen_exec_ids.add(trade_id)
         return True
+
+    @staticmethod
+    def _detect_cycle_transition(old_qty: float, new_qty: float) -> str | None:
+        """Classify a shard position change into a cycle lifecycle transition.
+
+        Pure helper with no side effects — the trader uses the result to
+        decide which ``position_cycles`` repository call to issue on a
+        given fill, keeping TradeService free of any DB awareness.
+
+        ``open``: a flat position became non-flat (``|old| < eps`` and
+        ``|new| >= eps``). A new cycle row must be inserted.
+
+        ``close``: a non-flat position returned to zero (``|old| >= eps``
+        and ``|new| < eps``). The active cycle must be SCD2-closed.
+
+        ``flip``: direction reversed in a single fill — both sides are
+        non-flat but with opposite signs. The existing cycle is closed
+        and a new one is opened in the same transaction.
+
+        ``scale_up``: direction was preserved (neither end was flat, same
+        sign) and the new absolute quantity strictly exceeds the old
+        one. Only the peak needs to move; the cycle row stays the same.
+
+        ``None``: all other cases — flat-to-flat, scale-down / hold
+        where ``|new| <= |old|``, or any shape that does not require a
+        DB write. The trader should treat this as a no-op.
+
+        The epsilon is ``1e-12`` to match the zero-snap used by
+        :meth:`_update_position` — quantities below this threshold are
+        indistinguishable from flat in the existing position math.
+
+        Args:
+            old_qty: Signed position quantity before the fill.
+            new_qty: Signed position quantity after the fill.
+
+        Returns:
+            One of ``"open"``, ``"close"``, ``"flip"``, ``"scale_up"``,
+            or ``None``.
+        """
+        eps = 1e-12
+        old_flat = abs(old_qty) < eps
+        new_flat = abs(new_qty) < eps
+        if old_flat and new_flat:
+            return None
+        if old_flat:
+            return "open"
+        if new_flat:
+            return "close"
+        same_sign = (old_qty > 0.0) == (new_qty > 0.0)
+        if not same_sign:
+            return "flip"
+        if abs(new_qty) > abs(old_qty):
+            return "scale_up"
+        return None
 
     def _update_position(
         self,
