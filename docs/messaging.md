@@ -511,6 +511,14 @@ The trade runtime subscribes to `orders.events.*` to keep `TradeService` and
 `BalanceService` in sync during normal operation. `VenueEvent` rows are used as
 the durable recovery and reconciliation backbone.
 
+`PlanExecutorService` (see docs/architecture.md → Execution Plans) also
+subscribes to `orders.events.` and `market.` on the broker XPUB, routes
+`ExecutionData` → fill propagation, `OrderData` → plan status
+transitions, and `TickData` → evaluator dispatch. Plan cancels flow
+through the same `TradeCommand` outbox as submits, with
+`command_type="cancel"` branching `_outbox_publish` to emit
+`OrderCancelData` on `orders.commands.{exchange}.{instrument}.cancel`.
+
 ## ZMQ-WebSocket Bridge
 
 Bridge between ZMQ and WebSocket for frontend:

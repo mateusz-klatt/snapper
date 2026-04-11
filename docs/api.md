@@ -411,7 +411,18 @@ X-CSRF-Token: <csrf_token>
 
 ### POST /api/orders/{plan_public_id}/cancel
 
-Cancel an active execution plan. Requires `cancel:orders` permission.
+Cancel an active execution plan by its plan public id. Requires
+`cancel:orders` permission and caller access to the plan's wallet.
+
+The route transitions the plan to `cancel_requested`, hydrates the
+venue-assigned `exchange_order_id` from the active `orders` row if
+available, and inserts a `cancel` `TradeCommand` so the outbox
+dispatcher can publish `OrderCancelData` on the
+`orders.commands.{ex}.{instr}.cancel` topic. If the cancel
+`TradeCommand` insert fails the plan is transitioned to `failed` with
+`last_error`, and HTTP 500 is returned — `PlanExecutorService` will
+re-emit the cancel on the next startup (idempotent via
+`has_pending_cancel_command`).
 
 **Request:**
 
@@ -434,7 +445,43 @@ X-CSRF-Token: <csrf_token>
 
 **Response (200):** `ExecutionPlanResponse` with status `cancel_requested`.
 
-**Errors:** 404 (not found), 409 (already terminal or concurrent change).
+**Errors:** 403 (wallet not accessible), 404 (not found), 409 (already
+terminal or concurrent change), 500 (cancel command insert failed).
+
+### POST /api/orders/by-client-order-id/{client_order_id}/cancel
+
+UI convenience route that cancels by the child order's
+`client_order_id` (the value displayed on the Orders table). Resolves
+the owning plan via the `trade_commands` table and delegates to the
+shared cancel flow described above.
+
+Requires `cancel:orders` permission. Same response shape and error
+codes as the plan-id route, plus 404 when no plan-linked
+`trade_commands` row is found for the given `client_order_id`.
+
+**Request:**
+
+```http
+POST /api/orders/by-client-order-id/<client_order_id>/cancel
+Content-Type: application/json
+X-CSRF-Token: <csrf_token>
+
+{
+    "type": "cancel_order_command",
+    "session_id": "ui",
+    "sequence_id": 0,
+    "public_id": "<uuid7>",
+    "timestamp": "2026-04-11T12:00:00Z",
+    "payload": {
+        "reason": "cancelled from Orders table"
+    }
+}
+```
+
+**Response (200):** `ExecutionPlanResponse` with status `cancel_requested`.
+
+**Errors:** 403 (wallet not accessible), 404 (no linked plan),
+409 (already terminal), 500 (cancel command insert failed).
 
 ### GET /api/instrument-capabilities
 

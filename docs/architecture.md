@@ -440,12 +440,47 @@ classes running inside `PlanExecutorService`.
 (high-churn evaluator state), `execution_plan_decisions` (tiered decision log),
 `instrument_order_capabilities` (capability matrix), `venue_fee_schedules` (fee tiers).
 
-**Plan types:** `manual_once` (Phase 1, shipped), `bracket` (Phase 2),
-`trailing_stop` (Phase 3), `peg` (Phase 4), `scheduler` (Phase 5).
+**Plan types:** `manual_once` (Phase 1 + Phase 1.5 hardening, shipped),
+`bracket` (Phase 2), `trailing_stop` (Phase 3), `peg` (Phase 4),
+`scheduler` (Phase 5).
 
-**Manual order flow:** `POST /api/orders` creates a `manual_once` plan
-(pending), inserts a `TradeCommand` for the outbox dispatcher, transitions
-to active. `PlanExecutorService` monitors fills and transitions to completed.
+**Manual order create flow:** `POST /api/orders` creates a `manual_once`
+plan (pending), stamps `child_client_order_id`, `native_instrument`, and
+`venue_order_type` into `plan.params`, then inserts a `create`
+`TradeCommand` for the outbox dispatcher and transitions the plan to
+`active`. The `OutboxDispatcher` inside `TraderCoordinator` publishes the
+command as `OrderRequestData` on the `orders.commands.{ex}.{instr}.submit`
+topic.
+
+**Fill propagation:** `PlanExecutorService` subscribes to
+`orders.events.` and `market.` on the broker XPUB and consumes every
+fill. Cumulative `ExecutionData.size` is compared against
+`plan.filled_quantity` with a small epsilon so duplicate or stale frames
+are dropped. Partial fills update `filled_quantity` and keep the plan
+`active`; full fills transition the plan to `completed` with
+`completed_at` stamped via SCD2.
+
+**Cancel flow:** `POST /api/orders/{plan_public_id}/cancel` (plan id path)
+or `POST /api/orders/by-client-order-id/{client_order_id}/cancel` (UI
+convenience route) resolves the plan, verifies wallet scope, transitions
+the plan to `cancel_requested`, hydrates `exchange_order_id` from the
+active `orders` row, and inserts a `cancel` `TradeCommand`. On insert
+failure the plan is marked `failed` and the route returns HTTP 500;
+`PlanExecutorService._recover_plans` then re-emits the cancel on the
+next service restart (deduplicated via `has_pending_cancel_command`).
+The outbox dispatcher branches on `command_type` and re-hydrates
+`exchange_order_id` one more time at publish time so a late venue ACK
+is picked up, then publishes `OrderCancelData` on the
+`orders.commands.{ex}.{instr}.cancel` topic.
+
+**Listen loop resilience:** per-message exceptions (parse failures,
+handler errors) are caught inside the loop so a single bad frame
+cannot silently stop the service. Transient `recv_multipart` errors
+retry with a 100 ms backoff. `asyncio.CancelledError` still unwinds
+the loop for graceful shutdown. After `_setup_subscriber()` the service
+sleeps 500 ms for ZMQ XPUB/XSUB slow-joiner stabilization before
+recovery to avoid losing terminal events triggered by stranded-cancel
+re-emits.
 
 ## Security
 
