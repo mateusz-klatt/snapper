@@ -1375,7 +1375,11 @@ class TraderCoordinator(RegisterableProcess):
           the ``.submit`` topic for the exchange executor to place.
         - ``cancel``: publishes an ``OrderCancelData`` to the ``.cancel``
           topic, carrying the original order's ``client_order_id`` and
-          (optionally) ``exchange_order_id`` so the executor can match.
+          ``exchange_order_id``. The venue id is re-hydrated from the
+          active ``orders`` row at dispatch time so a late venue ACK
+          landing after the REST route snapshotted the command row
+          still results in a cancel that targets the correct exchange
+          order id.
 
         Args:
             cmd: TradeCommandRow dict from the outbox dispatcher.
@@ -1385,6 +1389,13 @@ class TraderCoordinator(RegisterableProcess):
         command_type = cmd["command_type"]
         if command_type == OrderCommandEnum.CANCEL.value:
             topic = order_command_topic(exchange, cmd["instrument"], OrderCommandEnum.CANCEL)
+            resolved_venue_id = cmd.get("exchange_order_id") or ""
+            if not resolved_venue_id:
+                fresh = await self.repository.get_exchange_order_id_for_client_order_id(
+                    cmd["client_order_id"], as_of=datetime.now(UTC)
+                )
+                if fresh:
+                    resolved_venue_id = fresh
             cancel = OrderCancelData(
                 public_id=cmd["client_order_id"],
                 timestamp=datetime.now(UTC),
@@ -1392,7 +1403,7 @@ class TraderCoordinator(RegisterableProcess):
                 sequence_id=cmd["sequence_id"],
                 exchange=exchange,
                 instrument=cmd["instrument"],
-                exchange_order_id=cmd.get("exchange_order_id") or "",
+                exchange_order_id=resolved_venue_id,
                 client_order_id=cmd["client_order_id"],
                 wallet_public_id=cmd.get("wallet_public_id") or "",
                 operator_public_id=cmd.get("operator_public_id"),

@@ -1410,6 +1410,71 @@ describe('Orders', () => {
     expect(screen.queryByTestId('cancel-order-cid-filled')).not.toBeInTheDocument()
   })
 
+  it('hides cancel button on American-spelled canceled status', async () => {
+    const mockOrders: Order[] = [
+      {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
+        clientOrderId: 'cid-canceled',
+        instrument: 'BTC/USD',
+        exchange: 'kraken',
+        side: 'buy',
+        orderType: 'limit',
+        size: 1,
+        filledSize: 0,
+        price: 50000,
+        status: 'canceled',
+        createdAt: new Date('2024-01-01T00:00:00Z'),
+        updatedAt: null,
+      },
+    ]
+    const { useOrders } = await import('../../hooks/queries')
+
+    vi.mocked(useOrders).mockReturnValue({
+      data: mockOrders,
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    renderWithProviders(<Orders />)
+    await waitFor(() => {
+      expect(screen.getByText('canceled')).toBeInTheDocument()
+    })
+    expect(screen.queryByTestId('cancel-order-cid-canceled')).not.toBeInTheDocument()
+  })
+
+  it('hides cancel button on closed status (venue spelling)', async () => {
+    const mockOrders: Order[] = [
+      {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
+        clientOrderId: 'cid-closed',
+        instrument: 'BTC/USD',
+        exchange: 'kraken',
+        side: 'buy',
+        orderType: 'limit',
+        size: 1,
+        filledSize: 1,
+        price: 50000,
+        status: 'closed',
+        createdAt: new Date('2024-01-01T00:00:00Z'),
+        updatedAt: null,
+      },
+    ]
+    const { useOrders } = await import('../../hooks/queries')
+
+    vi.mocked(useOrders).mockReturnValue({
+      data: mockOrders,
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    renderWithProviders(<Orders />)
+    expect(screen.queryByTestId('cancel-order-cid-closed')).not.toBeInTheDocument()
+  })
+
   it('cancel button is disabled while the mutation is pending', async () => {
     const { useOrders, useCancelOrder } = await import('../../hooks/queries')
     const mockOrders: Order[] = [

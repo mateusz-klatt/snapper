@@ -24,6 +24,8 @@ def _make_plan_row(
     total_quantity: float = 1.0,
     filled_quantity: float = 0.0,
     child_client_order_id: str | None = "cid-1",
+    native_instrument: str | None = None,
+    venue_order_type: str | None = None,
 ) -> dict[str, object]:
     """Create a minimal plan row dict for testing."""
     now = datetime(2026, 4, 10, tzinfo=UTC)
@@ -34,6 +36,10 @@ def _make_plan_row(
     }
     if child_client_order_id is not None:
         params["child_client_order_id"] = child_client_order_id
+    if native_instrument is not None:
+        params["native_instrument"] = native_instrument
+    if venue_order_type is not None:
+        params["venue_order_type"] = venue_order_type
     return {
         "public_id": public_id,
         "timestamp": now,
@@ -182,6 +188,159 @@ class TestPlanExecutorService:
         await service._recover_plans()
         assert "plan-1" in service.plans
         assert isinstance(service.evaluators["plan-1"], ManualOnceEvaluator)
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_recover_plans_reemits_stranded_cancel(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """A cancel_requested plan with no cancel TradeCommand is re-emitted.
+
+        Phase 1.5 review round 2 fix: if the REST cancel route crashed
+        after flipping the plan to cancel_requested but before inserting
+        the cancel command, the plan would be stranded forever. On
+        startup recovery the service now re-emits the cancel.
+        """
+        mock_repo = AsyncMock()
+        mock_repo.get_active_execution_plans = AsyncMock(
+            return_value=[
+                _make_plan_row(
+                    public_id="plan-stranded",
+                    status="cancel_requested",
+                    child_client_order_id="cid-strand",
+                    native_instrument="BTC-USD",
+                    venue_order_type="limit",
+                )
+            ]
+        )
+        mock_repo.get_latest_plan_checkpoint = AsyncMock(return_value=None)
+        mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value="plan-stranded")
+        mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-77")
+        mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-77"))
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        await service._recover_plans()
+        mock_repo.insert_trade_command.assert_awaited_once()
+        inserted = mock_repo.insert_trade_command.await_args[0][0]
+        assert inserted["command_type"] == "cancel"
+        assert inserted["client_order_id"] == "cid-strand"
+        assert inserted["plan_public_id"] == "plan-stranded"
+        assert inserted["exchange_order_id"] == "ex-77"
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_recover_plans_skips_stranded_cancel_without_metadata(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """A cancel_requested plan with no child_client_order_id is a no-op.
+
+        Legacy or test-only plan rows missing ``child_client_order_id``
+        or ``native_instrument`` cannot be re-emitted — the service
+        leaves them alone rather than crashing.
+        """
+        mock_repo = AsyncMock()
+        mock_repo.get_active_execution_plans = AsyncMock(
+            return_value=[
+                _make_plan_row(
+                    public_id="plan-old",
+                    status="cancel_requested",
+                    child_client_order_id=None,
+                )
+            ]
+        )
+        mock_repo.get_latest_plan_checkpoint = AsyncMock(return_value=None)
+        mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd"))
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        await service._recover_plans()
+        mock_repo.insert_trade_command.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_reemit_stranded_cancel_swallows_lookup_failure(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Lookup failures while re-emitting cancels are logged, not raised."""
+        mock_repo = AsyncMock()
+        mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(side_effect=Exception("DB"))
+        mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd"))
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(
+            public_id="plan-err",
+            status="cancel_requested",
+            native_instrument="BTC-USD",
+            venue_order_type="limit",
+        )
+        await service._reemit_stranded_cancel(plan)
+        mock_repo.insert_trade_command.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_reemit_stranded_cancel_swallows_venue_lookup_failure(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Venue-id lookup failure falls back to None exchange_order_id."""
+        mock_repo = AsyncMock()
+        mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value="plan-x")
+        mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(side_effect=Exception("DB"))
+        mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd"))
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(
+            public_id="plan-x",
+            status="cancel_requested",
+            native_instrument="BTC-USD",
+            venue_order_type="limit",
+        )
+        await service._reemit_stranded_cancel(plan)
+        inserted = mock_repo.insert_trade_command.await_args[0][0]
+        assert inserted["exchange_order_id"] is None
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_reemit_stranded_cancel_swallows_insert_failure(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """A failing re-emit insert is logged and does not crash recovery."""
+        mock_repo = AsyncMock()
+        mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value="plan-y")
+        mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-9")
+        mock_repo.insert_trade_command = AsyncMock(side_effect=Exception("DB"))
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(
+            public_id="plan-y",
+            status="cancel_requested",
+            native_instrument="BTC-USD",
+            venue_order_type="limit",
+        )
+        await service._reemit_stranded_cancel(plan)
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_reemit_stranded_cancel_skips_when_no_plan_link(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """If the plan_public_id lookup returns None, no cancel is emitted."""
+        mock_repo = AsyncMock()
+        mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value=None)
+        mock_repo.insert_trade_command = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(
+            public_id="plan-z",
+            status="cancel_requested",
+            native_instrument="BTC-USD",
+        )
+        await service._reemit_stranded_cancel(plan)
+        mock_repo.insert_trade_command.assert_not_called()
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")

@@ -9,7 +9,15 @@ import { exportToCSV } from '../../lib/csvExport'
 import { EmptyState } from '../../components/ui'
 import clsx from 'clsx'
 
-const TERMINAL_ORDER_STATUSES = new Set(['filled', 'cancelled', 'rejected', 'error', 'expired'])
+const TERMINAL_ORDER_STATUSES = new Set([
+  'filled',
+  'cancelled',
+  'canceled',
+  'rejected',
+  'error',
+  'expired',
+  'closed',
+])
 
 const OrderCard: React.FC<{ order: Order }> = ({ order }) => {
   const cancelOrder = useCancelOrder()
@@ -23,6 +31,8 @@ const OrderCard: React.FC<{ order: Order }> = ({ order }) => {
       case 'open':
         return 'text-info-400 bg-info-900/20'
       case 'cancelled':
+      case 'canceled':
+      case 'closed':
         return 'text-muted-400 bg-muted-900/20'
       case 'rejected':
       case 'error':

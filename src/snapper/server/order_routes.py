@@ -387,14 +387,23 @@ async def _cancel_plan(
                 plan_public_id,
                 exc,
             )
-            await repo.update_execution_plan_status(
-                public_id=plan_public_id,
-                new_status="failed",
-                bus_time=ts,
-                session_id=sid,
-                sequence_id=tracker.next_sequence(_REST_STREAM),
-                last_error=f"Cancel command insert failed: {exc}",
-            )
+            try:
+                await repo.update_execution_plan_status(
+                    public_id=plan_public_id,
+                    new_status="failed",
+                    bus_time=ts,
+                    session_id=sid,
+                    sequence_id=tracker.next_sequence(_REST_STREAM),
+                    last_error=f"Cancel command insert failed: {exc}",
+                )
+            except Exception as compensation_exc:
+                logger.error(
+                    "Failed to compensate plan {} to failed after cancel insert "
+                    "error: {}; PlanExecutorService recovery re-emits the cancel "
+                    "on restart",
+                    plan_public_id,
+                    compensation_exc,
+                )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to emit cancel command",

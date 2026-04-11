@@ -488,3 +488,38 @@ class TestCancelOrder:
         assert "cancel_requested" in statuses
         assert "failed" in statuses
         client.close()
+
+    def test_cancel_compensation_failure_still_raises_500(self) -> None:
+        """If both insert and compensation update fail, route still returns 500.
+
+        Phase 1.5 review round 2 fix: a second failure in the
+        compensating ``failed`` transition must not mask the original
+        cancel-insert failure. The plan is stranded in
+        ``cancel_requested`` and the PlanExecutorService recovery loop
+        re-emits the cancel on next startup.
+        """
+        repo = AsyncMock()
+        repo.get_execution_plan = AsyncMock(
+            side_effect=[
+                _make_plan_row(status="active", with_child_order=True),
+                _make_plan_row(status="cancel_requested", with_child_order=True),
+            ]
+        )
+
+        calls: list[str] = []
+
+        async def _update_status(**kwargs: Any) -> int | None:
+            calls.append(kwargs["new_status"])
+            if kwargs["new_status"] == "failed":
+                raise RuntimeError("compensation DB error")
+            return 2
+
+        repo.update_execution_plan_status = _update_status
+        repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-42")
+        repo.insert_trade_command = AsyncMock(side_effect=Exception("primary DB error"))
+        client = _create_client(repo)
+        response = client.post("/api/orders/plan-1/cancel", json=_cancel_order_body())
+        assert response.status_code == 500
+        assert "cancel_requested" in calls
+        assert "failed" in calls
+        client.close()

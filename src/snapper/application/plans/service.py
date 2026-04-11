@@ -138,7 +138,14 @@ class PlanExecutorService(RegisterableProcess):
         logger.info("PlanExecutorService: subscribed to orders.events. and market.")
 
     async def _recover_plans(self) -> None:
-        """Load all actionable plans from DB and instantiate evaluators."""
+        """Load all actionable plans from DB and instantiate evaluators.
+
+        For plans recovered in ``cancel_requested`` status with no
+        outstanding cancel ``trade_commands`` row, re-emit the cancel
+        command. This closes the gap where a cancel route crashed
+        between the plan transition and the command insert, leaving the
+        plan stranded in ``cancel_requested`` forever.
+        """
         rows = await self.repository.get_active_execution_plans()
         for row in rows:
             plan_type = row["plan_type"]
@@ -157,7 +164,84 @@ class PlanExecutorService(RegisterableProcess):
                 self._watermarks[row["public_id"]] = checkpoint["last_venue_event_id"]
                 self._last_tick_timestamps[row["public_id"]] = checkpoint["last_tick_timestamp"]
             self._register_plan(row, evaluator)
+            if row["status"] == "cancel_requested":
+                await self._reemit_stranded_cancel(row)
         logger.info("Recovered {} plans from DB", len(self.plans))
+
+    async def _reemit_stranded_cancel(self, plan: ExecutionPlanRow) -> None:
+        """Re-emit a cancel TradeCommand for a stranded cancel_requested plan.
+
+        A plan can end up in ``cancel_requested`` with no matching
+        cancel command if the REST cancel route crashed after the
+        status transition but before the command insert (or if the
+        compensating ``failed`` transition also failed). On startup we
+        re-emit the cancel so the venue adapter still sees it.
+
+        If the plan has no child ``client_order_id`` stamped (legacy or
+        test-only rows) this is a no-op.
+
+        Args:
+            plan: Recovered plan row in ``cancel_requested`` status.
+        """
+        params = plan.get("params") or {}
+        child_client_order_id = params.get("child_client_order_id")
+        native_instrument = params.get("native_instrument")
+        if not isinstance(child_client_order_id, str) or not isinstance(native_instrument, str):
+            return
+        try:
+            existing = await self.repository.get_plan_public_id_for_client_order_id(
+                child_client_order_id
+            )
+        except Exception as exc:
+            logger.error("Stranded cancel lookup failed for {}: {}", plan["public_id"], exc)
+            return
+        if existing is None:
+            return
+        now = datetime.now(UTC)
+        try:
+            exchange_order_id = await self.repository.get_exchange_order_id_for_client_order_id(
+                child_client_order_id, as_of=now
+            )
+        except Exception as exc:
+            logger.error("Stranded cancel venue lookup failed for {}: {}", plan["public_id"], exc)
+            exchange_order_id = None
+        session_id = self.tracker.session_id
+        sequence_id = self.tracker.next_sequence("plan_stranded_cancels")
+        row: dict[str, Any] = {
+            "command_type": "cancel",
+            "shard_key": plan["shard_key"],
+            "exchange": plan["exchange"],
+            "instrument": native_instrument,
+            "mode": plan["mode"],
+            "strategy_id": "manual",
+            "client_order_id": child_client_order_id,
+            "venue_client_id": child_client_order_id,
+            "side": plan["side"],
+            "order_type": str(params.get("venue_order_type", "market")),
+            "quantity": plan["total_quantity"],
+            "price": params.get("price"),
+            "leverage": params.get("leverage"),
+            "reduce_only": False,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": plan["public_id"],
+            "session_id": session_id,
+            "sequence_id": sequence_id,
+            "timestamp": now,
+            "wallet_public_id": plan["wallet_public_id"] or "",
+            "operator_public_id": plan["operator_public_id"],
+            "user_public_id": None,
+            "plan_public_id": plan["public_id"],
+            "exchange_order_id": exchange_order_id,
+        }
+        try:
+            await self.repository.insert_trade_command(cast(Any, row))
+            logger.info(
+                "PlanExecutorService: re-emitted stranded cancel for plan {}",
+                plan["public_id"],
+            )
+        except Exception as exc:
+            logger.error("Stranded cancel re-emit failed for plan {}: {}", plan["public_id"], exc)
 
     def _register_plan(self, row: ExecutionPlanRow, evaluator: PlanEvaluator) -> None:
         """Install ``row``/``evaluator`` in memory and index by child order id.

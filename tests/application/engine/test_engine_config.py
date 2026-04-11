@@ -1540,6 +1540,97 @@ async def test_outbox_publish_cancel_sends_order_cancel_data() -> None:
 
 
 @pytest.mark.asyncio
+async def test_outbox_publish_cancel_rehydrates_missing_exchange_order_id() -> None:
+    """Cancel dispatch refreshes exchange_order_id from the repo when empty.
+
+    Given: a TraderCoordinator whose outbox is publishing a cancel
+        TradeCommand whose ``exchange_order_id`` is ``None`` (the REST
+        cancel route snapshotted the row before the venue ACK assigned
+        the id),
+    When: ``_outbox_publish`` is invoked,
+    Then: the dispatcher re-queries the repository at publish time and
+        the resulting ``OrderCancelData`` carries the hydrated venue id
+        so the live adapter can cancel by exchange id.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.msg_publisher = AsyncMock()
+    mock_repo = MagicMock()
+    mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-late")
+    coord.repository = mock_repo
+    cmd: dict[str, Any] = {
+        "public_id": "cmd-cancel",
+        "client_order_id": "cid-cancel",
+        "command_type": "cancel",
+        "shard_key": "kraken.BTC-USD.live",
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "strategy_id": "manual",
+        "side": "buy",
+        "order_type": "market",
+        "quantity": 0.5,
+        "price": None,
+        "leverage": None,
+        "reduce_only": False,
+        "session_id": "s1",
+        "sequence_id": 3,
+        "exchange_order_id": None,
+        "wallet_public_id": "wallet-1",
+        "operator_public_id": None,
+        "user_public_id": None,
+    }
+    await coord._outbox_publish(cmd)
+    mock_repo.get_exchange_order_id_for_client_order_id.assert_awaited_once()
+    sent = coord.msg_publisher.send.call_args[0][1]
+    assert sent.exchange_order_id == "ex-late"
+
+
+@pytest.mark.asyncio
+async def test_outbox_publish_cancel_repo_returns_none_keeps_empty() -> None:
+    """Cancel dispatch still publishes when the repo has no venue id yet.
+
+    Given: a cancel TradeCommand whose ``exchange_order_id`` is empty
+        and whose matching ``orders`` row has not yet been ACKed by
+        the venue,
+    When: ``_outbox_publish`` is invoked,
+    Then: the resulting ``OrderCancelData`` is still published with an
+        empty ``exchange_order_id`` so paper executors can fall back
+        to cancelling by ``client_order_id``.
+    """
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.msg_publisher = AsyncMock()
+    mock_repo = MagicMock()
+    mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value=None)
+    coord.repository = mock_repo
+    cmd: dict[str, Any] = {
+        "public_id": "cmd-cancel",
+        "client_order_id": "cid-cancel",
+        "command_type": "cancel",
+        "shard_key": "paper.BTC-USD.live",
+        "exchange": "paper",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "strategy_id": "manual",
+        "side": "buy",
+        "order_type": "market",
+        "quantity": 0.5,
+        "price": None,
+        "leverage": None,
+        "reduce_only": False,
+        "session_id": "s1",
+        "sequence_id": 3,
+        "exchange_order_id": "",
+        "wallet_public_id": "wallet-1",
+        "operator_public_id": None,
+        "user_public_id": None,
+    }
+    await coord._outbox_publish(cmd)
+    sent = coord.msg_publisher.send.call_args[0][1]
+    assert sent.exchange_order_id == ""
+    assert sent.client_order_id == "cid-cancel"
+
+
+@pytest.mark.asyncio
 async def test_outbox_publish_propagates_leverage_and_reduce_only() -> None:
     """Outbox publish forwards leverage and reduce_only into OrderRequestData.
 
