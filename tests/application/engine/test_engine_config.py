@@ -1971,7 +1971,12 @@ def _make_cycle_coord(
 
 @pytest.mark.asyncio
 async def test_sync_cycle_degraded_identity_skips_write() -> None:
-    """Given: engine.wallet_public_id is empty, When: sync called, Then: no repo write."""
+    """Degraded identity fail-closed: empty wallet_public_id triggers full skip.
+
+    Given: an engine whose wallet_public_id is the empty string,
+    When: _sync_position_cycle_on_fill runs after a flat->long fill,
+    Then: no repository method is called and the cycle is left unwritten.
+    """
     repo = AsyncMock()
     coord = _make_cycle_coord(repo)
     engine = _make_cycle_engine(wallet_public_id="")
@@ -1985,7 +1990,12 @@ async def test_sync_cycle_degraded_identity_skips_write() -> None:
 
 @pytest.mark.asyncio
 async def test_sync_cycle_transition_none_is_noop() -> None:
-    """Given: old_qty == new_qty (None transition), When: sync called, Then: no repo write."""
+    """Same direction equal-magnitude fills are a no-op (None transition).
+
+    Given: an engine with existing position 1.5,
+    When: a fill leaves position_qty unchanged at 1.5,
+    Then: _detect_cycle_transition returns None and no repo call is made.
+    """
     repo = AsyncMock()
     coord = _make_cycle_coord(repo)
     engine = _make_cycle_engine()
@@ -1996,7 +2006,12 @@ async def test_sync_cycle_transition_none_is_noop() -> None:
 
 @pytest.mark.asyncio
 async def test_sync_cycle_open_inserts_and_hydrates_cache() -> None:
-    """Given: flat->long, When: sync called, Then: insert_position_cycle + cache hydrated."""
+    """Open transition inserts a new cycle and hydrates the shard cache.
+
+    Given: a flat shard with no existing open cycle in the DB,
+    When: a flat->long fill triggers an open transition,
+    Then: insert_position_cycle is called and the shard cache mirrors the new row.
+    """
     repo = AsyncMock()
     repo.get_open_position_cycle = AsyncMock(return_value=None)
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
@@ -2020,7 +2035,12 @@ async def test_sync_cycle_open_inserts_and_hydrates_cache() -> None:
 
 @pytest.mark.asyncio
 async def test_sync_cycle_open_short_direction_and_operator_none() -> None:
-    """Given: flat->short + engine.operator_public_id empty, Then: direction='short' + operator=None."""
+    """Open transition for a short flips direction and coerces empty operator to None.
+
+    Given: an engine with empty operator_public_id and no existing cycle,
+    When: a flat->short fill triggers an open transition,
+    Then: the inserted row carries direction='short' and operator_public_id=None.
+    """
     repo = AsyncMock()
     repo.get_open_position_cycle = AsyncMock(return_value=None)
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
@@ -2036,7 +2056,12 @@ async def test_sync_cycle_open_short_direction_and_operator_none() -> None:
 
 @pytest.mark.asyncio
 async def test_sync_cycle_open_existing_cycle_hydrates_cache_only() -> None:
-    """Given: flat->long but DB has active cycle, When: sync called, Then: cache hydrated, no insert."""
+    """Idempotency on open: existing DB row hydrates the cache instead of double-inserting.
+
+    Given: an open cycle already exists in the DB for the shard,
+    When: a flat->long fill triggers an open transition,
+    Then: insert_position_cycle is skipped and the shard cache is hydrated from the existing row.
+    """
     repo = AsyncMock()
     existing_row = {"public_id": "cycle-existing", "max_qty": 3.0}
     repo.get_open_position_cycle = AsyncMock(return_value=existing_row)
@@ -2051,7 +2076,12 @@ async def test_sync_cycle_open_existing_cycle_hydrates_cache_only() -> None:
 
 @pytest.mark.asyncio
 async def test_sync_cycle_open_unresolved_instrument_skips() -> None:
-    """Given: flat->long but instrument lookup returns None, When: sync called, Then: skip + no insert."""
+    """Open transition skips when the instrument symbol cannot be resolved.
+
+    Given: get_instrument_public_id_by_symbol returns None for the engine's symbol,
+    When: a flat->long fill triggers an open transition,
+    Then: insert_position_cycle is skipped and the shard cache stays empty.
+    """
     repo = AsyncMock()
     repo.get_open_position_cycle = AsyncMock(return_value=None)
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
@@ -2065,7 +2095,12 @@ async def test_sync_cycle_open_unresolved_instrument_skips() -> None:
 
 @pytest.mark.asyncio
 async def test_sync_cycle_close_happy_path_clears_cache() -> None:
-    """Given: long->flat + cache hit, When: sync called, Then: close_position_cycle + cache cleared."""
+    """Close transition with cache hit closes the cycle and clears the shard cache.
+
+    Given: a shard with an active cycle cached in ShardState,
+    When: a long->flat fill triggers a close transition,
+    Then: close_position_cycle is called and both cache fields reset.
+    """
     repo = AsyncMock()
     repo.close_position_cycle = AsyncMock(return_value=2)
     coord = _make_cycle_coord(repo)
@@ -2083,7 +2118,12 @@ async def test_sync_cycle_close_happy_path_clears_cache() -> None:
 
 @pytest.mark.asyncio
 async def test_sync_cycle_close_cache_miss_db_fallback_succeeds() -> None:
-    """Given: long->flat + cache empty + DB has open row, Then: DB fallback + close."""
+    """Close transition recovers via DB fallback when the shard cache is empty.
+
+    Given: an empty shard cache and an open cycle row in the DB,
+    When: a long->flat fill triggers a close transition,
+    Then: get_open_position_cycle returns the row and close_position_cycle uses its public_id.
+    """
     repo = AsyncMock()
     repo.get_open_position_cycle = AsyncMock(return_value={"public_id": "cycle-db", "max_qty": 2.0})
     repo.close_position_cycle = AsyncMock(return_value=2)
@@ -2096,7 +2136,12 @@ async def test_sync_cycle_close_cache_miss_db_fallback_succeeds() -> None:
 
 @pytest.mark.asyncio
 async def test_sync_cycle_close_cache_miss_db_miss_skips() -> None:
-    """Given: long->flat + cache empty + DB empty, When: sync called, Then: skip (no close)."""
+    """Close transition fail-soft when neither cache nor DB knows of any open cycle.
+
+    Given: empty shard cache and no open cycle in the DB for this shard,
+    When: a long->flat fill triggers a close transition,
+    Then: close_position_cycle is not called and the helper logs a warning.
+    """
     repo = AsyncMock()
     repo.get_open_position_cycle = AsyncMock(return_value=None)
     coord = _make_cycle_coord(repo)
@@ -2107,7 +2152,12 @@ async def test_sync_cycle_close_cache_miss_db_miss_skips() -> None:
 
 @pytest.mark.asyncio
 async def test_sync_cycle_flip_happy_path_hydrates_new_cache() -> None:
-    """Given: long->short + cache hit, When: sync called, Then: flip + cache carries new pid."""
+    """Flip transition with cache hit calls flip_position_cycle and re-hydrates the cache.
+
+    Given: a shard with an active long cycle cached and a resolvable instrument,
+    When: a long->short fill triggers a flip transition,
+    Then: flip_position_cycle runs and shard cache carries the new short cycle's public_id.
+    """
     repo = AsyncMock()
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
     repo.flip_position_cycle = AsyncMock(return_value=(2, "cycle-new"))
@@ -2128,7 +2178,12 @@ async def test_sync_cycle_flip_happy_path_hydrates_new_cache() -> None:
 
 @pytest.mark.asyncio
 async def test_sync_cycle_flip_cache_miss_db_fallback_succeeds() -> None:
-    """Given: flip + cache empty + DB has open row, Then: DB fallback cycle_id used in flip."""
+    """Flip transition with cache miss recovers cycle_id from DB before calling flip.
+
+    Given: empty shard cache and an open cycle row in the DB,
+    When: a long->short fill triggers a flip transition,
+    Then: the DB fallback cycle_id is passed to flip_position_cycle.
+    """
     repo = AsyncMock()
     repo.get_open_position_cycle = AsyncMock(return_value={"public_id": "cycle-db", "max_qty": 1.0})
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
@@ -2142,7 +2197,12 @@ async def test_sync_cycle_flip_cache_miss_db_fallback_succeeds() -> None:
 
 @pytest.mark.asyncio
 async def test_sync_cycle_flip_cache_miss_db_miss_skips() -> None:
-    """Given: flip + cache empty + DB empty, When: sync called, Then: skip (no flip)."""
+    """Flip transition fail-soft when neither cache nor DB has any cycle to close.
+
+    Given: empty shard cache and no open cycle in the DB,
+    When: a long->short fill triggers a flip transition,
+    Then: flip_position_cycle is not called and the helper logs a warning.
+    """
     repo = AsyncMock()
     repo.get_open_position_cycle = AsyncMock(return_value=None)
     coord = _make_cycle_coord(repo)
@@ -2153,15 +2213,19 @@ async def test_sync_cycle_flip_cache_miss_db_miss_skips() -> None:
 
 @pytest.mark.asyncio
 async def test_sync_cycle_flip_unresolved_instrument_degrades_to_close_only() -> None:
-    """Given: flip + cache hit + unresolved instrument, When: sync called, Then: close old + clear cache.
+    """Flip with unresolved instrument degrades to close-only and clears the cache.
 
     The position has objectively flipped in TradeService, so leaving the
     old cycle live in the cache/DB would cause subsequent short-leg
     scale_up/close calls to corrupt the wrong row. Instead we degrade
     to close-only: shut the long cycle cleanly, leave the short leg
-    uncovered (no cycle row), and clear the cache. A later fill that
-    brings the position back to flat will hit the close branch with
-    cache None + DB miss and correctly fail-soft.
+    uncovered (no cycle row), and clear the cache.
+
+    Given: a flip transition with cached cycle_id but inst_pid lookup returns None,
+    When: _sync_position_cycle_on_fill runs,
+    Then: flip_position_cycle is skipped, close_position_cycle closes the old row,
+        and the shard cache is cleared so subsequent fail-soft paths handle the
+        uncovered short leg.
     """
     repo = AsyncMock()
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
@@ -2182,13 +2246,17 @@ async def test_sync_cycle_flip_unresolved_instrument_degrades_to_close_only() ->
 
 @pytest.mark.asyncio
 async def test_sync_cycle_flip_db_fallback_unresolved_instrument_closes_fallback_cycle() -> None:
-    """Given: flip + cache miss + DB fallback + unresolved instrument, Then: close fallback cycle.
+    """Flip degrade-to-close-only also fires when cycle_id comes from DB fallback.
 
     Covers the same degraded-close-only path but originating from a cache
     miss (e.g. after degraded startup reconciliation). The DB-fallback
     cycle_id is used as the close target. Without this fix, a
     subsequent short-leg fill would DB-fallback to the same long cycle
     and corrupt it.
+
+    Given: empty shard cache + DB has open long cycle + unresolved instrument,
+    When: a long->short fill triggers a flip transition,
+    Then: close_position_cycle uses the DB-fallback cycle_id and the shard cache stays empty.
     """
     repo = AsyncMock()
     repo.get_open_position_cycle = AsyncMock(
@@ -2209,7 +2277,12 @@ async def test_sync_cycle_flip_db_fallback_unresolved_instrument_closes_fallback
 
 @pytest.mark.asyncio
 async def test_sync_cycle_scale_up_updates_max() -> None:
-    """Given: scale_up with new_max > cached_max, When: sync called, Then: update_max_qty + cache."""
+    """Scale_up transition bumps max_qty in DB and cache when the new size is a new peak.
+
+    Given: a shard with cached cycle and active_cycle_max_qty=1.5,
+    When: a long fill scales position from 1.5 to 3.0,
+    Then: update_position_cycle_max_qty is called with new_max_qty=3.0 and the cache reflects it.
+    """
     repo = AsyncMock()
     repo.update_position_cycle_max_qty = AsyncMock(return_value=3)
     coord = _make_cycle_coord(repo)
@@ -2227,7 +2300,12 @@ async def test_sync_cycle_scale_up_updates_max() -> None:
 
 @pytest.mark.asyncio
 async def test_sync_cycle_scale_up_below_peak_is_noop() -> None:
-    """Given: scale_up where new_max <= cached peak, When: sync, Then: no update call."""
+    """Scale_up transition is a no-op when the new abs is below the cached peak.
+
+    Given: a shard with cached active_cycle_max_qty=5.0,
+    When: a long fill scales position from 1.5 to 3.0 (still below cached peak),
+    Then: update_position_cycle_max_qty is not called and cache peak stays at 5.0.
+    """
     repo = AsyncMock()
     coord = _make_cycle_coord(repo)
     engine = _make_cycle_engine()
@@ -2241,7 +2319,12 @@ async def test_sync_cycle_scale_up_below_peak_is_noop() -> None:
 
 @pytest.mark.asyncio
 async def test_sync_cycle_scale_up_cache_miss_db_fallback_hydrates_and_may_update() -> None:
-    """Given: scale_up + cache empty + DB has cycle with max=1, Then: hydrate cache + update."""
+    """Scale_up with cache miss recovers cycle from DB then bumps if recovered peak is stale.
+
+    Given: empty shard cache and DB has open cycle with max_qty=1.0,
+    When: a long fill scales position from 1.5 to 3.0,
+    Then: cache is hydrated from DB row and update_position_cycle_max_qty bumps peak to 3.0.
+    """
     repo = AsyncMock()
     repo.get_open_position_cycle = AsyncMock(return_value={"public_id": "cycle-db", "max_qty": 1.0})
     repo.update_position_cycle_max_qty = AsyncMock(return_value=3)
@@ -2257,7 +2340,12 @@ async def test_sync_cycle_scale_up_cache_miss_db_fallback_hydrates_and_may_updat
 
 @pytest.mark.asyncio
 async def test_sync_cycle_scale_up_cache_miss_db_miss_skips() -> None:
-    """Given: scale_up + cache empty + DB empty, When: sync, Then: skip (no update)."""
+    """Scale_up fail-soft when neither cache nor DB has a cycle to bump.
+
+    Given: empty shard cache and no open cycle in DB,
+    When: a long fill scales position from 1.5 to 3.0,
+    Then: update_position_cycle_max_qty is not called and the helper logs a warning.
+    """
     repo = AsyncMock()
     repo.get_open_position_cycle = AsyncMock(return_value=None)
     coord = _make_cycle_coord(repo)
@@ -2285,7 +2373,12 @@ def _make_reconcile_coord(
 
 @pytest.mark.asyncio
 async def test_reconcile_no_engines_is_noop() -> None:
-    """Given: zero engines, When: reconcile called, Then: no repo calls."""
+    """Reconciliation is a no-op when there are no engines to walk.
+
+    Given: a TraderCoordinator with an empty engines dict,
+    When: _reconcile_position_cycles runs,
+    Then: no repository methods are called.
+    """
     repo = AsyncMock()
     coord = _make_reconcile_coord(repo)
     await coord._reconcile_position_cycles()
@@ -2295,7 +2388,12 @@ async def test_reconcile_no_engines_is_noop() -> None:
 
 @pytest.mark.asyncio
 async def test_reconcile_flat_engine_without_stale_row_is_noop() -> None:
-    """Given: engine position_qty=0 + no open cycle in DB, When: reconcile, Then: no writes."""
+    """Reconciliation skips a flat shard with no stale cycle row in the DB.
+
+    Given: an engine with position_qty=0 and no open cycle row for the shard,
+    When: _reconcile_position_cycles runs,
+    Then: get_open_position_cycle is queried but no close or insert is issued.
+    """
     repo = AsyncMock()
     repo.get_open_position_cycle = AsyncMock(return_value=None)
     coord = _make_reconcile_coord(repo)
@@ -2310,11 +2408,15 @@ async def test_reconcile_flat_engine_without_stale_row_is_noop() -> None:
 
 @pytest.mark.asyncio
 async def test_reconcile_flat_engine_with_stale_row_closes_cycle() -> None:
-    """Given: engine recovered flat + DB has stale open row, When: reconcile, Then: close stale.
+    """Reconciliation closes a stale open cycle when the recovered position is flat.
 
     Coordinator was down when the position closed; the open cycle row
     never got its SCD2 close. Reconcile must close it so the next
     live fill does not reuse a stale public_id via DB fallback.
+
+    Given: engine recovered flat + a stale open long cycle still in DB,
+    When: _reconcile_position_cycles runs,
+    Then: close_position_cycle closes the stale cycle and the shard cache stays empty.
     """
     repo = AsyncMock()
     repo.get_open_position_cycle = AsyncMock(
@@ -2335,7 +2437,12 @@ async def test_reconcile_flat_engine_with_stale_row_closes_cycle() -> None:
 
 @pytest.mark.asyncio
 async def test_reconcile_degraded_identity_engine_is_skipped() -> None:
-    """Given: engine with empty wallet_public_id, When: reconcile, Then: skip fail-closed."""
+    """Reconciliation skips engines with degraded wallet attribution fail-closed.
+
+    Given: an engine whose wallet_public_id is empty (degraded recovery state),
+    When: _reconcile_position_cycles runs,
+    Then: no repository methods are called for that engine.
+    """
     repo = AsyncMock()
     coord = _make_reconcile_coord(repo)
     engine = _make_cycle_engine(wallet_public_id="")
@@ -2348,7 +2455,12 @@ async def test_reconcile_degraded_identity_engine_is_skipped() -> None:
 
 @pytest.mark.asyncio
 async def test_reconcile_existing_cycle_matching_direction_hydrates_cache() -> None:
-    """Given: non-flat long + DB has long cycle with matching peak, Then: hydrate, no writes."""
+    """Reconciliation hydrates cache from a matching-direction DB cycle without writing.
+
+    Given: a non-flat long engine and a matching-direction long cycle in DB whose peak >= current,
+    When: _reconcile_position_cycles runs,
+    Then: shard cache is hydrated and no insert/update/flip is issued.
+    """
     repo = AsyncMock()
     repo.get_open_position_cycle = AsyncMock(
         return_value={"public_id": "cycle-existing", "direction": "long", "max_qty": 2.5}
@@ -2368,11 +2480,15 @@ async def test_reconcile_existing_cycle_matching_direction_hydrates_cache() -> N
 
 @pytest.mark.asyncio
 async def test_reconcile_existing_cycle_understated_max_qty_bumps_peak() -> None:
-    """Given: non-flat long abs=3 + DB cycle max_qty=1.5, Then: bump max_qty to 3 (downtime scale-up).
+    """Reconciliation bumps DB max_qty when downtime scaled the position beyond last peak.
 
     The position scaled up during downtime beyond the last checkpointed
     peak. Reconcile must bring the DB peak up to the recovered size
     so the next live fill's scale_up guard is monotonic.
+
+    Given: non-flat long with abs=3.0 and DB cycle max_qty=1.5 (understated),
+    When: _reconcile_position_cycles runs,
+    Then: update_position_cycle_max_qty is called with new_max_qty=3.0 and cache reflects it.
     """
     repo = AsyncMock()
     repo.get_open_position_cycle = AsyncMock(
@@ -2395,11 +2511,15 @@ async def test_reconcile_existing_cycle_understated_max_qty_bumps_peak() -> None
 
 @pytest.mark.asyncio
 async def test_reconcile_direction_mismatch_flips_cycle() -> None:
-    """Given: recovered short + DB has long open cycle, Then: atomic flip to short cycle.
+    """Reconciliation atomically flips a stale opposite-direction cycle on restart.
 
     The position flipped during downtime. Reconcile must close the
     stale long cycle and open a new short cycle in one transaction
     via flip_position_cycle.
+
+    Given: a recovered short engine + a stale long open cycle in DB + resolvable instrument,
+    When: _reconcile_position_cycles runs,
+    Then: flip_position_cycle is called and the cache mirrors the new short cycle.
     """
     repo = AsyncMock()
     repo.get_open_position_cycle = AsyncMock(
@@ -2425,12 +2545,16 @@ async def test_reconcile_direction_mismatch_flips_cycle() -> None:
 
 @pytest.mark.asyncio
 async def test_reconcile_direction_mismatch_unresolved_instrument_degrades_to_close_only() -> None:
-    """Given: direction mismatch + unresolved instrument, Then: close stale + clear cache.
+    """Reconciliation degrades to close-only when flip needs instrument that cannot resolve.
 
     Mirrors the fill-path degrade-to-close-only behavior: we cannot
     open a new cycle without an instrument_public_id, but the old
     one is objectively dead, so close it so subsequent fails-soft
     paths handle the uncovered leg.
+
+    Given: a recovered short engine + stale long DB cycle + instrument lookup returns None,
+    When: _reconcile_position_cycles runs,
+    Then: flip_position_cycle is skipped, close_position_cycle closes the stale cycle, cache cleared.
     """
     repo = AsyncMock()
     repo.get_open_position_cycle = AsyncMock(
@@ -2453,7 +2577,13 @@ async def test_reconcile_direction_mismatch_unresolved_instrument_degrades_to_cl
 
 @pytest.mark.asyncio
 async def test_reconcile_non_flat_missing_cycle_bootstraps() -> None:
-    """Given: non-flat engine + DB has no cycle, When: reconcile, Then: bootstrap + hydrate."""
+    """Reconciliation bootstraps a synthetic cycle for a non-flat shard with no DB row.
+
+    Given: a non-flat long engine and no open cycle in DB,
+    When: _reconcile_position_cycles runs,
+    Then: insert_position_cycle creates a new row matching the recovered direction/qty
+        and the shard cache is hydrated from the new public_id.
+    """
     repo = AsyncMock()
     repo.get_open_position_cycle = AsyncMock(return_value=None)
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
@@ -2478,7 +2608,12 @@ async def test_reconcile_non_flat_missing_cycle_bootstraps() -> None:
 
 @pytest.mark.asyncio
 async def test_reconcile_short_position_bootstraps_short_direction() -> None:
-    """Given: engine.position_qty = -2.0, When: bootstrap, Then: direction='short'."""
+    """Reconciliation bootstrap derives direction='short' from a negative recovered position.
+
+    Given: a recovered engine with position_qty=-2.0 and no DB row,
+    When: _reconcile_position_cycles bootstraps the cycle,
+    Then: the inserted row carries direction='short' and max_qty=2.0.
+    """
     repo = AsyncMock()
     repo.get_open_position_cycle = AsyncMock(return_value=None)
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
@@ -2495,7 +2630,12 @@ async def test_reconcile_short_position_bootstraps_short_direction() -> None:
 
 @pytest.mark.asyncio
 async def test_reconcile_bootstrap_uses_checkpoint_opened_at_if_available() -> None:
-    """Given: TradeService has position_opened_at from checkpoint restore, Then: used as opened_at."""
+    """Reconciliation bootstrap uses checkpoint-restored position_opened_at when available.
+
+    Given: a non-flat engine and TradeService shard with position_opened_at from a checkpoint,
+    When: _reconcile_position_cycles bootstraps a synthetic cycle,
+    Then: the inserted row's opened_at carries the checkpoint timestamp.
+    """
     repo = AsyncMock()
     repo.get_open_position_cycle = AsyncMock(return_value=None)
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
@@ -2514,7 +2654,12 @@ async def test_reconcile_bootstrap_uses_checkpoint_opened_at_if_available() -> N
 
 @pytest.mark.asyncio
 async def test_reconcile_bootstrap_fallback_opened_at_when_no_checkpoint() -> None:
-    """Given: full replay shard (position_opened_at=None), Then: opened_at = now()."""
+    """Reconciliation bootstrap falls back to now() when no checkpoint timestamp is available.
+
+    Given: a full-replay shard with TradeService position_opened_at=None,
+    When: _reconcile_position_cycles bootstraps a synthetic cycle,
+    Then: the inserted row's opened_at lies between the test's before/after timestamps.
+    """
     repo = AsyncMock()
     repo.get_open_position_cycle = AsyncMock(return_value=None)
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value="inst-btc")
@@ -2532,7 +2677,12 @@ async def test_reconcile_bootstrap_fallback_opened_at_when_no_checkpoint() -> No
 
 @pytest.mark.asyncio
 async def test_reconcile_unresolved_instrument_skips_bootstrap() -> None:
-    """Given: non-flat engine + no DB cycle + unresolved instrument, Then: skip bootstrap."""
+    """Reconciliation bootstrap is skipped when the instrument cannot be resolved.
+
+    Given: a non-flat engine, no DB cycle, and instrument lookup returning None,
+    When: _reconcile_position_cycles runs,
+    Then: insert_position_cycle is not called and the shard cache stays empty.
+    """
     repo = AsyncMock()
     repo.get_open_position_cycle = AsyncMock(return_value=None)
     repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
@@ -2548,12 +2698,18 @@ async def test_reconcile_unresolved_instrument_skips_bootstrap() -> None:
 
 @pytest.mark.asyncio
 async def test_reconcile_mixed_engines_processes_each_independently() -> None:
-    """Given: mix of flat+no_row, degraded, existing, bootstrap-needed engines.
+    """Reconciliation processes each engine in a mixed batch by its own case independently.
 
-    Verifies each engine is processed independently per its own state.
-    Degraded identity is skipped before DB query; the other three
-    non-skipped engines all query DB, and only the bootstrap one
-    hits insert_position_cycle.
+    Verifies that flat / degraded / existing-cycle / bootstrap-needed
+    engines walk through their respective branches without interfering
+    with each other. Degraded identity is skipped before any DB query;
+    the other three non-skipped engines all query DB, and only the
+    bootstrap one hits insert_position_cycle.
+
+    Given: four engines (flat, degraded-identity, existing-long-cycle, needs-bootstrap),
+    When: _reconcile_position_cycles iterates the engines dict in insertion order,
+    Then: insert_position_cycle is called exactly once for the bootstrap engine,
+        the existing engine's cache is hydrated to the DB row, and degraded/flat are skipped.
     """
     repo = AsyncMock()
     repo.get_open_position_cycle = AsyncMock(

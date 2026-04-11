@@ -16,6 +16,7 @@ from dataclasses import field
 from datetime import UTC
 from datetime import datetime
 from typing import Final
+from typing import Literal
 
 from loguru import logger
 
@@ -305,7 +306,9 @@ class TradeService:
         return True
 
     @staticmethod
-    def _detect_cycle_transition(old_qty: float, new_qty: float) -> str | None:
+    def _detect_cycle_transition(
+        old_qty: float, new_qty: float
+    ) -> Literal["open", "close", "flip", "scale_up"] | None:
         """Classify a shard position change into a cycle lifecycle transition.
 
         Pure helper with no side effects — the trader uses the result to

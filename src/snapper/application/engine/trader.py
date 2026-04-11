@@ -1400,7 +1400,6 @@ class TraderCoordinator(RegisterableProcess):
             shard.active_cycle_public_id = new_pid
             shard.active_cycle_max_qty = abs(new_qty)
             return
-
         if transition == "close":
             cycle_id = shard.active_cycle_public_id
             if cycle_id is None:
@@ -1431,7 +1430,6 @@ class TraderCoordinator(RegisterableProcess):
             shard.active_cycle_public_id = None
             shard.active_cycle_max_qty = 0.0
             return
-
         if transition == "flip":
             cycle_id = shard.active_cycle_public_id
             if cycle_id is None:
@@ -1501,39 +1499,36 @@ class TraderCoordinator(RegisterableProcess):
             shard.active_cycle_public_id = new_pid
             shard.active_cycle_max_qty = abs(new_qty)
             return
-
-        if transition == "scale_up":
-            cycle_id = shard.active_cycle_public_id
-            if cycle_id is None:
-                fallback = await self.repository.get_open_position_cycle(shard_key, as_of=now)
-                if fallback is not None:
-                    cycle_id = fallback["public_id"]
-                    shard.active_cycle_public_id = cycle_id
-                    shard.active_cycle_max_qty = fallback["max_qty"]
-                    logger.warning(
-                        "ZMQTrader: position_cycle scale_up recovered via DB fallback "
-                        "(cache miss) shard={} cycle={}",
-                        shard_key,
-                        cycle_id,
-                    )
-            if cycle_id is None:
+        cycle_id = shard.active_cycle_public_id
+        if cycle_id is None:
+            fallback = await self.repository.get_open_position_cycle(shard_key, as_of=now)
+            if fallback is not None:
+                cycle_id = fallback["public_id"]
+                shard.active_cycle_public_id = cycle_id
+                shard.active_cycle_max_qty = fallback["max_qty"]
                 logger.warning(
-                    "ZMQTrader: position_cycle scale_up skipped "
-                    "(no open cycle in cache or DB) shard={}",
+                    "ZMQTrader: position_cycle scale_up recovered via DB fallback "
+                    "(cache miss) shard={} cycle={}",
                     shard_key,
+                    cycle_id,
                 )
-                return
-            new_max = abs(new_qty)
-            if new_max > shard.active_cycle_max_qty:
-                await self.repository.update_position_cycle_max_qty(
-                    cycle_public_id=cycle_id,
-                    new_max_qty=new_max,
-                    bus_time=now,
-                    session_id=fill.session_id,
-                    sequence_id=fill.sequence_id,
-                )
-                shard.active_cycle_max_qty = new_max
+        if cycle_id is None:
+            logger.warning(
+                "ZMQTrader: position_cycle scale_up skipped "
+                "(no open cycle in cache or DB) shard={}",
+                shard_key,
+            )
             return
+        new_max = abs(new_qty)
+        if new_max > shard.active_cycle_max_qty:
+            await self.repository.update_position_cycle_max_qty(
+                cycle_public_id=cycle_id,
+                new_max_qty=new_max,
+                bus_time=now,
+                session_id=fill.session_id,
+                sequence_id=fill.sequence_id,
+            )
+            shard.active_cycle_max_qty = new_max
 
     def _sync_status_to_trade_service(self, order_status: OrderData, parsed: Any) -> None:
         """Shadow-write order status to TradeService.
