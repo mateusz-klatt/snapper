@@ -438,11 +438,12 @@ classes running inside `PlanExecutorService`.
 
 **Tables:** `execution_plans` (plan state + lifecycle), `execution_plan_checkpoints`
 (high-churn evaluator state), `execution_plan_decisions` (tiered decision log),
-`instrument_order_capabilities` (capability matrix), `venue_fee_schedules` (fee tiers).
+`instrument_order_capabilities` (capability matrix), `venue_fee_schedules` (fee tiers),
+`position_cycles` (one open→close lifetime per shard, brackets attach by `position_cycle_public_id`).
 
 **Plan types:** `manual_once` (Phase 1 + Phase 1.5 hardening, shipped),
-`bracket` (Phase 2), `trailing_stop` (Phase 3), `peg` (Phase 4),
-`scheduler` (Phase 5).
+`bracket` (Phase 2 step 2 — attaches to `position_cycles` row from step 1),
+`trailing_stop` (Phase 3), `peg` (Phase 4), `scheduler` (Phase 5).
 
 **Manual order create flow:** `POST /api/orders` creates a `manual_once`
 plan (pending), stamps `child_client_order_id`, `native_instrument`, and
@@ -481,6 +482,52 @@ the loop for graceful shutdown. After `_setup_subscriber()` the service
 sleeps 500 ms for ZMQ XPUB/XSUB slow-joiner stabilization before
 recovery to avoid losing terminal events triggered by stranded-cancel
 re-emits.
+
+**Position cycles (Phase 2 step 1, shipped 2026-04-11):** the
+`position_cycles` table represents one flat→non-flat→flat lifetime per
+shard via the standard `TemporalMixin` SCD2 envelope. A partial unique
+index `uq_pc_shard_open_active` enforces at most one open cycle per
+`shard_key` at any instant. Five repository methods cover the lifecycle:
+`insert_position_cycle`, `close_position_cycle` (SCD2 close-and-insert),
+`get_open_position_cycle` (lookup by `shard_key` because paper shards
+embed `strategy_tag`), `flip_position_cycle` (TOCTOU-hardened atomic
+close+open with `shard_key` match assertion), and
+`update_position_cycle_max_qty` (monotonic — silent no-op when the new
+peak does not strictly exceed the existing one). The repository methods
+are called from the trader (not from `TradeService`, which stays sync
+and pure); `ShardState` carries trader-owned cache fields
+`active_cycle_public_id` and `active_cycle_max_qty`.
+
+The trader's `_sync_fill_to_trade_service` samples `old_qty` before
+`apply_venue_event` and `new_qty` after, then delegates to
+`_sync_position_cycle_on_fill`. That helper classifies the transition
+via `TradeService._detect_cycle_transition` (returns
+`Literal["open", "close", "flip", "scale_up"] | None` with a 1e-12
+epsilon to match the existing zero-snap) and issues the matching
+repository call. Four guards apply: degraded-identity fail-closed when
+`engine.wallet_public_id` is falsy, idempotency on open via a
+`get_open_position_cycle` pre-check, async `instrument_public_id`
+resolution via `get_instrument_public_id_by_symbol`, and a symmetric DB
+fallback on close/flip/scale_up paths so a degraded restart cannot
+reuse a stale cycle row from a prior life of the shard. When a flip's
+instrument resolution fails, the trader degrades to close-only — the
+old cycle is closed cleanly, the new leg is left uncovered with an
+audit-gap warning, and the cache is cleared so subsequent fail-soft
+paths handle themselves correctly.
+
+`_recover_engine_state` runs `_reconcile_position_cycles` as a fourth
+recovery phase, after engine state is rebuilt and before the trading
+loop starts. It iterates `self.engines` (engines, not `TradeService`,
+because full replay rebuilds `engine.position_qty` but not the
+projection) and handles four cases: recovered flat with a stale open
+row → close the row; recovered non-flat with a matching-direction open
+row → hydrate the cache and bump `max_qty` if downtime scaled-up beyond
+the stored peak; recovered non-flat with an opposite-direction row →
+atomic flip via `flip_position_cycle` (or degrade to close-only on
+unresolved instrument); recovered non-flat with no row → bootstrap a
+synthetic cycle. Brackets in Phase 2 step 2 attach to
+`position_cycle_public_id`, not to an order, so a flat reopen does not
+inherit stale stop levels.
 
 ## Security
 
