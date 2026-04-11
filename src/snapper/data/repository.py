@@ -89,6 +89,7 @@ from snapper.data.models import MarketSnapshot
 from snapper.data.models import Operator
 from snapper.data.models import Order
 from snapper.data.models import Position
+from snapper.data.models import PositionCycle
 from snapper.data.models import Setting
 from snapper.data.models import Signal
 from snapper.data.models import Symbol
@@ -125,6 +126,8 @@ from snapper.data.repository_types import MarketSnapshotRow
 from snapper.data.repository_types import MarketSnapshotUpsertRow
 from snapper.data.repository_types import OperatorRow
 from snapper.data.repository_types import OrderRow
+from snapper.data.repository_types import PositionCycleInsertRow
+from snapper.data.repository_types import PositionCycleRow
 from snapper.data.repository_types import PositionRow
 from snapper.data.repository_types import ScopeGrantRow
 from snapper.data.repository_types import SettingRow
@@ -1554,6 +1557,147 @@ class Repository(ABC):
             True if an active ``command_type='cancel'`` row with a
             non-terminal status (``created``/``dispatched``/``acked``)
             exists, False otherwise.
+        """
+        ...
+
+    @abstractmethod
+    async def insert_position_cycle(
+        self,
+        row: PositionCycleInsertRow,
+    ) -> tuple[int, str]:
+        """Insert a new ``position_cycles`` row in the open state.
+
+        A position cycle spans one flat->non-flat->flat trading lifetime on
+        a single shard. Brackets (SL/TP) attach to a cycle by its public_id.
+
+        Args:
+            row: Cycle insert payload; callers must supply all non-default
+                fields. ``status`` is typically ``"open"`` at insert time.
+
+        Returns:
+            Tuple of (id, public_id) for the new cycle row.
+        """
+        ...
+
+    @abstractmethod
+    async def close_position_cycle(
+        self,
+        cycle_public_id: str,
+        closed_at: datetime,
+        closing_command_public_id: str | None,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> int | None:
+        """SCD2 close-and-insert transitioning a cycle to ``closed``.
+
+        Loads the active open row under lock, closes it (``known_to=bus_time``),
+        and inserts a new row carrying the same ``public_id`` with
+        ``status='closed'``, ``closed_at``, and ``closing_command_public_id``.
+
+        Args:
+            cycle_public_id: Public identifier of the cycle to close.
+            closed_at: Timestamp at which the position returned to flat.
+            closing_command_public_id: Optional command id that closed the
+                cycle (may be None when the fill path has no command lineage).
+            bus_time: Bus timestamp for the SCD2 operation.
+            session_id: Producer session identifier.
+            sequence_id: Monotonic sequence counter.
+
+        Returns:
+            New row id, or None when no active open cycle exists for this
+            ``cycle_public_id``.
+        """
+        ...
+
+    @abstractmethod
+    async def get_open_position_cycle(
+        self,
+        shard_key: str,
+        as_of: datetime,
+    ) -> PositionCycleRow | None:
+        """Return the active open cycle for a shard at a point in time.
+
+        Keyed by ``shard_key`` because paper-mode shards embed
+        ``strategy_tag`` in the key; querying by
+        ``(instrument, wallet, mode)`` alone would collide across
+        strategies. At most one open cycle exists per shard at any
+        instant (enforced by ``uq_pc_shard_open_active``).
+
+        Args:
+            shard_key: Engine shard key identifying the position.
+            as_of: Bus time for the temporal query.
+
+        Returns:
+            Cycle row or None if the shard currently has no open cycle.
+        """
+        ...
+
+    @abstractmethod
+    async def flip_position_cycle(
+        self,
+        close_cycle_public_id: str,
+        new_open_row: PositionCycleInsertRow,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> tuple[int, str]:
+        """Atomically close one cycle and open another in a single transaction.
+
+        Used when a fill reverses position sign (long -> short or vice
+        versa) in one event. The existing cycle is loaded under lock and
+        its ``shard_key`` is asserted to match ``new_open_row['shard_key']``
+        to prevent stale ``close_cycle_public_id`` values from corrupting
+        a foreign cycle. Close and insert run in the same session/commit
+        so a crash between them cannot leave the DB with a stranded open.
+
+        Args:
+            close_cycle_public_id: Public id of the cycle to close.
+            new_open_row: Insert payload for the replacement open cycle
+                (``status`` is coerced to ``"open"``; ``closed_at`` and
+                ``closing_command_public_id`` must be absent or None).
+            bus_time: Bus timestamp for both SCD2 operations.
+            session_id: Producer session identifier.
+            sequence_id: Monotonic sequence counter.
+
+        Returns:
+            Tuple of (id, public_id) for the newly opened cycle row.
+
+        Raises:
+            ValueError: Source cycle is missing, not active, or its
+                ``shard_key`` does not match ``new_open_row['shard_key']``.
+        """
+        ...
+
+    @abstractmethod
+    async def update_position_cycle_max_qty(
+        self,
+        cycle_public_id: str,
+        new_max_qty: float,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> int | None:
+        """Monotonic SCD2 revision of a cycle's ``max_qty`` peak.
+
+        Loads the active row under lock and enforces monotonic progression:
+        ``new_max_qty <= existing.max_qty`` is a silent no-op (returns
+        ``None`` without writing). Only strictly larger values trigger
+        a SCD2 close-and-insert carrying the new peak. Targets that are
+        not currently active raise ``ValueError``.
+
+        Args:
+            cycle_public_id: Public id of the cycle to update.
+            new_max_qty: Candidate peak (absolute, non-negative).
+            bus_time: Bus timestamp for the SCD2 operation.
+            session_id: Producer session identifier.
+            sequence_id: Monotonic sequence counter.
+
+        Returns:
+            New row id on a real update, None on a monotonic no-op.
+
+        Raises:
+            ValueError: Target cycle is missing or not active.
         """
         ...
 
@@ -5197,6 +5341,278 @@ class SQLAlchemyRepository(Repository):
                 last_tick_timestamp=row.last_tick_timestamp,
                 checkpoint_at=row.checkpoint_at,
             )
+
+    @staticmethod
+    def _position_cycle_row_to_dict(pc: PositionCycle) -> PositionCycleRow:
+        """Project a PositionCycle ORM row into the TypedDict shape."""
+        return PositionCycleRow(
+            public_id=pc.public_id,
+            timestamp=pc.timestamp,
+            session_id=pc.session_id,
+            sequence_id=pc.sequence_id,
+            instrument_public_id=pc.instrument_public_id,
+            exchange=pc.exchange,
+            mode=pc.mode,
+            shard_key=pc.shard_key,
+            wallet_public_id=pc.wallet_public_id,
+            operator_public_id=pc.operator_public_id,
+            direction=pc.direction,
+            max_qty=pc.max_qty,
+            status=pc.status,
+            opened_at=pc.opened_at,
+            closed_at=pc.closed_at,
+            opening_command_public_id=pc.opening_command_public_id,
+            closing_command_public_id=pc.closing_command_public_id,
+        )
+
+    async def insert_position_cycle(
+        self,
+        row: PositionCycleInsertRow,
+    ) -> tuple[int, str]:
+        """Insert a new position_cycles row in the open state."""
+        async with self.session() as s:
+            cycle = PositionCycle(
+                instrument_public_id=row["instrument_public_id"],
+                exchange=row["exchange"],
+                mode=row["mode"],
+                shard_key=row["shard_key"],
+                wallet_public_id=row["wallet_public_id"],
+                operator_public_id=row.get("operator_public_id"),
+                direction=row["direction"],
+                max_qty=row["max_qty"],
+                status=row["status"],
+                opened_at=row["opened_at"],
+                closed_at=row.get("closed_at"),
+                opening_command_public_id=row.get("opening_command_public_id"),
+                closing_command_public_id=row.get("closing_command_public_id"),
+                session_id=row["session_id"],
+                sequence_id=row["sequence_id"],
+                timestamp=row["timestamp"],
+            )
+            s.add(cycle)
+            await s.commit()
+            await s.refresh(cycle)
+            return cycle.id, cycle.public_id
+
+    async def close_position_cycle(
+        self,
+        cycle_public_id: str,
+        closed_at: datetime,
+        closing_command_public_id: str | None,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> int | None:
+        """SCD2 close-and-insert transitioning an open cycle to closed."""
+        async with self.session() as s:
+            existing = (
+                (
+                    await s.execute(
+                        select(PositionCycle)
+                        .where(
+                            PositionCycle.public_id == cycle_public_id,
+                            PositionCycle.status == "open",
+                            *where_active(PositionCycle, bus_time),
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if existing is None:
+                return None
+            await s.execute(
+                update(PositionCycle)
+                .where(PositionCycle.id == existing.id)
+                .values(known_to=bus_time)
+            )
+            new_row = PositionCycle(
+                public_id=existing.public_id,
+                instrument_public_id=existing.instrument_public_id,
+                exchange=existing.exchange,
+                mode=existing.mode,
+                shard_key=existing.shard_key,
+                wallet_public_id=existing.wallet_public_id,
+                operator_public_id=existing.operator_public_id,
+                direction=existing.direction,
+                max_qty=existing.max_qty,
+                status="closed",
+                opened_at=existing.opened_at,
+                closed_at=closed_at,
+                opening_command_public_id=existing.opening_command_public_id,
+                closing_command_public_id=closing_command_public_id,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=bus_time,
+            )
+            s.add(new_row)
+            await s.commit()
+            await s.refresh(new_row)
+            return new_row.id
+
+    async def get_open_position_cycle(
+        self,
+        shard_key: str,
+        as_of: datetime,
+    ) -> PositionCycleRow | None:
+        """Return the active open cycle for a shard at a point in time."""
+        async with self.session() as s:
+            stmt = select(PositionCycle).where(
+                PositionCycle.shard_key == shard_key,
+                PositionCycle.status == "open",
+                *where_active(PositionCycle, as_of),
+            )
+            result = await s.execute(stmt)
+            row = result.scalars().first()
+            if row is None:
+                return None
+            return self._position_cycle_row_to_dict(row)
+
+    async def flip_position_cycle(
+        self,
+        close_cycle_public_id: str,
+        new_open_row: PositionCycleInsertRow,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> tuple[int, str]:
+        """Atomically close one cycle and open another in a single transaction."""
+        async with self.session() as s:
+            existing = (
+                (
+                    await s.execute(
+                        select(PositionCycle)
+                        .where(
+                            PositionCycle.public_id == close_cycle_public_id,
+                            PositionCycle.status == "open",
+                            *where_active(PositionCycle, bus_time),
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if existing is None:
+                raise ValueError(
+                    f"flip_position_cycle: no active open cycle found for "
+                    f"public_id={close_cycle_public_id!r}"
+                )
+            new_shard_key = new_open_row["shard_key"]
+            if existing.shard_key != new_shard_key:
+                raise ValueError(
+                    f"flip_position_cycle: shard_key mismatch "
+                    f"existing={existing.shard_key!r} new={new_shard_key!r}"
+                )
+            await s.execute(
+                update(PositionCycle)
+                .where(PositionCycle.id == existing.id)
+                .values(known_to=bus_time)
+            )
+            closed_row = PositionCycle(
+                public_id=existing.public_id,
+                instrument_public_id=existing.instrument_public_id,
+                exchange=existing.exchange,
+                mode=existing.mode,
+                shard_key=existing.shard_key,
+                wallet_public_id=existing.wallet_public_id,
+                operator_public_id=existing.operator_public_id,
+                direction=existing.direction,
+                max_qty=existing.max_qty,
+                status="closed",
+                opened_at=existing.opened_at,
+                closed_at=bus_time,
+                opening_command_public_id=existing.opening_command_public_id,
+                closing_command_public_id=new_open_row.get("opening_command_public_id"),
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=bus_time,
+            )
+            s.add(closed_row)
+            opened_row = PositionCycle(
+                instrument_public_id=new_open_row["instrument_public_id"],
+                exchange=new_open_row["exchange"],
+                mode=new_open_row["mode"],
+                shard_key=new_shard_key,
+                wallet_public_id=new_open_row["wallet_public_id"],
+                operator_public_id=new_open_row.get("operator_public_id"),
+                direction=new_open_row["direction"],
+                max_qty=new_open_row["max_qty"],
+                status="open",
+                opened_at=new_open_row["opened_at"],
+                closed_at=None,
+                opening_command_public_id=new_open_row.get("opening_command_public_id"),
+                closing_command_public_id=None,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=bus_time,
+            )
+            s.add(opened_row)
+            await s.commit()
+            await s.refresh(opened_row)
+            return opened_row.id, opened_row.public_id
+
+    async def update_position_cycle_max_qty(
+        self,
+        cycle_public_id: str,
+        new_max_qty: float,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> int | None:
+        """Monotonic SCD2 revision of a cycle's max_qty peak."""
+        async with self.session() as s:
+            existing = (
+                (
+                    await s.execute(
+                        select(PositionCycle)
+                        .where(
+                            PositionCycle.public_id == cycle_public_id,
+                            PositionCycle.status == "open",
+                            *where_active(PositionCycle, bus_time),
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if existing is None:
+                raise ValueError(
+                    f"update_position_cycle_max_qty: no active open cycle found "
+                    f"for public_id={cycle_public_id!r}"
+                )
+            if new_max_qty <= existing.max_qty:
+                return None
+            await s.execute(
+                update(PositionCycle)
+                .where(PositionCycle.id == existing.id)
+                .values(known_to=bus_time)
+            )
+            new_row = PositionCycle(
+                public_id=existing.public_id,
+                instrument_public_id=existing.instrument_public_id,
+                exchange=existing.exchange,
+                mode=existing.mode,
+                shard_key=existing.shard_key,
+                wallet_public_id=existing.wallet_public_id,
+                operator_public_id=existing.operator_public_id,
+                direction=existing.direction,
+                max_qty=new_max_qty,
+                status=existing.status,
+                opened_at=existing.opened_at,
+                closed_at=existing.closed_at,
+                opening_command_public_id=existing.opening_command_public_id,
+                closing_command_public_id=existing.closing_command_public_id,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=bus_time,
+            )
+            s.add(new_row)
+            await s.commit()
+            await s.refresh(new_row)
+            return new_row.id
 
     async def create_scope_grant(self, request: CreateScopeGrantRequest) -> ScopeGrantRow:
         """Create a new scope grant with advisory-locked overlap detection."""

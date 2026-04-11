@@ -119,6 +119,7 @@ __all__ = [
     "ExecutionPlan",
     "ExecutionPlanCheckpoint",
     "ExecutionPlanDecision",
+    "PositionCycle",
 ]
 
 
@@ -1735,3 +1736,59 @@ class ExecutionPlanDecision(TemporalMixin, Base):
     new_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     reason: Mapped[str] = mapped_column(String(512))
     decision_importance: Mapped[str] = mapped_column(String(16))
+
+
+class PositionCycle(TemporalMixin, Base):
+    """A single open->close lifetime of a position on one shard.
+
+    Brackets (SL/TP) attach to a cycle, not to an order: if a position closes
+    and the user reopens, the new trades belong to a new cycle even though
+    instrument/wallet/mode are identical. Created when a shard's position
+    goes flat -> non-flat, closed when it returns to zero, flipped (close +
+    open) atomically when the sign reverses in a single fill.
+    """
+
+    __tablename__ = "position_cycles"
+    __table_args__ = (
+        Index("ix_pc_shard_status", "shard_key", "status"),
+        Index("ix_pc_instrument_status", "instrument_public_id", "status"),
+        Index("ix_pc_wallet_status", "wallet_public_id", "status"),
+        Index(
+            "ix_pc_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "uq_pc_shard_open_active",
+            "shard_key",
+            unique=True,
+            sqlite_where=text("status = 'open' AND known_to = '9999-12-31 23:59:59.000000'"),
+            postgresql_where=text("status = 'open' AND known_to = '9999-12-31T23:59:59+00:00'"),
+        ),
+        CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_pc_exchange_lower"),
+        CheckConstraint("mode IN ('live', 'paper')", name="ck_pc_mode"),
+        CheckConstraint(
+            "direction IN ('long', 'short')",
+            name="ck_pc_direction",
+        ),
+        CheckConstraint(
+            "status IN ('open', 'closed', 'liquidated')",
+            name="ck_pc_status",
+        ),
+        CheckConstraint("max_qty >= 0", name="ck_pc_max_qty_nonneg"),
+    )
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    exchange: Mapped[str] = mapped_column(String(32), index=True)
+    mode: Mapped[str] = mapped_column(String(8))
+    shard_key: Mapped[str] = mapped_column(String(128), index=True)
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False, index=True)
+    operator_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    direction: Mapped[str] = mapped_column(String(8))
+    max_qty: Mapped[float] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    opened_at: Mapped[datetime] = mapped_column(TZDateTime())
+    closed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    opening_command_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    closing_command_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)

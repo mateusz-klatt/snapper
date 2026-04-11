@@ -20,6 +20,7 @@ from unittest.mock import Mock
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import select as _sa_select
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -34,6 +35,7 @@ from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import InstrumentOrderCapability
 from snapper.data.models import MarketSnapshot
 from snapper.data.models import Position
+from snapper.data.models import PositionCycle
 from snapper.data.models import Setting
 from snapper.data.models import Signal
 from snapper.data.models import Symbol
@@ -5889,3 +5891,315 @@ async def test_get_execution_plans_exchange_mode_wallet_filters(tmp_path: Path) 
     assert len(rows) == 1
     rows = await r.get_execution_plans(as_of=now, wallet_public_ids=["wallet-other"])
     assert len(rows) == 0
+
+
+def _make_cycle_row(
+    shard_key: str = "kraken.BTC-USD.live.w0000000000aa",
+    instrument_public_id: str = "inst-btc",
+    exchange: str = "kraken",
+    mode: str = "live",
+    wallet_public_id: str = "wallet-1",
+    operator_public_id: str | None = None,
+    direction: str = "long",
+    max_qty: float = 1.0,
+    status: str = "open",
+    opened_at: datetime | None = None,
+    opening_command_public_id: str | None = None,
+    session_id: str = "s1",
+    sequence_id: int = 1,
+    timestamp: datetime | None = None,
+) -> dict[str, Any]:
+    """Build a PositionCycleInsertRow dict for repository tests."""
+    now = datetime.now(UTC)
+    return {
+        "instrument_public_id": instrument_public_id,
+        "exchange": exchange,
+        "mode": mode,
+        "shard_key": shard_key,
+        "wallet_public_id": wallet_public_id,
+        "operator_public_id": operator_public_id,
+        "direction": direction,
+        "max_qty": max_qty,
+        "status": status,
+        "opened_at": opened_at or now,
+        "opening_command_public_id": opening_command_public_id,
+        "session_id": session_id,
+        "sequence_id": sequence_id,
+        "timestamp": timestamp or now,
+    }
+
+
+@pytest.mark.asyncio
+async def test_insert_and_get_open_position_cycle(tmp_path: Path) -> None:
+    """Given an open cycle inserted, When queried by shard_key, Then row returned."""
+    db_path = tmp_path / "pc_insert.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    row = _make_cycle_row(max_qty=2.5, direction="long", opened_at=now, timestamp=now)
+    new_id, pid = await r.insert_position_cycle(row)
+    assert new_id > 0
+    assert pid
+    found = await r.get_open_position_cycle(
+        "kraken.BTC-USD.live.w0000000000aa",
+        as_of=now + timedelta(seconds=1),
+    )
+    assert found is not None
+    assert found["public_id"] == pid
+    assert found["direction"] == "long"
+    assert found["max_qty"] == pytest.approx(2.5)
+    assert found["status"] == "open"
+    assert found["closed_at"] is None
+    assert found["opening_command_public_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_open_position_cycle_not_found(tmp_path: Path) -> None:
+    """Given no cycle, When queried by shard_key, Then None returned."""
+    db_path = tmp_path / "pc_missing.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    result = await r.get_open_position_cycle("nonexistent.shard", as_of=now)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_close_position_cycle_scd2(tmp_path: Path) -> None:
+    """Given an open cycle, When closed, Then SCD2 transition + closed_at recorded."""
+    db_path = tmp_path / "pc_close.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    row = _make_cycle_row(opened_at=now, timestamp=now)
+    _id, pid = await r.insert_position_cycle(row)
+    close_time = now + timedelta(minutes=5)
+    new_row_id = await r.close_position_cycle(
+        cycle_public_id=pid,
+        closed_at=close_time,
+        closing_command_public_id="cmd-close-1",
+        bus_time=close_time,
+        session_id="s2",
+        sequence_id=2,
+    )
+    assert new_row_id is not None
+    after = await r.get_open_position_cycle(
+        "kraken.BTC-USD.live.w0000000000aa",
+        as_of=close_time + timedelta(seconds=1),
+    )
+    assert after is None
+
+
+@pytest.mark.asyncio
+async def test_close_position_cycle_noop_on_closed(tmp_path: Path) -> None:
+    """Given a closed cycle, When close called again, Then None returned."""
+    db_path = tmp_path / "pc_close_noop.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _id, pid = await r.insert_position_cycle(_make_cycle_row(opened_at=now, timestamp=now))
+    close_time = now + timedelta(minutes=5)
+    await r.close_position_cycle(pid, close_time, None, close_time, "s1", 2)
+    result = await r.close_position_cycle(
+        pid, close_time + timedelta(seconds=1), None, close_time + timedelta(seconds=1), "s1", 3
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_update_position_cycle_max_qty_increases(tmp_path: Path) -> None:
+    """Given an open cycle, When max_qty increased, Then SCD2 row carries new peak."""
+    db_path = tmp_path / "pc_max_up.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _id, pid = await r.insert_position_cycle(
+        _make_cycle_row(max_qty=1.0, opened_at=now, timestamp=now)
+    )
+    t1 = now + timedelta(seconds=10)
+    new_id = await r.update_position_cycle_max_qty(pid, 2.5, t1, "s1", 2)
+    assert new_id is not None
+    found = await r.get_open_position_cycle(
+        "kraken.BTC-USD.live.w0000000000aa", as_of=t1 + timedelta(seconds=1)
+    )
+    assert found is not None
+    assert found["max_qty"] == pytest.approx(2.5)
+    assert found["public_id"] == pid
+
+
+@pytest.mark.asyncio
+async def test_update_position_cycle_max_qty_monotonic_noop(tmp_path: Path) -> None:
+    """Given peak of 2.5, When setting equal or lower, Then no-op (None returned)."""
+    db_path = tmp_path / "pc_max_noop.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _id, pid = await r.insert_position_cycle(
+        _make_cycle_row(max_qty=2.5, opened_at=now, timestamp=now)
+    )
+    t1 = now + timedelta(seconds=10)
+    equal = await r.update_position_cycle_max_qty(pid, 2.5, t1, "s1", 2)
+    assert equal is None
+    lower = await r.update_position_cycle_max_qty(pid, 1.0, t1, "s1", 3)
+    assert lower is None
+    found = await r.get_open_position_cycle(
+        "kraken.BTC-USD.live.w0000000000aa", as_of=t1 + timedelta(seconds=1)
+    )
+    assert found is not None
+    assert found["max_qty"] == pytest.approx(2.5)
+
+
+@pytest.mark.asyncio
+async def test_update_position_cycle_max_qty_raises_on_closed(tmp_path: Path) -> None:
+    """Given a closed cycle, When update called, Then ValueError raised."""
+    db_path = tmp_path / "pc_max_closed.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _id, pid = await r.insert_position_cycle(_make_cycle_row(opened_at=now, timestamp=now))
+    close_time = now + timedelta(seconds=10)
+    await r.close_position_cycle(pid, close_time, None, close_time, "s1", 2)
+    with pytest.raises(ValueError, match="no active open cycle"):
+        await r.update_position_cycle_max_qty(pid, 10.0, close_time, "s1", 3)
+
+
+@pytest.mark.asyncio
+async def test_flip_position_cycle_atomic_close_open(tmp_path: Path) -> None:
+    """Given a long cycle, When flipped to short, Then old closed + new open in one txn.
+
+    Also asserts that the closed row's ``closing_command_public_id`` is populated
+    from the new_open_row's ``opening_command_public_id`` — a single fill command
+    is the cause of both the close and the open, so the lineage field is carried
+    through. Without this assertion, a regression at ``flip_position_cycle`` that
+    silently dropped the cross-carry would not break any test.
+    """
+    db_path = tmp_path / "pc_flip.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _id, long_pid = await r.insert_position_cycle(
+        _make_cycle_row(direction="long", max_qty=1.0, opened_at=now, timestamp=now)
+    )
+    flip_time = now + timedelta(seconds=30)
+    new_open = _make_cycle_row(
+        direction="short",
+        max_qty=0.8,
+        opened_at=flip_time,
+        timestamp=flip_time,
+        opening_command_public_id="cmd-flip-close-1",
+    )
+    _new_id, short_pid = await r.flip_position_cycle(
+        close_cycle_public_id=long_pid,
+        new_open_row=new_open,
+        bus_time=flip_time,
+        session_id="s1",
+        sequence_id=2,
+    )
+    assert short_pid != long_pid
+    after = await r.get_open_position_cycle(
+        "kraken.BTC-USD.live.w0000000000aa", as_of=flip_time + timedelta(seconds=1)
+    )
+    assert after is not None
+    assert after["public_id"] == short_pid
+    assert after["direction"] == "short"
+    assert after["max_qty"] == pytest.approx(0.8)
+    assert after["opening_command_public_id"] == "cmd-flip-close-1"
+    async with r.session() as _s:
+        _rows = (
+            (
+                await _s.execute(
+                    _sa_select(PositionCycle).where(
+                        PositionCycle.public_id == long_pid,
+                        PositionCycle.status == "closed",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(_rows) == 1
+    closed_row = _rows[0]
+    assert closed_row.status == "closed"
+    assert closed_row.direction == "long"
+    assert closed_row.closing_command_public_id == "cmd-flip-close-1"
+    assert closed_row.closed_at == flip_time
+
+
+@pytest.mark.asyncio
+async def test_flip_position_cycle_raises_on_stale_public_id(tmp_path: Path) -> None:
+    """Given an already-closed cycle id, When flip called, Then ValueError raised."""
+    db_path = tmp_path / "pc_flip_stale.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _id, pid = await r.insert_position_cycle(_make_cycle_row(opened_at=now, timestamp=now))
+    close_time = now + timedelta(seconds=10)
+    await r.close_position_cycle(pid, close_time, None, close_time, "s1", 2)
+    stale_row = _make_cycle_row(direction="short", opened_at=close_time, timestamp=close_time)
+    with pytest.raises(ValueError, match="no active open cycle"):
+        await r.flip_position_cycle(pid, stale_row, close_time, "s1", 3)
+
+
+@pytest.mark.asyncio
+async def test_flip_position_cycle_raises_on_shard_mismatch(tmp_path: Path) -> None:
+    """Given cycle on shard A, When flip attempted with shard B payload, Then ValueError raised."""
+    db_path = tmp_path / "pc_flip_shard.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _id, pid = await r.insert_position_cycle(
+        _make_cycle_row(
+            shard_key="kraken.BTC-USD.live.w1111111111aa",
+            opened_at=now,
+            timestamp=now,
+        )
+    )
+    mismatch = _make_cycle_row(
+        shard_key="kraken.ETH-USD.live.w2222222222bb",
+        direction="short",
+        opened_at=now + timedelta(seconds=5),
+        timestamp=now + timedelta(seconds=5),
+    )
+    with pytest.raises(ValueError, match="shard_key mismatch"):
+        await r.flip_position_cycle(pid, mismatch, now + timedelta(seconds=5), "s1", 2)
+
+
+@pytest.mark.asyncio
+async def test_position_cycle_full_lifecycle(tmp_path: Path) -> None:
+    """End-to-end: insert -> update_max -> flip -> close yields expected DB state."""
+    db_path = tmp_path / "pc_lifecycle.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    shard = "kraken.BTC-USD.live.w3333333333cc"
+    t0 = datetime.now(UTC)
+    _id, long_pid = await r.insert_position_cycle(
+        _make_cycle_row(
+            shard_key=shard,
+            direction="long",
+            max_qty=1.0,
+            opened_at=t0,
+            timestamp=t0,
+        )
+    )
+    t1 = t0 + timedelta(seconds=10)
+    peak_id = await r.update_position_cycle_max_qty(long_pid, 3.0, t1, "s1", 2)
+    assert peak_id is not None
+    t2 = t0 + timedelta(seconds=20)
+    _flip_id, short_pid = await r.flip_position_cycle(
+        long_pid,
+        _make_cycle_row(
+            shard_key=shard,
+            direction="short",
+            max_qty=0.5,
+            opened_at=t2,
+            timestamp=t2,
+        ),
+        t2,
+        "s1",
+        3,
+    )
+    t3 = t0 + timedelta(seconds=30)
+    close_id = await r.close_position_cycle(short_pid, t3, None, t3, "s1", 4)
+    assert close_id is not None
+    final = await r.get_open_position_cycle(shard, as_of=t3 + timedelta(seconds=1))
+    assert final is None

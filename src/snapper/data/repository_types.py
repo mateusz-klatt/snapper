@@ -887,3 +887,55 @@ class CreateScopeGrantRequest(TypedDict):
     session_id: str
     sequence_id: int
     timestamp: datetime
+
+
+class PositionCycleRow(TypedDict):
+    """Read projection for position_cycles queries.
+
+    Represents one open->close lifetime of a position on a shard. Brackets
+    (SL/TP) reference a cycle by its public_id.
+    """
+
+    public_id: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+    instrument_public_id: str
+    exchange: str
+    mode: str
+    shard_key: str
+    wallet_public_id: str
+    operator_public_id: str | None
+    direction: str
+    max_qty: float
+    status: str
+    opened_at: datetime
+    closed_at: datetime | None
+    opening_command_public_id: str | None
+    closing_command_public_id: str | None
+
+
+class PositionCycleInsertRow(TypedDict, total=False):
+    """Insert params for insert_position_cycle and flip_position_cycle new-row.
+
+    All fields optional at the TypedDict level; callers decide which are
+    required. Cycle rows are typically inserted with status='open' and
+    closed_at/closing_command_public_id unset.
+    """
+
+    instrument_public_id: str
+    exchange: str
+    mode: str
+    shard_key: str
+    wallet_public_id: str
+    operator_public_id: str | None
+    direction: str
+    max_qty: float
+    status: str
+    opened_at: datetime
+    closed_at: datetime | None
+    opening_command_public_id: str | None
+    closing_command_public_id: str | None
+    session_id: str
+    sequence_id: int
+    timestamp: datetime

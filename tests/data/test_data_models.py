@@ -17,6 +17,7 @@ from snapper.data.models import Instrument
 from snapper.data.models import InstrumentOrderCapability
 from snapper.data.models import Order
 from snapper.data.models import Position
+from snapper.data.models import PositionCycle
 from snapper.data.models import Signal
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
@@ -1079,6 +1080,81 @@ class TestExecutionPlanDecisionModel:
         )
         assert dec.decision_importance == "routine"
         assert dec.evidence["skip_count"] == 60
+
+
+class TestPositionCycleModel:
+    """Tests for PositionCycle ORM model."""
+
+    def test_creation_open_long(self) -> None:
+        """Verify open long-direction cycle creation with required fields.
+
+        Given: Freshly opened long position parameters,
+        When: PositionCycle instantiated,
+        Then: All fields set and optional fields default to None.
+        """
+        now = datetime.now(UTC)
+        cycle = PositionCycle(
+            instrument_public_id="inst-1",
+            exchange="kraken",
+            mode="live",
+            shard_key="kraken.BTC-USD.live.w0123abcdef01",
+            wallet_public_id="wallet-1",
+            direction="long",
+            max_qty=1.5,
+            status="open",
+            opened_at=now,
+            session_id="s1",
+            sequence_id=1,
+            timestamp=now,
+        )
+        assert cycle.instrument_public_id == "inst-1"
+        assert cycle.exchange == "kraken"
+        assert cycle.mode == "live"
+        assert cycle.shard_key == "kraken.BTC-USD.live.w0123abcdef01"
+        assert cycle.wallet_public_id == "wallet-1"
+        assert cycle.direction == "long"
+        assert cycle.max_qty == pytest.approx(1.5)
+        assert cycle.status == "open"
+        assert cycle.opened_at == now
+        assert cycle.operator_public_id is None
+        assert cycle.closed_at is None
+        assert cycle.opening_command_public_id is None
+        assert cycle.closing_command_public_id is None
+
+    def test_creation_closed_short_with_commands(self) -> None:
+        """Verify closed short-direction cycle with command lineage.
+
+        Given: Closed short position with command IDs,
+        When: PositionCycle instantiated,
+        Then: Direction=short, status=closed, both command ids set.
+        """
+        opened = datetime.now(UTC)
+        closed = opened + timedelta(minutes=5)
+        cycle = PositionCycle(
+            instrument_public_id="inst-2",
+            exchange="kraken_futures",
+            mode="paper",
+            shard_key="kraken_futures.ETH-USD.paper.mean_revert",
+            wallet_public_id="wallet-2",
+            operator_public_id="op-1",
+            direction="short",
+            max_qty=2.0,
+            status="closed",
+            opened_at=opened,
+            closed_at=closed,
+            opening_command_public_id="cmd-open-1",
+            closing_command_public_id="cmd-close-1",
+            session_id="s2",
+            sequence_id=2,
+            timestamp=closed,
+        )
+        assert cycle.direction == "short"
+        assert cycle.status == "closed"
+        assert cycle.max_qty == pytest.approx(2.0)
+        assert cycle.operator_public_id == "op-1"
+        assert cycle.closed_at == closed
+        assert cycle.opening_command_public_id == "cmd-open-1"
+        assert cycle.closing_command_public_id == "cmd-close-1"
 
 
 class TestOrderPlanPublicId:
