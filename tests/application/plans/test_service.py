@@ -460,6 +460,86 @@ class TestPlanExecutorService:
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
     @patch("snapper.application.plans.service.get_repository")
+    async def test_start_sleeps_for_slow_joiner_when_subscriber_active(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Round 4 fix: start() awaits a slow-joiner sleep after subscriber setup.
+
+        When the subscriber is connected, ``start()`` sleeps briefly
+        so the XPUB/XSUB broker can propagate the subscription before
+        recovery starts publishing stranded cancels. Without this
+        window, the cancelled event can arrive while the broker has
+        not yet routed the SUB filter to this socket and the event is
+        dropped.
+        """
+        mock_repo = AsyncMock()
+        mock_repo.get_active_execution_plans = AsyncMock(return_value=[])
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+
+        def _setup() -> None:
+            service._subscriber = MagicMock()
+
+        sleeps: list[float] = []
+        real_sleep = asyncio.sleep
+
+        async def _tracking_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            await real_sleep(0)
+
+        async def _stop_after_start() -> None:
+            service._running = False
+
+        service._setup_subscriber = _setup
+        with (
+            patch(
+                "snapper.application.plans.service.asyncio.sleep",
+                side_effect=_tracking_sleep,
+            ),
+            patch.object(service, "_run_loop", side_effect=_stop_after_start),
+        ):
+            await service.start()
+        assert any(s >= 0.5 for s in sleeps)
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_start_skips_slow_joiner_sleep_when_no_subscriber(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """When no subscriber is set up (unit tests), start() skips the sleep."""
+        mock_repo = AsyncMock()
+        mock_repo.get_active_execution_plans = AsyncMock(return_value=[])
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+
+        def _setup() -> None:
+            service._subscriber = None
+
+        sleeps: list[float] = []
+        real_sleep = asyncio.sleep
+
+        async def _tracking_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            await real_sleep(0)
+
+        async def _stop_after_start() -> None:
+            service._running = False
+
+        service._setup_subscriber = _setup
+        with (
+            patch(
+                "snapper.application.plans.service.asyncio.sleep",
+                side_effect=_tracking_sleep,
+            ),
+            patch.object(service, "_run_loop", side_effect=_stop_after_start),
+        ):
+            await service.start()
+        assert all(s < 0.5 for s in sleeps)
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
     async def test_recover_plans_skips_unknown_types(
         self, mock_repo_fn: MagicMock, mock_settings: MagicMock
     ) -> None:

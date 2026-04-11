@@ -45,6 +45,7 @@ _EVALUATOR_REGISTRY: dict[str, type[PlanEvaluator]] = {
 }
 
 _CHECKPOINT_INTERVAL_S = 10.0
+_SLOW_JOINER_STABILIZATION_S = 0.5
 _TERMINAL_STATUSES = frozenset({"completed", "cancelled", "failed", "expired"})
 
 
@@ -93,10 +94,15 @@ class PlanExecutorService(RegisterableProcess):
         The subscriber is wired up **before** recovery so that any
         venue events triggered by the recovery path (e.g., re-emitted
         stranded cancels from ``_reemit_stranded_cancel``) cannot be
-        lost on the "subscriber not connected yet" race window.
+        lost on the "subscriber not connected yet" race window. A
+        brief slow-joiner stabilization sleep gives the XPUB/XSUB
+        broker time to propagate the subscription before recovery
+        starts emitting commands.
         """
         logger.info("PlanExecutorService starting")
         self._setup_subscriber()
+        if self._subscriber is not None:
+            await asyncio.sleep(_SLOW_JOINER_STABILIZATION_S)
         await self._recover_plans()
         self._running = True
         logger.info(
