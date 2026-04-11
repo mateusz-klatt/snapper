@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
-import { Download, Plus } from 'lucide-react'
-import { useOrders, useExecutions } from '../../hooks/queries'
+import { Download, Plus, X } from 'lucide-react'
+import { useOrders, useExecutions, useCancelOrder } from '../../hooks/queries'
 import { NewOrderModal } from './NewOrderModal'
 import type { Order, Execution } from '../../types/entities'
 import { OrderCardSkeleton } from '../../components/Skeleton'
@@ -9,7 +9,12 @@ import { exportToCSV } from '../../lib/csvExport'
 import { EmptyState } from '../../components/ui'
 import clsx from 'clsx'
 
+const TERMINAL_ORDER_STATUSES = new Set(['filled', 'cancelled', 'rejected', 'error', 'expired'])
+
 const OrderCard: React.FC<{ order: Order }> = ({ order }) => {
+  const cancelOrder = useCancelOrder()
+  const isTerminal = TERMINAL_ORDER_STATUSES.has(order.status.toLowerCase())
+
   const getStatusColor = (status: string) => {
     switch (status.toLowerCase()) {
       case 'filled':
@@ -47,14 +52,29 @@ const OrderCard: React.FC<{ order: Order }> = ({ order }) => {
           </span>
           <span className='text-sm text-muted-500'>{order.orderType}</span>
         </div>
-        <span
-          className={clsx(
-            'px-2 py-1 text-xs font-medium rounded-full',
-            getStatusColor(order.status)
+        <div className='flex items-center gap-2'>
+          <span
+            className={clsx(
+              'px-2 py-1 text-xs font-medium rounded-full',
+              getStatusColor(order.status)
+            )}
+          >
+            {order.status}
+          </span>
+          {!isTerminal && (
+            <button
+              type='button'
+              onClick={() => cancelOrder.mutate(order.clientOrderId)}
+              disabled={cancelOrder.isPending}
+              aria-label={`Cancel order ${order.clientOrderId}`}
+              data-testid={`cancel-order-${order.clientOrderId}`}
+              className='flex items-center gap-1 rounded-lg border border-loss-500 px-2 py-1 text-xs font-medium text-loss-500 transition-colors hover:bg-loss-900/20 disabled:opacity-50 disabled:cursor-not-allowed'
+            >
+              <X size={12} />
+              {cancelOrder.isPending ? 'Cancelling…' : 'Cancel'}
+            </button>
           )}
-        >
-          {order.status}
-        </span>
+        </div>
       </div>
       <div className='grid grid-cols-2 gap-4 text-sm'>
         <div>

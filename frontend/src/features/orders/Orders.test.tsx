@@ -11,7 +11,12 @@ vi.mock('../../lib/csvExport', () => ({
 }))
 
 vi.mock('./NewOrderModal', () => ({
-  NewOrderModal: () => null,
+  NewOrderModal: ({ open, onClose }: { open: boolean; onClose: () => void }) =>
+    open ? (
+      <button type='button' data-testid='new-order-modal-close' onClick={onClose}>
+        close
+      </button>
+    ) : null,
 }))
 
 vi.mock('../../components/ThemeSelect', () => ({
@@ -49,6 +54,8 @@ vi.mock('../../components/ThemeSelect', () => ({
   ),
 }))
 
+const cancelMutate = vi.fn()
+
 vi.mock('../../hooks/queries', () => ({
   useOrders: vi.fn(() => ({
     data: [],
@@ -57,6 +64,10 @@ vi.mock('../../hooks/queries', () => ({
   useExecutions: vi.fn(() => ({
     data: [],
     isLoading: false,
+  })),
+  useCancelOrder: vi.fn(() => ({
+    mutate: cancelMutate,
+    isPending: false,
   })),
 }))
 const createQueryClient = () =>
@@ -1323,5 +1334,117 @@ describe('Orders', () => {
 
     expect(button).toBeInTheDocument()
     await userEvent.click(button)
+    const closeBtn = await screen.findByTestId('new-order-modal-close')
+
+    await userEvent.click(closeBtn)
+    await waitFor(() => {
+      expect(screen.queryByTestId('new-order-modal-close')).not.toBeInTheDocument()
+    })
+  })
+
+  it('renders cancel button on non-terminal order and invokes mutation', async () => {
+    const mockOrders: Order[] = [
+      {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
+        clientOrderId: 'cid-open',
+        instrument: 'BTC/USD',
+        exchange: 'kraken',
+        side: 'buy',
+        orderType: 'limit',
+        size: 1,
+        filledSize: 0,
+        price: 50000,
+        status: 'open',
+        createdAt: new Date('2024-01-01T00:00:00Z'),
+        updatedAt: null,
+      },
+    ]
+    const { useOrders } = await import('../../hooks/queries')
+
+    vi.mocked(useOrders).mockReturnValue({
+      data: mockOrders,
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    renderWithProviders(<Orders />)
+    const cancelBtn = await screen.findByTestId('cancel-order-cid-open')
+
+    await userEvent.click(cancelBtn)
+    expect(cancelMutate).toHaveBeenCalledWith('cid-open')
+  })
+
+  it('hides cancel button on terminal order statuses', async () => {
+    const mockOrders: Order[] = [
+      {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
+        clientOrderId: 'cid-filled',
+        instrument: 'BTC/USD',
+        exchange: 'kraken',
+        side: 'buy',
+        orderType: 'limit',
+        size: 1,
+        filledSize: 1,
+        price: 50000,
+        status: 'filled',
+        createdAt: new Date('2024-01-01T00:00:00Z'),
+        updatedAt: null,
+      },
+    ]
+    const { useOrders } = await import('../../hooks/queries')
+
+    vi.mocked(useOrders).mockReturnValue({
+      data: mockOrders,
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    renderWithProviders(<Orders />)
+    await waitFor(() => {
+      expect(screen.getByText('filled')).toBeInTheDocument()
+    })
+    expect(screen.queryByTestId('cancel-order-cid-filled')).not.toBeInTheDocument()
+  })
+
+  it('cancel button is disabled while the mutation is pending', async () => {
+    const { useOrders, useCancelOrder } = await import('../../hooks/queries')
+    const mockOrders: Order[] = [
+      {
+        sequenceId: 0,
+        publicId: 'test-pid',
+        timestamp: new Date('2024-01-01T00:00:00Z'),
+        sessionId: 'test-sid',
+        clientOrderId: 'cid-pending',
+        instrument: 'BTC/USD',
+        exchange: 'kraken',
+        side: 'buy',
+        orderType: 'limit',
+        size: 1,
+        filledSize: 0,
+        price: 50000,
+        status: 'open',
+        createdAt: new Date('2024-01-01T00:00:00Z'),
+        updatedAt: null,
+      },
+    ]
+
+    vi.mocked(useOrders).mockReturnValue({
+      data: mockOrders,
+      isLoading: false,
+      refetch: vi.fn(),
+    } as never)
+    vi.mocked(useCancelOrder).mockReturnValue({
+      mutate: cancelMutate,
+      isPending: true,
+    } as never)
+    renderWithProviders(<Orders />)
+    const cancelBtn = await screen.findByTestId('cancel-order-cid-pending')
+
+    expect(cancelBtn).toBeDisabled()
+    expect(cancelBtn).toHaveTextContent(/Cancelling/i)
   })
 })

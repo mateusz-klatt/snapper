@@ -539,6 +539,12 @@ class APIClient {
   async createOrder(body: Record<string, unknown>): Promise<Record<string, unknown>> {
     return this.postJSON('/api/orders', body)
   }
+  async cancelOrder(clientOrderId: string): Promise<Record<string, unknown>> {
+    return this.postJSON(
+      `/api/orders/by-client-order-id/${encodeURIComponent(clientOrderId)}/cancel`,
+      {}
+    )
+  }
   async getConfiguredProcesses(): Promise<ConfiguredProcessesResponse> {
     const data = await this.getJSON('/api/processes/configured')
 

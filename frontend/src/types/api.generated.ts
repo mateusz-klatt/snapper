@@ -1032,7 +1032,8 @@ export type Paths = {
          * @description Cancel an active execution plan.
          *
          *     Verifies the caller has access to the plan's wallet before
-         *     transitioning the plan to cancel_requested status.
+         *     transitioning the plan to cancel_requested status and emitting a
+         *     venue-facing cancel ``TradeCommand`` for the active child order.
          *
          *     Args:
          *         request: FastAPI request (provides REST tracker for provenance).
@@ -1050,6 +1051,46 @@ export type Paths = {
          *             409 if already terminal.
          */
         post: Operations["cancel_order_api_orders__plan_public_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/orders/by-client-order-id/{client_order_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel Order By Client Order Id
+         * @description Cancel an order by its ``client_order_id``.
+         *
+         *     Convenience endpoint for the Orders UI that only knows the child
+         *     order's ``client_order_id``. Resolves to the owning execution plan
+         *     via ``trade_commands.plan_public_id`` and then delegates to the
+         *     shared cancel flow.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         client_order_id: Child order client id to cancel.
+         *         principal: Authenticated caller holding CANCEL_ORDERS.
+         *         _csrf: CSRF token validation.
+         *         command: Cancel command envelope.
+         *         repo: Repository dependency.
+         *
+         *     Returns:
+         *         ExecutionPlanResponse wrapping the updated plan.
+         *
+         *     Raises:
+         *         HTTPException: 404 if no plan linked to this client_order_id,
+         *             403 if wallet not accessible, 409 if already terminal.
+         */
+        post: Operations["cancel_order_by_client_order_id_api_orders_by_client_order_id__client_order_id__cancel_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -7124,6 +7165,41 @@ export interface Operations {
             header?: never;
             path: {
                 plan_public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["CancelOrderCommand"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["ExecutionPlanResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_order_by_client_order_id_api_orders_by_client_order_id__client_order_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                client_order_id: string;
             };
             cookie?: never;
         };

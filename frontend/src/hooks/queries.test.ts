@@ -17,6 +17,7 @@ import {
   useRotateCredential,
   useOrders,
   useExecutions,
+  useCancelOrder,
   useCreateOrder,
   useAvailableProcesses,
   useConfiguredProcesses,
@@ -76,6 +77,7 @@ vi.mock('../lib/apiClient', () => ({
     ),
     getWallets: vi.fn(() => Promise.resolve(envelope('wallet_list', { payload: [], count: 0 }))),
     createOrder: vi.fn(() => Promise.resolve({ type: 'execution_plan_response', payload: {} })),
+    cancelOrder: vi.fn(() => Promise.resolve({ type: 'execution_plan_response', payload: {} })),
     getOrders: vi.fn(() => Promise.resolve(envelope('order_list', { payload: [], count: 0 }))),
     getExecutions: vi.fn(() =>
       Promise.resolve(envelope('execution_list', { payload: [], count: 0 }))
@@ -1156,6 +1158,22 @@ describe('queries', () => {
       expect(apiClient.createOrder).toHaveBeenCalledWith({
         type: 'create_order_command',
       })
+    })
+  })
+
+  describe('useCancelOrder', () => {
+    it('calls apiClient.cancelOrder with the client_order_id', async () => {
+      const responseBody = { type: 'execution_plan_response', payload: {} }
+
+      vi.mocked(apiClient.cancelOrder).mockResolvedValueOnce(responseBody)
+
+      const { result } = renderHook(() => useCancelOrder(), { wrapper: createWrapper() })
+
+      await act(async () => {
+        await result.current.mutateAsync('cid-42')
+      })
+
+      expect(apiClient.cancelOrder).toHaveBeenCalledWith('cid-42')
     })
   })
 })

@@ -753,6 +753,22 @@ describe('domain API methods', () => {
       expect.objectContaining({ method: 'POST' })
     )
   })
+  it('cancelOrder posts to /api/orders/by-client-order-id/{cid}/cancel', async () => {
+    const responseBody = { type: 'execution_plan_response', payload: {} }
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => responseBody,
+    })
+    const result = await apiClient.cancelOrder('cid 42/with special')
+
+    expect(result).toEqual(responseBody)
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/orders/by-client-order-id/cid%2042%2Fwith%20special/cancel'),
+      expect.objectContaining({ method: 'POST' })
+    )
+  })
   it('getPositions returns positions', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,

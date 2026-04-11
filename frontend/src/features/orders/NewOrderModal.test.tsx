@@ -31,25 +31,33 @@ vi.mock('../../components/ThemeSelect', () => ({
 }))
 
 const mockMutateAsync = vi.fn()
+const mockCreateOrderState = { isPending: false }
+const mockHookState: {
+  exchanges: { payload: string[] } | undefined
+  instruments: { payload: string[] } | undefined
+  wallets: { public_id: string; label: string; is_paper: boolean }[] | undefined
+} = {
+  exchanges: { payload: ['kraken', 'zonda'] },
+  instruments: { payload: ['BTC-USD', 'ETH-USD'] },
+  wallets: [
+    { public_id: 'wallet-1', label: 'default', is_paper: false },
+    { public_id: 'wallet-2', label: 'paper', is_paper: true },
+  ],
+}
 
 vi.mock('../../hooks/queries', () => ({
   useExchanges: () => ({
-    data: { payload: ['kraken', 'zonda'] },
+    data: mockHookState.exchanges,
   }),
   useExchangeInstruments: () => ({
-    data: { payload: ['BTC-USD', 'ETH-USD'] },
+    data: mockHookState.instruments,
   }),
   useWallets: () => ({
-    data: {
-      payload: [
-        { public_id: 'wallet-1', label: 'default', is_paper: false },
-        { public_id: 'wallet-2', label: 'paper', is_paper: true },
-      ],
-    },
+    data: mockHookState.wallets ? { payload: mockHookState.wallets } : undefined,
   }),
   useCreateOrder: () => ({
     mutateAsync: mockMutateAsync,
-    isPending: false,
+    isPending: mockCreateOrderState.isPending,
   }),
 }))
 
@@ -154,6 +162,27 @@ describe('NewOrderModal', () => {
     })
   })
 
+  it('shows fallback error message when thrown value is not an Error', async () => {
+    mockMutateAsync.mockRejectedValueOnce('string failure')
+
+    render(<NewOrderModal open={true} onClose={vi.fn()} />, {
+      wrapper: createWrapper(),
+    })
+
+    const inputs = screen.getAllByPlaceholderText('0.00')
+
+    fireEvent.change(inputs[0], { target: { value: '0.5' } })
+    fireEvent.change(inputs[1], { target: { value: '50000' } })
+    await userEvent.click(screen.getByText('Review Order'))
+    await waitFor(() => {
+      expect(screen.getAllByText('Confirm Order').length).toBeGreaterThan(0)
+    })
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm Order' }))
+    await waitFor(() => {
+      expect(screen.getByText('Order creation failed')).toBeTruthy()
+    })
+  })
+
   it('goes back from confirmation', async () => {
     render(<NewOrderModal open={true} onClose={vi.fn()} />, {
       wrapper: createWrapper(),
@@ -234,6 +263,134 @@ describe('NewOrderModal', () => {
     fireEvent.change(inputs[0], { target: { value: '1' } })
     await userEvent.click(screen.getByText('Review Order'))
     expect(screen.getByText('Stop price is required for this order type')).toBeTruthy()
+  })
+
+  it('shows stop price positive error for stop with non-positive stop_price', async () => {
+    render(<NewOrderModal open={true} onClose={vi.fn()} />, {
+      wrapper: createWrapper(),
+    })
+    const selects = screen.getAllByRole('combobox')
+
+    fireEvent.change(selects[3], { target: { value: 'stop' } })
+    const inputs = screen.getAllByPlaceholderText('0.00')
+
+    fireEvent.change(inputs[0], { target: { value: '1' } })
+    fireEvent.change(inputs[1], { target: { value: '0' } })
+    await userEvent.click(screen.getByText('Review Order'))
+    expect(screen.getByText('Stop price must be a positive number')).toBeTruthy()
+  })
+
+  it('renders with empty fallback lists when hooks return undefined data', () => {
+    const prev = {
+      exchanges: mockHookState.exchanges,
+      instruments: mockHookState.instruments,
+      wallets: mockHookState.wallets,
+    }
+
+    mockHookState.exchanges = undefined
+    mockHookState.instruments = undefined
+    mockHookState.wallets = undefined
+
+    try {
+      render(<NewOrderModal open={true} onClose={vi.fn()} />, {
+        wrapper: createWrapper(),
+      })
+      expect(screen.getByTestId('modal')).toBeTruthy()
+    } finally {
+      mockHookState.exchanges = prev.exchanges
+      mockHookState.instruments = prev.instruments
+      mockHookState.wallets = prev.wallets
+    }
+  })
+
+  it('submits stop_limit order with both price and stop_price', async () => {
+    mockMutateAsync.mockResolvedValueOnce({})
+    render(<NewOrderModal open={true} onClose={vi.fn()} />, {
+      wrapper: createWrapper(),
+    })
+    const selects = screen.getAllByRole('combobox')
+
+    fireEvent.change(selects[3], { target: { value: 'stop_limit' } })
+    const inputs = screen.getAllByPlaceholderText('0.00')
+
+    fireEvent.change(inputs[0], { target: { value: '0.5' } })
+    fireEvent.change(inputs[1], { target: { value: '50000' } })
+    fireEvent.change(inputs[2], { target: { value: '48000' } })
+    await userEvent.click(screen.getByText('Review Order'))
+    await waitFor(() => {
+      expect(screen.getAllByText('Confirm Order').length).toBeGreaterThan(0)
+    })
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm Order' }))
+    await waitFor(() => {
+      expect(mockMutateAsync).toHaveBeenCalledTimes(1)
+    })
+    const body = mockMutateAsync.mock.calls[0][0] as { payload: Record<string, unknown> }
+
+    expect(body.payload.price).toBe(50000)
+    expect(body.payload.stop_price).toBe(48000)
+  })
+
+  it('submits market order with null price and null stop_price', async () => {
+    mockMutateAsync.mockResolvedValueOnce({})
+    render(<NewOrderModal open={true} onClose={vi.fn()} />, {
+      wrapper: createWrapper(),
+    })
+    const selects = screen.getAllByRole('combobox')
+
+    fireEvent.change(selects[3], { target: { value: 'market' } })
+    const inputs = screen.getAllByPlaceholderText('0.00')
+
+    fireEvent.change(inputs[0], { target: { value: '0.5' } })
+    await userEvent.click(screen.getByText('Review Order'))
+    await waitFor(() => {
+      expect(screen.getAllByText('Confirm Order').length).toBeGreaterThan(0)
+    })
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm Order' }))
+    await waitFor(() => {
+      expect(mockMutateAsync).toHaveBeenCalledTimes(1)
+    })
+    const body = mockMutateAsync.mock.calls[0][0] as { payload: Record<string, unknown> }
+
+    expect(body.payload.price).toBeNull()
+    expect(body.payload.stop_price).toBeNull()
+  })
+
+  it('shows sell side styling in confirmation view', async () => {
+    render(<NewOrderModal open={true} onClose={vi.fn()} />, {
+      wrapper: createWrapper(),
+    })
+    const selects = screen.getAllByRole('combobox')
+
+    fireEvent.change(selects[2], { target: { value: 'sell' } })
+    const inputs = screen.getAllByPlaceholderText('0.00')
+
+    fireEvent.change(inputs[0], { target: { value: '0.5' } })
+    fireEvent.change(inputs[1], { target: { value: '50000' } })
+    await userEvent.click(screen.getByText('Review Order'))
+    await waitFor(() => {
+      expect(screen.getAllByText('Confirm Order').length).toBeGreaterThan(0)
+    })
+    expect(screen.getByText('SELL')).toBeTruthy()
+  })
+
+  it('shows submitting label while create order mutation is pending', async () => {
+    mockCreateOrderState.isPending = true
+
+    try {
+      render(<NewOrderModal open={true} onClose={vi.fn()} />, {
+        wrapper: createWrapper(),
+      })
+      const inputs = screen.getAllByPlaceholderText('0.00')
+
+      fireEvent.change(inputs[0], { target: { value: '0.5' } })
+      fireEvent.change(inputs[1], { target: { value: '50000' } })
+      await userEvent.click(screen.getByText('Review Order'))
+      await waitFor(() => {
+        expect(screen.getByText('Submitting...')).toBeTruthy()
+      })
+    } finally {
+      mockCreateOrderState.isPending = false
+    }
   })
 
   it('confirmation shows stop price and mode', async () => {

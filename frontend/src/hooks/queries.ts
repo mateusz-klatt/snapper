@@ -303,6 +303,17 @@ export const useCreateOrder = () => {
   })
 }
 
+export const useCancelOrder = () => {
+  const queryClient = useQueryClient()
+
+  return useMutation<Record<string, unknown>, Error, string>({
+    mutationFn: clientOrderId => apiClient.cancelOrder(clientOrderId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['orders'] })
+    },
+  })
+}
+
 export const usePositions = () => {
   const { isAuthenticated } = useAuth()
   const asOf = useAppStore(s => s.asOf)
