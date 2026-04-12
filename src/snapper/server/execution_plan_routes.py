@@ -262,27 +262,6 @@ async def create_bracket(
             detail="Failed to create bracket",
         ) from exc
 
-    await repo.insert_execution_plan_decision(
-        row=ExecutionPlanDecisionInsertRow(
-            plan_public_id=plan_public_id,
-            decision_type="bracket_created",
-            decided_at=now,
-            trigger_type="api",
-            evidence={
-                "sl_price": body.sl_price,
-                "tp_price": body.tp_price,
-                "position_cycle_public_id": body.position_cycle_public_id,
-            },
-            emitted_command_public_id=None,
-            new_status="armed",
-            reason="Bracket created via API",
-            decision_importance="action",
-        ),
-        bus_time=ts,
-        session_id=sid,
-        sequence_id=tracker.next_sequence(_REST_STREAM),
-    )
-
     plan = await repo.get_execution_plan(plan_public_id, as_of=ts)
     if plan is None:
         raise HTTPException(
@@ -291,6 +270,30 @@ async def create_bracket(
         )
 
     service._register_plan(cast(Any, plan), BracketEvaluator())
+
+    try:
+        await repo.insert_execution_plan_decision(
+            row=ExecutionPlanDecisionInsertRow(
+                plan_public_id=plan_public_id,
+                decision_type="bracket_created",
+                decided_at=now,
+                trigger_type="api",
+                evidence={
+                    "sl_price": body.sl_price,
+                    "tp_price": body.tp_price,
+                    "position_cycle_public_id": body.position_cycle_public_id,
+                },
+                emitted_command_public_id=None,
+                new_status="armed",
+                reason="Bracket created via API",
+                decision_importance="action",
+            ),
+            bus_time=ts,
+            session_id=sid,
+            sequence_id=tracker.next_sequence(_REST_STREAM),
+        )
+    except Exception as exc:
+        logger.error("Decision logging failed for bracket {}: {}", plan_public_id, exc)
 
     plan_data = _plan_to_data(cast(dict[str, Any], plan))
     return ExecutionPlanResponse(

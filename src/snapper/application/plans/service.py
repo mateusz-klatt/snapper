@@ -483,50 +483,58 @@ class PlanExecutorService(RegisterableProcess):
         now = datetime.now(UTC)
         session_id = self.tracker.session_id
         child_ids: list[str] = []
-        for idx, cmd in enumerate(commands):
-            client_order_id = str(uuid7())
-            sequence_id = self.tracker.next_sequence("plan_commands")
-            row = TradeCommandInsertRow(
-                command_type=str(cmd.get("command_type", "create")),
-                shard_key=plan["shard_key"],
-                exchange=plan["exchange"],
-                instrument=str(cmd["instrument"]),
-                mode=plan["mode"],
-                strategy_id=plan["plan_type"],
-                client_order_id=client_order_id,
-                venue_client_id=client_order_id,
-                side=str(cmd["side"]),
-                order_type=str(cmd.get("order_type", "market")),
-                quantity=float(cast(Any, cmd["quantity"])),
-                price=cast(Any, cmd.get("price")),
-                leverage=cast(Any, cmd.get("leverage")),
-                reduce_only=bool(cmd.get("reduce_only", False)),
-                status="created",
-                created_at=now,
-                correlation_id=plan["public_id"],
-                session_id=session_id,
-                sequence_id=sequence_id,
-                timestamp=now,
-                wallet_public_id=plan["wallet_public_id"] or "",
-                operator_public_id=plan["operator_public_id"],
-                user_public_id=None,
-                plan_public_id=plan["public_id"],
-                exchange_order_id=None,
-                idempotency_key=f"{plan['public_id']}:{idx}",
-                supersedes_command_id=None,
-            )
-            await self.repository.insert_trade_command(row)
-            self._client_order_id_index[client_order_id] = plan_public_id
-            child_ids.append(client_order_id)
-            await self._log_decision(
-                plan_public_id=plan_public_id,
-                decision_type="command_emitted",
-                trigger_type=str(cmd.get("trigger_type", "evaluator")),
-                reason=str(cmd.get("reason", "evaluator emitted command")),
-                importance="action",
-                evidence={"command_index": idx, "side": str(cmd["side"])},
-                emitted_command_public_id=client_order_id,
-            )
+        try:
+            for idx, cmd in enumerate(commands):
+                client_order_id = str(uuid7())
+                sequence_id = self.tracker.next_sequence("plan_commands")
+                row = TradeCommandInsertRow(
+                    command_type=str(cmd.get("command_type", "create")),
+                    shard_key=plan["shard_key"],
+                    exchange=plan["exchange"],
+                    instrument=str(cmd["instrument"]),
+                    mode=plan["mode"],
+                    strategy_id=plan["plan_type"],
+                    client_order_id=client_order_id,
+                    venue_client_id=client_order_id,
+                    side=str(cmd["side"]),
+                    order_type=str(cmd.get("order_type", "market")),
+                    quantity=float(cast(Any, cmd["quantity"])),
+                    price=cast(Any, cmd.get("price")),
+                    leverage=cast(Any, cmd.get("leverage")),
+                    reduce_only=bool(cmd.get("reduce_only", False)),
+                    status="created",
+                    created_at=now,
+                    correlation_id=plan["public_id"],
+                    session_id=session_id,
+                    sequence_id=sequence_id,
+                    timestamp=now,
+                    wallet_public_id=plan["wallet_public_id"] or "",
+                    operator_public_id=plan["operator_public_id"],
+                    user_public_id=None,
+                    plan_public_id=plan["public_id"],
+                    exchange_order_id=None,
+                    idempotency_key=f"{plan['public_id']}:{idx}",
+                    supersedes_command_id=None,
+                )
+                await self.repository.insert_trade_command(row)
+                self._client_order_id_index[client_order_id] = plan_public_id
+                child_ids.append(client_order_id)
+                await self._log_decision(
+                    plan_public_id=plan_public_id,
+                    decision_type="command_emitted",
+                    trigger_type=str(cmd.get("trigger_type", "evaluator")),
+                    reason=str(cmd.get("reason", "evaluator emitted command")),
+                    importance="action",
+                    evidence={"command_index": idx, "side": str(cmd["side"])},
+                    emitted_command_public_id=client_order_id,
+                )
+        except Exception as exc:
+            logger.error("Command insert failed for plan {}: {}", plan_public_id, exc)
+            if not child_ids:
+                await self._transition_plan(
+                    plan_public_id, "failed", f"Command insert failed: {exc}"
+                )
+            return
         if child_ids:
             params_dict = plan.get("params") or {}
             existing_ids = self._extract_child_ids(params_dict)

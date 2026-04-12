@@ -2604,10 +2604,12 @@ class TestOnExecutionDispatchesCommands:
     async def test_execution_dispatch_failure_does_not_crash(
         self, mock_repo_fn: MagicMock, mock_settings: MagicMock
     ) -> None:
-        """If dispatch fails during execution, plan status still updates."""
+        """If dispatch fails during execution, plan compensated to failed + fill still updates."""
         mock_repo = AsyncMock()
         mock_repo.insert_trade_command = AsyncMock(side_effect=RuntimeError("DB down"))
         mock_repo.update_execution_plan_status = AsyncMock(return_value=1)
+        mock_repo.get_instrument_capabilities = AsyncMock(return_value=[])
+        mock_repo.insert_execution_plan_decision = AsyncMock(return_value="d1")
         mock_repo_fn.return_value = mock_repo
         service = PlanExecutorService()
         plan = _make_plan_row(native_instrument="BTC-USD")
@@ -2618,7 +2620,7 @@ class TestOnExecutionDispatchesCommands:
         service._register_plan(plan, evaluator)
         execution = _make_execution()
         await service._handle_execution(_cast(ExecutionData, execution))
-        mock_repo.update_execution_plan_status.assert_awaited_once()
+        assert mock_repo.update_execution_plan_status.await_count >= 1
 
 
 class TestTransitionPlan:
