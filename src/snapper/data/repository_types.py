@@ -234,6 +234,7 @@ class PositionRow(TypedDict):
     average_price: float
     unrealized_pnl: float | None
     realized_pnl: float | None
+    position_cycle_public_id: str | None
 
 
 class SettingRow(TypedDict):

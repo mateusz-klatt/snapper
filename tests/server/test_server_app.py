@@ -696,6 +696,7 @@ class MockRepository:
                 "average_price": pos.average_price,
                 "unrealized_pnl": pos.unrealized_pnl,
                 "realized_pnl": pos.realized_pnl,
+                "position_cycle_public_id": None,
             }
             for pos, inst, sym in self._session_result
         ]

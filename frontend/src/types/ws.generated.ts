@@ -141,6 +141,7 @@ export type UserPublicId5 = string | null;
 export type Type14 = "position";
 export type Exchange8 = "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
 export type Mode3 = "live" | "paper";
+export type PositionCyclePublicId1 = string | null;
 export type Type15 = "replay_end";
 export type Type16 = "replay_start";
 export type StartedAt = string | null;
@@ -875,6 +876,7 @@ export interface OrderRequestData {
  *     average_price: Average entry price.
  *     unrealized_pnl: Unrealized profit/loss.
  *     realized_pnl: Realized profit/loss.
+ *     position_cycle_public_id: Public ID of the open position cycle, if any.
  */
 export interface PositionData {
   type: Type14;
@@ -889,6 +891,7 @@ export interface PositionData {
   average_price: number;
   unrealized_pnl: number;
   realized_pnl: number;
+  position_cycle_public_id?: PositionCyclePublicId1;
 }
 /**
  * Historical data replay end marker.

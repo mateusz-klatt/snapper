@@ -222,6 +222,7 @@ export function positionFromAPI(api: PositionData): Position {
     averagePrice: api.average_price,
     unrealizedPnl: api.unrealized_pnl,
     realizedPnl: api.realized_pnl,
+    positionCyclePublicId: api.position_cycle_public_id ?? null,
   }
 }
 

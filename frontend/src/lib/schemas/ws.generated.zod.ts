@@ -329,6 +329,7 @@ export const PositionDataSchema = z
     average_price: z.number(),
     unrealized_pnl: z.number(),
     realized_pnl: z.number(),
+    position_cycle_public_id: z.string().nullable(),
   })
   .strict()
 

@@ -3299,6 +3299,7 @@ export type Components = {
          *         average_price: Average entry price.
          *         unrealized_pnl: Unrealized profit/loss.
          *         realized_pnl: Realized profit/loss.
+         *         position_cycle_public_id: Public ID of the open position cycle, if any.
          */
         PositionData: {
             /**
@@ -3339,6 +3340,8 @@ export type Components = {
             unrealized_pnl: number;
             /** Realized Pnl */
             realized_pnl: number;
+            /** Position Cycle Public Id */
+            position_cycle_public_id?: string | null;
         };
         /**
          * PositionListResponse

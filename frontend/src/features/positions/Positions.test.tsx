@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, fireEvent } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { Positions } from './Positions'
@@ -9,6 +9,11 @@ vi.mock('../../hooks/queries', () => ({
   usePositions: vi.fn(() => ({
     data: [],
     isLoading: false,
+  })),
+  useCreateBracket: vi.fn(() => ({
+    mutate: vi.fn(),
+    isPending: false,
+    reset: vi.fn(),
   })),
 }))
 
@@ -36,6 +41,7 @@ const makePosition = (overrides: Partial<Position> = {}): Position => ({
   averagePrice: 50000,
   unrealizedPnl: 1000,
   realizedPnl: 250,
+  positionCyclePublicId: null,
   ...overrides,
 })
 
@@ -190,5 +196,84 @@ describe('Positions', () => {
     renderWithProviders(<Positions />)
     expect(screen.getByTestId('position-side-BTC-USD-kraken-live')).toHaveTextContent('LONG')
     expect(screen.getByTestId('position-side-BTC-USD-kraken-paper')).toHaveTextContent('SHORT')
+  })
+
+  it('shows SL/TP button when position has an open cycle', async () => {
+    const pos = makePosition({
+      quantity: 1.5,
+      positionCyclePublicId: 'cycle-123',
+    })
+    const { usePositions } = await import('../../hooks/queries')
+
+    vi.mocked(usePositions).mockReturnValue({
+      data: [pos],
+      isLoading: false,
+    } as never)
+    renderWithProviders(<Positions />)
+    expect(screen.getByTestId('attach-bracket-BTC-USD-kraken-live')).toBeInTheDocument()
+  })
+
+  it('hides SL/TP button when position has no cycle', async () => {
+    const pos = makePosition({
+      quantity: 1.5,
+      positionCyclePublicId: null,
+    })
+    const { usePositions } = await import('../../hooks/queries')
+
+    vi.mocked(usePositions).mockReturnValue({
+      data: [pos],
+      isLoading: false,
+    } as never)
+    renderWithProviders(<Positions />)
+    expect(screen.queryByTestId('attach-bracket-BTC-USD-kraken-live')).not.toBeInTheDocument()
+  })
+
+  it('hides SL/TP button for FLAT positions even with a cycle', async () => {
+    const pos = makePosition({
+      quantity: 0,
+      positionCyclePublicId: 'cycle-123',
+    })
+    const { usePositions } = await import('../../hooks/queries')
+
+    vi.mocked(usePositions).mockReturnValue({
+      data: [pos],
+      isLoading: false,
+    } as never)
+    renderWithProviders(<Positions />)
+    expect(screen.queryByTestId('attach-bracket-SOL-USD-kraken-live')).not.toBeInTheDocument()
+  })
+
+  it('opens bracket modal when SL/TP button is clicked', async () => {
+    const pos = makePosition({
+      quantity: 1.5,
+      positionCyclePublicId: 'cycle-123',
+    })
+    const { usePositions } = await import('../../hooks/queries')
+
+    vi.mocked(usePositions).mockReturnValue({
+      data: [pos],
+      isLoading: false,
+    } as never)
+    renderWithProviders(<Positions />)
+    fireEvent.click(screen.getByTestId('attach-bracket-BTC-USD-kraken-live'))
+    expect(screen.getByText('Attach SL/TP — BTC-USD')).toBeInTheDocument()
+  })
+
+  it('closes bracket modal when onClose fires', async () => {
+    const pos = makePosition({
+      quantity: 1.5,
+      positionCyclePublicId: 'cycle-123',
+    })
+    const { usePositions } = await import('../../hooks/queries')
+
+    vi.mocked(usePositions).mockReturnValue({
+      data: [pos],
+      isLoading: false,
+    } as never)
+    renderWithProviders(<Positions />)
+    fireEvent.click(screen.getByTestId('attach-bracket-BTC-USD-kraken-live'))
+    expect(screen.getByText('Attach SL/TP — BTC-USD')).toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('Close'))
+    expect(screen.queryByText('Attach SL/TP — BTC-USD')).not.toBeInTheDocument()
   })
 })

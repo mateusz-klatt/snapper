@@ -31,6 +31,7 @@ import {
   useStartProcessByName,
   useStopProcessByName,
   useCreateProcessConfig,
+  useCreateBracket,
 } from './queries'
 import { useAuth } from '../stores/auth'
 import { apiClient } from '../lib/apiClient'
@@ -78,6 +79,7 @@ vi.mock('../lib/apiClient', () => ({
     getWallets: vi.fn(() => Promise.resolve(envelope('wallet_list', { payload: [], count: 0 }))),
     createOrder: vi.fn(() => Promise.resolve({ type: 'execution_plan_response', payload: {} })),
     cancelOrder: vi.fn(() => Promise.resolve({ type: 'execution_plan_response', payload: {} })),
+    createBracket: vi.fn(() => Promise.resolve({ type: 'execution_plan_response', payload: {} })),
     getOrders: vi.fn(() => Promise.resolve(envelope('order_list', { payload: [], count: 0 }))),
     getExecutions: vi.fn(() =>
       Promise.resolve(envelope('execution_list', { payload: [], count: 0 }))
@@ -1174,6 +1176,58 @@ describe('queries', () => {
       })
 
       expect(apiClient.cancelOrder).toHaveBeenCalledWith('cid-42')
+    })
+  })
+
+  describe('useCreateBracket', () => {
+    it('calls apiClient.createBracket and invalidates positions + orders', async () => {
+      const responseBody = {
+        type: 'execution_plan_response' as const,
+        sequence_id: 1,
+        public_id: 'plan-1',
+        timestamp: '2026-04-12T00:00:00Z',
+        session_id: 'sess-1',
+        payload: {
+          type: 'execution_plan' as const,
+          sequence_id: 1,
+          public_id: 'plan-1',
+          timestamp: '2026-04-12T00:00:00Z',
+          session_id: 'sess-1',
+          plan_type: 'bracket',
+          status: 'armed',
+          instrument_public_id: 'inst-1',
+          exchange: 'kraken_futures',
+          mode: 'paper',
+          side: 'buy',
+          total_quantity: 1.0,
+          filled_quantity: 0,
+          created_at: '2026-04-12T00:00:00Z',
+          created_via: 'api',
+          wallet_public_id: 'w-1',
+          operator_public_id: null,
+          params: { sl_price: 48000 },
+          position_cycle_public_id: 'cycle-1',
+          parent_plan_public_id: null,
+          last_error: null,
+          idempotency_key: null,
+        },
+      }
+
+      vi.mocked(apiClient.createBracket).mockResolvedValueOnce(responseBody)
+
+      const { result } = renderHook(() => useCreateBracket(), { wrapper: createWrapper() })
+
+      await act(async () => {
+        await result.current.mutateAsync({
+          position_cycle_public_id: 'cycle-1',
+          sl_price: 48000,
+        })
+      })
+
+      expect(apiClient.createBracket).toHaveBeenCalledWith({
+        position_cycle_public_id: 'cycle-1',
+        sl_price: 48000,
+      })
     })
   })
 })

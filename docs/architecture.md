@@ -442,7 +442,7 @@ classes running inside `PlanExecutorService`.
 `position_cycles` (one open→close lifetime per shard, brackets attach by `position_cycle_public_id`).
 
 **Plan types:** `manual_once` (Phase 1 + Phase 1.5 hardening, shipped),
-`bracket` (Phase 2 step 2 — attaches to `position_cycles` row from step 1),
+`bracket` (Phase 2 step 2, shipped 2026-04-12 — attaches to `position_cycles` row from step 1),
 `trailing_stop` (Phase 3), `peg` (Phase 4), `scheduler` (Phase 5).
 
 **Manual order create flow:** `POST /api/orders` creates a `manual_once`
@@ -525,7 +525,7 @@ row → hydrate the cache and bump `max_qty` if downtime scaled-up beyond
 the stored peak; recovered non-flat with an opposite-direction row →
 atomic flip via `flip_position_cycle` (or degrade to close-only on
 unresolved instrument); recovered non-flat with no row → bootstrap a
-synthetic cycle. Brackets in Phase 2 step 2 attach to
+synthetic cycle. Brackets (shipped Phase 2 step 2, 2026-04-12) attach to
 `position_cycle_public_id`, not to an order, so a flat reopen does not
 inherit stale stop levels.
 

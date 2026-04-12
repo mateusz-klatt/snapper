@@ -2304,4 +2304,83 @@ describe('cacheWsTicketFromResponse', () => {
       expect(url).toContain('/api/wallets/w-1/credentials/cred-1/rotate')
     })
   })
+  describe('Bracket API', () => {
+    const planResponse = {
+      type: 'execution_plan_response',
+      sequence_id: 1,
+      public_id: 'plan-1',
+      timestamp: '2026-04-12T00:00:00Z',
+      session_id: 'sess-1',
+      payload: {
+        type: 'execution_plan',
+        sequence_id: 1,
+        public_id: 'plan-1',
+        timestamp: '2026-04-12T00:00:00Z',
+        session_id: 'sess-1',
+        plan_type: 'bracket',
+        status: 'armed',
+        instrument_public_id: 'inst-1',
+        exchange: 'kraken_futures',
+        mode: 'paper',
+        side: 'buy',
+        total_quantity: 1.0,
+        filled_quantity: 0,
+        created_at: '2026-04-12T00:00:00Z',
+        created_via: 'api',
+        wallet_public_id: 'w-1',
+        operator_public_id: null,
+        params: { sl_price: 48000 },
+        position_cycle_public_id: 'cycle-1',
+        parent_plan_public_id: null,
+        last_error: null,
+        idempotency_key: null,
+      },
+    }
+
+    it('createBracket posts to /api/execution-plans', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => planResponse,
+      })
+      const result = await apiClient.createBracket({
+        position_cycle_public_id: 'cycle-1',
+        sl_price: 48000,
+      })
+
+      expect(result.payload.plan_type).toBe('bracket')
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/execution-plans'),
+        expect.objectContaining({ method: 'POST' })
+      )
+    })
+    it('cancelBracket posts to /api/execution-plans/{id}/cancel', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => planResponse,
+      })
+      const result = await apiClient.cancelBracket('plan-1')
+
+      expect(result.payload.public_id).toBe('plan-1')
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/execution-plans/plan-1/cancel'),
+        expect.objectContaining({ method: 'POST' })
+      )
+    })
+    it('getBracket fetches /api/execution-plans/{id}', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => planResponse,
+      })
+      const result = await apiClient.getBracket('plan-1')
+
+      expect(result.payload.plan_type).toBe('bracket')
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/execution-plans/plan-1'),
+        expect.objectContaining({ method: 'GET' })
+      )
+    })
+  })
 })

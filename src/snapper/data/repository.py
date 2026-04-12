@@ -3416,7 +3416,7 @@ class SQLAlchemyRepository(Repository):
         """Retrieve active positions with instrument/symbol info."""
         async with self.session() as s:
             query = (
-                select(Position, Instrument, Symbol)
+                select(Position, Instrument, Symbol, PositionCycle.public_id)
                 .join(
                     Instrument,
                     and_(
@@ -3429,6 +3429,16 @@ class SQLAlchemyRepository(Repository):
                     and_(
                         Instrument.symbol_public_id == Symbol.public_id,
                         *where_active(Symbol, as_of),
+                    ),
+                )
+                .outerjoin(
+                    PositionCycle,
+                    and_(
+                        PositionCycle.instrument_public_id == Position.instrument_public_id,
+                        PositionCycle.mode == Position.mode,
+                        PositionCycle.wallet_public_id == Position.wallet_public_id,
+                        PositionCycle.status == "open",
+                        *where_active(PositionCycle, as_of),
                     ),
                 )
                 .where(*where_active(Position, as_of))
@@ -3449,8 +3459,9 @@ class SQLAlchemyRepository(Repository):
                     "average_price": pos.average_price,
                     "unrealized_pnl": pos.unrealized_pnl,
                     "realized_pnl": pos.realized_pnl,
+                    "position_cycle_public_id": cycle_pid,
                 }
-                for pos, inst, sym in result.all()
+                for pos, inst, sym, cycle_pid in result.all()
             ]
 
     async def get_settings(self, as_of: datetime, category: str | None = None) -> list[SettingRow]:

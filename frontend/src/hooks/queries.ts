@@ -34,6 +34,8 @@ import type {
   CredentialResponse,
   CreateCredentialBody,
   RotateCredentialBody,
+  ExecutionPlanResponse,
+  BracketCreateBody,
 } from '../types/api'
 
 const queryKeys = {
@@ -669,3 +671,15 @@ export const useChangePassword = () =>
     mutationFn: ({ userId, currentPassword, newPassword }) =>
       apiClient.changePassword(userId, currentPassword, newPassword),
   })
+
+export const useCreateBracket = () => {
+  const queryClient = useQueryClient()
+
+  return useMutation<ExecutionPlanResponse, Error, BracketCreateBody>({
+    mutationFn: body => apiClient.createBracket(body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['positions'] })
+      queryClient.invalidateQueries({ queryKey: ['orders'] })
+    },
+  })
+}

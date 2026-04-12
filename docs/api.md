@@ -626,10 +626,81 @@ X-CSRF-Token: <csrf_token>
         "average_price": 41500.0,
         "unrealized_pnl": 250.0,
         "realized_pnl": 100.0,
-        "mode": "live"
+        "mode": "live",
+        "position_cycle_public_id": "019e1a2b-4d5e-7f6a-8b9c-0d1e2f3a4b5c"
     }
 ]
 ```
+
+The `position_cycle_public_id` field is `null` when no open position cycle exists
+for the position (e.g. flat positions or positions without cycle tracking).
+
+### POST /api/execution-plans
+
+Create a bracket (SL/TP) execution plan on an open position cycle. Requires
+`create:orders` permission.
+
+**Request:**
+
+```http
+POST /api/execution-plans
+Content-Type: application/json
+X-CSRF-Token: <csrf_token>
+```
+
+**Body (BracketCreateCommand envelope):**
+
+```json
+{
+    "type": "create_bracket_command",
+    "public_id": "019e1a2b-0000-7000-8000-000000000001",
+    "session_id": "ui-session-1",
+    "sequence_id": 1,
+    "timestamp": "2026-04-12T18:00:00Z",
+    "payload": {
+        "position_cycle_public_id": "019e1a2b-4d5e-7f6a-8b9c-0d1e2f3a4b5c",
+        "sl_price": 48000.0,
+        "tp_price": 55000.0
+    }
+}
+```
+
+At least one of `sl_price` or `tp_price` is required.
+
+**Response (200):** `ExecutionPlanResponse` wrapping the new armed bracket plan.
+
+**Errors:** 422 (invalid params, missing capability), 409 (cycle not open, duplicate),
+403 (wallet inaccessible), 503 (executor unavailable).
+
+### POST /api/execution-plans/{plan_public_id}/cancel
+
+Cancel a bracket execution plan. Armed brackets transition to cancelled directly.
+Active brackets transition to cancel_requested with cancel TradeCommands emitted.
+Requires `cancel:orders` permission.
+
+**Request:**
+
+```http
+POST /api/execution-plans/{plan_public_id}/cancel
+Content-Type: application/json
+X-CSRF-Token: <csrf_token>
+```
+
+**Response (200):** `ExecutionPlanResponse` wrapping the updated plan.
+
+**Errors:** 404 (not found), 409 (already terminal or concurrent cancel).
+
+### GET /api/execution-plans/{plan_public_id}
+
+Retrieve a single execution plan by public_id. Requires `read:orders` permission.
+
+**Response (200):** `ExecutionPlanResponse` wrapping the plan.
+
+### GET /api/execution-plans/{plan_public_id}/decisions
+
+List decision audit rows for an execution plan. Requires `read:orders` permission.
+
+**Response (200):** List of decision rows with action, reason, and timestamp.
 
 ### GET /api/exchanges
 

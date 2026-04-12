@@ -355,6 +355,7 @@ export interface Position {
   averagePrice: number
   unrealizedPnl: number
   realizedPnl: number
+  positionCyclePublicId?: string | null
 }
 
 /**

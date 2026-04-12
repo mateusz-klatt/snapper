@@ -1,8 +1,10 @@
-import React from 'react'
+import React, { useState } from 'react'
 import clsx from 'clsx'
+import { Shield } from 'lucide-react'
 import { usePositions } from '../../hooks/queries'
 import { OrderCardSkeleton } from '../../components/Skeleton'
 import { EmptyState } from '../../components/ui'
+import { AttachBracketModal } from './AttachBracketModal'
 import type { Position } from '../../types/entities'
 
 type PositionSide = 'LONG' | 'SHORT' | 'FLAT'
@@ -47,10 +49,17 @@ const formatPnl = (value: number): string => {
 const positionIdSuffix = (position: Position): string =>
   `${position.instrument}-${position.exchange}-${position.mode ?? 'live'}`
 
-const PositionRow: React.FC<{ position: Position }> = ({ position }) => {
+interface PositionRowProps {
+  position: Position
+  onAttachBracket: (position: Position) => void
+}
+
+const PositionRow: React.FC<PositionRowProps> = ({ position, onAttachBracket }) => {
   const side = getPositionSide(position.quantity)
   const absQuantity = Math.abs(position.quantity)
   const suffix = positionIdSuffix(position)
+  const hasCycle = !!position.positionCyclePublicId
+  const canAttachBracket = hasCycle && side !== 'FLAT'
 
   return (
     <div
@@ -68,6 +77,17 @@ const PositionRow: React.FC<{ position: Position }> = ({ position }) => {
             {side}
           </span>
         </div>
+        {canAttachBracket && (
+          <button
+            type='button'
+            onClick={() => onAttachBracket(position)}
+            className='flex items-center gap-1 rounded-lg border border-brand-500 px-2 py-1 text-xs font-medium text-brand-500 transition-colors hover:bg-brand-900/20'
+            data-testid={`attach-bracket-${suffix}`}
+          >
+            <Shield size={12} />
+            SL/TP
+          </button>
+        )}
       </div>
       <div className='grid grid-cols-2 gap-4 text-sm md:grid-cols-4'>
         <div>
@@ -108,9 +128,27 @@ const PositionRow: React.FC<{ position: Position }> = ({ position }) => {
 
 export const Positions: React.FC = () => {
   const { data: positions = [], isLoading } = usePositions()
+  const [bracketTarget, setBracketTarget] = useState<Position | null>(null)
+
+  const handleAttachBracket = (position: Position) => {
+    setBracketTarget(position)
+  }
+
+  const bracketSide =
+    bracketTarget && bracketTarget.quantity > 0 ? ('LONG' as const) : ('SHORT' as const)
 
   return (
     <div className='space-y-6'>
+      {bracketTarget?.positionCyclePublicId && (
+        <AttachBracketModal
+          open={true}
+          onClose={() => setBracketTarget(null)}
+          positionCyclePublicId={bracketTarget.positionCyclePublicId}
+          instrument={bracketTarget.instrument}
+          side={bracketSide}
+          averagePrice={bracketTarget.averagePrice}
+        />
+      )}
       <div className='flex items-center justify-between'>
         <h2 className='text-xl font-semibold text-alpine-900'>Positions</h2>
       </div>
@@ -141,7 +179,11 @@ export const Positions: React.FC = () => {
         {!isLoading && positions.length > 0 && (
           <div className='grid gap-4'>
             {positions.map((position: Position) => (
-              <PositionRow key={positionIdSuffix(position)} position={position} />
+              <PositionRow
+                key={positionIdSuffix(position)}
+                position={position}
+                onAttachBracket={handleAttachBracket}
+              />
             ))}
           </div>
         )}

@@ -34,6 +34,7 @@ import {
   ExecutionListResponseSchema,
   PositionListResponseSchema,
   SignalListResponseSchema,
+  ExecutionPlanResponseSchema,
 } from './schemas/api.generated.zod'
 import type {
   ScopeGrantListResponse,
@@ -76,6 +77,9 @@ import type {
   PositionListResponse,
   SignalListResponse,
   HealthCheckResponse,
+  ExecutionPlanResponse,
+  BracketCreateBody,
+  BracketCancelBody,
 } from '../types/api'
 
 interface RequestOptions {
@@ -544,6 +548,27 @@ class APIClient {
       `/api/orders/by-client-order-id/${encodeURIComponent(clientOrderId)}/cancel`,
       {}
     )
+  }
+  async createBracket(body: BracketCreateBody): Promise<ExecutionPlanResponse> {
+    const data = await this.postJSON('/api/execution-plans', body)
+
+    return validateResponse(data, ExecutionPlanResponseSchema, '/execution-plans POST')
+  }
+  async cancelBracket(
+    planPublicId: string,
+    body?: BracketCancelBody
+  ): Promise<ExecutionPlanResponse> {
+    const data = await this.postJSON(
+      `/api/execution-plans/${encodeURIComponent(planPublicId)}/cancel`,
+      body ?? {}
+    )
+
+    return validateResponse(data, ExecutionPlanResponseSchema, '/execution-plans/:id/cancel POST')
+  }
+  async getBracket(planPublicId: string): Promise<ExecutionPlanResponse> {
+    const data = await this.getJSON(`/api/execution-plans/${encodeURIComponent(planPublicId)}`)
+
+    return validateResponse(data, ExecutionPlanResponseSchema, '/execution-plans/:id')
   }
   async getConfiguredProcesses(): Promise<ConfiguredProcessesResponse> {
     const data = await this.getJSON('/api/processes/configured')

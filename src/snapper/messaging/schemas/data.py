@@ -295,6 +295,7 @@ class PositionData(StrictDataSchema[Literal["position"]]):
         average_price: Average entry price.
         unrealized_pnl: Unrealized profit/loss.
         realized_pnl: Realized profit/loss.
+        position_cycle_public_id: Public ID of the open position cycle, if any.
     """
 
     type: Literal["position"] = "position"
@@ -305,6 +306,7 @@ class PositionData(StrictDataSchema[Literal["position"]]):
     average_price: float
     unrealized_pnl: float
     realized_pnl: float
+    position_cycle_public_id: str | None = None
 
 
 class OrderRequestData(StrictDataSchema[Literal["order_request"]]):
