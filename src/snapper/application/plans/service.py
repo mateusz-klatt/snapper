@@ -226,22 +226,24 @@ class PlanExecutorService(RegisterableProcess):
     def _extract_child_ids(self, params: dict[str, Any]) -> list[str]:
         """Extract all child client order IDs from plan params.
 
-        Handles both the list format (child_client_order_ids) and the
-        legacy single-string format (child_client_order_id).
+        Unions both the list format (child_client_order_ids) and the
+        legacy single-string format (child_client_order_id) so that
+        mixed-format plans (upgraded mid-lifecycle) never lose IDs.
 
         Args:
             params: Plan params dict.
 
         Returns:
-            List of child client order ID strings (may be empty).
+            Deduplicated list of child client order ID strings (may be empty).
         """
+        result: set[str] = set()
         ids = params.get("child_client_order_ids")
         if isinstance(ids, list):
-            return [c for c in ids if isinstance(c, str)]
+            result.update(c for c in ids if isinstance(c, str))
         single = params.get("child_client_order_id")
         if isinstance(single, str):
-            return [single]
-        return []
+            result.add(single)
+        return list(result)
 
     async def _reemit_single_stranded_cancel(
         self,
@@ -350,15 +352,8 @@ class PlanExecutorService(RegisterableProcess):
         self.evaluators[public_id] = evaluator
         self._plan_locks[public_id] = asyncio.Lock()
         params = row.get("params") or {}
-        child_ids = params.get("child_client_order_ids")
-        if isinstance(child_ids, list):
-            for cid in child_ids:
-                if isinstance(cid, str):
-                    self._client_order_id_index[cid] = public_id
-        else:
-            child_id = params.get("child_client_order_id")
-            if isinstance(child_id, str):
-                self._client_order_id_index[child_id] = public_id
+        for cid in self._extract_child_ids(params):
+            self._client_order_id_index[cid] = public_id
         native_instrument = params.get("native_instrument")
         if isinstance(native_instrument, str):
             key = f"{row['exchange']}:{native_instrument}"
@@ -373,15 +368,8 @@ class PlanExecutorService(RegisterableProcess):
         self._plan_locks.pop(public_id, None)
         if row is not None:
             params = row.get("params") or {}
-            child_ids = params.get("child_client_order_ids")
-            if isinstance(child_ids, list):
-                for cid in child_ids:
-                    if isinstance(cid, str):
-                        self._client_order_id_index.pop(cid, None)
-            else:
-                child_id = params.get("child_client_order_id")
-                if isinstance(child_id, str):
-                    self._client_order_id_index.pop(child_id, None)
+            for cid in self._extract_child_ids(params):
+                self._client_order_id_index.pop(cid, None)
             native_instrument = params.get("native_instrument")
             if isinstance(native_instrument, str):
                 key = f"{row['exchange']}:{native_instrument}"
@@ -465,12 +453,9 @@ class PlanExecutorService(RegisterableProcess):
                 emitted_command_public_id=client_order_id,
             )
         if child_ids:
-            existing_ids: list[str] = []
             params_dict = plan.get("params") or {}
-            prev = params_dict.get("child_client_order_ids")
-            if isinstance(prev, list):
-                existing_ids = [c for c in prev if isinstance(c, str)]
-            merged_ids = existing_ids + child_ids
+            existing_ids = self._extract_child_ids(params_dict)
+            merged_ids = list(dict.fromkeys(existing_ids + child_ids))
             await self.repository.revise_execution_plan_params(
                 public_id=plan_public_id,
                 param_updates=cast(JsonObject, {"child_client_order_ids": merged_ids}),

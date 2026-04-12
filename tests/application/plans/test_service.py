@@ -1740,7 +1740,7 @@ class TestMultiChildIds:
         mock_repo.revise_execution_plan_params = AsyncMock()
         mock_repo_fn.return_value = mock_repo
         service = PlanExecutorService()
-        plan = _make_plan_row(native_instrument="BTC-USD")
+        plan = _make_plan_row(native_instrument="BTC-USD", child_client_order_id=None)
         service._register_plan(plan, ManualOnceEvaluator())
         commands: list[dict[str, object]] = [
             {"instrument": "BTC-USD", "side": "sell", "quantity": 0.5}
@@ -1751,6 +1751,65 @@ class TestMultiChildIds:
         assert "child_client_order_ids" in param_updates
         assert isinstance(param_updates["child_client_order_ids"], list)
         assert len(param_updates["child_client_order_ids"]) == 1
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_mixed_format_register_unions_both_keys(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Plans with BOTH singular and list child IDs index all of them."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        plan = _make_plan_row()
+        plan["params"]["child_client_order_id"] = "legacy-cid"
+        plan["params"]["child_client_order_ids"] = ["new-cid-a", "new-cid-b"]
+        service._register_plan(plan, ManualOnceEvaluator())
+        assert service._client_order_id_index["legacy-cid"] == "plan-1"
+        assert service._client_order_id_index["new-cid-a"] == "plan-1"
+        assert service._client_order_id_index["new-cid-b"] == "plan-1"
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_mixed_format_unregister_cleans_both_keys(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Unregister cleans IDs from both singular and list keys."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        plan = _make_plan_row()
+        plan["params"]["child_client_order_id"] = "legacy-cid"
+        plan["params"]["child_client_order_ids"] = ["new-cid-a"]
+        service._register_plan(plan, ManualOnceEvaluator())
+        service._unregister_plan("plan-1")
+        assert "legacy-cid" not in service._client_order_id_index
+        assert "new-cid-a" not in service._client_order_id_index
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_dispatch_merges_legacy_into_new_list(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """dispatch_commands includes legacy singular ID when building list."""
+        mock_repo = AsyncMock()
+        mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
+        mock_repo.insert_execution_plan_decision = AsyncMock(return_value="dec-1")
+        mock_repo.revise_execution_plan_params = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(native_instrument="BTC-USD")
+        plan["params"]["child_client_order_id"] = "legacy-cid"
+        service._register_plan(plan, ManualOnceEvaluator())
+        commands: list[dict[str, object]] = [
+            {"instrument": "BTC-USD", "side": "sell", "quantity": 0.5}
+        ]
+        await service._dispatch_commands("plan-1", commands)
+        revision_call = mock_repo.revise_execution_plan_params.await_args
+        merged = revision_call[1]["param_updates"]["child_client_order_ids"]
+        assert "legacy-cid" in merged
+        assert len(merged) == 2
 
 
 class TestTickRoutingSymbolIndex:
