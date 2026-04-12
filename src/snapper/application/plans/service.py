@@ -834,6 +834,8 @@ class PlanExecutorService(RegisterableProcess):
                     await self._dispatch_commands(plan_public_id, commands)
             except Exception as exc:
                 logger.error("dispatch failed for plan {} on execution: {}", plan_public_id, exc)
+        if self.plans.get(plan_public_id) is None:
+            return
         new_filled = incoming_cumulative
         total = float(plan["total_quantity"])
         qty_complete = new_filled + 1e-9 >= total
