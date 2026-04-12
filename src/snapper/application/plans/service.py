@@ -458,6 +458,9 @@ class PlanExecutorService(RegisterableProcess):
             return
         if plan["status"] == "armed":
             await self._transition_plan(plan_public_id, "active")
+            plan = self.plans.get(plan_public_id)
+            if plan is None:
+                return
         now = datetime.now(UTC)
         session_id = self.tracker.session_id
         child_ids: list[str] = []
@@ -825,7 +828,7 @@ class PlanExecutorService(RegisterableProcess):
                 session_id=self.tracker.session_id,
                 sequence_id=self.tracker.next_sequence("plan_status"),
                 last_error=last_error,
-                completed_at=now if new_status == "completed" else None,
+                completed_at=now,
                 last_evaluated_at=now,
             )
         except Exception as exc:

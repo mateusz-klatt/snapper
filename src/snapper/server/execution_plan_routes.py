@@ -167,15 +167,17 @@ async def create_bracket(
 
     side = "buy" if cycle["direction"] == "long" else "sell"
 
+    native_symbol = cycle["shard_key"].split(".")[1]
     positions = await repo.get_positions(as_of=now, wallet_public_ids=[cycle["wallet_public_id"]])
     current_qty = 0.0
-    cycle_mode = cycle["mode"]
-    cycle_instrument_pid = cycle["instrument_public_id"]
     for pos in positions:
-        if pos["exchange"] == cycle["exchange"] and pos.get("mode") == cycle_mode:
-            if pos.get("instrument_public_id", pos.get("instrument")) == cycle_instrument_pid:
-                current_qty = abs(pos["quantity"])
-                break
+        if (
+            pos["exchange"] == cycle["exchange"]
+            and pos.get("mode", "live") == cycle["mode"]
+            and pos["instrument"] == native_symbol
+        ):
+            current_qty = abs(pos["quantity"])
+            break
     if current_qty <= 0:
         current_qty = cycle["max_qty"]
 
@@ -313,15 +315,16 @@ def _resolve_average_price(
     Returns:
         Average price or None if position not found.
     """
+    native_symbol = cycle["shard_key"].split(".")[1]
     for pos in positions:
-        if pos["exchange"] == cycle["exchange"] and pos.get("mode") == cycle["mode"]:
-            if (
-                pos.get("instrument_public_id", pos.get("instrument"))
-                == cycle["instrument_public_id"]
-            ):
-                avg = pos.get("average_price")
-                if avg is not None and float(avg) > 0:
-                    return float(avg)
+        if (
+            pos["exchange"] == cycle["exchange"]
+            and pos.get("mode", "live") == cycle["mode"]
+            and pos["instrument"] == native_symbol
+        ):
+            avg = pos.get("average_price")
+            if avg is not None and float(avg) > 0:
+                return float(avg)
     return None
 
 
@@ -457,6 +460,25 @@ async def cancel_bracket(
                     child_cid,
                     exc,
                 )
+                try:
+                    await repo.update_execution_plan_status(
+                        public_id=plan_public_id,
+                        new_status="failed",
+                        bus_time=ts,
+                        session_id=sid,
+                        sequence_id=tracker.next_sequence(_REST_STREAM),
+                        last_error=f"Cancel command insert failed: {exc}",
+                    )
+                except Exception as comp_exc:
+                    logger.error(
+                        "Compensation to failed also failed for plan {}: {}",
+                        plan_public_id,
+                        comp_exc,
+                    )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to emit cancel command",
+                ) from exc
 
     await repo.insert_execution_plan_decision(
         row=ExecutionPlanDecisionInsertRow(
