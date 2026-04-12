@@ -456,6 +456,25 @@ class PlanExecutorService(RegisterableProcess):
                 plan_public_id, "failed", f"Capability revoked: {missing_caps}"
             )
             return
+        cycle_pid = plan.get("position_cycle_public_id")
+        if isinstance(cycle_pid, str):
+            cycle_open = await self._is_cycle_open(cycle_pid)
+            if not cycle_open:
+                logger.info(
+                    "Cycle {} closed before dispatch for plan {}, cancelling",
+                    cycle_pid,
+                    plan_public_id,
+                )
+                await self._transition_plan(plan_public_id, "cancelled", "cycle_closed_externally")
+                await self._log_decision(
+                    plan_public_id=plan_public_id,
+                    decision_type="cycle_closed_externally",
+                    trigger_type="dispatch",
+                    reason=f"Cycle {cycle_pid} closed before command dispatch",
+                    importance="action",
+                    new_status="cancelled",
+                )
+                return
         if plan["status"] == "armed":
             await self._transition_plan(plan_public_id, "active")
             plan = self.plans.get(plan_public_id)
@@ -607,6 +626,58 @@ class PlanExecutorService(RegisterableProcess):
                 missing.append(flag)
         return missing
 
+    async def _is_cycle_open(self, cycle_public_id: str) -> bool:
+        """Check if a position cycle is still open.
+
+        Args:
+            cycle_public_id: Cycle to check.
+
+        Returns:
+            True if cycle exists and status is open, False otherwise.
+        """
+        now = datetime.now(UTC)
+        try:
+            cycle = await self.repository.get_position_cycle_by_public_id(
+                cycle_public_id, as_of=now
+            )
+        except Exception as exc:
+            logger.error("Cycle lookup failed for {}: {}", cycle_public_id, exc)
+            return False
+        if cycle is None:
+            return False
+        return cycle["status"] == "open"
+
+    async def _sweep_cycle_closures(self) -> None:
+        """Check all armed/active bracket plans for closed cycles.
+
+        Backup sweep for quiet-market scenarios where no ticks arrive
+        to trigger the dispatch-time cycle check.
+        """
+        for public_id, plan in list(self.plans.items()):
+            if plan["plan_type"] != "bracket":
+                continue
+            if plan["status"] in _TERMINAL_STATUSES:
+                continue
+            cycle_pid = plan.get("position_cycle_public_id")
+            if not isinstance(cycle_pid, str):
+                continue
+            cycle_open = await self._is_cycle_open(cycle_pid)
+            if not cycle_open:
+                logger.info(
+                    "Clock sweep: cycle {} closed, cancelling bracket {}",
+                    cycle_pid,
+                    public_id,
+                )
+                await self._transition_plan(public_id, "cancelled", "cycle_closed_externally")
+                await self._log_decision(
+                    plan_public_id=public_id,
+                    decision_type="cycle_closed_externally",
+                    trigger_type="clock",
+                    reason=f"Cycle {cycle_pid} closed (detected by clock sweep)",
+                    importance="action",
+                    new_status="cancelled",
+                )
+
     async def _run_loop(self) -> None:
         """Run listen, checkpoint, and clock tasks until stopped."""
         tasks = [
@@ -707,6 +778,10 @@ class PlanExecutorService(RegisterableProcess):
                                 await self._dispatch_commands(public_id, commands)
                         except Exception as exc:
                             logger.error("dispatch failed for plan {} on clock: {}", public_id, exc)
+                try:
+                    await self._sweep_cycle_closures()
+                except Exception as exc:
+                    logger.error("Cycle closure sweep failed: {}", exc)
                 elapsed = asyncio.get_event_loop().time() - t0
                 await asyncio.sleep(max(0.0, 1.0 - elapsed))
         except asyncio.CancelledError:
