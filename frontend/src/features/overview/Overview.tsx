@@ -13,7 +13,7 @@ import type { Signal, Execution } from '../../types/entities'
 
 const CURRENCY_FORMAT = { minimumFractionDigits: 2, maximumFractionDigits: 2 }
 
-const formatCurrency = (value: number): string => value.toLocaleString(undefined, CURRENCY_FORMAT)
+const formatCurrency = (value: number): string => value.toLocaleString('en-US', CURRENCY_FORMAT)
 
 const pnlSign = (value: number): string => (value >= 0 ? '+' : '')
 
