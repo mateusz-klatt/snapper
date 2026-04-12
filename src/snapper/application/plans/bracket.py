@@ -9,6 +9,8 @@ Decision C1: brackets require ``supports_reduce_only`` on the venue.
 """
 
 from datetime import datetime
+from typing import Any
+from typing import cast
 
 from snapper.application.plans.evaluator import PlanEvaluator
 from snapper.core.json_types import JsonObject
@@ -52,15 +54,17 @@ class BracketEvaluator(PlanEvaluator):
         side = plan["side"]
 
         triggered_leg: str | None = None
+        sl_f = float(cast(Any, sl)) if sl is not None else None
+        tp_f = float(cast(Any, tp)) if tp is not None else None
         if side == "buy":
-            if sl is not None and float(sl) >= last:
+            if sl_f is not None and sl_f >= last:
                 triggered_leg = "sl_hit"
-            elif tp is not None and float(tp) <= last:
+            elif tp_f is not None and tp_f <= last:
                 triggered_leg = "tp_hit"
         else:
-            if sl is not None and float(sl) <= last:
+            if sl_f is not None and sl_f <= last:
                 triggered_leg = "sl_hit"
-            elif tp is not None and float(tp) >= last:
+            elif tp_f is not None and tp_f >= last:
                 triggered_leg = "tp_hit"
 
         if triggered_leg is None:

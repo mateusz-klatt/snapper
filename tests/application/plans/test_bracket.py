@@ -164,6 +164,14 @@ class TestBracketOnTick:
         assert commands == []
 
     @pytest.mark.asyncio
+    async def test_short_no_trigger_in_range(self) -> None:
+        """Short position: price between TP and SL does not trigger."""
+        evaluator = BracketEvaluator()
+        plan = _make_bracket_plan(side="sell", sl_price=52000.0, tp_price=48000.0)
+        commands = await evaluator.on_tick(plan, _make_tick(last=50000.0))
+        assert commands == []
+
+    @pytest.mark.asyncio
     async def test_last_none_returns_empty(self) -> None:
         """tick.last is None → no trigger, no error."""
         evaluator = BracketEvaluator()

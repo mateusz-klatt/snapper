@@ -303,8 +303,8 @@ async def create_bracket(
 
 
 def _resolve_average_price(
-    positions: list[dict[str, Any]],
-    cycle: dict[str, Any],
+    positions: list[Any],
+    cycle: Any,
 ) -> float | None:
     """Find the average entry price for the position matching a cycle.
 

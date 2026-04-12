@@ -1691,8 +1691,8 @@ class TestMultiChildIds:
         mock_repo_fn.return_value = AsyncMock()
         service = PlanExecutorService()
         plan = _make_plan_row()
-        plan["params"]["child_client_order_ids"] = ["cid-a", "cid-b"]
-        del plan["params"]["child_client_order_id"]
+        _cast(dict, plan["params"])["child_client_order_ids"] = ["cid-a", "cid-b"]
+        del _cast(dict, plan["params"])["child_client_order_id"]
         service._register_plan(plan, ManualOnceEvaluator())
         assert service._client_order_id_index["cid-a"] == "plan-1"
         assert service._client_order_id_index["cid-b"] == "plan-1"
@@ -1707,8 +1707,8 @@ class TestMultiChildIds:
         mock_repo_fn.return_value = AsyncMock()
         service = PlanExecutorService()
         plan = _make_plan_row()
-        plan["params"]["child_client_order_ids"] = ["cid-a", "cid-b"]
-        del plan["params"]["child_client_order_id"]
+        _cast(dict, plan["params"])["child_client_order_ids"] = ["cid-a", "cid-b"]
+        del _cast(dict, plan["params"])["child_client_order_id"]
         service._register_plan(plan, ManualOnceEvaluator())
         service._unregister_plan("plan-1")
         assert "cid-a" not in service._client_order_id_index
@@ -1762,8 +1762,8 @@ class TestMultiChildIds:
         mock_repo_fn.return_value = AsyncMock()
         service = PlanExecutorService()
         plan = _make_plan_row()
-        plan["params"]["child_client_order_id"] = "legacy-cid"
-        plan["params"]["child_client_order_ids"] = ["new-cid-a", "new-cid-b"]
+        _cast(dict, plan["params"])["child_client_order_id"] = "legacy-cid"
+        _cast(dict, plan["params"])["child_client_order_ids"] = ["new-cid-a", "new-cid-b"]
         service._register_plan(plan, ManualOnceEvaluator())
         assert service._client_order_id_index["legacy-cid"] == "plan-1"
         assert service._client_order_id_index["new-cid-a"] == "plan-1"
@@ -1779,8 +1779,8 @@ class TestMultiChildIds:
         mock_repo_fn.return_value = AsyncMock()
         service = PlanExecutorService()
         plan = _make_plan_row()
-        plan["params"]["child_client_order_id"] = "legacy-cid"
-        plan["params"]["child_client_order_ids"] = ["new-cid-a"]
+        _cast(dict, plan["params"])["child_client_order_id"] = "legacy-cid"
+        _cast(dict, plan["params"])["child_client_order_ids"] = ["new-cid-a"]
         service._register_plan(plan, ManualOnceEvaluator())
         service._unregister_plan("plan-1")
         assert "legacy-cid" not in service._client_order_id_index
@@ -1800,7 +1800,7 @@ class TestMultiChildIds:
         mock_repo_fn.return_value = mock_repo
         service = PlanExecutorService()
         plan = _make_plan_row(native_instrument="BTC-USD")
-        plan["params"]["child_client_order_id"] = "legacy-cid"
+        _cast(dict, plan["params"])["child_client_order_id"] = "legacy-cid"
         service._register_plan(plan, ManualOnceEvaluator())
         commands: list[dict[str, object]] = [
             {"instrument": "BTC-USD", "side": "sell", "quantity": 0.5}
@@ -2619,3 +2619,470 @@ class TestOnExecutionDispatchesCommands:
         execution = _make_execution()
         await service._handle_execution(_cast(ExecutionData, execution))
         mock_repo.update_execution_plan_status.assert_awaited_once()
+
+
+class TestTransitionPlan:
+    """Tests for _transition_plan helper."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_transition_updates_status_in_memory(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """_transition_plan updates in-memory plan status."""
+        mock_repo = AsyncMock()
+        mock_repo.update_execution_plan_status = AsyncMock(return_value=1)
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(status="armed", native_instrument="BTC-USD")
+        service._register_plan(plan, ManualOnceEvaluator())
+        await service._transition_plan("plan-1", "active")
+        assert service.plans["plan-1"]["status"] == "active"
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_transition_to_terminal_unregisters(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Terminal transition unregisters the plan."""
+        mock_repo = AsyncMock()
+        mock_repo.update_execution_plan_status = AsyncMock(return_value=1)
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(status="armed")
+        service._register_plan(plan, ManualOnceEvaluator())
+        await service._transition_plan("plan-1", "cancelled", "test cancel")
+        assert "plan-1" not in service.plans
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_transition_db_error_logged(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """DB error in transition is logged, plan stays in memory."""
+        mock_repo = AsyncMock()
+        mock_repo.update_execution_plan_status = AsyncMock(side_effect=RuntimeError("DB"))
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(status="armed")
+        service._register_plan(plan, ManualOnceEvaluator())
+        await service._transition_plan("plan-1", "failed", "test error")
+        assert "plan-1" in service.plans
+
+
+class TestFireTimeCapabilityGating:
+    """Tests for fire-time capability check in _dispatch_commands."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_capability_revoked_fails_plan(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Capability revoked between attach and fire → plan fails."""
+        mock_repo = AsyncMock()
+        mock_repo.get_instrument_capabilities = AsyncMock(
+            return_value=[{"supports_reduce_only": False}]
+        )
+        mock_repo.update_execution_plan_status = AsyncMock(return_value=1)
+        mock_repo.insert_execution_plan_decision = AsyncMock(return_value="d1")
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+
+        class _FakeEval(ManualOnceEvaluator):
+            def requires_capabilities(self) -> list[str]:
+                return ["supports_reduce_only"]
+
+        _EVALUATOR_REGISTRY["_test_cap_fire"] = _FakeEval
+        try:
+            plan = _make_plan_row(
+                plan_type="_test_cap_fire", status="armed", native_instrument="BTC-USD"
+            )
+            service._register_plan(plan, _FakeEval())
+            await service._dispatch_commands(
+                "plan-1", [{"instrument": "BTC-USD", "side": "sell", "quantity": 0.5}]
+            )
+            assert service.plans.get("plan-1") is None
+        finally:
+            del _EVALUATOR_REGISTRY["_test_cap_fire"]
+
+
+class TestCycleCloseDispatchGuard:
+    """Tests for cycle-close check in _dispatch_commands."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_closed_cycle_cancels_bracket(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Closed cycle before dispatch → bracket cancelled."""
+        mock_repo = AsyncMock()
+        mock_repo.get_instrument_capabilities = AsyncMock(return_value=[])
+        mock_repo.get_position_cycle_by_public_id = AsyncMock(
+            return_value={"status": "closed", "public_id": "cycle-1"}
+        )
+        mock_repo.update_execution_plan_status = AsyncMock(return_value=1)
+        mock_repo.insert_execution_plan_decision = AsyncMock(return_value="d1")
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(status="armed", native_instrument="BTC-USD")
+        plan["position_cycle_public_id"] = "cycle-1"
+        service._register_plan(plan, ManualOnceEvaluator())
+        await service._dispatch_commands(
+            "plan-1", [{"instrument": "BTC-USD", "side": "sell", "quantity": 0.5}]
+        )
+        assert service.plans.get("plan-1") is None
+        mock_repo.insert_trade_command.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_open_cycle_proceeds_normally(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Open cycle allows dispatch to proceed."""
+        mock_repo = AsyncMock()
+        mock_repo.get_instrument_capabilities = AsyncMock(return_value=[])
+        mock_repo.get_position_cycle_by_public_id = AsyncMock(
+            return_value={"status": "open", "public_id": "cycle-1"}
+        )
+        mock_repo.update_execution_plan_status = AsyncMock(return_value=1)
+        mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
+        mock_repo.insert_execution_plan_decision = AsyncMock(return_value="d1")
+        mock_repo.revise_execution_plan_params = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(
+            status="armed", native_instrument="BTC-USD", child_client_order_id=None
+        )
+        plan["position_cycle_public_id"] = "cycle-1"
+        service._register_plan(plan, ManualOnceEvaluator())
+        await service._dispatch_commands(
+            "plan-1", [{"instrument": "BTC-USD", "side": "sell", "quantity": 0.5}]
+        )
+        mock_repo.insert_trade_command.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_cycle_lookup_error_cancels_bracket(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """DB error on cycle lookup → fail-closed, bracket cancelled."""
+        mock_repo = AsyncMock()
+        mock_repo.get_instrument_capabilities = AsyncMock(return_value=[])
+        mock_repo.get_position_cycle_by_public_id = AsyncMock(side_effect=RuntimeError("DB"))
+        mock_repo.update_execution_plan_status = AsyncMock(return_value=1)
+        mock_repo.insert_execution_plan_decision = AsyncMock(return_value="d1")
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(status="armed", native_instrument="BTC-USD")
+        plan["position_cycle_public_id"] = "cycle-1"
+        service._register_plan(plan, ManualOnceEvaluator())
+        await service._dispatch_commands(
+            "plan-1", [{"instrument": "BTC-USD", "side": "sell", "quantity": 0.5}]
+        )
+        assert service.plans.get("plan-1") is None
+
+
+class TestSweepCycleClosures:
+    """Tests for _sweep_cycle_closures clock sweep."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_sweep_cancels_armed_bracket_with_closed_cycle(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Armed bracket on closed cycle is cancelled by sweep."""
+        mock_repo = AsyncMock()
+        mock_repo.get_position_cycle_by_public_id = AsyncMock(
+            return_value={"status": "closed", "public_id": "cycle-1"}
+        )
+        mock_repo.update_execution_plan_status = AsyncMock(return_value=1)
+        mock_repo.insert_execution_plan_decision = AsyncMock(return_value="d1")
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(plan_type="bracket", status="armed", native_instrument="BTC-USD")
+        plan["position_cycle_public_id"] = "cycle-1"
+        service._register_plan(plan, ManualOnceEvaluator())
+        await service._sweep_cycle_closures()
+        assert service.plans.get("plan-1") is None
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_sweep_skips_active_brackets(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Active brackets are NOT cancelled by sweep (need cancel_requested flow)."""
+        mock_repo = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(plan_type="bracket", status="active", native_instrument="BTC-USD")
+        plan["position_cycle_public_id"] = "cycle-1"
+        service._register_plan(plan, ManualOnceEvaluator())
+        await service._sweep_cycle_closures()
+        assert "plan-1" in service.plans
+        mock_repo.get_position_cycle_by_public_id.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_sweep_skips_non_bracket_plans(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Non-bracket plans are skipped by sweep."""
+        mock_repo = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(plan_type="manual_once", status="armed")
+        plan["position_cycle_public_id"] = "cycle-1"
+        service._register_plan(plan, ManualOnceEvaluator())
+        await service._sweep_cycle_closures()
+        assert "plan-1" in service.plans
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_sweep_called_in_clock_loop(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Clock loop calls _sweep_cycle_closures each tick."""
+        mock_repo = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        service._running = True
+        sweep_called = False
+
+        async def _track_sweep() -> None:
+            nonlocal sweep_called
+            sweep_called = True
+
+        service._sweep_cycle_closures = _track_sweep
+
+        async def stop_after_one_tick() -> None:
+            await asyncio.sleep(0.05)
+            service._running = False
+
+        await asyncio.gather(service._clock_loop(), stop_after_one_tick())
+        assert sweep_called
+
+
+class TestIsCycleOpen:
+    """Tests for _is_cycle_open helper."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_open_cycle_returns_true(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Open cycle returns True."""
+        mock_repo = AsyncMock()
+        mock_repo.get_position_cycle_by_public_id = AsyncMock(
+            return_value={"status": "open", "public_id": "c1"}
+        )
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        assert await service._is_cycle_open("c1") is True
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_closed_cycle_returns_false(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Closed cycle returns False."""
+        mock_repo = AsyncMock()
+        mock_repo.get_position_cycle_by_public_id = AsyncMock(
+            return_value={"status": "closed", "public_id": "c1"}
+        )
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        assert await service._is_cycle_open("c1") is False
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_missing_cycle_returns_false(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Missing cycle returns False."""
+        mock_repo = AsyncMock()
+        mock_repo.get_position_cycle_by_public_id = AsyncMock(return_value=None)
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        assert await service._is_cycle_open("nonexistent") is False
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_db_error_returns_false(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """DB error returns False (fail-closed)."""
+        mock_repo = AsyncMock()
+        mock_repo.get_position_cycle_by_public_id = AsyncMock(side_effect=RuntimeError("DB"))
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        assert await service._is_cycle_open("c1") is False
+
+
+class TestTransitionPlanEdgeCases:
+    """Edge case tests for _transition_plan and related paths."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_transition_with_last_error_stores_error(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Transition with last_error updates the in-memory plan."""
+        mock_repo = AsyncMock()
+        mock_repo.update_execution_plan_status = AsyncMock(return_value=1)
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(status="armed")
+        service._register_plan(plan, ManualOnceEvaluator())
+        await service._transition_plan("plan-1", "failed", "test error msg")
+        assert service.plans.get("plan-1") is None
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_dispatch_armed_plan_vanishes_after_transition(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """If plan disappears from memory after armed→active transition, dispatch exits."""
+        mock_repo = AsyncMock()
+        mock_repo.get_instrument_capabilities = AsyncMock(return_value=[])
+        mock_repo.get_position_cycle_by_public_id = AsyncMock(return_value=None)
+        mock_repo.update_execution_plan_status = AsyncMock(return_value=1)
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(
+            status="armed", native_instrument="BTC-USD", child_client_order_id=None
+        )
+        service._register_plan(plan, ManualOnceEvaluator())
+
+        original_transition = service._transition_plan
+
+        async def _transition_and_remove(pid: str, status: str, error: str | None = None) -> None:
+            await original_transition(pid, status, error)
+            service.plans.pop(pid, None)
+
+        service._transition_plan = _transition_and_remove
+        await service._dispatch_commands(
+            "plan-1", [{"instrument": "BTC-USD", "side": "sell", "quantity": 0.5}]
+        )
+        mock_repo.insert_trade_command.assert_not_called()
+
+
+class TestSweepEdgeCases:
+    """Edge cases for _sweep_cycle_closures."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_sweep_skips_bracket_without_cycle_id(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Armed bracket without position_cycle_public_id is skipped."""
+        mock_repo = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(plan_type="bracket", status="armed")
+        service._register_plan(plan, ManualOnceEvaluator())
+        await service._sweep_cycle_closures()
+        assert "plan-1" in service.plans
+        mock_repo.get_position_cycle_by_public_id.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_clock_loop_sweep_error_does_not_crash(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Sweep error in clock loop is caught and logged."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        service._running = True
+
+        async def _broken_sweep() -> None:
+            raise RuntimeError("sweep failed")
+
+        service._sweep_cycle_closures = _broken_sweep
+
+        async def stop_after_one_tick() -> None:
+            await asyncio.sleep(0.05)
+            service._running = False
+
+        await asyncio.gather(service._clock_loop(), stop_after_one_tick())
+
+
+class TestStrandedCancelEdgeCases:
+    """Edge cases for stranded cancel with native_instrument but no child IDs."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_stranded_cancel_no_child_ids_is_noop(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """cancel_requested plan with native_instrument but no child IDs → no cancel emitted."""
+        mock_repo = AsyncMock()
+        mock_repo.get_active_execution_plans = AsyncMock(
+            return_value=[
+                _make_plan_row(
+                    public_id="plan-empty",
+                    status="cancel_requested",
+                    child_client_order_id=None,
+                    native_instrument="BTC-USD",
+                )
+            ]
+        )
+        mock_repo.get_latest_plan_checkpoint = AsyncMock(return_value=None)
+        mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd"))
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        await service._recover_plans()
+        mock_repo.insert_trade_command.assert_not_called()
+
+
+class TestStrandedCancelMultiChild:
+    """Tests for _reemit_stranded_cancel with multi-child IDs."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_reemit_iterates_all_child_ids(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Stranded cancel re-emits for each child in the list."""
+        mock_repo = AsyncMock()
+        mock_repo.get_active_execution_plans = AsyncMock(
+            return_value=[
+                _make_plan_row(
+                    public_id="plan-multi",
+                    status="cancel_requested",
+                    native_instrument="BTC-USD",
+                )
+            ]
+        )
+        mock_repo.get_latest_plan_checkpoint = AsyncMock(return_value=None)
+        mock_repo.get_plan_public_id_for_client_order_id = AsyncMock(return_value="plan-multi")
+        mock_repo.has_pending_cancel_command = AsyncMock(return_value=False)
+        mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value=None)
+        mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd"))
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan_data = mock_repo.get_active_execution_plans.return_value[0]
+        plan_data["params"]["child_client_order_ids"] = ["cid-a", "cid-b"]
+        del plan_data["params"]["child_client_order_id"]
+        await service._recover_plans()
+        assert mock_repo.insert_trade_command.await_count == 2
