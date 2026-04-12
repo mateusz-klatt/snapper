@@ -6428,3 +6428,30 @@ async def test_revise_params_no_active_row_noop(tmp_path: Path) -> None:
     await r.create_all()
     now = datetime.now(UTC)
     await r.revise_execution_plan_params("nonexistent-id", {"a": 1}, now, "s1", 1)
+
+
+@pytest.mark.asyncio
+async def test_get_position_cycle_by_public_id(tmp_path: Path) -> None:
+    """Given an inserted cycle, When queried by public_id, Then row returned."""
+    db_path = tmp_path / "pc_by_pid.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    row = _make_cycle_row(opened_at=now, timestamp=now)
+    _id, pid = await r.insert_position_cycle(row)
+    cycle = await r.get_position_cycle_by_public_id(pid, as_of=now)
+    assert cycle is not None
+    assert cycle["public_id"] == pid
+    assert cycle["status"] == "open"
+    assert cycle["direction"] == "long"
+
+
+@pytest.mark.asyncio
+async def test_get_position_cycle_by_public_id_not_found(tmp_path: Path) -> None:
+    """Given nonexistent public_id, When queried, Then None returned."""
+    db_path = tmp_path / "pc_by_pid_nf.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    cycle = await r.get_position_cycle_by_public_id("nonexistent", as_of=now)
+    assert cycle is None

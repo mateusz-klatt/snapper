@@ -1704,6 +1704,26 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_position_cycle_by_public_id(
+        self,
+        cycle_public_id: str,
+        as_of: datetime,
+    ) -> PositionCycleRow | None:
+        """Retrieve a position cycle by its public_id.
+
+        Used by bracket creation to resolve the target cycle by explicit
+        ID (rather than by shard_key which can collide after a flip).
+
+        Args:
+            cycle_public_id: Cycle public identifier.
+            as_of: Bus time for the temporal query.
+
+        Returns:
+            Cycle row or None if not found at the given point in time.
+        """
+        ...
+
+    @abstractmethod
     async def flip_position_cycle(
         self,
         close_cycle_public_id: str,
@@ -5668,6 +5688,23 @@ class SQLAlchemyRepository(Repository):
             stmt = select(PositionCycle).where(
                 PositionCycle.shard_key == shard_key,
                 PositionCycle.status == "open",
+                *where_active(PositionCycle, as_of),
+            )
+            result = await s.execute(stmt)
+            row = result.scalars().first()
+            if row is None:
+                return None
+            return self._position_cycle_row_to_dict(row)
+
+    async def get_position_cycle_by_public_id(
+        self,
+        cycle_public_id: str,
+        as_of: datetime,
+    ) -> PositionCycleRow | None:
+        """Retrieve a position cycle by its public_id."""
+        async with self.session() as s:
+            stmt = select(PositionCycle).where(
+                PositionCycle.public_id == cycle_public_id,
                 *where_active(PositionCycle, as_of),
             )
             result = await s.execute(stmt)
