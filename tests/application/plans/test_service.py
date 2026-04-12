@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
+from snapper.application.plans.bracket import BracketEvaluator
 from snapper.application.plans.manual_once import ManualOnceEvaluator
 from snapper.application.plans.service import _EVALUATOR_REGISTRY
 from snapper.application.plans.service import PlanExecutorService
@@ -1663,6 +1664,93 @@ class TestDispatchCommands:
         dec_row = mock_repo.insert_execution_plan_decision.await_args[1]["row"]
         assert dec_row["decision_type"] == "command_emitted"
         assert dec_row["decision_importance"] == "action"
+
+
+class TestBracketRegistry:
+    """Tests for bracket evaluator registration."""
+
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    def test_get_evaluator_bracket(self, mock_repo: MagicMock, mock_settings: MagicMock) -> None:
+        """get_evaluator('bracket') returns BracketEvaluator."""
+        service = PlanExecutorService()
+        evaluator = service.get_evaluator("bracket")
+        assert isinstance(evaluator, BracketEvaluator)
+
+
+class TestMultiChildIds:
+    """Tests for multi-child ID handling in register/unregister/dispatch."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_register_indexes_child_list(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Plans with child_client_order_ids list have all IDs indexed."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        plan = _make_plan_row()
+        plan["params"]["child_client_order_ids"] = ["cid-a", "cid-b"]
+        del plan["params"]["child_client_order_id"]
+        service._register_plan(plan, ManualOnceEvaluator())
+        assert service._client_order_id_index["cid-a"] == "plan-1"
+        assert service._client_order_id_index["cid-b"] == "plan-1"
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_unregister_cleans_child_list(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Unregister removes all IDs from child_client_order_ids list."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        plan = _make_plan_row()
+        plan["params"]["child_client_order_ids"] = ["cid-a", "cid-b"]
+        del plan["params"]["child_client_order_id"]
+        service._register_plan(plan, ManualOnceEvaluator())
+        service._unregister_plan("plan-1")
+        assert "cid-a" not in service._client_order_id_index
+        assert "cid-b" not in service._client_order_id_index
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_register_falls_back_to_singular(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Plans with legacy child_client_order_id string still index correctly."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        plan = _make_plan_row(child_client_order_id="legacy-cid")
+        service._register_plan(plan, ManualOnceEvaluator())
+        assert service._client_order_id_index["legacy-cid"] == "plan-1"
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_dispatch_stores_child_ids_as_list(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """dispatch_commands writes child_client_order_ids as list."""
+        mock_repo = AsyncMock()
+        mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
+        mock_repo.insert_execution_plan_decision = AsyncMock(return_value="dec-1")
+        mock_repo.revise_execution_plan_params = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(native_instrument="BTC-USD")
+        service._register_plan(plan, ManualOnceEvaluator())
+        commands: list[dict[str, object]] = [
+            {"instrument": "BTC-USD", "side": "sell", "quantity": 0.5}
+        ]
+        await service._dispatch_commands("plan-1", commands)
+        revision_call = mock_repo.revise_execution_plan_params.await_args
+        param_updates = revision_call[1]["param_updates"]
+        assert "child_client_order_ids" in param_updates
+        assert isinstance(param_updates["child_client_order_ids"], list)
+        assert len(param_updates["child_client_order_ids"]) == 1
 
 
 class TestTickRoutingSymbolIndex:

@@ -21,6 +21,7 @@ import zmq
 import zmq.asyncio
 from loguru import logger
 
+from snapper.application.plans.bracket import BracketEvaluator
 from snapper.application.plans.evaluator import PlanEvaluator
 from snapper.application.plans.manual_once import ManualOnceEvaluator
 from snapper.application.process_manager.models import RegisterableProcess
@@ -46,6 +47,7 @@ from snapper.messaging.schemas.messages import parse_message
 
 _EVALUATOR_REGISTRY: dict[str, type[PlanEvaluator]] = {
     "manual_once": ManualOnceEvaluator,
+    "bracket": BracketEvaluator,
 }
 
 _CHECKPOINT_INTERVAL_S = 10.0
@@ -210,10 +212,51 @@ class PlanExecutorService(RegisterableProcess):
             plan: Recovered plan row in ``cancel_requested`` status.
         """
         params = plan.get("params") or {}
-        child_client_order_id = params.get("child_client_order_id")
         native_instrument = params.get("native_instrument")
-        if not isinstance(child_client_order_id, str) or not isinstance(native_instrument, str):
+        if not isinstance(native_instrument, str):
             return
+        child_order_ids = self._extract_child_ids(params)
+        if not child_order_ids:
+            return
+        for child_client_order_id in child_order_ids:
+            await self._reemit_single_stranded_cancel(
+                plan, child_client_order_id, native_instrument
+            )
+
+    def _extract_child_ids(self, params: dict[str, Any]) -> list[str]:
+        """Extract all child client order IDs from plan params.
+
+        Handles both the list format (child_client_order_ids) and the
+        legacy single-string format (child_client_order_id).
+
+        Args:
+            params: Plan params dict.
+
+        Returns:
+            List of child client order ID strings (may be empty).
+        """
+        ids = params.get("child_client_order_ids")
+        if isinstance(ids, list):
+            return [c for c in ids if isinstance(c, str)]
+        single = params.get("child_client_order_id")
+        if isinstance(single, str):
+            return [single]
+        return []
+
+    async def _reemit_single_stranded_cancel(
+        self,
+        plan: ExecutionPlanRow,
+        child_client_order_id: str,
+        native_instrument: str,
+    ) -> None:
+        """Re-emit a cancel command for a single child order.
+
+        Args:
+            plan: Recovered plan row in cancel_requested status.
+            child_client_order_id: Child order to cancel.
+            native_instrument: Native exchange symbol for the cancel command.
+        """
+        params = plan.get("params") or {}
         try:
             linked_plan_id = await self.repository.get_plan_public_id_for_client_order_id(
                 child_client_order_id
@@ -244,8 +287,9 @@ class PlanExecutorService(RegisterableProcess):
             return
         if already_pending:
             logger.info(
-                "PlanExecutorService: cancel already pending for plan {}, skipping re-emit",
+                "PlanExecutorService: cancel already pending for plan {} child {}, skipping",
                 plan["public_id"],
+                child_client_order_id,
             )
             return
         try:
@@ -263,7 +307,7 @@ class PlanExecutorService(RegisterableProcess):
             "exchange": plan["exchange"],
             "instrument": native_instrument,
             "mode": plan["mode"],
-            "strategy_id": "manual",
+            "strategy_id": plan["plan_type"],
             "client_order_id": child_client_order_id,
             "venue_client_id": child_client_order_id,
             "side": plan["side"],
@@ -287,8 +331,9 @@ class PlanExecutorService(RegisterableProcess):
         try:
             await self.repository.insert_trade_command(cast(Any, row))
             logger.info(
-                "PlanExecutorService: re-emitted stranded cancel for plan {}",
+                "PlanExecutorService: re-emitted stranded cancel for plan {} child {}",
                 plan["public_id"],
+                child_client_order_id,
             )
         except Exception as exc:
             logger.error("Stranded cancel re-emit failed for plan {}: {}", plan["public_id"], exc)
@@ -305,9 +350,15 @@ class PlanExecutorService(RegisterableProcess):
         self.evaluators[public_id] = evaluator
         self._plan_locks[public_id] = asyncio.Lock()
         params = row.get("params") or {}
-        child_id = params.get("child_client_order_id")
-        if isinstance(child_id, str):
-            self._client_order_id_index[child_id] = public_id
+        child_ids = params.get("child_client_order_ids")
+        if isinstance(child_ids, list):
+            for cid in child_ids:
+                if isinstance(cid, str):
+                    self._client_order_id_index[cid] = public_id
+        else:
+            child_id = params.get("child_client_order_id")
+            if isinstance(child_id, str):
+                self._client_order_id_index[child_id] = public_id
         native_instrument = params.get("native_instrument")
         if isinstance(native_instrument, str):
             key = f"{row['exchange']}:{native_instrument}"
@@ -322,9 +373,15 @@ class PlanExecutorService(RegisterableProcess):
         self._plan_locks.pop(public_id, None)
         if row is not None:
             params = row.get("params") or {}
-            child_id = params.get("child_client_order_id")
-            if isinstance(child_id, str):
-                self._client_order_id_index.pop(child_id, None)
+            child_ids = params.get("child_client_order_ids")
+            if isinstance(child_ids, list):
+                for cid in child_ids:
+                    if isinstance(cid, str):
+                        self._client_order_id_index.pop(cid, None)
+            else:
+                child_id = params.get("child_client_order_id")
+                if isinstance(child_id, str):
+                    self._client_order_id_index.pop(child_id, None)
             native_instrument = params.get("native_instrument")
             if isinstance(native_instrument, str):
                 key = f"{row['exchange']}:{native_instrument}"
@@ -408,18 +465,22 @@ class PlanExecutorService(RegisterableProcess):
                 emitted_command_public_id=client_order_id,
             )
         if child_ids:
-            param_key = "child_client_order_id"
-            param_value: Any = child_ids[0] if len(child_ids) == 1 else child_ids
+            existing_ids: list[str] = []
+            params_dict = plan.get("params") or {}
+            prev = params_dict.get("child_client_order_ids")
+            if isinstance(prev, list):
+                existing_ids = [c for c in prev if isinstance(c, str)]
+            merged_ids = existing_ids + child_ids
             await self.repository.revise_execution_plan_params(
                 public_id=plan_public_id,
-                param_updates=cast(JsonObject, {param_key: param_value}),
+                param_updates=cast(JsonObject, {"child_client_order_ids": merged_ids}),
                 bus_time=now,
                 session_id=session_id,
                 sequence_id=self.tracker.next_sequence("plan_param_revisions"),
             )
             plan_mut: dict[str, Any] = dict(plan)
             params_mut: dict[str, Any] = dict(plan_mut.get("params") or {})
-            params_mut[param_key] = param_value
+            params_mut["child_client_order_ids"] = merged_ids
             plan_mut["params"] = params_mut
             self.plans[plan_public_id] = cast(ExecutionPlanRow, plan_mut)
 
