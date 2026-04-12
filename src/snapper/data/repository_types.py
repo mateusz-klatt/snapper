@@ -889,6 +889,38 @@ class CreateScopeGrantRequest(TypedDict):
     timestamp: datetime
 
 
+class ExecutionPlanDecisionInsertRow(TypedDict):
+    """Insert params for insert_execution_plan_decision."""
+
+    plan_public_id: str
+    decision_type: str
+    decided_at: datetime
+    trigger_type: str
+    evidence: JsonObject
+    emitted_command_public_id: str | None
+    new_status: str | None
+    reason: str
+    decision_importance: str
+
+
+class ExecutionPlanDecisionRow(TypedDict):
+    """Read projection for execution_plan_decisions queries."""
+
+    public_id: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+    plan_public_id: str
+    decision_type: str
+    decided_at: datetime
+    trigger_type: str
+    evidence: JsonObject
+    emitted_command_public_id: str | None
+    new_status: str | None
+    reason: str
+    decision_importance: str
+
+
 class PositionCycleRow(TypedDict):
     """Read projection for position_cycles queries.
 

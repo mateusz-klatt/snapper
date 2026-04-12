@@ -80,6 +80,7 @@ from snapper.data.models import Candle
 from snapper.data.models import Execution
 from snapper.data.models import ExecutionPlan
 from snapper.data.models import ExecutionPlanCheckpoint
+from snapper.data.models import ExecutionPlanDecision
 from snapper.data.models import FundingRate
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentOrderCapability
@@ -112,6 +113,8 @@ from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import CheckpointUpsertRow
 from snapper.data.repository_types import CreateScopeGrantRequest
 from snapper.data.repository_types import ExecutionPlanCheckpointRow
+from snapper.data.repository_types import ExecutionPlanDecisionInsertRow
+from snapper.data.repository_types import ExecutionPlanDecisionRow
 from snapper.data.repository_types import ExecutionPlanInsertRow
 from snapper.data.repository_types import ExecutionPlanRow
 from snapper.data.repository_types import ExecutionRow
@@ -1471,6 +1474,73 @@ class Repository(ABC):
 
         Returns:
             Checkpoint row or None if no checkpoint exists.
+        """
+        ...
+
+    @abstractmethod
+    async def insert_execution_plan_decision(
+        self,
+        row: ExecutionPlanDecisionInsertRow,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> str:
+        """Insert a decision row for audit trail.
+
+        Args:
+            row: Decision insert payload.
+            bus_time: Timestamp for SCD2 operations.
+            session_id: Producer session identifier.
+            sequence_id: Monotonic sequence counter.
+
+        Returns:
+            public_id of the new decision row.
+        """
+        ...
+
+    @abstractmethod
+    async def list_execution_plan_decisions(
+        self,
+        plan_public_id: str,
+        as_of: datetime,
+        importance: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[ExecutionPlanDecisionRow]:
+        """Retrieve decision rows for a plan.
+
+        Args:
+            plan_public_id: Plan to query decisions for.
+            as_of: Point-in-time for temporal query.
+            importance: Optional importance filter (action/transition/routine).
+            limit: Maximum rows to return.
+            offset: Number of rows to skip.
+
+        Returns:
+            Decision rows ordered by decided_at DESC.
+        """
+        ...
+
+    @abstractmethod
+    async def revise_execution_plan_params(
+        self,
+        public_id: str,
+        param_updates: JsonObject,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> None:
+        """SCD2 close-and-insert for plan params revision only.
+
+        Shallow-merges param_updates into the existing params dict.
+        All other fields are preserved from the current active row.
+
+        Args:
+            public_id: Plan public identifier.
+            param_updates: Dict of param keys to update (shallow merge).
+            bus_time: Timestamp for SCD2 close and new row.
+            session_id: Producer session identifier.
+            sequence_id: Monotonic sequence counter.
         """
         ...
 
@@ -5341,6 +5411,143 @@ class SQLAlchemyRepository(Repository):
                 last_tick_timestamp=row.last_tick_timestamp,
                 checkpoint_at=row.checkpoint_at,
             )
+
+    async def insert_execution_plan_decision(
+        self,
+        row: ExecutionPlanDecisionInsertRow,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> str:
+        """Insert a decision row for audit trail."""
+        async with self.session() as s:
+            decision = ExecutionPlanDecision(
+                plan_public_id=row["plan_public_id"],
+                decision_type=row["decision_type"],
+                decided_at=row["decided_at"],
+                trigger_type=row["trigger_type"],
+                evidence=row["evidence"],
+                emitted_command_public_id=row.get("emitted_command_public_id"),
+                new_status=row.get("new_status"),
+                reason=row["reason"],
+                decision_importance=row["decision_importance"],
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=bus_time,
+            )
+            s.add(decision)
+            await s.commit()
+            await s.refresh(decision)
+            return decision.public_id
+
+    async def list_execution_plan_decisions(
+        self,
+        plan_public_id: str,
+        as_of: datetime,
+        importance: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[ExecutionPlanDecisionRow]:
+        """Retrieve decision rows for a plan."""
+        async with self.session() as s:
+            filters: list[Any] = [
+                ExecutionPlanDecision.plan_public_id == plan_public_id,
+                *where_active(ExecutionPlanDecision, as_of),
+            ]
+            if importance is not None:
+                filters.append(ExecutionPlanDecision.decision_importance == importance)
+            stmt = (
+                select(ExecutionPlanDecision)
+                .where(*filters)
+                .order_by(ExecutionPlanDecision.decided_at.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+            result = await s.execute(stmt)
+            return [
+                ExecutionPlanDecisionRow(
+                    public_id=d.public_id,
+                    timestamp=d.timestamp,
+                    session_id=d.session_id,
+                    sequence_id=d.sequence_id,
+                    plan_public_id=d.plan_public_id,
+                    decision_type=d.decision_type,
+                    decided_at=d.decided_at,
+                    trigger_type=d.trigger_type,
+                    evidence=d.evidence,
+                    emitted_command_public_id=d.emitted_command_public_id,
+                    new_status=d.new_status,
+                    reason=d.reason,
+                    decision_importance=d.decision_importance,
+                )
+                for d in result.scalars().all()
+            ]
+
+    async def revise_execution_plan_params(
+        self,
+        public_id: str,
+        param_updates: JsonObject,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> None:
+        """SCD2 close-and-insert for plan params revision only."""
+        async with self.session() as s:
+            existing = (
+                (
+                    await s.execute(
+                        select(ExecutionPlan)
+                        .where(
+                            ExecutionPlan.public_id == public_id,
+                            *where_active(ExecutionPlan, bus_time),
+                        )
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if existing is None:
+                return
+            await s.execute(
+                update(ExecutionPlan)
+                .where(ExecutionPlan.id == existing.id)
+                .values(known_to=bus_time)
+            )
+            merged_params: JsonObject = {**existing.params, **param_updates}
+            new_plan = ExecutionPlan(
+                public_id=existing.public_id,
+                plan_type=existing.plan_type,
+                created_by_user_id=existing.created_by_user_id,
+                created_by_strategy=existing.created_by_strategy,
+                created_via=existing.created_via,
+                instrument_public_id=existing.instrument_public_id,
+                exchange=existing.exchange,
+                mode=existing.mode,
+                shard_key=existing.shard_key,
+                wallet_public_id=existing.wallet_public_id,
+                operator_public_id=existing.operator_public_id,
+                total_quantity=existing.total_quantity,
+                filled_quantity=existing.filled_quantity,
+                side=existing.side,
+                parent_plan_public_id=existing.parent_plan_public_id,
+                position_cycle_public_id=existing.position_cycle_public_id,
+                params=merged_params,
+                status=existing.status,
+                created_at=existing.created_at,
+                started_at=existing.started_at,
+                completed_at=existing.completed_at,
+                expires_at=existing.expires_at,
+                cancel_requested_at=existing.cancel_requested_at,
+                last_evaluated_at=existing.last_evaluated_at,
+                last_error=existing.last_error,
+                idempotency_key=existing.idempotency_key,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=bus_time,
+            )
+            s.add(new_plan)
+            await s.commit()
 
     @staticmethod
     def _position_cycle_row_to_dict(pc: PositionCycle) -> PositionCycleRow:

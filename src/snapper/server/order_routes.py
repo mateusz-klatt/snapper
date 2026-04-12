@@ -83,6 +83,8 @@ def _plan_to_data(plan: dict[str, Any]) -> ExecutionPlanData:
         wallet_public_id=plan["wallet_public_id"],
         operator_public_id=plan["operator_public_id"],
         params=plan["params"],
+        position_cycle_public_id=plan.get("position_cycle_public_id"),
+        parent_plan_public_id=plan.get("parent_plan_public_id"),
         last_error=plan["last_error"],
         idempotency_key=plan["idempotency_key"],
     )

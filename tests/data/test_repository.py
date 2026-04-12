@@ -6203,3 +6203,228 @@ async def test_position_cycle_full_lifecycle(tmp_path: Path) -> None:
     assert close_id is not None
     final = await r.get_open_position_cycle(shard, as_of=t3 + timedelta(seconds=1))
     assert final is None
+
+
+@pytest.mark.asyncio
+async def test_insert_and_list_execution_plan_decisions(tmp_path: Path) -> None:
+    """Given inserted decisions, When listing, Then rows returned with temporal filter."""
+    db_path = tmp_path / "decisions.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    pid = await r.insert_execution_plan_decision(
+        row={
+            "plan_public_id": "plan-1",
+            "decision_type": "command_emitted",
+            "decided_at": now,
+            "trigger_type": "tick",
+            "evidence": {"price": 50000.0},
+            "emitted_command_public_id": "cmd-1",
+            "new_status": None,
+            "reason": "SL triggered",
+            "decision_importance": "action",
+        },
+        bus_time=now,
+        session_id="s1",
+        sequence_id=1,
+    )
+    assert pid
+    rows = await r.list_execution_plan_decisions("plan-1", as_of=now)
+    assert len(rows) == 1
+    assert rows[0]["decision_type"] == "command_emitted"
+    assert rows[0]["trigger_type"] == "tick"
+    assert rows[0]["evidence"] == {"price": 50000.0}
+    assert rows[0]["emitted_command_public_id"] == "cmd-1"
+    assert rows[0]["decision_importance"] == "action"
+
+
+@pytest.mark.asyncio
+async def test_list_decisions_importance_filter(tmp_path: Path) -> None:
+    """Given decisions of different importance, When filtering, Then subset returned."""
+    db_path = tmp_path / "decisions_filter.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    for i, imp in enumerate(("action", "transition", "routine")):
+        await r.insert_execution_plan_decision(
+            row={
+                "plan_public_id": "plan-1",
+                "decision_type": "test",
+                "decided_at": now,
+                "trigger_type": "tick",
+                "evidence": {},
+                "emitted_command_public_id": None,
+                "new_status": None,
+                "reason": f"test {imp}",
+                "decision_importance": imp,
+            },
+            bus_time=now,
+            session_id="s1",
+            sequence_id=i + 1,
+        )
+    rows = await r.list_execution_plan_decisions("plan-1", as_of=now, importance="action")
+    assert len(rows) == 1
+    assert rows[0]["decision_importance"] == "action"
+
+
+@pytest.mark.asyncio
+async def test_list_decisions_pagination(tmp_path: Path) -> None:
+    """Given multiple decisions, When paginating, Then correct slices returned."""
+    db_path = tmp_path / "decisions_page.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    for i in range(5):
+        t = now + timedelta(seconds=i)
+        await r.insert_execution_plan_decision(
+            row={
+                "plan_public_id": "plan-1",
+                "decision_type": "test",
+                "decided_at": t,
+                "trigger_type": "tick",
+                "evidence": {},
+                "emitted_command_public_id": None,
+                "new_status": None,
+                "reason": f"reason-{i}",
+                "decision_importance": "action",
+            },
+            bus_time=t,
+            session_id="s1",
+            sequence_id=i + 1,
+        )
+    page1 = await r.list_execution_plan_decisions(
+        "plan-1", as_of=now + timedelta(seconds=10), limit=2
+    )
+    assert len(page1) == 2
+    page2 = await r.list_execution_plan_decisions(
+        "plan-1", as_of=now + timedelta(seconds=10), limit=2, offset=2
+    )
+    assert len(page2) == 2
+    page3 = await r.list_execution_plan_decisions(
+        "plan-1", as_of=now + timedelta(seconds=10), limit=2, offset=4
+    )
+    assert len(page3) == 1
+
+
+@pytest.mark.asyncio
+async def test_revise_execution_plan_params(tmp_path: Path) -> None:
+    """Given a plan, When revising params, Then SCD2 close-and-insert preserves other fields."""
+    db_path = tmp_path / "params_rev.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _id, pid = await r.insert_execution_plan(
+        {
+            "plan_type": "manual_once",
+            "created_by_user_id": "user-1",
+            "created_via": "ui",
+            "instrument_public_id": "inst-1",
+            "exchange": "kraken",
+            "mode": "live",
+            "shard_key": "kraken:BTC-USD:live",
+            "wallet_public_id": "wallet-1",
+            "total_quantity": 1.0,
+            "side": "buy",
+            "params": {"order_type": "limit", "price": 50000.0},
+            "status": "active",
+            "created_at": now,
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+        }
+    )
+    t2 = now + timedelta(seconds=5)
+    await r.revise_execution_plan_params(
+        public_id=pid,
+        param_updates={"child_client_order_id": "cid-99"},
+        bus_time=t2,
+        session_id="s1",
+        sequence_id=2,
+    )
+    row = await r.get_execution_plan(pid, as_of=t2)
+    assert row is not None
+    assert row["params"]["child_client_order_id"] == "cid-99"
+    assert row["params"]["order_type"] == "limit"
+    assert row["params"]["price"] == 50000.0
+    assert row["status"] == "active"
+    assert row["total_quantity"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_revise_params_multiple_revisions(tmp_path: Path) -> None:
+    """Given sequential param revisions, Then each produces correct lineage."""
+    db_path = tmp_path / "params_multi.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _id, pid = await r.insert_execution_plan(
+        {
+            "plan_type": "manual_once",
+            "created_by_user_id": "user-1",
+            "created_via": "ui",
+            "instrument_public_id": "inst-1",
+            "exchange": "kraken",
+            "mode": "live",
+            "shard_key": "kraken:BTC-USD:live",
+            "wallet_public_id": "wallet-1",
+            "total_quantity": 1.0,
+            "side": "buy",
+            "params": {"a": 1},
+            "status": "active",
+            "created_at": now,
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+        }
+    )
+    t2 = now + timedelta(seconds=5)
+    await r.revise_execution_plan_params(pid, {"b": 2}, t2, "s1", 2)
+    t3 = now + timedelta(seconds=10)
+    await r.revise_execution_plan_params(pid, {"c": 3}, t3, "s1", 3)
+    row = await r.get_execution_plan(pid, as_of=t3)
+    assert row is not None
+    assert row["params"] == {"a": 1, "b": 2, "c": 3}
+
+
+@pytest.mark.asyncio
+async def test_revise_params_shallow_merge(tmp_path: Path) -> None:
+    """Param merge is shallow — nested dicts are replaced, not deep-merged."""
+    db_path = tmp_path / "params_shallow.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    _id, pid = await r.insert_execution_plan(
+        {
+            "plan_type": "manual_once",
+            "created_by_user_id": "user-1",
+            "created_via": "ui",
+            "instrument_public_id": "inst-1",
+            "exchange": "kraken",
+            "mode": "live",
+            "shard_key": "kraken:BTC-USD:live",
+            "wallet_public_id": "wallet-1",
+            "total_quantity": 1.0,
+            "side": "buy",
+            "params": {"nested": {"x": 1, "y": 2}},
+            "status": "active",
+            "created_at": now,
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+        }
+    )
+    t2 = now + timedelta(seconds=5)
+    await r.revise_execution_plan_params(pid, {"nested": {"z": 3}}, t2, "s1", 2)
+    row = await r.get_execution_plan(pid, as_of=t2)
+    assert row is not None
+    assert row["params"]["nested"] == {"z": 3}
+
+
+@pytest.mark.asyncio
+async def test_revise_params_no_active_row_noop(tmp_path: Path) -> None:
+    """Given a nonexistent plan, When revising params, Then nothing happens."""
+    db_path = tmp_path / "params_noop.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    await r.revise_execution_plan_params("nonexistent-id", {"a": 1}, now, "s1", 1)

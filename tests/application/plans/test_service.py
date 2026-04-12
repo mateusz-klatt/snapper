@@ -11,12 +11,14 @@ from unittest.mock import patch
 import pytest
 
 from snapper.application.plans.manual_once import ManualOnceEvaluator
+from snapper.application.plans.service import _EVALUATOR_REGISTRY
 from snapper.application.plans.service import PlanExecutorService
 from snapper.data.repository_types import ExecutionPlanRow
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import SignalData
 from snapper.messaging.schemas.data import TickData
+from snapper.server.order_routes import _plan_to_data
 
 
 def _make_plan_row(
@@ -887,7 +889,7 @@ class TestPlanExecutorService:
         """Given a tick on an instrument+exchange matching a plan, Then evaluator is invoked."""
         mock_repo_fn.return_value = AsyncMock()
         service = PlanExecutorService()
-        plan = _make_plan_row()
+        plan = _make_plan_row(native_instrument="BTC-USD")
         evaluator = ManualOnceEvaluator()
         service._register_plan(plan, evaluator)
         tick = TickData(
@@ -895,14 +897,14 @@ class TestPlanExecutorService:
             timestamp=datetime(2026, 4, 10, tzinfo=UTC),
             session_id="s1",
             sequence_id=1,
-            instrument="inst-1",
+            instrument="BTC-USD",
             exchange="kraken",
             volume=0.0,
             bid=50000.0,
             ask=50001.0,
             last=50000.5,
         )
-        await service._handle_tick("market.kraken.inst-1.ticks", tick)
+        await service._handle_tick("market.kraken.BTC-USD.ticks", tick)
         assert service._last_tick_timestamps["plan-1"] is not None
 
     @pytest.mark.asyncio
@@ -1371,7 +1373,7 @@ class TestPlanExecutorService:
         """Tick on different instrument does not touch unrelated plan state."""
         mock_repo_fn.return_value = AsyncMock()
         service = PlanExecutorService()
-        plan = _make_plan_row()
+        plan = _make_plan_row(native_instrument="BTC-USD")
         service._register_plan(plan, ManualOnceEvaluator())
         tick = TickData(
             public_id="t-1",
@@ -1397,21 +1399,21 @@ class TestPlanExecutorService:
         """Tick on different exchange does not touch plan state."""
         mock_repo_fn.return_value = AsyncMock()
         service = PlanExecutorService()
-        plan = _make_plan_row()
+        plan = _make_plan_row(native_instrument="BTC-USD")
         service._register_plan(plan, ManualOnceEvaluator())
         tick = TickData(
             public_id="t-1",
             timestamp=datetime(2026, 4, 10, tzinfo=UTC),
             session_id="s1",
             sequence_id=1,
-            instrument="inst-1",
+            instrument="BTC-USD",
             exchange="zonda",
             volume=0.0,
             bid=50000.0,
             ask=50001.0,
             last=50000.5,
         )
-        await service._handle_tick("market.zonda.inst-1.ticks", tick)
+        await service._handle_tick("market.zonda.BTC-USD.ticks", tick)
         assert service._last_tick_timestamps.get("plan-1") is None
 
     @pytest.mark.asyncio
@@ -1527,19 +1529,716 @@ class TestPlanExecutorService:
         """Plans without an evaluator do not receive tick dispatches."""
         mock_repo_fn.return_value = AsyncMock()
         service = PlanExecutorService()
-        plan = _make_plan_row()
+        plan = _make_plan_row(native_instrument="BTC-USD")
         service.plans[_cast(str, plan["public_id"])] = _cast(ExecutionPlanRow, plan)
+        service._runtime_symbol_index.setdefault("kraken:BTC-USD", set()).add("plan-1")
         tick = TickData(
             public_id="t-1",
             timestamp=datetime(2026, 4, 10, tzinfo=UTC),
             session_id="s1",
             sequence_id=1,
-            instrument="inst-1",
+            instrument="BTC-USD",
             exchange="kraken",
             volume=0.0,
             bid=50000.0,
             ask=50001.0,
             last=50000.5,
         )
-        await service._handle_tick("market.kraken.inst-1.ticks", tick)
+        await service._handle_tick("market.kraken.BTC-USD.ticks", tick)
         assert service._last_tick_timestamps.get("plan-1") is None
+
+
+class TestDispatchCommands:
+    """Tests for _dispatch_commands plumbing."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_dispatch_commands_inserts_trade_command(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Given evaluator returns a command, Then insert_trade_command is called."""
+        mock_repo = AsyncMock()
+        mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
+        mock_repo.insert_execution_plan_decision = AsyncMock(return_value="dec-1")
+        mock_repo.revise_execution_plan_params = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(native_instrument="BTC-USD")
+        service._register_plan(plan, ManualOnceEvaluator())
+        commands: list[dict[str, object]] = [
+            {
+                "instrument": "BTC-USD",
+                "side": "sell",
+                "quantity": 0.5,
+                "order_type": "market",
+                "reduce_only": True,
+                "trigger_type": "tick",
+                "reason": "SL triggered",
+            }
+        ]
+        await service._dispatch_commands("plan-1", commands)
+        mock_repo.insert_trade_command.assert_awaited_once()
+        inserted = mock_repo.insert_trade_command.await_args[0][0]
+        assert inserted["side"] == "sell"
+        assert inserted["quantity"] == 0.5
+        assert inserted["reduce_only"] is True
+        assert inserted["plan_public_id"] == "plan-1"
+        assert inserted["strategy_id"] == "manual_once"
+        mock_repo.revise_execution_plan_params.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_dispatch_commands_unknown_plan_noop(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Given a plan_public_id not in the plans dict, Then nothing happens."""
+        mock_repo = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        await service._dispatch_commands(
+            "nonexistent", [{"instrument": "X", "side": "buy", "quantity": 1}]
+        )
+        mock_repo.insert_trade_command.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_dispatch_commands_empty_list_no_insert(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Given evaluator returns empty list, Then no trade command inserted."""
+        mock_repo = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row()
+        service._register_plan(plan, ManualOnceEvaluator())
+        await service._dispatch_commands("plan-1", [])
+        mock_repo.insert_trade_command.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_dispatch_commands_updates_client_order_id_index(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Given a command dispatch, Then _client_order_id_index is updated."""
+        mock_repo = AsyncMock()
+        mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
+        mock_repo.insert_execution_plan_decision = AsyncMock(return_value="dec-1")
+        mock_repo.revise_execution_plan_params = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(native_instrument="BTC-USD")
+        service._register_plan(plan, ManualOnceEvaluator())
+        commands: list[dict[str, object]] = [
+            {"instrument": "BTC-USD", "side": "sell", "quantity": 0.5}
+        ]
+        await service._dispatch_commands("plan-1", commands)
+        inserted = mock_repo.insert_trade_command.await_args[0][0]
+        cid = inserted["client_order_id"]
+        assert service._client_order_id_index[cid] == "plan-1"
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_dispatch_commands_logs_decision(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Given a command dispatch, Then a decision audit row is written."""
+        mock_repo = AsyncMock()
+        mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
+        mock_repo.insert_execution_plan_decision = AsyncMock(return_value="dec-1")
+        mock_repo.revise_execution_plan_params = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(native_instrument="BTC-USD")
+        service._register_plan(plan, ManualOnceEvaluator())
+        commands: list[dict[str, object]] = [
+            {"instrument": "BTC-USD", "side": "sell", "quantity": 0.5, "reason": "SL hit"}
+        ]
+        await service._dispatch_commands("plan-1", commands)
+        mock_repo.insert_execution_plan_decision.assert_awaited_once()
+        dec_row = mock_repo.insert_execution_plan_decision.await_args[1]["row"]
+        assert dec_row["decision_type"] == "command_emitted"
+        assert dec_row["decision_importance"] == "action"
+
+
+class TestTickRoutingSymbolIndex:
+    """Tests for _runtime_symbol_index tick routing (deliverable 1.5)."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_register_plan_adds_to_symbol_index(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Registering a plan with native_instrument populates the symbol index."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        plan = _make_plan_row(native_instrument="BTC-USD")
+        service._register_plan(plan, ManualOnceEvaluator())
+        assert "plan-1" in service._runtime_symbol_index["kraken:BTC-USD"]
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_unregister_plan_removes_from_symbol_index(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Unregistering a plan removes it from the symbol index."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        plan = _make_plan_row(native_instrument="BTC-USD")
+        service._register_plan(plan, ManualOnceEvaluator())
+        service._unregister_plan("plan-1")
+        assert "kraken:BTC-USD" not in service._runtime_symbol_index
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_multiple_plans_same_instrument(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Multiple plans on the same instrument all receive ticks."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        plan1 = _make_plan_row(public_id="plan-1", native_instrument="BTC-USD")
+        plan2 = _make_plan_row(public_id="plan-2", native_instrument="BTC-USD")
+        service._register_plan(plan1, ManualOnceEvaluator())
+        service._register_plan(plan2, ManualOnceEvaluator())
+        assert service._runtime_symbol_index["kraken:BTC-USD"] == {"plan-1", "plan-2"}
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_plan_without_native_instrument_not_in_index(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Plans without native_instrument are not added to symbol index."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        plan = _make_plan_row()
+        service._register_plan(plan, ManualOnceEvaluator())
+        assert len(service._runtime_symbol_index) == 0
+
+
+class TestClockLoop:
+    """Tests for _clock_loop (deliverable 1.2)."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_clock_calls_on_clock_for_active_plans(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Active plans receive on_clock calls."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        plan = _make_plan_row(status="active")
+        evaluator = AsyncMock(spec=ManualOnceEvaluator)
+        evaluator.on_clock = AsyncMock(return_value=[])
+        service._register_plan(plan, evaluator)
+        service._running = True
+
+        async def stop_after_one_tick() -> None:
+            await asyncio.sleep(0.05)
+            service._running = False
+
+        await asyncio.gather(
+            service._clock_loop(),
+            stop_after_one_tick(),
+        )
+        evaluator.on_clock.assert_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_clock_skips_paused_plans(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Paused plans do not receive on_clock calls."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        plan = _make_plan_row(status="paused")
+        evaluator = AsyncMock(spec=ManualOnceEvaluator)
+        evaluator.on_clock = AsyncMock(return_value=[])
+        service._register_plan(plan, evaluator)
+        service._running = True
+
+        async def stop_after_one_tick() -> None:
+            await asyncio.sleep(0.05)
+            service._running = False
+
+        await asyncio.gather(
+            service._clock_loop(),
+            stop_after_one_tick(),
+        )
+        evaluator.on_clock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_clock_skips_terminal_plans(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Terminal plans do not receive on_clock calls."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        plan = _make_plan_row(status="completed")
+        evaluator = AsyncMock(spec=ManualOnceEvaluator)
+        evaluator.on_clock = AsyncMock(return_value=[])
+        service._register_plan(plan, evaluator)
+        service._running = True
+
+        async def stop_after_one_tick() -> None:
+            await asyncio.sleep(0.05)
+            service._running = False
+
+        await asyncio.gather(
+            service._clock_loop(),
+            stop_after_one_tick(),
+        )
+        evaluator.on_clock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_clock_exception_does_not_break_loop(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """An exception in on_clock does not crash the loop."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        plan = _make_plan_row(status="active")
+        evaluator = AsyncMock(spec=ManualOnceEvaluator)
+        evaluator.on_clock = AsyncMock(side_effect=RuntimeError("boom"))
+        service._register_plan(plan, evaluator)
+        service._running = True
+
+        async def stop_after_one_tick() -> None:
+            await asyncio.sleep(0.05)
+            service._running = False
+
+        await asyncio.gather(
+            service._clock_loop(),
+            stop_after_one_tick(),
+        )
+
+
+class TestCapabilityGating:
+    """Tests for _check_capabilities (deliverable 1.6)."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_manual_once_requires_no_capabilities(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """ManualOnceEvaluator requires no capabilities — always passes."""
+        mock_repo = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        missing = await service._check_capabilities("manual_once", "kraken", "inst-1")
+        assert missing == []
+        mock_repo.get_instrument_capabilities.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_unknown_plan_type_returns_error(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Unknown plan type returns a missing capability."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        missing = await service._check_capabilities("nonexistent", "kraken", "inst-1")
+        assert len(missing) == 1
+        assert "unknown_plan_type" in missing[0]
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_no_capability_rows_returns_all_required(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """No capability data for the instrument → fail-closed (all required returned)."""
+        mock_repo = AsyncMock()
+        mock_repo.get_instrument_capabilities = AsyncMock(return_value=[])
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+
+        class _FakeEvaluator(ManualOnceEvaluator):
+            def requires_capabilities(self) -> list[str]:
+                return ["supports_reduce_only"]
+
+        _EVALUATOR_REGISTRY["_test_bracket"] = _FakeEvaluator
+        try:
+            missing = await service._check_capabilities("_test_bracket", "kraken", "inst-1")
+            assert missing == ["supports_reduce_only"]
+        finally:
+            del _EVALUATOR_REGISTRY["_test_bracket"]
+
+
+class TestExecutionPlanDataFields:
+    """Tests for ExecutionPlanData response field additions (deliverable 1.7)."""
+
+    def test_plan_to_data_includes_new_fields(self) -> None:
+        """_plan_to_data maps position_cycle_public_id and parent_plan_public_id."""
+        plan = _make_plan_row()
+        plan["position_cycle_public_id"] = "cycle-99"
+        plan["parent_plan_public_id"] = "parent-1"
+        data = _plan_to_data(_cast(ExecutionPlanRow, plan))
+        assert data.position_cycle_public_id == "cycle-99"
+        assert data.parent_plan_public_id == "parent-1"
+
+    def test_plan_to_data_none_when_absent(self) -> None:
+        """_plan_to_data returns None for optional fields when not set."""
+        plan = _make_plan_row()
+        data = _plan_to_data(_cast(ExecutionPlanRow, plan))
+        assert data.position_cycle_public_id is None
+        assert data.parent_plan_public_id is None
+
+
+class TestUnregisterPlanSymbolIndex:
+    """Tests for _unregister_plan symbol index cleanup."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_unregister_removes_last_plan_cleans_key(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Unregistering the last plan on a key removes the key entirely."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        plan = _make_plan_row(native_instrument="BTC-USD")
+        service._register_plan(plan, ManualOnceEvaluator())
+        assert "kraken:BTC-USD" in service._runtime_symbol_index
+        service._unregister_plan("plan-1")
+        assert "kraken:BTC-USD" not in service._runtime_symbol_index
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_unregister_keeps_other_plans_on_same_key(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Unregistering one plan leaves others on the same key."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        plan1 = _make_plan_row(public_id="p1", native_instrument="BTC-USD")
+        plan2 = _make_plan_row(public_id="p2", native_instrument="BTC-USD")
+        service._register_plan(plan1, ManualOnceEvaluator())
+        service._register_plan(plan2, ManualOnceEvaluator())
+        service._unregister_plan("p1")
+        assert service._runtime_symbol_index["kraken:BTC-USD"] == {"p2"}
+
+
+class TestUnregisterPlanStaleIndex:
+    """Tests for unregister with stale symbol index state."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_unregister_with_missing_symbol_index_key(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Unregistering a plan whose symbol index key was already removed is safe."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        plan = _make_plan_row(native_instrument="BTC-USD")
+        service._register_plan(plan, ManualOnceEvaluator())
+        del service._runtime_symbol_index["kraken:BTC-USD"]
+        service._unregister_plan("plan-1")
+        assert "plan-1" not in service.plans
+
+
+class TestGetPlanLock:
+    """Tests for _get_plan_lock fallback creation."""
+
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    def test_get_plan_lock_creates_when_missing(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Lock is created on demand when not pre-registered."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        lock = service._get_plan_lock("unknown-plan")
+        assert isinstance(lock, asyncio.Lock)
+        assert service._plan_locks["unknown-plan"] is lock
+
+
+class TestLogDecisionError:
+    """Tests for _log_decision exception handling."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_log_decision_swallows_db_error(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """DB errors in _log_decision are logged, not raised."""
+        mock_repo = AsyncMock()
+        mock_repo.insert_execution_plan_decision = AsyncMock(side_effect=Exception("DB down"))
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        await service._log_decision(
+            plan_public_id="plan-1",
+            decision_type="test",
+            trigger_type="tick",
+            reason="test reason",
+            importance="action",
+        )
+
+
+class TestCheckCapabilitiesWithRows:
+    """Tests for _check_capabilities when capability rows exist."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_capability_present_and_true(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Capability flag True in row → empty missing list."""
+        mock_repo = AsyncMock()
+        mock_repo.get_instrument_capabilities = AsyncMock(
+            return_value=[{"supports_reduce_only": True}]
+        )
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+
+        class _FakeEval(ManualOnceEvaluator):
+            def requires_capabilities(self) -> list[str]:
+                return ["supports_reduce_only"]
+
+        _EVALUATOR_REGISTRY["_test_cap"] = _FakeEval
+        try:
+            missing = await service._check_capabilities("_test_cap", "kraken", "inst-1")
+            assert missing == []
+        finally:
+            del _EVALUATOR_REGISTRY["_test_cap"]
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_capability_present_and_false(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Capability flag False in row → returned as missing."""
+        mock_repo = AsyncMock()
+        mock_repo.get_instrument_capabilities = AsyncMock(
+            return_value=[{"supports_reduce_only": False}]
+        )
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+
+        class _FakeEval(ManualOnceEvaluator):
+            def requires_capabilities(self) -> list[str]:
+                return ["supports_reduce_only"]
+
+        _EVALUATOR_REGISTRY["_test_cap2"] = _FakeEval
+        try:
+            missing = await service._check_capabilities("_test_cap2", "kraken", "inst-1")
+            assert missing == ["supports_reduce_only"]
+        finally:
+            del _EVALUATOR_REGISTRY["_test_cap2"]
+
+
+class TestClockLoopDispatchAndEdgeCases:
+    """Tests for clock loop dispatch and edge cases."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_clock_dispatches_commands(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Clock loop dispatches commands returned by on_clock."""
+        mock_repo = AsyncMock()
+        mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
+        mock_repo.insert_execution_plan_decision = AsyncMock(return_value="dec-1")
+        mock_repo.revise_execution_plan_params = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(status="active", native_instrument="BTC-USD")
+        evaluator = AsyncMock(spec=ManualOnceEvaluator)
+        evaluator.on_clock = AsyncMock(
+            return_value=[{"instrument": "BTC-USD", "side": "sell", "quantity": 0.5}]
+        )
+        service._register_plan(plan, evaluator)
+        service._running = True
+
+        async def stop_after_one_tick() -> None:
+            await asyncio.sleep(0.05)
+            service._running = False
+
+        await asyncio.gather(
+            service._clock_loop(),
+            stop_after_one_tick(),
+        )
+        mock_repo.insert_trade_command.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_clock_skips_plan_without_evaluator(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Clock loop skips plans with no evaluator in the dict."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        plan = _make_plan_row(status="active")
+        service.plans["plan-1"] = _cast(ExecutionPlanRow, plan)
+        service._running = True
+
+        async def stop_after_one_tick() -> None:
+            await asyncio.sleep(0.05)
+            service._running = False
+
+        await asyncio.gather(
+            service._clock_loop(),
+            stop_after_one_tick(),
+        )
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_clock_loop_cancelled_error(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Clock loop re-raises CancelledError for clean shutdown."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        service._running = True
+        task = asyncio.create_task(service._clock_loop())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+class TestTickRoutingStaleIndex:
+    """Tests for tick routing when symbol index has stale entries."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_tick_skips_plan_not_in_plans_dict(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Stale symbol index entry (plan removed from dict) does not crash."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        service._runtime_symbol_index["kraken:BTC-USD"] = {"ghost-plan"}
+        tick = TickData(
+            public_id="t-1",
+            timestamp=datetime(2026, 4, 10, tzinfo=UTC),
+            session_id="s1",
+            sequence_id=1,
+            instrument="BTC-USD",
+            exchange="kraken",
+            volume=0.0,
+            bid=50000.0,
+            ask=50001.0,
+            last=50000.5,
+        )
+        await service._handle_tick("market.kraken.BTC-USD.ticks", tick)
+
+
+class TestOnTickDispatchesCommands:
+    """Tests that on_tick return values are captured and dispatched."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_on_tick_commands_dispatched(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Given evaluator.on_tick returns commands, Then _dispatch_commands is called."""
+        mock_repo = AsyncMock()
+        mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
+        mock_repo.insert_execution_plan_decision = AsyncMock(return_value="dec-1")
+        mock_repo.revise_execution_plan_params = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(native_instrument="BTC-USD")
+        evaluator = AsyncMock(spec=ManualOnceEvaluator)
+        evaluator.on_tick = AsyncMock(
+            return_value=[{"instrument": "BTC-USD", "side": "sell", "quantity": 0.5}]
+        )
+        service._register_plan(plan, evaluator)
+        tick = TickData(
+            public_id="t-1",
+            timestamp=datetime(2026, 4, 10, tzinfo=UTC),
+            session_id="s1",
+            sequence_id=1,
+            instrument="BTC-USD",
+            exchange="kraken",
+            volume=0.0,
+            bid=50000.0,
+            ask=50001.0,
+            last=50000.5,
+        )
+        await service._handle_tick("market.kraken.BTC-USD.ticks", tick)
+        mock_repo.insert_trade_command.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_on_tick_empty_no_dispatch(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Given evaluator.on_tick returns empty list, Then no command dispatched."""
+        mock_repo = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(native_instrument="BTC-USD")
+        evaluator = AsyncMock(spec=ManualOnceEvaluator)
+        evaluator.on_tick = AsyncMock(return_value=[])
+        service._register_plan(plan, evaluator)
+        tick = TickData(
+            public_id="t-1",
+            timestamp=datetime(2026, 4, 10, tzinfo=UTC),
+            session_id="s1",
+            sequence_id=1,
+            instrument="BTC-USD",
+            exchange="kraken",
+            volume=0.0,
+            bid=50000.0,
+            ask=50001.0,
+            last=50000.5,
+        )
+        await service._handle_tick("market.kraken.BTC-USD.ticks", tick)
+        mock_repo.insert_trade_command.assert_not_called()
+
+
+class TestOnExecutionDispatchesCommands:
+    """Tests that on_execution return values are captured and dispatched."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_on_execution_commands_dispatched(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Given evaluator.on_execution returns commands, Then commands are dispatched."""
+        mock_repo = AsyncMock()
+        mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
+        mock_repo.insert_execution_plan_decision = AsyncMock(return_value="dec-1")
+        mock_repo.revise_execution_plan_params = AsyncMock()
+        mock_repo.update_execution_plan_status = AsyncMock(return_value=1)
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(native_instrument="BTC-USD")
+        evaluator = AsyncMock(spec=ManualOnceEvaluator)
+        evaluator.on_execution = AsyncMock(
+            return_value=[{"instrument": "BTC-USD", "side": "sell", "quantity": 0.5}]
+        )
+        service._register_plan(plan, evaluator)
+        execution = _make_execution()
+        await service._handle_execution(_cast(ExecutionData, execution))
+        mock_repo.insert_trade_command.assert_awaited_once()

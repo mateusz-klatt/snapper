@@ -1623,6 +1623,23 @@ class ExecutionPlan(TemporalMixin, Base):
             sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
+        Index(
+            "uq_ep_active_bracket_per_cycle",
+            "position_cycle_public_id",
+            unique=True,
+            sqlite_where=text(
+                "position_cycle_public_id IS NOT NULL "
+                "AND plan_type = 'bracket' "
+                "AND status NOT IN ('completed', 'cancelled', 'failed', 'expired') "
+                "AND known_to = '9999-12-31 23:59:59.000000'"
+            ),
+            postgresql_where=text(
+                "position_cycle_public_id IS NOT NULL "
+                "AND plan_type = 'bracket' "
+                "AND status NOT IN ('completed', 'cancelled', 'failed', 'expired') "
+                "AND known_to = '9999-12-31T23:59:59+00:00'"
+            ),
+        ),
         CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_ep_exchange_lower"),
         CheckConstraint(
             "plan_type IN ('manual_once', 'bracket', 'trailing_stop', "

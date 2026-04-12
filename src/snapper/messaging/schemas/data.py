@@ -804,5 +804,7 @@ class ExecutionPlanData(StrictDataSchema[Literal["execution_plan"]]):
     wallet_public_id: str
     operator_public_id: str | None
     params: dict[str, object]
+    position_cycle_public_id: str | None
+    parent_plan_public_id: str | None
     last_error: str | None
     idempotency_key: str | None

@@ -15,6 +15,7 @@ from datetime import UTC
 from datetime import datetime
 from typing import Any
 from typing import cast
+from uuid import uuid7
 
 import zmq
 import zmq.asyncio
@@ -26,10 +27,13 @@ from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
+from snapper.core.json_types import JsonObject
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.data.repository import get_repository
+from snapper.data.repository_types import ExecutionPlanDecisionInsertRow
 from snapper.data.repository_types import ExecutionPlanRow
+from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.validated_socket import HWM_ORDER_FLOW
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
@@ -84,6 +88,8 @@ class PlanExecutorService(RegisterableProcess):
         self._watermarks: dict[str, int] = {}
         self._last_tick_timestamps: dict[str, datetime | None] = {}
         self._client_order_id_index: dict[str, str] = {}
+        self._runtime_symbol_index: dict[str, set[str]] = {}
+        self._plan_locks: dict[str, asyncio.Lock] = {}
         self._running = False
         self._zmq_context: zmq.asyncio.Context | None = None
         self._subscriber: ValidatedSubscriber | None = None
@@ -297,10 +303,15 @@ class PlanExecutorService(RegisterableProcess):
         public_id = row["public_id"]
         self.plans[public_id] = row
         self.evaluators[public_id] = evaluator
+        self._plan_locks[public_id] = asyncio.Lock()
         params = row.get("params") or {}
         child_id = params.get("child_client_order_id")
         if isinstance(child_id, str):
             self._client_order_id_index[child_id] = public_id
+        native_instrument = params.get("native_instrument")
+        if isinstance(native_instrument, str):
+            key = f"{row['exchange']}:{native_instrument}"
+            self._runtime_symbol_index.setdefault(key, set()).add(public_id)
 
     def _unregister_plan(self, public_id: str) -> None:
         """Drop a plan from the in-memory registry and its indexes."""
@@ -308,17 +319,198 @@ class PlanExecutorService(RegisterableProcess):
         self.evaluators.pop(public_id, None)
         self._watermarks.pop(public_id, None)
         self._last_tick_timestamps.pop(public_id, None)
+        self._plan_locks.pop(public_id, None)
         if row is not None:
             params = row.get("params") or {}
             child_id = params.get("child_client_order_id")
             if isinstance(child_id, str):
                 self._client_order_id_index.pop(child_id, None)
+            native_instrument = params.get("native_instrument")
+            if isinstance(native_instrument, str):
+                key = f"{row['exchange']}:{native_instrument}"
+                plan_ids = self._runtime_symbol_index.get(key)
+                if plan_ids is not None:
+                    plan_ids.discard(public_id)
+                    if not plan_ids:
+                        del self._runtime_symbol_index[key]
+
+    def _get_plan_lock(self, public_id: str) -> asyncio.Lock:
+        """Return the per-plan asyncio.Lock, creating it if needed."""
+        lock = self._plan_locks.get(public_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._plan_locks[public_id] = lock
+        return lock
+
+    async def _dispatch_commands(
+        self,
+        plan_public_id: str,
+        commands: list[JsonObject],
+    ) -> None:
+        """Persist evaluator-emitted commands as TradeCommand rows.
+
+        Wraps the entire command list in a single logical batch — all
+        commands must succeed or none are persisted (individual insert
+        failures propagate to the caller).
+
+        Args:
+            plan_public_id: Plan that emitted the commands.
+            commands: List of command dicts from the evaluator.
+        """
+        plan = self.plans.get(plan_public_id)
+        if plan is None:
+            return
+        now = datetime.now(UTC)
+        session_id = self.tracker.session_id
+        child_ids: list[str] = []
+        for idx, cmd in enumerate(commands):
+            client_order_id = str(uuid7())
+            sequence_id = self.tracker.next_sequence("plan_commands")
+            row = TradeCommandInsertRow(
+                command_type=str(cmd.get("command_type", "create")),
+                shard_key=plan["shard_key"],
+                exchange=plan["exchange"],
+                instrument=str(cmd["instrument"]),
+                mode=plan["mode"],
+                strategy_id=plan["plan_type"],
+                client_order_id=client_order_id,
+                venue_client_id=client_order_id,
+                side=str(cmd["side"]),
+                order_type=str(cmd.get("order_type", "market")),
+                quantity=float(cast(Any, cmd["quantity"])),
+                price=cast(Any, cmd.get("price")),
+                leverage=cast(Any, cmd.get("leverage")),
+                reduce_only=bool(cmd.get("reduce_only", False)),
+                status="created",
+                created_at=now,
+                correlation_id=plan["public_id"],
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=now,
+                wallet_public_id=plan["wallet_public_id"] or "",
+                operator_public_id=plan["operator_public_id"],
+                user_public_id=None,
+                plan_public_id=plan["public_id"],
+                exchange_order_id=None,
+                idempotency_key=f"{plan['public_id']}:{idx}",
+                supersedes_command_id=None,
+            )
+            await self.repository.insert_trade_command(row)
+            self._client_order_id_index[client_order_id] = plan_public_id
+            child_ids.append(client_order_id)
+            await self._log_decision(
+                plan_public_id=plan_public_id,
+                decision_type="command_emitted",
+                trigger_type=str(cmd.get("trigger_type", "evaluator")),
+                reason=str(cmd.get("reason", "evaluator emitted command")),
+                importance="action",
+                evidence={"command_index": idx, "side": str(cmd["side"])},
+                emitted_command_public_id=client_order_id,
+            )
+        if child_ids:
+            param_key = "child_client_order_id"
+            param_value: Any = child_ids[0] if len(child_ids) == 1 else child_ids
+            await self.repository.revise_execution_plan_params(
+                public_id=plan_public_id,
+                param_updates=cast(JsonObject, {param_key: param_value}),
+                bus_time=now,
+                session_id=session_id,
+                sequence_id=self.tracker.next_sequence("plan_param_revisions"),
+            )
+            plan_mut: dict[str, Any] = dict(plan)
+            params_mut: dict[str, Any] = dict(plan_mut.get("params") or {})
+            params_mut[param_key] = param_value
+            plan_mut["params"] = params_mut
+            self.plans[plan_public_id] = cast(ExecutionPlanRow, plan_mut)
+
+    async def _log_decision(
+        self,
+        plan_public_id: str,
+        decision_type: str,
+        trigger_type: str,
+        reason: str,
+        importance: str,
+        evidence: JsonObject | None = None,
+        emitted_command_public_id: str | None = None,
+        new_status: str | None = None,
+    ) -> None:
+        """Write a decision audit row for a plan.
+
+        Args:
+            plan_public_id: Plan this decision belongs to.
+            decision_type: Type of decision (e.g. command_emitted, tick_skip).
+            trigger_type: What triggered the decision (tick, execution, clock).
+            reason: Human-readable explanation.
+            importance: Decision importance tier (action/transition/routine).
+            evidence: Optional evidence dict.
+            emitted_command_public_id: Optional command id if a command was emitted.
+            new_status: Optional new plan status if a transition happened.
+        """
+        now = datetime.now(UTC)
+        row = ExecutionPlanDecisionInsertRow(
+            plan_public_id=plan_public_id,
+            decision_type=decision_type,
+            decided_at=now,
+            trigger_type=trigger_type,
+            evidence=evidence or {},
+            emitted_command_public_id=emitted_command_public_id,
+            new_status=new_status,
+            reason=reason,
+            decision_importance=importance,
+        )
+        try:
+            await self.repository.insert_execution_plan_decision(
+                row=row,
+                bus_time=now,
+                session_id=self.tracker.session_id,
+                sequence_id=self.tracker.next_sequence("plan_decisions"),
+            )
+        except Exception as exc:
+            logger.error("Failed to log decision for plan {}: {}", plan_public_id, exc)
+
+    async def _check_capabilities(
+        self,
+        plan_type: str,
+        exchange: str,
+        instrument_public_id: str,
+    ) -> list[str]:
+        """Check if the venue supports capabilities required by a plan type.
+
+        Args:
+            plan_type: Plan type string (e.g. 'bracket').
+            exchange: Exchange identifier.
+            instrument_public_id: Instrument UUID.
+
+        Returns:
+            List of missing capability flag names (empty = all satisfied).
+        """
+        evaluator_cls = _EVALUATOR_REGISTRY.get(plan_type)
+        if evaluator_cls is None:
+            return [f"unknown_plan_type:{plan_type}"]
+        required = evaluator_cls().requires_capabilities()
+        if not required:
+            return []
+        now = datetime.now(UTC)
+        rows = await self.repository.get_instrument_capabilities(
+            as_of=now,
+            exchange=exchange,
+            instrument_public_id=instrument_public_id,
+        )
+        if not rows:
+            return list(required)
+        cap_row = rows[0]
+        missing: list[str] = []
+        for flag in required:
+            if not cap_row.get(flag, False):
+                missing.append(flag)
+        return missing
 
     async def _run_loop(self) -> None:
-        """Run listen and checkpoint tasks until stopped."""
+        """Run listen, checkpoint, and clock tasks until stopped."""
         tasks = [
             asyncio.create_task(self._listen_loop()),
             asyncio.create_task(self._checkpoint_loop()),
+            asyncio.create_task(self._clock_loop()),
         ]
         try:
             while self._running:
@@ -388,6 +580,34 @@ class PlanExecutorService(RegisterableProcess):
             logger.info("PlanExecutorService: checkpoint loop cancelled")
             raise
 
+    async def _clock_loop(self) -> None:
+        """1Hz clock dispatch to evaluators with drift compensation."""
+        try:
+            while self._running:
+                t0 = asyncio.get_event_loop().time()
+                now = datetime.now(UTC)
+                for public_id, plan in list(self.plans.items()):
+                    if plan["status"] in _TERMINAL_STATUSES:
+                        continue
+                    if plan["status"] == "paused":
+                        continue
+                    evaluator = self.evaluators.get(public_id)
+                    if evaluator is None:
+                        continue
+                    try:
+                        commands = await evaluator.on_clock(plan, now)
+                    except Exception as exc:
+                        logger.error("on_clock failed for plan {}: {}", public_id, exc)
+                        continue
+                    if commands:
+                        async with self._get_plan_lock(public_id):
+                            await self._dispatch_commands(public_id, commands)
+                elapsed = asyncio.get_event_loop().time() - t0
+                await asyncio.sleep(max(0.0, 1.0 - elapsed))
+        except asyncio.CancelledError:
+            logger.info("PlanExecutorService: clock loop cancelled")
+            raise
+
     async def _handle_execution(self, execution: ExecutionData) -> None:
         """Propagate a fill into the matching plan's state.
 
@@ -412,9 +632,13 @@ class PlanExecutorService(RegisterableProcess):
         if incoming_cumulative <= existing_filled + 1e-12:
             return
         evaluator = self.evaluators.get(plan_public_id)
+        commands: list[JsonObject] = []
         if evaluator is not None:
             with contextlib.suppress(Exception):
-                await evaluator.on_execution(plan, execution)
+                commands = await evaluator.on_execution(plan, execution)
+        if commands:
+            async with self._get_plan_lock(plan_public_id):
+                await self._dispatch_commands(plan_public_id, commands)
         new_filled = incoming_cumulative
         total = float(plan["total_quantity"])
         is_complete = new_filled + 1e-9 >= total
@@ -512,28 +736,33 @@ class PlanExecutorService(RegisterableProcess):
         self._unregister_plan(plan_public_id)
 
     async def _handle_tick(self, topic: str, tick: TickData) -> None:
-        """Dispatch a tick to evaluators interested in the instrument.
+        """Dispatch a tick to evaluators via O(1) symbol index lookup.
 
-        Phase 1 evaluators (ManualOnce) do not react to ticks so this is
-        effectively a no-op, but the plumbing is in place for Phase 2+.
+        Uses ``_runtime_symbol_index`` keyed by ``exchange:native_symbol``
+        for constant-time routing instead of iterating all plans.
 
         Args:
             topic: ZMQ topic the tick arrived on.
             tick: Incoming tick data.
         """
-        if not self.plans:
+        key = f"{tick.exchange}:{tick.instrument}"
+        plan_ids = self._runtime_symbol_index.get(key)
+        if not plan_ids:
             return
         now = datetime.now(UTC)
-        for public_id, plan in self.plans.items():
-            if plan["instrument_public_id"] != tick.instrument:
-                continue
-            if plan["exchange"] != tick.exchange:
+        for public_id in plan_ids:
+            plan = self.plans.get(public_id)
+            if plan is None:
                 continue
             evaluator = self.evaluators.get(public_id)
             if evaluator is None:
                 continue
+            commands: list[JsonObject] = []
             with contextlib.suppress(Exception):
-                await evaluator.on_tick(plan, tick)
+                commands = await evaluator.on_tick(plan, tick)
+            if commands:
+                async with self._get_plan_lock(public_id):
+                    await self._dispatch_commands(public_id, commands)
             self._last_tick_timestamps[public_id] = now
 
     async def _write_checkpoints(self) -> None:
