@@ -5305,6 +5305,107 @@ async def test_get_positions_filters_by_wallet_public_ids(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_get_positions_single_cycle_returns_cycle_pid(tmp_path: Path) -> None:
+    """Verify get_positions returns position_cycle_public_id for unambiguous cycle.
+
+    Given: One position and one open cycle for the same instrument/exchange/mode/wallet,
+    When: get_positions is called,
+    Then: position_cycle_public_id is the cycle's public_id.
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    async with r.session() as s:
+        s.add(
+            Position(
+                instrument_public_id=inst_pid,
+                wallet_public_id="wallet-1",
+                quantity=1.5,
+                average_price=48000.0,
+                unrealized_pnl=0.0,
+                realized_pnl=0.0,
+                timestamp=now,
+                session_id="s1",
+                sequence_id=30,
+            )
+        )
+        await s.commit()
+    cycle_row = _make_cycle_row(
+        instrument_public_id=inst_pid,
+        exchange="kraken",
+        mode="live",
+        shard_key="kraken.BTC-USD.live",
+        wallet_public_id="wallet-1",
+        direction="long",
+        max_qty=1.5,
+        opened_at=now,
+        timestamp=now,
+        sequence_id=31,
+    )
+    _, cycle_pid = await r.insert_position_cycle(cycle_row)
+    result = await r.get_positions(as_of=now)
+    assert len(result) == 1
+    assert result[0]["position_cycle_public_id"] == cycle_pid
+
+
+@pytest.mark.asyncio
+async def test_get_positions_multiple_cycles_returns_null(tmp_path: Path) -> None:
+    """Verify get_positions returns NULL when multiple cycles match one position.
+
+    Given: One position and two open cycles for the same instrument/exchange/mode/wallet
+    (different shard_keys, e.g. paper mode with strategy tags),
+    When: get_positions is called,
+    Then: position_cycle_public_id is None (fail-closed).
+    """
+    r, _, inst_pid = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    async with r.session() as s:
+        s.add(
+            Position(
+                instrument_public_id=inst_pid,
+                wallet_public_id="wallet-1",
+                mode="paper",
+                quantity=2.0,
+                average_price=48000.0,
+                unrealized_pnl=0.0,
+                realized_pnl=0.0,
+                timestamp=now,
+                session_id="s1",
+                sequence_id=30,
+            )
+        )
+        await s.commit()
+    cycle_a = _make_cycle_row(
+        instrument_public_id=inst_pid,
+        exchange="kraken",
+        mode="paper",
+        shard_key="kraken.BTC-USD.paper.momentum",
+        wallet_public_id="wallet-1",
+        direction="long",
+        max_qty=1.0,
+        opened_at=now,
+        timestamp=now,
+        sequence_id=31,
+    )
+    cycle_b = _make_cycle_row(
+        instrument_public_id=inst_pid,
+        exchange="kraken",
+        mode="paper",
+        shard_key="kraken.BTC-USD.paper.mean_revert",
+        wallet_public_id="wallet-1",
+        direction="long",
+        max_qty=1.0,
+        opened_at=now,
+        timestamp=now,
+        sequence_id=32,
+    )
+    await r.insert_position_cycle(cycle_a)
+    await r.insert_position_cycle(cycle_b)
+    result = await r.get_positions(as_of=now)
+    assert len(result) == 1
+    assert result[0]["position_cycle_public_id"] is None
+
+
+@pytest.mark.asyncio
 async def test_get_accruals_wallet_filter(tmp_path: Path) -> None:
     """Verify get_accruals filters by wallet_public_id when provided.
 
