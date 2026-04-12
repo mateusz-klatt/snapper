@@ -28,6 +28,7 @@ Example:
         inserted = await repo.upsert_candles(rows)
 """
 
+import weakref
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import AsyncIterator
@@ -2223,6 +2224,7 @@ class SQLAlchemyRepository(Repository):
         self.session_factory = async_sessionmaker(
             self.engine, expire_on_commit=False, class_=AsyncSession
         )
+        _live_sqlalchemy_repositories.add(self)
 
     async def create_all(self) -> None:
         """Create all database tables from model metadata."""
@@ -6381,6 +6383,7 @@ class SQLAlchemyRepository(Repository):
 
 
 _repository_cache: dict[str, Repository] = {}
+_live_sqlalchemy_repositories: weakref.WeakSet[object] = weakref.WeakSet()
 
 
 def get_repository(db_url: str) -> Repository:
@@ -6405,7 +6408,12 @@ async def dispose_repositories() -> None:
     Should be called during application shutdown to properly close
     database connections and release resources.
     """
-    for repo in _repository_cache.values():
+    repos_to_dispose: dict[int, object] = {
+        id(cached_repo): cached_repo for cached_repo in _repository_cache.values()
+    }
+    for live_repo in list(_live_sqlalchemy_repositories):
+        repos_to_dispose[id(live_repo)] = live_repo
+    for repo in repos_to_dispose.values():
         engine = getattr(repo, "engine", None)
         if engine is None:
             continue

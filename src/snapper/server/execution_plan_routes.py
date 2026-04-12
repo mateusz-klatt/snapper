@@ -138,7 +138,7 @@ async def create_bracket(
 
     if body.sl_price is None and body.tp_price is None:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="At least one of sl_price or tp_price required",
         )
 
@@ -161,7 +161,7 @@ async def create_bracket(
     )
     if missing:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Venue missing required capabilities: {', '.join(missing)}",
         )
 
@@ -183,7 +183,7 @@ async def create_bracket(
 
     if current_qty <= 0:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="No open position found for this cycle",
         )
 
@@ -192,23 +192,23 @@ async def create_bracket(
         if side == "buy":
             if body.sl_price is not None and body.sl_price >= average_price:
                 raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail=f"SL price {body.sl_price} must be below entry price {average_price} for long position",
                 )
             if body.tp_price is not None and body.tp_price <= average_price:
                 raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail=f"TP price {body.tp_price} must be above entry price {average_price} for long position",
                 )
         else:
             if body.sl_price is not None and body.sl_price <= average_price:
                 raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail=f"SL price {body.sl_price} must be above entry price {average_price} for short position",
                 )
             if body.tp_price is not None and body.tp_price >= average_price:
                 raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail=f"TP price {body.tp_price} must be below entry price {average_price} for short position",
                 )
 
