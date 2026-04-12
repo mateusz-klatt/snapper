@@ -648,15 +648,17 @@ class PlanExecutorService(RegisterableProcess):
         return cycle["status"] == "open"
 
     async def _sweep_cycle_closures(self) -> None:
-        """Check all armed/active bracket plans for closed cycles.
+        """Check armed bracket plans for closed cycles.
 
-        Backup sweep for quiet-market scenarios where no ticks arrive
-        to trigger the dispatch-time cycle check.
+        Only targets armed brackets (no child orders emitted yet).
+        Active brackets with in-flight child orders must go through
+        the cancel_requested + cancel TradeCommand flow, which is
+        handled by the cancel route, not this sweep.
         """
         for public_id, plan in list(self.plans.items()):
             if plan["plan_type"] != "bracket":
                 continue
-            if plan["status"] in _TERMINAL_STATUSES:
+            if plan["status"] != "armed":
                 continue
             cycle_pid = plan.get("position_cycle_public_id")
             if not isinstance(cycle_pid, str):
@@ -664,7 +666,7 @@ class PlanExecutorService(RegisterableProcess):
             cycle_open = await self._is_cycle_open(cycle_pid)
             if not cycle_open:
                 logger.info(
-                    "Clock sweep: cycle {} closed, cancelling bracket {}",
+                    "Clock sweep: cycle {} closed, cancelling armed bracket {}",
                     cycle_pid,
                     public_id,
                 )
