@@ -1,5 +1,7 @@
 """Tests for seed data loader."""
 
+import base64
+import json
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
@@ -991,6 +993,53 @@ class TestSeedDefaultMultiTenant:
 
 class TestBuildCredentialEnvelope:
     """Tests for ``_build_credential_envelope`` payload packing."""
+
+    def test_api_key_secret_returns_expected_json_envelope(self) -> None:
+        """api_key_secret credentials serialize into the DB envelope shape.
+
+        Given: A ``SeedWalletCredential`` with ``credential_type="api_key_secret"``
+            plus API key and secret values,
+        When: ``_build_credential_envelope`` is called,
+        Then: The returned JSON contains both values under the exact keys
+            consumed later by the credential resolver.
+        """
+        cred = SeedWalletCredential(
+            exchange="kraken",
+            credential_type="api_key_secret",
+            api_key="public-key",
+            api_secret="secret-value",
+        )
+
+        envelope = _build_credential_envelope(cred)
+
+        assert json.loads(envelope) == {
+            "api_key": "public-key",
+            "api_secret": "secret-value",
+        }
+
+    def test_rsa_pem_decodes_base64_and_returns_expected_json_envelope(self) -> None:
+        """rsa_pem credentials decode PEM material before building the envelope.
+
+        Given: A ``SeedWalletCredential`` with ``credential_type="rsa_pem"``
+            and a base64-encoded PEM payload,
+        When: ``_build_credential_envelope`` is called,
+        Then: The returned JSON contains the decoded PEM text so the
+            exchange client can consume the original multi-line key.
+        """
+        pem_text = "-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----\n"
+        cred = SeedWalletCredential(
+            exchange="walutomat",
+            credential_type="rsa_pem",
+            api_key="wallet-key",
+            private_key_pem_base64=base64.b64encode(pem_text.encode("utf-8")).decode("ascii"),
+        )
+
+        envelope = _build_credential_envelope(cred)
+
+        assert json.loads(envelope) == {
+            "api_key": "wallet-key",
+            "private_key_pem": pem_text,
+        }
 
     def test_unknown_credential_type_raises_value_error(self) -> None:
         """Unknown credential_type surfaces a fail-fast ValueError.
