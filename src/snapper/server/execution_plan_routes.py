@@ -468,6 +468,7 @@ async def cancel_bracket(
                         session_id=sid,
                         sequence_id=tracker.next_sequence(_REST_STREAM),
                         last_error=f"Cancel command insert failed: {exc}",
+                        completed_at=now,
                     )
                 except Exception as comp_exc:
                     logger.error(
