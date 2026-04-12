@@ -165,6 +165,7 @@ async def paper_e2e_stack(
     broker.start()
 
     executor = PaperOrderExecutor()
+    executor._credentials = {"initial_balance": "1000000"}
     executor_task = asyncio.create_task(executor.start())
 
     trader = TraderCoordinator(signal_topics=["signals."])

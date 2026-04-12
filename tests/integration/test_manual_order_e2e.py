@@ -134,7 +134,7 @@ async def _start_service_in_background(
 ) -> asyncio.Task[None]:
     """Start the service's ``start()`` coroutine in a background task."""
     task = asyncio.create_task(service.start())
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(1.5)
     return task
 
 
@@ -257,6 +257,7 @@ class TestManualOrderE2E:
             total_quantity=1.0,
         )
         service = PlanExecutorService()
+        service.repository = stack["repo"]
         service_task = await _start_service_in_background(service)
         try:
             assert plan_public_id in service.plans
@@ -298,6 +299,7 @@ class TestManualOrderE2E:
             total_quantity=2.0,
         )
         service = PlanExecutorService()
+        service.repository = stack["repo"]
         service_task = await _start_service_in_background(service)
         try:
             assert plan_public_id in service.plans
