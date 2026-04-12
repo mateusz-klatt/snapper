@@ -56,6 +56,7 @@ import pytest_asyncio
 import zmq
 import zmq.asyncio
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
 
 from snapper.api.auth.services.ws_token_service import WsTokenService
 from snapper.application.services.settings import SettingsService
@@ -67,6 +68,9 @@ from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.config import settings
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
+from snapper.data.models import Base
+from snapper.data.repository import DatabaseRepository
+from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import _repository_cache
 from snapper.data.repository import dispose_repositories
 from snapper.data.seed.loader import run_seed
@@ -74,6 +78,9 @@ from snapper.infrastructure.security.encryption import SettingsEncryptionService
 from snapper.infrastructure.symbols.mapper import CapabilityInfo
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.server.rate_limiting import limiter
+
+_ORIGINAL_SQLALCHEMY_CREATE_ALL = SQLAlchemyRepository.create_all
+_ORIGINAL_DATABASE_CREATE_ALL = DatabaseRepository.create_all
 
 _background_tasks: set[asyncio.Task[None]] = set()
 _tracked_zmq_contexts: weakref.WeakSet[object] = weakref.WeakSet()
@@ -374,6 +381,78 @@ def _extract_sqlite_path(db_url: str) -> Path | None:
         if db_url.startswith(prefix):
             return Path(db_url[len(prefix) :]).resolve()
     return None
+
+
+_db_template_state: dict[str, Path | None] = {"path": None}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def db_template_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Create a template SQLite DB with full schema once per worker.
+
+    Subsequent create_all() calls on SQLAlchemyRepository/DatabaseRepository
+    copy this template (~1ms) instead of running metadata.create_all (~3-4s).
+    """
+    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
+    template_dir = tmp_path_factory.mktemp(f"db-template-{worker_id}")
+    template_path = template_dir / "template.db"
+
+    engine = create_engine(f"sqlite:///{template_path}")
+    Base.metadata.create_all(engine)
+    engine.dispose()
+    _db_template_state["path"] = template_path
+    return template_path
+
+
+def _try_copy_template(db_url: str) -> bool:
+    """Copy template DB file if URL is file-based SQLite and template exists.
+
+    Returns True if copy succeeded, False if fallback to real create_all needed.
+    In-memory SQLite (`:memory:`) always falls back.
+    """
+    if _db_template_state["path"] is None or not _db_template_state["path"].exists():
+        return False
+    if ":memory:" in db_url:
+        return False
+    for prefix in ("sqlite:///", "sqlite+aiosqlite:///"):
+        if db_url.startswith(prefix):
+            raw_path = db_url[len(prefix) :]
+            if not raw_path or raw_path == ":memory:":
+                return False
+            target = Path(raw_path)
+            if not target.exists():
+                shutil.copy2(_db_template_state["path"], target)
+                return True
+    return False
+
+
+async def _patched_create_all_async(self: Any) -> None:
+    """Async create_all that copies template DB instead of full schema creation."""
+    if _try_copy_template(str(self.engine.url)):
+        return
+    async with self.engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+
+def _patched_create_all_sync(self: Any) -> None:
+    """Sync create_all that copies template DB instead of full schema creation."""
+    if _try_copy_template(str(self.engine.url)):
+        return
+    Base.metadata.create_all(self.engine)
+
+
+_patched_create_all_async.__wrapped__ = _ORIGINAL_SQLALCHEMY_CREATE_ALL
+_patched_create_all_sync.__wrapped__ = _ORIGINAL_DATABASE_CREATE_ALL
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _patch_create_all(db_template_path: Path) -> Generator[None]:
+    """Monkeypatch create_all to use template copy for all test DBs."""
+    SQLAlchemyRepository.create_all = _patched_create_all_async
+    DatabaseRepository.create_all = _patched_create_all_sync
+    yield
+    SQLAlchemyRepository.create_all = _ORIGINAL_SQLALCHEMY_CREATE_ALL
+    DatabaseRepository.create_all = _ORIGINAL_DATABASE_CREATE_ALL
 
 
 @pytest.fixture(autouse=True, scope="session")

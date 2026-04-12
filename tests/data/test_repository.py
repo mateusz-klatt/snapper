@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator
+from collections.abc import Awaitable
 from collections.abc import Callable
 from collections.abc import Generator
 from contextlib import AbstractAsyncContextManager
@@ -969,6 +970,42 @@ async def test_sqlalchemy_session_rolls_back_on_exception(monkeypatch: pytest.Mo
     assert dummy.rolled
 
 
+@pytest.mark.asyncio
+async def test_sqlalchemy_repository_create_all_runs_metadata() -> None:
+    """Test SQLAlchemyRepository.create_all runs model metadata on the engine."""
+    called_with: list[Callable[..., object]] = []
+
+    class _Connection:
+        async def __aenter__(self) -> _Connection:
+            return self
+
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            tb: TracebackType | None,
+        ) -> None:
+            return None
+
+        async def run_sync(self, fn: Callable[..., object]) -> None:
+            called_with.append(fn)
+
+    class _Engine:
+        def begin(self) -> _Connection:
+            return _Connection()
+
+    repo = SQLAlchemyRepository.__new__(SQLAlchemyRepository)
+    repo.engine = cast(AsyncEngine, _Engine())
+
+    create_all = cast(
+        Callable[[SQLAlchemyRepository], Awaitable[None]],
+        repo_module.SQLAlchemyRepository.create_all.__wrapped__,
+    )
+    await create_all(repo)
+
+    assert called_with == [repo_module.Base.metadata.create_all]
+
+
 class DummyRepository(Repository):
     """Dummy repository implementing Repository interface for testing."""
 
@@ -1242,6 +1279,28 @@ def test_database_repository_get_session_and_create_all(
     session.close()
 
 
+def test_database_repository_create_all_delegates_to_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test DatabaseRepository.create_all delegates to SQLAlchemy metadata."""
+    captured_engines: list[object] = []
+
+    def fake_create_all(engine: object) -> None:
+        captured_engines.append(engine)
+
+    repo = DatabaseRepository.__new__(DatabaseRepository)
+    repo.engine = object()
+    monkeypatch.setattr(repo_module.Base.metadata, "create_all", fake_create_all)
+
+    create_all = cast(
+        Callable[[DatabaseRepository], None],
+        repo_module.DatabaseRepository.create_all.__wrapped__,
+    )
+    create_all(repo)
+
+    assert captured_engines == [repo.engine]
+
+
 def test_database_repository_del_without_engine() -> None:
     """Test DatabaseRepository.__del__ tolerates missing engine attribute.
 
@@ -1327,6 +1386,28 @@ async def test_dispose_repositories_with_sync_dispose(monkeypatch: pytest.Monkey
             self.engine = _SyncEngine()
 
     repo_module._repository_cache["test_sync"] = _StubRepo()
+    await dispose_repositories()
+    assert dispose_called["value"] is True
+    assert repo_module._repository_cache == {}
+
+
+@pytest.mark.asyncio
+async def test_dispose_repositories_includes_live_uncached_repositories() -> None:
+    """Test dispose_repositories also disposes uncached live SQLAlchemyRepository instances."""
+    repo._repository_cache.clear()
+    dispose_called = {"value": False}
+
+    class _SyncEngine:
+        def dispose(self) -> None:
+            dispose_called["value"] = True
+            return None
+
+    class _LiveRepo:
+        def __init__(self) -> None:
+            self.engine = _SyncEngine()
+
+    live_repo = _LiveRepo()
+    repo_module._live_sqlalchemy_repositories.add(live_repo)
     await dispose_repositories()
     assert dispose_called["value"] is True
     assert repo_module._repository_cache == {}

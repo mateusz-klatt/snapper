@@ -17,6 +17,7 @@ from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.app import create_app
 from snapper.server.app import get_repository_dependency
+from snapper.server.execution_plan_routes import _resolve_average_price
 
 
 async def _noop_lifespan(_app: FastAPI) -> AsyncGenerator[None]:
@@ -416,6 +417,107 @@ class TestCreateBracket:
         assert response.status_code == 200
         client.close()
 
+    def test_create_bracket_short_tp_only_success(self) -> None:
+        """Given short cycle with valid TP only, Then 200 and TP is persisted."""
+        repo = AsyncMock()
+        repo.get_position_cycle_by_public_id = AsyncMock(
+            return_value=_make_cycle_row(direction="short")
+        )
+        repo.get_positions = AsyncMock(
+            return_value=[
+                {
+                    "exchange": "kraken_futures",
+                    "instrument": "ETH-USD",
+                    "mode": "paper",
+                    "quantity": -5.0,
+                    "average_price": 2000.0,
+                },
+                {
+                    "exchange": "kraken_futures",
+                    "instrument": "BTC-USD",
+                    "mode": "paper",
+                    "quantity": -1.0,
+                    "average_price": 50000.0,
+                },
+            ]
+        )
+        repo.insert_execution_plan = AsyncMock(return_value=(1, "bracket-1"))
+        repo.insert_execution_plan_decision = AsyncMock(return_value="dec-1")
+        plan = _make_plan_row()
+        plan["side"] = "sell"
+        repo.get_execution_plan = AsyncMock(return_value=plan)
+        client = _create_client(repo)
+
+        response = client.post(
+            "/api/execution-plans", json=_create_bracket_body(sl_price=None, tp_price=49000.0)
+        )
+
+        assert response.status_code == 200
+        plan_row = repo.insert_execution_plan.await_args.args[0]
+        assert plan_row["side"] == "sell"
+        assert plan_row["params"] == {
+            "native_instrument": "BTC-USD",
+            "tp_price": 49000.0,
+        }
+        client.close()
+
+    def test_create_bracket_long_sl_only_success(self) -> None:
+        """Given long cycle with valid SL only, Then 200 and SL is persisted."""
+        repo = AsyncMock()
+        repo.get_position_cycle_by_public_id = AsyncMock(return_value=_make_cycle_row())
+        repo.get_positions = AsyncMock(
+            return_value=[
+                {
+                    "exchange": "kraken_futures",
+                    "instrument": "BTC-USD",
+                    "mode": "paper",
+                    "quantity": 1.0,
+                    "average_price": 50000.0,
+                }
+            ]
+        )
+        repo.insert_execution_plan = AsyncMock(return_value=(1, "bracket-1"))
+        repo.insert_execution_plan_decision = AsyncMock(return_value="dec-1")
+        repo.get_execution_plan = AsyncMock(return_value=_make_plan_row())
+        client = _create_client(repo)
+
+        response = client.post(
+            "/api/execution-plans", json=_create_bracket_body(sl_price=49000.0, tp_price=None)
+        )
+
+        assert response.status_code == 200
+        plan_row = repo.insert_execution_plan.await_args.args[0]
+        assert plan_row["params"] == {
+            "native_instrument": "BTC-USD",
+            "sl_price": 49000.0,
+        }
+        client.close()
+
+    def test_create_bracket_decision_logging_failure_still_returns_200(self) -> None:
+        """Given decision insert fails, Then bracket creation still succeeds."""
+        repo = AsyncMock()
+        repo.get_position_cycle_by_public_id = AsyncMock(return_value=_make_cycle_row())
+        repo.get_positions = AsyncMock(
+            return_value=[
+                {
+                    "exchange": "kraken_futures",
+                    "instrument": "BTC-USD",
+                    "mode": "paper",
+                    "quantity": 1.0,
+                    "average_price": 50000.0,
+                }
+            ]
+        )
+        repo.insert_execution_plan = AsyncMock(return_value=(1, "bracket-1"))
+        repo.insert_execution_plan_decision = AsyncMock(side_effect=RuntimeError("decision failed"))
+        repo.get_execution_plan = AsyncMock(return_value=_make_plan_row())
+        client = _create_client(repo)
+
+        response = client.post("/api/execution-plans", json=_create_bracket_body())
+
+        assert response.status_code == 200
+        client.close()
+
 
 class TestCancelBracket:
     """Tests for POST /api/execution-plans/{id}/cancel."""
@@ -517,6 +619,93 @@ class TestCancelBracket:
         response = client.post("/api/execution-plans/bracket-1/cancel", json=_cancel_bracket_body())
         assert response.status_code == 500
         client.close()
+
+    def test_cancel_active_bracket_without_native_instrument_skips_cancel_insert(self) -> None:
+        """Given active bracket without native_instrument, Then cancel emits nothing and still succeeds."""
+        repo = AsyncMock()
+        plan = _make_plan_row(status="active")
+        plan["params"] = {"child_client_order_ids": ["cid-1"]}
+        repo.get_execution_plan = AsyncMock(return_value=plan)
+        repo.update_execution_plan_status = AsyncMock(return_value=1)
+        repo.insert_execution_plan_decision = AsyncMock(return_value="dec-1")
+        client = _create_client(repo)
+        client.app.state.plan_executor._extract_child_ids = MagicMock(return_value=["cid-1"])
+
+        response = client.post("/api/execution-plans/bracket-1/cancel", json=_cancel_bracket_body())
+
+        assert response.status_code == 200
+        repo.insert_trade_command.assert_not_called()
+        client.close()
+
+    def test_cancel_active_bracket_venue_lookup_error_is_logged_and_cancel_continues(self) -> None:
+        """Given venue lookup failure, Then cancel command is still emitted."""
+        repo = AsyncMock()
+        plan = _make_plan_row(status="active")
+        plan["params"]["child_client_order_ids"] = ["cid-1"]
+        repo.get_execution_plan = AsyncMock(return_value=plan)
+        repo.update_execution_plan_status = AsyncMock(return_value=1)
+        repo.insert_execution_plan_decision = AsyncMock(return_value="dec-1")
+        repo.get_exchange_order_id_for_client_order_id = AsyncMock(
+            side_effect=RuntimeError("lookup failed")
+        )
+        repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
+        client = _create_client(repo)
+        client.app.state.plan_executor._extract_child_ids = MagicMock(return_value=["cid-1"])
+
+        response = client.post("/api/execution-plans/bracket-1/cancel", json=_cancel_bracket_body())
+
+        assert response.status_code == 200
+        repo.insert_trade_command.assert_awaited_once()
+        client.close()
+
+    def test_cancel_command_insert_failure_with_failed_compensation_still_returns_500(self) -> None:
+        """Given cancel insert and failed-compensation both fail, Then route still returns 500."""
+        repo = AsyncMock()
+        plan = _make_plan_row(status="active")
+        plan["params"]["child_client_order_ids"] = ["cid-1"]
+        repo.get_execution_plan = AsyncMock(return_value=plan)
+        repo.update_execution_plan_status = AsyncMock(side_effect=[1, RuntimeError("comp failed")])
+        repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value=None)
+        repo.insert_trade_command = AsyncMock(side_effect=RuntimeError("DB"))
+        client = _create_client(repo)
+        client.app.state.plan_executor._extract_child_ids = MagicMock(return_value=["cid-1"])
+
+        response = client.post("/api/execution-plans/bracket-1/cancel", json=_cancel_bracket_body())
+
+        assert response.status_code == 500
+        client.close()
+
+
+class TestResolveAveragePrice:
+    """Tests for _resolve_average_price helper."""
+
+    def test_returns_none_when_no_position_matches_cycle(self) -> None:
+        """Given no matching position row, Then None is returned."""
+        cycle = _make_cycle_row()
+        positions = [
+            {
+                "exchange": "kraken_futures",
+                "instrument": "ETH-USD",
+                "mode": "paper",
+                "average_price": 2000.0,
+            }
+        ]
+
+        assert _resolve_average_price(positions, cycle) is None
+
+    def test_returns_none_when_matching_position_average_price_is_not_positive(self) -> None:
+        """Given matching row with non-positive average_price, Then None is returned."""
+        cycle = _make_cycle_row()
+        positions = [
+            {
+                "exchange": "kraken_futures",
+                "instrument": "BTC-USD",
+                "mode": "paper",
+                "average_price": 0.0,
+            }
+        ]
+
+        assert _resolve_average_price(positions, cycle) is None
 
 
 class TestGetBracket:
