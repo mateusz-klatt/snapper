@@ -383,6 +383,13 @@ def _extract_sqlite_path(db_url: str) -> Path | None:
     return None
 
 
+def _clear_lru_cache(func: object) -> None:
+    """Clear a cache-enabled callable when the cache API is available."""
+    cache_clear = getattr(func, "cache_clear", None)
+    if callable(cache_clear):
+        cache_clear()
+
+
 _db_template_state: dict[str, Path | None] = {"path": None}
 
 
@@ -465,7 +472,7 @@ def isolated_sqlite_db(tmp_path_factory: pytest.TempPathFactory) -> Generator[No
     ensures test credentials are available.
     """
     original_db_url = os.environ.get("DB_URL")
-    settings.get_bootstrap_settings.cache_clear()
+    _clear_lru_cache(settings.get_bootstrap_settings)
     configured_url = BootstrapSettingsLoader().db_url
     sqlite_path = _extract_sqlite_path(configured_url)
 
@@ -479,9 +486,9 @@ def isolated_sqlite_db(tmp_path_factory: pytest.TempPathFactory) -> Generator[No
         conn.commit()
         conn.close()
         os.environ["DB_URL"] = f"sqlite+aiosqlite:///{db_path.as_posix()}"
-        settings.get_bootstrap_settings.cache_clear()
+        _clear_lru_cache(settings.get_bootstrap_settings)
 
-    settings.get_settings.cache_clear()
+    _clear_lru_cache(settings.get_settings)
     run_seed("dev")
     try:
         yield
@@ -490,8 +497,8 @@ def isolated_sqlite_db(tmp_path_factory: pytest.TempPathFactory) -> Generator[No
             os.environ["DB_URL"] = original_db_url
         else:
             os.environ.pop("DB_URL", None)
-        settings.get_bootstrap_settings.cache_clear()
-        settings.get_settings.cache_clear()
+        _clear_lru_cache(settings.get_bootstrap_settings)
+        _clear_lru_cache(settings.get_settings)
 
 
 @pytest.fixture(scope="session", autouse=True)

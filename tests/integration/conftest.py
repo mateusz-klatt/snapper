@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import socket
 from collections.abc import AsyncIterator
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -144,6 +145,27 @@ async def _wait_for_executor_subscription(stack_xsub: str, instrument: str) -> N
     await asyncio.sleep(0.5)
 
 
+async def _stop_background_process(
+    stop_coro: Awaitable[None],
+    task: asyncio.Task[None],
+) -> None:
+    """Stop a background process gracefully before falling back to cancellation.
+
+    Args:
+        stop_coro: Awaitable returned by the process ``stop()`` method.
+        task: Background task running the process ``start()`` loop.
+    """
+    with contextlib.suppress(Exception):
+        await stop_coro
+    if not task.done():
+        with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError, Exception):
+            await asyncio.wait_for(task, timeout=2.0)
+    if not task.done():
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError, Exception):
+            await asyncio.wait_for(task, timeout=2.0)
+
+
 @pytest_asyncio.fixture
 async def paper_e2e_stack(
     monkeypatch: pytest.MonkeyPatch,
@@ -188,15 +210,8 @@ async def paper_e2e_stack(
     try:
         yield stack
     finally:
-        for task in (trader_task, executor_task):
-            if not task.done():
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await asyncio.wait_for(task, timeout=2.0)
-        with contextlib.suppress(Exception):
-            await trader.stop()
-        with contextlib.suppress(Exception):
-            await executor.stop()
+        await _stop_background_process(trader.stop(), trader_task)
+        await _stop_background_process(executor.stop(), executor_task)
         with contextlib.suppress(Exception):
             broker.stop()
         with contextlib.suppress(Exception):
