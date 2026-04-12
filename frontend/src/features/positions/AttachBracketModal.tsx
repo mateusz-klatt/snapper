@@ -11,13 +11,15 @@ interface AttachBracketModalProps {
   averagePrice: number
 }
 
-const validateBracketPrices = (
+export const validateBracketPrices = (
   sl: number | null,
   tp: number | null,
   side: 'LONG' | 'SHORT',
   averagePrice: number
 ): string | null => {
   if (sl === null && tp === null) return 'At least one of SL or TP price is required'
+  if (sl !== null && !Number.isFinite(sl)) return 'Invalid stop-loss price'
+  if (tp !== null && !Number.isFinite(tp)) return 'Invalid take-profit price'
   if (sl !== null && sl <= 0) return 'Stop-loss price must be positive'
   if (tp !== null && tp <= 0) return 'Take-profit price must be positive'
 

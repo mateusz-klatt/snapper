@@ -3,7 +3,7 @@ import { render, screen, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
-import { AttachBracketModal } from './AttachBracketModal'
+import { AttachBracketModal, validateBracketPrices } from './AttachBracketModal'
 
 const mockMutate = vi.fn()
 const mockReset = vi.fn()
@@ -278,5 +278,37 @@ describe('AttachBracketModal', () => {
 
     act(() => opts.onError(new Error('Duplicate bracket')))
     expect(screen.getByTestId('bracket-error')).toHaveTextContent('Duplicate bracket')
+  })
+})
+
+describe('validateBracketPrices', () => {
+  it('returns error when both prices are null', () => {
+    expect(validateBracketPrices(null, null, 'LONG', 50000)).toBe(
+      'At least one of SL or TP price is required'
+    )
+  })
+
+  it('rejects non-finite SL (Infinity)', () => {
+    expect(validateBracketPrices(Infinity, null, 'LONG', 50000)).toBe('Invalid stop-loss price')
+  })
+
+  it('rejects non-finite SL (NaN)', () => {
+    expect(validateBracketPrices(NaN, null, 'LONG', 50000)).toBe('Invalid stop-loss price')
+  })
+
+  it('rejects non-finite TP (Infinity)', () => {
+    expect(validateBracketPrices(48000, Infinity, 'LONG', 50000)).toBe('Invalid take-profit price')
+  })
+
+  it('rejects non-finite TP (NaN)', () => {
+    expect(validateBracketPrices(48000, NaN, 'LONG', 50000)).toBe('Invalid take-profit price')
+  })
+
+  it('returns null for valid LONG SL+TP', () => {
+    expect(validateBracketPrices(48000, 55000, 'LONG', 50000)).toBeNull()
+  })
+
+  it('returns null for valid SHORT SL+TP', () => {
+    expect(validateBracketPrices(55000, 45000, 'SHORT', 50000)).toBeNull()
   })
 })

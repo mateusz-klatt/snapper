@@ -3413,10 +3413,44 @@ class SQLAlchemyRepository(Repository):
         as_of: datetime,
         wallet_public_ids: list[str] | None = None,
     ) -> list[PositionRow]:
-        """Retrieve active positions with instrument/symbol info."""
+        """Retrieve active positions with instrument/symbol info.
+
+        The position_cycle_public_id is resolved via a grouped subquery
+        that returns a cycle only when exactly one open cycle matches
+        the position's (instrument, exchange, mode, wallet). Multiple
+        matching cycles (e.g. paper mode with strategy tags) yield NULL
+        to prevent attaching a bracket to the wrong cycle.
+        """
         async with self.session() as s:
+            open_cycle_unambiguous = (
+                select(
+                    PositionCycle.instrument_public_id.label("instrument_public_id"),
+                    PositionCycle.exchange.label("exchange"),
+                    PositionCycle.mode.label("mode"),
+                    PositionCycle.wallet_public_id.label("wallet_public_id"),
+                    func.min(PositionCycle.public_id).label("position_cycle_public_id"),
+                )
+                .where(
+                    PositionCycle.status == "open",
+                    *where_active(PositionCycle, as_of),
+                )
+                .group_by(
+                    PositionCycle.instrument_public_id,
+                    PositionCycle.exchange,
+                    PositionCycle.mode,
+                    PositionCycle.wallet_public_id,
+                )
+                .having(func.count(PositionCycle.public_id) == 1)
+                .subquery()
+            )
+
             query = (
-                select(Position, Instrument, Symbol, PositionCycle.public_id)
+                select(
+                    Position,
+                    Instrument,
+                    Symbol,
+                    open_cycle_unambiguous.c.position_cycle_public_id,
+                )
                 .join(
                     Instrument,
                     and_(
@@ -3432,13 +3466,12 @@ class SQLAlchemyRepository(Repository):
                     ),
                 )
                 .outerjoin(
-                    PositionCycle,
+                    open_cycle_unambiguous,
                     and_(
-                        PositionCycle.instrument_public_id == Position.instrument_public_id,
-                        PositionCycle.mode == Position.mode,
-                        PositionCycle.wallet_public_id == Position.wallet_public_id,
-                        PositionCycle.status == "open",
-                        *where_active(PositionCycle, as_of),
+                        open_cycle_unambiguous.c.instrument_public_id == Instrument.public_id,
+                        open_cycle_unambiguous.c.exchange == Instrument.exchange,
+                        open_cycle_unambiguous.c.mode == Position.mode,
+                        open_cycle_unambiguous.c.wallet_public_id == Position.wallet_public_id,
                     ),
                 )
                 .where(*where_active(Position, as_of))
