@@ -387,6 +387,44 @@ class PlanExecutorService(RegisterableProcess):
             self._plan_locks[public_id] = lock
         return lock
 
+    async def _transition_plan(
+        self,
+        plan_public_id: str,
+        new_status: str,
+        last_error: str | None = None,
+    ) -> None:
+        """Transition a plan to a new status and update in-memory state.
+
+        Args:
+            plan_public_id: Plan to transition.
+            new_status: Target status.
+            last_error: Optional error message (for failed transitions).
+        """
+        now = datetime.now(UTC)
+        try:
+            await self.repository.update_execution_plan_status(
+                public_id=plan_public_id,
+                new_status=new_status,
+                bus_time=now,
+                session_id=self.tracker.session_id,
+                sequence_id=self.tracker.next_sequence("plan_transitions"),
+                last_error=last_error,
+                started_at=now if new_status == "active" else None,
+                completed_at=now if new_status in _TERMINAL_STATUSES else None,
+            )
+        except Exception as exc:
+            logger.error("Failed to transition plan {} to {}: {}", plan_public_id, new_status, exc)
+            return
+        plan = self.plans.get(plan_public_id)
+        if plan is not None:
+            plan_mut: dict[str, Any] = dict(plan)
+            plan_mut["status"] = new_status
+            if last_error is not None:
+                plan_mut["last_error"] = last_error
+            self.plans[plan_public_id] = cast(ExecutionPlanRow, plan_mut)
+        if new_status in _TERMINAL_STATUSES:
+            self._unregister_plan(plan_public_id)
+
     async def _dispatch_commands(
         self,
         plan_public_id: str,
@@ -405,6 +443,21 @@ class PlanExecutorService(RegisterableProcess):
         plan = self.plans.get(plan_public_id)
         if plan is None:
             return
+        missing_caps = await self._check_capabilities(
+            plan["plan_type"], plan["exchange"], plan["instrument_public_id"]
+        )
+        if missing_caps:
+            logger.error(
+                "Fire-time capability check failed for plan {}: missing {}",
+                plan_public_id,
+                missing_caps,
+            )
+            await self._transition_plan(
+                plan_public_id, "failed", f"Capability revoked: {missing_caps}"
+            )
+            return
+        if plan["status"] == "armed":
+            await self._transition_plan(plan_public_id, "active")
         now = datetime.now(UTC)
         session_id = self.tracker.session_id
         child_ids: list[str] = []
@@ -695,7 +748,9 @@ class PlanExecutorService(RegisterableProcess):
                 logger.error("dispatch failed for plan {} on execution: {}", plan_public_id, exc)
         new_filled = incoming_cumulative
         total = float(plan["total_quantity"])
-        is_complete = new_filled + 1e-9 >= total
+        qty_complete = new_filled + 1e-9 >= total
+        venue_filled = execution.status == "filled"
+        is_complete = qty_complete or venue_filled
         new_status = "completed" if is_complete else "active"
         now = datetime.now(UTC)
         try:

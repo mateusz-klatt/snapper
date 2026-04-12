@@ -32,6 +32,7 @@ from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import Repository
 from snapper.data.repository_types import ExecutionPlanDecisionInsertRow
 from snapper.data.repository_types import ExecutionPlanInsertRow
+from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ExecutionPlanData
 from snapper.server.dependencies import get_repository_dependency
@@ -44,6 +45,21 @@ router = APIRouter(prefix="/execution-plans", tags=["execution-plans"])
 _REST_STREAM = "execution_plan_rest"
 _EVALUATOR = BracketEvaluator()
 _TERMINAL_STATUSES = frozenset({"completed", "cancelled", "failed", "expired"})
+
+
+def _get_plan_executor(request: Request) -> PlanExecutorService:
+    """Retrieve the PlanExecutorService from app state.
+
+    Raises:
+        HTTPException: 503 if executor is not available (API-only mode).
+    """
+    executor = getattr(request.app.state, "plan_executor", None)
+    if executor is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Plan executor not available (API-only mode)",
+        )
+    return cast(PlanExecutorService, executor)
 
 
 def _plan_to_data(plan: dict[str, Any]) -> ExecutionPlanData:
@@ -95,9 +111,9 @@ async def create_bracket(
     """Create a bracket (SL/TP) execution plan on an open position cycle.
 
     Validates the cycle is open, the caller has wallet access, the venue
-    supports reduce_only (Decision C1), and at least one price leg is
-    present. The bracket is created with status=armed and immediately
-    starts watching ticks.
+    supports reduce_only (Decision C1), price thresholds are on the
+    correct side, and at least one leg is present. The bracket is created
+    with status=armed and immediately starts watching ticks.
 
     Args:
         request: FastAPI request (provides REST tracker + app state).
@@ -112,8 +128,9 @@ async def create_bracket(
     Raises:
         HTTPException: 422 if params invalid or capability missing,
             409 if cycle not open or duplicate bracket, 403 if wallet
-            not accessible.
+            not accessible, 503 if executor unavailable.
     """
+    service = _get_plan_executor(request)
     tracker: SequenceTracker = request.app.state.rest_tracker
     body = command.payload
     now = datetime.now(UTC)
@@ -139,7 +156,6 @@ async def create_bracket(
         operator_public_id=cycle["operator_public_id"],
     )
 
-    service: PlanExecutorService = request.app.state.plan_executor
     missing = await service._check_capabilities(
         "bracket", cycle["exchange"], cycle["instrument_public_id"]
     )
@@ -153,15 +169,46 @@ async def create_bracket(
 
     positions = await repo.get_positions(as_of=now, wallet_public_ids=[cycle["wallet_public_id"]])
     current_qty = 0.0
+    cycle_mode = cycle["mode"]
+    cycle_instrument_pid = cycle["instrument_public_id"]
     for pos in positions:
-        if (
-            pos["exchange"] == cycle["exchange"]
-            and pos["instrument"] == cycle["shard_key"].split(".")[1]
-        ):
-            current_qty = abs(pos["quantity"])
-            break
+        if pos["exchange"] == cycle["exchange"] and pos.get("mode") == cycle_mode:
+            if pos.get("instrument_public_id", pos.get("instrument")) == cycle_instrument_pid:
+                current_qty = abs(pos["quantity"])
+                break
     if current_qty <= 0:
         current_qty = cycle["max_qty"]
+
+    if current_qty <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No open position found for this cycle",
+        )
+
+    average_price = _resolve_average_price(positions, cycle)
+    if average_price is not None:
+        if side == "buy":
+            if body.sl_price is not None and body.sl_price >= average_price:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"SL price {body.sl_price} must be below entry price {average_price} for long position",
+                )
+            if body.tp_price is not None and body.tp_price <= average_price:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"TP price {body.tp_price} must be above entry price {average_price} for long position",
+                )
+        else:
+            if body.sl_price is not None and body.sl_price <= average_price:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"SL price {body.sl_price} must be above entry price {average_price} for short position",
+                )
+            if body.tp_price is not None and body.tp_price >= average_price:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"TP price {body.tp_price} must be below entry price {average_price} for short position",
+                )
 
     native_symbol = cycle["shard_key"].split(".")[1]
 
@@ -241,8 +288,7 @@ async def create_bracket(
             detail="Bracket created but not found",
         )
 
-    evaluator = _EVALUATOR
-    service._register_plan(cast(Any, plan), evaluator)
+    service._register_plan(cast(Any, plan), BracketEvaluator())
 
     plan_data = _plan_to_data(cast(dict[str, Any], plan))
     return ExecutionPlanResponse(
@@ -252,6 +298,31 @@ async def create_bracket(
         timestamp=ts,
         payload=plan_data,
     )
+
+
+def _resolve_average_price(
+    positions: list[dict[str, Any]],
+    cycle: dict[str, Any],
+) -> float | None:
+    """Find the average entry price for the position matching a cycle.
+
+    Args:
+        positions: Position rows from repo.
+        cycle: Position cycle row.
+
+    Returns:
+        Average price or None if position not found.
+    """
+    for pos in positions:
+        if pos["exchange"] == cycle["exchange"] and pos.get("mode") == cycle["mode"]:
+            if (
+                pos.get("instrument_public_id", pos.get("instrument"))
+                == cycle["instrument_public_id"]
+            ):
+                avg = pos.get("average_price")
+                if avg is not None and float(avg) > 0:
+                    return float(avg)
+    return None
 
 
 @router.post(
@@ -269,10 +340,12 @@ async def cancel_bracket(
     command: Annotated[BracketCancelCommand, Depends(json_body(BracketCancelCommand))],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
 ) -> ExecutionPlanResponse:
-    """Cancel an active bracket execution plan.
+    """Cancel a bracket execution plan.
 
-    Transitions the bracket to cancel_requested and emits cancel
-    commands for any outstanding child orders.
+    Armed brackets (no child orders yet) transition directly to cancelled.
+    Active brackets (child orders in-flight) transition to cancel_requested
+    and emit cancel TradeCommands, keeping the plan registered until venue
+    terminal events land.
 
     Args:
         request: FastAPI request.
@@ -287,8 +360,9 @@ async def cancel_bracket(
 
     Raises:
         HTTPException: 404 if not found, 409 if already terminal,
-            403 if wallet not accessible.
+            403 if wallet not accessible, 503 if executor unavailable.
     """
+    service = _get_plan_executor(request)
     tracker: SequenceTracker = request.app.state.rest_tracker
     now = datetime.now(UTC)
     ts = dt.datetime.now(dt.UTC)
@@ -305,6 +379,7 @@ async def cancel_bracket(
         principal=principal,
         repo=repo,
         wallet_public_id=plan["wallet_public_id"],
+        operator_public_id=plan.get("operator_public_id"),
     )
 
     if plan["status"] in _TERMINAL_STATUSES:
@@ -313,13 +388,20 @@ async def cancel_bracket(
             detail=f"Plan already in terminal status: {plan['status']}",
         )
 
+    params = cast(dict[str, Any], plan["params"])
+    child_ids = service._extract_child_ids(params)
+    has_active_children = len(child_ids) > 0
+
+    new_status = "cancel_requested" if has_active_children else "cancelled"
+
     new_id = await repo.update_execution_plan_status(
         public_id=plan_public_id,
-        new_status="cancel_requested",
+        new_status=new_status,
         bus_time=ts,
         session_id=sid,
         sequence_id=tracker.next_sequence(_REST_STREAM),
         cancel_requested_at=now,
+        completed_at=now if new_status == "cancelled" else None,
     )
     if new_id is None:
         raise HTTPException(
@@ -327,15 +409,64 @@ async def cancel_bracket(
             detail="Plan status changed concurrently",
         )
 
+    if has_active_children:
+        native_instrument = cast(str | None, params.get("native_instrument"))
+        for child_cid in child_ids:
+            if native_instrument is None:
+                continue
+            exchange_order_id: str | None = None
+            try:
+                exchange_order_id = await repo.get_exchange_order_id_for_client_order_id(
+                    child_cid, as_of=now
+                )
+            except Exception as exc:
+                logger.error("Cancel venue lookup failed for {}: {}", plan_public_id, exc)
+            cancel_cmd = TradeCommandInsertRow(
+                command_type="cancel",
+                shard_key=plan["shard_key"],
+                exchange=plan["exchange"],
+                instrument=native_instrument,
+                mode=plan["mode"],
+                strategy_id=plan["plan_type"],
+                client_order_id=child_cid,
+                venue_client_id=child_cid,
+                side=plan["side"],
+                order_type=str(params.get("venue_order_type", "market")),
+                quantity=plan["total_quantity"],
+                price=cast(Any, params.get("price")),
+                leverage=cast(Any, params.get("leverage")),
+                reduce_only=False,
+                status="created",
+                created_at=now,
+                correlation_id=plan_public_id,
+                session_id=sid,
+                sequence_id=tracker.next_sequence(_REST_STREAM),
+                timestamp=ts,
+                wallet_public_id=plan["wallet_public_id"] or "",
+                operator_public_id=plan.get("operator_public_id"),
+                user_public_id=principal.user_public_id or principal.username,
+                plan_public_id=plan_public_id,
+                exchange_order_id=exchange_order_id,
+            )
+            try:
+                await repo.insert_trade_command(cancel_cmd)
+            except Exception as exc:
+                logger.error(
+                    "Failed to insert cancel command for plan {} child {}: {}",
+                    plan_public_id,
+                    child_cid,
+                    exc,
+                )
+
     await repo.insert_execution_plan_decision(
         row=ExecutionPlanDecisionInsertRow(
             plan_public_id=plan_public_id,
             decision_type="bracket_cancelled",
             decided_at=now,
             trigger_type="api",
-            evidence={"reason": command.payload.reason},
+            evidence={"reason": command.payload.reason, "had_children": has_active_children},
             emitted_command_public_id=None,
-            new_status="cancel_requested",
+            new_status=new_status,
             reason=command.payload.reason or "Cancelled via API",
             decision_importance="action",
         ),
@@ -344,8 +475,8 @@ async def cancel_bracket(
         sequence_id=tracker.next_sequence(_REST_STREAM),
     )
 
-    service: PlanExecutorService = request.app.state.plan_executor
-    service._unregister_plan(plan_public_id)
+    if not has_active_children:
+        service._unregister_plan(plan_public_id)
 
     updated = await repo.get_execution_plan(plan_public_id, as_of=ts)
     if updated is None:
@@ -403,6 +534,7 @@ async def get_bracket(
         principal=principal,
         repo=repo,
         wallet_public_id=plan["wallet_public_id"],
+        operator_public_id=plan.get("operator_public_id"),
     )
 
     plan_data = _plan_to_data(cast(dict[str, Any], plan))
@@ -458,6 +590,7 @@ async def list_bracket_decisions(
         principal=principal,
         repo=repo,
         wallet_public_id=plan["wallet_public_id"],
+        operator_public_id=plan.get("operator_public_id"),
     )
 
     decisions = await repo.list_execution_plan_decisions(
