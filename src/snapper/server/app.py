@@ -145,6 +145,7 @@ from snapper.messaging.schemas.data import VenueFeeScheduleData
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
 from snapper.server.credential_routes import router as credential_router
 from snapper.server.dependencies import get_repository_dependency
+from snapper.server.execution_plan_routes import router as execution_plan_router
 from snapper.server.json_body import patch_openapi
 from snapper.server.operator_routes import router as operator_router
 from snapper.server.order_routes import router as order_router
@@ -271,6 +272,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         else:
             await process_factory.start_all_processes()
             await process_factory.spawn_per_wallet_executors()
+        plan_executor = process_factory.started_processes.get("plan_executor")
+        app.state.plan_executor = plan_executor
         manager_ref: WebSocketConnectionManager = app.state.manager
         app.state.zmq_bridge_task = asyncio.create_task(manager_ref.zmq_bridge.start())
         logger.info("Application startup complete")
@@ -350,6 +353,7 @@ def create_app() -> FastAPI:
     app.include_router(scope_grant_router, prefix=API_PREFIX)
     app.include_router(credential_router, prefix=API_PREFIX)
     app.include_router(order_router, prefix=API_PREFIX)
+    app.include_router(execution_plan_router, prefix=API_PREFIX)
     app.include_router(create_api_router(manager), prefix=API_PREFIX)
     app.include_router(create_authenticated_websocket_router(manager), prefix=API_PREFIX)
 
