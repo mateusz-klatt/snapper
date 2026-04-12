@@ -1,10 +1,12 @@
 """Initial database schema migration.
 
-Creates all core tables for the Snapper trading system including
-instruments, candles, trades, orders, users, market snapshots, and
-trade runtime tables (trade_commands, venue_events,
-trade_projection_checkpoints).
-Seeds symbols, aliases, and exchange capabilities.
+Creates all tables for the Snapper trading system: instruments, candles,
+trades, orders, executions, positions, signals, users, settings, market
+snapshots, trade runtime tables, multi-tenant foundation (wallets,
+operators, credentials, memberships, scope grants), funding rates, accrual
+ledger, continuous contracts, execution plans, position cycles, and
+supporting reference tables. Seeds symbols, aliases, and exchange
+capabilities.
 """
 
 from collections.abc import Sequence
@@ -100,13 +102,7 @@ for _alias in SYMBOL_ALIASES:
 
 
 def upgrade() -> None:
-    """Create initial database schema and seed reference data.
-
-    Creates all tables for instruments, candles, ticks, trades, orders,
-    executions, positions, signals, users, settings, symbols, symbol aliases,
-    process runs, instrument specs, market snapshots, control, and telemetry.
-    Seeds symbols, aliases, and exchange capabilities.
-    """
+    """Create all database tables, indexes, and seed reference data."""
     op.create_table(
         "symbols",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -406,6 +402,11 @@ def upgrade() -> None:
         sa.Column("error", sa.String(512), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("leverage", sa.Integer(), nullable=True),
+        sa.Column("reduce_only", sa.Boolean(), nullable=False, server_default="0"),
+        sa.Column("wallet_public_id", sa.String(36), nullable=False),
+        sa.Column("operator_public_id", sa.String(36), nullable=True),
+        sa.Column("plan_public_id", sa.String(36), nullable=True),
         sa.Column("session_id", sa.String(36), nullable=False),
         sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
@@ -441,6 +442,7 @@ def upgrade() -> None:
         sqlite_where=text("exchange_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE_SQLITE),
         postgresql_where=text("exchange_order_id IS NOT NULL AND " + _KNOWN_TO_ACTIVE_PG),
     )
+    op.create_index("ix_orders_plan_public_id", "orders", ["plan_public_id"])
     op.create_table(
         "executions",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -455,6 +457,9 @@ def upgrade() -> None:
         sa.Column("fee", sa.Float(), nullable=False),
         sa.Column("fee_asset", sa.String(16), nullable=False),
         sa.Column("executed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("wallet_public_id", sa.String(36), nullable=False),
+        sa.Column("operator_public_id", sa.String(36), nullable=True),
+        sa.Column("liquidity_role", sa.String(16), nullable=False, server_default="unknown"),
         sa.Column("session_id", sa.String(36), nullable=False),
         sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
@@ -496,6 +501,7 @@ def upgrade() -> None:
         sa.Column("average_price", sa.Float(), nullable=False),
         sa.Column("unrealized_pnl", sa.Float(), nullable=False),
         sa.Column("realized_pnl", sa.Float(), nullable=False),
+        sa.Column("wallet_public_id", sa.String(36), nullable=False),
         sa.Column("session_id", sa.String(36), nullable=False),
         sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
@@ -515,7 +521,7 @@ def upgrade() -> None:
     op.create_index(
         "uq_positions_instrument_public_id",
         "positions",
-        ["instrument_public_id", "mode"],
+        ["instrument_public_id", "mode", "wallet_public_id"],
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
         postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
@@ -532,6 +538,8 @@ def upgrade() -> None:
         sa.Column("strategy_name", sa.String(64), nullable=True),
         sa.Column("price", sa.Float(), nullable=True),
         sa.Column("fired_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("wallet_public_id", sa.String(36), nullable=False),
+        sa.Column("operator_public_id", sa.String(36), nullable=True),
         sa.Column("session_id", sa.String(36), nullable=False),
         sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
@@ -655,6 +663,7 @@ def upgrade() -> None:
         sa.Column("tags", sa.JSON(), nullable=True),
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("wallet_public_id", sa.String(36), nullable=True),
         sa.Column("session_id", sa.String(36), nullable=False),
         sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
@@ -689,6 +698,13 @@ def upgrade() -> None:
         sa.Column("position_limit_long", sa.Integer(), nullable=True),
         sa.Column("position_limit_short", sa.Integer(), nullable=True),
         sa.Column("status", sa.String(20), nullable=True),
+        sa.Column("expiry_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("instrument_kind", sa.String(16), nullable=True),
+        sa.Column("funding_type", sa.String(32), nullable=True),
+        sa.Column("funding_frequency_hours", sa.Integer(), nullable=True),
+        sa.Column("rollover_rate_long", sa.Float(), nullable=True),
+        sa.Column("rollover_rate_short", sa.Float(), nullable=True),
+        sa.Column("max_funding_rate", sa.Float(), nullable=True),
         sa.Column("session_id", sa.String(36), nullable=False),
         sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
@@ -696,6 +712,16 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.CheckConstraint(_CK_SESSION_ID, name="ck_instrument_specs_session_id"),
         sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_instrument_specs_sequence_id"),
+        sa.CheckConstraint(
+            "instrument_kind IN ('spot', 'perpetual', 'future', 'etf', 'option') "
+            "OR instrument_kind IS NULL",
+            name="ck_instrument_specs_kind",
+        ),
+        sa.CheckConstraint(
+            "funding_type IS NULL OR funding_type IN "
+            "('spot_margin_rollover', 'perpetual_funding')",
+            name="ck_instrument_specs_funding_type",
+        ),
     )
     op.create_index(
         "ix_instrument_specs_public_id",
@@ -715,6 +741,13 @@ def upgrade() -> None:
     )
     op.create_index(
         "ix_instrument_specs_instrument_public_id", "instrument_specs", ["instrument_public_id"]
+    )
+    op.create_index(
+        "ix_instrument_specs_expiry",
+        "instrument_specs",
+        ["expiry_at"],
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
     op.create_table(
         "market_snapshots",
@@ -828,7 +861,7 @@ def upgrade() -> None:
         sa.Column("timestamp", sa.DateTime, nullable=False),
         sa.Column("known_to", sa.DateTime, nullable=False),
         sa.Column("command_type", sa.String(16), nullable=False),
-        sa.Column("shard_key", sa.String(64), nullable=False),
+        sa.Column("shard_key", sa.String(256), nullable=False),
         sa.Column("exchange", sa.String(32), nullable=False),
         sa.Column("instrument", sa.String(64), nullable=False),
         sa.Column("mode", sa.String(8), nullable=False),
@@ -850,6 +883,12 @@ def upgrade() -> None:
         sa.Column("exchange_order_id", sa.String(64), nullable=True),
         sa.Column("supersedes_command_id", sa.String(36), nullable=True),
         sa.Column("correlation_id", sa.String(36), nullable=False),
+        sa.Column("leverage", sa.Integer(), nullable=True),
+        sa.Column("reduce_only", sa.Boolean(), nullable=False, server_default="0"),
+        sa.Column("wallet_public_id", sa.String(36), nullable=False),
+        sa.Column("operator_public_id", sa.String(36), nullable=True),
+        sa.Column("user_public_id", sa.String(36), nullable=True),
+        sa.Column("plan_public_id", sa.String(36), nullable=True),
         sa.CheckConstraint(_CK_SESSION_ID, name="ck_trade_commands_session"),
         sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_trade_commands_sequence"),
     )
@@ -871,6 +910,7 @@ def upgrade() -> None:
         sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
         postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
+    op.create_index("ix_trade_commands_plan_public_id", "trade_commands", ["plan_public_id"])
     op.create_table(
         "venue_events",
         sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
@@ -880,7 +920,7 @@ def upgrade() -> None:
         sa.Column("timestamp", sa.DateTime, nullable=False),
         sa.Column("known_to", sa.DateTime, nullable=False),
         sa.Column("event_type", sa.String(32), nullable=False),
-        sa.Column("shard_key", sa.String(64), nullable=False),
+        sa.Column("shard_key", sa.String(256), nullable=False),
         sa.Column("command_public_id", sa.String(36), nullable=True),
         sa.Column("exchange", sa.String(32), nullable=False),
         sa.Column("instrument", sa.String(64), nullable=False),
@@ -901,6 +941,8 @@ def upgrade() -> None:
         sa.Column("venue_timestamp", sa.DateTime, nullable=True),
         sa.Column("received_at", sa.DateTime, nullable=False),
         sa.Column("payload_json", sa.Text, nullable=True),
+        sa.Column("wallet_public_id", sa.String(36), nullable=False),
+        sa.Column("liquidity_role", sa.String(16), nullable=False, server_default="unknown"),
         sa.CheckConstraint(_CK_SESSION_ID, name="ck_venue_events_session"),
         sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_venue_events_sequence"),
     )
@@ -926,7 +968,7 @@ def upgrade() -> None:
         sa.Column("sequence_id", sa.Integer, nullable=False),
         sa.Column("timestamp", sa.DateTime, nullable=False),
         sa.Column("known_to", sa.DateTime, nullable=False),
-        sa.Column("shard_key", sa.String(64), nullable=False),
+        sa.Column("shard_key", sa.String(256), nullable=False),
         sa.Column("position_qty", sa.Float, server_default="0", nullable=False),
         sa.Column("entry_price", sa.Float, nullable=True),
         sa.Column("cash", sa.Float, nullable=False),
@@ -937,6 +979,10 @@ def upgrade() -> None:
         sa.Column("last_venue_event_at", sa.DateTime, nullable=True),
         sa.Column("open_command_ids", sa.Text, nullable=True),
         sa.Column("checkpoint_at", sa.DateTime, nullable=False),
+        sa.Column("seen_exec_ids", sa.Text(), server_default="[]", nullable=False),
+        sa.Column("position_opened_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("wallet_public_id", sa.String(36), nullable=False),
+        sa.Column("operator_public_id", sa.String(36), nullable=True),
         sa.CheckConstraint(_CK_SESSION_ID, name="ck_trade_checkpoints_session"),
         sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_trade_checkpoints_sequence"),
     )
@@ -956,6 +1002,822 @@ def upgrade() -> None:
         sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
         postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
     )
+    op.create_table(
+        "underlying_assets",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("name", sa.String(64), nullable=False),
+        sa.Column("ticker", sa.String(16), nullable=False),
+        sa.Column("asset_class", sa.String(16), nullable=False),
+        sa.Column("sector", sa.String(32), nullable=True),
+        sa.Column("description", sa.String(256), nullable=True),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(
+            "asset_class IN ('crypto', 'forex', 'equity', 'index', 'commodity', 'yield')",
+            name="ck_underlying_asset_class",
+        ),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_underlying_assets_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_underlying_assets_sequence_id"),
+    )
+    op.create_index(
+        "uq_underlying_assets_active_ticker",
+        "underlying_assets",
+        ["ticker"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "uq_underlying_assets_active_name",
+        "underlying_assets",
+        ["name"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_underlying_assets_public_id",
+        "underlying_assets",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_table(
+        "instrument_underlying_mappings",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("instrument_public_id", sa.String(36), nullable=False),
+        sa.Column("underlying_public_id", sa.String(36), nullable=False),
+        sa.Column("relationship_type", sa.String(16), nullable=False),
+        sa.Column("contract_family", sa.String(16), nullable=True),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(
+            "relationship_type IN ('exact', 'derivative', 'proxy')",
+            name="ck_ium_relationship_type",
+        ),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_ium_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_ium_sequence_id"),
+    )
+    op.create_index(
+        "uq_ium_active_instrument",
+        "instrument_underlying_mappings",
+        ["instrument_public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_ium_underlying",
+        "instrument_underlying_mappings",
+        ["underlying_public_id"],
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_ium_family",
+        "instrument_underlying_mappings",
+        ["underlying_public_id", "contract_family"],
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_table(
+        "continuous_contract_configs",
+        sa.Column("id", sa.Integer(), autoincrement=True, primary_key=True),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("session_id", sa.String(64), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column(
+            "known_to",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default="9999-12-31 23:59:59.000000",
+        ),
+        sa.Column("underlying_public_id", sa.String(36), nullable=False),
+        sa.Column("exchange", sa.String(20), nullable=False),
+        sa.Column("contract_family", sa.String(16), nullable=False),
+        sa.Column("method", sa.String(16), nullable=False),
+        sa.Column("rollover_days_before", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("label", sa.String(64), nullable=True),
+        sa.CheckConstraint(
+            "method IN ('unadjusted', 'ratio', 'panama')",
+            name="ck_ccc_method",
+        ),
+    )
+    op.create_index(
+        "uq_ccc_active_key",
+        "continuous_contract_configs",
+        [
+            "underlying_public_id",
+            "exchange",
+            "contract_family",
+            "method",
+            "rollover_days_before",
+        ],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_ccc_public_id",
+        "continuous_contract_configs",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_table(
+        "funding_rates",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("instrument_public_id", sa.String(36), nullable=False),
+        sa.Column("exchange", sa.String(32), nullable=False),
+        sa.Column("rate_type", sa.String(32), nullable=False),
+        sa.Column("direction", sa.String(8), nullable=False),
+        sa.Column("rate", sa.Float(), nullable=False),
+        sa.Column("notional_asset", sa.String(16), nullable=False),
+        sa.Column("effective_from", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("source", sa.String(32), nullable=False),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_funding_rates_exchange_lower"),
+        sa.CheckConstraint(
+            "rate_type IN ('spot_margin_rollover', 'perpetual_funding')",
+            name="ck_funding_rates_rate_type",
+        ),
+        sa.CheckConstraint(
+            "direction IN ('long', 'short', 'both')",
+            name="ck_funding_rates_direction",
+        ),
+        sa.CheckConstraint(
+            "source IN ('exchange_api', 'exchange_docs', 'manual', 'derived')",
+            name="ck_funding_rates_source",
+        ),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_funding_rates_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_funding_rates_sequence_id"),
+    )
+    op.create_index(
+        "ix_funding_rates_unique_active",
+        "funding_rates",
+        [
+            "instrument_public_id",
+            "exchange",
+            "rate_type",
+            "direction",
+            "effective_from",
+        ],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_funding_rates_public_id",
+        "funding_rates",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_funding_rates_instrument_public_id",
+        "funding_rates",
+        ["instrument_public_id"],
+    )
+    op.create_table(
+        "accrual_ledger",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("instrument_public_id", sa.String(36), nullable=False),
+        sa.Column("mode", sa.String(8), nullable=False),
+        sa.Column("accrual_type", sa.String(16), nullable=False),
+        sa.Column("accrued_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("amount", sa.Float(), nullable=False),
+        sa.Column("amount_asset", sa.String(16), nullable=False),
+        sa.Column("rate", sa.Float(), nullable=False),
+        sa.Column("notional", sa.Float(), nullable=False),
+        sa.Column("position_quantity_at_accrual", sa.Float(), nullable=False),
+        sa.Column("exchange", sa.String(32), nullable=False),
+        sa.Column("wallet_public_id", sa.String(36), nullable=False),
+        sa.Column("operator_public_id", sa.String(36), nullable=True),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_accrual_ledger_exchange_lower"),
+        sa.CheckConstraint(
+            "mode IN ('live', 'paper', 'backtest')",
+            name="ck_accrual_ledger_mode",
+        ),
+        sa.CheckConstraint(
+            "accrual_type IN ('funding', 'rollover', 'borrow')",
+            name="ck_accrual_ledger_type",
+        ),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_accrual_ledger_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_accrual_ledger_sequence_id"),
+    )
+    op.create_index(
+        "ix_accrual_ledger_unique_active",
+        "accrual_ledger",
+        [
+            "wallet_public_id",
+            "instrument_public_id",
+            "mode",
+            "accrual_type",
+            "accrued_at",
+        ],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_accrual_ledger_public_id",
+        "accrual_ledger",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_accrual_ledger_recovery",
+        "accrual_ledger",
+        [
+            "wallet_public_id",
+            "instrument_public_id",
+            "mode",
+            "accrued_at",
+        ],
+    )
+    op.create_index(
+        "ix_accrual_ledger_accrued_at",
+        "accrual_ledger",
+        ["accrued_at"],
+    )
+    op.create_index(
+        "ix_accrual_ledger_instrument_public_id",
+        "accrual_ledger",
+        ["instrument_public_id"],
+    )
+    op.create_table(
+        "wallets",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("label", sa.String(128), nullable=False),
+        sa.Column("description", sa.String(512), nullable=True),
+        sa.Column(
+            "is_paper",
+            sa.Boolean(),
+            nullable=False,
+            server_default=sa.text("0"),
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_wallets_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_wallets_sequence_id"),
+    )
+    op.create_index(
+        "ix_wallets_public_id",
+        "wallets",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_wallets_label_is_paper_active",
+        "wallets",
+        ["label", "is_paper"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_table(
+        "wallet_credentials",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("wallet_public_id", sa.String(36), nullable=False),
+        sa.Column("exchange", sa.String(20), nullable=False),
+        sa.Column("credential_type", sa.String(32), nullable=False),
+        sa.Column("encrypted_payload", sa.Text(), nullable=False),
+        sa.Column("label", sa.String(128), nullable=True),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_wallet_credentials_exchange_lower"),
+        sa.CheckConstraint(
+            "credential_type IN ('api_key_secret', 'rsa_pem', 'oauth', 'paper')",
+            name="ck_wallet_credentials_type",
+        ),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_wallet_credentials_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_wallet_credentials_sequence_id"),
+    )
+    op.create_index(
+        "ix_wallet_credentials_public_id",
+        "wallet_credentials",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_wallet_credentials_wallet_exchange_active",
+        "wallet_credentials",
+        ["wallet_public_id", "exchange"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_wallet_credentials_exchange",
+        "wallet_credentials",
+        ["exchange"],
+    )
+    op.create_table(
+        "operators",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("label", sa.String(128), nullable=False),
+        sa.Column("description", sa.String(512), nullable=True),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_operators_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_operators_sequence_id"),
+    )
+    op.create_index(
+        "ix_operators_public_id",
+        "operators",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_operators_label_active",
+        "operators",
+        ["label"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_table(
+        "user_operator_memberships",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("user_public_id", sa.String(36), nullable=False),
+        sa.Column("operator_public_id", sa.String(36), nullable=False),
+        sa.Column(
+            "is_primary",
+            sa.Boolean(),
+            nullable=False,
+            server_default=sa.text("0"),
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_user_operator_memberships_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_user_operator_memberships_sequence_id"),
+    )
+    op.create_index(
+        "ix_user_operator_memberships_public_id",
+        "user_operator_memberships",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_user_operator_memberships_unique_active",
+        "user_operator_memberships",
+        ["user_public_id", "operator_public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_user_operator_memberships_primary_unique_active",
+        "user_operator_memberships",
+        ["user_public_id"],
+        unique=True,
+        sqlite_where=text("is_primary = 1 AND known_to = '9999-12-31 23:59:59.000000'"),
+        postgresql_where=text("is_primary = TRUE AND known_to = '9999-12-31T23:59:59+00:00'"),
+    )
+    op.create_index(
+        "ix_user_operator_memberships_user",
+        "user_operator_memberships",
+        ["user_public_id"],
+    )
+    op.create_index(
+        "ix_user_operator_memberships_operator",
+        "user_operator_memberships",
+        ["operator_public_id"],
+    )
+    op.create_table(
+        "wallet_operator_scope_grants",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("operator_public_id", sa.String(36), nullable=False),
+        sa.Column("wallet_public_id", sa.String(36), nullable=False),
+        sa.Column("granted_by_user_public_id", sa.String(36), nullable=False),
+        sa.Column("scope_kind", sa.String(16), nullable=False),
+        sa.Column("underlying_public_id", sa.String(36), nullable=True),
+        sa.Column("instrument_public_id", sa.String(36), nullable=True),
+        sa.Column("note", sa.String(512), nullable=True),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(
+            "scope_kind IN ('underlying', 'instrument')",
+            name="ck_scope_grants_scope_kind",
+        ),
+        sa.CheckConstraint(
+            "(scope_kind = 'underlying' AND underlying_public_id IS NOT NULL "
+            "AND instrument_public_id IS NULL) "
+            "OR (scope_kind = 'instrument' AND instrument_public_id IS NOT NULL "
+            "AND underlying_public_id IS NULL)",
+            name="ck_scope_grants_scope_kind_xor",
+        ),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_scope_grants_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_scope_grants_sequence_id"),
+    )
+    op.create_index(
+        "ix_scope_grants_public_id",
+        "wallet_operator_scope_grants",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_scope_grants_instrument_exclusive_active",
+        "wallet_operator_scope_grants",
+        ["wallet_public_id", "instrument_public_id"],
+        unique=True,
+        sqlite_where=text(
+            "instrument_public_id IS NOT NULL AND known_to = '9999-12-31 23:59:59.000000'"
+        ),
+        postgresql_where=text(
+            "instrument_public_id IS NOT NULL AND known_to = '9999-12-31T23:59:59+00:00'"
+        ),
+    )
+    op.create_index(
+        "ix_scope_grants_underlying_exclusive_active",
+        "wallet_operator_scope_grants",
+        ["wallet_public_id", "underlying_public_id"],
+        unique=True,
+        sqlite_where=text(
+            "underlying_public_id IS NOT NULL AND known_to = '9999-12-31 23:59:59.000000'"
+        ),
+        postgresql_where=text(
+            "underlying_public_id IS NOT NULL AND known_to = '9999-12-31T23:59:59+00:00'"
+        ),
+    )
+    op.create_index(
+        "ix_scope_grants_operator",
+        "wallet_operator_scope_grants",
+        ["operator_public_id"],
+    )
+    op.create_index(
+        "ix_scope_grants_wallet",
+        "wallet_operator_scope_grants",
+        ["wallet_public_id"],
+    )
+    op.create_table(
+        "instrument_order_capabilities",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("instrument_public_id", sa.String(36), nullable=False),
+        sa.Column("exchange", sa.String(32), nullable=False),
+        sa.Column("supported_order_types", sa.JSON(), nullable=False),
+        sa.Column("supports_post_only", sa.Boolean(), nullable=False, server_default="0"),
+        sa.Column("supports_reduce_only", sa.Boolean(), nullable=False, server_default="0"),
+        sa.Column("supports_amend_in_place", sa.Boolean(), nullable=False, server_default="0"),
+        sa.Column("supports_native_stop_loss", sa.Boolean(), nullable=False, server_default="0"),
+        sa.Column("supports_native_take_profit", sa.Boolean(), nullable=False, server_default="0"),
+        sa.Column(
+            "supports_trailing_stop_client_side",
+            sa.Boolean(),
+            nullable=False,
+            server_default="1",
+        ),
+        sa.Column("supports_market_making", sa.Boolean(), nullable=False, server_default="0"),
+        sa.Column("supports_short_selling", sa.Boolean(), nullable=False, server_default="0"),
+        sa.Column("supports_leverage", sa.Boolean(), nullable=False, server_default="0"),
+        sa.Column("max_leverage_long", sa.Float(), nullable=False, server_default="1.0"),
+        sa.Column("max_leverage_short", sa.Float(), nullable=False, server_default="0.0"),
+        sa.Column("min_notional", sa.Float(), nullable=True),
+        sa.Column("max_order_size", sa.Float(), nullable=True),
+        sa.Column("top_of_book_quality", sa.String(16), nullable=False, server_default="unknown"),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_ioc_exchange_lower"),
+        sa.CheckConstraint(
+            "top_of_book_quality IN ('realtime', 'polled', 'thin', 'unknown')",
+            name="ck_ioc_tob_quality",
+        ),
+    )
+    op.create_index(
+        "ix_ioc_instrument_exchange_active",
+        "instrument_order_capabilities",
+        ["instrument_public_id", "exchange"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_ioc_public_id",
+        "instrument_order_capabilities",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_ioc_instrument_public_id",
+        "instrument_order_capabilities",
+        ["instrument_public_id"],
+    )
+    op.create_index(
+        "ix_ioc_exchange",
+        "instrument_order_capabilities",
+        ["exchange"],
+    )
+    op.create_table(
+        "venue_fee_schedules",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("exchange", sa.String(32), nullable=False),
+        sa.Column("instrument_public_id", sa.String(36), nullable=True),
+        sa.Column("fee_tier", sa.String(32), nullable=False),
+        sa.Column("maker_bps", sa.Float(), nullable=False),
+        sa.Column("taker_bps", sa.Float(), nullable=False),
+        sa.Column("min_volume_30d", sa.Float(), nullable=True),
+        sa.Column("currency", sa.String(8), nullable=False),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_vfs_exchange_lower"),
+    )
+    op.create_index(
+        "ix_vfs_exchange_tier_active",
+        "venue_fee_schedules",
+        ["exchange", "fee_tier"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_vfs_public_id",
+        "venue_fee_schedules",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_vfs_exchange",
+        "venue_fee_schedules",
+        ["exchange"],
+    )
+    op.create_table(
+        "execution_plans",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("plan_type", sa.String(32), nullable=False),
+        sa.Column("created_by_user_id", sa.String(36), nullable=True),
+        sa.Column("created_by_strategy", sa.String(128), nullable=True),
+        sa.Column("created_via", sa.String(16), nullable=False),
+        sa.Column("instrument_public_id", sa.String(36), nullable=False),
+        sa.Column("exchange", sa.String(32), nullable=False),
+        sa.Column("mode", sa.String(8), nullable=False),
+        sa.Column("shard_key", sa.String(128), nullable=False),
+        sa.Column("wallet_public_id", sa.String(36), nullable=False),
+        sa.Column("operator_public_id", sa.String(36), nullable=True),
+        sa.Column("total_quantity", sa.Float(), nullable=False),
+        sa.Column("filled_quantity", sa.Float(), nullable=False, server_default="0"),
+        sa.Column("side", sa.String(8), nullable=False),
+        sa.Column("parent_plan_public_id", sa.String(36), nullable=True),
+        sa.Column("position_cycle_public_id", sa.String(36), nullable=True),
+        sa.Column("params", sa.JSON(), nullable=False),
+        sa.Column("status", sa.String(20), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("cancel_requested_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("last_evaluated_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("last_error", sa.String(1024), nullable=True),
+        sa.Column("idempotency_key", sa.String(64), nullable=True),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_ep_exchange_lower"),
+        sa.CheckConstraint(
+            "plan_type IN ('manual_once', 'bracket', 'trailing_stop', "
+            "'passive_mm', 'peg', 'scheduler')",
+            name="ck_ep_plan_type",
+        ),
+        sa.CheckConstraint(
+            "status IN ('pending', 'armed', 'active', 'paused', 'completed', "
+            "'cancel_requested', 'cancelled', 'failed', 'expired')",
+            name="ck_ep_status",
+        ),
+        sa.CheckConstraint("side IN ('buy', 'sell')", name="ck_ep_side"),
+        sa.CheckConstraint("mode IN ('live', 'paper')", name="ck_ep_mode"),
+        sa.CheckConstraint(
+            "created_via IN ('ui', 'api', 'cli', 'strategy')",
+            name="ck_ep_created_via",
+        ),
+    )
+    op.create_index("ix_ep_plan_type", "execution_plans", ["plan_type"])
+    op.create_index("ix_ep_created_by_user_id", "execution_plans", ["created_by_user_id"])
+    op.create_index("ix_ep_instrument_public_id", "execution_plans", ["instrument_public_id"])
+    op.create_index("ix_ep_exchange", "execution_plans", ["exchange"])
+    op.create_index("ix_ep_shard_key", "execution_plans", ["shard_key"])
+    op.create_index("ix_ep_status", "execution_plans", ["status"])
+    op.create_index("ix_ep_status_exchange_mode", "execution_plans", ["status", "exchange", "mode"])
+    op.create_index(
+        "ix_ep_instrument_status", "execution_plans", ["instrument_public_id", "status"]
+    )
+    op.create_index("ix_ep_shard_status", "execution_plans", ["shard_key", "status"])
+
+    dialect = op.get_bind().dialect.name
+    active_filter = _KNOWN_TO_ACTIVE_PG if dialect == "postgresql" else _KNOWN_TO_ACTIVE_SQLITE
+    _terminal_statuses = "('completed', 'cancelled', 'failed', 'expired')"
+    with op.get_context().autocommit_block():
+        op.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_ep_idempotency_key "
+                "ON execution_plans (idempotency_key) "
+                f"WHERE idempotency_key IS NOT NULL AND {active_filter}"
+            )
+        )
+        op.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_ep_public_id "
+                f"ON execution_plans (public_id) WHERE {active_filter}"
+            )
+        )
+        op.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_ep_active_bracket_per_cycle "
+                "ON execution_plans (position_cycle_public_id) "
+                "WHERE position_cycle_public_id IS NOT NULL "
+                f"AND plan_type = 'bracket' "
+                f"AND status NOT IN {_terminal_statuses} "
+                f"AND {active_filter}"
+            )
+        )
+
+    op.create_table(
+        "execution_plan_checkpoints",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("plan_public_id", sa.String(36), nullable=False),
+        sa.Column("state", sa.JSON(), nullable=False),
+        sa.Column("last_venue_event_id", sa.Integer(), nullable=False),
+        sa.Column("last_tick_timestamp", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("checkpoint_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_index("ix_epc_plan_public_id", "execution_plan_checkpoints", ["plan_public_id"])
+
+    with op.get_context().autocommit_block():
+        op.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_epc_public_id "
+                f"ON execution_plan_checkpoints (public_id) WHERE {active_filter}"
+            )
+        )
+
+    op.create_table(
+        "execution_plan_decisions",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("plan_public_id", sa.String(36), nullable=False),
+        sa.Column("decision_type", sa.String(32), nullable=False),
+        sa.Column("decided_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("trigger_type", sa.String(16), nullable=False),
+        sa.Column("evidence", sa.JSON(), nullable=False),
+        sa.Column("emitted_command_public_id", sa.String(36), nullable=True),
+        sa.Column("new_status", sa.String(20), nullable=True),
+        sa.Column("reason", sa.String(512), nullable=False),
+        sa.Column("decision_importance", sa.String(16), nullable=False),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(
+            "decision_importance IN ('action', 'transition', 'routine')",
+            name="ck_epd_importance",
+        ),
+    )
+    op.create_index("ix_epd_plan_public_id", "execution_plan_decisions", ["plan_public_id"])
+    op.create_index("ix_epd_decided_at", "execution_plan_decisions", ["decided_at"])
+
+    with op.get_context().autocommit_block():
+        op.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_epd_public_id "
+                f"ON execution_plan_decisions (public_id) WHERE {active_filter}"
+            )
+        )
+
+    op.create_table(
+        "position_cycles",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("instrument_public_id", sa.String(36), nullable=False),
+        sa.Column("exchange", sa.String(32), nullable=False),
+        sa.Column("mode", sa.String(8), nullable=False),
+        sa.Column("shard_key", sa.String(128), nullable=False),
+        sa.Column("wallet_public_id", sa.String(36), nullable=False),
+        sa.Column("operator_public_id", sa.String(36), nullable=True),
+        sa.Column("direction", sa.String(8), nullable=False),
+        sa.Column("max_qty", sa.Float(), nullable=False),
+        sa.Column("status", sa.String(16), nullable=False),
+        sa.Column("opened_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("closed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("opening_command_public_id", sa.String(36), nullable=True),
+        sa.Column("closing_command_public_id", sa.String(36), nullable=True),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_EXCHANGE_LOWER, name="ck_pc_exchange_lower"),
+        sa.CheckConstraint("mode IN ('live', 'paper')", name="ck_pc_mode"),
+        sa.CheckConstraint(
+            "direction IN ('long', 'short')",
+            name="ck_pc_direction",
+        ),
+        sa.CheckConstraint(
+            "status IN ('open', 'closed', 'liquidated')",
+            name="ck_pc_status",
+        ),
+        sa.CheckConstraint("max_qty >= 0", name="ck_pc_max_qty_nonneg"),
+    )
+    op.create_index("ix_pc_instrument_public_id", "position_cycles", ["instrument_public_id"])
+    op.create_index("ix_pc_exchange", "position_cycles", ["exchange"])
+    op.create_index("ix_pc_shard_key", "position_cycles", ["shard_key"])
+    op.create_index("ix_pc_wallet_public_id", "position_cycles", ["wallet_public_id"])
+    op.create_index("ix_pc_status", "position_cycles", ["status"])
+    op.create_index("ix_pc_shard_status", "position_cycles", ["shard_key", "status"])
+    op.create_index(
+        "ix_pc_instrument_status", "position_cycles", ["instrument_public_id", "status"]
+    )
+    op.create_index("ix_pc_wallet_status", "position_cycles", ["wallet_public_id", "status"])
+
+    with op.get_context().autocommit_block():
+        op.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_pc_public_id "
+                f"ON position_cycles (public_id) WHERE {active_filter}"
+            )
+        )
+        op.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_pc_shard_open_active "
+                "ON position_cycles (shard_key) "
+                f"WHERE status = 'open' AND {active_filter}"
+            )
+        )
+
     conn = op.get_bind()
     now = datetime.now(tz=UTC)
     seed_session_id = str(uuid7())
@@ -1036,11 +1898,31 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop all tables in reverse order of creation.
-
-    Removes all tables created by the upgrade function, respecting
-    foreign key constraints by dropping in reverse dependency order.
-    """
+    """Drop all tables in reverse order of creation."""
+    with op.get_context().autocommit_block():
+        op.execute(text("DROP INDEX IF EXISTS uq_pc_shard_open_active"))
+        op.execute(text("DROP INDEX IF EXISTS ix_pc_public_id"))
+        op.execute(text("DROP INDEX IF EXISTS ix_epd_public_id"))
+        op.execute(text("DROP INDEX IF EXISTS ix_epc_public_id"))
+        op.execute(text("DROP INDEX IF EXISTS uq_ep_active_bracket_per_cycle"))
+        op.execute(text("DROP INDEX IF EXISTS ix_ep_public_id"))
+        op.execute(text("DROP INDEX IF EXISTS uq_ep_idempotency_key"))
+    op.drop_table("position_cycles")
+    op.drop_table("execution_plan_decisions")
+    op.drop_table("execution_plan_checkpoints")
+    op.drop_table("execution_plans")
+    op.drop_table("venue_fee_schedules")
+    op.drop_table("instrument_order_capabilities")
+    op.drop_table("wallet_operator_scope_grants")
+    op.drop_table("user_operator_memberships")
+    op.drop_table("operators")
+    op.drop_table("wallet_credentials")
+    op.drop_table("wallets")
+    op.drop_table("accrual_ledger")
+    op.drop_table("funding_rates")
+    op.drop_table("continuous_contract_configs")
+    op.drop_table("instrument_underlying_mappings")
+    op.drop_table("underlying_assets")
     op.drop_table("trade_projection_checkpoints")
     op.drop_table("venue_events")
     op.drop_table("trade_commands")
