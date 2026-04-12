@@ -600,8 +600,11 @@ class PlanExecutorService(RegisterableProcess):
                         logger.error("on_clock failed for plan {}: {}", public_id, exc)
                         continue
                     if commands:
-                        async with self._get_plan_lock(public_id):
-                            await self._dispatch_commands(public_id, commands)
+                        try:
+                            async with self._get_plan_lock(public_id):
+                                await self._dispatch_commands(public_id, commands)
+                        except Exception as exc:
+                            logger.error("dispatch failed for plan {} on clock: {}", public_id, exc)
                 elapsed = asyncio.get_event_loop().time() - t0
                 await asyncio.sleep(max(0.0, 1.0 - elapsed))
         except asyncio.CancelledError:
@@ -634,11 +637,16 @@ class PlanExecutorService(RegisterableProcess):
         evaluator = self.evaluators.get(plan_public_id)
         commands: list[JsonObject] = []
         if evaluator is not None:
-            with contextlib.suppress(Exception):
+            try:
                 commands = await evaluator.on_execution(plan, execution)
+            except Exception as exc:
+                logger.error("on_execution failed for plan {}: {}", plan_public_id, exc)
         if commands:
-            async with self._get_plan_lock(plan_public_id):
-                await self._dispatch_commands(plan_public_id, commands)
+            try:
+                async with self._get_plan_lock(plan_public_id):
+                    await self._dispatch_commands(plan_public_id, commands)
+            except Exception as exc:
+                logger.error("dispatch failed for plan {} on execution: {}", plan_public_id, exc)
         new_filled = incoming_cumulative
         total = float(plan["total_quantity"])
         is_complete = new_filled + 1e-9 >= total
@@ -750,19 +758,29 @@ class PlanExecutorService(RegisterableProcess):
         if not plan_ids:
             return
         now = datetime.now(UTC)
-        for public_id in plan_ids:
+        for public_id in list(plan_ids):
             plan = self.plans.get(public_id)
             if plan is None:
+                continue
+            if plan["status"] in _TERMINAL_STATUSES:
+                continue
+            if plan["status"] == "paused":
                 continue
             evaluator = self.evaluators.get(public_id)
             if evaluator is None:
                 continue
             commands: list[JsonObject] = []
-            with contextlib.suppress(Exception):
+            try:
                 commands = await evaluator.on_tick(plan, tick)
+            except Exception as exc:
+                logger.error("on_tick failed for plan {}: {}", public_id, exc)
+                continue
             if commands:
-                async with self._get_plan_lock(public_id):
-                    await self._dispatch_commands(public_id, commands)
+                try:
+                    async with self._get_plan_lock(public_id):
+                        await self._dispatch_commands(public_id, commands)
+                except Exception as exc:
+                    logger.error("dispatch failed for plan {} on tick: {}", public_id, exc)
             self._last_tick_timestamps[public_id] = now
 
     async def _write_checkpoints(self) -> None:

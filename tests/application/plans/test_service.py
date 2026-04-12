@@ -2149,6 +2149,214 @@ class TestTickRoutingStaleIndex:
         await service._handle_tick("market.kraken.BTC-USD.ticks", tick)
 
 
+class TestHandleTickStatusGuards:
+    """Tests for F1: _handle_tick must skip terminal and paused plans."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_tick_skips_terminal_plan(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Terminal plans do not receive tick dispatches."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        plan = _make_plan_row(status="completed", native_instrument="BTC-USD")
+        evaluator = AsyncMock(spec=ManualOnceEvaluator)
+        evaluator.on_tick = AsyncMock(return_value=[])
+        service._register_plan(plan, evaluator)
+        tick = TickData(
+            public_id="t-1",
+            timestamp=datetime(2026, 4, 10, tzinfo=UTC),
+            session_id="s1",
+            sequence_id=1,
+            instrument="BTC-USD",
+            exchange="kraken",
+            volume=0.0,
+            bid=50000.0,
+            ask=50001.0,
+            last=50000.5,
+        )
+        await service._handle_tick("market.kraken.BTC-USD.ticks", tick)
+        evaluator.on_tick.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_tick_skips_paused_plan(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Paused plans do not receive tick dispatches."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        plan = _make_plan_row(status="paused", native_instrument="BTC-USD")
+        evaluator = AsyncMock(spec=ManualOnceEvaluator)
+        evaluator.on_tick = AsyncMock(return_value=[])
+        service._register_plan(plan, evaluator)
+        tick = TickData(
+            public_id="t-1",
+            timestamp=datetime(2026, 4, 10, tzinfo=UTC),
+            session_id="s1",
+            sequence_id=1,
+            instrument="BTC-USD",
+            exchange="kraken",
+            volume=0.0,
+            bid=50000.0,
+            ask=50001.0,
+            last=50000.5,
+        )
+        await service._handle_tick("market.kraken.BTC-USD.ticks", tick)
+        evaluator.on_tick.assert_not_awaited()
+
+
+class TestTickEvaluatorErrorLogging:
+    """Tests for F6: evaluator exceptions must be logged, not silently suppressed."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_tick_evaluator_error_logged_not_silent(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """on_tick exception is caught and logged, not silently suppressed."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        plan = _make_plan_row(native_instrument="BTC-USD")
+        evaluator = AsyncMock(spec=ManualOnceEvaluator)
+        evaluator.on_tick = AsyncMock(side_effect=RuntimeError("boom"))
+        service._register_plan(plan, evaluator)
+        tick = TickData(
+            public_id="t-1",
+            timestamp=datetime(2026, 4, 10, tzinfo=UTC),
+            session_id="s1",
+            sequence_id=1,
+            instrument="BTC-USD",
+            exchange="kraken",
+            volume=0.0,
+            bid=50000.0,
+            ask=50001.0,
+            last=50000.5,
+        )
+        await service._handle_tick("market.kraken.BTC-USD.ticks", tick)
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_execution_evaluator_error_logged_not_silent(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """on_execution exception is caught and logged, not silently suppressed."""
+        mock_repo = AsyncMock()
+        mock_repo.update_execution_plan_status = AsyncMock(return_value=1)
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(native_instrument="BTC-USD")
+        evaluator = AsyncMock(spec=ManualOnceEvaluator)
+        evaluator.on_execution = AsyncMock(side_effect=RuntimeError("boom"))
+        service._register_plan(plan, evaluator)
+        execution = _make_execution()
+        await service._handle_execution(_cast(ExecutionData, execution))
+
+
+class TestDispatchFailureIsolation:
+    """Tests for F7: dispatch failure must not break sibling plans."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_tick_dispatch_failure_does_not_break_siblings(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """If dispatch fails for plan A, plan B on the same symbol still gets its tick."""
+        mock_repo = AsyncMock()
+        call_count = 0
+
+        async def _insert_side_effect(row: object) -> tuple[int, str]:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("DB down for plan A")
+            return (2, "cmd-2")
+
+        mock_repo.insert_trade_command = AsyncMock(side_effect=_insert_side_effect)
+        mock_repo.insert_execution_plan_decision = AsyncMock(return_value="dec-1")
+        mock_repo.revise_execution_plan_params = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan_a = _make_plan_row(public_id="plan-a", native_instrument="BTC-USD")
+        plan_b = _make_plan_row(public_id="plan-b", native_instrument="BTC-USD")
+        eval_a = AsyncMock(spec=ManualOnceEvaluator)
+        eval_a.on_tick = AsyncMock(
+            return_value=[{"instrument": "BTC-USD", "side": "sell", "quantity": 0.5}]
+        )
+        eval_b = AsyncMock(spec=ManualOnceEvaluator)
+        eval_b.on_tick = AsyncMock(
+            return_value=[{"instrument": "BTC-USD", "side": "sell", "quantity": 0.5}]
+        )
+        service._register_plan(plan_a, eval_a)
+        service._register_plan(plan_b, eval_b)
+        tick = TickData(
+            public_id="t-1",
+            timestamp=datetime(2026, 4, 10, tzinfo=UTC),
+            session_id="s1",
+            sequence_id=1,
+            instrument="BTC-USD",
+            exchange="kraken",
+            volume=0.0,
+            bid=50000.0,
+            ask=50001.0,
+            last=50000.5,
+        )
+        await service._handle_tick("market.kraken.BTC-USD.ticks", tick)
+        assert mock_repo.insert_trade_command.await_count == 2
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_clock_dispatch_failure_does_not_break_siblings(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """If clock dispatch fails for plan A, plan B still gets its clock tick."""
+        mock_repo = AsyncMock()
+        call_count = 0
+
+        async def _insert_side_effect(row: object) -> tuple[int, str]:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("DB down for plan A")
+            return (2, "cmd-2")
+
+        mock_repo.insert_trade_command = AsyncMock(side_effect=_insert_side_effect)
+        mock_repo.insert_execution_plan_decision = AsyncMock(return_value="dec-1")
+        mock_repo.revise_execution_plan_params = AsyncMock()
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan_a = _make_plan_row(public_id="plan-a", status="active")
+        plan_b = _make_plan_row(public_id="plan-b", status="active")
+        eval_a = AsyncMock(spec=ManualOnceEvaluator)
+        eval_a.on_clock = AsyncMock(
+            return_value=[{"instrument": "BTC-USD", "side": "sell", "quantity": 0.5}]
+        )
+        eval_b = AsyncMock(spec=ManualOnceEvaluator)
+        eval_b.on_clock = AsyncMock(
+            return_value=[{"instrument": "BTC-USD", "side": "sell", "quantity": 0.5}]
+        )
+        service._register_plan(plan_a, eval_a)
+        service._register_plan(plan_b, eval_b)
+        service._running = True
+
+        async def stop_after_one_tick() -> None:
+            await asyncio.sleep(0.05)
+            service._running = False
+
+        await asyncio.gather(
+            service._clock_loop(),
+            stop_after_one_tick(),
+        )
+        assert mock_repo.insert_trade_command.await_count == 2
+
+
 class TestOnTickDispatchesCommands:
     """Tests that on_tick return values are captured and dispatched."""
 
@@ -2242,3 +2450,25 @@ class TestOnExecutionDispatchesCommands:
         execution = _make_execution()
         await service._handle_execution(_cast(ExecutionData, execution))
         mock_repo.insert_trade_command.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_execution_dispatch_failure_does_not_crash(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """If dispatch fails during execution, plan status still updates."""
+        mock_repo = AsyncMock()
+        mock_repo.insert_trade_command = AsyncMock(side_effect=RuntimeError("DB down"))
+        mock_repo.update_execution_plan_status = AsyncMock(return_value=1)
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(native_instrument="BTC-USD")
+        evaluator = AsyncMock(spec=ManualOnceEvaluator)
+        evaluator.on_execution = AsyncMock(
+            return_value=[{"instrument": "BTC-USD", "side": "sell", "quantity": 0.5}]
+        )
+        service._register_plan(plan, evaluator)
+        execution = _make_execution()
+        await service._handle_execution(_cast(ExecutionData, execution))
+        mock_repo.update_execution_plan_status.assert_awaited_once()
