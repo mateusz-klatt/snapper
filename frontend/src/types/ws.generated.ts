@@ -73,6 +73,8 @@ export type OperatorPublicId = string | null;
 export type UserPublicId = string | null;
 export type Type4 = "execution_plan";
 export type OperatorPublicId1 = string | null;
+export type PositionCyclePublicId = string | null;
+export type ParentPlanPublicId = string | null;
 export type LastError = string | null;
 export type IdempotencyKey = string | null;
 export type Type5 = "front_month";
@@ -518,6 +520,8 @@ export interface ExecutionPlanData {
   wallet_public_id: string;
   operator_public_id: OperatorPublicId1;
   params: Params;
+  position_cycle_public_id: PositionCyclePublicId;
+  parent_plan_public_id: ParentPlanPublicId;
   last_error: LastError;
   idempotency_key: IdempotencyKey;
 }

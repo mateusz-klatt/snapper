@@ -691,6 +691,8 @@ struct ExecutionPlanData: Codable, Sendable {
     let walletPublicId: String
     let operatorPublicId: String?
     let params: [String: AnyCodable]
+    let positionCyclePublicId: String?
+    let parentPlanPublicId: String?
     let lastError: String?
     let idempotencyKey: String?
 
@@ -713,6 +715,8 @@ struct ExecutionPlanData: Codable, Sendable {
         case walletPublicId = "wallet_public_id"
         case operatorPublicId = "operator_public_id"
         case params
+        case positionCyclePublicId = "position_cycle_public_id"
+        case parentPlanPublicId = "parent_plan_public_id"
         case lastError = "last_error"
         case idempotencyKey = "idempotency_key"
     }
@@ -2627,6 +2631,60 @@ struct RotateCredentialBody: Codable, Sendable {
         case credentialPayload = "credential_payload"
         case label
     }
+}
+
+struct BracketCreateCommand: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: BracketCreateBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct BracketCreateBody: Codable, Sendable {
+    let positionCyclePublicId: String
+    let slPrice: Double?
+    let tpPrice: Double?
+    let idempotencyKey: String?
+
+    enum CodingKeys: String, CodingKey {
+        case positionCyclePublicId = "position_cycle_public_id"
+        case slPrice = "sl_price"
+        case tpPrice = "tp_price"
+        case idempotencyKey = "idempotency_key"
+    }
+}
+
+struct BracketCancelCommand: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: BracketCancelBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct BracketCancelBody: Codable, Sendable {
+    let reason: String?
 }
 
 struct CreateOrderCommand: Codable, Sendable {

@@ -128,6 +128,8 @@ export const ExecutionPlanDataSchema = z
     wallet_public_id: z.string(),
     operator_public_id: z.string().nullable(),
     params: z.record(z.string(), z.unknown()),
+    position_cycle_public_id: z.string().nullable(),
+    parent_plan_public_id: z.string().nullable(),
     last_error: z.string().nullable(),
     idempotency_key: z.string().nullable(),
   })
@@ -556,6 +558,21 @@ export const RotateCredentialBodySchema = z
   .object({
     credential_payload: z.record(z.string(), z.string()),
     label: z.string().max(128).nullable().optional(),
+  })
+  .strict()
+
+export const BracketCreateBodySchema = z
+  .object({
+    position_cycle_public_id: z.string(),
+    sl_price: z.number().nullable().optional(),
+    tp_price: z.number().nullable().optional(),
+    idempotency_key: z.string().nullable().optional(),
+  })
+  .strict()
+
+export const BracketCancelBodySchema = z
+  .object({
+    reason: z.string().nullable().optional(),
   })
   .strict()
 
@@ -1086,6 +1103,28 @@ export const RotateCredentialCommandSchema = z
   })
   .strict()
 
+export const BracketCreateCommandSchema = z
+  .object({
+    type: z.literal('create_bracket_command').optional(),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: BracketCreateBodySchema,
+  })
+  .strict()
+
+export const BracketCancelCommandSchema = z
+  .object({
+    type: z.literal('cancel_bracket_command').optional(),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: BracketCancelBodySchema,
+  })
+  .strict()
+
 export const CreateOrderCommandSchema = z
   .object({
     type: z.literal('create_order_command').optional(),
@@ -1574,6 +1613,8 @@ export type SettingUpdateBody = z.infer<typeof SettingUpdateBodySchema>
 export type RemoveSettingBody = z.infer<typeof RemoveSettingBodySchema>
 export type CreateCredentialBody = z.infer<typeof CreateCredentialBodySchema>
 export type RotateCredentialBody = z.infer<typeof RotateCredentialBodySchema>
+export type BracketCreateBody = z.infer<typeof BracketCreateBodySchema>
+export type BracketCancelBody = z.infer<typeof BracketCancelBodySchema>
 export type CreateOrderBody = z.infer<typeof CreateOrderBodySchema>
 export type CancelOrderBody = z.infer<typeof CancelOrderBodySchema>
 export type CreateScopeGrantBody = z.infer<typeof CreateScopeGrantBodySchema>
@@ -1623,6 +1664,8 @@ export type SettingUpdate = z.infer<typeof SettingUpdateSchema>
 export type RemoveSettingRequest = z.infer<typeof RemoveSettingRequestSchema>
 export type CreateCredentialCommand = z.infer<typeof CreateCredentialCommandSchema>
 export type RotateCredentialCommand = z.infer<typeof RotateCredentialCommandSchema>
+export type BracketCreateCommand = z.infer<typeof BracketCreateCommandSchema>
+export type BracketCancelCommand = z.infer<typeof BracketCancelCommandSchema>
 export type CreateOrderCommand = z.infer<typeof CreateOrderCommandSchema>
 export type CancelOrderCommand = z.infer<typeof CancelOrderCommandSchema>
 export type CreateScopeGrantCommand = z.infer<typeof CreateScopeGrantCommandSchema>

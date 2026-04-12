@@ -1097,6 +1097,153 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
+    "/api/execution-plans": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Bracket
+         * @description Create a bracket (SL/TP) execution plan on an open position cycle.
+         *
+         *     Validates the cycle is open, the caller has wallet access, the venue
+         *     supports reduce_only (Decision C1), price thresholds are on the
+         *     correct side, and at least one leg is present. The bracket is created
+         *     with status=armed and immediately starts watching ticks.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker + app state).
+         *         principal: Authenticated caller holding CREATE_ORDERS.
+         *         _csrf: CSRF token validation.
+         *         command: Bracket create command envelope.
+         *         repo: Repository dependency.
+         *
+         *     Returns:
+         *         ExecutionPlanResponse wrapping the new armed bracket plan.
+         *
+         *     Raises:
+         *         HTTPException: 422 if params invalid or capability missing,
+         *             409 if cycle not open or duplicate bracket, 403 if wallet
+         *             not accessible, 503 if executor unavailable.
+         */
+        post: Operations["create_bracket_api_execution_plans_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/execution-plans/{plan_public_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel Bracket
+         * @description Cancel a bracket execution plan.
+         *
+         *     Armed brackets (no child orders yet) transition directly to cancelled.
+         *     Active brackets (child orders in-flight) transition to cancel_requested
+         *     and emit cancel TradeCommands, keeping the plan registered until venue
+         *     terminal events land.
+         *
+         *     Args:
+         *         request: FastAPI request.
+         *         plan_public_id: Bracket plan to cancel.
+         *         principal: Authenticated caller holding CANCEL_ORDERS.
+         *         _csrf: CSRF token validation.
+         *         command: Cancel command envelope.
+         *         repo: Repository dependency.
+         *
+         *     Returns:
+         *         ExecutionPlanResponse wrapping the updated plan.
+         *
+         *     Raises:
+         *         HTTPException: 404 if not found, 409 if already terminal,
+         *             403 if wallet not accessible, 503 if executor unavailable.
+         */
+        post: Operations["cancel_bracket_api_execution_plans__plan_public_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/execution-plans/{plan_public_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Bracket
+         * @description Retrieve a single execution plan by public_id.
+         *
+         *     Args:
+         *         request: FastAPI request.
+         *         plan_public_id: Plan to retrieve.
+         *         principal: Authenticated caller holding READ_ORDERS.
+         *         repo: Repository dependency.
+         *
+         *     Returns:
+         *         ExecutionPlanResponse wrapping the plan.
+         *
+         *     Raises:
+         *         HTTPException: 404 if not found, 403 if wallet not accessible.
+         */
+        get: Operations["get_bracket_api_execution_plans__plan_public_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/execution-plans/{plan_public_id}/decisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Bracket Decisions
+         * @description List decision audit rows for an execution plan.
+         *
+         *     Args:
+         *         request: FastAPI request.
+         *         plan_public_id: Plan to query decisions for.
+         *         principal: Authenticated caller holding READ_ORDERS.
+         *         repo: Repository dependency.
+         *         importance: Optional importance filter (action/transition/routine).
+         *         limit: Maximum rows to return.
+         *         offset: Number of rows to skip.
+         *
+         *     Returns:
+         *         Dict with decisions list and count.
+         *
+         *     Raises:
+         *         HTTPException: 404 if plan not found, 403 if wallet not accessible.
+         */
+        get: Operations["list_bracket_decisions_api_execution_plans__plan_public_id__decisions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/candles": {
         parameters: {
             query?: never;
@@ -2473,6 +2620,10 @@ export type Components = {
             params: {
                 [key: string]: unknown;
             };
+            /** Position Cycle Public Id */
+            position_cycle_public_id: string | null;
+            /** Parent Plan Public Id */
+            parent_plan_public_id: string | null;
             /** Last Error */
             last_error: string | null;
             /** Idempotency Key */
@@ -5763,6 +5914,83 @@ export type Components = {
             label?: string | null;
         };
         /**
+         * BracketCreateCommand
+         * @description Request envelope for POST /api/execution-plans.
+         */
+        BracketCreateCommand: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "create_bracket_command";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["BracketCreateBody"];
+        };
+        /**
+         * BracketCreateBody
+         * @description Request body for POST /api/execution-plans (bracket creation).
+         *
+         *     Attributes:
+         *         position_cycle_public_id: Target position cycle to protect.
+         *         sl_price: Stop-loss trigger price (optional if tp_price set).
+         *         tp_price: Take-profit trigger price (optional if sl_price set).
+         *         idempotency_key: Optional dedup key for retries.
+         */
+        BracketCreateBody: {
+            /** Position Cycle Public Id */
+            position_cycle_public_id: string;
+            /** Sl Price */
+            sl_price?: number | null;
+            /** Tp Price */
+            tp_price?: number | null;
+            /** Idempotency Key */
+            idempotency_key?: string | null;
+        };
+        /**
+         * BracketCancelCommand
+         * @description Request envelope for POST /api/execution-plans/{id}/cancel.
+         */
+        BracketCancelCommand: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "cancel_bracket_command";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["BracketCancelBody"];
+        };
+        /**
+         * BracketCancelBody
+         * @description Request body for POST /api/execution-plans/{id}/cancel.
+         *
+         *     Attributes:
+         *         reason: Optional human-readable cancellation reason.
+         */
+        BracketCancelBody: {
+            /** Reason */
+            reason?: string | null;
+        };
+        /**
          * CreateOrderCommand
          * @description Request envelope for POST /api/orders.
          */
@@ -7216,6 +7444,133 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["ExecutionPlanResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_bracket_api_execution_plans_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["BracketCreateCommand"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["ExecutionPlanResponse"];
+                };
+            };
+        };
+    };
+    cancel_bracket_api_execution_plans__plan_public_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                plan_public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["BracketCancelCommand"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["ExecutionPlanResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_bracket_api_execution_plans__plan_public_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                plan_public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["ExecutionPlanResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_bracket_decisions_api_execution_plans__plan_public_id__decisions_get: {
+        parameters: {
+            query?: {
+                importance?: string | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                plan_public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
             /** @description Validation Error */

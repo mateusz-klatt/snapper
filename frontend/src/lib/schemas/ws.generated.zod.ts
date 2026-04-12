@@ -130,6 +130,8 @@ export const ExecutionPlanDataSchema = z
     wallet_public_id: z.string(),
     operator_public_id: z.string().nullable(),
     params: z.record(z.string(), z.unknown()),
+    position_cycle_public_id: z.string().nullable(),
+    parent_plan_public_id: z.string().nullable(),
     last_error: z.string().nullable(),
     idempotency_key: z.string().nullable(),
   })

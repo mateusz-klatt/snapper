@@ -133,6 +133,8 @@ export interface ExecutionPlan {
   walletPublicId: string
   operatorPublicId: string | null
   params: Record<string, unknown>
+  positionCyclePublicId: string | null
+  parentPlanPublicId: string | null
   lastError: string | null
   idempotencyKey: string | null
 }
