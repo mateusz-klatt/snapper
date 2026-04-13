@@ -546,6 +546,28 @@ flowchart TB
     Encryption --> DB["Encrypted Setting in DB"]
 ```
 
+### Backtesting
+
+The backtesting subsystem runs strategy simulations against historical candle
+data. Phase 1 uses DirectDbEngine (synchronous candle reads from DB).
+
+**Architecture:**
+
+- **BacktestConfig** (Pydantic): Strategy, instruments, date range, fill model
+- **DirectDbEngine**: Candle-driven simulation loop with time-batched processing
+- **ResultCollector**: In-memory artifact buffer (signals, trades, equity)
+- **BacktestMetrics**: Pure-math metrics computation (Sharpe, Sortino, CAGR, etc.)
+- **BacktestRunnerProcess**: ONE_SHOT RegisterableProcess orchestrating lifecycle
+- **BacktestRepository**: Separate repo sharing session_factory, SCD2 status transitions
+
+**Lifecycle:** pending -> running -> completed | failed | cancelled
+
+**Boot reconciliation:** Orphaned runs (pending/running/cancel_requested) are
+swept to failed at server startup via `reconcile_stale_runs()`.
+
+**Storage:** 6 bitemporal tables (BacktestRun, BacktestEvent, BacktestSignal,
+BacktestTrade, BacktestEquityPoint, BacktestResult) all with TemporalMixin.
+
 ### Authentication
 
 - JWT tokens via HTTP-only cookies (access: 15min, refresh: 7 days)

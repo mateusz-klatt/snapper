@@ -1991,3 +1991,70 @@ async function connect() {
     }, 30000);
 }
 ```
+
+## Backtests
+
+Backtest endpoints manage strategy backtesting runs. Read endpoints require
+`read:backtests` permission (viewer+). Mutation endpoints require
+`manage:backtests` (operator+). All reads are wallet-scoped via auth context.
+
+### POST /api/backtests
+
+Create and launch a new backtest run. Requires an active wallet selection.
+
+**Request body:**
+
+```json
+{
+    "strategy_class": "sma_cross",
+    "instrument_public_id": "BTC-USD",
+    "exchange": "kraken",
+    "timeframe": "1h",
+    "start_date": "2026-01-01T00:00:00Z",
+    "end_date": "2026-06-01T00:00:00Z",
+    "initial_cash": 10000.0,
+    "strategy_params": {"fast": 10, "slow": 30}
+}
+```
+
+**Response:** `BacktestRunResponse` with the created run details.
+
+### GET /api/backtests
+
+List backtest runs with optional filters.
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+| --------- | ---- | ----------- |
+| `strategy` | string | Filter by strategy name |
+| `status` | string | Filter by status (pending, running, completed, failed, cancelled) |
+| `limit` | int | Page size (1-100, default 20) |
+| `offset` | int | Page offset (default 0) |
+| `as_of` | datetime | Temporal query timestamp |
+
+### GET /api/backtests/{run_id}
+
+Get backtest run detail by public ID.
+
+### POST /api/backtests/{run_id}/cancel
+
+Cancel a pending or running backtest. Sets status to `cancel_requested`
+via SCD2 close-and-insert. Returns 409 if the run is already in a
+terminal state.
+
+### POST /api/backtests/{run_id}/rerun
+
+Create a new backtest run with the same configuration as the original.
+
+### GET /api/backtests/{run_id}/trades
+
+Get paginated trades for a completed backtest run.
+
+### GET /api/backtests/{run_id}/signals
+
+Get paginated signals for a completed backtest run.
+
+### GET /api/backtests/{run_id}/events
+
+Get lifecycle events for a backtest run (started, failed, etc.).

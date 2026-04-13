@@ -627,3 +627,60 @@ snapper polygon-backfill-aggregates -s SPY --days 30 --timespan minute
 # Backfill daily data for all symbols
 snapper polygon-backfill-aggregates --all --timespan day --days 365
 ```
+
+## Backtesting
+
+### `backtest-run`
+
+Run a backtest synchronously. Creates a DB record, executes the engine
+in-process, and persists results (signals, trades, equity, metrics).
+
+```bash
+snapper backtest-run \
+    --strategy sma_cross \
+    --instrument BTC-USD \
+    --exchange kraken \
+    --start 2026-01-01 \
+    --end 2026-06-01 \
+    --timeframe 1h \
+    --initial-cash 10000 \
+    --params '{"fast": 10, "slow": 30}'
+```
+
+**Options:**
+
+| Option | Type | Default | Description |
+| ------ | ---- | ------- | ----------- |
+| `--strategy` | str | required | Registered strategy class name |
+| `--instrument` | str | required | Instrument public ID |
+| `--exchange` | str | required | Exchange name |
+| `--start` | str | required | Start date (ISO format) |
+| `--end` | str | required | End date (ISO format) |
+| `--timeframe` | str | `1h` | Candle timeframe |
+| `--initial-cash` | float | `10000` | Starting cash balance |
+| `--wallet` | str | `cli` | Wallet public ID |
+| `--params` | str | `{}` | Strategy params as JSON |
+
+### `backtest-list`
+
+List backtest runs with optional filters.
+
+```bash
+snapper backtest-list --status completed --limit 10
+```
+
+### `backtest-cancel`
+
+Cancel a pending or running backtest run.
+
+```bash
+snapper backtest-cancel <run-public-id>
+```
+
+### `backtest-rerun`
+
+Re-run a backtest with the same configuration (including strategy params).
+
+```bash
+snapper backtest-rerun <run-public-id>
+```
