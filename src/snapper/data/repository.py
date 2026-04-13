@@ -1793,6 +1793,24 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_all_open_position_cycles(
+        self,
+        as_of: datetime,
+        opened_before: datetime | None = None,
+    ) -> list[PositionCycleRow]:
+        """Return all open position cycles, optionally filtered by age.
+
+        Args:
+            as_of: Bus time for the temporal query.
+            opened_before: When provided, only cycles opened before this
+                timestamp are returned (stale-cycle detection).
+
+        Returns:
+            List of open cycle rows matching the criteria.
+        """
+        ...
+
+    @abstractmethod
     async def create_scope_grant(self, request: CreateScopeGrantRequest) -> ScopeGrantRow:
         """Create a new ``wallet_operator_scope_grants`` row.
 
@@ -5903,6 +5921,22 @@ class SQLAlchemyRepository(Repository):
             await s.commit()
             await s.refresh(new_row)
             return new_row.id
+
+    async def get_all_open_position_cycles(
+        self,
+        as_of: datetime,
+        opened_before: datetime | None = None,
+    ) -> list[PositionCycleRow]:
+        """Return all open position cycles, optionally filtered by age."""
+        async with self.session() as s:
+            conditions = [
+                PositionCycle.status == "open",
+                *where_active(PositionCycle, as_of),
+            ]
+            if opened_before is not None:
+                conditions.append(PositionCycle.opened_at < opened_before)
+            rows = (await s.execute(select(PositionCycle).where(*conditions))).scalars().all()
+            return [self._position_cycle_row_to_dict(r) for r in rows]
 
     async def create_scope_grant(self, request: CreateScopeGrantRequest) -> ScopeGrantRow:
         """Create a new scope grant with advisory-locked overlap detection."""

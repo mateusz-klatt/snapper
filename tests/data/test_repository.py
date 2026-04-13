@@ -6637,3 +6637,90 @@ async def test_get_position_cycle_by_public_id_not_found(tmp_path: Path) -> None
     now = datetime.now(UTC)
     cycle = await r.get_position_cycle_by_public_id("nonexistent", as_of=now)
     assert cycle is None
+
+
+@pytest.mark.asyncio
+async def test_get_all_open_position_cycles_returns_open_only(tmp_path: Path) -> None:
+    """Only open cycles are returned, closed cycles excluded.
+
+    Given: one open cycle and one closed cycle,
+    When: get_all_open_position_cycles is called,
+    Then: only the open cycle is returned.
+    """
+    db_path = tmp_path / "pc_all_open.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    open_row = _make_cycle_row(
+        shard_key="kraken.BTC-USD.live.waaaa",
+        opened_at=now - timedelta(hours=48),
+        timestamp=now - timedelta(hours=48),
+    )
+    _, open_pid = await r.insert_position_cycle(open_row)
+    closed_row = _make_cycle_row(
+        shard_key="kraken.ETH-USD.live.wbbbb",
+        opened_at=now - timedelta(hours=96),
+        timestamp=now - timedelta(hours=96),
+        sequence_id=2,
+    )
+    _, closed_pid = await r.insert_position_cycle(closed_row)
+    await r.close_position_cycle(
+        cycle_public_id=closed_pid,
+        closed_at=now - timedelta(hours=24),
+        closing_command_public_id=None,
+        bus_time=now,
+        session_id="s1",
+        sequence_id=10,
+    )
+    cycles = await r.get_all_open_position_cycles(as_of=now + timedelta(seconds=1))
+    assert len(cycles) == 1
+    assert cycles[0]["public_id"] == open_pid
+
+
+@pytest.mark.asyncio
+async def test_get_all_open_position_cycles_age_filter(tmp_path: Path) -> None:
+    """Opened_before filter excludes recent cycles.
+
+    Given: one cycle opened 5 days ago, one opened 1 hour ago,
+    When: get_all_open_position_cycles is called with opened_before=3 days ago,
+    Then: only the old cycle is returned.
+    """
+    db_path = tmp_path / "pc_age_filter.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    old_row = _make_cycle_row(
+        shard_key="kraken.BTC-USD.live.wold1",
+        opened_at=now - timedelta(days=5),
+        timestamp=now - timedelta(days=5),
+    )
+    _, old_pid = await r.insert_position_cycle(old_row)
+    recent_row = _make_cycle_row(
+        shard_key="kraken.ETH-USD.live.wnew1",
+        opened_at=now - timedelta(hours=1),
+        timestamp=now - timedelta(hours=1),
+        sequence_id=2,
+    )
+    await r.insert_position_cycle(recent_row)
+    cycles = await r.get_all_open_position_cycles(
+        as_of=now + timedelta(seconds=1),
+        opened_before=now - timedelta(days=3),
+    )
+    assert len(cycles) == 1
+    assert cycles[0]["public_id"] == old_pid
+
+
+@pytest.mark.asyncio
+async def test_get_all_open_position_cycles_empty(tmp_path: Path) -> None:
+    """Empty result when no open cycles exist.
+
+    Given: no position cycles in the database,
+    When: get_all_open_position_cycles is called,
+    Then: empty list returned.
+    """
+    db_path = tmp_path / "pc_empty.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    cycles = await r.get_all_open_position_cycles(as_of=now)
+    assert cycles == []
