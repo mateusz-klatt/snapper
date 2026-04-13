@@ -443,7 +443,9 @@ classes running inside `PlanExecutorService`.
 
 **Plan types:** `manual_once` (Phase 1 + Phase 1.5 hardening, shipped),
 `bracket` (Phase 2 step 2, shipped 2026-04-12 — attaches to `position_cycles` row from step 1),
-`trailing_stop` (Phase 3), `peg` (Phase 4), `scheduler` (Phase 5).
+`trailing_stop` (Phase 3, shipped 2026-04-13 — stateful ratcheting stop with
+checkpoint persistence, separate `/api/trailing-stops` route module),
+`peg` (Phase 4), `scheduler` (Phase 5).
 
 **Manual order create flow:** `POST /api/orders` creates a `manual_once`
 plan (pending), stamps `child_client_order_id`, `native_instrument`, and

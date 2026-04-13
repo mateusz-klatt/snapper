@@ -702,6 +702,59 @@ List decision audit rows for an execution plan. Requires `read:orders` permissio
 
 **Response (200):** List of decision rows with action, reason, and timestamp.
 
+### POST /api/trailing-stops
+
+Create a trailing stop execution plan on an open position cycle. The trailing
+stop ratchets the stop price as the market moves favorably and triggers a
+reduce_only market close on breach.
+
+**Request body:**
+
+- `position_cycle_public_id` (string, required): Target position cycle.
+- `trailing_pct` (float, required): Trailing distance as percentage (0 < x < 100).
+- `min_lock_pct` (float, optional, default 0): Minimum profit % before trailing activates.
+- `idempotency_key` (string, optional): Dedup key for retries.
+
+**Permission:** `create:orders`. CSRF token required.
+
+**Response (200):** `ExecutionPlanResponse` with `plan_type: "trailing_stop"`, `status: "armed"`.
+
+**Response (409):** Cycle not open or duplicate trailing stop on same cycle.
+
+**Response (422):** Invalid params, missing capability, or no open position.
+
+### POST /api/trailing-stops/{plan_public_id}/cancel
+
+Cancel a trailing stop. Armed stops transition directly to cancelled. Active
+stops (with in-flight child orders) transition to cancel_requested.
+
+**Permission:** `cancel:orders`. CSRF token required.
+
+### GET /api/trailing-stops/{plan_public_id}
+
+Retrieve a trailing stop plan by public_id. Only returns plans with
+`plan_type: "trailing_stop"`.
+
+**Permission:** `read:orders`.
+
+### GET /api/trailing-stops/{plan_public_id}/decisions
+
+List decision audit rows for a trailing stop plan.
+
+**Permission:** `read:orders`.
+
+### GET /api/trailing-stops/by-cycle/{cycle_public_id}
+
+Get live trailing stop state for a position cycle. Returns peak_price and
+current_stop from the evaluator's in-memory state.
+
+**Permission:** `read:orders`.
+
+**Response (200):** `TrailingStopStateResponse` with live state, or
+`{ "type": "message", "payload": "none" }` if no active trailing stop.
+
+**Response (404):** Position cycle not found.
+
 ### GET /api/position-cycles/open
 
 List all open position cycles with age information. Admin-only endpoint for
