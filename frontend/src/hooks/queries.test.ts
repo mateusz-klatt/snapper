@@ -32,6 +32,8 @@ import {
   useStopProcessByName,
   useCreateProcessConfig,
   useCreateBracket,
+  useCreateTrailingStop,
+  useTrailingStopForCycle,
 } from './queries'
 import { useAuth } from '../stores/auth'
 import { apiClient } from '../lib/apiClient'
@@ -80,6 +82,13 @@ vi.mock('../lib/apiClient', () => ({
     createOrder: vi.fn(() => Promise.resolve({ type: 'execution_plan_response', payload: {} })),
     cancelOrder: vi.fn(() => Promise.resolve({ type: 'execution_plan_response', payload: {} })),
     createBracket: vi.fn(() => Promise.resolve({ type: 'execution_plan_response', payload: {} })),
+    createTrailingStop: vi.fn(() =>
+      Promise.resolve({ type: 'execution_plan_response', payload: {} })
+    ),
+    cancelTrailingStop: vi.fn(() =>
+      Promise.resolve({ type: 'execution_plan_response', payload: {} })
+    ),
+    getTrailingStopByCycle: vi.fn(() => Promise.resolve({ type: 'message', payload: 'none' })),
     getOrders: vi.fn(() => Promise.resolve(envelope('order_list', { payload: [], count: 0 }))),
     getExecutions: vi.fn(() =>
       Promise.resolve(envelope('execution_list', { payload: [], count: 0 }))
@@ -1228,6 +1237,85 @@ describe('queries', () => {
         position_cycle_public_id: 'cycle-1',
         sl_price: 48000,
       })
+    })
+  })
+
+  describe('useCreateTrailingStop', () => {
+    it('calls apiClient.createTrailingStop and invalidates queries', async () => {
+      const responseBody = {
+        type: 'execution_plan_response' as const,
+        sequence_id: 1,
+        public_id: 'ts-1',
+        timestamp: '2026-04-13T00:00:00Z',
+        session_id: 'sess-1',
+        payload: {
+          type: 'execution_plan' as const,
+          sequence_id: 1,
+          public_id: 'ts-1',
+          timestamp: '2026-04-13T00:00:00Z',
+          session_id: 'sess-1',
+          plan_type: 'trailing_stop',
+          status: 'armed',
+          instrument_public_id: 'inst-1',
+          exchange: 'kraken_futures',
+          mode: 'paper',
+          side: 'buy',
+          total_quantity: 1.0,
+          filled_quantity: 0,
+          created_at: '2026-04-13T00:00:00Z',
+          created_via: 'api',
+          wallet_public_id: 'w-1',
+          operator_public_id: null,
+          params: { trailing_pct: 5 },
+          position_cycle_public_id: 'cycle-1',
+          parent_plan_public_id: null,
+          last_error: null,
+          idempotency_key: null,
+        },
+      }
+
+      vi.mocked(apiClient.createTrailingStop).mockResolvedValueOnce(responseBody)
+
+      const { result } = renderHook(() => useCreateTrailingStop(), { wrapper: createWrapper() })
+
+      await act(async () => {
+        await result.current.mutateAsync({
+          position_cycle_public_id: 'cycle-1',
+          trailing_pct: 5,
+        })
+      })
+
+      expect(apiClient.createTrailingStop).toHaveBeenCalledWith({
+        position_cycle_public_id: 'cycle-1',
+        trailing_pct: 5,
+      })
+    })
+  })
+
+  describe('useTrailingStopForCycle', () => {
+    it('fetches trailing stop state for a cycle', async () => {
+      vi.mocked(apiClient.getTrailingStopByCycle).mockResolvedValueOnce({
+        type: 'message',
+        payload: 'none',
+      })
+
+      const { result } = renderHook(() => useTrailingStopForCycle('cycle-1'), {
+        wrapper: createWrapper(),
+      })
+
+      await vi.waitFor(() => {
+        expect(result.current.isSuccess).toBe(true)
+      })
+
+      expect(apiClient.getTrailingStopByCycle).toHaveBeenCalledWith('cycle-1')
+    })
+
+    it('is disabled when cyclePublicId is undefined', () => {
+      const { result } = renderHook(() => useTrailingStopForCycle(undefined), {
+        wrapper: createWrapper(),
+      })
+
+      expect(result.current.fetchStatus).toBe('idle')
     })
   })
 })

@@ -76,3 +76,11 @@ export type ExecutionPlanData = Components['schemas']['ExecutionPlanData']
 export type ExecutionPlanResponse = Components['schemas']['ExecutionPlanResponse']
 export type BracketCreateBody = Components['schemas']['BracketCreateBody']
 export type BracketCancelBody = Components['schemas']['BracketCancelBody']
+export type TrailingStopCreateBody = Components['schemas']['TrailingStopCreateBody']
+export type TrailingStopCancelBody = Components['schemas']['TrailingStopCancelBody']
+export type TrailingStopStateData = Components['schemas']['TrailingStopStateData']
+export type TrailingStopStateResponse = Components['schemas']['TrailingStopStateResponse']
+
+export type TrailingStopByCycleResult =
+  | TrailingStopStateResponse
+  | { type: 'message'; payload: string }

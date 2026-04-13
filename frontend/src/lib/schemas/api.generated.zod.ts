@@ -453,6 +453,24 @@ export const TopicMetricSnapshotSchema = z
   })
   .strict()
 
+export const TrailingStopStateDataSchema = z
+  .object({
+    type: z.literal('trailing_stop_state'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    plan_public_id: z.string(),
+    status: z.string(),
+    trailing_pct: z.number(),
+    min_lock_pct: z.number(),
+    entry_price: z.number(),
+    peak_price: z.number(),
+    current_stop: z.number(),
+    side: z.string(),
+  })
+  .strict()
+
 export const UnderlyingAssetDataSchema = z
   .object({
     type: z.literal('underlying_asset'),
@@ -653,6 +671,21 @@ export const HandoverScopeGrantBodySchema = z
     from_grant_public_id: z.string().min(1).max(64),
     to_operator_public_id: z.string().min(1).max(64),
     reason: z.string().max(512).nullable().optional(),
+  })
+  .strict()
+
+export const TrailingStopCreateBodySchema = z
+  .object({
+    position_cycle_public_id: z.string(),
+    trailing_pct: z.number(),
+    min_lock_pct: z.number().optional(),
+    idempotency_key: z.string().nullable().optional(),
+  })
+  .strict()
+
+export const TrailingStopCancelBodySchema = z
+  .object({
+    reason: z.string().nullable().optional(),
   })
   .strict()
 
@@ -952,6 +985,17 @@ export const StrategyListResponseSchema = z
   })
   .strict()
 
+export const TrailingStopStateResponseSchema = z
+  .object({
+    type: z.literal('trailing_stop_state'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: TrailingStopStateDataSchema,
+  })
+  .strict()
+
 export const UnderlyingAssetListResponseSchema = z
   .object({
     type: z.literal('underlying_asset_list'),
@@ -1223,6 +1267,28 @@ export const HandoverScopeGrantCommandSchema = z
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     payload: HandoverScopeGrantBodySchema,
+  })
+  .strict()
+
+export const TrailingStopCreateCommandSchema = z
+  .object({
+    type: z.literal('create_trailing_stop_command').optional(),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: TrailingStopCreateBodySchema,
+  })
+  .strict()
+
+export const TrailingStopCancelCommandSchema = z
+  .object({
+    type: z.literal('cancel_trailing_stop_command').optional(),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: TrailingStopCancelBodySchema,
   })
   .strict()
 
@@ -1654,6 +1720,7 @@ export type SignalData = z.infer<typeof SignalDataSchema>
 export type StrategyProcess = z.infer<typeof StrategyProcessSchema>
 export type SubscriptionsStats = z.infer<typeof SubscriptionsStatsSchema>
 export type TopicMetricSnapshot = z.infer<typeof TopicMetricSnapshotSchema>
+export type TrailingStopStateData = z.infer<typeof TrailingStopStateDataSchema>
 export type UnderlyingAssetData = z.infer<typeof UnderlyingAssetDataSchema>
 export type UnderlyingInstrumentData = z.infer<typeof UnderlyingInstrumentDataSchema>
 export type UserRole = z.infer<typeof UserRoleSchema>
@@ -1678,6 +1745,8 @@ export type CreateOrderBody = z.infer<typeof CreateOrderBodySchema>
 export type CancelOrderBody = z.infer<typeof CancelOrderBodySchema>
 export type CreateScopeGrantBody = z.infer<typeof CreateScopeGrantBodySchema>
 export type HandoverScopeGrantBody = z.infer<typeof HandoverScopeGrantBodySchema>
+export type TrailingStopCreateBody = z.infer<typeof TrailingStopCreateBodySchema>
+export type TrailingStopCancelBody = z.infer<typeof TrailingStopCancelBodySchema>
 export type CreateWalletBody = z.infer<typeof CreateWalletBodySchema>
 export type ContinuousCandleListResponse = z.infer<typeof ContinuousCandleListResponseSchema>
 export type ContractListResponse = z.infer<typeof ContractListResponseSchema>
@@ -1705,6 +1774,7 @@ export type SettingListResponse = z.infer<typeof SettingListResponseSchema>
 export type SettingResponse = z.infer<typeof SettingResponseSchema>
 export type SignalListResponse = z.infer<typeof SignalListResponseSchema>
 export type StrategyListResponse = z.infer<typeof StrategyListResponseSchema>
+export type TrailingStopStateResponse = z.infer<typeof TrailingStopStateResponseSchema>
 export type UnderlyingAssetListResponse = z.infer<typeof UnderlyingAssetListResponseSchema>
 export type UnderlyingInstrumentListResponse = z.infer<
   typeof UnderlyingInstrumentListResponseSchema
@@ -1731,6 +1801,8 @@ export type CreateOrderCommand = z.infer<typeof CreateOrderCommandSchema>
 export type CancelOrderCommand = z.infer<typeof CancelOrderCommandSchema>
 export type CreateScopeGrantCommand = z.infer<typeof CreateScopeGrantCommandSchema>
 export type HandoverScopeGrantCommand = z.infer<typeof HandoverScopeGrantCommandSchema>
+export type TrailingStopCreateCommand = z.infer<typeof TrailingStopCreateCommandSchema>
+export type TrailingStopCancelCommand = z.infer<typeof TrailingStopCancelCommandSchema>
 export type CreateWalletCommand = z.infer<typeof CreateWalletCommandSchema>
 export type HealthCheckData = z.infer<typeof HealthCheckDataSchema>
 export type JsonObject = z.infer<typeof JsonObjectSchema>

@@ -36,6 +36,7 @@ import type {
   RotateCredentialBody,
   ExecutionPlanResponse,
   BracketCreateBody,
+  TrailingStopCreateBody,
 } from '../types/api'
 
 const queryKeys = {
@@ -681,5 +682,29 @@ export const useCreateBracket = () => {
       queryClient.invalidateQueries({ queryKey: ['positions'] })
       queryClient.invalidateQueries({ queryKey: ['orders'] })
     },
+  })
+}
+
+export const useCreateTrailingStop = () => {
+  const queryClient = useQueryClient()
+
+  return useMutation<ExecutionPlanResponse, Error, TrailingStopCreateBody>({
+    mutationFn: body => apiClient.createTrailingStop(body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['positions'] })
+      queryClient.invalidateQueries({ queryKey: ['orders'] })
+      queryClient.invalidateQueries({ queryKey: ['trailingStopState'] })
+    },
+  })
+}
+
+export const useTrailingStopForCycle = (cyclePublicId: string | undefined) => {
+  const isTimeTraveling = useAppStore(s => s.isTimeTraveling)
+
+  return useQuery({
+    queryKey: ['trailingStopState', cyclePublicId],
+    queryFn: () => apiClient.getTrailingStopByCycle(cyclePublicId as string),
+    enabled: !!cyclePublicId && !isTimeTraveling,
+    refetchInterval: 5000,
   })
 }

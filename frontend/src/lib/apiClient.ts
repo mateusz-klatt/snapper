@@ -80,6 +80,9 @@ import type {
   ExecutionPlanResponse,
   BracketCreateBody,
   BracketCancelBody,
+  TrailingStopCreateBody,
+  TrailingStopCancelBody,
+  TrailingStopByCycleResult,
 } from '../types/api'
 
 interface RequestOptions {
@@ -569,6 +572,29 @@ class APIClient {
     const data = await this.getJSON(`/api/execution-plans/${encodeURIComponent(planPublicId)}`)
 
     return validateResponse(data, ExecutionPlanResponseSchema, '/execution-plans/:id')
+  }
+  async createTrailingStop(body: TrailingStopCreateBody): Promise<ExecutionPlanResponse> {
+    const data = await this.postJSON('/api/trailing-stops', body)
+
+    return validateResponse(data, ExecutionPlanResponseSchema, '/trailing-stops POST')
+  }
+  async cancelTrailingStop(
+    planPublicId: string,
+    body?: TrailingStopCancelBody
+  ): Promise<ExecutionPlanResponse> {
+    const data = await this.postJSON(
+      `/api/trailing-stops/${encodeURIComponent(planPublicId)}/cancel`,
+      body ?? {}
+    )
+
+    return validateResponse(data, ExecutionPlanResponseSchema, '/trailing-stops/:id/cancel POST')
+  }
+  async getTrailingStopByCycle(cyclePublicId: string): Promise<TrailingStopByCycleResult> {
+    const data = await this.getJSON(
+      `/api/trailing-stops/by-cycle/${encodeURIComponent(cyclePublicId)}`
+    )
+
+    return data as TrailingStopByCycleResult
   }
   async getConfiguredProcesses(): Promise<ConfiguredProcessesResponse> {
     const data = await this.getJSON('/api/processes/configured')

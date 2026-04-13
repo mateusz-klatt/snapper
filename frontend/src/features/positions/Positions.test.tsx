@@ -5,6 +5,12 @@ import type { ReactNode } from 'react'
 import { Positions } from './Positions'
 import type { Position } from '../../types/entities'
 
+vi.mock('../../stores/app', () => ({
+  useAppStore: vi.fn((selector: (s: { isTimeTraveling: boolean }) => boolean) =>
+    selector({ isTimeTraveling: false })
+  ),
+}))
+
 vi.mock('../../hooks/queries', () => ({
   usePositions: vi.fn(() => ({
     data: [],
@@ -14,6 +20,14 @@ vi.mock('../../hooks/queries', () => ({
     mutate: vi.fn(),
     isPending: false,
     reset: vi.fn(),
+  })),
+  useCreateTrailingStop: vi.fn(() => ({
+    mutate: vi.fn(),
+    isPending: false,
+    reset: vi.fn(),
+  })),
+  useTrailingStopForCycle: vi.fn(() => ({
+    data: null,
   })),
 }))
 
@@ -275,5 +289,154 @@ describe('Positions', () => {
     expect(screen.getByText('Attach SL/TP — BTC-USD')).toBeInTheDocument()
     fireEvent.click(screen.getByLabelText('Close'))
     expect(screen.queryByText('Attach SL/TP — BTC-USD')).not.toBeInTheDocument()
+  })
+
+  it('shows Trail button when position has an open cycle', async () => {
+    const pos = makePosition({
+      quantity: 1.5,
+      positionCyclePublicId: 'cycle-123',
+    })
+    const { usePositions } = await import('../../hooks/queries')
+
+    vi.mocked(usePositions).mockReturnValue({
+      data: [pos],
+      isLoading: false,
+    } as never)
+    renderWithProviders(<Positions />)
+    expect(screen.getByTestId('attach-trailing-stop-BTC-USD-kraken-live')).toBeInTheDocument()
+  })
+
+  it('hides Trail button when position has no cycle', async () => {
+    const pos = makePosition({
+      quantity: 1.5,
+      positionCyclePublicId: null,
+    })
+    const { usePositions } = await import('../../hooks/queries')
+
+    vi.mocked(usePositions).mockReturnValue({
+      data: [pos],
+      isLoading: false,
+    } as never)
+    renderWithProviders(<Positions />)
+    expect(screen.queryByTestId('attach-trailing-stop-BTC-USD-kraken-live')).not.toBeInTheDocument()
+  })
+
+  it('opens trailing stop modal when Trail button is clicked', async () => {
+    const pos = makePosition({
+      quantity: 1.5,
+      positionCyclePublicId: 'cycle-123',
+    })
+    const { usePositions } = await import('../../hooks/queries')
+
+    vi.mocked(usePositions).mockReturnValue({
+      data: [pos],
+      isLoading: false,
+    } as never)
+    renderWithProviders(<Positions />)
+    fireEvent.click(screen.getByTestId('attach-trailing-stop-BTC-USD-kraken-live'))
+    expect(screen.getByText('Attach Trailing Stop — BTC-USD')).toBeInTheDocument()
+  })
+
+  it('closes trailing stop modal when onClose fires', async () => {
+    const pos = makePosition({
+      quantity: 1.5,
+      positionCyclePublicId: 'cycle-123',
+    })
+    const { usePositions } = await import('../../hooks/queries')
+
+    vi.mocked(usePositions).mockReturnValue({
+      data: [pos],
+      isLoading: false,
+    } as never)
+    renderWithProviders(<Positions />)
+    fireEvent.click(screen.getByTestId('attach-trailing-stop-BTC-USD-kraken-live'))
+    expect(screen.getByText('Attach Trailing Stop — BTC-USD')).toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('Close'))
+    expect(screen.queryByText('Attach Trailing Stop — BTC-USD')).not.toBeInTheDocument()
+  })
+
+  it('hides buttons and badge when time traveling', async () => {
+    const { useAppStore } = await import('../../stores/app')
+
+    vi.mocked(useAppStore).mockImplementation(((
+      selector: (s: { isTimeTraveling: boolean }) => boolean
+    ) => selector({ isTimeTraveling: true })) as never)
+    const pos = makePosition({
+      quantity: 1.5,
+      positionCyclePublicId: 'cycle-123',
+    })
+    const { usePositions } = await import('../../hooks/queries')
+
+    vi.mocked(usePositions).mockReturnValue({
+      data: [pos],
+      isLoading: false,
+    } as never)
+    renderWithProviders(<Positions />)
+    expect(screen.queryByTestId('attach-bracket-BTC-USD-kraken-live')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('attach-trailing-stop-BTC-USD-kraken-live')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('trailing-stop-badge')).not.toBeInTheDocument()
+
+    vi.mocked(useAppStore).mockImplementation(((
+      selector: (s: { isTimeTraveling: boolean }) => boolean
+    ) => selector({ isTimeTraveling: false })) as never)
+  })
+
+  it('shows trailing stop badge when active stop exists', async () => {
+    const pos = makePosition({
+      quantity: 1.5,
+      positionCyclePublicId: 'cycle-123',
+    })
+    const { usePositions, useTrailingStopForCycle } = await import('../../hooks/queries')
+
+    vi.mocked(usePositions).mockReturnValue({
+      data: [pos],
+      isLoading: false,
+    } as never)
+    vi.mocked(useTrailingStopForCycle).mockReturnValue({
+      data: { type: 'trailing_stop_state', payload: { current_stop: 95000 } },
+    } as never)
+    renderWithProviders(<Positions />)
+    const badge = screen.getByTestId('trailing-stop-badge')
+
+    expect(badge).toHaveTextContent('TS: $95000.00')
+  })
+
+  it('shows pending badge when stop is not yet activated', async () => {
+    const pos = makePosition({
+      quantity: 1.5,
+      positionCyclePublicId: 'cycle-123',
+    })
+    const { usePositions, useTrailingStopForCycle } = await import('../../hooks/queries')
+
+    vi.mocked(usePositions).mockReturnValue({
+      data: [pos],
+      isLoading: false,
+    } as never)
+    vi.mocked(useTrailingStopForCycle).mockReturnValue({
+      data: { type: 'trailing_stop_state', payload: { current_stop: 0 } },
+    } as never)
+    renderWithProviders(<Positions />)
+    const badge = screen.getByTestId('trailing-stop-badge')
+
+    expect(badge).toHaveTextContent('TS: pending')
+  })
+
+  it('hides badge when response is message type (no trailing stop)', async () => {
+    const pos = makePosition({
+      quantity: 1.5,
+      positionCyclePublicId: 'cycle-123',
+    })
+    const { usePositions, useTrailingStopForCycle } = await import('../../hooks/queries')
+
+    vi.mocked(usePositions).mockReturnValue({
+      data: [pos],
+      isLoading: false,
+    } as never)
+    vi.mocked(useTrailingStopForCycle).mockReturnValue({
+      data: { type: 'message', payload: 'none' },
+    } as never)
+    renderWithProviders(<Positions />)
+
+    expect(screen.queryByTestId('trailing-stop-badge')).not.toBeInTheDocument()
   })
 })

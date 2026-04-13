@@ -2382,5 +2382,50 @@ describe('cacheWsTicketFromResponse', () => {
         expect.objectContaining({ method: 'GET' })
       )
     })
+    it('createTrailingStop posts to /api/trailing-stops', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => planResponse,
+      })
+      const result = await apiClient.createTrailingStop({
+        position_cycle_public_id: 'cycle-1',
+        trailing_pct: 5,
+      })
+
+      expect(result.payload.plan_type).toBe('bracket')
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/trailing-stops'),
+        expect.objectContaining({ method: 'POST' })
+      )
+    })
+    it('cancelTrailingStop posts to /api/trailing-stops/{id}/cancel', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => planResponse,
+      })
+      const result = await apiClient.cancelTrailingStop('ts-1')
+
+      expect(result.payload.public_id).toBe('plan-1')
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/trailing-stops/ts-1/cancel'),
+        expect.objectContaining({ method: 'POST' })
+      )
+    })
+    it('getTrailingStopByCycle fetches /api/trailing-stops/by-cycle/{id}', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ type: 'message', payload: 'none' }),
+      })
+      const result = await apiClient.getTrailingStopByCycle('cycle-1')
+
+      expect(result).toEqual({ type: 'message', payload: 'none' })
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/trailing-stops/by-cycle/cycle-1'),
+        expect.objectContaining({ method: 'GET' })
+      )
+    })
   })
 })

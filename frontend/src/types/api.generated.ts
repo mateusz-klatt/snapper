@@ -1339,6 +1339,184 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
+    "/api/trailing-stops": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create Trailing Stop
+         * @description Create a trailing stop execution plan on an open position cycle.
+         *
+         *     Validates the cycle is open, the caller has wallet access, the venue
+         *     supports reduce_only, and trailing_pct is within bounds. The trailing
+         *     stop is created with status=armed and immediately starts watching ticks.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker + app state).
+         *         principal: Authenticated caller holding CREATE_ORDERS.
+         *         _csrf: CSRF token validation.
+         *         command: Trailing stop create command envelope.
+         *         repo: Repository dependency.
+         *
+         *     Returns:
+         *         ExecutionPlanResponse wrapping the new armed trailing stop plan.
+         *
+         *     Raises:
+         *         HTTPException: 422 if params invalid or capability missing,
+         *             409 if cycle not open or duplicate, 403 if wallet not
+         *             accessible, 503 if executor unavailable.
+         */
+        post: Operations["create_trailing_stop_api_trailing_stops_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/trailing-stops/{plan_public_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel Trailing Stop
+         * @description Cancel a trailing stop execution plan.
+         *
+         *     Armed trailing stops (no child orders yet) transition directly to cancelled.
+         *     Active trailing stops (child orders in-flight) transition to cancel_requested
+         *     and emit cancel TradeCommands.
+         *
+         *     Args:
+         *         request: FastAPI request.
+         *         plan_public_id: Trailing stop plan to cancel.
+         *         principal: Authenticated caller holding CANCEL_ORDERS.
+         *         _csrf: CSRF token validation.
+         *         command: Cancel command envelope.
+         *         repo: Repository dependency.
+         *
+         *     Returns:
+         *         ExecutionPlanResponse wrapping the updated plan.
+         *
+         *     Raises:
+         *         HTTPException: 404 if not found, 409 if already terminal,
+         *             403 if wallet not accessible, 503 if executor unavailable.
+         */
+        post: Operations["cancel_trailing_stop_api_trailing_stops__plan_public_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/trailing-stops/{plan_public_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Trailing Stop
+         * @description Retrieve a single trailing stop plan by public_id.
+         *
+         *     Args:
+         *         request: FastAPI request.
+         *         plan_public_id: Plan to retrieve.
+         *         principal: Authenticated caller holding READ_ORDERS.
+         *         repo: Repository dependency.
+         *
+         *     Returns:
+         *         ExecutionPlanResponse wrapping the plan.
+         *
+         *     Raises:
+         *         HTTPException: 404 if not found, 403 if wallet not accessible.
+         */
+        get: Operations["get_trailing_stop_api_trailing_stops__plan_public_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/trailing-stops/{plan_public_id}/decisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Trailing Stop Decisions
+         * @description List decision audit rows for a trailing stop plan.
+         *
+         *     Args:
+         *         request: FastAPI request.
+         *         plan_public_id: Plan to query decisions for.
+         *         principal: Authenticated caller holding READ_ORDERS.
+         *         repo: Repository dependency.
+         *         importance: Optional importance filter (action/transition/routine).
+         *         limit: Maximum rows to return.
+         *         offset: Number of rows to skip.
+         *
+         *     Returns:
+         *         Dict with decisions list and count.
+         *
+         *     Raises:
+         *         HTTPException: 404 if plan not found, 403 if wallet not accessible.
+         */
+        get: Operations["list_trailing_stop_decisions_api_trailing_stops__plan_public_id__decisions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/trailing-stops/by-cycle/{cycle_public_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Trailing Stop By Cycle
+         * @description Get live trailing stop state for a position cycle.
+         *
+         *     Returns the active trailing stop's live evaluator state (peak_price,
+         *     current_stop) if one exists. Returns a message payload if no active
+         *     trailing stop is found.
+         *
+         *     Args:
+         *         request: FastAPI request.
+         *         cycle_public_id: Position cycle to look up.
+         *         principal: Authenticated caller holding READ_ORDERS.
+         *         repo: Repository dependency.
+         *
+         *     Returns:
+         *         TrailingStopStateResponse with live state, or message payload.
+         */
+        get: Operations["get_trailing_stop_by_cycle_api_trailing_stops_by_cycle__cycle_public_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/candles": {
         parameters: {
             query?: never;
@@ -4994,6 +5172,69 @@ export type Components = {
             pattern?: string | null;
         };
         /**
+         * TrailingStopStateData
+         * @description Live trailing stop state from evaluator memory.
+         */
+        TrailingStopStateData: {
+            /**
+             * Type
+             * @default trailing_stop_state
+             * @constant
+             */
+            type: "trailing_stop_state";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Plan Public Id */
+            plan_public_id: string;
+            /** Status */
+            status: string;
+            /** Trailing Pct */
+            trailing_pct: number;
+            /** Min Lock Pct */
+            min_lock_pct: number;
+            /** Entry Price */
+            entry_price: number;
+            /** Peak Price */
+            peak_price: number;
+            /** Current Stop */
+            current_stop: number;
+            /** Side */
+            side: string;
+        };
+        /**
+         * TrailingStopStateResponse
+         * @description Response wrapping live trailing stop state.
+         */
+        TrailingStopStateResponse: {
+            /**
+             * Type
+             * @default trailing_stop_state
+             * @constant
+             */
+            type: "trailing_stop_state";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["TrailingStopStateData"];
+        };
+        /**
          * UnderlyingAssetData
          * @description Underlying asset with instrument count.
          *
@@ -6556,6 +6797,83 @@ export type Components = {
             reason?: string | null;
         };
         /**
+         * TrailingStopCreateCommand
+         * @description Request envelope for POST /api/trailing-stops.
+         */
+        TrailingStopCreateCommand: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "create_trailing_stop_command";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["TrailingStopCreateBody"];
+        };
+        /**
+         * TrailingStopCreateBody
+         * @description Request body for POST /api/trailing-stops.
+         *
+         *     Attributes:
+         *         position_cycle_public_id: Target position cycle to protect.
+         *         trailing_pct: Trailing distance as percentage (e.g., 2.0 = 2%).
+         *         min_lock_pct: Minimum profit % before trailing activates (0 = immediate).
+         *         idempotency_key: Optional dedup key for retries.
+         */
+        TrailingStopCreateBody: {
+            /** Position Cycle Public Id */
+            position_cycle_public_id: string;
+            /** Trailing Pct */
+            trailing_pct: number;
+            /** Min Lock Pct */
+            min_lock_pct?: number;
+            /** Idempotency Key */
+            idempotency_key?: string | null;
+        };
+        /**
+         * TrailingStopCancelCommand
+         * @description Request envelope for POST /api/trailing-stops/{id}/cancel.
+         */
+        TrailingStopCancelCommand: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "cancel_trailing_stop_command";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["TrailingStopCancelBody"];
+        };
+        /**
+         * TrailingStopCancelBody
+         * @description Request body for POST /api/trailing-stops/{id}/cancel.
+         *
+         *     Attributes:
+         *         reason: Optional human-readable cancellation reason.
+         */
+        TrailingStopCancelBody: {
+            /** Reason */
+            reason?: string | null;
+        };
+        /**
          * CreateWalletCommand
          * @description Request envelope for ``POST /api/wallets``.
          */
@@ -7888,6 +8206,166 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["OrphanSweepResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_trailing_stop_api_trailing_stops_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["TrailingStopCreateCommand"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["ExecutionPlanResponse"];
+                };
+            };
+        };
+    };
+    cancel_trailing_stop_api_trailing_stops__plan_public_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                plan_public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["TrailingStopCancelCommand"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["ExecutionPlanResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_trailing_stop_api_trailing_stops__plan_public_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                plan_public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["ExecutionPlanResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_trailing_stop_decisions_api_trailing_stops__plan_public_id__decisions_get: {
+        parameters: {
+            query?: {
+                importance?: string | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                plan_public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_trailing_stop_by_cycle_api_trailing_stops_by_cycle__cycle_public_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                cycle_public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["TrailingStopStateResponse"] | {
+                        [key: string]: unknown;
+                    };
                 };
             };
             /** @description Validation Error */

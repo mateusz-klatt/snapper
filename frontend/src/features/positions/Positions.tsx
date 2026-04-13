@@ -1,11 +1,14 @@
 import React, { useState } from 'react'
 import clsx from 'clsx'
-import { Shield } from 'lucide-react'
-import { usePositions } from '../../hooks/queries'
+import { Shield, TrendingDown } from 'lucide-react'
+import { usePositions, useTrailingStopForCycle } from '../../hooks/queries'
+import { useAppStore } from '../../stores/app'
 import { OrderCardSkeleton } from '../../components/Skeleton'
 import { EmptyState } from '../../components/ui'
 import { AttachBracketModal } from './AttachBracketModal'
+import { AttachTrailingStopModal } from './AttachTrailingStopModal'
 import type { Position } from '../../types/entities'
+import type { TrailingStopByCycleResult } from '../../types/api'
 
 type PositionSide = 'LONG' | 'SHORT' | 'FLAT'
 
@@ -52,14 +55,40 @@ const positionIdSuffix = (position: Position): string =>
 interface PositionRowProps {
   position: Position
   onAttachBracket: (position: Position) => void
+  onAttachTrailingStop: (position: Position) => void
+  isTimeTraveling: boolean
 }
 
-const PositionRow: React.FC<PositionRowProps> = ({ position, onAttachBracket }) => {
+const TrailingStopBadge: React.FC<{ cyclePublicId: string | undefined }> = ({ cyclePublicId }) => {
+  const { data } = useTrailingStopForCycle(cyclePublicId)
+
+  if (!data) return null
+  const result = data as TrailingStopByCycleResult
+
+  if (result.type === 'message') return null
+  const currentStop = result.payload.current_stop ?? 0
+
+  return (
+    <span
+      className='rounded-full bg-brand-900/20 px-2 py-1 text-xs font-medium text-brand-400'
+      data-testid='trailing-stop-badge'
+    >
+      {currentStop > 0 ? `TS: $${currentStop.toFixed(2)}` : 'TS: pending'}
+    </span>
+  )
+}
+
+const PositionRow: React.FC<PositionRowProps> = ({
+  position,
+  onAttachBracket,
+  onAttachTrailingStop,
+  isTimeTraveling,
+}) => {
   const side = getPositionSide(position.quantity)
   const absQuantity = Math.abs(position.quantity)
   const suffix = positionIdSuffix(position)
   const hasCycle = !!position.positionCyclePublicId
-  const canAttachBracket = hasCycle && side !== 'FLAT'
+  const canAttach = hasCycle && side !== 'FLAT' && !isTimeTraveling
 
   return (
     <div
@@ -76,18 +105,34 @@ const PositionRow: React.FC<PositionRowProps> = ({ position, onAttachBracket }) 
           >
             {side}
           </span>
+          {!isTimeTraveling && hasCycle && side !== 'FLAT' && (
+            <TrailingStopBadge cyclePublicId={position.positionCyclePublicId ?? undefined} />
+          )}
         </div>
-        {canAttachBracket && (
-          <button
-            type='button'
-            onClick={() => onAttachBracket(position)}
-            className='flex items-center gap-1 rounded-lg border border-brand-500 px-2 py-1 text-xs font-medium text-brand-500 transition-colors hover:bg-brand-900/20'
-            data-testid={`attach-bracket-${suffix}`}
-          >
-            <Shield size={12} />
-            SL/TP
-          </button>
-        )}
+        <div className='flex items-center gap-2'>
+          {canAttach && (
+            <button
+              type='button'
+              onClick={() => onAttachBracket(position)}
+              className='flex items-center gap-1 rounded-lg border border-brand-500 px-2 py-1 text-xs font-medium text-brand-500 transition-colors hover:bg-brand-900/20'
+              data-testid={`attach-bracket-${suffix}`}
+            >
+              <Shield size={12} />
+              SL/TP
+            </button>
+          )}
+          {canAttach && (
+            <button
+              type='button'
+              onClick={() => onAttachTrailingStop(position)}
+              className='flex items-center gap-1 rounded-lg border border-brand-500 px-2 py-1 text-xs font-medium text-brand-500 transition-colors hover:bg-brand-900/20'
+              data-testid={`attach-trailing-stop-${suffix}`}
+            >
+              <TrendingDown size={12} />
+              Trail
+            </button>
+          )}
+        </div>
       </div>
       <div className='grid grid-cols-2 gap-4 text-sm md:grid-cols-4'>
         <div>
@@ -128,14 +173,22 @@ const PositionRow: React.FC<PositionRowProps> = ({ position, onAttachBracket }) 
 
 export const Positions: React.FC = () => {
   const { data: positions = [], isLoading } = usePositions()
+  const isTimeTraveling = useAppStore(s => s.isTimeTraveling)
   const [bracketTarget, setBracketTarget] = useState<Position | null>(null)
+  const [trailingStopTarget, setTrailingStopTarget] = useState<Position | null>(null)
 
   const handleAttachBracket = (position: Position) => {
     setBracketTarget(position)
   }
 
+  const handleAttachTrailingStop = (position: Position) => {
+    setTrailingStopTarget(position)
+  }
+
   const bracketSide =
     bracketTarget && bracketTarget.quantity > 0 ? ('LONG' as const) : ('SHORT' as const)
+  const trailingStopSide =
+    trailingStopTarget && trailingStopTarget.quantity > 0 ? ('LONG' as const) : ('SHORT' as const)
 
   return (
     <div className='space-y-6'>
@@ -147,6 +200,16 @@ export const Positions: React.FC = () => {
           instrument={bracketTarget.instrument}
           side={bracketSide}
           averagePrice={bracketTarget.averagePrice}
+        />
+      )}
+      {trailingStopTarget?.positionCyclePublicId && (
+        <AttachTrailingStopModal
+          open={true}
+          onClose={() => setTrailingStopTarget(null)}
+          positionCyclePublicId={trailingStopTarget.positionCyclePublicId}
+          instrument={trailingStopTarget.instrument}
+          side={trailingStopSide}
+          averagePrice={trailingStopTarget.averagePrice}
         />
       )}
       <div className='flex items-center justify-between'>
@@ -183,6 +246,8 @@ export const Positions: React.FC = () => {
                 key={positionIdSuffix(position)}
                 position={position}
                 onAttachBracket={handleAttachBracket}
+                onAttachTrailingStop={handleAttachTrailingStop}
+                isTimeTraveling={isTimeTraveling}
               />
             ))}
           </div>
