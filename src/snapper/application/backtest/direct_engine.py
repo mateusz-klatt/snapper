@@ -1,0 +1,229 @@
+"""Direct-DB backtest engine — candle-driven simulation loop.
+
+Reads historical candles from the database, feeds them to a strategy
+instance, simulates fills via the fill model, and collects results.
+Phase 1 MVP: single execution mode, no ZMQ replay.
+"""
+
+from collections.abc import AsyncIterator
+from datetime import datetime
+from typing import Any
+from typing import NamedTuple
+from typing import cast
+
+from loguru import logger
+
+from snapper.application.backtest.config import BacktestConfig
+from snapper.application.backtest.fill_model import simulate_market_fill
+from snapper.application.backtest.result_collector import ResultCollector
+from snapper.application.portfolio.models import PortfolioTracker
+from snapper.data.repository import Repository
+from snapper.data.repository_types import CandleRow
+from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.schemas.data import CandleData
+from snapper.strategies.factory import StrategyFactory
+from snapper.strategies.models import StrategyConfig
+
+
+class CandleEvent(NamedTuple):
+    """A candle row with exchange/instrument context for sorting."""
+
+    open_at: datetime
+    exchange: str
+    instrument: str
+    row: CandleRow
+
+
+def candle_row_to_data(event: CandleEvent, timeframe: str) -> CandleData:
+    """Convert a CandleEvent to a CandleData schema object.
+
+    Args:
+        event: Candle event with row data.
+        timeframe: Candle timeframe string.
+
+    Returns:
+        CandleData suitable for strategy consumption.
+    """
+    row = event.row
+    return CandleData(
+        public_id=row["public_id"],
+        timestamp=row["timestamp"],
+        session_id=row["session_id"],
+        sequence_id=row["sequence_id"],
+        instrument=event.instrument,
+        exchange=cast(Any, event.exchange),
+        timeframe=timeframe,
+        open_at=row["open_at"],
+        open=row["open"],
+        high=row["high"],
+        low=row["low"],
+        close=row["close"],
+        volume=row["volume"],
+    )
+
+
+async def iter_sorted_candle_chunks(
+    config: BacktestConfig,
+    repository: Repository,
+    snapshot_as_of: datetime,
+    warmup_bars: int = 0,
+) -> AsyncIterator[list[CandleEvent]]:
+    """Async generator yielding sorted candle chunks.
+
+    Loads candles per (exchange, instruments) pair and yields them
+    sorted by (open_at, exchange, instrument) for deterministic ordering.
+
+    Args:
+        config: Backtest configuration with instruments and date range.
+        repository: Database repository for candle queries.
+        snapshot_as_of: Temporal snapshot for all reads.
+        warmup_bars: Extra bars before start_date for indicator warm-up.
+
+    Yields:
+        Lists of CandleEvent sorted by (open_at, exchange, instrument).
+    """
+    all_events: list[CandleEvent] = []
+    for exchange, instruments in config.instruments.items():
+        for instrument in instruments:
+            rows = await repository.get_candles(
+                instrument=instrument,
+                timeframe=config.timeframe,
+                start=None,
+                end=config.end_date,
+                exchange=cast(Any, exchange),
+                as_of=snapshot_as_of,
+                order="asc",
+            )
+            for row in rows:
+                all_events.append(
+                    CandleEvent(
+                        open_at=row["open_at"],
+                        exchange=exchange,
+                        instrument=instrument,
+                        row=row,
+                    )
+                )
+
+    all_events.sort(key=lambda e: (e.open_at, e.exchange, e.instrument))
+    if all_events:
+        yield all_events
+
+
+class DirectDbEngine:
+    """Candle-driven backtest engine using direct DB reads.
+
+    Instantiates a fresh strategy, feeds historical candles through it,
+    simulates fills, and collects results. Returns (portfolio, latest_closes)
+    for the runner to finalize.
+    """
+
+    def __init__(self, repository: Repository, snapshot_as_of: datetime) -> None:
+        """Initialize engine with repository and snapshot time.
+
+        Args:
+            repository: Database repository for candle/instrument queries.
+            snapshot_as_of: Temporal snapshot for all DB reads.
+        """
+        self._repository = repository
+        self._snapshot_as_of = snapshot_as_of
+
+    async def run(
+        self,
+        run_public_id: str,
+        config: BacktestConfig,
+        collector: ResultCollector,
+    ) -> tuple[PortfolioTracker, dict[str, float]]:
+        """Execute the backtest simulation loop.
+
+        Args:
+            run_public_id: Public ID of the backtest run.
+            config: Backtest configuration.
+            collector: Result collector for buffering artifacts.
+
+        Returns:
+            Tuple of (final portfolio state, latest close prices).
+        """
+        all_instruments: list[str] = []
+        for instruments in config.instruments.values():
+            all_instruments.extend(instruments)
+
+        first_exchange = next(iter(config.instruments))
+        strategy = StrategyFactory.STRATEGY_CLASSES[config.strategy_class](
+            StrategyConfig(
+                name=f"bt_{run_public_id[:8]}",
+                strategy_class=config.strategy_class,
+                inputs=[f"candles.{first_exchange}.synthetic.{config.timeframe}"],
+                outputs=all_instruments,
+                exchange=cast(Any, "paper"),
+                params=dict(config.strategy_params),
+            )
+        )
+
+        warmup_bars = strategy.required_candle_history()
+        portfolio = PortfolioTracker(cash=config.initial_balance)
+        latest_closes: dict[str, float] = {}
+        tracker = SequenceTracker()
+
+        async for chunk in iter_sorted_candle_chunks(
+            config, self._repository, self._snapshot_as_of, warmup_bars
+        ):
+            for event in chunk:
+                latest_closes[event.instrument] = float(event.row["close"])
+                candle_data = candle_row_to_data(event, config.timeframe)
+
+                signal = await strategy.on_candle(event.instrument, candle_data)
+
+                if event.open_at < config.start_date:
+                    continue
+
+                if signal is not None:
+                    fill = simulate_market_fill(
+                        exchange=event.exchange,
+                        instrument=event.instrument,
+                        side=str(signal.side),
+                        close_price=float(event.row["close"]),
+                        fill_at=event.open_at,
+                        portfolio=portfolio,
+                        slippage_bps=config.slippage_bps,
+                        commission_bps=config.commission_bps,
+                        signal_strength=getattr(signal, "strength", None),
+                        signal_reason=getattr(signal, "reason", None),
+                    )
+                    if fill is not None:
+                        collector.record_trade(
+                            run_public_id=run_public_id,
+                            fill=fill,
+                            session_id=tracker.session_id,
+                            sequence_id=tracker.next_sequence("bt"),
+                            bus_time=self._snapshot_as_of,
+                        )
+                    collector.record_signal(
+                        run_public_id=run_public_id,
+                        signal_time=event.open_at,
+                        signal_type=str(signal.side),
+                        instrument=event.instrument,
+                        price=float(event.row["close"]),
+                        indicators=getattr(signal, "indicators", {}),
+                        session_id=tracker.session_id,
+                        sequence_id=tracker.next_sequence("bt"),
+                        bus_time=self._snapshot_as_of,
+                    )
+
+                collector.maybe_record_equity(
+                    run_public_id=run_public_id,
+                    point_time=event.open_at,
+                    portfolio=portfolio,
+                    latest_closes=latest_closes,
+                    session_id=tracker.session_id,
+                    sequence_id=tracker.next_sequence("bt"),
+                    bus_time=self._snapshot_as_of,
+                )
+
+        logger.info(
+            "Backtest {} complete: {} signals, {} trades, {} equity points",
+            run_public_id[:8],
+            len(collector.signals),
+            len(collector.trades),
+            len(collector.equity_points),
+        )
+        return portfolio, latest_closes
