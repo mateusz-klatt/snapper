@@ -1826,3 +1826,189 @@ class PositionCycle(TemporalMixin, Base):
     closed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     opening_command_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
     closing_command_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+
+
+class BacktestRun(TemporalMixin, Base):
+    """A single backtest run from creation to completion.
+
+    Status transitions use SCD2 close-and-insert: pending -> running ->
+    completed/failed/cancelled. Multi-tenant via wallet_public_id.
+    """
+
+    __tablename__ = "backtest_runs"
+    __table_args__ = (
+        Index("ix_backtest_runs_wallet_status", "wallet_public_id", "status"),
+        Index(
+            "ix_backtest_runs_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'completed', 'failed', "
+            "'cancel_requested', 'cancelled')",
+            name="ck_br_status",
+        ),
+    )
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    operator_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    strategy_name: Mapped[str] = mapped_column(String(128))
+    strategy_params: Mapped[JsonObject] = mapped_column(JSON, default=dict)
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    exchange: Mapped[str] = mapped_column(String(32))
+    mode: Mapped[str] = mapped_column(String(8), default="paper")
+    timeframe: Mapped[str] = mapped_column(String(16))
+    start_date: Mapped[datetime] = mapped_column(TZDateTime())
+    end_date: Mapped[datetime] = mapped_column(TZDateTime())
+    initial_cash: Mapped[float] = mapped_column(Float, default=10000.0)
+    status: Mapped[str] = mapped_column(String(24), default="pending")
+    created_by_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    process_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+
+class BacktestEvent(TemporalMixin, Base):
+    """Append-only event log for a backtest run.
+
+    Records lifecycle events (started, candle_processed, signal_generated,
+    trade_executed, completed, failed, cancelled). known_to stays MAX.
+    """
+
+    __tablename__ = "backtest_events"
+    __table_args__ = (
+        Index("ix_be_run_ts", "run_public_id", "timestamp"),
+        Index(
+            "ix_be_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+    )
+    run_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    event_type: Mapped[str] = mapped_column(String(64))
+    detail: Mapped[JsonObject] = mapped_column(JSON, default=dict)
+
+
+class BacktestResult(TemporalMixin, Base):
+    """Aggregate metrics for a completed backtest run.
+
+    One-to-one with completed run. On recalculation (bug fix), the old
+    row is SCD2-closed and a new corrected version is inserted.
+    """
+
+    __tablename__ = "backtest_results"
+    __table_args__ = (
+        Index(
+            "uq_br_run_active",
+            "run_public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_bres_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+    )
+    run_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    total_trades: Mapped[int] = mapped_column(Integer, default=0)
+    winning_trades: Mapped[int] = mapped_column(Integer, default=0)
+    losing_trades: Mapped[int] = mapped_column(Integer, default=0)
+    total_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    max_drawdown: Mapped[float] = mapped_column(Float, default=0.0)
+    sharpe_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    win_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    profit_factor: Mapped[float | None] = mapped_column(Float, nullable=True)
+    final_equity: Mapped[float] = mapped_column(Float, default=0.0)
+    max_equity: Mapped[float] = mapped_column(Float, default=0.0)
+    extra_metrics: Mapped[JsonObject] = mapped_column(JSON, default=dict)
+
+
+class BacktestSignal(TemporalMixin, Base):
+    """Immutable signal generated during a backtest.
+
+    Records each strategy signal with its context (candle close price,
+    indicator values). Append-only, known_to stays MAX.
+    """
+
+    __tablename__ = "backtest_signals"
+    __table_args__ = (
+        Index("ix_bs_run_ts", "run_public_id", "signal_time"),
+        Index(
+            "ix_bs_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+    )
+    run_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    signal_time: Mapped[datetime] = mapped_column(TZDateTime())
+    signal_type: Mapped[str] = mapped_column(String(32))
+    instrument: Mapped[str] = mapped_column(String(64))
+    price: Mapped[float] = mapped_column(Float)
+    indicators: Mapped[JsonObject] = mapped_column(JSON, default=dict)
+
+
+class BacktestTrade(TemporalMixin, Base):
+    """Immutable simulated trade fill from a backtest.
+
+    Records entry/exit fills with price, size, fees, and PnL.
+    Append-only, known_to stays MAX.
+    """
+
+    __tablename__ = "backtest_trades"
+    __table_args__ = (
+        Index("ix_bt_run_ts", "run_public_id", "executed_at"),
+        Index(
+            "ix_bt_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+    )
+    run_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    executed_at: Mapped[datetime] = mapped_column(TZDateTime())
+    instrument: Mapped[str] = mapped_column(String(64))
+    side: Mapped[str] = mapped_column(String(8))
+    quantity: Mapped[float] = mapped_column(Float)
+    price: Mapped[float] = mapped_column(Float)
+    fee: Mapped[float] = mapped_column(Float, default=0.0)
+    pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    position_after: Mapped[float] = mapped_column(Float, default=0.0)
+    signal_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+
+
+class BacktestEquityPoint(TemporalMixin, Base):
+    """Immutable equity curve data point from a backtest.
+
+    Records portfolio value at each candle close. Used for equity
+    chart visualization and drawdown calculation.
+    Append-only, known_to stays MAX.
+    """
+
+    __tablename__ = "backtest_equity_points"
+    __table_args__ = (
+        Index("ix_bep_run_ts", "run_public_id", "point_time"),
+        Index(
+            "ix_bep_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+    )
+    run_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    point_time: Mapped[datetime] = mapped_column(TZDateTime())
+    equity: Mapped[float] = mapped_column(Float)
+    cash: Mapped[float] = mapped_column(Float)
+    position_value: Mapped[float] = mapped_column(Float, default=0.0)
+    drawdown: Mapped[float] = mapped_column(Float, default=0.0)

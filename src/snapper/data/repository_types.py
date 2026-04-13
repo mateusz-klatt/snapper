@@ -7,6 +7,7 @@ data transfer.
 """
 
 from datetime import datetime
+from typing import Any
 from typing import NotRequired
 from typing import TypedDict
 
@@ -972,3 +973,210 @@ class PositionCycleInsertRow(TypedDict, total=False):
     session_id: str
     sequence_id: int
     timestamp: datetime
+
+
+class BacktestRunInsertRow(TypedDict, total=False):
+    """Insert payload for backtest_runs."""
+
+    wallet_public_id: str
+    operator_public_id: str | None
+    strategy_name: str
+    strategy_params: dict[str, Any]
+    instrument_public_id: str
+    exchange: str
+    mode: str
+    timeframe: str
+    start_date: datetime
+    end_date: datetime
+    initial_cash: float
+    status: str
+    created_by_user_id: str | None
+    process_name: str | None
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+
+
+class BacktestRunRow(TypedDict):
+    """Read projection for backtest_runs queries."""
+
+    public_id: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+    wallet_public_id: str
+    operator_public_id: str | None
+    strategy_name: str
+    strategy_params: dict[str, Any]
+    instrument_public_id: str
+    exchange: str
+    mode: str
+    timeframe: str
+    start_date: datetime
+    end_date: datetime
+    initial_cash: float
+    status: str
+    created_by_user_id: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    error: str | None
+    process_name: str | None
+
+
+class BacktestEventInsertRow(TypedDict):
+    """Insert payload for backtest_events."""
+
+    run_public_id: str
+    event_type: str
+    detail: dict[str, Any]
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+
+
+class BacktestEventRow(TypedDict):
+    """Read projection for backtest_events."""
+
+    public_id: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+    run_public_id: str
+    event_type: str
+    detail: dict[str, Any]
+
+
+class BacktestResultInsertRow(TypedDict, total=False):
+    """Insert payload for backtest_results."""
+
+    run_public_id: str
+    total_trades: int
+    winning_trades: int
+    losing_trades: int
+    total_pnl: float
+    max_drawdown: float
+    sharpe_ratio: float | None
+    win_rate: float | None
+    profit_factor: float | None
+    final_equity: float
+    max_equity: float
+    extra_metrics: dict[str, Any]
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+
+
+class BacktestResultRow(TypedDict):
+    """Read projection for backtest_results."""
+
+    public_id: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+    run_public_id: str
+    total_trades: int
+    winning_trades: int
+    losing_trades: int
+    total_pnl: float
+    max_drawdown: float
+    sharpe_ratio: float | None
+    win_rate: float | None
+    profit_factor: float | None
+    final_equity: float
+    max_equity: float
+    extra_metrics: dict[str, Any]
+
+
+class BacktestSignalInsertRow(TypedDict):
+    """Insert payload for backtest_signals."""
+
+    run_public_id: str
+    signal_time: datetime
+    signal_type: str
+    instrument: str
+    price: float
+    indicators: dict[str, Any]
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+
+
+class BacktestSignalRow(TypedDict):
+    """Read projection for backtest_signals."""
+
+    public_id: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+    run_public_id: str
+    signal_time: datetime
+    signal_type: str
+    instrument: str
+    price: float
+    indicators: dict[str, Any]
+
+
+class BacktestTradeInsertRow(TypedDict):
+    """Insert payload for backtest_trades."""
+
+    run_public_id: str
+    executed_at: datetime
+    instrument: str
+    side: str
+    quantity: float
+    price: float
+    fee: float
+    pnl: float | None
+    position_after: float
+    signal_public_id: str | None
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+
+
+class BacktestTradeRow(TypedDict):
+    """Read projection for backtest_trades."""
+
+    public_id: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+    run_public_id: str
+    executed_at: datetime
+    instrument: str
+    side: str
+    quantity: float
+    price: float
+    fee: float
+    pnl: float | None
+    position_after: float
+    signal_public_id: str | None
+
+
+class BacktestEquityPointInsertRow(TypedDict):
+    """Insert payload for backtest_equity_points."""
+
+    run_public_id: str
+    point_time: datetime
+    equity: float
+    cash: float
+    position_value: float
+    drawdown: float
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+
+
+class BacktestEquityPointRow(TypedDict):
+    """Read projection for backtest_equity_points."""
+
+    public_id: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+    run_public_id: str
+    point_time: datetime
+    equity: float
+    cash: float
+    position_value: float
+    drawdown: float

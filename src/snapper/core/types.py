@@ -165,6 +165,17 @@ class ProcessRunStatusEnum(StrEnum):
     CANCELLED = "cancelled"
 
 
+class BacktestRunStatusEnum(StrEnum):
+    """Lifecycle state of a backtest run."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCEL_REQUESTED = "cancel_requested"
+    CANCELLED = "cancelled"
+
+
 TradeSide = Literal[TradeSideEnum.BUY, TradeSideEnum.SELL]
 """Direction of a trade: 'buy' for long entry, 'sell' for short/exit."""
 
