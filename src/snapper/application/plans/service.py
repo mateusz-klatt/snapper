@@ -24,6 +24,7 @@ from loguru import logger
 from snapper.application.plans.bracket import BracketEvaluator
 from snapper.application.plans.evaluator import PlanEvaluator
 from snapper.application.plans.manual_once import ManualOnceEvaluator
+from snapper.application.plans.trailing_stop import TrailingStopEvaluator
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
@@ -48,6 +49,7 @@ from snapper.messaging.schemas.messages import parse_message
 _EVALUATOR_REGISTRY: dict[str, type[PlanEvaluator]] = {
     "manual_once": ManualOnceEvaluator,
     "bracket": BracketEvaluator,
+    "trailing_stop": TrailingStopEvaluator,
 }
 
 _CHECKPOINT_INTERVAL_S = 10.0
