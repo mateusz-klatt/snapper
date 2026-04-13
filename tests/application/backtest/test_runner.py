@@ -1,5 +1,6 @@
 """Tests for BacktestRunnerProcess lifecycle orchestration."""
 
+import asyncio
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -330,6 +331,78 @@ class TestBacktestRunnerProcess:
             mock_bt_repo.insert_trades_batch.assert_not_called()
             mock_bt_repo.insert_equity_points_batch.assert_not_called()
             mock_bt_repo.insert_result.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.backtest.runner.get_repository")
+    @patch("snapper.application.backtest.runner.BacktestConfig")
+    async def test_config_validation_failure_transitions_to_failed(
+        self,
+        mock_config_cls: MagicMock,
+        mock_get_repo: MagicMock,
+    ) -> None:
+        """Config validation error before running still marks failed."""
+        run = _make_run_row()
+        mock_repo = MagicMock()
+        mock_repo.session_factory = MagicMock()
+        mock_get_repo.return_value = mock_repo
+
+        mock_config_cls.model_validate.side_effect = ValueError("bad strategy")
+
+        with patch("snapper.application.backtest.runner.BacktestRepository") as mock_bt_repo_cls:
+            mock_bt_repo = AsyncMock()
+            mock_bt_repo.get_run = AsyncMock(return_value=run)
+            mock_bt_repo.insert_event = AsyncMock(return_value="evt-1")
+            mock_bt_repo.update_run_status = AsyncMock(return_value=1)
+            mock_bt_repo_cls.return_value = mock_bt_repo
+
+            runner = BacktestRunnerProcess(run_public_id="run-1", db_url="sqlite://")
+            with pytest.raises(ValueError, match="bad strategy"):
+                await runner.start()
+
+            status_calls = mock_bt_repo.update_run_status.call_args_list
+            assert len(status_calls) == 1
+            assert status_calls[0].kwargs["new_status"] == "failed"
+            assert "bad strategy" in (status_calls[0].kwargs["error"] or "")
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.backtest.runner.get_repository")
+    @patch("snapper.application.backtest.runner.DirectDbEngine")
+    @patch("snapper.application.backtest.runner.BacktestConfig")
+    async def test_cancellation_transitions_to_cancelled(
+        self,
+        mock_config_cls: MagicMock,
+        mock_engine_cls: MagicMock,
+        mock_get_repo: MagicMock,
+    ) -> None:
+        """CancelledError transitions run to cancelled and re-raises."""
+        run = _make_run_row()
+        mock_repo = MagicMock()
+        mock_repo.session_factory = MagicMock()
+        mock_get_repo.return_value = mock_repo
+
+        mock_config = MagicMock()
+        mock_config.strategy_class = "sma_cross"
+        mock_config_cls.model_validate.return_value = mock_config
+
+        mock_engine = AsyncMock()
+        mock_engine.run = AsyncMock(side_effect=asyncio.CancelledError())
+        mock_engine_cls.return_value = mock_engine
+
+        with patch("snapper.application.backtest.runner.BacktestRepository") as mock_bt_repo_cls:
+            mock_bt_repo = AsyncMock()
+            mock_bt_repo.get_run = AsyncMock(return_value=run)
+            mock_bt_repo.insert_event = AsyncMock(return_value="evt-1")
+            mock_bt_repo.update_run_status = AsyncMock(return_value=1)
+            mock_bt_repo_cls.return_value = mock_bt_repo
+
+            runner = BacktestRunnerProcess(run_public_id="run-1", db_url="sqlite://")
+            with pytest.raises(asyncio.CancelledError):
+                await runner.start()
+
+            status_calls = mock_bt_repo.update_run_status.call_args_list
+            assert len(status_calls) == 2
+            assert status_calls[0].kwargs["new_status"] == "running"
+            assert status_calls[1].kwargs["new_status"] == "cancelled"
 
 
 class TestReconcileStaleRuns:

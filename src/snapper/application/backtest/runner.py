@@ -8,6 +8,7 @@ to launch the runner.
 Lifecycle: pending → running → completed | failed | cancelled.
 """
 
+import asyncio
 import traceback
 from datetime import UTC
 from datetime import datetime
@@ -117,6 +118,7 @@ class BacktestRunnerProcess(RegisterableProcess):
         Transitions: pending → running → completed | failed | cancelled.
         On success, persists signals, trades, equity, and result metrics.
         On failure, records error details as an event.
+        On cancellation (asyncio.CancelledError), transitions to cancelled.
         """
         repository = get_repository(self._db_url)
         bt_repo = BacktestRepository(cast(Any, repository).session_factory)
@@ -127,33 +129,33 @@ class BacktestRunnerProcess(RegisterableProcess):
             logger.error("Backtest run {} not found — aborting", self._run_public_id[:8])
             return
 
-        config = BacktestConfig.model_validate(run_to_config_dict(run))
-
-        evt_sid = self._tracker.session_id
-        evt_seq = self._tracker.next_sequence(_BT_EVENTS_STREAM)
-        await bt_repo.insert_event(
-            row={
-                "run_public_id": run["public_id"],
-                "event_type": "run_started",
-                "detail": {"strategy": config.strategy_class},
-                "session_id": evt_sid,
-                "sequence_id": evt_seq,
-                "timestamp": now,
-            },
-            bus_time=now,
-            session_id=evt_sid,
-            sequence_id=evt_seq,
-        )
-        await bt_repo.update_run_status(
-            public_id=run["public_id"],
-            new_status="running",
-            bus_time=now,
-            session_id=self._tracker.session_id,
-            sequence_id=self._tracker.next_sequence(_BT_STATUS_STREAM),
-            started_at=now,
-        )
-
         try:
+            config = BacktestConfig.model_validate(run_to_config_dict(run))
+
+            evt_sid = self._tracker.session_id
+            evt_seq = self._tracker.next_sequence(_BT_EVENTS_STREAM)
+            await bt_repo.insert_event(
+                row={
+                    "run_public_id": run["public_id"],
+                    "event_type": "run_started",
+                    "detail": {"strategy": config.strategy_class},
+                    "session_id": evt_sid,
+                    "sequence_id": evt_seq,
+                    "timestamp": now,
+                },
+                bus_time=now,
+                session_id=evt_sid,
+                sequence_id=evt_seq,
+            )
+            await bt_repo.update_run_status(
+                public_id=run["public_id"],
+                new_status="running",
+                bus_time=now,
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence(_BT_STATUS_STREAM),
+                started_at=now,
+            )
+
             engine = DirectDbEngine(repository, now)
             collector = ResultCollector()
             await engine.run(run["public_id"], config, collector)
@@ -173,6 +175,17 @@ class BacktestRunnerProcess(RegisterableProcess):
                 len(collector.trades),
                 len(collector.equity_points),
             )
+        except asyncio.CancelledError:
+            cancel_now = datetime.now(UTC)
+            await bt_repo.update_run_status(
+                public_id=run["public_id"],
+                new_status="cancelled",
+                bus_time=cancel_now,
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence(_BT_STATUS_STREAM),
+            )
+            logger.info("Backtest {} cancelled", self._run_public_id[:8])
+            raise
         except Exception as exc:
             fail_now = datetime.now(UTC)
             error_msg = str(exc)[:1024]
