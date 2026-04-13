@@ -40,6 +40,7 @@ Example:
 """
 
 import asyncio
+import json as json_mod
 import signal
 import threading
 from datetime import UTC
@@ -1514,6 +1515,7 @@ def backtest_run(
     timeframe: Annotated[str, typer.Option("--timeframe")] = "1h",
     initial_cash: Annotated[float, typer.Option("--initial-cash")] = 10_000.0,
     wallet: Annotated[str, typer.Option("--wallet", help="Wallet public ID")] = "cli",
+    params_json: Annotated[str, typer.Option("--params", help="Strategy params as JSON")] = "{}",
 ) -> None:
     """Run a backtest synchronously via CLI.
 
@@ -1529,9 +1531,11 @@ def backtest_run(
         timeframe: Candle timeframe (default: 1h).
         initial_cash: Starting cash balance (default: 10000).
         wallet: Wallet public ID for run ownership.
+        params_json: Strategy parameters as JSON string.
     """
     start_dt = _parse_utc(start)
     end_dt = _parse_utc(end)
+    strategy_params: dict[str, Any] = json_mod.loads(params_json)
 
     async def run_backtest() -> None:
         bootstrap = BootstrapSettingsLoader()
@@ -1548,13 +1552,14 @@ def backtest_run(
             wallet_public_id=wallet,
             initial_balance=initial_cash,
             timeframe=timeframe,
+            strategy_params=strategy_params,
         )
 
         _, public_id = await bt_repo.create_run(
             row={
                 "wallet_public_id": wallet,
                 "strategy_name": strategy,
-                "strategy_params": {},
+                "strategy_params": strategy_params,
                 "instrument_public_id": instrument,
                 "exchange": exchange,
                 "timeframe": timeframe,
@@ -1783,4 +1788,5 @@ def backtest_rerun(
         timeframe=original["timeframe"],
         initial_cash=original["initial_cash"],
         wallet=original["wallet_public_id"],
+        params_json=json_mod.dumps(original.get("strategy_params", {})),
     )

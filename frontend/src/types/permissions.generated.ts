@@ -22,6 +22,8 @@ export const Permission = {
   MANAGE_WALLET_CREDENTIALS: 'manage:wallet_credentials',
   MANAGE_SCOPE_GRANTS: 'manage:scope_grants',
   IMPERSONATE_OPERATOR: 'impersonate:operator',
+  READ_BACKTESTS: 'read:backtests',
+  MANAGE_BACKTESTS: 'manage:backtests',
 } as const
 
 export type Permission = (typeof Permission)[keyof typeof Permission]
@@ -29,9 +31,9 @@ export type Permission = (typeof Permission)[keyof typeof Permission]
 type UserRole = 'viewer' | 'operator' | 'admin'
 
 export const ROLE_PERMISSIONS: Record<UserRole, readonly Permission[]> = {
-  viewer: ['read:market_data', 'read:orders', 'read:positions', 'read:strategies', 'read:system_status'],
-  operator: ['cancel:orders', 'create:orders', 'manage:positions', 'manage:processes', 'read:market_data', 'read:orders', 'read:positions', 'read:strategies', 'read:system_status', 'start:strategies', 'stop:strategies'],
-  admin: ['cancel:orders', 'configure:strategies', 'configure:system', 'create:orders', 'impersonate:operator', 'manage:positions', 'manage:processes', 'manage:scope_grants', 'manage:users', 'manage:wallet_credentials', 'read:market_data', 'read:orders', 'read:positions', 'read:strategies', 'read:system_status', 'read:wallet_credentials', 'start:strategies', 'stop:strategies'],
+  viewer: ['read:backtests', 'read:market_data', 'read:orders', 'read:positions', 'read:strategies', 'read:system_status'],
+  operator: ['cancel:orders', 'create:orders', 'manage:backtests', 'manage:positions', 'manage:processes', 'read:backtests', 'read:market_data', 'read:orders', 'read:positions', 'read:strategies', 'read:system_status', 'start:strategies', 'stop:strategies'],
+  admin: ['cancel:orders', 'configure:strategies', 'configure:system', 'create:orders', 'impersonate:operator', 'manage:backtests', 'manage:positions', 'manage:processes', 'manage:scope_grants', 'manage:users', 'manage:wallet_credentials', 'read:backtests', 'read:market_data', 'read:orders', 'read:positions', 'read:strategies', 'read:system_status', 'read:wallet_credentials', 'start:strategies', 'stop:strategies'],
 } as const
 
 export const RESOURCE_ACCESS: Record<string, readonly UserRole[]> = {
@@ -45,4 +47,5 @@ export const RESOURCE_ACCESS: Record<string, readonly UserRole[]> = {
   health: ['viewer', 'operator', 'admin'],
   admin: ['admin'],
   settings: ['admin'],
+  backtests: ['viewer', 'operator', 'admin'],
 } as const

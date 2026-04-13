@@ -279,6 +279,234 @@ struct AvailableProcessesResponse: Codable, Sendable {
     }
 }
 
+struct BacktestEventData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let runPublicId: String
+    let eventType: String
+    let detail: [String: AnyCodable]?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case runPublicId = "run_public_id"
+        case eventType = "event_type"
+        case detail
+    }
+}
+
+struct BacktestEventListResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: [BacktestEventData]
+    /// Number of items in payload
+    let count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+        case count
+    }
+}
+
+struct BacktestRunData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let walletPublicId: String
+    let strategyName: String
+    let strategyParams: JsonObject?
+    let instrumentPublicId: String
+    let exchange: String
+    let timeframe: String
+    let startDate: Date
+    let endDate: Date
+    let initialCash: Double
+    let status: String
+    let startedAt: Date?
+    let completedAt: Date?
+    let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case walletPublicId = "wallet_public_id"
+        case strategyName = "strategy_name"
+        case strategyParams = "strategy_params"
+        case instrumentPublicId = "instrument_public_id"
+        case exchange
+        case timeframe
+        case startDate = "start_date"
+        case endDate = "end_date"
+        case initialCash = "initial_cash"
+        case status
+        case startedAt = "started_at"
+        case completedAt = "completed_at"
+        case error
+    }
+}
+
+struct BacktestRunListResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: [BacktestRunData]
+    /// Number of items in payload
+    let count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+        case count
+    }
+}
+
+struct BacktestRunResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: BacktestRunData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct BacktestSignalData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let runPublicId: String
+    let signalTime: Date
+    let signalType: String
+    let instrument: String
+    let price: Double
+    let indicators: [String: AnyCodable]?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case runPublicId = "run_public_id"
+        case signalTime = "signal_time"
+        case signalType = "signal_type"
+        case instrument
+        case price
+        case indicators
+    }
+}
+
+struct BacktestSignalListResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: [BacktestSignalData]
+    /// Number of items in payload
+    let count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+        case count
+    }
+}
+
+struct BacktestTradeData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let runPublicId: String
+    let executedAt: Date
+    let instrument: String
+    let side: String
+    let quantity: Double
+    let price: Double
+    let fee: Double
+    let pnl: Double?
+    let positionAfter: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case runPublicId = "run_public_id"
+        case executedAt = "executed_at"
+        case instrument
+        case side
+        case quantity
+        case price
+        case fee
+        case pnl
+        case positionAfter = "position_after"
+    }
+}
+
+struct BacktestTradeListResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: [BacktestTradeData]
+    /// Number of items in payload
+    let count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+        case count
+    }
+}
+
 struct ConfiguredProcess: Codable, Sendable {
     let type: String?
     let sequenceId: Int
@@ -2718,6 +2946,32 @@ struct RemoveSettingRequest: Codable, Sendable {
 }
 
 struct RemoveSettingBody: Codable, Sendable {
+}
+
+struct BacktestCreateBody: Codable, Sendable {
+    let strategyClass: String
+    let instrumentPublicId: String
+    let exchange: String
+    let timeframe: String?
+    let startDate: Date
+    let endDate: Date
+    let initialCash: Double?
+    let strategyParams: JsonObject?
+
+    enum CodingKeys: String, CodingKey {
+        case strategyClass = "strategy_class"
+        case instrumentPublicId = "instrument_public_id"
+        case exchange
+        case timeframe
+        case startDate = "start_date"
+        case endDate = "end_date"
+        case initialCash = "initial_cash"
+        case strategyParams = "strategy_params"
+    }
+}
+
+struct BacktestCancelBody: Codable, Sendable {
+    let reason: String?
 }
 
 struct CreateCredentialCommand: Codable, Sendable {

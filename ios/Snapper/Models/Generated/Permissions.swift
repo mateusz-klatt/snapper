@@ -22,12 +22,14 @@ enum Permission: String, CaseIterable, Codable, Sendable {
     case manageWalletCredentials = "manage:wallet_credentials"
     case manageScopeGrants = "manage:scope_grants"
     case impersonateOperator = "impersonate:operator"
+    case readBacktests = "read:backtests"
+    case manageBacktests = "manage:backtests"
 }
 
 let rolePermissions: [UserRole: [Permission]] = [
-    .viewer: [.readMarketData, .readOrders, .readPositions, .readStrategies, .readSystemStatus],
-    .operatorRole: [.cancelOrders, .createOrders, .managePositions, .manageProcesses, .readMarketData, .readOrders, .readPositions, .readStrategies, .readSystemStatus, .startStrategies, .stopStrategies],
-    .admin: [.cancelOrders, .configureStrategies, .configureSystem, .createOrders, .impersonateOperator, .managePositions, .manageProcesses, .manageScopeGrants, .manageUsers, .manageWalletCredentials, .readMarketData, .readOrders, .readPositions, .readStrategies, .readSystemStatus, .readWalletCredentials, .startStrategies, .stopStrategies],
+    .viewer: [.readBacktests, .readMarketData, .readOrders, .readPositions, .readStrategies, .readSystemStatus],
+    .operatorRole: [.cancelOrders, .createOrders, .manageBacktests, .managePositions, .manageProcesses, .readBacktests, .readMarketData, .readOrders, .readPositions, .readStrategies, .readSystemStatus, .startStrategies, .stopStrategies],
+    .admin: [.cancelOrders, .configureStrategies, .configureSystem, .createOrders, .impersonateOperator, .manageBacktests, .managePositions, .manageProcesses, .manageScopeGrants, .manageUsers, .manageWalletCredentials, .readBacktests, .readMarketData, .readOrders, .readPositions, .readStrategies, .readSystemStatus, .readWalletCredentials, .startStrategies, .stopStrategies],
 ]
 
 let resourceAccess: [String: [UserRole]] = [
@@ -41,4 +43,5 @@ let resourceAccess: [String: [UserRole]] = [
     "health": [.viewer, .operatorRole, .admin],
     "admin": [.admin],
     "settings": [.admin],
+    "backtests": [.viewer, .operatorRole, .admin],
 ]

@@ -1517,6 +1517,235 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
+    "/api/backtests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Backtests
+         * @description List backtest runs with optional filters.
+         *
+         *     Args:
+         *         request: FastAPI request.
+         *         principal: Authenticated caller with READ_BACKTESTS.
+         *         repo: Database repository.
+         *         as_of: Temporal query parameter.
+         *         strategy: Optional strategy filter.
+         *         run_status: Optional status filter.
+         *         limit: Page size.
+         *         offset: Page offset.
+         *
+         *     Returns:
+         *         List of backtest runs.
+         */
+        get: Operations["list_backtests_api_backtests_get"];
+        put?: never;
+        /**
+         * Create Backtest
+         * @description Create and launch a new backtest run.
+         *
+         *     Args:
+         *         request: FastAPI request.
+         *         body: Validated create body.
+         *         principal: Authenticated caller with MANAGE_BACKTESTS.
+         *         repo: Database repository.
+         *
+         *     Returns:
+         *         Created backtest run response.
+         */
+        post: Operations["create_backtest_api_backtests_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/backtests/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Backtest
+         * @description Get backtest run detail.
+         *
+         *     Args:
+         *         run_id: Run public ID.
+         *         request: FastAPI request.
+         *         principal: Authenticated caller.
+         *         repo: Database repository.
+         *         as_of: Temporal query parameter.
+         *
+         *     Returns:
+         *         Backtest run detail with result if completed.
+         */
+        get: Operations["get_backtest_api_backtests__run_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/backtests/{run_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel Backtest
+         * @description Cancel a running or pending backtest run.
+         *
+         *     Args:
+         *         run_id: Run public ID.
+         *         request: FastAPI request.
+         *         body: Cancel body with optional reason.
+         *         principal: Authenticated caller with MANAGE_BACKTESTS.
+         *         repo: Database repository.
+         *
+         *     Returns:
+         *         Updated backtest run.
+         */
+        post: Operations["cancel_backtest_api_backtests__run_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/backtests/{run_id}/rerun": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rerun Backtest
+         * @description Re-run a backtest with the same configuration.
+         *
+         *     Args:
+         *         run_id: Original run public ID.
+         *         request: FastAPI request.
+         *         principal: Authenticated caller with MANAGE_BACKTESTS.
+         *         repo: Database repository.
+         *
+         *     Returns:
+         *         Newly created backtest run.
+         */
+        post: Operations["rerun_backtest_api_backtests__run_id__rerun_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/backtests/{run_id}/trades": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Backtest Trades
+         * @description Get trades for a backtest run.
+         *
+         *     Args:
+         *         run_id: Run public ID.
+         *         request: FastAPI request.
+         *         principal: Authenticated caller.
+         *         repo: Database repository.
+         *         as_of: Temporal query.
+         *         limit: Page size.
+         *         offset: Page offset.
+         *
+         *     Returns:
+         *         List of backtest trades.
+         */
+        get: Operations["get_backtest_trades_api_backtests__run_id__trades_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/backtests/{run_id}/signals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Backtest Signals
+         * @description Get signals for a backtest run.
+         *
+         *     Args:
+         *         run_id: Run public ID.
+         *         request: FastAPI request.
+         *         principal: Authenticated caller.
+         *         repo: Database repository.
+         *         as_of: Temporal query.
+         *         limit: Page size.
+         *         offset: Page offset.
+         *
+         *     Returns:
+         *         List of backtest signals.
+         */
+        get: Operations["get_backtest_signals_api_backtests__run_id__signals_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/backtests/{run_id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Backtest Events
+         * @description Get events for a backtest run.
+         *
+         *     Args:
+         *         run_id: Run public ID.
+         *         request: FastAPI request.
+         *         principal: Authenticated caller.
+         *         repo: Database repository.
+         *         as_of: Temporal query.
+         *
+         *     Returns:
+         *         List of backtest events.
+         */
+        get: Operations["get_backtest_events_api_backtests__run_id__events_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/candles": {
         parameters: {
             query?: never;
@@ -2137,6 +2366,366 @@ export type Components = {
             session_id: string;
             /** Payload */
             payload: Components["schemas"]["AvailableProcess"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
+            count: number;
+        };
+        /**
+         * BacktestEventData
+         * @description Backtest event payload.
+         *
+         *     Attributes:
+         *         type: Payload discriminator.
+         *         run_public_id: Parent run.
+         *         event_type: Event classification.
+         *         detail: Event-specific data.
+         */
+        BacktestEventData: {
+            /**
+             * Type
+             * @default backtest_event
+             * @constant
+             */
+            type: "backtest_event";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Run Public Id */
+            run_public_id: string;
+            /** Event Type */
+            event_type: string;
+            /** Detail */
+            detail?: {
+                [key: string]: unknown;
+            };
+        };
+        /**
+         * BacktestEventListResponse
+         * @description List of backtest events response.
+         */
+        BacktestEventListResponse: {
+            /**
+             * Type
+             * @default backtest_event_list
+             * @constant
+             */
+            type: "backtest_event_list";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Payload */
+            payload: Components["schemas"]["BacktestEventData"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
+            count: number;
+        };
+        /**
+         * BacktestRunData
+         * @description Backtest run detail payload.
+         *
+         *     Attributes:
+         *         type: Payload discriminator.
+         *         wallet_public_id: Owning wallet.
+         *         strategy_name: Strategy class name.
+         *         strategy_params: Strategy parameters.
+         *         instrument_public_id: Target instrument.
+         *         exchange: Exchange name.
+         *         timeframe: Candle timeframe.
+         *         start_date: Period start.
+         *         end_date: Period end.
+         *         initial_cash: Starting balance.
+         *         status: Run lifecycle status.
+         *         started_at: When execution started.
+         *         completed_at: When execution finished.
+         *         error: Error message if failed.
+         */
+        BacktestRunData: {
+            /**
+             * Type
+             * @default backtest_run
+             * @constant
+             */
+            type: "backtest_run";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Wallet Public Id */
+            wallet_public_id: string;
+            /** Strategy Name */
+            strategy_name: string;
+            /** @default {} */
+            strategy_params: Record<string, unknown>;
+            /** Instrument Public Id */
+            instrument_public_id: string;
+            /** Exchange */
+            exchange: string;
+            /** Timeframe */
+            timeframe: string;
+            /**
+             * Start Date
+             * Format: date-time
+             */
+            start_date: string;
+            /**
+             * End Date
+             * Format: date-time
+             */
+            end_date: string;
+            /** Initial Cash */
+            initial_cash: number;
+            /** Status */
+            status: string;
+            /** Started At */
+            started_at?: string | null;
+            /** Completed At */
+            completed_at?: string | null;
+            /** Error */
+            error?: string | null;
+        };
+        /**
+         * BacktestRunListResponse
+         * @description List of backtest runs response.
+         */
+        BacktestRunListResponse: {
+            /**
+             * Type
+             * @default backtest_run_list
+             * @constant
+             */
+            type: "backtest_run_list";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Payload */
+            payload: Components["schemas"]["BacktestRunData"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
+            count: number;
+        };
+        /**
+         * BacktestRunResponse
+         * @description Single backtest run response.
+         */
+        BacktestRunResponse: {
+            /**
+             * Type
+             * @default backtest_run_response
+             * @constant
+             */
+            type: "backtest_run_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["BacktestRunData"];
+        };
+        /**
+         * BacktestSignalData
+         * @description Backtest signal payload.
+         *
+         *     Attributes:
+         *         type: Payload discriminator.
+         *         run_public_id: Parent run.
+         *         signal_time: When signal was generated.
+         *         signal_type: Signal direction.
+         *         instrument: Target instrument.
+         *         price: Price at signal time.
+         *         indicators: Strategy indicator values.
+         */
+        BacktestSignalData: {
+            /**
+             * Type
+             * @default backtest_signal
+             * @constant
+             */
+            type: "backtest_signal";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Run Public Id */
+            run_public_id: string;
+            /**
+             * Signal Time
+             * Format: date-time
+             */
+            signal_time: string;
+            /** Signal Type */
+            signal_type: string;
+            /** Instrument */
+            instrument: string;
+            /** Price */
+            price: number;
+            /** Indicators */
+            indicators?: {
+                [key: string]: unknown;
+            };
+        };
+        /**
+         * BacktestSignalListResponse
+         * @description List of backtest signals response.
+         */
+        BacktestSignalListResponse: {
+            /**
+             * Type
+             * @default backtest_signal_list
+             * @constant
+             */
+            type: "backtest_signal_list";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Payload */
+            payload: Components["schemas"]["BacktestSignalData"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
+            count: number;
+        };
+        /**
+         * BacktestTradeData
+         * @description Backtest trade payload.
+         *
+         *     Attributes:
+         *         type: Payload discriminator.
+         *         run_public_id: Parent run.
+         *         executed_at: Trade execution time.
+         *         instrument: Instrument name.
+         *         side: Trade direction.
+         *         quantity: Trade size.
+         *         price: Fill price.
+         *         fee: Commission fee.
+         *         pnl: Per-fill PnL (None for entries).
+         *         position_after: Portfolio position after fill.
+         */
+        BacktestTradeData: {
+            /**
+             * Type
+             * @default backtest_trade
+             * @constant
+             */
+            type: "backtest_trade";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Run Public Id */
+            run_public_id: string;
+            /**
+             * Executed At
+             * Format: date-time
+             */
+            executed_at: string;
+            /** Instrument */
+            instrument: string;
+            /** Side */
+            side: string;
+            /** Quantity */
+            quantity: number;
+            /** Price */
+            price: number;
+            /** Fee */
+            fee: number;
+            /** Pnl */
+            pnl?: number | null;
+            /**
+             * Position After
+             * @default 0
+             */
+            position_after: number;
+        };
+        /**
+         * BacktestTradeListResponse
+         * @description List of backtest trades response.
+         */
+        BacktestTradeListResponse: {
+            /**
+             * Type
+             * @default backtest_trade_list
+             * @constant
+             */
+            type: "backtest_trade_list";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Payload */
+            payload: Components["schemas"]["BacktestTradeData"][];
             /**
              * Count
              * @description Number of items in payload
@@ -6269,6 +6858,54 @@ export type Components = {
          */
         RemoveSettingBody: Record<string, never>;
         /**
+         * BacktestCreateBody
+         * @description Request body for POST /api/backtests.
+         *
+         *     Attributes:
+         *         strategy_class: Registered strategy name.
+         *         instrument_public_id: Instrument to backtest.
+         *         exchange: Exchange name.
+         *         timeframe: Candle timeframe (e.g., "1h").
+         *         start_date: Backtest period start.
+         *         end_date: Backtest period end.
+         *         initial_cash: Starting cash balance.
+         *         strategy_params: Strategy-specific parameters.
+         */
+        BacktestCreateBody: {
+            /** Strategy Class */
+            strategy_class: string;
+            /** Instrument Public Id */
+            instrument_public_id: string;
+            /** Exchange */
+            exchange: string;
+            /** Timeframe */
+            timeframe?: string;
+            /**
+             * Start Date
+             * Format: date-time
+             */
+            start_date: string;
+            /**
+             * End Date
+             * Format: date-time
+             */
+            end_date: string;
+            /** Initial Cash */
+            initial_cash?: number;
+            strategy_params?: Record<string, unknown>;
+        };
+        /**
+         * BacktestCancelBody
+         * @description Request body for POST /api/backtests/{id}/cancel.
+         *
+         *     Attributes:
+         *         reason: Optional cancellation reason.
+         */
+        BacktestCancelBody: {
+            /** Reason */
+            reason?: string;
+        };
+        /**
          * CreateCredentialCommand
          * @description Request envelope for ``POST /api/wallets/{id}/credentials``.
          */
@@ -8366,6 +9003,274 @@ export interface Operations {
                     "application/json": Components["schemas"]["TrailingStopStateResponse"] | {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_backtests_api_backtests_get: {
+        parameters: {
+            query?: {
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
+                /** @description Filter by strategy name */
+                strategy?: string | null;
+                /** @description Filter by status */
+                status?: string | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["BacktestRunListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_backtest_api_backtests_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["BacktestCreateBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["BacktestRunResponse"];
+                };
+            };
+        };
+    };
+    get_backtest_api_backtests__run_id__get: {
+        parameters: {
+            query?: {
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
+            };
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["BacktestRunResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_backtest_api_backtests__run_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["BacktestCancelBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["BacktestRunResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    rerun_backtest_api_backtests__run_id__rerun_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["BacktestRunResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_backtest_trades_api_backtests__run_id__trades_get: {
+        parameters: {
+            query?: {
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["BacktestTradeListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_backtest_signals_api_backtests__run_id__signals_get: {
+        parameters: {
+            query?: {
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["BacktestSignalListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_backtest_events_api_backtests__run_id__events_get: {
+        parameters: {
+            query?: {
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
+            };
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["BacktestEventListResponse"];
                 };
             };
             /** @description Validation Error */
