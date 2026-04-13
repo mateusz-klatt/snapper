@@ -156,6 +156,7 @@ from snapper.server.rate_limiting import limiter
 from snapper.server.scope_grant_routes import router as scope_grant_router
 from snapper.server.scoping import resolve_target_wallets
 from snapper.server.strategy_routes import router as strategy_router
+from snapper.server.trailing_stop_routes import router as trailing_stop_router
 from snapper.server.wallet_routes import router as wallet_router
 from snapper.utils.logging import set_log_context
 
@@ -356,6 +357,7 @@ def create_app() -> FastAPI:
     app.include_router(order_router, prefix=API_PREFIX)
     app.include_router(execution_plan_router, prefix=API_PREFIX)
     app.include_router(position_cycle_router, prefix=API_PREFIX)
+    app.include_router(trailing_stop_router, prefix=API_PREFIX)
     app.include_router(create_api_router(manager), prefix=API_PREFIX)
     app.include_router(create_authenticated_websocket_router(manager), prefix=API_PREFIX)
 
