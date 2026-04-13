@@ -28,8 +28,10 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.interface.websocket.models import ConnectionStats
 from snapper.interface.websocket.models import WsStatsSnapshot
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server import process_runner
 from snapper.server.app import _build_strategy_payload
+from snapper.server.app import _reconcile_stale_backtests
 from snapper.server.app import create_api_router
 from snapper.server.app import create_app
 from snapper.server.app import get_repository_dependency
@@ -2244,3 +2246,62 @@ class TestScopedEndpoints403Propagation:
         response = client.get("/api/positions?operator_public_id=op-foreign")
 
         assert response.status_code == 403
+
+
+class TestReconcileStaleBacktests:
+    """Tests for _reconcile_stale_backtests boot helper."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.server.app.get_repository_dependency")
+    @patch("snapper.server.app.BacktestRepository")
+    async def test_reconciles_stale_runs(
+        self, mock_bt_cls: MagicMock, mock_get_repo: MagicMock
+    ) -> None:
+        """Calls reconcile_stale_runs and logs when count > 0."""
+        mock_repo = MagicMock()
+        mock_repo.session_factory = MagicMock()
+        mock_get_repo.return_value = mock_repo
+
+        mock_bt = AsyncMock()
+        mock_bt.reconcile_stale_runs = AsyncMock(return_value=2)
+        mock_bt_cls.return_value = mock_bt
+
+        app = FastAPI()
+        app.state.rest_tracker = SequenceTracker()
+
+        await _reconcile_stale_backtests(app)
+
+        mock_bt.reconcile_stale_runs.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.server.app.get_repository_dependency")
+    @patch("snapper.server.app.BacktestRepository")
+    async def test_zero_stale_runs_no_log(
+        self, mock_bt_cls: MagicMock, mock_get_repo: MagicMock
+    ) -> None:
+        """Zero stale runs skips the count>0 log branch."""
+        mock_repo = MagicMock()
+        mock_repo.session_factory = MagicMock()
+        mock_get_repo.return_value = mock_repo
+
+        mock_bt = AsyncMock()
+        mock_bt.reconcile_stale_runs = AsyncMock(return_value=0)
+        mock_bt_cls.return_value = mock_bt
+
+        app = FastAPI()
+        app.state.rest_tracker = SequenceTracker()
+
+        await _reconcile_stale_backtests(app)
+
+        mock_bt.reconcile_stale_runs.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.server.app.get_repository_dependency")
+    async def test_exception_is_non_fatal(self, mock_get_repo: MagicMock) -> None:
+        """Exception during reconciliation is caught (non-fatal)."""
+        mock_get_repo.side_effect = RuntimeError("db down")
+
+        app = FastAPI()
+        app.state.rest_tracker = SequenceTracker()
+
+        await _reconcile_stale_backtests(app)

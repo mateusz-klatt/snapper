@@ -122,6 +122,7 @@ from snapper.core.types import MarketDataExchange
 from snapper.core.types import OrderExchange
 from snapper.core.types import RelationshipTypeEnum
 from snapper.core.types import SpawnerProcessStatus
+from snapper.data.backtest_repository import BacktestRepository
 from snapper.data.repository import Repository
 from snapper.data.repository import dispose_repositories
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
@@ -224,6 +225,28 @@ def _configure_auth_services(settings_service: SettingsService) -> None:
     logger.info("WsTokenService initialized with database settings")
 
 
+async def _reconcile_stale_backtests(app: FastAPI) -> None:
+    """Mark orphaned backtest runs as failed at boot time.
+
+    Args:
+        app: FastAPI application instance.
+    """
+    try:
+        repo: Repository = get_repository_dependency()
+        bt_repo = BacktestRepository(cast(Any, repo).session_factory)
+        tracker: SequenceTracker = app.state.rest_tracker
+        now = datetime.now(UTC)
+        count = await bt_repo.reconcile_stale_runs(
+            bus_time=now,
+            session_id=tracker.session_id,
+            sequence_id=tracker.next_sequence("backtest_reconcile"),
+        )
+        if count > 0:
+            logger.info("Reconciled {} stale backtest run(s) as failed", count)
+    except Exception as exc:
+        logger.warning("Backtest reconciliation failed (non-fatal): {}", exc)
+
+
 async def _shutdown_zmq_bridge(app: FastAPI) -> None:
     """Stop ZMQ bridge and await its task during shutdown.
 
@@ -274,6 +297,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         else:
             await process_factory.start_all_processes()
             await process_factory.spawn_per_wallet_executors()
+            await _reconcile_stale_backtests(app)
         plan_executor = process_factory.started_processes.get("plan_executor")
         app.state.plan_executor = plan_executor
         manager_ref: WebSocketConnectionManager = app.state.manager

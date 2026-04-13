@@ -700,3 +700,44 @@ class BacktestRepository:
                 .all()
             )
             return [_event_to_dict(r) for r in rows]
+
+    async def reconcile_stale_runs(
+        self,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> int:
+        """Mark stale running/pending/cancel_requested runs as failed.
+
+        Called at boot time to clean up orphaned runs from a previous
+        crash. Any run in a non-terminal state is assumed orphaned.
+
+        Args:
+            bus_time: Current bus time for SCD2 transitions.
+            session_id: Producer session ID.
+            sequence_id: Base sequence counter.
+
+        Returns:
+            Number of runs transitioned to failed.
+        """
+        async with self.session() as s:
+            stale_statuses = ("pending", "running", "cancel_requested")
+            conditions = list(where_active(BacktestRun, bus_time))
+            conditions.append(BacktestRun.status.in_(stale_statuses))
+            stale_rows = (await s.execute(select(BacktestRun).where(*conditions))).scalars().all()
+            if not stale_rows:
+                return 0
+
+        count = 0
+        for row in stale_rows:
+            result = await self.update_run_status(
+                public_id=row.public_id,
+                new_status="failed",
+                bus_time=bus_time,
+                session_id=session_id,
+                sequence_id=sequence_id + count,
+                error="Orphaned run — process terminated before completion",
+            )
+            if result is not None:
+                count += 1
+        return count
