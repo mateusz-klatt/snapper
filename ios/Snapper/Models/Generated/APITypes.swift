@@ -1109,6 +1109,103 @@ struct OrderListResponse: Codable, Sendable {
     }
 }
 
+struct OrphanSweepResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: OrphanSweepResultData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct OrphanSweepResultData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let closedCount: Int
+    let closedCycleIds: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case closedCount = "closed_count"
+        case closedCycleIds = "closed_cycle_ids"
+    }
+}
+
+struct PositionCycleData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let cyclePublicId: String
+    let shardKey: String
+    let instrumentPublicId: String
+    let exchange: String
+    let mode: String
+    let walletPublicId: String
+    let operatorPublicId: String?
+    let direction: String
+    let maxQty: Double
+    let openedAt: String
+    let ageHours: Double
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case cyclePublicId = "cycle_public_id"
+        case shardKey = "shard_key"
+        case instrumentPublicId = "instrument_public_id"
+        case exchange
+        case mode
+        case walletPublicId = "wallet_public_id"
+        case operatorPublicId = "operator_public_id"
+        case direction
+        case maxQty = "max_qty"
+        case openedAt = "opened_at"
+        case ageHours = "age_hours"
+    }
+}
+
+struct PositionCycleListResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: [PositionCycleData]
+    /// Number of items in payload
+    let count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+        case count
+    }
+}
+
 struct PositionData: Codable, Sendable {
     let type: String?
     let sequenceId: Int

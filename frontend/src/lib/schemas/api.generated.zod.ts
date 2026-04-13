@@ -236,6 +236,39 @@ export const OrderDataSchema = z
   })
   .strict()
 
+export const OrphanSweepResultDataSchema = z
+  .object({
+    type: z.literal('orphan_sweep_result'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    closed_count: z.number().int(),
+    closed_cycle_ids: z.array(z.string()),
+  })
+  .strict()
+
+export const PositionCycleDataSchema = z
+  .object({
+    type: z.literal('position_cycle'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    cycle_public_id: z.string(),
+    shard_key: z.string(),
+    instrument_public_id: z.string(),
+    exchange: z.string(),
+    mode: z.string(),
+    wallet_public_id: z.string(),
+    operator_public_id: z.string().nullable(),
+    direction: z.string(),
+    max_qty: z.number(),
+    opened_at: z.string(),
+    age_hours: z.number(),
+  })
+  .strict()
+
 export const PositionDataSchema = z
   .object({
     type: z.literal('position'),
@@ -741,6 +774,29 @@ export const OrderListResponseSchema = z
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     payload: z.array(OrderDataSchema),
+    count: z.number().int(),
+  })
+  .strict()
+
+export const OrphanSweepResponseSchema = z
+  .object({
+    type: z.literal('orphan_sweep_result'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: OrphanSweepResultDataSchema,
+  })
+  .strict()
+
+export const PositionCycleListResponseSchema = z
+  .object({
+    type: z.literal('position_cycles'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: z.array(PositionCycleDataSchema),
     count: z.number().int(),
   })
   .strict()
@@ -1581,6 +1637,8 @@ export type JsonPrimitive = z.infer<typeof JsonPrimitiveSchema>
 export type MessageResponse = z.infer<typeof MessageResponseSchema>
 export type OperatorInfo = z.infer<typeof OperatorInfoSchema>
 export type OrderData = z.infer<typeof OrderDataSchema>
+export type OrphanSweepResultData = z.infer<typeof OrphanSweepResultDataSchema>
+export type PositionCycleData = z.infer<typeof PositionCycleDataSchema>
 export type PositionData = z.infer<typeof PositionDataSchema>
 export type ProcessCategoryCount = z.infer<typeof ProcessCategoryCountSchema>
 export type ProcessCreatedInfo = z.infer<typeof ProcessCreatedInfoSchema>
@@ -1632,6 +1690,8 @@ export type GapDetectionStats = z.infer<typeof GapDetectionStatsSchema>
 export type JsonValue = z.infer<typeof JsonValueSchema>
 export type OperatorListResponse = z.infer<typeof OperatorListResponseSchema>
 export type OrderListResponse = z.infer<typeof OrderListResponseSchema>
+export type OrphanSweepResponse = z.infer<typeof OrphanSweepResponseSchema>
+export type PositionCycleListResponse = z.infer<typeof PositionCycleListResponseSchema>
 export type PositionListResponse = z.infer<typeof PositionListResponseSchema>
 export type ProcessSummaryData = z.infer<typeof ProcessSummaryDataSchema>
 export type ProcessCreateData = z.infer<typeof ProcessCreateDataSchema>

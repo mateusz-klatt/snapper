@@ -1244,6 +1244,101 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
+    "/api/position-cycles/open": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Open Cycles
+         * @description List all open position cycles, optionally filtered by minimum age.
+         *
+         *     Args:
+         *         principal: Authenticated admin user.
+         *         repo: Database repository.
+         *         min_age_hours: Only show cycles open longer than this (hours).
+         *
+         *     Returns:
+         *         List of open cycles with age information.
+         */
+        get: Operations["list_open_cycles_api_position_cycles_open_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/position-cycles/close-orphan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Close Orphan Cycle
+         * @description Close a specific orphaned position cycle.
+         *
+         *     Closes a single open cycle identified by its public_id. The operator
+         *     should verify via GET /open that the cycle is genuinely orphaned
+         *     (no active engine) before calling this endpoint.
+         *
+         *     Args:
+         *         principal: Authenticated admin user.
+         *         repo: Database repository.
+         *         cycle_public_id: Public ID of the cycle to close.
+         *
+         *     Returns:
+         *         Sweep result with the closed cycle ID.
+         */
+        post: Operations["close_orphan_cycle_api_position_cycles_close_orphan_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/position-cycles/sweep-orphans": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sweep Orphan Cycles
+         * @description Bulk-close orphaned position cycles older than min_age_hours.
+         *
+         *     Closes all open cycles that have been open longer than the specified
+         *     threshold. Default threshold is 72 hours (3 days). The operator
+         *     should review via GET /open?min_age_hours=72 before running this.
+         *
+         *     Args:
+         *         principal: Authenticated admin user.
+         *         repo: Database repository.
+         *         min_age_hours: Minimum age in hours for a cycle to be considered orphaned.
+         *
+         *     Returns:
+         *         Sweep result with count and list of closed cycle IDs.
+         *
+         *     Raises:
+         *         HTTPException: 400 if min_age_hours < 1.
+         */
+        post: Operations["sweep_orphan_cycles_api_position_cycles_sweep_orphans_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/candles": {
         parameters: {
             query?: never;
@@ -3278,6 +3373,132 @@ export type Components = {
             session_id: string;
             /** Payload */
             payload: Components["schemas"]["OrderData"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
+            count: number;
+        };
+        /**
+         * OrphanSweepResponse
+         * @description Response from orphan sweep endpoint.
+         */
+        OrphanSweepResponse: {
+            /**
+             * Type
+             * @default orphan_sweep_result
+             * @constant
+             */
+            type: "orphan_sweep_result";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["OrphanSweepResultData"];
+        };
+        /**
+         * OrphanSweepResultData
+         * @description Result of an orphan cycle sweep operation.
+         */
+        OrphanSweepResultData: {
+            /**
+             * Type
+             * @default orphan_sweep_result
+             * @constant
+             */
+            type: "orphan_sweep_result";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Closed Count */
+            closed_count: number;
+            /** Closed Cycle Ids */
+            closed_cycle_ids: string[];
+        };
+        /**
+         * PositionCycleData
+         * @description Position cycle summary for admin display.
+         */
+        PositionCycleData: {
+            /**
+             * Type
+             * @default position_cycle
+             * @constant
+             */
+            type: "position_cycle";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Cycle Public Id */
+            cycle_public_id: string;
+            /** Shard Key */
+            shard_key: string;
+            /** Instrument Public Id */
+            instrument_public_id: string;
+            /** Exchange */
+            exchange: string;
+            /** Mode */
+            mode: string;
+            /** Wallet Public Id */
+            wallet_public_id: string;
+            /** Operator Public Id */
+            operator_public_id: string | null;
+            /** Direction */
+            direction: string;
+            /** Max Qty */
+            max_qty: number;
+            /** Opened At */
+            opened_at: string;
+            /** Age Hours */
+            age_hours: number;
+        };
+        /**
+         * PositionCycleListResponse
+         * @description List of open position cycles.
+         */
+        PositionCycleListResponse: {
+            /**
+             * Type
+             * @default position_cycles
+             * @constant
+             */
+            type: "position_cycles";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Payload */
+            payload: Components["schemas"]["PositionCycleData"][];
             /**
              * Count
              * @description Number of items in payload
@@ -7574,6 +7795,99 @@ export interface Operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_open_cycles_api_position_cycles_open_get: {
+        parameters: {
+            query?: {
+                min_age_hours?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["PositionCycleListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    close_orphan_cycle_api_position_cycles_close_orphan_post: {
+        parameters: {
+            query: {
+                cycle_public_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["OrphanSweepResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    sweep_orphan_cycles_api_position_cycles_sweep_orphans_post: {
+        parameters: {
+            query?: {
+                min_age_hours?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["OrphanSweepResponse"];
                 };
             };
             /** @description Validation Error */

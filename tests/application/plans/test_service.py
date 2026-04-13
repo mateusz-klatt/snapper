@@ -2963,15 +2963,14 @@ class TestSweepCycleClosures:
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
     @patch("snapper.application.plans.service.get_repository")
-    async def test_sweep_skips_non_bracket_plans(
+    async def test_sweep_skips_plans_without_cycle(
         self, mock_repo_fn: MagicMock, mock_settings: MagicMock
     ) -> None:
-        """Non-bracket plans are skipped by sweep."""
+        """Plans without position_cycle_public_id are skipped by sweep."""
         mock_repo = AsyncMock()
         mock_repo_fn.return_value = mock_repo
         service = PlanExecutorService()
         plan = _make_plan_row(plan_type="manual_once", status="armed")
-        plan["position_cycle_public_id"] = "cycle-1"
         service._register_plan(plan, ManualOnceEvaluator())
         await service._sweep_cycle_closures()
         assert "plan-1" in service.plans
@@ -2997,6 +2996,29 @@ class TestSweepCycleClosures:
 
         assert "plan-1" in service.plans
         mock_repo.update_execution_plan_status.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_sweep_cancels_armed_trailing_stop_with_closed_cycle(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Armed trailing stop on closed cycle is cancelled by sweep."""
+        mock_repo = AsyncMock()
+        mock_repo.get_position_cycle_by_public_id = AsyncMock(
+            return_value={"status": "closed", "public_id": "cycle-1"}
+        )
+        mock_repo.update_execution_plan_status = AsyncMock(return_value=1)
+        mock_repo.insert_execution_plan_decision = AsyncMock(return_value="d1")
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        plan = _make_plan_row(
+            plan_type="trailing_stop", status="armed", native_instrument="BTC-USD"
+        )
+        plan["position_cycle_public_id"] = "cycle-1"
+        service._register_plan(plan, ManualOnceEvaluator())
+        await service._sweep_cycle_closures()
+        assert service.plans.get("plan-1") is None
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")

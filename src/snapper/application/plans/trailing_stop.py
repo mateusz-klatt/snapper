@@ -81,7 +81,9 @@ class TrailingStopEvaluator(PlanEvaluator):
         plan: ExecutionPlanRow,
     ) -> list[JsonObject]:
         """Evaluate trailing stop for long positions (peak is highest)."""
-        if last > state["peak_price"] or state["peak_price"] < 1e-15:
+        if state["peak_price"] < 1e-15:
+            state["peak_price"] = max(last, entry)
+        elif last > state["peak_price"]:
             state["peak_price"] = last
         if min_lock < 1e-15 or state["peak_price"] >= entry * (1 + min_lock):
             new_stop = state["peak_price"] * (1 - trail_pct)
@@ -100,7 +102,9 @@ class TrailingStopEvaluator(PlanEvaluator):
         plan: ExecutionPlanRow,
     ) -> list[JsonObject]:
         """Evaluate trailing stop for short positions (peak is lowest)."""
-        if last < state["peak_price"] or state["peak_price"] < 1e-15:
+        if state["peak_price"] < 1e-15:
+            state["peak_price"] = min(last, entry)
+        elif last < state["peak_price"]:
             state["peak_price"] = last
         if min_lock < 1e-15 or state["peak_price"] <= entry * (1 - min_lock):
             new_stop = state["peak_price"] * (1 + trail_pct)

@@ -223,6 +223,34 @@ class TestEdgeCases:
         assert cmds == []
 
     @pytest.mark.asyncio
+    async def test_short_first_tick_above_entry_floors_peak(self) -> None:
+        """Short: first tick above entry floors peak at entry.
+
+        Given: short, entry=100, first tick at 110 (adverse move),
+        When: on_tick called,
+        Then: peak is min(110, 100) = 100, not 110.
+        """
+        ev = TrailingStopEvaluator()
+        plan = _make_plan(side="sell", entry_price=100, trailing_pct=5.0)
+        await ev.on_tick(plan, _make_tick(110.0))
+        assert ev._state["plan-1"]["peak_price"] == pytest.approx(100.0)
+        assert ev._state["plan-1"]["current_stop"] == pytest.approx(105.0)
+
+    @pytest.mark.asyncio
+    async def test_long_first_tick_below_entry_floors_peak(self) -> None:
+        """Long: first tick below entry floors peak at entry.
+
+        Given: long, entry=100, first tick at 90 (adverse move),
+        When: on_tick called,
+        Then: peak is max(90, 100) = 100, not 90.
+        """
+        ev = TrailingStopEvaluator()
+        plan = _make_plan(side="buy", entry_price=100, trailing_pct=5.0)
+        await ev.on_tick(plan, _make_tick(90.0))
+        assert ev._state["plan-1"]["peak_price"] == pytest.approx(100.0)
+        assert ev._state["plan-1"]["current_stop"] == pytest.approx(95.0)
+
+    @pytest.mark.asyncio
     async def test_non_armed_returns_empty(self) -> None:
         """Non-armed status -> empty commands."""
         ev = TrailingStopEvaluator()
