@@ -146,6 +146,17 @@ class BaseStrategy(ABC):
         """
         return self._running
 
+    def required_candle_history(self) -> int:
+        """Return number of candle bars needed for indicator warm-up.
+
+        Override in subclasses that need historical candles to compute
+        indicators before generating signals. Default: 0 (no warm-up).
+
+        Returns:
+            Number of warm-up bars required.
+        """
+        return 0
+
     async def on_candle(self, instrument: str, candle: CandleData) -> StrategySignal | None:
         """Handle incoming candle data.
 
