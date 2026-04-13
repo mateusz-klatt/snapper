@@ -527,7 +527,9 @@ atomic flip via `flip_position_cycle` (or degrade to close-only on
 unresolved instrument); recovered non-flat with no row → bootstrap a
 synthetic cycle. Brackets (shipped Phase 2 step 2, 2026-04-12) attach to
 `position_cycle_public_id`, not to an order, so a flat reopen does not
-inherit stale stop levels.
+inherit stale stop levels. Orphan cycles (open rows without a matching
+engine) can be detected and closed via admin endpoints at
+`/api/position-cycles/` (shipped 2026-04-13).
 
 ## Security
 

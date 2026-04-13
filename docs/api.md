@@ -702,6 +702,52 @@ List decision audit rows for an execution plan. Requires `read:orders` permissio
 
 **Response (200):** List of decision rows with action, reason, and timestamp.
 
+### GET /api/position-cycles/open
+
+List all open position cycles with age information. Admin-only endpoint for
+diagnosing orphaned cycles (open cycles without a matching trading engine).
+
+**Query parameters:**
+
+- `min_age_hours` (float, optional, default 0): Only return cycles open longer than this.
+
+**Permission:** `manage:users` (admin only).
+
+**Response (200):** List of open cycles with `cycle_public_id`, `shard_key`,
+`instrument_public_id`, `exchange`, `mode`, `wallet_public_id`, `direction`,
+`max_qty`, `opened_at`, and `age_hours`.
+
+### POST /api/position-cycles/close-orphan
+
+Close a specific orphaned position cycle. The operator should verify via
+`GET /open` that the cycle is genuinely orphaned before calling this.
+
+**Query parameters:**
+
+- `cycle_public_id` (string, required): Public ID of the cycle to close.
+
+**Permission:** `manage:users` (admin only). CSRF token required.
+
+**Response (200):** `{ "closed_count": 1, "closed_cycle_ids": ["<id>"] }`
+
+**Response (404):** No active open cycle found for the given public_id.
+
+### POST /api/position-cycles/sweep-orphans
+
+Bulk-close all open position cycles older than `min_age_hours`. Default
+threshold is 72 hours (3 days). Review via `GET /open?min_age_hours=72`
+before running.
+
+**Query parameters:**
+
+- `min_age_hours` (float, optional, default 72, minimum 1): Minimum age threshold.
+
+**Permission:** `manage:users` (admin only). CSRF token required.
+
+**Response (200):** `{ "closed_count": N, "closed_cycle_ids": [...] }`
+
+**Response (400):** `min_age_hours` must be at least 1.
+
 ### GET /api/exchanges
 
 List distinct exchange names from active symbol aliases. Requires
