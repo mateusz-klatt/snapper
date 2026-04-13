@@ -11,6 +11,7 @@ executor/exchange-client path.
 
 import json
 import math
+from collections import OrderedDict
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import UTC
@@ -88,7 +89,7 @@ class ShardState:
     peak_equity: float = 10_000.0
     turnover: float = 0.0
     last_venue_event_id: int = 0
-    seen_exec_ids: set[str] = field(default_factory=set)
+    seen_exec_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
     halted: bool = False
     recon_failure_count: int = 0
     active_cycle_public_id: str | None = None
@@ -300,9 +301,11 @@ class TradeService:
         if dedup_key in shard.seen_exec_ids:
             return False
         if exec_id:
-            shard.seen_exec_ids.add(exec_id)
+            shard.seen_exec_ids[exec_id] = None
         if trade_id:
-            shard.seen_exec_ids.add(trade_id)
+            shard.seen_exec_ids[trade_id] = None
+        if len(shard.seen_exec_ids) > 10_000:
+            shard.seen_exec_ids.popitem(last=False)
         return True
 
     @staticmethod
@@ -480,7 +483,7 @@ class TradeService:
         turnover: float,
         last_venue_event_id: int,
         open_command_ids: list[str],
-        seen_exec_ids: set[str],
+        seen_exec_ids: OrderedDict[str, None],
         position_opened_at: datetime | None = None,
     ) -> None:
         """Restore shard state from a checkpoint during recovery.

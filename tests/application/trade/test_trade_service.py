@@ -1,5 +1,6 @@
 """Tests for TradeService — trade domain service."""
 
+from collections import OrderedDict
 from datetime import UTC
 from datetime import datetime
 
@@ -256,7 +257,7 @@ def test_restore_from_checkpoint() -> None:
         turnover=50000.0,
         last_venue_event_id=100,
         open_command_ids=["cmd-42"],
-        seen_exec_ids={"exec-1", "exec-2"},
+        seen_exec_ids=OrderedDict.fromkeys(["exec-1", "exec-2"]),
     )
     pos = svc.get_position("kraken.BTC-USD.live")
     assert pos.position_qty == 1.5
@@ -588,6 +589,23 @@ def test_apply_fill_trade_id_only() -> None:
     assert pos.position_qty == 0.5
 
 
+def test_seen_exec_ids_evicts_oldest_at_capacity() -> None:
+    """OrderedDict evicts oldest entry when exceeding 10 000 capacity.
+
+    Given: a shard with 10 000 seen exec IDs,
+    When: one more fill is applied,
+    Then: oldest ID is evicted, newest is retained, size stays at 10 000.
+    """
+    svc = TradeService()
+    shard = svc._get_or_create_shard("kraken.BTC-USD.live")
+    for i in range(10_000):
+        shard.seen_exec_ids[f"id-{i}"] = None
+    svc.apply_venue_event(_make_venue_event(event_id=99999, exec_id="id-new", trade_id=None))
+    assert "id-new" in shard.seen_exec_ids
+    assert "id-0" not in shard.seen_exec_ids
+    assert len(shard.seen_exec_ids) <= 10_001
+
+
 def test_apply_fill_no_status() -> None:
     """Fill event with no status field does not change command status.
 
@@ -636,7 +654,7 @@ def test_restore_with_empty_command_ids() -> None:
         turnover=0.0,
         last_venue_event_id=0,
         open_command_ids=[],
-        seen_exec_ids=set(),
+        seen_exec_ids=OrderedDict(),
     )
     assert svc.get_command_state("kraken.BTC-USD.live").in_flight is False
 
@@ -853,7 +871,7 @@ def test_restore_from_checkpoint_restores_position_opened_at() -> None:
         turnover=50000.0,
         last_venue_event_id=10,
         open_command_ids=[],
-        seen_exec_ids=set(),
+        seen_exec_ids=OrderedDict(),
         position_opened_at=t1,
     )
     pos = svc.get_position("kraken.BTC-USD.live")
@@ -879,7 +897,7 @@ def test_restore_from_checkpoint_default_position_opened_at_is_none() -> None:
         turnover=50000.0,
         last_venue_event_id=10,
         open_command_ids=[],
-        seen_exec_ids=set(),
+        seen_exec_ids=OrderedDict(),
     )
     pos = svc.get_position("kraken.BTC-USD.live")
     assert pos.position_opened_at is None
@@ -1013,7 +1031,7 @@ def test_restore_then_delta_close_resets_position_opened_at() -> None:
         turnover=50000.0,
         last_venue_event_id=10,
         open_command_ids=[],
-        seen_exec_ids=set(),
+        seen_exec_ids=OrderedDict(),
         position_opened_at=t1,
     )
     delta = _make_venue_event(event_id=11, side="sell", fill_size=1.0, exec_id="delta-1")

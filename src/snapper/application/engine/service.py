@@ -7,6 +7,7 @@ stop-loss logic, fee calculation, and order publication to ZMQ.
 
 import datetime as dt
 import time
+from collections import OrderedDict
 from uuid import uuid7
 
 import zmq
@@ -72,7 +73,7 @@ class TradingEngineService:
     instrument_specs: dict[str, dict[str, float]]
     order_in_flight: bool
     pending_client_order_id: str | None
-    seen_exec_ids: set[str]
+    seen_exec_ids: OrderedDict[str, None]
 
     def __init__(
         self,
@@ -124,7 +125,7 @@ class TradingEngineService:
         self.order_in_flight = False
         self.pending_client_order_id: str | None = None
         self._in_flight_since: float | None = None
-        self.seen_exec_ids: set[str] = set()
+        self.seen_exec_ids: OrderedDict[str, None] = OrderedDict()
         self.read_only = False
         self._repository = repository
         self._outbox = outbox
@@ -180,7 +181,9 @@ class TradingEngineService:
         if guard_key in self.seen_exec_ids:
             logger.info(f"Duplicate execution {guard_key} ignored for {self.instrument}")
             return False
-        self.seen_exec_ids.add(guard_key)
+        self.seen_exec_ids[guard_key] = None
+        if len(self.seen_exec_ids) > 10_000:
+            self.seen_exec_ids.popitem(last=False)
         self.portfolio.update_fill(
             self.instrument, fill.side, fill.last_size, fill.last_price, fill.fee
         )

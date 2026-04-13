@@ -1,5 +1,6 @@
 """Tests for Phase 3b: checkpoint recovery in TraderCoordinator."""
 
+from collections import OrderedDict
 from datetime import UTC
 from datetime import datetime
 from typing import Any
@@ -320,7 +321,7 @@ class TestCheckpointRecovery:
             turnover=100.0,
             last_venue_event_id=5,
             open_command_ids=[],
-            seen_exec_ids={"t2", "t1"},
+            seen_exec_ids=OrderedDict.fromkeys(["t2", "t1"]),
         )
         snap = ts.snapshot_for_checkpoint("test.X.live")
         assert snap["seen_exec_ids"] == '["t1", "t2"]'
@@ -371,7 +372,7 @@ class TestCheckpointRecovery:
         await coord._recover_engine_state()
 
         engine = coord.engines["BTC-USD@kraken-live"]
-        assert engine.seen_exec_ids == set()
+        assert engine.seen_exec_ids == OrderedDict()
 
     @pytest.mark.asyncio
     async def test_engine_state_restored_from_checkpoint(
@@ -476,7 +477,7 @@ class TestCheckpointRecovery:
             "realized_pnl": 0.0,
             "turnover": 0.0,
             "last_venue_event_id": 0,
-            "seen_exec_ids": set(),
+            "seen_exec_ids": cast(Any, OrderedDict()),
         }
         ts_mid = TradeService()
         for ev in events[:5]:
@@ -489,7 +490,7 @@ class TestCheckpointRecovery:
         snap_at_5["realized_pnl"] = mid_shard.position.realized_pnl
         snap_at_5["turnover"] = mid_shard.turnover
         snap_at_5["last_venue_event_id"] = mid_shard.last_venue_event_id
-        snap_at_5["seen_exec_ids"] = set(mid_shard.seen_exec_ids)
+        snap_at_5["seen_exec_ids"] = OrderedDict(mid_shard.seen_exec_ids)
 
         ts_checkpoint = TradeService()
         ts_checkpoint.restore_from_checkpoint(

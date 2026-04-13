@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import json
 import time
+from collections import OrderedDict
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -450,7 +451,9 @@ class TraderCoordinator(RegisterableProcess):
                 )
                 continue
 
-            seen_ids: set[str] = set(json.loads(cp["seen_exec_ids"] or "[]"))
+            seen_ids: OrderedDict[str, None] = OrderedDict.fromkeys(
+                json.loads(cp["seen_exec_ids"] or "[]")
+            )
             open_cmd_ids: list[str] = json.loads(cp["open_command_ids"] or "[]")
 
             self.trade_service.restore_from_checkpoint(
@@ -556,7 +559,7 @@ class TraderCoordinator(RegisterableProcess):
         engine.position_qty = shard.position.position_qty
         engine.entry_price = shard.position.entry_price
         engine.peak_equity = shard.peak_equity
-        engine.seen_exec_ids = set(shard.seen_exec_ids)
+        engine.seen_exec_ids = OrderedDict.fromkeys(shard.seen_exec_ids)
         engine.portfolio.cash = shard.cash
         engine.portfolio.turnover = shard.turnover
         if shard.position.position_qty != 0 and shard.position.entry_price is not None:
@@ -1023,7 +1026,7 @@ class TraderCoordinator(RegisterableProcess):
             engine.entry_price = (old_abs * engine.entry_price + size * price) / new_abs
         trade_id = fill_row.get("trade_id")
         if trade_id:
-            engine.seen_exec_ids.add(trade_id)
+            engine.seen_exec_ids[trade_id] = None
 
     def _handle_settings_update(self, payload: bytes) -> None:
         """Handle settings change event from ZMQ.

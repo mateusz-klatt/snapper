@@ -2630,7 +2630,7 @@ class TestEngineApplyFill:
         engine = self._make_engine(position_qty=0.3, entry_price=50000.0)
         engine.order_in_flight = True
         engine.pending_client_order_id = "order-123"
-        engine.seen_exec_ids.add("trade-1")
+        engine.seen_exec_ids["trade-1"] = None
         fill = _make_fill(
             client_order_id="order-123",
             side="buy",
@@ -2673,7 +2673,7 @@ class TestEngineApplyFill:
         Then: apply_fill returns False, state unchanged.
         """
         engine = self._make_engine(position_qty=0.5)
-        engine.seen_exec_ids.add("trade-456")
+        engine.seen_exec_ids["trade-456"] = None
         fill = _make_fill(trade_id="trade-456", side="buy", last_size=0.5, last_price=50000.0)
         result = engine.apply_fill(fill)
         assert result is False
@@ -2701,6 +2701,23 @@ class TestEngineApplyFill:
         assert engine.position_qty == pytest.approx(0.5)
         assert engine.order_in_flight is True
         assert engine.pending_client_order_id == "order-456"
+
+    def test_seen_exec_ids_evicts_oldest_at_10k(self) -> None:
+        """OrderedDict evicts oldest entry when exceeding 10 000 capacity.
+
+        Given: Engine with 10 000 seen exec IDs,
+        When: One more fill is applied,
+        Then: Oldest ID is evicted, newest is retained.
+        """
+        engine = self._make_engine()
+        for i in range(10_000):
+            engine.seen_exec_ids[f"id-{i}"] = None
+        assert len(engine.seen_exec_ids) == 10_000
+        fill = _make_fill(trade_id="id-new", side="buy", last_size=0.1, last_price=50000.0)
+        engine.apply_fill(fill)
+        assert "id-new" in engine.seen_exec_ids
+        assert "id-0" not in engine.seen_exec_ids
+        assert len(engine.seen_exec_ids) == 10_000
 
 
 class TestMaybeStopInFlight:
