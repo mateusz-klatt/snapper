@@ -8,6 +8,7 @@ import { Strategies } from '../features/strategies/Strategies'
 import { Orders } from '../features/orders/Orders'
 import { Positions } from '../features/positions/Positions'
 import { Signals } from '../features/signals/Signals'
+import { Backtests } from '../features/backtests/Backtests'
 import { Health } from '../features/health/Health'
 import { Admin } from '../features/admin/Admin'
 import { Settings } from '../features/settings/Settings'
@@ -63,6 +64,14 @@ export function AppRoutes({ activeTab }: Readonly<AppRoutesProps>): React.ReactE
         <ErrorBoundary componentName='Signals'>
           <ProtectedRoute resource='signals'>
             <Signals />
+          </ProtectedRoute>
+        </ErrorBoundary>
+      )
+    case 'backtests':
+      return (
+        <ErrorBoundary componentName='Backtests'>
+          <ProtectedRoute resource='backtests'>
+            <Backtests />
           </ProtectedRoute>
         </ErrorBoundary>
       )

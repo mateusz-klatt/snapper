@@ -708,3 +708,68 @@ export const useTrailingStopForCycle = (cyclePublicId: string | undefined) => {
     refetchInterval: 5000,
   })
 }
+
+export const useBacktests = (strategy?: string, status?: string) => {
+  return useQuery({
+    queryKey: ['backtests', strategy, status],
+    queryFn: () => apiClient.getBacktests(50, 0, strategy, status),
+  })
+}
+
+export const useBacktest = (runId: string | undefined) => {
+  return useQuery({
+    queryKey: ['backtests', runId],
+    queryFn: () => apiClient.getBacktest(runId as string),
+    enabled: !!runId,
+  })
+}
+
+export const useBacktestTrades = (runId: string | undefined) => {
+  return useQuery({
+    queryKey: ['backtests', runId, 'trades'],
+    queryFn: () => apiClient.getBacktestTrades(runId as string),
+    enabled: !!runId,
+  })
+}
+
+export const useBacktestSignals = (runId: string | undefined) => {
+  return useQuery({
+    queryKey: ['backtests', runId, 'signals'],
+    queryFn: () => apiClient.getBacktestSignals(runId as string),
+    enabled: !!runId,
+  })
+}
+
+export const useCreateBacktest = () => {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (body: Parameters<typeof apiClient.createBacktest>[0]) =>
+      apiClient.createBacktest(body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['backtests'] })
+    },
+  })
+}
+
+export const useCancelBacktest = () => {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (runId: string) => apiClient.cancelBacktest(runId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['backtests'] })
+    },
+  })
+}
+
+export const useRerunBacktest = () => {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (runId: string) => apiClient.rerunBacktest(runId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['backtests'] })
+    },
+  })
+}

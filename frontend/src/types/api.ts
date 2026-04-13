@@ -84,3 +84,15 @@ export type TrailingStopStateResponse = Components['schemas']['TrailingStopState
 export type TrailingStopByCycleResult =
   | TrailingStopStateResponse
   | { type: 'message'; payload: string }
+
+export type BacktestRunData = Components['schemas']['BacktestRunData']
+export type BacktestRunResponse = Components['schemas']['BacktestRunResponse']
+export type BacktestRunListResponse = Components['schemas']['BacktestRunListResponse']
+export type BacktestTradeData = Components['schemas']['BacktestTradeData']
+export type BacktestTradeListResponse = Components['schemas']['BacktestTradeListResponse']
+export type BacktestSignalData = Components['schemas']['BacktestSignalData']
+export type BacktestSignalListResponse = Components['schemas']['BacktestSignalListResponse']
+export type BacktestEventData = Components['schemas']['BacktestEventData']
+export type BacktestEventListResponse = Components['schemas']['BacktestEventListResponse']
+export type BacktestCreateBody = Components['schemas']['BacktestCreateBody']
+export type BacktestCancelBody = Components['schemas']['BacktestCancelBody']

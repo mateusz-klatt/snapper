@@ -2428,4 +2428,143 @@ describe('cacheWsTicketFromResponse', () => {
       )
     })
   })
+
+  describe('backtests', () => {
+    it('getBacktests sends GET without optional filters', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ type: 'backtest_run_list', payload: [], count: 0 }),
+      })
+      await apiClient.getBacktests()
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/backtests?limit=20&offset=0'),
+        expect.objectContaining({ method: 'GET' })
+      )
+    })
+
+    it('getBacktests sends GET with query params', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ type: 'backtest_run_list', payload: [], count: 0 }),
+      })
+      const result = await apiClient.getBacktests(10, 5, 'sma', 'completed')
+
+      expect(result.count).toBe(0)
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/backtests?limit=10&offset=5&strategy=sma&status=completed'),
+        expect.objectContaining({ method: 'GET' })
+      )
+    })
+
+    it('getBacktest sends GET by ID', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ type: 'backtest_run_response', payload: { public_id: 'r1' } }),
+      })
+      await apiClient.getBacktest('r1')
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/backtests/r1'),
+        expect.objectContaining({ method: 'GET' })
+      )
+    })
+
+    it('createBacktest sends POST with body', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ type: 'backtest_run_response', payload: { public_id: 'r2' } }),
+      })
+      await apiClient.createBacktest({
+        strategy_class: 'sma',
+        instrument_public_id: 'BTC-USD',
+        exchange: 'kraken',
+        start_date: '2026-01-01',
+        end_date: '2026-06-01',
+      } as never)
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/backtests'),
+        expect.objectContaining({ method: 'POST' })
+      )
+    })
+
+    it('cancelBacktest sends POST cancel', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ type: 'backtest_run_response', payload: {} }),
+      })
+      await apiClient.cancelBacktest('r1')
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/backtests/r1/cancel'),
+        expect.objectContaining({ method: 'POST' })
+      )
+    })
+
+    it('rerunBacktest sends POST rerun', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ type: 'backtest_run_response', payload: {} }),
+      })
+      await apiClient.rerunBacktest('r1')
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/backtests/r1/rerun'),
+        expect.objectContaining({ method: 'POST' })
+      )
+    })
+
+    it('getBacktestTrades sends GET with default limit', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ type: 'backtest_trade_list', payload: [], count: 0 }),
+      })
+      await apiClient.getBacktestTrades('r1')
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/backtests/r1/trades?limit=100'),
+        expect.objectContaining({ method: 'GET' })
+      )
+    })
+
+    it('getBacktestTrades sends GET with limit', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ type: 'backtest_trade_list', payload: [], count: 0 }),
+      })
+      await apiClient.getBacktestTrades('r1', 50)
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/backtests/r1/trades?limit=50'),
+        expect.objectContaining({ method: 'GET' })
+      )
+    })
+
+    it('getBacktestSignals sends GET with default limit', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ type: 'backtest_signal_list', payload: [], count: 0 }),
+      })
+      await apiClient.getBacktestSignals('r1')
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/backtests/r1/signals?limit=100'),
+        expect.objectContaining({ method: 'GET' })
+      )
+    })
+
+    it('getBacktestSignals sends GET with limit', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ type: 'backtest_signal_list', payload: [], count: 0 }),
+      })
+      await apiClient.getBacktestSignals('r1', 50)
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/backtests/r1/signals?limit=50'),
+        expect.objectContaining({ method: 'GET' })
+      )
+    })
+  })
 })

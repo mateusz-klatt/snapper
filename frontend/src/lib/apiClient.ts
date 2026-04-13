@@ -83,6 +83,11 @@ import type {
   TrailingStopCreateBody,
   TrailingStopCancelBody,
   TrailingStopByCycleResult,
+  BacktestRunListResponse,
+  BacktestRunResponse,
+  BacktestTradeListResponse,
+  BacktestSignalListResponse,
+  BacktestCreateBody,
 } from '../types/api'
 
 interface RequestOptions {
@@ -688,6 +693,58 @@ class APIClient {
     )
 
     return validateResponse(data, MessageResponseSchema, '/auth/users/:id/admin-reset-password')
+  }
+  async getBacktests(
+    limit = 20,
+    offset = 0,
+    strategy?: string,
+    status?: string
+  ): Promise<BacktestRunListResponse> {
+    const params = new URLSearchParams()
+
+    params.set('limit', String(limit))
+    params.set('offset', String(offset))
+    if (strategy) params.set('strategy', strategy)
+    if (status) params.set('status', status)
+    const data = await this.getJSON(`/api/backtests?${params.toString()}`)
+
+    return data as BacktestRunListResponse
+  }
+  async getBacktest(runId: string): Promise<BacktestRunResponse> {
+    const data = await this.getJSON(`/api/backtests/${encodeURIComponent(runId)}`)
+
+    return data as BacktestRunResponse
+  }
+  async createBacktest(body: BacktestCreateBody): Promise<BacktestRunResponse> {
+    const data = await this.postJSON('/api/backtests', body)
+
+    return data as BacktestRunResponse
+  }
+  async cancelBacktest(runId: string): Promise<BacktestRunResponse> {
+    const data = await this.postJSON(`/api/backtests/${encodeURIComponent(runId)}/cancel`, {
+      reason: '',
+    })
+
+    return data as BacktestRunResponse
+  }
+  async rerunBacktest(runId: string): Promise<BacktestRunResponse> {
+    const data = await this.postJSON(`/api/backtests/${encodeURIComponent(runId)}/rerun`, {})
+
+    return data as BacktestRunResponse
+  }
+  async getBacktestTrades(runId: string, limit = 100): Promise<BacktestTradeListResponse> {
+    const data = await this.getJSON(
+      `/api/backtests/${encodeURIComponent(runId)}/trades?limit=${limit}`
+    )
+
+    return data as BacktestTradeListResponse
+  }
+  async getBacktestSignals(runId: string, limit = 100): Promise<BacktestSignalListResponse> {
+    const data = await this.getJSON(
+      `/api/backtests/${encodeURIComponent(runId)}/signals?limit=${limit}`
+    )
+
+    return data as BacktestSignalListResponse
   }
 }
 

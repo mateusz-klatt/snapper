@@ -8,6 +8,7 @@ export type ValidTab =
   | 'orders'
   | 'positions'
   | 'signals'
+  | 'backtests'
   | 'health'
   | 'admin'
   | 'settings'
@@ -19,6 +20,7 @@ const VALID_TABS: ValidTab[] = [
   'orders',
   'positions',
   'signals',
+  'backtests',
   'health',
   'admin',
   'settings',

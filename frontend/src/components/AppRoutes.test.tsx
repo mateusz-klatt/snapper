@@ -28,6 +28,9 @@ vi.mock('../features/positions/Positions', () => ({
 vi.mock('../features/signals/Signals', () => ({
   Signals: () => <div data-testid='signals'>Signals Component</div>,
 }))
+vi.mock('../features/backtests/Backtests', () => ({
+  Backtests: () => <div data-testid='backtests'>Backtests Component</div>,
+}))
 vi.mock('../features/health/Health', () => ({
   Health: () => <div data-testid='health'>Health Component</div>,
 }))
@@ -94,6 +97,12 @@ describe('AppRoutes', () => {
     renderWithProviders(<AppRoutes activeTab='signals' />)
     await waitFor(() => {
       expect(screen.getByTestId('signals')).toBeTruthy()
+    })
+  })
+  it('renders Backtests component for backtests tab', async () => {
+    renderWithProviders(<AppRoutes activeTab='backtests' />)
+    await waitFor(() => {
+      expect(screen.getByTestId('backtests')).toBeTruthy()
     })
   })
   it('renders Health component for health tab', async () => {

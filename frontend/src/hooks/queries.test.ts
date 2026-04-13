@@ -34,6 +34,11 @@ import {
   useCreateBracket,
   useCreateTrailingStop,
   useTrailingStopForCycle,
+  useBacktests,
+  useBacktest,
+  useBacktestTrades,
+  useBacktestSignals,
+  useCreateBacktest,
 } from './queries'
 import { useAuth } from '../stores/auth'
 import { apiClient } from '../lib/apiClient'
@@ -253,6 +258,21 @@ vi.mock('../lib/apiClient', () => ({
           }),
         })
       )
+    ),
+    getBacktests: vi.fn(() =>
+      Promise.resolve({ type: 'backtest_run_list', payload: [], count: 0 })
+    ),
+    getBacktest: vi.fn(() => Promise.resolve({ type: 'backtest_run_response', payload: {} })),
+    createBacktest: vi.fn(() =>
+      Promise.resolve({ type: 'backtest_run_response', payload: { public_id: 'r-new' } })
+    ),
+    cancelBacktest: vi.fn(() => Promise.resolve({ type: 'backtest_run_response', payload: {} })),
+    rerunBacktest: vi.fn(() => Promise.resolve({ type: 'backtest_run_response', payload: {} })),
+    getBacktestTrades: vi.fn(() =>
+      Promise.resolve({ type: 'backtest_trade_list', payload: [], count: 0 })
+    ),
+    getBacktestSignals: vi.fn(() =>
+      Promise.resolve({ type: 'backtest_signal_list', payload: [], count: 0 })
     ),
   },
 }))
@@ -1316,6 +1336,109 @@ describe('queries', () => {
       })
 
       expect(result.current.fetchStatus).toBe('idle')
+    })
+  })
+
+  describe('useBacktests', () => {
+    it('fetches backtest list', async () => {
+      const { result } = renderHook(() => useBacktests(), {
+        wrapper: createWrapper(),
+      })
+
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      expect(apiClient.getBacktests).toHaveBeenCalled()
+    })
+  })
+
+  describe('useBacktest', () => {
+    it('fetches backtest detail when runId is provided', async () => {
+      ;(apiClient.getBacktest as Mock).mockResolvedValue({
+        type: 'backtest_run_response',
+        payload: { public_id: 'run-1' },
+      })
+
+      const { result } = renderHook(() => useBacktest('run-1'), {
+        wrapper: createWrapper(),
+      })
+
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      expect(apiClient.getBacktest).toHaveBeenCalledWith('run-1')
+    })
+
+    it('is disabled when runId is undefined', () => {
+      const { result } = renderHook(() => useBacktest(undefined), {
+        wrapper: createWrapper(),
+      })
+
+      expect(result.current.fetchStatus).toBe('idle')
+    })
+  })
+
+  describe('useBacktestTrades', () => {
+    it('fetches trades when runId is provided', async () => {
+      ;(apiClient.getBacktestTrades as Mock).mockResolvedValue({
+        type: 'backtest_trade_list',
+        payload: [],
+        count: 0,
+      })
+
+      const { result } = renderHook(() => useBacktestTrades('run-1'), {
+        wrapper: createWrapper(),
+      })
+
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      expect(apiClient.getBacktestTrades).toHaveBeenCalledWith('run-1')
+    })
+
+    it('is disabled when runId is undefined', () => {
+      const { result } = renderHook(() => useBacktestTrades(undefined), {
+        wrapper: createWrapper(),
+      })
+
+      expect(result.current.fetchStatus).toBe('idle')
+    })
+  })
+
+  describe('useBacktestSignals', () => {
+    it('fetches signals when runId is provided', async () => {
+      ;(apiClient.getBacktestSignals as Mock).mockResolvedValue({
+        type: 'backtest_signal_list',
+        payload: [],
+        count: 0,
+      })
+
+      const { result } = renderHook(() => useBacktestSignals('run-1'), {
+        wrapper: createWrapper(),
+      })
+
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      expect(apiClient.getBacktestSignals).toHaveBeenCalledWith('run-1')
+    })
+  })
+
+  describe('useCreateBacktest', () => {
+    it('calls createBacktest and invalidates queries', async () => {
+      ;(apiClient.createBacktest as Mock).mockResolvedValue({
+        type: 'backtest_run_response',
+        payload: { public_id: 'r-new' },
+      })
+
+      const { result } = renderHook(() => useCreateBacktest(), {
+        wrapper: createWrapper(),
+      })
+
+      await act(async () => {
+        result.current.mutate({
+          strategy_class: 'sma',
+          instrument_public_id: 'BTC-USD',
+          exchange: 'kraken',
+          start_date: '2026-01-01',
+          end_date: '2026-06-01',
+        } as never)
+      })
+
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      expect(apiClient.createBacktest).toHaveBeenCalled()
     })
   })
 })
