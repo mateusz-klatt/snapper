@@ -603,7 +603,7 @@ def test_seen_exec_ids_evicts_oldest_at_capacity() -> None:
     svc.apply_venue_event(_make_venue_event(event_id=99999, exec_id="id-new", trade_id=None))
     assert "id-new" in shard.seen_exec_ids
     assert "id-0" not in shard.seen_exec_ids
-    assert len(shard.seen_exec_ids) <= 10_001
+    assert len(shard.seen_exec_ids) == 10_000
 
 
 def test_apply_fill_no_status() -> None:

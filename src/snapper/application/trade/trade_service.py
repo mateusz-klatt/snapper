@@ -304,7 +304,7 @@ class TradeService:
             shard.seen_exec_ids[exec_id] = None
         if trade_id:
             shard.seen_exec_ids[trade_id] = None
-        if len(shard.seen_exec_ids) > 10_000:
+        while len(shard.seen_exec_ids) > 10_000:
             shard.seen_exec_ids.popitem(last=False)
         return True
 
