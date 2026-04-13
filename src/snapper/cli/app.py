@@ -49,6 +49,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Annotated
 from typing import Any
+from typing import cast
 
 import sqlalchemy as sa
 import typer
@@ -59,6 +60,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
+from snapper.application.backtest.config import BacktestConfig
+from snapper.application.backtest.direct_engine import DirectDbEngine
+from snapper.application.backtest.metrics import compute_metrics
+from snapper.application.backtest.result_collector import ResultCollector
 from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.services.continuous_contract_builder import ContinuousContractBuilder
 from snapper.application.updaters.historical.aggregates import PolygonAggregatesBackfillService
@@ -90,11 +95,14 @@ from snapper.data.archiver import CandleCacheArchiver
 from snapper.data.archiver import EventArchiver
 from snapper.data.archiver import ExportResult
 from snapper.data.archiver import StateArchiver
+from snapper.data.backtest_repository import BacktestRepository
 from snapper.data.models import Setting
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active_now
+from snapper.data.repository_types import BacktestResultInsertRow
+from snapper.data.repository_types import BacktestRunRow
 from snapper.data.seed.loader import run_seed
 from snapper.infrastructure.market_data.kraken import run_snapshot_update
 from snapper.infrastructure.market_data.kraken_equities import run_kraken_equities_snapshot_update
@@ -1494,3 +1502,285 @@ def build_continuous(
             )
 
     asyncio.run(run_build())
+
+
+@app.command(name="backtest-run")
+def backtest_run(
+    strategy: Annotated[str, typer.Option("--strategy", help="Strategy class name")],
+    instrument: Annotated[str, typer.Option("--instrument", help="Instrument public ID")],
+    exchange: Annotated[str, typer.Option("--exchange", help="Exchange name")],
+    start: Annotated[str, typer.Option("--start", help="Start date (ISO format)")],
+    end: Annotated[str, typer.Option("--end", help="End date (ISO format)")],
+    timeframe: Annotated[str, typer.Option("--timeframe")] = "1h",
+    initial_cash: Annotated[float, typer.Option("--initial-cash")] = 10_000.0,
+    wallet: Annotated[str, typer.Option("--wallet", help="Wallet public ID")] = "cli",
+) -> None:
+    """Run a backtest synchronously via CLI.
+
+    Creates a backtest run record, executes the engine, and persists results.
+    Unlike the API endpoint, this runs in-process without the process framework.
+
+    Args:
+        strategy: Registered strategy class name.
+        instrument: Target instrument public ID.
+        exchange: Exchange name for candle data.
+        start: Backtest start date in ISO format.
+        end: Backtest end date in ISO format.
+        timeframe: Candle timeframe (default: 1h).
+        initial_cash: Starting cash balance (default: 10000).
+        wallet: Wallet public ID for run ownership.
+    """
+    start_dt = _parse_utc(start)
+    end_dt = _parse_utc(end)
+
+    async def run_backtest() -> None:
+        bootstrap = BootstrapSettingsLoader()
+        repo = get_repository(bootstrap.db_url)
+        bt_repo = BacktestRepository(cast(Any, repo).session_factory)
+        tracker = SequenceTracker()
+        now = datetime.now(UTC)
+
+        config = BacktestConfig(
+            strategy_class=strategy,
+            instruments={exchange: [instrument]},
+            start_date=start_dt,
+            end_date=end_dt,
+            wallet_public_id=wallet,
+            initial_balance=initial_cash,
+            timeframe=timeframe,
+        )
+
+        _, public_id = await bt_repo.create_run(
+            row={
+                "wallet_public_id": wallet,
+                "strategy_name": strategy,
+                "strategy_params": {},
+                "instrument_public_id": instrument,
+                "exchange": exchange,
+                "timeframe": timeframe,
+                "start_date": start_dt,
+                "end_date": end_dt,
+                "initial_cash": initial_cash,
+                "status": "running",
+                "created_by_user_id": "cli",
+                "session_id": tracker.session_id,
+                "sequence_id": tracker.next_sequence("cli"),
+                "timestamp": now,
+            },
+            bus_time=now,
+            session_id=tracker.session_id,
+            sequence_id=tracker.next_sequence("cli"),
+        )
+        typer.echo(f"Created backtest run: {public_id}")
+
+        try:
+            engine = DirectDbEngine(repo, now)
+            collector = ResultCollector()
+            await engine.run(public_id, config, collector)
+
+            persist_now = datetime.now(UTC)
+            if collector.signals:
+                await bt_repo.insert_signals_batch(
+                    collector.signals,
+                    bus_time=persist_now,
+                    session_id=tracker.session_id,
+                    sequence_id=tracker.next_sequence("cli"),
+                )
+            if collector.trades:
+                await bt_repo.insert_trades_batch(
+                    collector.trades,
+                    bus_time=persist_now,
+                    session_id=tracker.session_id,
+                    sequence_id=tracker.next_sequence("cli"),
+                )
+            if collector.equity_points:
+                await bt_repo.insert_equity_points_batch(
+                    collector.equity_points,
+                    bus_time=persist_now,
+                    session_id=tracker.session_id,
+                    sequence_id=tracker.next_sequence("cli"),
+                )
+
+            metrics = compute_metrics(
+                collector.equity_points, collector.trades, initial_balance=initial_cash
+            )
+            await bt_repo.insert_result(
+                BacktestResultInsertRow(
+                    run_public_id=public_id,
+                    total_trades=metrics.total_trades,
+                    winning_trades=metrics.winning_trades,
+                    losing_trades=metrics.losing_trades,
+                    total_pnl=metrics.total_pnl,
+                    max_drawdown=metrics.max_drawdown,
+                    sharpe_ratio=metrics.sharpe_ratio,
+                    win_rate=metrics.win_rate,
+                    profit_factor=metrics.profit_factor,
+                    final_equity=metrics.final_equity,
+                    max_equity=metrics.max_equity,
+                    extra_metrics={},
+                    session_id=tracker.session_id,
+                    sequence_id=tracker.next_sequence("cli"),
+                    timestamp=persist_now,
+                ),
+                bus_time=persist_now,
+                session_id=tracker.session_id,
+                sequence_id=tracker.next_sequence("cli"),
+            )
+
+            final_now = datetime.now(UTC)
+            await bt_repo.update_run_status(
+                public_id=public_id,
+                new_status="completed",
+                bus_time=final_now,
+                session_id=tracker.session_id,
+                sequence_id=tracker.next_sequence("cli"),
+                completed_at=final_now,
+            )
+            typer.echo(
+                f"Backtest completed: {metrics.total_trades} trades, "
+                f"PnL={metrics.total_pnl:.2f}, "
+                f"Sharpe={metrics.sharpe_ratio:.3f}, "
+                f"MaxDD={metrics.max_drawdown:.2%}"
+            )
+        except Exception as exc:
+            fail_now = datetime.now(UTC)
+            await bt_repo.update_run_status(
+                public_id=public_id,
+                new_status="failed",
+                bus_time=fail_now,
+                session_id=tracker.session_id,
+                sequence_id=tracker.next_sequence("cli"),
+                error=str(exc)[:1024],
+            )
+            typer.echo(f"Backtest failed: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+    asyncio.run(run_backtest())
+
+
+@app.command(name="backtest-list")
+def backtest_list(
+    strategy_filter: Annotated[str | None, typer.Option("--strategy")] = None,
+    status_filter: Annotated[str | None, typer.Option("--status")] = None,
+    wallet_filter: Annotated[str | None, typer.Option("--wallet")] = None,
+    limit: Annotated[int, typer.Option("--limit")] = 20,
+) -> None:
+    """List backtest runs with optional filters.
+
+    Args:
+        strategy_filter: Filter by strategy name.
+        status_filter: Filter by status.
+        wallet_filter: Filter by wallet public ID.
+        limit: Maximum runs to show.
+    """
+
+    async def run_list() -> None:
+        bootstrap = BootstrapSettingsLoader()
+        repo = get_repository(bootstrap.db_url)
+        bt_repo = BacktestRepository(cast(Any, repo).session_factory)
+        now = datetime.now(UTC)
+
+        runs = await bt_repo.list_runs(
+            as_of=now,
+            wallet_public_id=wallet_filter,
+            strategy=strategy_filter,
+            status=status_filter,
+            limit=limit,
+        )
+        if not runs:
+            typer.echo("No backtest runs found.")
+            return
+
+        for run in runs:
+            status_str = run["status"]
+            typer.echo(
+                f"  {run['public_id'][:12]}  "
+                f"{run['strategy_name']:20s}  "
+                f"{status_str:18s}  "
+                f"{run['instrument_public_id']:12s}  "
+                f"{run['exchange']:10s}  "
+                f"{run['start_date'].strftime('%Y-%m-%d')} → "
+                f"{run['end_date'].strftime('%Y-%m-%d')}"
+            )
+        typer.echo(f"\n{len(runs)} run(s) shown.")
+
+    asyncio.run(run_list())
+
+
+@app.command(name="backtest-cancel")
+def backtest_cancel(
+    run_id: Annotated[str, typer.Argument(help="Run public ID to cancel")],
+) -> None:
+    """Cancel a pending or running backtest run.
+
+    Args:
+        run_id: Public ID of the backtest run.
+    """
+
+    async def run_cancel() -> None:
+        bootstrap = BootstrapSettingsLoader()
+        repo = get_repository(bootstrap.db_url)
+        bt_repo = BacktestRepository(cast(Any, repo).session_factory)
+        tracker = SequenceTracker()
+        now = datetime.now(UTC)
+
+        run = await bt_repo.get_run(run_id, as_of=now)
+        if run is None:
+            typer.echo(f"Run not found: {run_id}", err=True)
+            raise typer.Exit(code=1)
+        if run["status"] not in ("pending", "running"):
+            typer.echo(f"Cannot cancel run in status '{run['status']}'", err=True)
+            raise typer.Exit(code=1)
+
+        await bt_repo.update_run_status(
+            public_id=run_id,
+            new_status="cancel_requested",
+            bus_time=now,
+            session_id=tracker.session_id,
+            sequence_id=tracker.next_sequence("cli"),
+        )
+        typer.echo(f"Cancel requested for run {run_id}")
+
+    asyncio.run(run_cancel())
+
+
+@app.command(name="backtest-rerun")
+def backtest_rerun(
+    run_id: Annotated[str, typer.Argument(help="Run public ID to re-run")],
+) -> None:
+    """Re-run a backtest with the same configuration.
+
+    Args:
+        run_id: Public ID of the original backtest run.
+    """
+    original: BacktestRunRow | None = None
+
+    async def load_original() -> BacktestRunRow | None:
+        bootstrap = BootstrapSettingsLoader()
+        repo = get_repository(bootstrap.db_url)
+        bt_repo = BacktestRepository(cast(Any, repo).session_factory)
+        now = datetime.now(UTC)
+        return await bt_repo.get_run(run_id, as_of=now)
+
+    original = asyncio.run(load_original())
+    if original is None:
+        typer.echo(f"Run not found: {run_id}", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(
+        f"Re-running {original['strategy_name']} on "
+        f"{original['instrument_public_id']} "
+        f"({original['start_date'].strftime('%Y-%m-%d')} → "
+        f"{original['end_date'].strftime('%Y-%m-%d')})"
+    )
+
+    backtest_run(
+        strategy=original["strategy_name"],
+        instrument=original["instrument_public_id"],
+        exchange=original["exchange"],
+        start=original["start_date"].isoformat(),
+        end=original["end_date"].isoformat(),
+        timeframe=original["timeframe"],
+        initial_cash=original["initial_cash"],
+        wallet=original["wallet_public_id"],
+    )

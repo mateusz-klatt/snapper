@@ -3782,3 +3782,300 @@ def test_build_continuous_with_explicit_dates(
 
     assert captured_kwargs["start"].tzinfo == UTC
     assert captured_kwargs["end"].tzinfo == UTC
+
+
+class TestBacktestList:
+    """Tests for backtest-list CLI command."""
+
+    def test_list_empty(self, cli_runner: CliRunner) -> None:
+        """No runs shows empty message."""
+        mock_bt_repo = AsyncMock()
+        mock_bt_repo.list_runs = AsyncMock(return_value=[])
+
+        with (
+            patch("snapper.cli.app.BootstrapSettingsLoader") as mock_boot,
+            patch("snapper.cli.app.get_repository") as mock_get_repo,
+            patch("snapper.cli.app.BacktestRepository", return_value=mock_bt_repo),
+        ):
+            mock_boot.return_value.db_url = ASYNC_MEMORY_DB_URL
+            mock_repo = MagicMock()
+            mock_repo.session_factory = MagicMock()
+            mock_get_repo.return_value = mock_repo
+
+            result = cli_runner.invoke(app, ["backtest-list"])
+            assert result.exit_code == 0
+            assert "No backtest runs found" in result.output
+
+    def test_list_with_runs(self, cli_runner: CliRunner) -> None:
+        """Runs are displayed in table format."""
+        mock_bt_repo = AsyncMock()
+        mock_bt_repo.list_runs = AsyncMock(
+            return_value=[
+                {
+                    "public_id": "run-123456789012",
+                    "strategy_name": "sma_cross",
+                    "status": "completed",
+                    "instrument_public_id": "BTC-USD",
+                    "exchange": "kraken",
+                    "start_date": datetime(2026, 1, 1, tzinfo=UTC),
+                    "end_date": datetime(2026, 6, 1, tzinfo=UTC),
+                }
+            ]
+        )
+
+        with (
+            patch("snapper.cli.app.BootstrapSettingsLoader") as mock_boot,
+            patch("snapper.cli.app.get_repository") as mock_get_repo,
+            patch("snapper.cli.app.BacktestRepository", return_value=mock_bt_repo),
+        ):
+            mock_boot.return_value.db_url = ASYNC_MEMORY_DB_URL
+            mock_repo = MagicMock()
+            mock_repo.session_factory = MagicMock()
+            mock_get_repo.return_value = mock_repo
+
+            result = cli_runner.invoke(app, ["backtest-list"])
+            assert result.exit_code == 0
+            assert "sma_cross" in result.output
+            assert "1 run(s)" in result.output
+
+
+class TestBacktestCancel:
+    """Tests for backtest-cancel CLI command."""
+
+    def test_cancel_running(self, cli_runner: CliRunner) -> None:
+        """Running run gets cancel_requested."""
+        mock_bt_repo = AsyncMock()
+        mock_bt_repo.get_run = AsyncMock(return_value={"status": "running", "public_id": "run-1"})
+        mock_bt_repo.update_run_status = AsyncMock(return_value=1)
+
+        with (
+            patch("snapper.cli.app.BootstrapSettingsLoader") as mock_boot,
+            patch("snapper.cli.app.get_repository") as mock_get_repo,
+            patch("snapper.cli.app.BacktestRepository", return_value=mock_bt_repo),
+        ):
+            mock_boot.return_value.db_url = ASYNC_MEMORY_DB_URL
+            mock_repo = MagicMock()
+            mock_repo.session_factory = MagicMock()
+            mock_get_repo.return_value = mock_repo
+
+            result = cli_runner.invoke(app, ["backtest-cancel", "run-1"])
+            assert result.exit_code == 0
+            assert "Cancel requested" in result.output
+
+    def test_cancel_not_found(self, cli_runner: CliRunner) -> None:
+        """Missing run exits with error."""
+        mock_bt_repo = AsyncMock()
+        mock_bt_repo.get_run = AsyncMock(return_value=None)
+
+        with (
+            patch("snapper.cli.app.BootstrapSettingsLoader") as mock_boot,
+            patch("snapper.cli.app.get_repository") as mock_get_repo,
+            patch("snapper.cli.app.BacktestRepository", return_value=mock_bt_repo),
+        ):
+            mock_boot.return_value.db_url = ASYNC_MEMORY_DB_URL
+            mock_repo = MagicMock()
+            mock_repo.session_factory = MagicMock()
+            mock_get_repo.return_value = mock_repo
+
+            result = cli_runner.invoke(app, ["backtest-cancel", "nonexistent"])
+            assert result.exit_code == 1
+            assert "not found" in result.output.lower()
+
+    def test_cancel_completed_exits_error(self, cli_runner: CliRunner) -> None:
+        """Completed run cannot be cancelled."""
+        mock_bt_repo = AsyncMock()
+        mock_bt_repo.get_run = AsyncMock(return_value={"status": "completed", "public_id": "run-1"})
+
+        with (
+            patch("snapper.cli.app.BootstrapSettingsLoader") as mock_boot,
+            patch("snapper.cli.app.get_repository") as mock_get_repo,
+            patch("snapper.cli.app.BacktestRepository", return_value=mock_bt_repo),
+        ):
+            mock_boot.return_value.db_url = ASYNC_MEMORY_DB_URL
+            mock_repo = MagicMock()
+            mock_repo.session_factory = MagicMock()
+            mock_get_repo.return_value = mock_repo
+
+            result = cli_runner.invoke(app, ["backtest-cancel", "run-1"])
+            assert result.exit_code == 1
+            assert "Cannot cancel" in result.output
+
+
+class TestBacktestRerun:
+    """Tests for backtest-rerun CLI command."""
+
+    def test_rerun_not_found(self, cli_runner: CliRunner) -> None:
+        """Missing original run exits with error."""
+        with (
+            patch("snapper.cli.app.BootstrapSettingsLoader") as mock_boot,
+            patch("snapper.cli.app.get_repository") as mock_get_repo,
+            patch("snapper.cli.app.BacktestRepository") as mock_bt_cls,
+        ):
+            mock_boot.return_value.db_url = ASYNC_MEMORY_DB_URL
+            mock_repo = MagicMock()
+            mock_repo.session_factory = MagicMock()
+            mock_get_repo.return_value = mock_repo
+            mock_bt = AsyncMock()
+            mock_bt.get_run = AsyncMock(return_value=None)
+            mock_bt_cls.return_value = mock_bt
+
+            result = cli_runner.invoke(app, ["backtest-rerun", "nonexistent"])
+            assert result.exit_code == 1
+            assert "not found" in result.output.lower()
+
+    @patch.dict(
+        "snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", {"sma_cross": MagicMock()}
+    )
+    def test_rerun_success(self, cli_runner: CliRunner) -> None:
+        """Found run is re-run with same config."""
+        original = {
+            "strategy_name": "sma_cross",
+            "instrument_public_id": "BTC-USD",
+            "exchange": "kraken",
+            "timeframe": "1h",
+            "start_date": datetime(2026, 1, 1, tzinfo=UTC),
+            "end_date": datetime(2026, 6, 1, tzinfo=UTC),
+            "initial_cash": 10000.0,
+            "wallet_public_id": "w-1",
+        }
+        mock_bt_repo = AsyncMock()
+        mock_bt_repo.get_run = AsyncMock(return_value=original)
+        mock_bt_repo.create_run = AsyncMock(return_value=(1, "run-rerun"))
+        mock_bt_repo.insert_signals_batch = AsyncMock()
+        mock_bt_repo.insert_trades_batch = AsyncMock()
+        mock_bt_repo.insert_equity_points_batch = AsyncMock()
+        mock_bt_repo.insert_result = AsyncMock(return_value="res-1")
+        mock_bt_repo.update_run_status = AsyncMock(return_value=1)
+
+        mock_engine = AsyncMock()
+        mock_engine.run = AsyncMock(return_value=(MagicMock(), {}))
+
+        with (
+            patch("snapper.cli.app.BootstrapSettingsLoader") as mock_boot,
+            patch("snapper.cli.app.get_repository") as mock_get_repo,
+            patch("snapper.cli.app.BacktestRepository", return_value=mock_bt_repo),
+            patch("snapper.cli.app.DirectDbEngine", return_value=mock_engine),
+        ):
+            mock_boot.return_value.db_url = ASYNC_MEMORY_DB_URL
+            mock_repo = MagicMock()
+            mock_repo.session_factory = MagicMock()
+            mock_get_repo.return_value = mock_repo
+
+            result = cli_runner.invoke(app, ["backtest-rerun", "run-1"])
+            assert result.exit_code == 0
+            assert "Re-running" in result.output
+            assert "sma_cross" in result.output
+
+
+class TestBacktestRun:
+    """Tests for backtest-run CLI command."""
+
+    @patch.dict(
+        "snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", {"sma_cross": MagicMock()}
+    )
+    def test_run_success(self, cli_runner: CliRunner) -> None:
+        """Successful backtest run prints metrics."""
+        mock_bt_repo = AsyncMock()
+        mock_bt_repo.create_run = AsyncMock(return_value=(1, "run-new"))
+        mock_bt_repo.insert_signals_batch = AsyncMock()
+        mock_bt_repo.insert_trades_batch = AsyncMock()
+        mock_bt_repo.insert_equity_points_batch = AsyncMock()
+        mock_bt_repo.insert_result = AsyncMock(return_value="res-1")
+        mock_bt_repo.update_run_status = AsyncMock(return_value=1)
+
+        mock_engine = AsyncMock()
+        mock_engine.run = AsyncMock(return_value=(MagicMock(), {}))
+
+        mock_collector = MagicMock()
+        mock_collector.signals = [{"s": 1}]
+        mock_collector.trades = [{"t": 1}]
+        mock_collector.equity_points = [{"e": 1}]
+
+        mock_metrics = MagicMock()
+        mock_metrics.total_trades = 5
+        mock_metrics.total_pnl = 500.0
+        mock_metrics.sharpe_ratio = 1.5
+        mock_metrics.max_drawdown = 0.1
+        mock_metrics.winning_trades = 3
+        mock_metrics.losing_trades = 2
+        mock_metrics.win_rate = 0.6
+        mock_metrics.profit_factor = 3.0
+        mock_metrics.final_equity = 10500.0
+        mock_metrics.max_equity = 11000.0
+
+        with (
+            patch("snapper.cli.app.BootstrapSettingsLoader") as mock_boot,
+            patch("snapper.cli.app.get_repository") as mock_get_repo,
+            patch("snapper.cli.app.BacktestRepository", return_value=mock_bt_repo),
+            patch("snapper.cli.app.DirectDbEngine", return_value=mock_engine),
+            patch("snapper.cli.app.ResultCollector", return_value=mock_collector),
+            patch("snapper.cli.app.compute_metrics", return_value=mock_metrics),
+        ):
+            mock_boot.return_value.db_url = ASYNC_MEMORY_DB_URL
+            mock_repo = MagicMock()
+            mock_repo.session_factory = MagicMock()
+            mock_get_repo.return_value = mock_repo
+
+            result = cli_runner.invoke(
+                app,
+                [
+                    "backtest-run",
+                    "--strategy",
+                    "sma_cross",
+                    "--instrument",
+                    "BTC-USD",
+                    "--exchange",
+                    "kraken",
+                    "--start",
+                    "2026-01-01",
+                    "--end",
+                    "2026-06-01",
+                ],
+            )
+            assert result.exit_code == 0
+            assert "completed" in result.output.lower()
+            mock_bt_repo.insert_signals_batch.assert_called_once()
+            mock_bt_repo.insert_trades_batch.assert_called_once()
+            mock_bt_repo.insert_equity_points_batch.assert_called_once()
+
+    @patch.dict(
+        "snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", {"sma_cross": MagicMock()}
+    )
+    def test_run_engine_failure(self, cli_runner: CliRunner) -> None:
+        """Engine failure marks run as failed and exits 1."""
+        mock_bt_repo = AsyncMock()
+        mock_bt_repo.create_run = AsyncMock(return_value=(1, "run-fail"))
+        mock_bt_repo.update_run_status = AsyncMock(return_value=1)
+
+        mock_engine = AsyncMock()
+        mock_engine.run = AsyncMock(side_effect=RuntimeError("no data"))
+
+        with (
+            patch("snapper.cli.app.BootstrapSettingsLoader") as mock_boot,
+            patch("snapper.cli.app.get_repository") as mock_get_repo,
+            patch("snapper.cli.app.BacktestRepository", return_value=mock_bt_repo),
+            patch("snapper.cli.app.DirectDbEngine", return_value=mock_engine),
+        ):
+            mock_boot.return_value.db_url = ASYNC_MEMORY_DB_URL
+            mock_repo = MagicMock()
+            mock_repo.session_factory = MagicMock()
+            mock_get_repo.return_value = mock_repo
+
+            result = cli_runner.invoke(
+                app,
+                [
+                    "backtest-run",
+                    "--strategy",
+                    "sma_cross",
+                    "--instrument",
+                    "BTC-USD",
+                    "--exchange",
+                    "kraken",
+                    "--start",
+                    "2026-01-01",
+                    "--end",
+                    "2026-06-01",
+                ],
+            )
+            assert result.exit_code == 1
+            assert "failed" in result.output.lower()
