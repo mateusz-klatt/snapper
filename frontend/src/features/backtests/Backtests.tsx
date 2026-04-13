@@ -99,13 +99,12 @@ const BacktestRow: React.FC<BacktestRowProps> = ({ run, onCancel, onRerun }) => 
 }
 
 export const Backtests: React.FC = () => {
-  const { data, isLoading } = useBacktests()
+  const [statusFilter, setStatusFilter] = useState<string>('')
+  const { data, isLoading } = useBacktests(undefined, statusFilter || undefined)
   const cancelMutation = useCancelBacktest()
   const rerunMutation = useRerunBacktest()
-  const [statusFilter, setStatusFilter] = useState<string>('')
 
   const runs = data?.payload ?? []
-  const filtered = statusFilter ? runs.filter(r => r.status === statusFilter) : runs
 
   const handleCancel = (publicId: string) => {
     cancelMutation.mutate(publicId)
@@ -142,16 +141,16 @@ export const Backtests: React.FC = () => {
             <OrderCardSkeleton />
           </div>
         )}
-        {!isLoading && filtered.length === 0 && (
+        {!isLoading && runs.length === 0 && (
           <EmptyState
             icon={<Play className='h-6 w-6' />}
             title='No backtests'
             message='Run a backtest via the CLI or API to see results here.'
           />
         )}
-        {!isLoading && filtered.length > 0 && (
+        {!isLoading && runs.length > 0 && (
           <div className='grid gap-4'>
-            {filtered.map((run: BacktestRunData) => (
+            {runs.map((run: BacktestRunData) => (
               <BacktestRow
                 key={run.public_id}
                 run={run}

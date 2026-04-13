@@ -150,28 +150,26 @@ describe('Backtests', () => {
     expect(await screen.findByTestId('rerun-run-abc123')).toBeInTheDocument()
   })
 
-  it('filters by status', async () => {
+  it('filters by status via server-side query', async () => {
     mockGetBacktests.mockResolvedValue({
       type: 'backtest_run_list',
       session_id: 's1',
       sequence_id: 1,
       public_id: 'resp-1',
       timestamp: NOW,
-      payload: [
-        makeRun({ public_id: 'run-1', status: 'completed' }),
-        makeRun({ public_id: 'run-2', status: 'failed' }),
-      ],
-      count: 2,
+      payload: [makeRun({ status: 'completed' })],
+      count: 1,
     })
 
     renderWithQuery(<Backtests />)
-    await screen.findAllByText('sma_cross')
+    await screen.findByText('sma_cross')
 
     const select = screen.getByTestId('status-filter')
 
     fireEvent.change(select, { target: { value: 'failed' } })
-    expect(screen.queryByTestId('backtest-run-1')).not.toBeInTheDocument()
-    expect(screen.getByTestId('backtest-run-2')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(mockGetBacktests).toHaveBeenCalledWith(50, 0, undefined, 'failed')
+    })
   })
 
   it('renders pending status with default color', async () => {
