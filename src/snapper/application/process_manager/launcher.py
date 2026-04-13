@@ -52,6 +52,8 @@ from snapper.core.types import ProcessMode
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.core.types import ProcessRunStatusEnum
+from snapper.core.types import StartProcessStatusEnum
+from snapper.core.types import StopProcessStatusEnum
 from snapper.data.models import Setting
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active_now
@@ -948,7 +950,7 @@ class ProcessLauncherService:
         if name in self.started_processes:
             logger.warning(f"Process '{name}' is already running")
             return ProcessStartResult(
-                status="already_running",
+                status=StartProcessStatusEnum.ALREADY_RUNNING,
                 message=f"Process '{name}' is already running",
             )
         repository = get_repository(self.settings.db_url)
@@ -961,7 +963,7 @@ class ProcessLauncherService:
             setting = result.scalar_one_or_none()
             if not setting:
                 return ProcessStartResult(
-                    status="error",
+                    status=StartProcessStatusEnum.ERROR,
                     message=f"Process '{name}' not found in configuration",
                 )
             config_dict = json.loads(setting.value)
@@ -972,20 +974,20 @@ class ProcessLauncherService:
         except Exception as e:
             logger.error(f"Failed to start process '{name}': {e}")
             return ProcessStartResult(
-                status="error",
+                status=StartProcessStatusEnum.ERROR,
                 message=f"Failed to start process '{name}': {str(e)}",
             )
         self._start_native_process_monitoring()
         public_id = self.active_runs.get(name)
         if config.lifecycle is ProcessLifecycleEnum.ONE_SHOT:
             return ProcessStartResult(
-                status="success",
+                status=StartProcessStatusEnum.SUCCESS,
                 message=f"Process '{name}' executed successfully",
                 public_id=public_id,
             )
         logger.info(f"Process '{name}' started successfully")
         return ProcessStartResult(
-            status="success",
+            status=StartProcessStatusEnum.SUCCESS,
             message=f"Process '{name}' started successfully",
             public_id=public_id,
         )
@@ -1018,7 +1020,7 @@ class ProcessLauncherService:
         if name not in self.started_processes:
             logger.warning(f"Process '{name}' is not running")
             return ProcessStopResult(
-                status="not_running",
+                status=StopProcessStatusEnum.NOT_RUNNING,
                 message=f"Process '{name}' is not running",
             )
         try:
@@ -1034,12 +1036,12 @@ class ProcessLauncherService:
             logger.info(f"Process '{name}' stopped successfully")
             await self._finalize_process_run(name, ProcessRunStatusEnum.CANCELLED)
             return ProcessStopResult(
-                status="success",
+                status=StopProcessStatusEnum.SUCCESS,
                 message=f"Process '{name}' stopped successfully",
             )
         except Exception as e:
             logger.error(f"Failed to stop process '{name}': {e}")
-            return ProcessStopResult(status="error", message=str(e))
+            return ProcessStopResult(status=StopProcessStatusEnum.ERROR, message=str(e))
         finally:
             self.expected_terminations.discard(name)
 

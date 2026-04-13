@@ -11,6 +11,8 @@ from uuid import uuid7
 from fastapi import WebSocket
 
 from snapper.auth.domain.roles import UserRole
+from snapper.core.types import SubscriptionActionEnum
+from snapper.core.types import SubscriptionStatusEnum
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
 from snapper.interface.websocket.helpers import filter_topics
 from snapper.interface.websocket.helpers import get_allowed_topics_for_role
@@ -105,8 +107,8 @@ async def handle_subscribe(
     allowed, denied = filter_topics(topics, allowed_set, allowed_categories)
     if not allowed and denied:
         response = WSSubscriptionSuccessResponse(
-            action="subscribe",
-            status="denied",
+            action=SubscriptionActionEnum.SUBSCRIBE,
+            status=SubscriptionStatusEnum.DENIED,
             topics=[],
             denied_topics=denied,
             active_subscriptions=list(manager.get_client_subscriptions(websocket)),
@@ -119,8 +121,8 @@ async def handle_subscribe(
         return
     if not allowed:
         response = WSSubscriptionSuccessResponse(
-            action="subscribe",
-            status="no_topics",
+            action=SubscriptionActionEnum.SUBSCRIBE,
+            status=SubscriptionStatusEnum.NO_TOPICS,
             topics=[],
             denied_topics=denied,
             active_subscriptions=list(manager.get_client_subscriptions(websocket)),
@@ -146,8 +148,8 @@ async def handle_subscribe(
         return
     await bridge.add_subscription(websocket, allowed)
     response = WSSubscriptionSuccessResponse(
-        action="subscribe",
-        status="partial" if denied else "subscribed",
+        action=SubscriptionActionEnum.SUBSCRIBE,
+        status=SubscriptionStatusEnum.PARTIAL if denied else SubscriptionStatusEnum.SUBSCRIBED,
         topics=allowed,
         denied_topics=denied,
         active_subscriptions=list(manager.get_client_subscriptions(websocket)),
@@ -184,8 +186,8 @@ async def handle_unsubscribe(
     denied = [topic for topic in topics if topic not in current_subscriptions]
     if not allowed:
         response = WSSubscriptionSuccessResponse(
-            action="unsubscribe",
-            status="no_topics",
+            action=SubscriptionActionEnum.UNSUBSCRIBE,
+            status=SubscriptionStatusEnum.NO_TOPICS,
             topics=[],
             denied_topics=denied,
             active_subscriptions=list(current_subscriptions),
@@ -211,8 +213,8 @@ async def handle_unsubscribe(
         manager.unsubscribe_client(websocket, topic)
     await bridge.remove_subscription(websocket, allowed)
     response = WSSubscriptionSuccessResponse(
-        action="unsubscribe",
-        status="partial" if denied else "unsubscribed",
+        action=SubscriptionActionEnum.UNSUBSCRIBE,
+        status=SubscriptionStatusEnum.PARTIAL if denied else SubscriptionStatusEnum.UNSUBSCRIBED,
         topics=allowed,
         denied_topics=denied,
         active_subscriptions=list(manager.get_client_subscriptions(websocket)),

@@ -116,12 +116,14 @@ from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
 from snapper.config.settings_routes import router as settings_router
+from snapper.core.types import ComponentStatusEnum
 from snapper.core.types import HealthStatus
 from snapper.core.types import HealthStatusEnum
 from snapper.core.types import MarketDataExchange
 from snapper.core.types import OrderExchange
 from snapper.core.types import RelationshipTypeEnum
 from snapper.core.types import SpawnerProcessStatus
+from snapper.core.types import SpawnerProcessStatusEnum
 from snapper.data.backtest_repository import BacktestRepository
 from snapper.data.repository import Repository
 from snapper.data.repository import dispose_repositories
@@ -468,9 +470,9 @@ def _resolve_trader_status(
         ProcessStatus reflecting actual trader coordinator state.
     """
     ps_status: SpawnerProcessStatus = (
-        "running"
+        SpawnerProcessStatusEnum.RUNNING
         if TRADER_COORDINATOR_PROCESS in process_factory.started_processes
-        else "not_running"
+        else SpawnerProcessStatusEnum.NOT_RUNNING
     )
     return ProcessStatus(
         status=ps_status,
@@ -1143,8 +1145,10 @@ def _create_monitoring_endpoints_router(
                 timestamp=ts,
                 status=status,
                 components=ZmqComponents(
-                    zmq_context="ok" if not error_messages else "error",
-                    websocket_manager="ok",
+                    zmq_context=(
+                        ComponentStatusEnum.OK if not error_messages else ComponentStatusEnum.ERROR
+                    ),
+                    websocket_manager=ComponentStatusEnum.OK,
                     active_connections=stats.connections.active_connections,
                 ),
                 config=ZmqConfig(

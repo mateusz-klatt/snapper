@@ -13,7 +13,6 @@ from dataclasses import field
 from datetime import UTC
 from datetime import datetime
 from typing import Any
-from typing import Literal
 from typing import cast
 from uuid import uuid7
 
@@ -31,6 +30,8 @@ from snapper.config.settings import get_settings_with_service
 from snapper.core.types import CancelEventType
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
+from snapper.core.types import FillStatus
+from snapper.core.types import FillStatusEnum
 from snapper.core.types import HealthStatusEnum
 from snapper.core.types import OrderCommandEnum
 from snapper.core.types import OrderEventType
@@ -1366,7 +1367,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         execution: ExecutionUpdate,
         cum_qty: float,
         expected_qty: float,
-    ) -> Literal["filled", "partial"]:
+    ) -> FillStatus:
         """Determine whether execution represents a full or partial fill.
 
         Args:
@@ -1385,7 +1386,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             OrderStatusEnum.CLOSED,
             OrderStatusEnum.CANCELED,
         )
-        return "filled" if qty_complete or exchange_terminal else "partial"
+        return (
+            FillStatusEnum.FILLED if qty_complete or exchange_terminal else FillStatusEnum.PARTIAL
+        )
 
     @staticmethod
     def _resolve_fee(execution: ExecutionUpdate) -> tuple[float, str]:

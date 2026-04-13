@@ -176,6 +176,63 @@ class BacktestRunStatusEnum(StrEnum):
     CANCELLED = "cancelled"
 
 
+class ComponentStatusEnum(StrEnum):
+    """Infrastructure component status for ZMQ and WebSocket health checks."""
+
+    OK = "ok"
+    ERROR = "error"
+
+
+class StartProcessStatusEnum(StrEnum):
+    """Start operation outcome."""
+
+    SUCCESS = "success"
+    ALREADY_RUNNING = "already_running"
+    ERROR = "error"
+
+
+class StopProcessStatusEnum(StrEnum):
+    """Stop operation outcome."""
+
+    SUCCESS = "success"
+    NOT_RUNNING = "not_running"
+    ERROR = "error"
+
+
+class SpawnerProcessStatusEnum(StrEnum):
+    """Subprocess-level process status for spawner-managed processes."""
+
+    NOT_RUNNING = "not_running"
+    RUNNING = "running"
+    STOPPED = "stopped"
+    COMPLETED = "completed"
+    ERROR = "error"
+
+
+class SubscriptionActionEnum(StrEnum):
+    """WebSocket subscription action."""
+
+    SUBSCRIBE = "subscribe"
+    UNSUBSCRIBE = "unsubscribe"
+
+
+class SubscriptionStatusEnum(StrEnum):
+    """WebSocket subscription result status."""
+
+    SUBSCRIBED = "subscribed"
+    UNSUBSCRIBED = "unsubscribed"
+    PARTIAL = "partial"
+    DENIED = "denied"
+    NO_TOPICS = "no_topics"
+
+
+class FillStatusEnum(StrEnum):
+    """Result of an order execution."""
+
+    FILLED = "filled"
+    PARTIAL = "partial"
+
+
 TradeSide = Literal[TradeSideEnum.BUY, TradeSideEnum.SELL]
 """Direction of a trade: 'buy' for long entry, 'sell' for short/exit."""
 
@@ -187,7 +244,7 @@ OrderStatus = Literal[
 ]
 """Order lifecycle state from creation through completion or cancellation."""
 
-FillStatus = Literal["filled", "partial"]
+FillStatus = Literal[FillStatusEnum.FILLED, FillStatusEnum.PARTIAL]
 """Result of an order execution: 'filled' for complete, 'partial' for ongoing."""
 
 CancelEventType = Literal["cancelled", "rejected"]
@@ -268,16 +325,22 @@ AllExchange = Literal[
 HealthStatus = Literal[HealthStatusEnum.HEALTHY, HealthStatusEnum.WARNING, HealthStatusEnum.ERROR]
 """Component health state for monitoring and alerting."""
 
-ComponentStatus = Literal["ok", "error"]
+ComponentStatus = Literal[ComponentStatusEnum.OK, ComponentStatusEnum.ERROR]
 """Infrastructure component status for ZMQ and WebSocket health checks."""
 
 ProcessMode = Literal[ProcessModeEnum.THREAD, ProcessModeEnum.PROCESS]
 """Process execution mode: 'thread' for in-process, 'process' for subprocess."""
 
-StartProcessStatus = Literal["success", "already_running", "error"]
+StartProcessStatus = Literal[
+    StartProcessStatusEnum.SUCCESS,
+    StartProcessStatusEnum.ALREADY_RUNNING,
+    StartProcessStatusEnum.ERROR,
+]
 """Start operation outcome: success, already running, or error."""
 
-StopProcessStatus = Literal["success", "not_running", "error"]
+StopProcessStatus = Literal[
+    StopProcessStatusEnum.SUCCESS, StopProcessStatusEnum.NOT_RUNNING, StopProcessStatusEnum.ERROR
+]
 """Stop operation outcome: success, not running, or error."""
 
 ProcessLifecycleType = Literal[ProcessLifecycleEnum.LONG_RUNNING, ProcessLifecycleEnum.ONE_SHOT]
@@ -317,13 +380,25 @@ MarketDataType = Literal[
 ]
 """Market data type for ZMQ topic routing (market.{exchange}.{instrument}.{type})."""
 
-SubscriptionAction = Literal["subscribe", "unsubscribe"]
+SubscriptionAction = Literal[SubscriptionActionEnum.SUBSCRIBE, SubscriptionActionEnum.UNSUBSCRIBE]
 """WebSocket subscription action: subscribe to or unsubscribe from topics."""
 
-SubscriptionStatus = Literal["subscribed", "unsubscribed", "partial", "denied", "no_topics"]
+SubscriptionStatus = Literal[
+    SubscriptionStatusEnum.SUBSCRIBED,
+    SubscriptionStatusEnum.UNSUBSCRIBED,
+    SubscriptionStatusEnum.PARTIAL,
+    SubscriptionStatusEnum.DENIED,
+    SubscriptionStatusEnum.NO_TOPICS,
+]
 """WebSocket subscription result status indicating the outcome of a subscription request."""
 
-SpawnerProcessStatus = Literal["not_running", "running", "stopped", "completed", "error"]
+SpawnerProcessStatus = Literal[
+    SpawnerProcessStatusEnum.NOT_RUNNING,
+    SpawnerProcessStatusEnum.RUNNING,
+    SpawnerProcessStatusEnum.STOPPED,
+    SpawnerProcessStatusEnum.COMPLETED,
+    SpawnerProcessStatusEnum.ERROR,
+]
 """Subprocess-level process status for spawner-managed processes."""
 
 AliasChannel = Literal[AliasChannelEnum.WS, AliasChannelEnum.REST, AliasChannelEnum.CCXT]
@@ -353,10 +428,12 @@ __all__ = [
     "AssetType",
     "AssetTypeEnum",
     "ComponentStatus",
+    "ComponentStatusEnum",
     "ExchangeEnum",
     "ExecutionMode",
     "ExecutionModeEnum",
     "FillStatus",
+    "FillStatusEnum",
     "HealthStatus",
     "HealthStatusEnum",
     "IndicatorBackend",
@@ -383,10 +460,15 @@ __all__ = [
     "ProcessRunStatusType",
     "RelationshipTypeEnum",
     "SpawnerProcessStatus",
+    "SpawnerProcessStatusEnum",
     "StartProcessStatus",
+    "StartProcessStatusEnum",
     "StopProcessStatus",
+    "StopProcessStatusEnum",
     "SubscriptionAction",
+    "SubscriptionActionEnum",
     "SubscriptionStatus",
+    "SubscriptionStatusEnum",
     "TradeSide",
     "TradeSideEnum",
     "UpsertResult",

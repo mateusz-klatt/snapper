@@ -9,6 +9,9 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal
 
+from snapper.core.types import FillStatus
+from snapper.core.types import FillStatusEnum
+
 
 class OrderSideEnum(Enum):
     """Enumeration of order sides (buy/sell)."""
@@ -54,7 +57,7 @@ class TimeInForceEnum(Enum):
     IOC = "IOC"
 
 
-def to_fill_status(execution: ExecutionUpdate) -> Literal["filled", "partial"]:
+def to_fill_status(execution: ExecutionUpdate) -> FillStatus:
     """Derive FillStatus from an ExecutionUpdate.
 
     Single source of truth for mapping exchange-level order status to
@@ -68,8 +71,8 @@ def to_fill_status(execution: ExecutionUpdate) -> Literal["filled", "partial"]:
         'filled' otherwise (closed, explicitly filled, or default).
     """
     if execution.order_status == OrderStatusEnum.OPEN and (execution.cum_qty or 0) > 0:
-        return "partial"
-    return "filled"
+        return FillStatusEnum.PARTIAL
+    return FillStatusEnum.FILLED
 
 
 def normalize_order_status(status: OrderStatusEnum) -> OrderStatusEnum:
