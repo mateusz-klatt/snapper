@@ -1,0 +1,188 @@
+"""Tests for executor shard_key wallet segment alignment with coordinator."""
+
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock
+
+import pytest
+
+from snapper.application.engine.service import TradingEngineService
+from snapper.data.repository import SQLAlchemyRepository
+from snapper.messaging.executors.base import ExchangeExecutorService
+
+WALLET_UUID = "01968a3b-7c4d-7e0f-8a1b-2c3d4e5f6a7b"
+WALLET_SHORT = WALLET_UUID.replace("-", "")[:12].lower()
+
+
+class ShardKeyExecutor(ExchangeExecutorService[Any]):
+    """Minimal executor stub for shard_key tests."""
+
+    def __init__(self, wallet_public_id: str = "") -> None:
+        """Initialize with configurable wallet."""
+        super().__init__(wallet_public_id=wallet_public_id)
+        self.settings = SimpleNamespace(
+            db_url="sqlite:///:memory:",
+            zmq_broker_xpub="xpub",
+            zmq_broker_xsub="xsub",
+            master_password=None,
+            use_venue_reconciliation=False,
+            use_durable_commands=False,
+        )
+
+    def _create_exchange_client(self) -> Any:
+        return SimpleNamespace()
+
+    def _get_exchange_name(self) -> str:
+        return "kraken"
+
+
+def _mock_repo() -> AsyncMock:
+    """Create a mock SQLAlchemyRepository with insert_venue_event."""
+    repo = AsyncMock(spec=SQLAlchemyRepository)
+    repo.insert_venue_event = AsyncMock(return_value=1)
+    return repo
+
+
+@pytest.mark.asyncio
+async def test_venue_event_shard_key_includes_wallet() -> None:
+    """Executor with wallet produces shard_key with wallet segment.
+
+    Given: an executor with wallet_public_id set,
+    When: _record_venue_event is called for a live instrument,
+    Then: shard_key contains .w{wallet_short} segment.
+    """
+    ex: Any = ShardKeyExecutor(wallet_public_id=WALLET_UUID)
+    repo = _mock_repo()
+    ex.repository = repo
+    await ex._record_venue_event(
+        {
+            "event_type": "fill_observed",
+            "exchange_name": "kraken",
+            "instrument": "BTC-USD",
+        }
+    )
+    call_dict = repo.insert_venue_event.call_args.args[0]
+    assert call_dict["shard_key"] == f"kraken.BTC-USD.live.w{WALLET_SHORT}"
+
+
+@pytest.mark.asyncio
+async def test_venue_event_shard_key_paper_with_wallet_and_strategy() -> None:
+    """Paper mode with wallet and strategy_tag produces 5-segment shard_key.
+
+    Given: an executor with wallet_public_id set,
+    When: _record_venue_event is called for paper exchange with strategy_tag,
+    Then: shard_key is {exchange}.{instrument}.{mode}.w{short}.{tag}.
+    """
+    ex: Any = ShardKeyExecutor(wallet_public_id=WALLET_UUID)
+    repo = _mock_repo()
+    ex.repository = repo
+    await ex._record_venue_event(
+        {
+            "event_type": "fill_observed",
+            "exchange_name": "paper",
+            "instrument": "BTC-USD",
+            "side": "buy",
+            "strategy_tag": "scalp",
+        }
+    )
+    call_dict = repo.insert_venue_event.call_args.args[0]
+    assert call_dict["shard_key"] == f"paper.BTC-USD.paper.w{WALLET_SHORT}.scalp"
+
+
+@pytest.mark.asyncio
+async def test_venue_event_shard_key_paper_with_wallet_no_strategy() -> None:
+    """Paper mode with wallet but no strategy_tag produces 4-segment shard_key.
+
+    Given: an executor with wallet_public_id set,
+    When: _record_venue_event is called for paper exchange without strategy_tag,
+    Then: shard_key is {exchange}.{instrument}.{mode}.w{short}.
+    """
+    ex: Any = ShardKeyExecutor(wallet_public_id=WALLET_UUID)
+    repo = _mock_repo()
+    ex.repository = repo
+    await ex._record_venue_event(
+        {
+            "event_type": "order_accepted",
+            "exchange_name": "paper",
+            "instrument": "ETH-USD",
+        }
+    )
+    call_dict = repo.insert_venue_event.call_args.args[0]
+    assert call_dict["shard_key"] == f"paper.ETH-USD.paper.w{WALLET_SHORT}"
+
+
+@pytest.mark.asyncio
+async def test_venue_event_shard_key_matches_coordinator() -> None:
+    """Executor and coordinator produce identical shard_keys for same params.
+
+    Given: same exchange, instrument, mode, wallet, strategy,
+    When: executor writes a venue event and coordinator computes _shard_key,
+    Then: both shard_keys are identical.
+    """
+    ex: Any = ShardKeyExecutor(wallet_public_id=WALLET_UUID)
+    repo = _mock_repo()
+    ex.repository = repo
+    await ex._record_venue_event(
+        {
+            "event_type": "fill_observed",
+            "exchange_name": "paper",
+            "instrument": "BTC-USD",
+            "strategy_tag": "scalp",
+        }
+    )
+    executor_shard = repo.insert_venue_event.call_args.args[0]["shard_key"]
+
+    engine = TradingEngineService(
+        instrument="BTC-USD",
+        execution_socket=AsyncMock(),
+        exchange="paper",
+        strategy_tag="scalp",
+        wallet_public_id=WALLET_UUID,
+    )
+    assert executor_shard == engine._shard_key
+
+
+@pytest.mark.asyncio
+async def test_venue_event_shard_key_backwards_compatible() -> None:
+    """Executor without wallet produces legacy 3-segment shard_key.
+
+    Given: an executor with empty wallet_public_id (legacy),
+    When: _record_venue_event is called,
+    Then: shard_key is the original 3-segment format.
+    """
+    ex: Any = ShardKeyExecutor(wallet_public_id="")
+    repo = _mock_repo()
+    ex.repository = repo
+    await ex._record_venue_event(
+        {
+            "event_type": "fill_observed",
+            "exchange_name": "kraken",
+            "instrument": "BTC-USD",
+        }
+    )
+    call_dict = repo.insert_venue_event.call_args.args[0]
+    assert call_dict["shard_key"] == "kraken.BTC-USD.live"
+
+
+@pytest.mark.asyncio
+async def test_venue_event_shard_key_wallet_short_format() -> None:
+    """Wallet short is UUID stripped of dashes, first 12 chars, lowercase.
+
+    Given: a known UUID7 wallet_public_id,
+    When: shard_key is computed,
+    Then: wallet segment matches expected transformation.
+    """
+    ex: Any = ShardKeyExecutor(wallet_public_id=WALLET_UUID)
+    repo = _mock_repo()
+    ex.repository = repo
+    await ex._record_venue_event(
+        {
+            "event_type": "order_accepted",
+            "exchange_name": "kraken",
+            "instrument": "ETH-USD",
+        }
+    )
+    call_dict = repo.insert_venue_event.call_args.args[0]
+    expected_short = "01968a3b7c4d"
+    assert f".w{expected_short}" in call_dict["shard_key"]
+    assert call_dict["shard_key"] == f"kraken.ETH-USD.live.w{expected_short}"

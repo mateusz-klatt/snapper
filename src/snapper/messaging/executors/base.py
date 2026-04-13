@@ -968,9 +968,13 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             else ExecutionModeEnum.LIVE
         )
         strategy_tag = params.get("strategy_tag")
-        shard_key = f"{exchange_name}.{instrument}.{mode}"
-        if mode == ExecutionModeEnum.PAPER and strategy_tag:
-            shard_key = f"{shard_key}.{strategy_tag}"
+        base = f"{exchange_name}.{instrument}.{mode}"
+        if self.wallet_public_id:
+            wallet_short = self.wallet_public_id.replace("-", "")[:12].lower()
+            base = f"{base}.w{wallet_short}"
+        shard_key = (
+            f"{base}.{strategy_tag}" if mode == ExecutionModeEnum.PAPER and strategy_tag else base
+        )
         now = datetime.now(UTC)
         try:
             await self.repository.insert_venue_event(
