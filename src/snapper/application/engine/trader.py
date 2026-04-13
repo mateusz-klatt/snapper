@@ -1073,9 +1073,10 @@ class TraderCoordinator(RegisterableProcess):
     def _find_engine_for_fill(self, fill: ExecutionData) -> TradingEngineService | None:
         """Find engine matching an execution fill by client_order_id or instrument.
 
-        Searches engines in two passes:
+        Searches engines in three passes:
         1. Exact match on pending_client_order_id (current in-flight order).
-        2. Fallback match on instrument + exchange (for late fills after timeout).
+        2. Wallet-scoped fallback: instrument + exchange + wallet_public_id.
+        3. Legacy fallback: instrument + exchange only (when fill has no wallet).
 
         Args:
             fill: Execution fill to match.
@@ -1086,9 +1087,18 @@ class TraderCoordinator(RegisterableProcess):
         for engine in self.engines.values():
             if engine.pending_client_order_id == fill.client_order_id:
                 return engine
-        for engine in self.engines.values():
-            if engine.instrument == fill.instrument and engine.exchange == fill.exchange:
-                return engine
+        if fill.wallet_public_id:
+            for engine in self.engines.values():
+                if (
+                    engine.instrument == fill.instrument
+                    and engine.exchange == fill.exchange
+                    and engine.wallet_public_id == fill.wallet_public_id
+                ):
+                    return engine
+        else:
+            for engine in self.engines.values():
+                if engine.instrument == fill.instrument and engine.exchange == fill.exchange:
+                    return engine
         return None
 
     async def _handle_execution_fill(self, topic: str, fill: ExecutionData) -> None:

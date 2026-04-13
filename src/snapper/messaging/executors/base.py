@@ -1466,6 +1466,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             fee_asset=fee_asset,
             status=status,
             executed_at=execution.timestamp,
+            wallet_public_id=original_order.wallet_public_id or self.wallet_public_id,
+            operator_public_id=original_order.operator_public_id,
             liquidity_role={"m": "maker", "t": "taker"}.get(
                 getattr(execution, "liquidity_ind", None) or "", "unknown"
             ),
