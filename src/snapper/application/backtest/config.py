@@ -65,7 +65,14 @@ class BacktestConfig(StrictBody):
     @field_validator("execution_mode")
     @classmethod
     def validate_execution_mode_phase1(cls, v: BacktestExecutionMode) -> BacktestExecutionMode:
-        """Phase 1 only supports DIRECT_DB."""
+        """Phase 1 only supports DIRECT_DB.
+
+        Args:
+            v: Execution mode to validate.
+
+        Returns:
+            Validated execution mode.
+        """
         if v != BacktestExecutionMode.DIRECT_DB:
             raise ValueError(f"Execution mode '{v}' not supported in Phase 1; use 'direct_db'")
         return v
@@ -73,7 +80,14 @@ class BacktestConfig(StrictBody):
     @field_validator("initial_balance")
     @classmethod
     def validate_initial_balance(cls, v: float) -> float:
-        """Initial balance must be positive."""
+        """Initial balance must be positive.
+
+        Args:
+            v: Balance value to validate.
+
+        Returns:
+            Validated balance.
+        """
         if v <= 0:
             raise ValueError("initial_balance must be positive")
         return v
@@ -81,7 +95,14 @@ class BacktestConfig(StrictBody):
     @field_validator("slippage_bps")
     @classmethod
     def validate_slippage_bps(cls, v: float) -> float:
-        """Slippage must be non-negative."""
+        """Slippage must be non-negative.
+
+        Args:
+            v: Slippage value in basis points.
+
+        Returns:
+            Validated slippage.
+        """
         if v < 0:
             raise ValueError("slippage_bps must be non-negative")
         return v
@@ -89,7 +110,14 @@ class BacktestConfig(StrictBody):
     @field_validator("commission_bps")
     @classmethod
     def validate_commission_bps(cls, v: float) -> float:
-        """Commission must be non-negative."""
+        """Commission must be non-negative.
+
+        Args:
+            v: Commission value in basis points.
+
+        Returns:
+            Validated commission.
+        """
         if v < 0:
             raise ValueError("commission_bps must be non-negative")
         return v
@@ -97,7 +125,14 @@ class BacktestConfig(StrictBody):
     @field_validator("strategy_class")
     @classmethod
     def validate_strategy_class(cls, v: str) -> str:
-        """Validate strategy_class is registered."""
+        """Validate strategy_class is registered.
+
+        Args:
+            v: Strategy class name.
+
+        Returns:
+            Validated strategy class name.
+        """
         if v not in StrategyFactory.STRATEGY_CLASSES:
             available = ", ".join(sorted(StrategyFactory.STRATEGY_CLASSES.keys()))
             raise ValueError(
@@ -108,7 +143,15 @@ class BacktestConfig(StrictBody):
     @field_validator("end_date")
     @classmethod
     def validate_date_range(cls, v: datetime, info: object) -> datetime:
-        """Validate end_date is after start_date."""
+        """Validate end_date is after start_date.
+
+        Args:
+            v: End date to validate.
+            info: Pydantic validation info with prior field values.
+
+        Returns:
+            Validated end date.
+        """
         data = getattr(info, "data", {})
         start = data.get("start_date")
         if start is not None and v <= start:
@@ -118,7 +161,14 @@ class BacktestConfig(StrictBody):
     @field_validator("instruments")
     @classmethod
     def validate_instruments_non_empty(cls, v: dict[str, list[str]]) -> dict[str, list[str]]:
-        """Validate at least one exchange with one instrument."""
+        """Validate at least one exchange with one instrument.
+
+        Args:
+            v: Instruments dict to validate.
+
+        Returns:
+            Validated instruments dict.
+        """
         if not v:
             raise ValueError("instruments must contain at least one exchange")
         for exchange, symbols in v.items():
