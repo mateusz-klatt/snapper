@@ -42,6 +42,8 @@ class Permission(StrEnum):
     MANAGE_WALLET_CREDENTIALS = "manage:wallet_credentials"
     MANAGE_SCOPE_GRANTS = "manage:scope_grants"
     IMPERSONATE_OPERATOR = "impersonate:operator"
+    READ_BACKTESTS = "read:backtests"
+    MANAGE_BACKTESTS = "manage:backtests"
 
 
 RESOURCE_PERMISSIONS: dict[str, Permission | None] = {
@@ -55,6 +57,7 @@ RESOURCE_PERMISSIONS: dict[str, Permission | None] = {
     "health": Permission.READ_SYSTEM_STATUS,
     "admin": Permission.MANAGE_USERS,
     "settings": Permission.CONFIGURE_SYSTEM,
+    "backtests": Permission.READ_BACKTESTS,
 }
 
 
@@ -65,6 +68,7 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.READ_POSITIONS,
         Permission.READ_STRATEGIES,
         Permission.READ_SYSTEM_STATUS,
+        Permission.READ_BACKTESTS,
     },
     UserRole.OPERATOR: {
         Permission.READ_MARKET_DATA,
@@ -78,6 +82,8 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.STOP_STRATEGIES,
         Permission.READ_SYSTEM_STATUS,
         Permission.MANAGE_PROCESSES,
+        Permission.READ_BACKTESTS,
+        Permission.MANAGE_BACKTESTS,
     },
     UserRole.ADMIN: set(Permission),
 }

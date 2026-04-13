@@ -1,0 +1,277 @@
+"""Backtest API schemas — request bodies and response payloads.
+
+Defines Pydantic models for backtest REST endpoints:
+create, list, detail, cancel, rerun, trades, signals, events.
+"""
+
+from datetime import datetime
+from typing import Any
+from typing import Literal
+
+from pydantic import Field
+from pydantic import field_validator
+
+from snapper.api.schemas.base import PayloadListResponse
+from snapper.api.schemas.base import PayloadResponse
+from snapper.api.schemas.base import StrictBody
+from snapper.api.schemas.base import StrictDataSchema
+from snapper.core.json_types import JsonObject
+from snapper.strategies.factory import StrategyFactory
+
+
+class BacktestCreateBody(StrictBody):
+    """Request body for POST /api/backtests.
+
+    Attributes:
+        strategy_class: Registered strategy name.
+        instrument_public_id: Instrument to backtest.
+        exchange: Exchange name.
+        timeframe: Candle timeframe (e.g., "1h").
+        start_date: Backtest period start.
+        end_date: Backtest period end.
+        initial_cash: Starting cash balance.
+        strategy_params: Strategy-specific parameters.
+    """
+
+    strategy_class: str
+    instrument_public_id: str
+    exchange: str
+    timeframe: str = "1h"
+    start_date: datetime
+    end_date: datetime
+    initial_cash: float = 10_000.0
+    strategy_params: JsonObject = {}
+
+    @field_validator("strategy_class")
+    @classmethod
+    def validate_strategy_class(cls, v: str) -> str:
+        """Validate strategy_class is registered.
+
+        Args:
+            v: Strategy class name.
+
+        Returns:
+            Validated strategy class name.
+        """
+        if v not in StrategyFactory.STRATEGY_CLASSES:
+            available = ", ".join(sorted(StrategyFactory.STRATEGY_CLASSES.keys()))
+            raise ValueError(
+                f"Unknown strategy class '{v}'. Available: {available or 'none registered'}"
+            )
+        return v
+
+    @field_validator("initial_cash")
+    @classmethod
+    def validate_initial_cash(cls, v: float) -> float:
+        """Initial cash must be positive.
+
+        Args:
+            v: Cash value.
+
+        Returns:
+            Validated cash value.
+        """
+        if v <= 0:
+            raise ValueError("initial_cash must be positive")
+        return v
+
+    @field_validator("end_date")
+    @classmethod
+    def validate_date_range(cls, v: datetime, info: object) -> datetime:
+        """End date must be after start date.
+
+        Args:
+            v: End date.
+            info: Pydantic validation info.
+
+        Returns:
+            Validated end date.
+        """
+        data = getattr(info, "data", None)
+        if data is not None:
+            start = data.get("start_date")
+            if start is not None and v <= start:
+                raise ValueError("end_date must be after start_date")
+        return v
+
+
+class BacktestCancelBody(StrictBody):
+    """Request body for POST /api/backtests/{id}/cancel.
+
+    Attributes:
+        reason: Optional cancellation reason.
+    """
+
+    reason: str = ""
+
+
+class BacktestRunData(StrictDataSchema[Literal["backtest_run"]]):
+    """Backtest run detail payload.
+
+    Attributes:
+        type: Payload discriminator.
+        wallet_public_id: Owning wallet.
+        strategy_name: Strategy class name.
+        strategy_params: Strategy parameters.
+        instrument_public_id: Target instrument.
+        exchange: Exchange name.
+        timeframe: Candle timeframe.
+        start_date: Period start.
+        end_date: Period end.
+        initial_cash: Starting balance.
+        status: Run lifecycle status.
+        started_at: When execution started.
+        completed_at: When execution finished.
+        error: Error message if failed.
+    """
+
+    type: Literal["backtest_run"] = "backtest_run"
+    wallet_public_id: str
+    strategy_name: str
+    strategy_params: JsonObject = {}
+    instrument_public_id: str
+    exchange: str
+    timeframe: str
+    start_date: datetime
+    end_date: datetime
+    initial_cash: float
+    status: str
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    error: str | None = None
+
+
+class BacktestRunResponse(PayloadResponse[Literal["backtest_run_response"], BacktestRunData]):
+    """Single backtest run response."""
+
+    type: Literal["backtest_run_response"] = "backtest_run_response"
+
+
+class BacktestRunListResponse(PayloadListResponse[Literal["backtest_run_list"], BacktestRunData]):
+    """List of backtest runs response."""
+
+    type: Literal["backtest_run_list"] = "backtest_run_list"
+
+
+class BacktestResultData(StrictDataSchema[Literal["backtest_result"]]):
+    """Backtest result metrics payload.
+
+    Attributes:
+        type: Payload discriminator.
+        run_public_id: Associated run.
+        total_trades: Total exit trades.
+        winning_trades: Profitable trades.
+        losing_trades: Losing trades.
+        total_pnl: Net PnL.
+        max_drawdown: Maximum drawdown fraction.
+        sharpe_ratio: Annualized Sharpe.
+        win_rate: Win rate fraction.
+        profit_factor: Gross profit / gross loss.
+        final_equity: Final equity value.
+        max_equity: Peak equity value.
+        extra_metrics: Additional computed metrics.
+    """
+
+    type: Literal["backtest_result"] = "backtest_result"
+    run_public_id: str
+    total_trades: int
+    winning_trades: int
+    losing_trades: int
+    total_pnl: float
+    max_drawdown: float
+    sharpe_ratio: float | None = None
+    win_rate: float | None = None
+    profit_factor: float | None = None
+    final_equity: float
+    max_equity: float
+    extra_metrics: dict[str, Any] = Field(default_factory=dict)
+
+
+class BacktestTradeData(StrictDataSchema[Literal["backtest_trade"]]):
+    """Backtest trade payload.
+
+    Attributes:
+        type: Payload discriminator.
+        run_public_id: Parent run.
+        executed_at: Trade execution time.
+        instrument: Instrument name.
+        side: Trade direction.
+        quantity: Trade size.
+        price: Fill price.
+        fee: Commission fee.
+        pnl: Per-fill PnL (None for entries).
+        position_after: Portfolio position after fill.
+    """
+
+    type: Literal["backtest_trade"] = "backtest_trade"
+    run_public_id: str
+    executed_at: datetime
+    instrument: str
+    side: str
+    quantity: float
+    price: float
+    fee: float
+    pnl: float | None = None
+    position_after: float = 0.0
+
+
+class BacktestTradeListResponse(
+    PayloadListResponse[Literal["backtest_trade_list"], BacktestTradeData]
+):
+    """List of backtest trades response."""
+
+    type: Literal["backtest_trade_list"] = "backtest_trade_list"
+
+
+class BacktestSignalData(StrictDataSchema[Literal["backtest_signal"]]):
+    """Backtest signal payload.
+
+    Attributes:
+        type: Payload discriminator.
+        run_public_id: Parent run.
+        signal_time: When signal was generated.
+        signal_type: Signal direction.
+        instrument: Target instrument.
+        price: Price at signal time.
+        indicators: Strategy indicator values.
+    """
+
+    type: Literal["backtest_signal"] = "backtest_signal"
+    run_public_id: str
+    signal_time: datetime
+    signal_type: str
+    instrument: str
+    price: float
+    indicators: dict[str, Any] = Field(default_factory=dict)
+
+
+class BacktestSignalListResponse(
+    PayloadListResponse[Literal["backtest_signal_list"], BacktestSignalData]
+):
+    """List of backtest signals response."""
+
+    type: Literal["backtest_signal_list"] = "backtest_signal_list"
+
+
+class BacktestEventData(StrictDataSchema[Literal["backtest_event"]]):
+    """Backtest event payload.
+
+    Attributes:
+        type: Payload discriminator.
+        run_public_id: Parent run.
+        event_type: Event classification.
+        detail: Event-specific data.
+    """
+
+    type: Literal["backtest_event"] = "backtest_event"
+    run_public_id: str
+    event_type: str
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class BacktestEventListResponse(
+    PayloadListResponse[Literal["backtest_event_list"], BacktestEventData]
+):
+    """List of backtest events response."""
+
+    type: Literal["backtest_event_list"] = "backtest_event_list"

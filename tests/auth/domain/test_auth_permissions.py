@@ -1528,6 +1528,7 @@ class TestResourcePermissions:
             "health",
             "admin",
             "settings",
+            "backtests",
         }
         assert set(RESOURCE_PERMISSIONS.keys()) == expected
 
