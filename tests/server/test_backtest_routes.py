@@ -111,18 +111,39 @@ def _make_event_row() -> dict[str, Any]:
     }
 
 
-def _create_body() -> dict[str, Any]:
-    """Build a valid create body for POST /api/backtests."""
+def _wrap_command(
+    payload: dict[str, Any], cmd_type: str = "backtest_create_command"
+) -> dict[str, Any]:
+    """Wrap a payload dict in a provenance command envelope."""
     return {
-        "strategy_class": "sma_cross",
-        "instrument_public_id": "BTC-USD",
-        "exchange": "kraken",
-        "timeframe": "1h",
-        "start_date": NOW.isoformat(),
-        "end_date": (NOW + timedelta(days=30)).isoformat(),
-        "initial_cash": 10000.0,
-        "strategy_params": {},
+        "type": cmd_type,
+        "public_id": "req-1",
+        "session_id": "s1",
+        "sequence_id": 1,
+        "timestamp": NOW.isoformat(),
+        "payload": payload,
     }
+
+
+def _create_body() -> dict[str, Any]:
+    """Build a valid create command for POST /api/backtests."""
+    return _wrap_command(
+        {
+            "strategy_class": "sma_cross",
+            "instrument_public_id": "BTC-USD",
+            "exchange": "kraken",
+            "timeframe": "1h",
+            "start_date": NOW.isoformat(),
+            "end_date": (NOW + timedelta(days=30)).isoformat(),
+            "initial_cash": 10000.0,
+            "strategy_params": {},
+        }
+    )
+
+
+def _cancel_body() -> dict[str, Any]:
+    """Build a valid cancel command for POST /api/backtests/{id}/cancel."""
+    return _wrap_command({"reason": "test"}, "backtest_cancel_command")
 
 
 def _create_client(
@@ -251,7 +272,7 @@ class TestCancelBacktest:
         bt.update_run_status = AsyncMock(return_value=1)
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
             client = _create_client(bt)
-            response = client.post("/api/backtests/run-1/cancel", json={"reason": "test"})
+            response = client.post("/api/backtests/run-1/cancel", json=_cancel_body())
             assert response.status_code == 200
             assert response.json()["payload"]["status"] == "cancel_requested"
             client.close()
@@ -262,7 +283,7 @@ class TestCancelBacktest:
         bt.get_run = AsyncMock(return_value=_make_run_row(status="completed"))
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
             client = _create_client(bt)
-            response = client.post("/api/backtests/run-1/cancel", json={"reason": "late"})
+            response = client.post("/api/backtests/run-1/cancel", json=_cancel_body())
             assert response.status_code == 409
             client.close()
 
@@ -272,7 +293,7 @@ class TestCancelBacktest:
         bt.get_run = AsyncMock(return_value=None)
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
             client = _create_client(bt)
-            response = client.post("/api/backtests/run-1/cancel", json={"reason": "gone"})
+            response = client.post("/api/backtests/run-1/cancel", json=_cancel_body())
             assert response.status_code == 404
             client.close()
 
@@ -430,7 +451,7 @@ class TestWalletScopingOnSubResources:
         bt.get_run = AsyncMock(return_value=_make_run_row(wallet="other"))
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
             client = _create_client(bt, wallet="wallet-1")
-            response = client.post("/api/backtests/run-1/cancel", json={"reason": "x"})
+            response = client.post("/api/backtests/run-1/cancel", json=_cancel_body())
             assert response.status_code == 404
             client.close()
 
@@ -494,7 +515,7 @@ class TestCreateEdgeCases:
         bt.update_run_status = AsyncMock(return_value=1)
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
             client = _create_client(bt)
-            response = client.post("/api/backtests/run-1/cancel", json={"reason": "x"})
+            response = client.post("/api/backtests/run-1/cancel", json=_cancel_body())
             assert response.status_code == 500
             assert "not found" in response.json()["detail"]
             client.close()

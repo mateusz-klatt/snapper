@@ -20,8 +20,9 @@ from fastapi import Request
 from fastapi import status
 from loguru import logger
 
-from snapper.api.schemas.backtest import BacktestCancelBody
+from snapper.api.schemas.backtest import BacktestCancelCommand
 from snapper.api.schemas.backtest import BacktestCreateBody
+from snapper.api.schemas.backtest import BacktestCreateCommand
 from snapper.api.schemas.backtest import BacktestEventData
 from snapper.api.schemas.backtest import BacktestEventListResponse
 from snapper.api.schemas.backtest import BacktestRunData
@@ -97,12 +98,12 @@ def _get_process_factory(request: Request) -> ProcessLauncherService:
 
 @router.post(
     "",
-    openapi_extra=openapi_schema(BacktestCreateBody),
+    openapi_extra=openapi_schema(BacktestCreateCommand),
     dependencies=[Depends(validate_csrf_token)],
 )
 async def create_backtest(
     request: Request,
-    body: Annotated[BacktestCreateBody, Depends(json_body(BacktestCreateBody))],
+    command: Annotated[BacktestCreateCommand, Depends(json_body(BacktestCreateCommand))],
     principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_BACKTESTS))],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
 ) -> BacktestRunResponse:
@@ -110,7 +111,7 @@ async def create_backtest(
 
     Args:
         request: FastAPI request.
-        body: Validated create body.
+        command: Validated create command envelope.
         principal: Authenticated caller with MANAGE_BACKTESTS.
         repo: Database repository.
 
@@ -134,6 +135,7 @@ async def create_backtest(
             detail="No active wallet selected — select a wallet before creating backtests",
         )
 
+    body = command.payload
     _, public_id = await bt_repo.create_run(
         row={
             "wallet_public_id": wallet_id,
@@ -304,13 +306,13 @@ async def get_backtest(
 
 @router.post(
     "/{run_id}/cancel",
-    openapi_extra=openapi_schema(BacktestCancelBody),
+    openapi_extra=openapi_schema(BacktestCancelCommand),
     dependencies=[Depends(validate_csrf_token)],
 )
 async def cancel_backtest(
     run_id: str,
     request: Request,
-    body: Annotated[BacktestCancelBody, Depends(json_body(BacktestCancelBody))],
+    command: Annotated[BacktestCancelCommand, Depends(json_body(BacktestCancelCommand))],
     principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_BACKTESTS))],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
 ) -> BacktestRunResponse:
@@ -319,7 +321,7 @@ async def cancel_backtest(
     Args:
         run_id: Run public ID.
         request: FastAPI request.
-        body: Cancel body with optional reason.
+        command: Cancel command envelope.
         principal: Authenticated caller with MANAGE_BACKTESTS.
         repo: Database repository.
 
@@ -390,6 +392,7 @@ async def rerun_backtest(
         Newly created backtest run.
     """
     bt_repo = _bt_repo(repo)
+    tracker: SequenceTracker = request.app.state.rest_tracker
     now = datetime.now(UTC)
 
     original = await bt_repo.get_run(run_id, as_of=now)
@@ -411,8 +414,16 @@ async def rerun_backtest(
         initial_cash=original["initial_cash"],
         strategy_params=original["strategy_params"],
     )
+    rerun_command = BacktestCreateCommand(
+        type="backtest_create_command",
+        public_id=str(uuid7()),
+        timestamp=now,
+        session_id=tracker.session_id,
+        sequence_id=tracker.next_sequence(_REST_STREAM),
+        payload=rerun_body,
+    )
 
-    return await create_backtest(request, rerun_body, principal, repo)
+    return await create_backtest(request, rerun_command, principal, repo)
 
 
 @router.get("/{run_id}/trades")

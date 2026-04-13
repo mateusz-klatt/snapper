@@ -12,6 +12,7 @@ from pydantic import Field
 from pydantic import field_validator
 
 from snapper.api.schemas.base import PayloadListResponse
+from snapper.api.schemas.base import PayloadRequest
 from snapper.api.schemas.base import PayloadResponse
 from snapper.api.schemas.base import StrictBody
 from snapper.api.schemas.base import StrictDataSchema
@@ -95,6 +96,14 @@ class BacktestCreateBody(StrictBody):
         return v
 
 
+class BacktestCreateCommand(
+    PayloadRequest[Literal["backtest_create_command"], BacktestCreateBody],
+):
+    """Request envelope for POST /api/backtests."""
+
+    type: Literal["backtest_create_command"] = "backtest_create_command"
+
+
 class BacktestCancelBody(StrictBody):
     """Request body for POST /api/backtests/{id}/cancel.
 
@@ -103,6 +112,14 @@ class BacktestCancelBody(StrictBody):
     """
 
     reason: str = ""
+
+
+class BacktestCancelCommand(
+    PayloadRequest[Literal["backtest_cancel_command"], BacktestCancelBody],
+):
+    """Request envelope for POST /api/backtests/{id}/cancel."""
+
+    type: Literal["backtest_cancel_command"] = "backtest_cancel_command"
 
 
 class BacktestRunData(StrictDataSchema[Literal["backtest_run"]]):
