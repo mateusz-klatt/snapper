@@ -563,7 +563,8 @@ data. Phase 1 uses DirectDbEngine (synchronous candle reads from DB).
 **Lifecycle:** pending -> running -> completed | failed | cancelled
 
 **Boot reconciliation:** Orphaned runs (pending/running/cancel_requested) are
-swept to failed at server startup via `reconcile_stale_runs()`.
+swept to failed at server startup via `reconcile_stale_runs()`. This runs
+only on the normal startup path (skipped in `SERVER_API_ONLY` mode).
 
 **Storage:** 6 bitemporal tables (BacktestRun, BacktestEvent, BacktestSignal,
 BacktestTrade, BacktestEquityPoint, BacktestResult) all with TemporalMixin.

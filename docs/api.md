@@ -1996,7 +1996,8 @@ async function connect() {
 
 Backtest endpoints manage strategy backtesting runs. Read endpoints require
 `read:backtests` permission (viewer+). Mutation endpoints require
-`manage:backtests` (operator+). All reads are wallet-scoped via auth context.
+`manage:backtests` (operator+). Reads are wallet-scoped when the caller
+has an active wallet selected; admins without a wallet selection see all runs.
 
 ### POST /api/backtests
 
