@@ -107,6 +107,12 @@ async def test_list_runs_with_filters(tmp_path: Path) -> None:
     sma_runs = await repo.list_runs(as_of=NOW + timedelta(seconds=1), strategy="rsi")
     assert len(sma_runs) == 1
 
+    pending_runs = await repo.list_runs(as_of=NOW + timedelta(seconds=1), status="pending")
+    assert len(pending_runs) == 2
+
+    pending_runs = await repo.list_runs(as_of=NOW + timedelta(seconds=1), status="pending")
+    assert len(pending_runs) == 2
+
 
 @pytest.mark.asyncio
 async def test_update_run_status_scd2(tmp_path: Path) -> None:

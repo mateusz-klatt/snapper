@@ -67,7 +67,7 @@ export const AttachTrailingStopModal: React.FC<AttachTrailingStopModalProps> = (
 
   const handleConfirm = () => {
     const pct = Number.parseFloat(trailingPct)
-    const lock = minLockPct ? Number.parseFloat(minLockPct) : 0
+    const lock = Number.parseFloat(minLockPct || '0')
 
     createTrailingStop.mutate(
       {

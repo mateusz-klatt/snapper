@@ -6,6 +6,11 @@ from datetime import timedelta
 
 import pytest
 
+from snapper.application.backtest.metrics import _compute_cagr
+from snapper.application.backtest.metrics import _compute_max_drawdown
+from snapper.application.backtest.metrics import _compute_returns
+from snapper.application.backtest.metrics import _compute_sharpe
+from snapper.application.backtest.metrics import _compute_sortino
 from snapper.application.backtest.metrics import compute_metrics
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
@@ -137,6 +142,16 @@ class TestComputeMetrics:
         assert metrics.cagr == 0.0
         assert metrics.final_equity == 10000
 
+    def test_zero_duration_curve_skips_cagr_and_calmar(self) -> None:
+        """Equal timestamps prevent CAGR and Calmar computation."""
+        points = [
+            _equity_point(0, 10000),
+            _equity_point(0, 11000),
+        ]
+        metrics = compute_metrics(points, [], initial_balance=10000)
+        assert metrics.cagr == 0.0
+        assert metrics.calmar_ratio == 0.0
+
     def test_all_losing_trades(self) -> None:
         """All losing trades → win_rate=0, profit_factor=0."""
         trades = [_trade(pnl=-100.0), _trade(pnl=-50.0)]
@@ -151,6 +166,60 @@ class TestComputeMetrics:
         assert metrics.win_rate == 1.0
         assert metrics.profit_factor == float("inf")
 
+    def test_sortino_with_mixed_returns(self) -> None:
+        """Mixed returns with downside → positive Sortino."""
+        points = [
+            _equity_point(0, 10000),
+            _equity_point(24, 10500),
+            _equity_point(48, 10200),
+            _equity_point(72, 10800),
+            _equity_point(96, 10600),
+        ]
+        metrics = compute_metrics(points, [])
+        assert metrics.sortino_ratio != 0.0
+
+    def test_cagr_wipeout(self) -> None:
+        """Final equity 0 → CAGR = -1.0."""
+        points = [
+            _equity_point(0, 10000),
+            _equity_point(24 * 30, 0),
+        ]
+        metrics = compute_metrics(points, [], initial_balance=10000)
+        assert metrics.cagr == -1.0
+
+    def test_calmar_with_drawdown(self) -> None:
+        """Positive CAGR with drawdown → non-zero Calmar."""
+        points = [
+            _equity_point(0, 10000),
+            _equity_point(24 * 100, 12000),
+            _equity_point(24 * 200, 10000),
+            _equity_point(24 * 365, 15000),
+        ]
+        metrics = compute_metrics(points, [], initial_balance=10000)
+        assert metrics.calmar_ratio != 0.0
+        assert metrics.max_drawdown > 0
+
+    def test_equity_only_metrics(self) -> None:
+        """Equity without trades still computes curve metrics."""
+        points = [
+            _equity_point(0, 10000),
+            _equity_point(24, 10100),
+        ]
+        metrics = compute_metrics(points, [], initial_balance=10000)
+        assert metrics.final_equity == 10100
+        assert metrics.max_equity == 10100
+        assert metrics.total_trades == 0
+
+    def test_flat_equity_sharpe_zero(self) -> None:
+        """Flat equity (no returns variance) → Sharpe = 0."""
+        points = [
+            _equity_point(0, 10000),
+            _equity_point(24, 10000),
+            _equity_point(48, 10000),
+        ]
+        metrics = compute_metrics(points, [])
+        assert metrics.sharpe_ratio == 0.0
+
     def test_breakeven_trade(self) -> None:
         """Breakeven trade (pnl=0.0) counted, not winning or losing."""
         trades = [_trade(pnl=0.0)]
@@ -158,3 +227,14 @@ class TestComputeMetrics:
         assert metrics.total_trades == 1
         assert metrics.winning_trades == 0
         assert metrics.losing_trades == 0
+
+    def test_metric_helpers_cover_guard_paths(self) -> None:
+        """Internal helpers return safe defaults for edge-case inputs."""
+        assert _compute_max_drawdown([]) == 0.0
+        assert _compute_returns([0.0, 100.0, 50.0]) == [0.0, -0.5]
+        assert _compute_sharpe([0.01, 0.01], 365.0) == 0.0
+        assert _compute_sortino([0.01, -1e-16], 365.0) == 0.0
+        assert _compute_cagr(0.0, 100.0, 30.0, 365.0) == 0.0
+        assert _compute_cagr(100.0, -1.0, 30.0, 365.0) == -1.0
+        assert _compute_cagr(100.0, 100.0, 30.0, 365.0) == 0.0
+        assert _compute_cagr(100.0, 200.0, 1e-7, 365.0) == 0.0

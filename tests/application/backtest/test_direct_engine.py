@@ -1,5 +1,6 @@
 """Tests for DirectDbEngine candle-driven simulation."""
 
+from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -16,6 +17,8 @@ from snapper.application.backtest.direct_engine import DirectDbEngine
 from snapper.application.backtest.direct_engine import candle_row_to_data
 from snapper.application.backtest.direct_engine import iter_sorted_candle_chunks
 from snapper.application.backtest.result_collector import ResultCollector
+from snapper.application.portfolio.models import PortfolioTracker
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.strategies.base import BaseStrategy
 from snapper.strategies.models import StrategySignal
 
@@ -209,6 +212,199 @@ class TestDirectDbEngine:
 
             assert len(collector.signals) == 0
             assert len(collector.trades) == 0
+
+    @pytest.mark.asyncio
+    async def test_engine_processes_signals_and_fills(self) -> None:
+        """Engine with buy signal produces trade + signal + equity."""
+        mock_strategy_class = MagicMock()
+        mock_instance = MagicMock(spec=BaseStrategy)
+        mock_instance.required_candle_history.return_value = 0
+
+        buy_signal = StrategySignal(
+            instrument="BTC-USD", side="buy", strength=1.0, reason="test_buy", price=100.0
+        )
+        mock_instance._handle_candle_data = AsyncMock(return_value=buy_signal)
+        mock_strategy_class.return_value = mock_instance
+
+        with patch.dict(
+            "snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES",
+            {"test_strategy": mock_strategy_class},
+        ):
+            repo = AsyncMock()
+            t1 = NOW + timedelta(hours=1)
+            repo.get_candles = AsyncMock(return_value=[_candle_row(t1, 100)])
+
+            config = MagicMock(spec=BacktestConfig)
+            config.strategy_class = "test_strategy"
+            config.instruments = {"kraken": ["BTC-USD"]}
+            config.timeframe = "1h"
+            config.start_date = NOW
+            config.end_date = END
+            config.initial_balance = 10000.0
+            config.slippage_bps = 0.0
+            config.commission_bps = 0.0
+            config.strategy_params = {}
+
+            engine = DirectDbEngine(repo, NOW)
+            collector = ResultCollector()
+            portfolio, closes = await engine.run("run-1", config, collector)
+
+            assert len(collector.signals) == 1
+            assert collector.signals[0]["signal_type"] == "buy"
+            assert len(collector.trades) == 1
+            assert collector.trades[0]["side"] == "buy"
+            assert len(collector.equity_points) == 1
+
+    @pytest.mark.asyncio
+    async def test_engine_multi_timestamp_batching(self) -> None:
+        """Engine processes candles at different timestamps in separate batches."""
+        mock_strategy_class = MagicMock()
+        mock_instance = MagicMock(spec=BaseStrategy)
+        mock_instance.required_candle_history.return_value = 0
+        mock_instance._handle_candle_data = AsyncMock(return_value=None)
+        mock_strategy_class.return_value = mock_instance
+
+        with patch.dict(
+            "snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES",
+            {"test_strategy": mock_strategy_class},
+        ):
+            repo = AsyncMock()
+            t1 = NOW + timedelta(hours=1)
+            t2 = NOW + timedelta(hours=2)
+            repo.get_candles = AsyncMock(return_value=[_candle_row(t1, 100), _candle_row(t2, 110)])
+
+            config = MagicMock(spec=BacktestConfig)
+            config.strategy_class = "test_strategy"
+            config.instruments = {"kraken": ["BTC-USD"]}
+            config.timeframe = "1h"
+            config.start_date = NOW
+            config.end_date = END
+            config.initial_balance = 10000.0
+            config.slippage_bps = 0.0
+            config.commission_bps = 0.0
+            config.strategy_params = {}
+
+            engine = DirectDbEngine(repo, NOW)
+            collector = ResultCollector()
+            portfolio, closes = await engine.run("run-1", config, collector)
+
+            assert len(collector.equity_points) == 2
+            assert closes["BTC-USD"] == 110.0
+
+    @pytest.mark.asyncio
+    async def test_engine_runs_across_multiple_chunks(self) -> None:
+        """Engine continues processing when the candle iterator yields multiple chunks."""
+        mock_strategy_class = MagicMock()
+        mock_instance = MagicMock(spec=BaseStrategy)
+        mock_instance.required_candle_history.return_value = 0
+        mock_instance._handle_candle_data = AsyncMock(return_value=None)
+        mock_strategy_class.return_value = mock_instance
+
+        async def fake_iter_sorted_candle_chunks(
+            _config: BacktestConfig,
+            _repository: object,
+            _snapshot_as_of: datetime,
+        ) -> AsyncIterator[list[CandleEvent]]:
+            yield []
+            yield [
+                CandleEvent(
+                    open_at=NOW + timedelta(hours=1),
+                    exchange="kraken",
+                    instrument="BTC-USD",
+                    row=_candle_row(NOW + timedelta(hours=1), 100.0),
+                )
+            ]
+            yield [
+                CandleEvent(
+                    open_at=NOW + timedelta(hours=2),
+                    exchange="kraken",
+                    instrument="BTC-USD",
+                    row=_candle_row(NOW + timedelta(hours=2), 105.0),
+                )
+            ]
+
+        with (
+            patch.dict(
+                "snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES",
+                {"test_strategy": mock_strategy_class},
+            ),
+            patch(
+                "snapper.application.backtest.direct_engine.iter_sorted_candle_chunks",
+                fake_iter_sorted_candle_chunks,
+            ),
+        ):
+            repo = AsyncMock()
+
+            config = MagicMock(spec=BacktestConfig)
+            config.strategy_class = "test_strategy"
+            config.instruments = {"kraken": ["BTC-USD"]}
+            config.timeframe = "1h"
+            config.start_date = NOW
+            config.end_date = END
+            config.initial_balance = 10000.0
+            config.slippage_bps = 0.0
+            config.commission_bps = 0.0
+            config.strategy_params = {}
+
+            engine = DirectDbEngine(repo, NOW)
+            collector = ResultCollector()
+            portfolio, closes = await engine.run("run-1", config, collector)
+
+            assert mock_instance._handle_candle_data.await_count == 2
+            assert len(collector.equity_points) == 2
+            assert portfolio.cash == 10000.0
+            assert closes["BTC-USD"] == 105.0
+
+    @pytest.mark.asyncio
+    async def test_process_time_batch_records_signal_when_fill_is_skipped(self) -> None:
+        """Signal artifacts are kept even when no executable fill is produced."""
+        strategy = MagicMock(spec=BaseStrategy)
+        strategy._handle_candle_data = AsyncMock(
+            return_value=StrategySignal(
+                instrument="BTC-USD",
+                side="sell",
+                strength=1.0,
+                reason="close_without_position",
+                price=100.0,
+            )
+        )
+
+        config = MagicMock(spec=BacktestConfig)
+        config.timeframe = "1h"
+        config.start_date = NOW
+        config.slippage_bps = 0.0
+        config.commission_bps = 0.0
+
+        engine = DirectDbEngine(AsyncMock(), NOW)
+        collector = ResultCollector()
+        portfolio = PortfolioTracker(cash=10000.0)
+        latest_closes: dict[str, float] = {}
+        tracker = SequenceTracker()
+        batch = [
+            CandleEvent(
+                open_at=NOW + timedelta(hours=1),
+                exchange="kraken",
+                instrument="BTC-USD",
+                row=_candle_row(NOW + timedelta(hours=1), 100.0),
+            )
+        ]
+
+        await engine._process_time_batch(
+            batch,
+            "run-1",
+            config,
+            strategy,
+            portfolio,
+            latest_closes,
+            collector,
+            tracker,
+        )
+
+        assert len(collector.signals) == 1
+        assert collector.signals[0]["signal_type"] == "sell"
+        assert len(collector.trades) == 0
+        assert len(collector.equity_points) == 1
+        assert portfolio.cash == 10000.0
 
     @pytest.mark.asyncio
     async def test_empty_data_produces_zero_trades(self) -> None:

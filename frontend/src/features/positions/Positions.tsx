@@ -105,8 +105,8 @@ const PositionRow: React.FC<PositionRowProps> = ({
           >
             {side}
           </span>
-          {!isTimeTraveling && hasCycle && side !== 'FLAT' && (
-            <TrailingStopBadge cyclePublicId={position.positionCyclePublicId ?? undefined} />
+          {canAttach && (
+            <TrailingStopBadge cyclePublicId={position.positionCyclePublicId as string} />
           )}
         </div>
         <div className='flex items-center gap-2'>

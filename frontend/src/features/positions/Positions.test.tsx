@@ -421,6 +421,26 @@ describe('Positions', () => {
     expect(badge).toHaveTextContent('TS: pending')
   })
 
+  it('shows pending badge when current_stop is missing', async () => {
+    const pos = makePosition({
+      quantity: 1.5,
+      positionCyclePublicId: 'cycle-123',
+    })
+    const { usePositions, useTrailingStopForCycle } = await import('../../hooks/queries')
+
+    vi.mocked(usePositions).mockReturnValue({
+      data: [pos],
+      isLoading: false,
+    } as never)
+    vi.mocked(useTrailingStopForCycle).mockReturnValue({
+      data: { type: 'trailing_stop_state', payload: {} },
+    } as never)
+    renderWithProviders(<Positions />)
+    const badge = screen.getByTestId('trailing-stop-badge')
+
+    expect(badge).toHaveTextContent('TS: pending')
+  })
+
   it('hides badge when response is message type (no trailing stop)', async () => {
     const pos = makePosition({
       quantity: 1.5,
