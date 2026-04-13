@@ -21,6 +21,7 @@ from snapper.data.repository import Repository
 from snapper.data.repository_types import CandleRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import CandleData
+from snapper.strategies.base import BaseStrategy
 from snapper.strategies.factory import StrategyFactory
 from snapper.strategies.models import StrategyConfig
 
@@ -66,7 +67,6 @@ async def iter_sorted_candle_chunks(
     config: BacktestConfig,
     repository: Repository,
     snapshot_as_of: datetime,
-    warmup_bars: int = 0,
 ) -> AsyncIterator[list[CandleEvent]]:
     """Async generator yielding sorted candle chunks.
 
@@ -159,64 +159,42 @@ class DirectDbEngine:
             )
         )
 
-        warmup_bars = strategy.required_candle_history()
         portfolio = PortfolioTracker(cash=config.initial_balance)
         latest_closes: dict[str, float] = {}
         tracker = SequenceTracker()
 
         async for chunk in iter_sorted_candle_chunks(
-            config, self._repository, self._snapshot_as_of, warmup_bars
+            config, self._repository, self._snapshot_as_of
         ):
+            prev_time: datetime | None = None
+            time_batch: list[CandleEvent] = []
+
             for event in chunk:
-                latest_closes[event.instrument] = float(event.row["close"])
-                candle_data = candle_row_to_data(event, config.timeframe)
-
-                signal = await strategy.on_candle(event.instrument, candle_data)
-
-                if event.open_at < config.start_date:
-                    continue
-
-                if signal is not None:
-                    fill = simulate_market_fill(
-                        exchange=event.exchange,
-                        instrument=event.instrument,
-                        side=str(signal.side),
-                        close_price=float(event.row["close"]),
-                        fill_at=event.open_at,
-                        portfolio=portfolio,
-                        slippage_bps=config.slippage_bps,
-                        commission_bps=config.commission_bps,
-                        signal_strength=getattr(signal, "strength", None),
-                        signal_reason=getattr(signal, "reason", None),
+                if prev_time is not None and event.open_at != prev_time and time_batch:
+                    await self._process_time_batch(
+                        time_batch,
+                        run_public_id,
+                        config,
+                        strategy,
+                        portfolio,
+                        latest_closes,
+                        collector,
+                        tracker,
                     )
-                    if fill is not None:
-                        collector.record_trade(
-                            run_public_id=run_public_id,
-                            fill=fill,
-                            session_id=tracker.session_id,
-                            sequence_id=tracker.next_sequence("bt"),
-                            bus_time=self._snapshot_as_of,
-                        )
-                    collector.record_signal(
-                        run_public_id=run_public_id,
-                        signal_time=event.open_at,
-                        signal_type=str(signal.side),
-                        instrument=event.instrument,
-                        price=float(event.row["close"]),
-                        indicators=getattr(signal, "indicators", {}),
-                        session_id=tracker.session_id,
-                        sequence_id=tracker.next_sequence("bt"),
-                        bus_time=self._snapshot_as_of,
-                    )
+                    time_batch = []
+                time_batch.append(event)
+                prev_time = event.open_at
 
-                collector.maybe_record_equity(
-                    run_public_id=run_public_id,
-                    point_time=event.open_at,
-                    portfolio=portfolio,
-                    latest_closes=latest_closes,
-                    session_id=tracker.session_id,
-                    sequence_id=tracker.next_sequence("bt"),
-                    bus_time=self._snapshot_as_of,
+            if time_batch:
+                await self._process_time_batch(
+                    time_batch,
+                    run_public_id,
+                    config,
+                    strategy,
+                    portfolio,
+                    latest_closes,
+                    collector,
+                    tracker,
                 )
 
         logger.info(
@@ -227,3 +205,88 @@ class DirectDbEngine:
             len(collector.equity_points),
         )
         return portfolio, latest_closes
+
+    async def _process_time_batch(
+        self,
+        batch: list[CandleEvent],
+        run_public_id: str,
+        config: BacktestConfig,
+        strategy: BaseStrategy,
+        portfolio: PortfolioTracker,
+        latest_closes: dict[str, float],
+        collector: ResultCollector,
+        tracker: SequenceTracker,
+    ) -> None:
+        """Process all candle events at the same timestamp.
+
+        Updates all close prices first, then feeds candles to strategy,
+        then records equity once. This ensures multi-instrument equity
+        snapshots use all close prices for the same timestamp.
+
+        Args:
+            batch: All CandleEvents at the same open_at.
+            run_public_id: Backtest run identifier.
+            config: Backtest configuration.
+            strategy: Strategy instance.
+            portfolio: Portfolio state (mutated).
+            latest_closes: Latest close prices (mutated).
+            collector: Result collector.
+            tracker: Sequence tracker.
+        """
+        for event in batch:
+            latest_closes[event.instrument] = float(event.row["close"])
+
+        signals_and_events: list[tuple[Any, CandleEvent]] = []
+        for event in batch:
+            candle_data = candle_row_to_data(event, config.timeframe)
+            payload = candle_data.model_dump_json()
+            signal = await strategy._handle_candle_data(event.instrument, payload)
+            if signal is not None:
+                signals_and_events.append((signal, event))
+
+        if batch[0].open_at < config.start_date:
+            return
+
+        for signal, event in signals_and_events:
+            fill = simulate_market_fill(
+                exchange=event.exchange,
+                instrument=event.instrument,
+                side=str(signal.side),
+                close_price=float(event.row["close"]),
+                fill_at=event.open_at,
+                portfolio=portfolio,
+                slippage_bps=config.slippage_bps,
+                commission_bps=config.commission_bps,
+                signal_strength=getattr(signal, "strength", None),
+                signal_reason=getattr(signal, "reason", None),
+            )
+            if fill is not None:
+                collector.record_trade(
+                    run_public_id=run_public_id,
+                    fill=fill,
+                    portfolio=portfolio,
+                    session_id=tracker.session_id,
+                    sequence_id=tracker.next_sequence("bt"),
+                    bus_time=self._snapshot_as_of,
+                )
+            collector.record_signal(
+                run_public_id=run_public_id,
+                signal_time=event.open_at,
+                signal_type=str(signal.side),
+                instrument=event.instrument,
+                price=float(event.row["close"]),
+                indicators=getattr(signal, "indicators", {}),
+                session_id=tracker.session_id,
+                sequence_id=tracker.next_sequence("bt"),
+                bus_time=self._snapshot_as_of,
+            )
+
+        collector.maybe_record_equity(
+            run_public_id=run_public_id,
+            point_time=batch[0].open_at,
+            portfolio=portfolio,
+            latest_closes=latest_closes,
+            session_id=tracker.session_id,
+            sequence_id=tracker.next_sequence("bt"),
+            bus_time=self._snapshot_as_of,
+        )

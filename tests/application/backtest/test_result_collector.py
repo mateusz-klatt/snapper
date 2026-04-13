@@ -48,9 +48,12 @@ class TestResultCollector:
             signal_reason="macd_cross",
             signal_strength=1.0,
         )
+        portfolio = PortfolioTracker(cash=10000.0)
+        portfolio.update_fill("BTC-USD", "buy", 0.2, 50000.0, 10.0)
         collector.record_trade(
             run_public_id="run-1",
             fill=fill,
+            portfolio=portfolio,
             session_id="s1",
             sequence_id=1,
             bus_time=NOW,
@@ -58,6 +61,7 @@ class TestResultCollector:
         assert len(collector.trades) == 1
         assert collector.trades[0]["side"] == "buy"
         assert collector.trades[0]["quantity"] == 0.2
+        assert collector.trades[0]["position_after"] == 0.2
 
     def test_maybe_record_equity_deduplicates(self) -> None:
         """Equity points are deduplicated by timestamp."""

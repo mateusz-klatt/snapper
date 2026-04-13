@@ -72,6 +72,7 @@ class ResultCollector:
         self,
         run_public_id: str,
         fill: BacktestFill,
+        portfolio: PortfolioTracker,
         session_id: str,
         sequence_id: int,
         bus_time: datetime,
@@ -81,6 +82,7 @@ class ResultCollector:
         Args:
             run_public_id: Backtest run identifier.
             fill: Simulated fill from fill_model.
+            portfolio: Portfolio state after fill (for position_after).
             session_id: Producer session ID.
             sequence_id: Sequence counter.
             bus_time: Bus time for temporal tracking.
@@ -95,7 +97,7 @@ class ResultCollector:
                 price=fill.price,
                 fee=fill.fee,
                 pnl=fill.pnl,
-                position_after=0.0,
+                position_after=portfolio.position_qty(fill.instrument),
                 signal_public_id=None,
                 session_id=session_id,
                 sequence_id=sequence_id,

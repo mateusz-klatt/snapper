@@ -2049,6 +2049,56 @@ struct TopicMetricSnapshot: Codable, Sendable {
     }
 }
 
+struct TrailingStopStateData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let planPublicId: String
+    let status: String
+    let trailingPct: Double
+    let minLockPct: Double
+    let entryPrice: Double
+    let peakPrice: Double
+    let currentStop: Double
+    let side: String
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case planPublicId = "plan_public_id"
+        case status
+        case trailingPct = "trailing_pct"
+        case minLockPct = "min_lock_pct"
+        case entryPrice = "entry_price"
+        case peakPrice = "peak_price"
+        case currentStop = "current_stop"
+        case side
+    }
+}
+
+struct TrailingStopStateResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: TrailingStopStateData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
 struct UnderlyingAssetData: Codable, Sendable {
     let type: String?
     let sequenceId: Int
@@ -2986,6 +3036,60 @@ struct HandoverScopeGrantBody: Codable, Sendable {
         case toOperatorPublicId = "to_operator_public_id"
         case reason
     }
+}
+
+struct TrailingStopCreateCommand: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: TrailingStopCreateBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct TrailingStopCreateBody: Codable, Sendable {
+    let positionCyclePublicId: String
+    let trailingPct: Double
+    let minLockPct: Double?
+    let idempotencyKey: String?
+
+    enum CodingKeys: String, CodingKey {
+        case positionCyclePublicId = "position_cycle_public_id"
+        case trailingPct = "trailing_pct"
+        case minLockPct = "min_lock_pct"
+        case idempotencyKey = "idempotency_key"
+    }
+}
+
+struct TrailingStopCancelCommand: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: TrailingStopCancelBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct TrailingStopCancelBody: Codable, Sendable {
+    let reason: String?
 }
 
 struct CreateWalletCommand: Codable, Sendable {

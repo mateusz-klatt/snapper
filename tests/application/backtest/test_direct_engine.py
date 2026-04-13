@@ -138,7 +138,7 @@ class TestDirectDbEngine:
         """Engine with no-signal strategy produces zero trades."""
         mock_strategy_class = MagicMock()
         mock_instance = MagicMock(spec=BaseStrategy)
-        mock_instance.on_candle = AsyncMock(return_value=None)
+        mock_instance._handle_candle_data = AsyncMock(return_value=None)
         mock_instance.required_candle_history.return_value = 0
         mock_strategy_class.return_value = mock_instance
 
@@ -181,7 +181,7 @@ class TestDirectDbEngine:
         warmup_signal = StrategySignal(
             instrument="BTC-USD", side="buy", strength=1.0, reason="test", price=100.0
         )
-        mock_instance.on_candle = AsyncMock(return_value=warmup_signal)
+        mock_instance._handle_candle_data = AsyncMock(return_value=warmup_signal)
         mock_strategy_class.return_value = mock_instance
 
         with patch.dict(
@@ -216,7 +216,7 @@ class TestDirectDbEngine:
         mock_strategy_class = MagicMock()
         mock_instance = MagicMock()
         mock_instance.required_candle_history.return_value = 0
-        mock_instance.on_candle = AsyncMock(return_value=None)
+        mock_instance._handle_candle_data = AsyncMock(return_value=None)
         mock_strategy_class.return_value = mock_instance
 
         with patch.dict(
