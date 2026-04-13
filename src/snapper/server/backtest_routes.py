@@ -127,9 +127,16 @@ async def create_backtest(
     run_public_id = str(uuid7())
     process_name = f"backtest_runner_{run_public_id}"
 
+    wallet_id = principal.active_wallet_public_id
+    if not wallet_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No active wallet selected — select a wallet before creating backtests",
+        )
+
     _, public_id = await bt_repo.create_run(
         row={
-            "wallet_public_id": principal.active_wallet_public_id or "",
+            "wallet_public_id": wallet_id,
             "operator_public_id": principal.primary_operator_public_id or None,
             "strategy_name": body.strategy_class,
             "strategy_params": dict(body.strategy_params),

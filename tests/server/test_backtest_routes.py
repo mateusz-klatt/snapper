@@ -351,7 +351,7 @@ class TestCreateBacktest:
         bt.create_run = AsyncMock(return_value=(1, "run-new"))
         bt.get_run = AsyncMock(return_value=_make_run_row(public_id="run-new"))
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client(bt, wallet="wallet-1")
             response = client.post("/api/backtests", json=_create_body())
             assert response.status_code == 200
             assert response.json()["payload"]["public_id"] == "run-new"
@@ -363,7 +363,7 @@ class TestCreateBacktest:
         bt.create_run = AsyncMock(return_value=(1, "run-fail"))
         bt.update_run_status = AsyncMock(return_value=1)
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt, launch_error=RuntimeError("no thread"))
+            client = _create_client(bt, wallet="wallet-1", launch_error=RuntimeError("no thread"))
             response = client.post("/api/backtests", json=_create_body())
             assert response.status_code == 500
             bt.update_run_status.assert_called_once()
@@ -456,6 +456,21 @@ class TestResolveAsOf:
         assert result is not None
 
 
+@patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", _MOCK_STRATEGIES)
+class TestCreateWalletGuard:
+    """Tests for wallet guard on POST /api/backtests."""
+
+    def test_no_wallet_returns_400(self) -> None:
+        """Create without active wallet returns 400."""
+        bt = AsyncMock()
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt, wallet=None)
+            response = client.post("/api/backtests", json=_create_body())
+            assert response.status_code == 400
+            assert "wallet" in response.json()["detail"].lower()
+            client.close()
+
+
 class TestCreateEdgeCases:
     """Edge cases for POST /api/backtests (create + cancel post-get failures)."""
 
@@ -466,7 +481,7 @@ class TestCreateEdgeCases:
         bt.create_run = AsyncMock(return_value=(1, "run-ghost"))
         bt.get_run = AsyncMock(return_value=None)
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client(bt, wallet="wallet-1")
             response = client.post("/api/backtests", json=_create_body())
             assert response.status_code == 500
             assert "not found" in response.json()["detail"]
@@ -520,7 +535,7 @@ class TestRerunBacktest:
         )
         bt.create_run = AsyncMock(return_value=(2, "run-rerun"))
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
-            client = _create_client(bt)
+            client = _create_client(bt, wallet="wallet-1")
             response = client.post("/api/backtests/run-1/rerun")
             assert response.status_code == 200
             assert response.json()["payload"]["public_id"] == "run-rerun"
