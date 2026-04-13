@@ -1549,7 +1549,7 @@ export type Paths = {
          *
          *     Args:
          *         request: FastAPI request.
-         *         body: Validated create body.
+         *         command: Validated create command envelope.
          *         principal: Authenticated caller with MANAGE_BACKTESTS.
          *         repo: Database repository.
          *
@@ -1609,7 +1609,7 @@ export type Paths = {
          *     Args:
          *         run_id: Run public ID.
          *         request: FastAPI request.
-         *         body: Cancel body with optional reason.
+         *         command: Cancel command envelope.
          *         principal: Authenticated caller with MANAGE_BACKTESTS.
          *         repo: Database repository.
          *
@@ -6858,6 +6858,29 @@ export type Components = {
          */
         RemoveSettingBody: Record<string, never>;
         /**
+         * BacktestCreateCommand
+         * @description Request envelope for POST /api/backtests.
+         */
+        BacktestCreateCommand: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "backtest_create_command";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["BacktestCreateBody"];
+        };
+        /**
          * BacktestCreateBody
          * @description Request body for POST /api/backtests.
          *
@@ -6893,6 +6916,29 @@ export type Components = {
             /** Initial Cash */
             initial_cash?: number;
             strategy_params?: Record<string, unknown>;
+        };
+        /**
+         * BacktestCancelCommand
+         * @description Request envelope for POST /api/backtests/{id}/cancel.
+         */
+        BacktestCancelCommand: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "backtest_cancel_command";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["BacktestCancelBody"];
         };
         /**
          * BacktestCancelBody
@@ -9063,7 +9109,7 @@ export interface Operations {
         };
         requestBody: {
             content: {
-                "application/json": Components["schemas"]["BacktestCreateBody"];
+                "application/json": Components["schemas"]["BacktestCreateCommand"];
             };
         };
         responses: {
@@ -9123,7 +9169,7 @@ export interface Operations {
         };
         requestBody: {
             content: {
-                "application/json": Components["schemas"]["BacktestCancelBody"];
+                "application/json": Components["schemas"]["BacktestCancelCommand"];
             };
         };
         responses: {

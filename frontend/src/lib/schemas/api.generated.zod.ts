@@ -1272,6 +1272,17 @@ export const RemoveSettingRequestSchema = z
   })
   .strict()
 
+export const BacktestCancelCommandSchema = z
+  .object({
+    type: z.literal('backtest_cancel_command').optional(),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: BacktestCancelBodySchema,
+  })
+  .strict()
+
 export const CreateCredentialCommandSchema = z
   .object({
     type: z.literal('create_credential_command').optional(),
@@ -1803,6 +1814,17 @@ export const SystemStatusDataSchema = z
   })
   .strict()
 
+export const BacktestCreateCommandSchema = z
+  .object({
+    type: z.literal('backtest_create_command').optional(),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: BacktestCreateBodySchema,
+  })
+  .strict()
+
 export const ProcessCreateRequestSchema = z
   .object({
     type: z.literal('process_create_request').optional(),
@@ -1949,6 +1971,7 @@ export type ChangePasswordRequest = z.infer<typeof ChangePasswordRequestSchema>
 export type AdminResetPasswordRequest = z.infer<typeof AdminResetPasswordRequestSchema>
 export type SettingUpdate = z.infer<typeof SettingUpdateSchema>
 export type RemoveSettingRequest = z.infer<typeof RemoveSettingRequestSchema>
+export type BacktestCancelCommand = z.infer<typeof BacktestCancelCommandSchema>
 export type CreateCredentialCommand = z.infer<typeof CreateCredentialCommandSchema>
 export type RotateCredentialCommand = z.infer<typeof RotateCredentialCommandSchema>
 export type BracketCreateCommand = z.infer<typeof BracketCreateCommandSchema>
@@ -1992,6 +2015,7 @@ export type ConfiguredProcessesResponse = z.infer<typeof ConfiguredProcessesResp
 export type ProcessRunsResponse = z.infer<typeof ProcessRunsResponseSchema>
 export type ProcessSchemaResponse = z.infer<typeof ProcessSchemaResponseSchema>
 export type SystemStatusData = z.infer<typeof SystemStatusDataSchema>
+export type BacktestCreateCommand = z.infer<typeof BacktestCreateCommandSchema>
 export type ProcessCreateRequest = z.infer<typeof ProcessCreateRequestSchema>
 export type ProcessStartRequest = z.infer<typeof ProcessStartRequestSchema>
 export type SystemStatusResponse = z.infer<typeof SystemStatusResponseSchema>

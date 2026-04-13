@@ -2948,6 +2948,24 @@ struct RemoveSettingRequest: Codable, Sendable {
 struct RemoveSettingBody: Codable, Sendable {
 }
 
+struct BacktestCreateCommand: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: BacktestCreateBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
 struct BacktestCreateBody: Codable, Sendable {
     let strategyClass: String
     let instrumentPublicId: String
@@ -2967,6 +2985,24 @@ struct BacktestCreateBody: Codable, Sendable {
         case endDate = "end_date"
         case initialCash = "initial_cash"
         case strategyParams = "strategy_params"
+    }
+}
+
+struct BacktestCancelCommand: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: BacktestCancelBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
     }
 }
 
