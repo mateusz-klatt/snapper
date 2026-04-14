@@ -206,7 +206,7 @@ exclude = [
 ]
 
 [[tool.mypy.overrides]]
-module = ["tests.*", "proprietary.tests.*"]
+module = ["tests.*"]
 # Tests can mock methods and pass invalid types intentionally
 disable_error_code = [
     "method-assign",

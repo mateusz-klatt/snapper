@@ -1572,7 +1572,7 @@ export type Paths = {
         };
         /**
          * Get Backtest
-         * @description Get backtest run detail.
+         * @description Get backtest run detail with optional inline result for completed runs.
          *
          *     Args:
          *         run_id: Run public ID.
@@ -1738,6 +1738,39 @@ export type Paths = {
          *         List of backtest events.
          */
         get: Operations["get_backtest_events_api_backtests__run_id__events_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/backtests/{run_id}/equity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Backtest Equity
+         * @description Get equity-curve points for a backtest run, ordered ascending by point_time.
+         *
+         *     Args:
+         *         run_id: Run public ID.
+         *         request: FastAPI request.
+         *         principal: Authenticated caller.
+         *         repo: Database repository.
+         *         as_of: Temporal query parameter.
+         *         limit: Page size (max 20000).
+         *         after: Forward cursor — set to the last seen point_time of the
+         *             previous page to fetch the next slice (exclusive).
+         *
+         *     Returns:
+         *         List of equity points.
+         */
+        get: Operations["get_backtest_equity_api_backtests__run_id__equity_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2373,6 +2406,68 @@ export type Components = {
             count: number;
         };
         /**
+         * BacktestEquityPointInline
+         * @description Inline equity-curve point used by GET /api/backtests/{id}/equity.
+         *
+         *     Attributes:
+         *         point_time: Timestamp of the equity sample.
+         *         equity: Total portfolio equity.
+         *         cash: Cash component.
+         *         position_value: Open-position value.
+         *         drawdown: Drawdown fraction at this point.
+         */
+        BacktestEquityPointInline: {
+            /**
+             * Point Time
+             * Format: date-time
+             */
+            point_time: string;
+            /** Equity */
+            equity: number;
+            /** Cash */
+            cash: number;
+            /**
+             * Position Value
+             * @default 0
+             */
+            position_value: number;
+            /**
+             * Drawdown
+             * @default 0
+             */
+            drawdown: number;
+        };
+        /**
+         * BacktestEquityPointListResponse
+         * @description Paginated response for GET /api/backtests/{id}/equity.
+         */
+        BacktestEquityPointListResponse: {
+            /**
+             * Type
+             * @default backtest_equity_point_list
+             * @constant
+             */
+            type: "backtest_equity_point_list";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Payload */
+            payload: Components["schemas"]["BacktestEquityPointInline"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
+            count: number;
+        };
+        /**
          * BacktestEventData
          * @description Backtest event payload.
          *
@@ -2440,6 +2535,46 @@ export type Components = {
             count: number;
         };
         /**
+         * BacktestResultInline
+         * @description Inline backtest aggregate metrics embedded in BacktestRunDetailData.
+         *
+         *     Attributes:
+         *         total_trades: Total exit trades.
+         *         winning_trades: Profitable trades.
+         *         losing_trades: Losing trades.
+         *         total_pnl: Net PnL.
+         *         max_drawdown: Maximum drawdown fraction.
+         *         sharpe_ratio: Annualized Sharpe.
+         *         win_rate: Win rate fraction.
+         *         profit_factor: Gross profit divided by gross loss.
+         *         final_equity: Final equity value.
+         *         max_equity: Peak equity value.
+         *         extra_metrics: Additional computed metrics.
+         */
+        BacktestResultInline: {
+            /** Total Trades */
+            total_trades: number;
+            /** Winning Trades */
+            winning_trades: number;
+            /** Losing Trades */
+            losing_trades: number;
+            /** Total Pnl */
+            total_pnl: number;
+            /** Max Drawdown */
+            max_drawdown: number;
+            /** Sharpe Ratio */
+            sharpe_ratio?: number | null;
+            /** Win Rate */
+            win_rate?: number | null;
+            /** Profit Factor */
+            profit_factor?: number | null;
+            /** Final Equity */
+            final_equity: number;
+            /** Max Equity */
+            max_equity: number;
+            extra_metrics?: Record<string, unknown>;
+        };
+        /**
          * BacktestRunData
          * @description Backtest run detail payload.
          *
@@ -2503,12 +2638,139 @@ export type Components = {
             initial_cash: number;
             /** Status */
             status: string;
+            /**
+             * Execution Mode
+             * @default direct_db
+             */
+            execution_mode: string;
+            /**
+             * Fill Model
+             * @default market
+             */
+            fill_model: string;
+            /**
+             * Slippage Bps
+             * @default 0
+             */
+            slippage_bps: number;
+            /**
+             * Commission Bps
+             * @default 0
+             */
+            commission_bps: number;
             /** Started At */
             started_at?: string | null;
             /** Completed At */
             completed_at?: string | null;
             /** Error */
             error?: string | null;
+        };
+        /**
+         * BacktestRunDetailData
+         * @description Detail-only payload — adds inline result for completed runs.
+         *
+         *     Used exclusively by GET /api/backtests/{id}. Other endpoints
+         *     (create/list/cancel/rerun) keep emitting the lighter BacktestRunData
+         *     so they do not leak a permanent ``result: null`` field.
+         *
+         *     Attributes:
+         *         result: Inline aggregate metrics if status == 'completed', else None.
+         */
+        BacktestRunDetailData: {
+            /**
+             * Type
+             * @default backtest_run
+             * @constant
+             */
+            type: "backtest_run";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Wallet Public Id */
+            wallet_public_id: string;
+            /** Strategy Name */
+            strategy_name: string;
+            /** @default {} */
+            strategy_params: Record<string, unknown>;
+            /** Instrument Public Id */
+            instrument_public_id: string;
+            /** Exchange */
+            exchange: string;
+            /** Timeframe */
+            timeframe: string;
+            /**
+             * Start Date
+             * Format: date-time
+             */
+            start_date: string;
+            /**
+             * End Date
+             * Format: date-time
+             */
+            end_date: string;
+            /** Initial Cash */
+            initial_cash: number;
+            /** Status */
+            status: string;
+            /**
+             * Execution Mode
+             * @default direct_db
+             */
+            execution_mode: string;
+            /**
+             * Fill Model
+             * @default market
+             */
+            fill_model: string;
+            /**
+             * Slippage Bps
+             * @default 0
+             */
+            slippage_bps: number;
+            /**
+             * Commission Bps
+             * @default 0
+             */
+            commission_bps: number;
+            /** Started At */
+            started_at?: string | null;
+            /** Completed At */
+            completed_at?: string | null;
+            /** Error */
+            error?: string | null;
+            result?: Components["schemas"]["BacktestResultInline"] | null;
+        };
+        /**
+         * BacktestRunDetailResponse
+         * @description Detail backtest run response — used by GET /api/backtests/{id}.
+         */
+        BacktestRunDetailResponse: {
+            /**
+             * Type
+             * @default backtest_run_detail_response
+             * @constant
+             */
+            type: "backtest_run_detail_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["BacktestRunDetailData"];
         };
         /**
          * BacktestRunListResponse
@@ -2542,7 +2804,7 @@ export type Components = {
         };
         /**
          * BacktestRunResponse
-         * @description Single backtest run response.
+         * @description Single backtest run response (lightweight; no inline result).
          */
         BacktestRunResponse: {
             /**
@@ -6916,6 +7178,14 @@ export type Components = {
             /** Initial Cash */
             initial_cash?: number;
             strategy_params?: Record<string, unknown>;
+            /** Execution Mode */
+            execution_mode?: string;
+            /** Fill Model */
+            fill_model?: string;
+            /** Slippage Bps */
+            slippage_bps?: number;
+            /** Commission Bps */
+            commission_bps?: number;
         };
         /**
          * BacktestCancelCommand
@@ -9144,7 +9414,7 @@ export interface Operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Components["schemas"]["BacktestRunResponse"];
+                    "application/json": Components["schemas"]["BacktestRunDetailResponse"];
                 };
             };
             /** @description Validation Error */
@@ -9317,6 +9587,43 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["BacktestEventListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_backtest_equity_api_backtests__run_id__equity_get: {
+        parameters: {
+            query?: {
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
+                limit?: number;
+                /** @description Forward cursor: return points strictly after this point_time */
+                after?: string | null;
+            };
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["BacktestEquityPointListResponse"];
                 };
             };
             /** @description Validation Error */

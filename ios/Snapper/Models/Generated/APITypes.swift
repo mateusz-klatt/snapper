@@ -279,6 +279,43 @@ struct AvailableProcessesResponse: Codable, Sendable {
     }
 }
 
+struct BacktestEquityPointInline: Codable, Sendable {
+    let pointTime: Date
+    let equity: Double
+    let cash: Double
+    let positionValue: Double?
+    let drawdown: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case pointTime = "point_time"
+        case equity
+        case cash
+        case positionValue = "position_value"
+        case drawdown
+    }
+}
+
+struct BacktestEquityPointListResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: [BacktestEquityPointInline]
+    /// Number of items in payload
+    let count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+        case count
+    }
+}
+
 struct BacktestEventData: Codable, Sendable {
     let type: String?
     let sequenceId: Int
@@ -322,6 +359,34 @@ struct BacktestEventListResponse: Codable, Sendable {
     }
 }
 
+struct BacktestResultInline: Codable, Sendable {
+    let totalTrades: Int
+    let winningTrades: Int
+    let losingTrades: Int
+    let totalPnl: Double
+    let maxDrawdown: Double
+    let sharpeRatio: Double?
+    let winRate: Double?
+    let profitFactor: Double?
+    let finalEquity: Double
+    let maxEquity: Double
+    let extraMetrics: JsonObject?
+
+    enum CodingKeys: String, CodingKey {
+        case totalTrades = "total_trades"
+        case winningTrades = "winning_trades"
+        case losingTrades = "losing_trades"
+        case totalPnl = "total_pnl"
+        case maxDrawdown = "max_drawdown"
+        case sharpeRatio = "sharpe_ratio"
+        case winRate = "win_rate"
+        case profitFactor = "profit_factor"
+        case finalEquity = "final_equity"
+        case maxEquity = "max_equity"
+        case extraMetrics = "extra_metrics"
+    }
+}
+
 struct BacktestRunData: Codable, Sendable {
     let type: String?
     let sequenceId: Int
@@ -338,6 +403,10 @@ struct BacktestRunData: Codable, Sendable {
     let endDate: Date
     let initialCash: Double
     let status: String
+    let executionMode: String?
+    let fillModel: String?
+    let slippageBps: Double?
+    let commissionBps: Double?
     let startedAt: Date?
     let completedAt: Date?
     let error: String?
@@ -358,9 +427,83 @@ struct BacktestRunData: Codable, Sendable {
         case endDate = "end_date"
         case initialCash = "initial_cash"
         case status
+        case executionMode = "execution_mode"
+        case fillModel = "fill_model"
+        case slippageBps = "slippage_bps"
+        case commissionBps = "commission_bps"
         case startedAt = "started_at"
         case completedAt = "completed_at"
         case error
+    }
+}
+
+struct BacktestRunDetailData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let walletPublicId: String
+    let strategyName: String
+    let strategyParams: JsonObject?
+    let instrumentPublicId: String
+    let exchange: String
+    let timeframe: String
+    let startDate: Date
+    let endDate: Date
+    let initialCash: Double
+    let status: String
+    let executionMode: String?
+    let fillModel: String?
+    let slippageBps: Double?
+    let commissionBps: Double?
+    let startedAt: Date?
+    let completedAt: Date?
+    let error: String?
+    let result: BacktestResultInline?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case walletPublicId = "wallet_public_id"
+        case strategyName = "strategy_name"
+        case strategyParams = "strategy_params"
+        case instrumentPublicId = "instrument_public_id"
+        case exchange
+        case timeframe
+        case startDate = "start_date"
+        case endDate = "end_date"
+        case initialCash = "initial_cash"
+        case status
+        case executionMode = "execution_mode"
+        case fillModel = "fill_model"
+        case slippageBps = "slippage_bps"
+        case commissionBps = "commission_bps"
+        case startedAt = "started_at"
+        case completedAt = "completed_at"
+        case error
+        case result
+    }
+}
+
+struct BacktestRunDetailResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: BacktestRunDetailData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
     }
 }
 
@@ -2975,6 +3118,10 @@ struct BacktestCreateBody: Codable, Sendable {
     let endDate: Date
     let initialCash: Double?
     let strategyParams: JsonObject?
+    let executionMode: String?
+    let fillModel: String?
+    let slippageBps: Double?
+    let commissionBps: Double?
 
     enum CodingKeys: String, CodingKey {
         case strategyClass = "strategy_class"
@@ -2985,6 +3132,10 @@ struct BacktestCreateBody: Codable, Sendable {
         case endDate = "end_date"
         case initialCash = "initial_cash"
         case strategyParams = "strategy_params"
+        case executionMode = "execution_mode"
+        case fillModel = "fill_model"
+        case slippageBps = "slippage_bps"
+        case commissionBps = "commission_bps"
     }
 }
 

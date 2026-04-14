@@ -5,6 +5,16 @@
 
 import { z } from 'zod'
 
+export const BacktestEquityPointInlineSchema = z
+  .object({
+    point_time: z.iso.datetime(),
+    equity: z.number(),
+    cash: z.number(),
+    position_value: z.number(),
+    drawdown: z.number(),
+  })
+  .strict()
+
 export const BacktestEventDataSchema = z
   .object({
     type: z.literal('backtest_event'),
@@ -748,6 +758,18 @@ export const CreateWalletBodySchema = z
     label: z.string().min(1).max(128),
     description: z.string().max(512).nullable().optional(),
     is_paper: z.boolean().optional(),
+  })
+  .strict()
+
+export const BacktestEquityPointListResponseSchema = z
+  .object({
+    type: z.literal('backtest_equity_point_list'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: z.array(BacktestEquityPointInlineSchema),
+    count: z.number().int(),
   })
   .strict()
 
@@ -1578,6 +1600,22 @@ export const AvailableProcessSchema = z
   })
   .strict()
 
+export const BacktestResultInlineSchema = z
+  .object({
+    total_trades: z.number().int(),
+    winning_trades: z.number().int(),
+    losing_trades: z.number().int(),
+    total_pnl: z.number(),
+    max_drawdown: z.number(),
+    sharpe_ratio: z.number().nullable().optional(),
+    win_rate: z.number().nullable().optional(),
+    profit_factor: z.number().nullable().optional(),
+    final_equity: z.number(),
+    max_equity: z.number(),
+    extra_metrics: z.record(z.string(), z.any()).optional(),
+  })
+  .strict()
+
 export const BacktestRunDataSchema = z
   .object({
     type: z.literal('backtest_run'),
@@ -1595,6 +1633,10 @@ export const BacktestRunDataSchema = z
     end_date: z.iso.datetime(),
     initial_cash: z.number(),
     status: z.string(),
+    execution_mode: z.string(),
+    fill_model: z.string(),
+    slippage_bps: z.number(),
+    commission_bps: z.number(),
     started_at: z.iso.datetime().nullable().optional(),
     completed_at: z.iso.datetime().nullable().optional(),
     error: z.string().nullable().optional(),
@@ -1688,6 +1730,10 @@ export const BacktestCreateBodySchema = z
     end_date: z.iso.datetime(),
     initial_cash: z.number().optional(),
     strategy_params: z.record(z.string(), z.any()).optional(),
+    execution_mode: z.string().optional(),
+    fill_model: z.string().optional(),
+    slippage_bps: z.number().optional(),
+    commission_bps: z.number().optional(),
   })
   .strict()
 
@@ -1740,6 +1786,34 @@ export const AvailableProcessesResponseSchema = z
     session_id: z.string(),
     payload: z.array(AvailableProcessSchema),
     count: z.number().int(),
+  })
+  .strict()
+
+export const BacktestRunDetailDataSchema = z
+  .object({
+    type: z.literal('backtest_run'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    wallet_public_id: z.string(),
+    strategy_name: z.string(),
+    strategy_params: z.record(z.string(), z.any()),
+    instrument_public_id: z.string(),
+    exchange: z.string(),
+    timeframe: z.string(),
+    start_date: z.iso.datetime(),
+    end_date: z.iso.datetime(),
+    initial_cash: z.number(),
+    status: z.string(),
+    execution_mode: z.string(),
+    fill_model: z.string(),
+    slippage_bps: z.number(),
+    commission_bps: z.number(),
+    started_at: z.iso.datetime().nullable().optional(),
+    completed_at: z.iso.datetime().nullable().optional(),
+    error: z.string().nullable().optional(),
+    result: BacktestResultInlineSchema.nullable().optional(),
   })
   .strict()
 
@@ -1847,6 +1921,17 @@ export const ProcessStartRequestSchema = z
   })
   .strict()
 
+export const BacktestRunDetailResponseSchema = z
+  .object({
+    type: z.literal('backtest_run_detail_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: BacktestRunDetailDataSchema,
+  })
+  .strict()
+
 export const SystemStatusResponseSchema = z
   .object({
     type: z.literal('system_status_response'),
@@ -1859,6 +1944,7 @@ export const SystemStatusResponseSchema = z
   .strict()
 
 // Type exports
+export type BacktestEquityPointInline = z.infer<typeof BacktestEquityPointInlineSchema>
 export type BacktestEventData = z.infer<typeof BacktestEventDataSchema>
 export type BacktestSignalData = z.infer<typeof BacktestSignalDataSchema>
 export type BacktestTradeData = z.infer<typeof BacktestTradeDataSchema>
@@ -1923,6 +2009,7 @@ export type HandoverScopeGrantBody = z.infer<typeof HandoverScopeGrantBodySchema
 export type TrailingStopCreateBody = z.infer<typeof TrailingStopCreateBodySchema>
 export type TrailingStopCancelBody = z.infer<typeof TrailingStopCancelBodySchema>
 export type CreateWalletBody = z.infer<typeof CreateWalletBodySchema>
+export type BacktestEquityPointListResponse = z.infer<typeof BacktestEquityPointListResponseSchema>
 export type BacktestEventListResponse = z.infer<typeof BacktestEventListResponseSchema>
 export type BacktestSignalListResponse = z.infer<typeof BacktestSignalListResponseSchema>
 export type BacktestTradeListResponse = z.infer<typeof BacktestTradeListResponseSchema>
@@ -1998,6 +2085,7 @@ export type WsStatsResponse = z.infer<typeof WsStatsResponseSchema>
 export type ZmqHealthResponse = z.infer<typeof ZmqHealthResponseSchema>
 export type HealthCheckResponse = z.infer<typeof HealthCheckResponseSchema>
 export type AvailableProcess = z.infer<typeof AvailableProcessSchema>
+export type BacktestResultInline = z.infer<typeof BacktestResultInlineSchema>
 export type BacktestRunData = z.infer<typeof BacktestRunDataSchema>
 export type ConfiguredProcess = z.infer<typeof ConfiguredProcessSchema>
 export type ProcessRun = z.infer<typeof ProcessRunSchema>
@@ -2009,6 +2097,7 @@ export type ProcessStartBody = z.infer<typeof ProcessStartBodySchema>
 export type LoginResponse = z.infer<typeof LoginResponseSchema>
 export type RefreshResponse = z.infer<typeof RefreshResponseSchema>
 export type AvailableProcessesResponse = z.infer<typeof AvailableProcessesResponseSchema>
+export type BacktestRunDetailData = z.infer<typeof BacktestRunDetailDataSchema>
 export type BacktestRunListResponse = z.infer<typeof BacktestRunListResponseSchema>
 export type BacktestRunResponse = z.infer<typeof BacktestRunResponseSchema>
 export type ConfiguredProcessesResponse = z.infer<typeof ConfiguredProcessesResponseSchema>
@@ -2018,4 +2107,5 @@ export type SystemStatusData = z.infer<typeof SystemStatusDataSchema>
 export type BacktestCreateCommand = z.infer<typeof BacktestCreateCommandSchema>
 export type ProcessCreateRequest = z.infer<typeof ProcessCreateRequestSchema>
 export type ProcessStartRequest = z.infer<typeof ProcessStartRequestSchema>
+export type BacktestRunDetailResponse = z.infer<typeof BacktestRunDetailResponseSchema>
 export type SystemStatusResponse = z.infer<typeof SystemStatusResponseSchema>

@@ -135,7 +135,12 @@ class SpikeDrainCoordinator:
 
 
 def make_candles() -> list[SpikeCandle]:
-    """Synthesise two correlated price paths so MACD crosses fire."""
+    """Synthesise two correlated price paths so MACD crosses fire.
+
+    Returns:
+        Flat list of SpikeCandle across BTC-USD and ETH-USD instruments,
+        interleaved per timestamp for WARMUP_AND_RUN_CANDLES hours.
+    """
     base_time = datetime(2026, 1, 1, tzinfo=UTC)
     out: list[SpikeCandle] = []
     for i in range(WARMUP_AND_RUN_CANDLES):
@@ -279,6 +284,10 @@ def _apply_fill(
 async def run_reference(candles: list[SpikeCandle]) -> SpikeCollector:
     """Reference engine — drives the strategy directly, mirrors DirectDbEngine.
 
+    Args:
+        candles: Flat list of SpikeCandle across all instruments, ordered
+            by ``open_at`` and interleaved per timestamp.
+
     Returns:
         Collector with signals/trades/equity produced by Direct-DB-style
         batch processing.
@@ -363,7 +372,17 @@ def _build_backtest_strategy_class(
 
 
 async def run_via_broker(candles: list[SpikeCandle]) -> SpikeCollector:
-    """ZMQ replay — buffer candles by timestamp, flush batches, mirror Direct-DB."""
+    """ZMQ replay — buffer candles by timestamp, flush batches, mirror Direct-DB.
+
+    Args:
+        candles: Flat list of SpikeCandle across all instruments, ordered
+            by ``open_at`` and interleaved per timestamp. Published one at
+            a time through the local broker.
+
+    Returns:
+        Collector with signals/trades/equity produced on the broker path,
+        which should match ``run_reference`` field-for-field.
+    """
     broker = ZmqBrokerProcess(xsub_endpoint=BROKER_XSUB, xpub_endpoint=BROKER_XPUB)
     await broker.start()
     state = _BacktestReplayState()
@@ -469,7 +488,11 @@ def _equal_equity(a: list[SpikeEquityRecord], b: list[SpikeEquityRecord]) -> boo
 
 
 async def main() -> int:
-    """Compare reference vs broker-replay on the same 2-instrument fixture."""
+    """Compare reference vs broker-replay on the same 2-instrument fixture.
+
+    Returns:
+        0 on full parity; 1 on any mismatch in signals, trades, or equity.
+    """
     candles = make_candles()
     logger.info("fixture: {} candles ({} per instrument)", len(candles), len(candles) // 2)
 
