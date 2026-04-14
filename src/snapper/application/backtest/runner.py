@@ -26,6 +26,7 @@ from snapper.application.backtest.result_collector import ResultCollector
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
+from snapper.core.types import BacktestRunStatusEnum
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
@@ -133,6 +134,22 @@ class BacktestRunnerProcess(RegisterableProcess):
         run = await bt_repo.get_run(self._run_public_id, as_of=now)
         if run is None:
             logger.error("Backtest run {} not found — aborting", self._run_public_id[:8])
+            return
+
+        if run["status"] == BacktestRunStatusEnum.CANCEL_REQUESTED:
+            logger.info(
+                "Backtest {} cancel_requested before runner start — short-circuiting "
+                "to cancelled without starting engine",
+                self._run_public_id[:8],
+            )
+            await bt_repo.update_run_status(
+                public_id=run["public_id"],
+                new_status=BacktestRunStatusEnum.CANCELLED,
+                bus_time=now,
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence(_BT_STATUS_STREAM),
+                completed_at=now,
+            )
             return
 
         try:

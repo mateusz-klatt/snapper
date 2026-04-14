@@ -80,6 +80,51 @@ class BacktestCreateBody(StrictBody):
             raise ValueError("initial_cash must be positive")
         return v
 
+    @field_validator("execution_mode")
+    @classmethod
+    def validate_execution_mode(cls, v: str) -> str:
+        """Reject execution modes the engine does not implement.
+
+        Args:
+            v: Execution mode value.
+
+        Returns:
+            Validated execution mode.
+        """
+        if v not in ("direct_db", "zmq_replay"):
+            raise ValueError(f"execution_mode must be 'direct_db' or 'zmq_replay'; got '{v}'")
+        return v
+
+    @field_validator("fill_model")
+    @classmethod
+    def validate_fill_model(cls, v: str) -> str:
+        """Phase 2a only ships the 'market' fill model.
+
+        Args:
+            v: Fill model value.
+
+        Returns:
+            Validated fill model.
+        """
+        if v != "market":
+            raise ValueError(f"fill_model must be 'market'; got '{v}'")
+        return v
+
+    @field_validator("slippage_bps", "commission_bps")
+    @classmethod
+    def validate_bps_bounds(cls, v: float) -> float:
+        """Basis-point fields must be in [0, 500].
+
+        Args:
+            v: Basis-point value.
+
+        Returns:
+            Validated value.
+        """
+        if v < 0 or v > 500:
+            raise ValueError("bps fields must be in [0, 500]")
+        return v
+
     @field_validator("end_date")
     @classmethod
     def validate_date_range(cls, v: datetime, info: object) -> datetime:

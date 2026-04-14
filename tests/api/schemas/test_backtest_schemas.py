@@ -63,3 +63,51 @@ class TestBacktestCreateBody:
                 start_date=NOW + timedelta(days=30),
                 end_date=NOW,
             )
+
+    def test_invalid_execution_mode_rejected(self) -> None:
+        """Unknown execution_mode is rejected at the API boundary, not the DB."""
+        with pytest.raises(ValueError, match="execution_mode must be"):
+            BacktestCreateBody(
+                strategy_class="sma_cross",
+                instrument_public_id="BTC-USD",
+                exchange="kraken",
+                start_date=NOW,
+                end_date=NOW + timedelta(days=30),
+                execution_mode="other",
+            )
+
+    def test_invalid_fill_model_rejected(self) -> None:
+        """fill_model only accepts 'market' in Phase 2a."""
+        with pytest.raises(ValueError, match="fill_model must be 'market'"):
+            BacktestCreateBody(
+                strategy_class="sma_cross",
+                instrument_public_id="BTC-USD",
+                exchange="kraken",
+                start_date=NOW,
+                end_date=NOW + timedelta(days=30),
+                fill_model="midpoint",
+            )
+
+    def test_negative_slippage_rejected(self) -> None:
+        """Negative slippage_bps fails API validation before reaching the DB."""
+        with pytest.raises(ValueError, match="bps fields must be in"):
+            BacktestCreateBody(
+                strategy_class="sma_cross",
+                instrument_public_id="BTC-USD",
+                exchange="kraken",
+                start_date=NOW,
+                end_date=NOW + timedelta(days=30),
+                slippage_bps=-1.0,
+            )
+
+    def test_commission_above_cap_rejected(self) -> None:
+        """commission_bps above 500 fails API validation."""
+        with pytest.raises(ValueError, match="bps fields must be in"):
+            BacktestCreateBody(
+                strategy_class="sma_cross",
+                instrument_public_id="BTC-USD",
+                exchange="kraken",
+                start_date=NOW,
+                end_date=NOW + timedelta(days=30),
+                commission_bps=600.0,
+            )

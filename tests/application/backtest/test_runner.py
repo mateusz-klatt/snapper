@@ -107,6 +107,35 @@ class TestBacktestRunnerProcess:
     @pytest.mark.asyncio
     @patch("snapper.application.backtest.runner.get_repository")
     @patch("snapper.application.backtest.runner.DirectDbEngine")
+    async def test_cancel_requested_before_start_short_circuits(
+        self,
+        mock_engine_cls: MagicMock,
+        mock_get_repo: MagicMock,
+    ) -> None:
+        """Cancel request received while pending must skip the engine entirely."""
+        run = _make_run_row(status="cancel_requested")
+        mock_repo = MagicMock()
+        mock_repo.session_factory = MagicMock()
+        mock_get_repo.return_value = mock_repo
+
+        with patch("snapper.application.backtest.runner.BacktestRepository") as mock_bt_repo_cls:
+            mock_bt_repo = AsyncMock()
+            mock_bt_repo.get_run = AsyncMock(return_value=run)
+            mock_bt_repo.update_run_status = AsyncMock(return_value=1)
+            mock_bt_repo_cls.return_value = mock_bt_repo
+
+            runner = BacktestRunnerProcess(run_public_id="run-1", db_url="sqlite://")
+            await runner.start()
+
+            mock_engine_cls.assert_not_called()
+            mock_bt_repo.insert_event.assert_not_called()
+            assert mock_bt_repo.update_run_status.await_count == 1
+            kwargs = mock_bt_repo.update_run_status.await_args.kwargs
+            assert kwargs["new_status"] == "cancelled"
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.backtest.runner.get_repository")
+    @patch("snapper.application.backtest.runner.DirectDbEngine")
     @patch("snapper.application.backtest.runner.BacktestConfig")
     async def test_happy_path_pending_to_completed(
         self,
