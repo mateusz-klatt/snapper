@@ -162,7 +162,9 @@ class BacktestRunnerProcess(RegisterableProcess):
                 started_at=now,
             )
 
-            engine = DirectDbEngine(repository, now)
+            engine = DirectDbEngine(
+                repository, now, bt_repo=bt_repo, cancel_poll_ms=config.cancel_poll_ms
+            )
             collector = ResultCollector()
             await engine.run(run["public_id"], config, collector)
             await self._persist_artifacts(bt_repo, run["public_id"], collector, config)

@@ -1,5 +1,6 @@
 """Tests for DirectDbEngine candle-driven simulation."""
 
+import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
@@ -438,3 +439,157 @@ class TestDirectDbEngine:
             assert len(collector.trades) == 0
             assert len(collector.equity_points) == 0
             assert portfolio.cash == 10000.0
+
+
+class TestCooperativeCancel:
+    """Cooperative cancellation between time-batches via bt_repo polling."""
+
+    def _build_config(self) -> MagicMock:
+        config = MagicMock(spec=BacktestConfig)
+        config.strategy_class = "test_strategy"
+        config.instruments = {"kraken": ["BTC-USD"]}
+        config.timeframe = "1h"
+        config.start_date = NOW
+        config.end_date = END
+        config.initial_balance = 10000.0
+        config.slippage_bps = 0.0
+        config.commission_bps = 0.0
+        config.strategy_params = {}
+        return config
+
+    def _patch_chunks(self, count: int) -> tuple[Any, list[CandleEvent]]:
+        events = [
+            CandleEvent(
+                open_at=NOW + timedelta(hours=i + 1),
+                exchange="kraken",
+                instrument="BTC-USD",
+                row=_candle_row(NOW + timedelta(hours=i + 1), 100.0 + i),
+            )
+            for i in range(count)
+        ]
+
+        async def fake_iter(
+            _config: BacktestConfig,
+            _repository: object,
+            _snapshot_as_of: datetime,
+        ) -> AsyncIterator[list[CandleEvent]]:
+            for ev in events:
+                yield [ev]
+
+        return fake_iter, events
+
+    @pytest.mark.asyncio
+    async def test_cancel_requested_raises_cancelled_error(self) -> None:
+        """When bt_repo.get_run reports cancel_requested, engine raises CancelledError."""
+        mock_strategy_class = MagicMock()
+        mock_instance = MagicMock(spec=BaseStrategy)
+        mock_instance.required_candle_history.return_value = 0
+        mock_instance._handle_candle_data = AsyncMock(return_value=None)
+        mock_strategy_class.return_value = mock_instance
+
+        fake_iter, _ = self._patch_chunks(5)
+        bt_repo = AsyncMock()
+        bt_repo.get_run = AsyncMock(return_value={"status": "cancel_requested"})
+
+        with (
+            patch.dict(
+                "snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES",
+                {"test_strategy": mock_strategy_class},
+            ),
+            patch(
+                "snapper.application.backtest.direct_engine.iter_sorted_candle_chunks",
+                fake_iter,
+            ),
+        ):
+            repo = AsyncMock()
+            engine = DirectDbEngine(repo, NOW, bt_repo=bt_repo, cancel_poll_ms=0)
+            collector = ResultCollector()
+            with pytest.raises(asyncio.CancelledError):
+                await engine.run("run-1", self._build_config(), collector)
+            assert bt_repo.get_run.await_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_no_polling_when_bt_repo_is_none(self) -> None:
+        """Without bt_repo, engine never polls and runs to completion (CLI path)."""
+        mock_strategy_class = MagicMock()
+        mock_instance = MagicMock(spec=BaseStrategy)
+        mock_instance.required_candle_history.return_value = 0
+        mock_instance._handle_candle_data = AsyncMock(return_value=None)
+        mock_strategy_class.return_value = mock_instance
+
+        fake_iter, events = self._patch_chunks(3)
+
+        with (
+            patch.dict(
+                "snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES",
+                {"test_strategy": mock_strategy_class},
+            ),
+            patch(
+                "snapper.application.backtest.direct_engine.iter_sorted_candle_chunks",
+                fake_iter,
+            ),
+        ):
+            repo = AsyncMock()
+            engine = DirectDbEngine(repo, NOW, bt_repo=None)
+            collector = ResultCollector()
+            _, _ = await engine.run("run-1", self._build_config(), collector)
+            assert mock_instance._handle_candle_data.await_count == len(events)
+
+    @pytest.mark.asyncio
+    async def test_running_status_does_not_cancel(self) -> None:
+        """get_run returning 'running' allows the engine to finish normally."""
+        mock_strategy_class = MagicMock()
+        mock_instance = MagicMock(spec=BaseStrategy)
+        mock_instance.required_candle_history.return_value = 0
+        mock_instance._handle_candle_data = AsyncMock(return_value=None)
+        mock_strategy_class.return_value = mock_instance
+
+        fake_iter, events = self._patch_chunks(3)
+        bt_repo = AsyncMock()
+        bt_repo.get_run = AsyncMock(return_value={"status": "running"})
+
+        with (
+            patch.dict(
+                "snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES",
+                {"test_strategy": mock_strategy_class},
+            ),
+            patch(
+                "snapper.application.backtest.direct_engine.iter_sorted_candle_chunks",
+                fake_iter,
+            ),
+        ):
+            repo = AsyncMock()
+            engine = DirectDbEngine(repo, NOW, bt_repo=bt_repo, cancel_poll_ms=0)
+            collector = ResultCollector()
+            await engine.run("run-1", self._build_config(), collector)
+            assert mock_instance._handle_candle_data.await_count == len(events)
+
+    @pytest.mark.asyncio
+    async def test_poll_interval_throttles_probes(self) -> None:
+        """High cancel_poll_ms suppresses repeated DB probes within the window."""
+        mock_strategy_class = MagicMock()
+        mock_instance = MagicMock(spec=BaseStrategy)
+        mock_instance.required_candle_history.return_value = 0
+        mock_instance._handle_candle_data = AsyncMock(return_value=None)
+        mock_strategy_class.return_value = mock_instance
+
+        fake_iter, events = self._patch_chunks(5)
+        bt_repo = AsyncMock()
+        bt_repo.get_run = AsyncMock(return_value={"status": "running"})
+
+        with (
+            patch.dict(
+                "snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES",
+                {"test_strategy": mock_strategy_class},
+            ),
+            patch(
+                "snapper.application.backtest.direct_engine.iter_sorted_candle_chunks",
+                fake_iter,
+            ),
+        ):
+            repo = AsyncMock()
+            engine = DirectDbEngine(repo, NOW, bt_repo=bt_repo, cancel_poll_ms=60_000)
+            collector = ResultCollector()
+            await engine.run("run-1", self._build_config(), collector)
+            assert bt_repo.get_run.await_count == 1
+            assert mock_instance._handle_candle_data.await_count == len(events)

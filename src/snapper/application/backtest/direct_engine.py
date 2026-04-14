@@ -5,8 +5,11 @@ instance, simulates fills via the fill model, and collects results.
 Phase 1 MVP: single execution mode, no ZMQ replay.
 """
 
+import asyncio
 from collections.abc import AsyncIterator
+from datetime import UTC
 from datetime import datetime
+from time import monotonic
 from typing import Any
 from typing import NamedTuple
 from typing import cast
@@ -17,6 +20,8 @@ from snapper.application.backtest.config import BacktestConfig
 from snapper.application.backtest.fill_model import simulate_market_fill
 from snapper.application.backtest.result_collector import ResultCollector
 from snapper.application.portfolio.models import PortfolioTracker
+from snapper.core.types import BacktestRunStatusEnum
+from snapper.data.backtest_repository import BacktestRepository
 from snapper.data.repository import Repository
 from snapper.data.repository_types import CandleRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -117,15 +122,32 @@ class DirectDbEngine:
     for the runner to finalize.
     """
 
-    def __init__(self, repository: Repository, snapshot_as_of: datetime) -> None:
-        """Initialize engine with repository and snapshot time.
+    def __init__(
+        self,
+        repository: Repository,
+        snapshot_as_of: datetime,
+        bt_repo: BacktestRepository | None = None,
+        cancel_poll_ms: int = 500,
+    ) -> None:
+        """Initialize engine with repository, snapshot time, and optional cancel polling.
 
         Args:
             repository: Database repository for candle/instrument queries.
             snapshot_as_of: Temporal snapshot for all DB reads.
+            bt_repo: Optional BacktestRepository for cooperative cancel polling.
+                When provided, the engine probes ``get_run`` between time-batches
+                and raises ``asyncio.CancelledError`` on ``cancel_requested``.
+                Passing None disables polling (used by the CLI which has no
+                background cancel mechanism).
+            cancel_poll_ms: Minimum wall-time gap between cancel probes in
+                milliseconds. Probes are attempted between each time-batch but
+                skipped if the previous probe was within this window.
         """
         self._repository = repository
         self._snapshot_as_of = snapshot_as_of
+        self._bt_repo = bt_repo
+        self._cancel_poll_ms = cancel_poll_ms
+        self._last_cancel_check_ms: float = 0.0
 
     async def run(
         self,
@@ -171,6 +193,7 @@ class DirectDbEngine:
 
             for event in chunk:
                 if prev_time is not None and event.open_at != prev_time and time_batch:
+                    await self._maybe_check_cancel(run_public_id)
                     await self._process_time_batch(
                         time_batch,
                         run_public_id,
@@ -186,6 +209,7 @@ class DirectDbEngine:
                 prev_time = event.open_at
 
             if time_batch:
+                await self._maybe_check_cancel(run_public_id)
                 await self._process_time_batch(
                     time_batch,
                     run_public_id,
@@ -205,6 +229,32 @@ class DirectDbEngine:
             len(collector.equity_points),
         )
         return portfolio, latest_closes
+
+    async def _maybe_check_cancel(self, run_public_id: str) -> None:
+        """Probe ``backtest_runs`` for cancel_requested between time batches.
+
+        Skips the probe when polling is disabled (``bt_repo`` is None), when
+        the previous probe was within ``cancel_poll_ms``, or when the run is
+        not in a cancel-requested state. Raises ``asyncio.CancelledError``
+        when the run is marked for cancellation so the runner's existing
+        handler transitions the status to ``cancelled``.
+
+        Args:
+            run_public_id: Run to probe.
+
+        Raises:
+            asyncio.CancelledError: When the run's status is
+                ``cancel_requested``.
+        """
+        if self._bt_repo is None:
+            return
+        now_ms = monotonic() * 1000.0
+        if now_ms - self._last_cancel_check_ms < self._cancel_poll_ms:
+            return
+        self._last_cancel_check_ms = now_ms
+        run = await self._bt_repo.get_run(run_public_id, as_of=datetime.now(UTC))
+        if run is not None and run["status"] == BacktestRunStatusEnum.CANCEL_REQUESTED:
+            raise asyncio.CancelledError()
 
     async def _process_time_batch(
         self,
