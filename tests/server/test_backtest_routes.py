@@ -279,6 +279,125 @@ class TestGetBacktest:
             assert response.status_code == 404
             client.close()
 
+    def test_get_completed_inlines_result(self) -> None:
+        """Completed run returns inline result with all metrics."""
+        bt = AsyncMock()
+        bt.get_run = AsyncMock(return_value=_make_run_row(status="completed"))
+        bt.get_result = AsyncMock(
+            return_value={
+                "total_trades": 10,
+                "winning_trades": 7,
+                "losing_trades": 3,
+                "total_pnl": 1234.5,
+                "max_drawdown": 0.12,
+                "sharpe_ratio": 1.6,
+                "win_rate": 0.7,
+                "profit_factor": 2.1,
+                "final_equity": 11234.5,
+                "max_equity": 11500.0,
+                "extra_metrics": {"trades_per_day": 0.4},
+            }
+        )
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            response = client.get("/api/backtests/run-1")
+            payload = response.json()["payload"]
+            assert payload["result"] is not None
+            assert payload["result"]["total_trades"] == 10
+            assert payload["result"]["sharpe_ratio"] == pytest.approx(1.6)
+            assert payload["result"]["extra_metrics"] == {"trades_per_day": 0.4}
+            client.close()
+
+    def test_get_completed_no_result_row_yields_none(self) -> None:
+        """Completed run without persisted result still returns 200 with result=None."""
+        bt = AsyncMock()
+        bt.get_run = AsyncMock(return_value=_make_run_row(status="completed"))
+        bt.get_result = AsyncMock(return_value=None)
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            response = client.get("/api/backtests/run-1")
+            assert response.json()["payload"]["result"] is None
+            client.close()
+
+    def test_get_pending_omits_result(self) -> None:
+        """Pending run returns result=None without querying get_result."""
+        bt = AsyncMock()
+        bt.get_run = AsyncMock(return_value=_make_run_row(status="pending"))
+        bt.get_result = AsyncMock()
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            response = client.get("/api/backtests/run-1")
+            assert response.json()["payload"]["result"] is None
+            bt.get_result.assert_not_called()
+            client.close()
+
+
+class TestGetBacktestEquity:
+    """Tests for GET /api/backtests/{run_id}/equity."""
+
+    @staticmethod
+    def _make_equity_row(point_time: datetime, equity: float) -> dict[str, Any]:
+        return {
+            "public_id": f"eq-{equity}",
+            "timestamp": point_time,
+            "session_id": "s1",
+            "sequence_id": 1,
+            "run_public_id": "run-1",
+            "point_time": point_time,
+            "equity": equity,
+            "cash": equity,
+            "position_value": 0.0,
+            "drawdown": 0.0,
+        }
+
+    def test_equity_returns_paginated_points(self) -> None:
+        """Endpoint returns points ordered by point_time and respects pagination args."""
+        rows = [self._make_equity_row(NOW + timedelta(minutes=i), 10000.0 + i) for i in range(3)]
+        bt = AsyncMock()
+        bt.get_run = AsyncMock(return_value=_make_run_row())
+        bt.get_equity_points = AsyncMock(return_value=rows)
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            cursor = (NOW + timedelta(minutes=10)).isoformat().replace("+", "%2B")
+            response = client.get(f"/api/backtests/run-1/equity?limit=50&before={cursor}")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["count"] == 3
+            assert data["payload"][0]["equity"] == pytest.approx(10000.0)
+            kwargs = bt.get_equity_points.await_args.kwargs
+            assert kwargs["limit"] == 50
+            assert kwargs["before"] is not None
+            client.close()
+
+    def test_equity_404_when_run_missing(self) -> None:
+        """Missing run returns 404."""
+        bt = AsyncMock()
+        bt.get_run = AsyncMock(return_value=None)
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            response = client.get("/api/backtests/missing/equity")
+            assert response.status_code == 404
+            client.close()
+
+    def test_equity_404_when_wallet_mismatch(self) -> None:
+        """Cross-wallet read returns 404 (not 403, matching list endpoint)."""
+        bt = AsyncMock()
+        bt.get_run = AsyncMock(return_value=_make_run_row(wallet="other"))
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt, wallet="wallet-1")
+            response = client.get("/api/backtests/run-1/equity")
+            assert response.status_code == 404
+            client.close()
+
+    def test_equity_limit_above_cap_rejected(self) -> None:
+        """Limit > 20000 fails query validation (422)."""
+        bt = AsyncMock()
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            response = client.get("/api/backtests/run-1/equity?limit=20001")
+            assert response.status_code == 422
+            client.close()
+
 
 class TestCancelBacktest:
     """Tests for POST /api/backtests/{run_id}/cancel."""

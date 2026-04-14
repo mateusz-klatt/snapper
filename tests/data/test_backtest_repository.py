@@ -274,6 +274,38 @@ async def test_insert_equity_points_batch(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_equity_points_pagination(tmp_path: Path) -> None:
+    """get_equity_points respects limit and before cursor."""
+    repo = await _make_repo(tmp_path)
+    base_time = NOW
+    points = [
+        {
+            "run_public_id": "run-1",
+            "point_time": base_time + timedelta(minutes=i),
+            "equity": 10000.0 + i,
+            "cash": 10000.0,
+            "position_value": 0.0,
+            "drawdown": 0.0,
+            "session_id": "s1",
+            "sequence_id": i + 1,
+            "timestamp": base_time,
+        }
+        for i in range(5)
+    ]
+    await repo.insert_equity_points_batch(
+        points, bus_time=base_time, session_id="s1", sequence_id=99
+    )
+    limited = await repo.get_equity_points("run-1", as_of=base_time + timedelta(hours=1), limit=2)
+    assert len(limited) == 2
+    assert limited[0]["equity"] == pytest.approx(10000.0)
+    cursor = base_time + timedelta(minutes=3)
+    before = await repo.get_equity_points(
+        "run-1", as_of=base_time + timedelta(hours=1), before=cursor
+    )
+    assert [p["equity"] for p in before] == pytest.approx([10000.0, 10001.0, 10002.0])
+
+
+@pytest.mark.asyncio
 async def test_insert_and_get_result(tmp_path: Path) -> None:
     """Given: result metrics, When: insert + get, Then: round-trip."""
     repo = await _make_repo(tmp_path)

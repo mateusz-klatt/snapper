@@ -23,8 +23,11 @@ from loguru import logger
 from snapper.api.schemas.backtest import BacktestCancelCommand
 from snapper.api.schemas.backtest import BacktestCreateBody
 from snapper.api.schemas.backtest import BacktestCreateCommand
+from snapper.api.schemas.backtest import BacktestEquityPointInline
+from snapper.api.schemas.backtest import BacktestEquityPointListResponse
 from snapper.api.schemas.backtest import BacktestEventData
 from snapper.api.schemas.backtest import BacktestEventListResponse
+from snapper.api.schemas.backtest import BacktestResultInline
 from snapper.api.schemas.backtest import BacktestRunData
 from snapper.api.schemas.backtest import BacktestRunListResponse
 from snapper.api.schemas.backtest import BacktestRunResponse
@@ -67,8 +70,13 @@ def _resolve_as_of(as_of: datetime | None) -> datetime:
     return as_of if as_of is not None else datetime.now(UTC)
 
 
-def _run_to_data(run: BacktestRunRow, sid: str, seq: int) -> BacktestRunData:
-    """Project a BacktestRunRow into the response schema."""
+def _run_to_data(
+    run: BacktestRunRow,
+    sid: str,
+    seq: int,
+    result: BacktestResultInline | None = None,
+) -> BacktestRunData:
+    """Project a BacktestRunRow into the response schema, with optional result."""
     return BacktestRunData(
         type="backtest_run",
         public_id=run["public_id"],
@@ -92,6 +100,7 @@ def _run_to_data(run: BacktestRunRow, sid: str, seq: int) -> BacktestRunData:
         started_at=run.get("started_at"),
         completed_at=run.get("completed_at"),
         error=run.get("error"),
+        result=result,
     )
 
 
@@ -302,13 +311,31 @@ async def get_backtest(
     ):
         raise HTTPException(status_code=404, detail=_NOT_FOUND)
 
+    inline_result: BacktestResultInline | None = None
+    if run["status"] == "completed":
+        result_row = await bt_repo.get_result(run["public_id"], as_of=ts)
+        if result_row is not None:
+            inline_result = BacktestResultInline(
+                total_trades=result_row["total_trades"],
+                winning_trades=result_row["winning_trades"],
+                losing_trades=result_row["losing_trades"],
+                total_pnl=result_row["total_pnl"],
+                max_drawdown=result_row["max_drawdown"],
+                sharpe_ratio=result_row.get("sharpe_ratio"),
+                win_rate=result_row.get("win_rate"),
+                profit_factor=result_row.get("profit_factor"),
+                final_equity=result_row["final_equity"],
+                max_equity=result_row["max_equity"],
+                extra_metrics=result_row.get("extra_metrics", {}),
+            )
+
     return BacktestRunResponse(
         type="backtest_run_response",
         public_id=str(uuid7()),
         timestamp=datetime.now(UTC),
         session_id=sid,
         sequence_id=seq,
-        payload=_run_to_data(run, sid, seq),
+        payload=_run_to_data(run, sid, seq, result=inline_result),
     )
 
 
@@ -626,6 +653,69 @@ async def get_backtest_events(
     ]
     return BacktestEventListResponse(
         type="backtest_event_list",
+        public_id=str(uuid7()),
+        timestamp=datetime.now(UTC),
+        session_id=sid,
+        sequence_id=seq,
+        payload=items,
+        count=len(items),
+    )
+
+
+@router.get("/{run_id}/equity")
+async def get_backtest_equity(
+    run_id: str,
+    request: Request,
+    principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_BACKTESTS))],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
+    as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
+    limit: Annotated[int, Query(ge=1, le=20000)] = 5000,
+    before: Annotated[
+        datetime | None, Query(description="Cursor: only points strictly before this time")
+    ] = None,
+) -> BacktestEquityPointListResponse:
+    """Get equity-curve points for a backtest run, ordered ascending by point_time.
+
+    Args:
+        run_id: Run public ID.
+        request: FastAPI request.
+        principal: Authenticated caller.
+        repo: Database repository.
+        as_of: Temporal query parameter.
+        limit: Page size (max 20000).
+        before: Cursor — only return points strictly before this timestamp.
+
+    Returns:
+        List of equity points.
+    """
+    bt_repo = _bt_repo(repo)
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    sid = tracker.session_id
+    seq = tracker.next_sequence(_REST_STREAM)
+    ts = _resolve_as_of(as_of)
+
+    run = await bt_repo.get_run(run_id, as_of=ts)
+    if run is None:
+        raise HTTPException(status_code=404, detail=_NOT_FOUND)
+    if (
+        principal.active_wallet_public_id
+        and run["wallet_public_id"] != principal.active_wallet_public_id
+    ):
+        raise HTTPException(status_code=404, detail=_NOT_FOUND)
+
+    points = await bt_repo.get_equity_points(run_id, as_of=ts, limit=limit, before=before)
+    items = [
+        BacktestEquityPointInline(
+            point_time=p["point_time"],
+            equity=p["equity"],
+            cash=p["cash"],
+            position_value=p.get("position_value", 0.0),
+            drawdown=p.get("drawdown", 0.0),
+        )
+        for p in points
+    ]
+    return BacktestEquityPointListResponse(
+        type="backtest_equity_point_list",
         public_id=str(uuid7()),
         timestamp=datetime.now(UTC),
         session_id=sid,

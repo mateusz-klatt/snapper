@@ -164,6 +164,7 @@ class BacktestRunData(StrictDataSchema[Literal["backtest_run"]]):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     error: str | None = None
+    result: BacktestResultInline | None = None
 
 
 class BacktestRunResponse(PayloadResponse[Literal["backtest_run_response"], BacktestRunData]):
@@ -176,6 +177,65 @@ class BacktestRunListResponse(PayloadListResponse[Literal["backtest_run_list"], 
     """List of backtest runs response."""
 
     type: Literal["backtest_run_list"] = "backtest_run_list"
+
+
+class BacktestResultInline(StrictBody):
+    """Inline backtest aggregate metrics embedded in BacktestRunData.
+
+    Attributes:
+        total_trades: Total exit trades.
+        winning_trades: Profitable trades.
+        losing_trades: Losing trades.
+        total_pnl: Net PnL.
+        max_drawdown: Maximum drawdown fraction.
+        sharpe_ratio: Annualized Sharpe.
+        win_rate: Win rate fraction.
+        profit_factor: Gross profit divided by gross loss.
+        final_equity: Final equity value.
+        max_equity: Peak equity value.
+        extra_metrics: Additional computed metrics.
+    """
+
+    total_trades: int
+    winning_trades: int
+    losing_trades: int
+    total_pnl: float
+    max_drawdown: float
+    sharpe_ratio: float | None = None
+    win_rate: float | None = None
+    profit_factor: float | None = None
+    final_equity: float
+    max_equity: float
+    extra_metrics: dict[str, Any] = Field(default_factory=dict)
+
+
+class BacktestEquityPointInline(StrictBody):
+    """Inline equity-curve point used by GET /api/backtests/{id}/equity.
+
+    Attributes:
+        point_time: Timestamp of the equity sample.
+        equity: Total portfolio equity.
+        cash: Cash component.
+        position_value: Open-position value.
+        drawdown: Drawdown fraction at this point.
+    """
+
+    point_time: datetime
+    equity: float
+    cash: float
+    position_value: float = 0.0
+    drawdown: float = 0.0
+
+
+class BacktestEquityPointListResponse(
+    PayloadListResponse[Literal["backtest_equity_point_list"], BacktestEquityPointInline]
+):
+    """Paginated response for GET /api/backtests/{id}/equity."""
+
+    type: Literal["backtest_equity_point_list"] = "backtest_equity_point_list"
+
+
+BacktestRunData.model_rebuild()
 
 
 class BacktestResultData(StrictDataSchema[Literal["backtest_result"]]):

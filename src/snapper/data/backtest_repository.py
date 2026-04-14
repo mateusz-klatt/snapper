@@ -624,31 +624,35 @@ class BacktestRepository:
         self,
         run_public_id: str,
         as_of: datetime,
+        limit: int | None = None,
+        before: datetime | None = None,
     ) -> list[BacktestEquityPointRow]:
         """Retrieve equity curve for a backtest run.
 
         Args:
             run_public_id: Run to query.
             as_of: Bus time for temporal query.
+            limit: Maximum points to return (None = unbounded).
+            before: Only return points strictly before this timestamp
+                (cursor pagination on point_time, exclusive).
 
         Returns:
-            List of equity points ordered by point_time.
+            List of equity points ordered by point_time ascending.
         """
         async with self.session() as s:
-            rows = (
-                (
-                    await s.execute(
-                        select(BacktestEquityPoint)
-                        .where(
-                            BacktestEquityPoint.run_public_id == run_public_id,
-                            *where_active(BacktestEquityPoint, as_of),
-                        )
-                        .order_by(BacktestEquityPoint.point_time)
-                    )
+            stmt = (
+                select(BacktestEquityPoint)
+                .where(
+                    BacktestEquityPoint.run_public_id == run_public_id,
+                    *where_active(BacktestEquityPoint, as_of),
                 )
-                .scalars()
-                .all()
+                .order_by(BacktestEquityPoint.point_time)
             )
+            if before is not None:
+                stmt = stmt.where(BacktestEquityPoint.point_time < before)
+            if limit is not None:
+                stmt = stmt.limit(limit)
+            rows = (await s.execute(stmt)).scalars().all()
             return [_equity_to_dict(r) for r in rows]
 
     async def get_result(
