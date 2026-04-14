@@ -25,7 +25,6 @@ two-instrument (BTC + ETH) 200-candle fixture.
 
 import asyncio
 import math
-import sys
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import UTC
@@ -487,8 +486,17 @@ def _equal_equity(a: list[SpikeEquityRecord], b: list[SpikeEquityRecord]) -> boo
     return True
 
 
-async def main() -> int:
+def main() -> int:
     """Compare reference vs broker-replay on the same 2-instrument fixture.
+
+    Returns:
+        0 on full parity; 1 on any mismatch in signals, trades, or equity.
+    """
+    return asyncio.run(_main_async())
+
+
+async def _main_async() -> int:
+    """Async body of the CLI entry; see :func:`main`.
 
     Returns:
         0 on full parity; 1 on any mismatch in signals, trades, or equity.
@@ -534,4 +542,4 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    raise SystemExit(main())
