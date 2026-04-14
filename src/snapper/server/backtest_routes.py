@@ -29,6 +29,8 @@ from snapper.api.schemas.backtest import BacktestEventData
 from snapper.api.schemas.backtest import BacktestEventListResponse
 from snapper.api.schemas.backtest import BacktestResultInline
 from snapper.api.schemas.backtest import BacktestRunData
+from snapper.api.schemas.backtest import BacktestRunDetailData
+from snapper.api.schemas.backtest import BacktestRunDetailResponse
 from snapper.api.schemas.backtest import BacktestRunListResponse
 from snapper.api.schemas.backtest import BacktestRunResponse
 from snapper.api.schemas.backtest import BacktestSignalData
@@ -74,10 +76,42 @@ def _run_to_data(
     run: BacktestRunRow,
     sid: str,
     seq: int,
-    result: BacktestResultInline | None = None,
 ) -> BacktestRunData:
-    """Project a BacktestRunRow into the response schema, with optional result."""
+    """Project a BacktestRunRow into the lightweight list/event response schema."""
     return BacktestRunData(
+        type="backtest_run",
+        public_id=run["public_id"],
+        timestamp=run["timestamp"],
+        session_id=sid,
+        sequence_id=seq,
+        wallet_public_id=run["wallet_public_id"],
+        strategy_name=run["strategy_name"],
+        strategy_params=run["strategy_params"],
+        instrument_public_id=run["instrument_public_id"],
+        exchange=run["exchange"],
+        timeframe=run["timeframe"],
+        start_date=run["start_date"],
+        end_date=run["end_date"],
+        initial_cash=run["initial_cash"],
+        status=run["status"],
+        execution_mode=run["execution_mode"],
+        fill_model=run["fill_model"],
+        slippage_bps=run["slippage_bps"],
+        commission_bps=run["commission_bps"],
+        started_at=run.get("started_at"),
+        completed_at=run.get("completed_at"),
+        error=run.get("error"),
+    )
+
+
+def _run_to_detail_data(
+    run: BacktestRunRow,
+    sid: str,
+    seq: int,
+    result: BacktestResultInline | None,
+) -> BacktestRunDetailData:
+    """Project a BacktestRunRow into the detail schema with optional inline result."""
+    return BacktestRunDetailData(
         type="backtest_run",
         public_id=run["public_id"],
         timestamp=run["timestamp"],
@@ -283,8 +317,8 @@ async def get_backtest(
     principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_BACKTESTS))],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
-) -> BacktestRunResponse:
-    """Get backtest run detail.
+) -> BacktestRunDetailResponse:
+    """Get backtest run detail with optional inline result for completed runs.
 
     Args:
         run_id: Run public ID.
@@ -329,13 +363,13 @@ async def get_backtest(
                 extra_metrics=result_row.get("extra_metrics", {}),
             )
 
-    return BacktestRunResponse(
-        type="backtest_run_response",
+    return BacktestRunDetailResponse(
+        type="backtest_run_detail_response",
         public_id=str(uuid7()),
         timestamp=datetime.now(UTC),
         session_id=sid,
         sequence_id=seq,
-        payload=_run_to_data(run, sid, seq, result=inline_result),
+        payload=_run_to_detail_data(run, sid, seq, inline_result),
     )
 
 
@@ -670,8 +704,9 @@ async def get_backtest_equity(
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
     limit: Annotated[int, Query(ge=1, le=20000)] = 5000,
-    before: Annotated[
-        datetime | None, Query(description="Cursor: only points strictly before this time")
+    after: Annotated[
+        datetime | None,
+        Query(description="Forward cursor: return points strictly after this point_time"),
     ] = None,
 ) -> BacktestEquityPointListResponse:
     """Get equity-curve points for a backtest run, ordered ascending by point_time.
@@ -683,7 +718,8 @@ async def get_backtest_equity(
         repo: Database repository.
         as_of: Temporal query parameter.
         limit: Page size (max 20000).
-        before: Cursor — only return points strictly before this timestamp.
+        after: Forward cursor — set to the last seen point_time of the
+            previous page to fetch the next slice (exclusive).
 
     Returns:
         List of equity points.
@@ -703,7 +739,7 @@ async def get_backtest_equity(
     ):
         raise HTTPException(status_code=404, detail=_NOT_FOUND)
 
-    points = await bt_repo.get_equity_points(run_id, as_of=ts, limit=limit, before=before)
+    points = await bt_repo.get_equity_points(run_id, as_of=ts, limit=limit, after=after)
     items = [
         BacktestEquityPointInline(
             point_time=p["point_time"],

@@ -275,7 +275,7 @@ async def test_insert_equity_points_batch(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_get_equity_points_pagination(tmp_path: Path) -> None:
-    """get_equity_points respects limit and before cursor."""
+    """get_equity_points respects limit and after cursor."""
     repo = await _make_repo(tmp_path)
     base_time = NOW
     points = [
@@ -298,11 +298,11 @@ async def test_get_equity_points_pagination(tmp_path: Path) -> None:
     limited = await repo.get_equity_points("run-1", as_of=base_time + timedelta(hours=1), limit=2)
     assert len(limited) == 2
     assert limited[0]["equity"] == pytest.approx(10000.0)
-    cursor = base_time + timedelta(minutes=3)
-    before = await repo.get_equity_points(
-        "run-1", as_of=base_time + timedelta(hours=1), before=cursor
+    cursor = base_time + timedelta(minutes=1)
+    after = await repo.get_equity_points(
+        "run-1", as_of=base_time + timedelta(hours=1), after=cursor
     )
-    assert [p["equity"] for p in before] == pytest.approx([10000.0, 10001.0, 10002.0])
+    assert [p["equity"] for p in after] == pytest.approx([10002.0, 10003.0, 10004.0])
 
 
 @pytest.mark.asyncio

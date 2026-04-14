@@ -625,16 +625,20 @@ class BacktestRepository:
         run_public_id: str,
         as_of: datetime,
         limit: int | None = None,
-        before: datetime | None = None,
+        after: datetime | None = None,
     ) -> list[BacktestEquityPointRow]:
-        """Retrieve equity curve for a backtest run.
+        """Retrieve equity curve for a backtest run, ordered ascending by point_time.
+
+        Pagination model: forward cursor on point_time. Pass ``after`` set to the
+        last seen ``point_time`` of the previous page to fetch the next slice.
 
         Args:
             run_public_id: Run to query.
             as_of: Bus time for temporal query.
             limit: Maximum points to return (None = unbounded).
-            before: Only return points strictly before this timestamp
-                (cursor pagination on point_time, exclusive).
+            after: Cursor — return only points strictly greater than this
+                timestamp (exclusive). Combined with ASC ordering and LIMIT
+                this gives correct forward pagination.
 
         Returns:
             List of equity points ordered by point_time ascending.
@@ -648,8 +652,8 @@ class BacktestRepository:
                 )
                 .order_by(BacktestEquityPoint.point_time)
             )
-            if before is not None:
-                stmt = stmt.where(BacktestEquityPoint.point_time < before)
+            if after is not None:
+                stmt = stmt.where(BacktestEquityPoint.point_time > after)
             if limit is not None:
                 stmt = stmt.limit(limit)
             rows = (await s.execute(stmt)).scalars().all()

@@ -164,23 +164,10 @@ class BacktestRunData(StrictDataSchema[Literal["backtest_run"]]):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     error: str | None = None
-    result: BacktestResultInline | None = None
-
-
-class BacktestRunResponse(PayloadResponse[Literal["backtest_run_response"], BacktestRunData]):
-    """Single backtest run response."""
-
-    type: Literal["backtest_run_response"] = "backtest_run_response"
-
-
-class BacktestRunListResponse(PayloadListResponse[Literal["backtest_run_list"], BacktestRunData]):
-    """List of backtest runs response."""
-
-    type: Literal["backtest_run_list"] = "backtest_run_list"
 
 
 class BacktestResultInline(StrictBody):
-    """Inline backtest aggregate metrics embedded in BacktestRunData.
+    """Inline backtest aggregate metrics embedded in BacktestRunDetailData.
 
     Attributes:
         total_trades: Total exit trades.
@@ -206,7 +193,7 @@ class BacktestResultInline(StrictBody):
     profit_factor: float | None = None
     final_equity: float
     max_equity: float
-    extra_metrics: dict[str, Any] = Field(default_factory=dict)
+    extra_metrics: JsonObject = Field(default_factory=dict)
 
 
 class BacktestEquityPointInline(StrictBody):
@@ -235,7 +222,38 @@ class BacktestEquityPointListResponse(
     type: Literal["backtest_equity_point_list"] = "backtest_equity_point_list"
 
 
-BacktestRunData.model_rebuild()
+class BacktestRunDetailData(BacktestRunData):
+    """Detail-only payload — adds inline result for completed runs.
+
+    Used exclusively by GET /api/backtests/{id}. Other endpoints
+    (create/list/cancel/rerun) keep emitting the lighter BacktestRunData
+    so they do not leak a permanent ``result: null`` field.
+
+    Attributes:
+        result: Inline aggregate metrics if status == 'completed', else None.
+    """
+
+    result: BacktestResultInline | None = None
+
+
+class BacktestRunResponse(PayloadResponse[Literal["backtest_run_response"], BacktestRunData]):
+    """Single backtest run response (lightweight; no inline result)."""
+
+    type: Literal["backtest_run_response"] = "backtest_run_response"
+
+
+class BacktestRunDetailResponse(
+    PayloadResponse[Literal["backtest_run_detail_response"], BacktestRunDetailData]
+):
+    """Detail backtest run response — used by GET /api/backtests/{id}."""
+
+    type: Literal["backtest_run_detail_response"] = "backtest_run_detail_response"
+
+
+class BacktestRunListResponse(PayloadListResponse[Literal["backtest_run_list"], BacktestRunData]):
+    """List of backtest runs response."""
+
+    type: Literal["backtest_run_list"] = "backtest_run_list"
 
 
 class BacktestResultData(StrictDataSchema[Literal["backtest_result"]]):

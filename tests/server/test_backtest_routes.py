@@ -358,15 +358,15 @@ class TestGetBacktestEquity:
         bt.get_equity_points = AsyncMock(return_value=rows)
         with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
             client = _create_client(bt)
-            cursor = (NOW + timedelta(minutes=10)).isoformat().replace("+", "%2B")
-            response = client.get(f"/api/backtests/run-1/equity?limit=50&before={cursor}")
+            cursor = NOW.isoformat().replace("+", "%2B")
+            response = client.get(f"/api/backtests/run-1/equity?limit=50&after={cursor}")
             assert response.status_code == 200
             data = response.json()
             assert data["count"] == 3
             assert data["payload"][0]["equity"] == pytest.approx(10000.0)
             kwargs = bt.get_equity_points.await_args.kwargs
             assert kwargs["limit"] == 50
-            assert kwargs["before"] is not None
+            assert kwargs["after"] is not None
             client.close()
 
     def test_equity_404_when_run_missing(self) -> None:
