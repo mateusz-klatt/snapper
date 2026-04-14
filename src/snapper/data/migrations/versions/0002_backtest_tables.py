@@ -19,6 +19,8 @@ from sqlalchemy import text
 
 _KNOWN_TO_ACTIVE_PG = "known_to = '9999-12-31T23:59:59+00:00'"
 _KNOWN_TO_ACTIVE_SQLITE = "known_to = '9999-12-31 23:59:59.000000'"
+_CK_SESSION_ID = "session_id != ''"
+_CK_SEQUENCE_ID = "sequence_id > 0"
 
 revision: str = "0002"
 down_revision: str | None = "0001"
@@ -59,6 +61,8 @@ def upgrade() -> None:
             "'cancel_requested', 'cancelled')",
             name="ck_br_status",
         ),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_backtest_runs_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_backtest_runs_sequence_id"),
     )
     op.create_index(
         "ix_backtest_runs_wallet_status", "backtest_runs", ["wallet_public_id", "status"]
@@ -76,6 +80,8 @@ def upgrade() -> None:
         sa.Column("event_type", sa.String(64), nullable=False),
         sa.Column("detail", sa.JSON(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_backtest_events_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_backtest_events_sequence_id"),
     )
     op.create_index("ix_be_run_ts", "backtest_events", ["run_public_id", "timestamp"])
     op.create_index("ix_backtest_events_run_public_id", "backtest_events", ["run_public_id"])
@@ -101,6 +107,8 @@ def upgrade() -> None:
         sa.Column("max_equity", sa.Float(), nullable=False, server_default="0"),
         sa.Column("extra_metrics", sa.JSON(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_backtest_results_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_backtest_results_sequence_id"),
     )
     op.create_index("ix_backtest_results_run_public_id", "backtest_results", ["run_public_id"])
 
@@ -119,6 +127,8 @@ def upgrade() -> None:
         sa.Column("price", sa.Float(), nullable=False),
         sa.Column("indicators", sa.JSON(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_backtest_signals_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_backtest_signals_sequence_id"),
     )
     op.create_index("ix_bs_run_ts", "backtest_signals", ["run_public_id", "signal_time"])
     op.create_index("ix_backtest_signals_run_public_id", "backtest_signals", ["run_public_id"])
@@ -142,6 +152,8 @@ def upgrade() -> None:
         sa.Column("position_after", sa.Float(), nullable=False, server_default="0"),
         sa.Column("signal_public_id", sa.String(36), nullable=True),
         sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_backtest_trades_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_backtest_trades_sequence_id"),
     )
     op.create_index("ix_bt_run_ts", "backtest_trades", ["run_public_id", "executed_at"])
     op.create_index("ix_backtest_trades_run_public_id", "backtest_trades", ["run_public_id"])
@@ -161,6 +173,8 @@ def upgrade() -> None:
         sa.Column("position_value", sa.Float(), nullable=False, server_default="0"),
         sa.Column("drawdown", sa.Float(), nullable=False, server_default="0"),
         sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_backtest_equity_points_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_backtest_equity_points_sequence_id"),
     )
     op.create_index("ix_bep_run_ts", "backtest_equity_points", ["run_public_id", "point_time"])
     op.create_index(
