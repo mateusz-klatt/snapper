@@ -240,6 +240,7 @@ branch = true
 omit = [
     "*/__init__.py",
     "scripts/test_live_orders.py",
+    "scripts/spike_backtest_zmq.py",
     "tests/integration/*",
     "src/snapper/data/migrations/*",
 ]
