@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -238,6 +239,24 @@ class TestGetBacktest:
             response = client.get("/api/backtests/run-1")
             assert response.status_code == 200
             assert response.json()["payload"]["public_id"] == "run-1"
+            client.close()
+
+    def test_get_returns_phase2_fields_non_default(self) -> None:
+        """Non-default Phase 2 fields round-trip through the response projection."""
+        row = _make_run_row()
+        row["execution_mode"] = "zmq_replay"
+        row["fill_model"] = "market"
+        row["slippage_bps"] = 12.5
+        row["commission_bps"] = 7.5
+        bt = AsyncMock()
+        bt.get_run = AsyncMock(return_value=row)
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            response = client.get("/api/backtests/run-1")
+            payload = response.json()["payload"]
+            assert payload["execution_mode"] == "zmq_replay"
+            assert payload["slippage_bps"] == pytest.approx(12.5)
+            assert payload["commission_bps"] == pytest.approx(7.5)
             client.close()
 
     def test_get_not_found(self) -> None:

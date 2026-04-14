@@ -62,6 +62,8 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 from snapper.application.backtest.config import BacktestConfig
+from snapper.application.backtest.config import BacktestExecutionMode
+from snapper.application.backtest.config import BacktestFillModel
 from snapper.application.backtest.direct_engine import DirectDbEngine
 from snapper.application.backtest.metrics import compute_metrics
 from snapper.application.backtest.result_collector import ResultCollector
@@ -1516,6 +1518,10 @@ def backtest_run(
     initial_cash: Annotated[float, typer.Option("--initial-cash")] = 10_000.0,
     wallet: Annotated[str, typer.Option("--wallet", help="Wallet public ID")] = "cli",
     params_json: Annotated[str, typer.Option("--params", help="Strategy params as JSON")] = "{}",
+    execution_mode: Annotated[str, typer.Option("--execution-mode")] = "direct_db",
+    fill_model: Annotated[str, typer.Option("--fill-model")] = "market",
+    slippage_bps: Annotated[float, typer.Option("--slippage-bps")] = 0.0,
+    commission_bps: Annotated[float, typer.Option("--commission-bps")] = 0.0,
 ) -> None:
     """Run a backtest synchronously via CLI.
 
@@ -1532,6 +1538,10 @@ def backtest_run(
         initial_cash: Starting cash balance (default: 10000).
         wallet: Wallet public ID for run ownership.
         params_json: Strategy parameters as JSON string.
+        execution_mode: Engine type (direct_db / zmq_replay).
+        fill_model: Fill simulation model.
+        slippage_bps: Per-fill slippage in basis points.
+        commission_bps: Per-fill commission in basis points.
     """
     start_dt = _parse_utc(start)
     end_dt = _parse_utc(end)
@@ -1553,6 +1563,10 @@ def backtest_run(
             initial_balance=initial_cash,
             timeframe=timeframe,
             strategy_params=strategy_params,
+            execution_mode=BacktestExecutionMode(execution_mode),
+            fill_model=BacktestFillModel(fill_model),
+            slippage_bps=slippage_bps,
+            commission_bps=commission_bps,
         )
 
         _, public_id = await bt_repo.create_run(
@@ -1567,6 +1581,10 @@ def backtest_run(
                 "end_date": end_dt,
                 "initial_cash": initial_cash,
                 "status": "running",
+                "execution_mode": execution_mode,
+                "fill_model": fill_model,
+                "slippage_bps": slippage_bps,
+                "commission_bps": commission_bps,
                 "created_by_user_id": "cli",
                 "session_id": tracker.session_id,
                 "sequence_id": tracker.next_sequence("cli"),
@@ -1789,4 +1807,8 @@ def backtest_rerun(
         initial_cash=original["initial_cash"],
         wallet=original["wallet_public_id"],
         params_json=json_mod.dumps(original.get("strategy_params", {})),
+        execution_mode=original.get("execution_mode", "direct_db"),
+        fill_model=original.get("fill_model", "market"),
+        slippage_bps=original.get("slippage_bps", 0.0),
+        commission_bps=original.get("commission_bps", 0.0),
     )

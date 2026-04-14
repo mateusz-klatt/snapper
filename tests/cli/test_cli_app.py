@@ -3969,6 +3969,66 @@ class TestBacktestRerun:
             assert result.exit_code == 0
             assert "Re-running" in result.output
             assert "sma_cross" in result.output
+            create_call = mock_bt_repo.create_run.await_args
+            assert create_call is not None
+            row_arg = create_call.kwargs.get("row") or create_call.args[0]
+            assert row_arg["execution_mode"] == "direct_db"
+            assert row_arg["fill_model"] == "market"
+            assert row_arg["slippage_bps"] == pytest.approx(0.0)
+            assert row_arg["commission_bps"] == pytest.approx(0.0)
+
+
+class TestBacktestRerunPreservesPhase2Fields:
+    """backtest-rerun must propagate non-default Phase 2 fields."""
+
+    @patch.dict(
+        "snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES",
+        {"sma_cross": MagicMock()},
+    )
+    def test_rerun_propagates_non_default_fields(self, cli_runner: CliRunner) -> None:
+        """Non-default execution_mode / slippage / commission survive a rerun."""
+        original = {
+            "strategy_name": "sma_cross",
+            "instrument_public_id": "BTC-USD",
+            "exchange": "kraken",
+            "timeframe": "1h",
+            "start_date": datetime(2026, 1, 1, tzinfo=UTC),
+            "end_date": datetime(2026, 6, 1, tzinfo=UTC),
+            "initial_cash": 10000.0,
+            "wallet_public_id": "w-1",
+            "execution_mode": "zmq_replay",
+            "fill_model": "market",
+            "slippage_bps": 12.5,
+            "commission_bps": 7.5,
+        }
+        mock_bt_repo = AsyncMock()
+        mock_bt_repo.get_run = AsyncMock(return_value=original)
+        mock_bt_repo.create_run = AsyncMock(return_value=(1, "run-rerun"))
+        mock_bt_repo.insert_signals_batch = AsyncMock()
+        mock_bt_repo.insert_trades_batch = AsyncMock()
+        mock_bt_repo.insert_equity_points_batch = AsyncMock()
+        mock_bt_repo.insert_result = AsyncMock(return_value="res-1")
+        mock_bt_repo.update_run_status = AsyncMock(return_value=1)
+        mock_engine = AsyncMock()
+        mock_engine.run = AsyncMock(return_value=(MagicMock(), {}))
+        with (
+            patch("snapper.cli.app.BootstrapSettingsLoader") as mock_boot,
+            patch("snapper.cli.app.get_repository") as mock_get_repo,
+            patch("snapper.cli.app.BacktestRepository", return_value=mock_bt_repo),
+            patch("snapper.cli.app.DirectDbEngine", return_value=mock_engine),
+        ):
+            mock_boot.return_value.db_url = ASYNC_MEMORY_DB_URL
+            mock_repo = MagicMock()
+            mock_repo.session_factory = MagicMock()
+            mock_get_repo.return_value = mock_repo
+            result = cli_runner.invoke(app, ["backtest-rerun", "run-1"])
+            assert result.exit_code == 0
+            create_call = mock_bt_repo.create_run.await_args
+            assert create_call is not None
+            row_arg = create_call.kwargs.get("row") or create_call.args[0]
+            assert row_arg["execution_mode"] == "zmq_replay"
+            assert row_arg["slippage_bps"] == pytest.approx(12.5)
+            assert row_arg["commission_bps"] == pytest.approx(7.5)
 
 
 class TestBacktestRun:
