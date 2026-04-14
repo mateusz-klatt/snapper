@@ -30,6 +30,8 @@ from snapper.strategies.base import BaseStrategy
 from snapper.strategies.factory import StrategyFactory
 from snapper.strategies.models import StrategyConfig
 
+_CANCEL_PROBE_TIMEOUT_S: float = 1.0
+
 
 class CandleEvent(NamedTuple):
     """A candle row with exchange/instrument context for sorting."""
@@ -239,6 +241,13 @@ class DirectDbEngine:
         when the run is marked for cancellation so the runner's existing
         handler transitions the status to ``cancelled``.
 
+        The DB read is bounded by ``_CANCEL_PROBE_TIMEOUT_S``: if the
+        repository hangs (lock contention, slow DB), the probe is skipped
+        with a warning instead of stalling the engine. A future probe will
+        retry; the user-visible cancel SLA degrades gracefully rather than
+        hanging behind the SQLite driver's 30s lock timeout
+        (see data/repository.py).
+
         Args:
             run_public_id: Run to probe.
 
@@ -252,7 +261,18 @@ class DirectDbEngine:
         if now_ms - self._last_cancel_check_ms < self._cancel_poll_ms:
             return
         self._last_cancel_check_ms = now_ms
-        run = await self._bt_repo.get_run(run_public_id, as_of=datetime.now(UTC))
+        try:
+            run = await asyncio.wait_for(
+                self._bt_repo.get_run(run_public_id, as_of=datetime.now(UTC)),
+                timeout=_CANCEL_PROBE_TIMEOUT_S,
+            )
+        except TimeoutError:
+            logger.warning(
+                "Backtest {} cancel probe timed out after {}s — will retry next batch",
+                run_public_id[:8],
+                _CANCEL_PROBE_TIMEOUT_S,
+            )
+            return
         if run is not None and run["status"] == BacktestRunStatusEnum.CANCEL_REQUESTED:
             raise asyncio.CancelledError()
 

@@ -479,8 +479,8 @@ class TestCooperativeCancel:
         return fake_iter, events
 
     @pytest.mark.asyncio
-    async def test_cancel_requested_raises_cancelled_error(self) -> None:
-        """When bt_repo.get_run reports cancel_requested, engine raises CancelledError."""
+    async def test_cancel_requested_raises_cancelled_error_before_first_batch(self) -> None:
+        """cancel_requested set BEFORE the first batch raises before any candle work."""
         mock_strategy_class = MagicMock()
         mock_instance = MagicMock(spec=BaseStrategy)
         mock_instance.required_candle_history.return_value = 0
@@ -506,7 +506,46 @@ class TestCooperativeCancel:
             collector = ResultCollector()
             with pytest.raises(asyncio.CancelledError):
                 await engine.run("run-1", self._build_config(), collector)
-            assert bt_repo.get_run.await_count >= 1
+            assert bt_repo.get_run.await_count == 1
+            assert mock_instance._handle_candle_data.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_probe_timeout_skips_without_failing_run(self) -> None:
+        """Slow get_run is skipped via wait_for and the engine continues."""
+        mock_strategy_class = MagicMock()
+        mock_instance = MagicMock(spec=BaseStrategy)
+        mock_instance.required_candle_history.return_value = 0
+        mock_instance._handle_candle_data = AsyncMock(return_value=None)
+        mock_strategy_class.return_value = mock_instance
+
+        fake_iter, events = self._patch_chunks(2)
+
+        async def hanging_get_run(*_args: object, **_kwargs: object) -> object:
+            await asyncio.sleep(60)
+            return {"status": "running"}
+
+        bt_repo = AsyncMock()
+        bt_repo.get_run = AsyncMock(side_effect=hanging_get_run)
+
+        with (
+            patch.dict(
+                "snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES",
+                {"test_strategy": mock_strategy_class},
+            ),
+            patch(
+                "snapper.application.backtest.direct_engine.iter_sorted_candle_chunks",
+                fake_iter,
+            ),
+            patch(
+                "snapper.application.backtest.direct_engine._CANCEL_PROBE_TIMEOUT_S",
+                0.05,
+            ),
+        ):
+            repo = AsyncMock()
+            engine = DirectDbEngine(repo, NOW, bt_repo=bt_repo, cancel_poll_ms=0)
+            collector = ResultCollector()
+            await engine.run("run-1", self._build_config(), collector)
+            assert mock_instance._handle_candle_data.await_count == len(events)
 
     @pytest.mark.asyncio
     async def test_no_polling_when_bt_repo_is_none(self) -> None:
