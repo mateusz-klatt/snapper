@@ -237,7 +237,12 @@ warn_required_dynamic_aliases = true
 [tool.coverage.run]
 source = ["src/snapper", "proprietary/src", "scripts"]
 branch = true
-omit = ["*/__init__.py", "scripts/test_live_orders.py", "tests/integration/*"]
+omit = [
+    "*/__init__.py",
+    "scripts/test_live_orders.py",
+    "tests/integration/*",
+    "src/snapper/data/migrations/*",
+]
 
 [tool.coverage.report]
 skip_covered = true

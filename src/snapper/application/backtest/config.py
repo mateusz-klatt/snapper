@@ -61,20 +61,36 @@ class BacktestConfig(StrictBody):
     fill_model: BacktestFillModel = BacktestFillModel.MARKET
     slippage_bps: float = 0.0
     commission_bps: float = 0.0
+    cancel_poll_ms: int = 500
 
-    @field_validator("execution_mode")
+    @field_validator("cancel_poll_ms")
     @classmethod
-    def validate_execution_mode_phase1(cls, v: BacktestExecutionMode) -> BacktestExecutionMode:
-        """Phase 1 only supports DIRECT_DB.
+    def validate_cancel_poll_ms(cls, v: int) -> int:
+        """Cancel poll interval must be positive and bounded.
 
         Args:
-            v: Execution mode to validate.
+            v: Poll interval in milliseconds.
 
         Returns:
-            Validated execution mode.
+            Validated poll interval.
         """
-        if v != BacktestExecutionMode.DIRECT_DB:
-            raise ValueError(f"Execution mode '{v}' not supported in Phase 1; use 'direct_db'")
+        if v <= 0 or v > 60_000:
+            raise ValueError("cancel_poll_ms must be in (0, 60000]")
+        return v
+
+    @field_validator("slippage_bps", "commission_bps")
+    @classmethod
+    def validate_bps_bounds(cls, v: float) -> float:
+        """Basis-point fields must be in [0, 500].
+
+        Args:
+            v: Basis-point value.
+
+        Returns:
+            Validated value.
+        """
+        if v < 0 or v > 500:
+            raise ValueError("bps fields must be in [0, 500]")
         return v
 
     @field_validator("initial_balance")
@@ -90,36 +106,6 @@ class BacktestConfig(StrictBody):
         """
         if v <= 0:
             raise ValueError("initial_balance must be positive")
-        return v
-
-    @field_validator("slippage_bps")
-    @classmethod
-    def validate_slippage_bps(cls, v: float) -> float:
-        """Slippage must be non-negative.
-
-        Args:
-            v: Slippage value in basis points.
-
-        Returns:
-            Validated slippage.
-        """
-        if v < 0:
-            raise ValueError("slippage_bps must be non-negative")
-        return v
-
-    @field_validator("commission_bps")
-    @classmethod
-    def validate_commission_bps(cls, v: float) -> float:
-        """Commission must be non-negative.
-
-        Args:
-            v: Commission value in basis points.
-
-        Returns:
-            Validated commission.
-        """
-        if v < 0:
-            raise ValueError("commission_bps must be non-negative")
         return v
 
     @field_validator("strategy_class")

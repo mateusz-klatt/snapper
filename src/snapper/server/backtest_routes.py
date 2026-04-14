@@ -149,6 +149,10 @@ async def create_backtest(
             "end_date": body.end_date,
             "initial_cash": body.initial_cash,
             "status": "pending",
+            "execution_mode": body.execution_mode,
+            "fill_model": body.fill_model,
+            "slippage_bps": body.slippage_bps,
+            "commission_bps": body.commission_bps,
             "created_by_user_id": principal.username,
             "process_name": process_name,
             "session_id": sid,
@@ -413,6 +417,10 @@ async def rerun_backtest(
         end_date=original["end_date"],
         initial_cash=original["initial_cash"],
         strategy_params=original["strategy_params"],
+        execution_mode=original["execution_mode"],
+        fill_model=original["fill_model"],
+        slippage_bps=original["slippage_bps"],
+        commission_bps=original["commission_bps"],
     )
     rerun_command = BacktestCreateCommand(
         type="backtest_create_command",

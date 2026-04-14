@@ -42,6 +42,10 @@ class BacktestCreateBody(StrictBody):
     end_date: datetime
     initial_cash: float = 10_000.0
     strategy_params: JsonObject = {}
+    execution_mode: str = "direct_db"
+    fill_model: str = "market"
+    slippage_bps: float = 0.0
+    commission_bps: float = 0.0
 
     @field_validator("strategy_class")
     @classmethod
@@ -153,6 +157,10 @@ class BacktestRunData(StrictDataSchema[Literal["backtest_run"]]):
     end_date: datetime
     initial_cash: float
     status: str
+    execution_mode: str = "direct_db"
+    fill_model: str = "market"
+    slippage_bps: float = 0.0
+    commission_bps: float = 0.0
     started_at: datetime | None = None
     completed_at: datetime | None = None
     error: str | None = None

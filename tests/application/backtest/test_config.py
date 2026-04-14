@@ -107,20 +107,38 @@ class TestBacktestConfigValidation:
     @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
     def test_negative_slippage(self) -> None:
         """Negative slippage_bps raises ValidationError."""
-        with pytest.raises(ValidationError, match="slippage_bps must be non-negative"):
+        with pytest.raises(ValidationError, match="bps fields must be in"):
             BacktestConfig(**_valid_config(slippage_bps=-1))
 
     @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
     def test_negative_commission(self) -> None:
         """Negative commission_bps raises ValidationError."""
-        with pytest.raises(ValidationError, match="commission_bps must be non-negative"):
+        with pytest.raises(ValidationError, match="bps fields must be in"):
             BacktestConfig(**_valid_config(commission_bps=-1))
 
     @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
-    def test_zmq_replay_rejected_phase1(self) -> None:
-        """ZMQ_REPLAY mode rejected in Phase 1."""
-        with pytest.raises(ValidationError, match="not supported in Phase 1"):
-            BacktestConfig(**_valid_config(execution_mode=BacktestExecutionMode.ZMQ_REPLAY))
+    def test_slippage_above_cap(self) -> None:
+        """slippage_bps above 500 raises ValidationError."""
+        with pytest.raises(ValidationError, match="bps fields must be in"):
+            BacktestConfig(**_valid_config(slippage_bps=501))
+
+    @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
+    def test_zmq_replay_now_accepted(self) -> None:
+        """ZMQ_REPLAY mode is accepted at schema level (Phase 2a)."""
+        config = BacktestConfig(**_valid_config(execution_mode=BacktestExecutionMode.ZMQ_REPLAY))
+        assert config.execution_mode == BacktestExecutionMode.ZMQ_REPLAY
+
+    @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
+    def test_cancel_poll_ms_must_be_positive(self) -> None:
+        """cancel_poll_ms <= 0 raises ValidationError."""
+        with pytest.raises(ValidationError, match="cancel_poll_ms must be in"):
+            BacktestConfig(**_valid_config(cancel_poll_ms=0))
+
+    @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
+    def test_cancel_poll_ms_upper_bound(self) -> None:
+        """cancel_poll_ms above 60000 raises ValidationError."""
+        with pytest.raises(ValidationError, match="cancel_poll_ms must be in"):
+            BacktestConfig(**_valid_config(cancel_poll_ms=60_001))
 
 
 class TestFingerprint:

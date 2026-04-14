@@ -18,6 +18,8 @@ from typing import cast
 from loguru import logger
 
 from snapper.application.backtest.config import BacktestConfig
+from snapper.application.backtest.config import BacktestExecutionMode
+from snapper.application.backtest.config import BacktestFillModel
 from snapper.application.backtest.direct_engine import DirectDbEngine
 from snapper.application.backtest.metrics import compute_metrics
 from snapper.application.backtest.result_collector import ResultCollector
@@ -60,6 +62,10 @@ def run_to_config_dict(run: BacktestRunRow) -> dict[str, Any]:
         "initial_balance": run["initial_cash"],
         "strategy_params": run["strategy_params"],
         "timeframe": run["timeframe"],
+        "execution_mode": BacktestExecutionMode(run["execution_mode"]),
+        "fill_model": BacktestFillModel(run["fill_model"]),
+        "slippage_bps": run["slippage_bps"],
+        "commission_bps": run["commission_bps"],
     }
 
 

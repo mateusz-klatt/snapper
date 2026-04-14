@@ -1850,6 +1850,19 @@ class BacktestRun(TemporalMixin, Base):
             "'cancel_requested', 'cancelled')",
             name="ck_br_status",
         ),
+        CheckConstraint(
+            "execution_mode IN ('direct_db', 'zmq_replay')",
+            name="ck_br_execution_mode",
+        ),
+        CheckConstraint("fill_model IN ('market')", name="ck_br_fill_model"),
+        CheckConstraint(
+            "slippage_bps >= 0 AND slippage_bps <= 500",
+            name="ck_br_slippage_bounds",
+        ),
+        CheckConstraint(
+            "commission_bps >= 0 AND commission_bps <= 500",
+            name="ck_br_commission_bounds",
+        ),
     )
     wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
     operator_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
@@ -1863,6 +1876,10 @@ class BacktestRun(TemporalMixin, Base):
     end_date: Mapped[datetime] = mapped_column(TZDateTime())
     initial_cash: Mapped[float] = mapped_column(Float, default=10000.0)
     status: Mapped[str] = mapped_column(String(24), default="pending")
+    execution_mode: Mapped[str] = mapped_column(String(16), default="direct_db")
+    fill_model: Mapped[str] = mapped_column(String(32), default="market")
+    slippage_bps: Mapped[float] = mapped_column(Float, default=0.0)
+    commission_bps: Mapped[float] = mapped_column(Float, default=0.0)
     created_by_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)

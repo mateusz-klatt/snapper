@@ -3937,6 +3937,10 @@ class TestBacktestRerun:
             "end_date": datetime(2026, 6, 1, tzinfo=UTC),
             "initial_cash": 10000.0,
             "wallet_public_id": "w-1",
+            "execution_mode": "direct_db",
+            "fill_model": "market",
+            "slippage_bps": 0.0,
+            "commission_bps": 0.0,
         }
         mock_bt_repo = AsyncMock()
         mock_bt_repo.get_run = AsyncMock(return_value=original)

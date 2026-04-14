@@ -990,6 +990,10 @@ class BacktestRunInsertRow(TypedDict, total=False):
     end_date: datetime
     initial_cash: float
     status: str
+    execution_mode: str
+    fill_model: str
+    slippage_bps: float
+    commission_bps: float
     created_by_user_id: str | None
     process_name: str | None
     session_id: str
@@ -1016,6 +1020,10 @@ class BacktestRunRow(TypedDict):
     end_date: datetime
     initial_cash: float
     status: str
+    execution_mode: str
+    fill_model: str
+    slippage_bps: float
+    commission_bps: float
     created_by_user_id: str | None
     started_at: datetime | None
     completed_at: datetime | None
