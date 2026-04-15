@@ -349,6 +349,9 @@ class BacktestTradeData(StrictDataSchema[Literal["backtest_trade"]]):
         fee: Commission fee.
         pnl: Per-fill PnL (None for entries).
         position_after: Portfolio position after fill.
+        signal_public_id: ``public_id`` of the originating ``backtest_signal``;
+            None for synthetic fills with no triggering signal. Surfaces the
+            FK-style linkage required by Phase 2b parity tests.
     """
 
     type: Literal["backtest_trade"] = "backtest_trade"
@@ -361,6 +364,7 @@ class BacktestTradeData(StrictDataSchema[Literal["backtest_trade"]]):
     fee: float
     pnl: float | None = None
     position_after: float = 0.0
+    signal_public_id: str | None = None
 
 
 class BacktestTradeListResponse(

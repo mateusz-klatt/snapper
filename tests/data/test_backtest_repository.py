@@ -232,16 +232,33 @@ async def test_insert_trades_batch(tmp_path: Path) -> None:
             "fee": 25.0,
             "pnl": None,
             "position_after": 0.5,
-            "signal_public_id": None,
+            "signal_public_id": "00000000-0000-7000-8000-00000000beef",
             "session_id": "s1",
             "sequence_id": 1,
+            "timestamp": NOW,
+        },
+        {
+            "run_public_id": "run-1",
+            "executed_at": NOW + timedelta(minutes=5),
+            "instrument": "BTC-USD",
+            "side": "sell",
+            "quantity": 0.5,
+            "price": 51000.0,
+            "fee": 25.0,
+            "pnl": 475.0,
+            "position_after": 0.0,
+            "signal_public_id": None,
+            "session_id": "s1",
+            "sequence_id": 2,
             "timestamp": NOW,
         },
     ]
     await repo.insert_trades_batch(trades, bus_time=NOW, session_id="s1", sequence_id=20)
     result = await repo.get_trades("run-1", as_of=NOW + timedelta(seconds=1))
-    assert len(result) == 1
+    assert len(result) == 2
     assert result[0]["side"] == "buy"
+    assert result[0]["signal_public_id"] == "00000000-0000-7000-8000-00000000beef"
+    assert result[1]["signal_public_id"] is None
 
 
 @pytest.mark.asyncio

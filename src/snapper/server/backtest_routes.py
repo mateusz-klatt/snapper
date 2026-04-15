@@ -555,6 +555,7 @@ async def get_backtest_trades(
             fee=t["fee"],
             pnl=t["pnl"],
             position_after=t["position_after"],
+            signal_public_id=t.get("signal_public_id"),
         )
         for t in trades
     ]

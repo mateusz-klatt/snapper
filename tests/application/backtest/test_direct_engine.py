@@ -255,6 +255,7 @@ class TestDirectDbEngine:
             assert len(collector.trades) == 1
             assert collector.trades[0]["side"] == "buy"
             assert len(collector.equity_points) == 1
+            assert collector.trades[0]["signal_public_id"] == collector.signals[0]["public_id"]
 
     @pytest.mark.asyncio
     async def test_engine_multi_timestamp_batching(self) -> None:
@@ -403,6 +404,7 @@ class TestDirectDbEngine:
 
         assert len(collector.signals) == 1
         assert collector.signals[0]["signal_type"] == "sell"
+        assert collector.signals[0]["public_id"]
         assert len(collector.trades) == 0
         assert len(collector.equity_points) == 1
         assert portfolio.cash == 10000.0

@@ -83,7 +83,7 @@ def _make_trade_row() -> dict[str, Any]:
         "fee": 25.0,
         "pnl": None,
         "position_after": 0.5,
-        "signal_public_id": None,
+        "signal_public_id": "sig-pid-linked",
     }
 
 
@@ -455,6 +455,7 @@ class TestGetTrades:
             data = response.json()
             assert data["count"] == 1
             assert data["payload"][0]["side"] == "buy"
+            assert data["payload"][0]["signal_public_id"] == "sig-pid-linked"
             client.close()
 
     def test_trades_run_not_found(self) -> None:

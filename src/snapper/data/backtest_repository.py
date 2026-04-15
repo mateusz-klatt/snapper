@@ -466,7 +466,7 @@ class BacktestRepository:
                         fee=row.get("fee", 0.0),
                         pnl=row.get("pnl"),
                         position_after=row.get("position_after", 0.0),
-                        signal_public_id=row.get("signal_public_id"),
+                        signal_public_id=row["signal_public_id"],
                         session_id=session_id,
                         sequence_id=sequence_id + i,
                         timestamp=bus_time,
