@@ -203,6 +203,7 @@ class TestBacktestResultCollectorE2E:
         collector = ResultCollector()
         collector.record_signal(
             run_public_id=public_id,
+            public_id="00000000-0000-7000-8000-00000000abcd",
             signal_time=NOW,
             signal_type="buy",
             instrument="BTC-USD",

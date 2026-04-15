@@ -13,6 +13,7 @@ from time import monotonic
 from typing import Any
 from typing import NamedTuple
 from typing import cast
+from uuid import uuid7
 
 from loguru import logger
 
@@ -318,6 +319,7 @@ class DirectDbEngine:
             return
 
         for signal, event in signals_and_events:
+            sig_pid = str(uuid7())
             fill = simulate_market_fill(
                 exchange=event.exchange,
                 instrument=event.instrument,
@@ -335,12 +337,14 @@ class DirectDbEngine:
                     run_public_id=run_public_id,
                     fill=fill,
                     portfolio=portfolio,
+                    signal_public_id=sig_pid,
                     session_id=tracker.session_id,
                     sequence_id=tracker.next_sequence("bt"),
                     bus_time=self._snapshot_as_of,
                 )
             collector.record_signal(
                 run_public_id=run_public_id,
+                public_id=sig_pid,
                 signal_time=event.open_at,
                 signal_type=str(signal.side),
                 instrument=event.instrument,

@@ -183,6 +183,7 @@ async def test_insert_signals_batch(tmp_path: Path) -> None:
     signals = [
         {
             "run_public_id": "run-1",
+            "public_id": "00000000-0000-7000-8000-00000000000a",
             "signal_time": NOW,
             "signal_type": "buy",
             "instrument": "BTC-USD",
@@ -194,6 +195,7 @@ async def test_insert_signals_batch(tmp_path: Path) -> None:
         },
         {
             "run_public_id": "run-1",
+            "public_id": "00000000-0000-7000-8000-00000000000b",
             "signal_time": NOW + timedelta(hours=1),
             "signal_type": "sell",
             "instrument": "BTC-USD",
@@ -209,6 +211,10 @@ async def test_insert_signals_batch(tmp_path: Path) -> None:
     assert len(result) == 2
     assert result[0]["signal_type"] == "buy"
     assert result[1]["signal_type"] == "sell"
+    assert {r["public_id"] for r in result} == {
+        "00000000-0000-7000-8000-00000000000a",
+        "00000000-0000-7000-8000-00000000000b",
+    }
 
 
 @pytest.mark.asyncio

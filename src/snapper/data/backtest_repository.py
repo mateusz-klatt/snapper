@@ -424,6 +424,7 @@ class BacktestRepository:
             for i, row in enumerate(rows):
                 s.add(
                     BacktestSignal(
+                        public_id=row["public_id"],
                         run_public_id=row["run_public_id"],
                         signal_time=row["signal_time"],
                         signal_type=row["signal_type"],

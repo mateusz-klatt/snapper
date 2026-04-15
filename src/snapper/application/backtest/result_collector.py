@@ -32,6 +32,7 @@ class ResultCollector:
     def record_signal(
         self,
         run_public_id: str,
+        public_id: str,
         signal_time: datetime,
         signal_type: str,
         instrument: str,
@@ -45,6 +46,9 @@ class ResultCollector:
 
         Args:
             run_public_id: Backtest run identifier.
+            public_id: Pre-allocated UUID7 for this signal; the matching trade
+                row carries the same value in ``signal_public_id`` so engines
+                emit FK-linkable artifact pairs.
             signal_time: When the signal was generated.
             signal_type: Signal direction (buy/sell/hold).
             instrument: Target instrument.
@@ -57,6 +61,7 @@ class ResultCollector:
         self.signals.append(
             BacktestSignalInsertRow(
                 run_public_id=run_public_id,
+                public_id=public_id,
                 signal_time=signal_time,
                 signal_type=signal_type,
                 instrument=instrument,
@@ -73,6 +78,7 @@ class ResultCollector:
         run_public_id: str,
         fill: BacktestFill,
         portfolio: PortfolioTracker,
+        signal_public_id: str | None,
         session_id: str,
         sequence_id: int,
         bus_time: datetime,
@@ -83,6 +89,10 @@ class ResultCollector:
             run_public_id: Backtest run identifier.
             fill: Simulated fill from fill_model.
             portfolio: Portfolio state after fill (for position_after).
+            signal_public_id: Pre-allocated public_id of the signal that triggered
+                this fill. Required (no default) so callers consciously pass the
+                linkage; pass None only for synthetic fills with no originating
+                signal.
             session_id: Producer session ID.
             sequence_id: Sequence counter.
             bus_time: Bus time for temporal tracking.
@@ -98,7 +108,7 @@ class ResultCollector:
                 fee=fill.fee,
                 pnl=fill.pnl,
                 position_after=portfolio.position_qty(fill.instrument),
-                signal_public_id=None,
+                signal_public_id=signal_public_id,
                 session_id=session_id,
                 sequence_id=sequence_id,
                 timestamp=bus_time,

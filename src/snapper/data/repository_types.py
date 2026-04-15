@@ -1096,9 +1096,16 @@ class BacktestResultRow(TypedDict):
 
 
 class BacktestSignalInsertRow(TypedDict):
-    """Insert payload for backtest_signals."""
+    """Insert payload for backtest_signals.
+
+    ``public_id`` is required and supplied by the engine so the matching
+    trade row can carry the same value in ``signal_public_id`` (FK-style
+    linkage), enabling parity checks between Direct-DB and ZMQ replay
+    engines.
+    """
 
     run_public_id: str
+    public_id: str
     signal_time: datetime
     signal_type: str
     instrument: str

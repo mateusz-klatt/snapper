@@ -15,10 +15,11 @@ class TestResultCollector:
     """Tests for ResultCollector buffering behavior."""
 
     def test_record_signal(self) -> None:
-        """Signal is buffered with correct fields."""
+        """Signal is buffered with correct fields, including engine-supplied public_id."""
         collector = ResultCollector()
         collector.record_signal(
             run_public_id="run-1",
+            public_id="00000000-0000-7000-8000-000000000001",
             signal_time=NOW,
             signal_type="buy",
             instrument="BTC-USD",
@@ -31,6 +32,7 @@ class TestResultCollector:
         assert len(collector.signals) == 1
         assert collector.signals[0]["signal_type"] == "buy"
         assert collector.signals[0]["instrument"] == "BTC-USD"
+        assert collector.signals[0]["public_id"] == "00000000-0000-7000-8000-000000000001"
 
     def test_record_trade(self) -> None:
         """Trade fill is buffered with correct fields."""
@@ -54,6 +56,7 @@ class TestResultCollector:
             run_public_id="run-1",
             fill=fill,
             portfolio=portfolio,
+            signal_public_id="00000000-0000-7000-8000-000000000002",
             session_id="s1",
             sequence_id=1,
             bus_time=NOW,
@@ -62,6 +65,36 @@ class TestResultCollector:
         assert collector.trades[0]["side"] == "buy"
         assert collector.trades[0]["quantity"] == 0.2
         assert collector.trades[0]["position_after"] == 0.2
+        assert collector.trades[0]["signal_public_id"] == "00000000-0000-7000-8000-000000000002"
+
+    def test_record_trade_signal_public_id_none_for_synthetic_fills(self) -> None:
+        """signal_public_id may be None for synthetic fills with no originating signal."""
+        collector = ResultCollector()
+        fill = BacktestFill(
+            exchange="kraken",
+            instrument="BTC-USD",
+            side="buy",
+            size=0.1,
+            price=50000.0,
+            fee=5.0,
+            fee_currency="USD",
+            fill_at=NOW,
+            pnl=None,
+            signal_reason=None,
+            signal_strength=None,
+        )
+        portfolio = PortfolioTracker(cash=10000.0)
+        portfolio.update_fill("BTC-USD", "buy", 0.1, 50000.0, 5.0)
+        collector.record_trade(
+            run_public_id="run-1",
+            fill=fill,
+            portfolio=portfolio,
+            signal_public_id=None,
+            session_id="s1",
+            sequence_id=1,
+            bus_time=NOW,
+        )
+        assert collector.trades[0]["signal_public_id"] is None
 
     def test_maybe_record_equity_deduplicates(self) -> None:
         """Equity points are deduplicated by timestamp."""
