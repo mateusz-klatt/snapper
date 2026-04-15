@@ -1,0 +1,310 @@
+"""Tests for ReplayPublisher echo-ack handshake + drain semantics."""
+
+import asyncio
+import json
+from datetime import UTC
+from datetime import datetime
+from typing import Any
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
+
+import pytest
+import zmq
+import zmq.asyncio
+
+from snapper.application.backtest.config import BacktestConfig
+from snapper.application.backtest.drain import BacktestDrainTimeoutError
+from snapper.application.backtest.drain import BacktestReadinessTimeoutError
+from snapper.application.backtest.drain import DrainCoordinator
+from snapper.application.backtest.endpoints import allocate_replay_endpoints
+from snapper.messaging.infrastructure.broker import ZmqBrokerProcess
+from snapper.messaging.publishers.replay_publisher import WARMUP_PUBLIC_ID
+from snapper.messaging.publishers.replay_publisher import ReplayPublisher
+
+NOW = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def _candle_row(open_at: datetime, close: float = 100.0) -> dict[str, Any]:
+    """Build a minimal CandleRow dict."""
+    return {
+        "open_at": open_at,
+        "timeframe": "1h",
+        "open": close - 1,
+        "high": close + 1,
+        "low": close - 2,
+        "close": close,
+        "volume": 1000.0,
+        "vwap": None,
+        "trades": None,
+        "public_id": f"candle-{open_at.isoformat()}",
+        "timestamp": open_at,
+        "session_id": "s1",
+        "sequence_id": 1,
+    }
+
+
+def _make_config(instruments: dict[str, list[str]] | None = None) -> BacktestConfig:
+    """Build a BacktestConfig MagicMock matching what the publisher inspects."""
+    config = MagicMock(spec=BacktestConfig)
+    config.instruments = instruments or {"kraken": ["BTC-USD"]}
+    config.timeframe = "1h"
+    config.end_date = NOW
+    return config
+
+
+async def _strategy_harness(
+    broker: ZmqBrokerProcess,
+    topics: list[str],
+    drain: DrainCoordinator,
+    subscriber_ready: asyncio.Event,
+    *,
+    expected_real_candles: int,
+    ack_after_retry: int = 1,
+    never_ack: bool = False,
+    process_real: bool = True,
+) -> int:
+    """Run a SUB socket that mimics the strategy mixin's ACK behaviour.
+
+    Returns the number of real candles received. Sets subscriber_ready
+    only after every topic in ``topics`` has been ACKed at least once,
+    optionally skipping the first ``ack_after_retry-1`` rounds to test
+    retry behaviour. When ``process_real`` is False the harness still
+    drains the socket but never calls ``drain.on_processed``, simulating
+    a strategy that ACKs warmup but stalls before consuming real candles
+    — used to drive the drain-timeout path.
+    """
+    ctx = zmq.asyncio.Context()
+    sub = ctx.socket(zmq.SUB)
+    sub.connect(broker.xpub_endpoint)
+    for topic in topics:
+        sub.setsockopt(zmq.SUBSCRIBE, topic.encode())
+    await broker.wait_for_subscription(b"market.", timeout=3.0)
+    acked: set[str] = set()
+    real_count = 0
+    seen_warmup_rounds_per_topic: dict[str, int] = dict.fromkeys(topics, 0)
+    try:
+        while True:
+            try:
+                topic_bytes, payload = await asyncio.wait_for(sub.recv_multipart(), timeout=10.0)
+            except TimeoutError:
+                break
+            topic_str = topic_bytes.decode()
+            data = json.loads(payload.decode())
+            if data["public_id"] == WARMUP_PUBLIC_ID:
+                seen_warmup_rounds_per_topic[topic_str] = (
+                    seen_warmup_rounds_per_topic.get(topic_str, 0) + 1
+                )
+                if never_ack:
+                    continue
+                if seen_warmup_rounds_per_topic[topic_str] < ack_after_retry:
+                    continue
+                acked.add(topic_str)
+                if acked >= set(topics):
+                    subscriber_ready.set()
+                continue
+            real_count += 1
+            if process_real:
+                drain.on_processed()
+            if process_real and real_count >= expected_real_candles:
+                break
+    finally:
+        sub.setsockopt(zmq.LINGER, 0)
+        sub.close()
+        ctx.term()
+    return real_count
+
+
+@pytest.mark.asyncio
+class TestReplayPublisher:
+    """Echo-ack handshake, streaming, drain, and cleanup paths."""
+
+    @pytest.mark.timeout(15)
+    async def test_handshake_then_streams_all_candles(self) -> None:
+        """First-attempt ack: every published candle is processed."""
+        broker, endpoints = await allocate_replay_endpoints()
+        try:
+            t1 = NOW
+            t2 = NOW.replace(hour=1)
+            repo = AsyncMock()
+            repo.get_candles = AsyncMock(return_value=[_candle_row(t1, 100), _candle_row(t2, 101)])
+            config = _make_config()
+            drain = DrainCoordinator()
+            ready = asyncio.Event()
+            publisher = ReplayPublisher(
+                local_xsub=endpoints.xsub,
+                repository=repo,
+                config=config,
+                snapshot_as_of=NOW,
+                drain=drain,
+                subscriber_ready=ready,
+            )
+            harness = asyncio.create_task(
+                _strategy_harness(
+                    broker,
+                    topics=["market.kraken.BTC-USD.candles.1h"],
+                    drain=drain,
+                    subscriber_ready=ready,
+                    expected_real_candles=2,
+                )
+            )
+            await asyncio.wait_for(publisher.start(), timeout=10.0)
+            count = await asyncio.wait_for(harness, timeout=2.0)
+            assert count == 2
+            assert drain.published_count == 2
+            assert drain.processed_count == 2
+            assert drain.drained.is_set()
+        finally:
+            await asyncio.wait_for(broker.stop(), timeout=2.0)
+
+    @pytest.mark.timeout(15)
+    async def test_handshake_completes_after_retry(self) -> None:
+        """Strategy ACKs only on round 3 — publisher completes without raising."""
+        broker, endpoints = await allocate_replay_endpoints()
+        try:
+            repo = AsyncMock()
+            repo.get_candles = AsyncMock(return_value=[_candle_row(NOW, 100)])
+            config = _make_config()
+            drain = DrainCoordinator()
+            ready = asyncio.Event()
+            publisher = ReplayPublisher(
+                local_xsub=endpoints.xsub,
+                repository=repo,
+                config=config,
+                snapshot_as_of=NOW,
+                drain=drain,
+                subscriber_ready=ready,
+            )
+            harness = asyncio.create_task(
+                _strategy_harness(
+                    broker,
+                    topics=["market.kraken.BTC-USD.candles.1h"],
+                    drain=drain,
+                    subscriber_ready=ready,
+                    expected_real_candles=1,
+                    ack_after_retry=3,
+                )
+            )
+            await asyncio.wait_for(publisher.start(), timeout=10.0)
+            await asyncio.wait_for(harness, timeout=2.0)
+            assert drain.processed_count == 1
+        finally:
+            await asyncio.wait_for(broker.stop(), timeout=2.0)
+
+    @pytest.mark.timeout(15)
+    async def test_handshake_timeout_when_strategy_never_acks(self) -> None:
+        """Strategy that never ACKs forces BacktestReadinessTimeoutError."""
+        broker, endpoints = await allocate_replay_endpoints()
+        try:
+            repo = AsyncMock()
+            repo.get_candles = AsyncMock(return_value=[_candle_row(NOW, 100)])
+            config = _make_config()
+            drain = DrainCoordinator()
+            ready = asyncio.Event()
+            publisher = ReplayPublisher(
+                local_xsub=endpoints.xsub,
+                repository=repo,
+                config=config,
+                snapshot_as_of=NOW,
+                drain=drain,
+                subscriber_ready=ready,
+            )
+            harness = asyncio.create_task(
+                _strategy_harness(
+                    broker,
+                    topics=["market.kraken.BTC-USD.candles.1h"],
+                    drain=drain,
+                    subscriber_ready=ready,
+                    expected_real_candles=1,
+                    never_ack=True,
+                )
+            )
+            with pytest.raises(BacktestReadinessTimeoutError) as exc_info:
+                await asyncio.wait_for(publisher.start(), timeout=10.0)
+            assert "5 retries" in str(exc_info.value)
+            assert "market.kraken.BTC-USD.candles.1h" in str(exc_info.value)
+            harness.cancel()
+            with pytest.raises((asyncio.CancelledError, TimeoutError, BaseException)):
+                await asyncio.wait_for(harness, timeout=2.0)
+        finally:
+            await asyncio.wait_for(broker.stop(), timeout=2.0)
+
+    @pytest.mark.timeout(20)
+    async def test_drain_timeout_when_processed_lags(self) -> None:
+        """If the strategy stops processing mid-stream, drain raises with counters."""
+        broker, endpoints = await allocate_replay_endpoints()
+        try:
+            t1 = NOW
+            t2 = NOW.replace(hour=1)
+            repo = AsyncMock()
+            repo.get_candles = AsyncMock(return_value=[_candle_row(t1, 100), _candle_row(t2, 101)])
+            config = _make_config()
+            drain = DrainCoordinator()
+            ready = asyncio.Event()
+            publisher = ReplayPublisher(
+                local_xsub=endpoints.xsub,
+                repository=repo,
+                config=config,
+                snapshot_as_of=NOW,
+                drain=drain,
+                subscriber_ready=ready,
+            )
+
+            from snapper.messaging.publishers import replay_publisher as rp
+
+            original_drain_timeout = rp.DRAIN_TIMEOUT_S
+            rp.DRAIN_TIMEOUT_S = 0.5
+            try:
+                harness = asyncio.create_task(
+                    _strategy_harness(
+                        broker,
+                        topics=["market.kraken.BTC-USD.candles.1h"],
+                        drain=drain,
+                        subscriber_ready=ready,
+                        expected_real_candles=2,
+                        process_real=False,
+                    )
+                )
+                with pytest.raises(BacktestDrainTimeoutError) as exc_info:
+                    await asyncio.wait_for(publisher.start(), timeout=10.0)
+                assert "published=2" in str(exc_info.value)
+                assert "processed=" in str(exc_info.value)
+                harness.cancel()
+                with pytest.raises((asyncio.CancelledError, TimeoutError, BaseException)):
+                    await asyncio.wait_for(harness, timeout=2.0)
+            finally:
+                rp.DRAIN_TIMEOUT_S = original_drain_timeout
+        finally:
+            await asyncio.wait_for(broker.stop(), timeout=2.0)
+
+    @pytest.mark.timeout(15)
+    async def test_socket_closed_on_handshake_failure(self) -> None:
+        """Context.term() is reached even when handshake raises."""
+        broker, endpoints = await allocate_replay_endpoints()
+        try:
+            repo = AsyncMock()
+            repo.get_candles = AsyncMock(return_value=[])
+            config = _make_config()
+            drain = DrainCoordinator()
+            ready = asyncio.Event()
+            publisher = ReplayPublisher(
+                local_xsub=endpoints.xsub,
+                repository=repo,
+                config=config,
+                snapshot_as_of=NOW,
+                drain=drain,
+                subscriber_ready=ready,
+            )
+            with pytest.raises(BacktestReadinessTimeoutError):
+                await asyncio.wait_for(publisher.start(), timeout=10.0)
+            second_publisher = ReplayPublisher(
+                local_xsub=endpoints.xsub,
+                repository=repo,
+                config=config,
+                snapshot_as_of=NOW,
+                drain=DrainCoordinator(),
+                subscriber_ready=asyncio.Event(),
+            )
+            with pytest.raises(BacktestReadinessTimeoutError):
+                await asyncio.wait_for(second_publisher.start(), timeout=10.0)
+        finally:
+            await asyncio.wait_for(broker.stop(), timeout=2.0)
