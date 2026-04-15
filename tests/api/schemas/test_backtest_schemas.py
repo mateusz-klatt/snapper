@@ -64,6 +64,10 @@ class TestBacktestCreateBody:
                 end_date=NOW,
             )
 
+    def test_end_date_validator_allows_missing_peer_data(self) -> None:
+        """Direct validator call returns the value when validation info has no data."""
+        assert BacktestCreateBody.validate_date_range(NOW, object()) == NOW
+
     def test_invalid_execution_mode_rejected(self) -> None:
         """Unknown execution_mode is rejected at the API boundary, not the DB."""
         with pytest.raises(ValueError, match="execution_mode must be"):
