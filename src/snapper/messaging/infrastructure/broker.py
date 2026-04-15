@@ -142,21 +142,34 @@ class ZmqBrokerProcess(RegisterableProcess):
             "xpub_endpoint": settings.zmq_broker_xpub,
         }
 
-    def __init__(self, xsub_endpoint: str | None = None, xpub_endpoint: str | None = None):
+    def __init__(
+        self,
+        xsub_endpoint: str | None = None,
+        xpub_endpoint: str | None = None,
+        xpub_verbose: bool = False,
+    ):
         """Initialize the async ZMQ broker.
 
         Args:
             xsub_endpoint: Endpoint for publishers to connect. Defaults to settings value.
             xpub_endpoint: Endpoint for subscribers to connect. Defaults to settings value.
+            xpub_verbose: When True, enable XPUB_VERBOSE sockopt (forwards every
+                subscription frame including duplicates) and track subscriptions
+                into ``_observed_subscriptions``. Used by the backtest ZMQ replay
+                engine to prove end-to-end PUB→SUB wiring before streaming. Default
+                False preserves live-broker behaviour.
         """
         self.settings = get_settings()
         self.xsub_endpoint = xsub_endpoint or self.settings.zmq_broker_xsub
         self.xpub_endpoint = xpub_endpoint or self.settings.zmq_broker_xpub
+        self.xpub_verbose = xpub_verbose
         self.context: zmq.asyncio.Context | None = None
         self.xsub_socket: zmq.asyncio.Socket | None = None
         self.xpub_socket: zmq.asyncio.Socket | None = None
         self.proxy_task: asyncio.Task[None] | None = None
         self.running = False
+        self._observed_subscriptions: dict[bytes, int] | None = None
+        self._subscription_event: asyncio.Event | None = None
 
     async def start(self) -> None:
         """Start the async broker and begin forwarding messages.
@@ -176,9 +189,15 @@ class ZmqBrokerProcess(RegisterableProcess):
         self.xsub_socket = self.context.socket(zmq.XSUB)
         apply_hwm(self.xsub_socket, rcvhwm=HWM_BROKER)
         self.xsub_socket.bind(self.xsub_endpoint)
+        self.xsub_endpoint = self._resolve_endpoint(self.xsub_socket, self.xsub_endpoint)
         self.xpub_socket = self.context.socket(zmq.XPUB)
         apply_hwm(self.xpub_socket, sndhwm=HWM_BROKER)
+        if self.xpub_verbose:
+            self.xpub_socket.setsockopt(zmq.XPUB_VERBOSE, 1)
+            self._observed_subscriptions = {}
+            self._subscription_event = asyncio.Event()
         self.xpub_socket.bind(self.xpub_endpoint)
+        self.xpub_endpoint = self._resolve_endpoint(self.xpub_socket, self.xpub_endpoint)
         self.proxy_task = asyncio.create_task(self._proxy_loop())
         self.running = True
         logger.info(f"ZMQ Broker started: {self.xsub_endpoint} -> {self.xpub_endpoint}")
@@ -206,8 +225,42 @@ class ZmqBrokerProcess(RegisterableProcess):
             self.context.term()
         logger.info("ZMQ Broker stopped")
 
+    @staticmethod
+    def _resolve_endpoint(socket: Any, configured: str) -> str:
+        """Return the actual bound endpoint, resolving OS-assigned ports.
+
+        When ``configured`` requests an OS-assigned port (``:0`` or ``:*``),
+        query ``LAST_ENDPOINT`` to get the concrete tcp address so callers
+        connecting later (e.g. ephemeral backtest replay endpoints) know the
+        real port. Returns the configured endpoint unchanged for non-tcp
+        transports or when the socket stub does not support the query.
+        """
+        needs_resolution = configured.endswith(":0") or configured.endswith(":*")
+        if not needs_resolution:
+            return configured
+        getsockopt = getattr(socket, "getsockopt", None)
+        if getsockopt is None:
+            return configured
+        actual = getsockopt(zmq.LAST_ENDPOINT)
+        if isinstance(actual, bytes):
+            return actual.decode()
+        if isinstance(actual, str):
+            return actual
+        return configured
+
     async def _forward_polled_messages(self, events: dict[Any, int]) -> None:
-        """Forward messages based on poll results.
+        r"""Forward messages based on poll results.
+
+        XSUB → XPUB carries data frames (publishers to subscribers).
+        XPUB → XSUB carries subscription frames (``b"\x01" + topic`` for
+        subscribe, ``b"\x00" + topic`` for unsubscribe). When ``xpub_verbose``
+        is on, every subscription frame from each subscriber is forwarded
+        (including duplicates) so the broker can update an observed-set the
+        backtest replay engine uses to confirm wiring before streaming.
+
+        ``continue`` (not ``return``) is used after handling each socket so
+        the outer loop still services the other ready socket within the
+        same poll cycle.
 
         Args:
             events: Dictionary mapping socket objects to event flags.
@@ -218,9 +271,64 @@ class ZmqBrokerProcess(RegisterableProcess):
             if socket == self.xsub_socket and self.xpub_socket:
                 message = await socket.recv_multipart(zmq.NOBLOCK)
                 await self.xpub_socket.send_multipart(message)
-            elif socket == self.xpub_socket and self.xsub_socket:
+                continue
+            if socket == self.xpub_socket and self.xsub_socket:
                 message = await socket.recv_multipart(zmq.NOBLOCK)
+                if self._observed_subscriptions is not None and message:
+                    frame = message[0]
+                    if frame and frame[:1] in (b"\x01", b"\x00"):
+                        await self.xsub_socket.send_multipart(message)
+                        topic = frame[1:]
+                        if frame[:1] == b"\x01":
+                            self._observed_subscriptions[topic] = (
+                                self._observed_subscriptions.get(topic, 0) + 1
+                            )
+                        else:
+                            count = self._observed_subscriptions.get(topic, 0)
+                            if count <= 1:
+                                self._observed_subscriptions.pop(topic, None)
+                            else:
+                                self._observed_subscriptions[topic] = count - 1
+                        if self._subscription_event is not None:
+                            self._subscription_event.set()
+                            self._subscription_event.clear()
+                        continue
                 await self.xsub_socket.send_multipart(message)
+                continue
+
+    async def wait_for_subscription(self, topic_prefix: bytes, timeout: float) -> None:
+        """Return when a SUB has subscribed to a topic starting with ``topic_prefix``.
+
+        Cheap defence-in-depth check used by the backtest ZMQ replay engine
+        before issuing the echo-ack handshake. Only available when the broker
+        was started with ``xpub_verbose=True``.
+
+        Args:
+            topic_prefix: Byte prefix to match against observed subscription
+                topics (e.g. ``b"market."``).
+            timeout: Maximum seconds to wait before raising ``TimeoutError``.
+
+        Raises:
+            RuntimeError: If broker was not started with ``xpub_verbose=True``.
+            TimeoutError: If no matching subscription is observed before
+                ``timeout`` elapses; message includes the current observed-set.
+        """
+        if self._observed_subscriptions is None or self._subscription_event is None:
+            raise RuntimeError("broker was not started with xpub_verbose=True")
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            if any(topic.startswith(topic_prefix) for topic in self._observed_subscriptions):
+                return
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"no subscription for prefix {topic_prefix!r} within {timeout}s; "
+                    f"observed={list(self._observed_subscriptions)}"
+                )
+            try:
+                await asyncio.wait_for(self._subscription_event.wait(), timeout=remaining)
+            except TimeoutError:
+                continue
 
     async def _proxy_loop(self) -> None:
         """Forward messages between XSUB and XPUB sockets.
