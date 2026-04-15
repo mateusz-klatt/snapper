@@ -213,12 +213,14 @@ class ReplayPublisher:
         does not leak ports if a backtest fails partway through.
         """
         ctx = zmq.asyncio.Context()
-        socket = ctx.socket(zmq.PUB)
-        socket.connect(self._local_xsub)
+        socket: zmq.asyncio.Socket | None = None
         try:
+            socket = ctx.socket(zmq.PUB)
+            socket.connect(self._local_xsub)
             await self._handshake(socket)
             await self._stream_candles(socket)
         finally:
-            socket.setsockopt(zmq.LINGER, 0)
-            socket.close()
+            if socket is not None:
+                socket.setsockopt(zmq.LINGER, 0)
+                socket.close()
             ctx.term()
