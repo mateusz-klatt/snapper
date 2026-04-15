@@ -16,6 +16,7 @@ from typing import Any
 from typing import cast
 
 from loguru import logger
+from sqlalchemy.exc import IntegrityError
 
 from snapper.application.backtest.config import BacktestConfig
 from snapper.application.backtest.config import BacktestExecutionMode
@@ -31,6 +32,7 @@ from snapper.core.types import BacktestRunStatusEnum
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
+from snapper.data.backtest_conflict import is_single_running_conflict
 from snapper.data.backtest_repository import BacktestRepository
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import BacktestResultInsertRow
@@ -171,14 +173,35 @@ class BacktestRunnerProcess(RegisterableProcess):
                 session_id=evt_sid,
                 sequence_id=evt_seq,
             )
-            await bt_repo.update_run_status(
-                public_id=run["public_id"],
-                new_status="running",
-                bus_time=now,
-                session_id=self._tracker.session_id,
-                sequence_id=self._tracker.next_sequence(_BT_STATUS_STREAM),
-                started_at=now,
-            )
+            try:
+                await bt_repo.update_run_status(
+                    public_id=run["public_id"],
+                    new_status="running",
+                    bus_time=now,
+                    session_id=self._tracker.session_id,
+                    sequence_id=self._tracker.next_sequence(_BT_STATUS_STREAM),
+                    started_at=now,
+                )
+            except IntegrityError as e:
+                if not is_single_running_conflict(e):
+                    raise
+                fail_now = datetime.now(UTC)
+                await asyncio.shield(
+                    bt_repo.update_run_status(
+                        public_id=run["public_id"],
+                        new_status="failed",
+                        bus_time=fail_now,
+                        session_id=self._tracker.session_id,
+                        sequence_id=self._tracker.next_sequence(_BT_STATUS_STREAM),
+                        completed_at=fail_now,
+                        error="another backtest is already running (uq_bt_single_running)",
+                    )
+                )
+                logger.info(
+                    "Backtest {} rejected: another run in progress",
+                    run["public_id"][:8],
+                )
+                return
 
             engine: DirectDbEngine | ZmqReplayEngine
             if config.execution_mode == BacktestExecutionMode.ZMQ_REPLAY:
