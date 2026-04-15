@@ -162,9 +162,11 @@ class TestStrategyFactory:
                 assert strategy.subscriber is not None
                 assert strategy.publisher is not None
             finally:
-                strategy._listen_task.cancel()
-                with pytest.raises((asyncio.CancelledError, BaseException)):
-                    await asyncio.wait_for(strategy._listen_task, timeout=2.0)
+                listen = strategy._listen_task
+                if listen is not None:
+                    listen.cancel()
+                    with pytest.raises((asyncio.CancelledError, BaseException)):
+                        await asyncio.wait_for(listen, timeout=2.0)
                 await strategy.stop()
         finally:
             await asyncio.wait_for(broker.stop(), timeout=2.0)
@@ -221,9 +223,11 @@ class TestStrategyFactory:
                     pub.close()
                     ctx.term()
             finally:
-                strategy._listen_task.cancel()
-                with pytest.raises((asyncio.CancelledError, BaseException)):
-                    await asyncio.wait_for(strategy._listen_task, timeout=2.0)
+                listen = strategy._listen_task
+                if listen is not None:
+                    listen.cancel()
+                    with pytest.raises((asyncio.CancelledError, BaseException)):
+                        await asyncio.wait_for(listen, timeout=2.0)
                 await strategy.stop()
         finally:
             await asyncio.wait_for(broker.stop(), timeout=2.0)
@@ -268,9 +272,11 @@ class TestStrategyFactory:
                     pub.close()
                     ctx.term()
             finally:
-                strategy._listen_task.cancel()
-                with pytest.raises((asyncio.CancelledError, BaseException)):
-                    await asyncio.wait_for(strategy._listen_task, timeout=2.0)
+                listen = strategy._listen_task
+                if listen is not None:
+                    listen.cancel()
+                    with pytest.raises((asyncio.CancelledError, BaseException)):
+                        await asyncio.wait_for(listen, timeout=2.0)
                 await strategy.stop()
         finally:
             await asyncio.wait_for(broker.stop(), timeout=2.0)
@@ -320,9 +326,11 @@ class TestStrategyFactory:
                     pub.close()
                     ctx.term()
             finally:
-                strategy._listen_task.cancel()
-                with pytest.raises((asyncio.CancelledError, BaseException)):
-                    await asyncio.wait_for(strategy._listen_task, timeout=2.0)
+                listen = strategy._listen_task
+                if listen is not None:
+                    listen.cancel()
+                    with pytest.raises((asyncio.CancelledError, BaseException)):
+                        await asyncio.wait_for(listen, timeout=2.0)
                 await strategy.stop()
         finally:
             await asyncio.wait_for(broker.stop(), timeout=2.0)

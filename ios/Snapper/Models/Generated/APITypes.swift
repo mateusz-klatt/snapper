@@ -610,6 +610,7 @@ struct BacktestTradeData: Codable, Sendable {
     let fee: Double
     let pnl: Double?
     let positionAfter: Double?
+    let signalPublicId: String?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -626,6 +627,7 @@ struct BacktestTradeData: Codable, Sendable {
         case fee
         case pnl
         case positionAfter = "position_after"
+        case signalPublicId = "signal_public_id"
     }
 }
 

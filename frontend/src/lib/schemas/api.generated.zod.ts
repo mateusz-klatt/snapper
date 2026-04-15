@@ -60,6 +60,7 @@ export const BacktestTradeDataSchema = z
     fee: z.number(),
     pnl: z.number().nullable().optional(),
     position_after: z.number(),
+    signal_public_id: z.string().nullable().optional(),
   })
   .strict()
 

@@ -2920,6 +2920,9 @@ export type Components = {
          *         fee: Commission fee.
          *         pnl: Per-fill PnL (None for entries).
          *         position_after: Portfolio position after fill.
+         *         signal_public_id: ``public_id`` of the originating ``backtest_signal``;
+         *             None for synthetic fills with no triggering signal. Surfaces the
+         *             FK-style linkage required by Phase 2b parity tests.
          */
         BacktestTradeData: {
             /**
@@ -2963,6 +2966,8 @@ export type Components = {
              * @default 0
              */
             position_after: number;
+            /** Signal Public Id */
+            signal_public_id?: string | null;
         };
         /**
          * BacktestTradeListResponse
