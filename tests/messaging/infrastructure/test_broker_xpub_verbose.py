@@ -35,7 +35,7 @@ class TestBrokerXpubVerbose:
         broker = await _start_broker(xpub_verbose=False)
         try:
             assert broker._observed_subscriptions is None
-            assert broker._subscription_event is None
+            assert broker._observation_changed is None
             with pytest.raises(RuntimeError, match="xpub_verbose=True"):
                 await broker.wait_for_subscription(b"market.", timeout=0.1)
         finally:
@@ -54,7 +54,7 @@ class TestBrokerXpubVerbose:
             t0 = loop.time()
             await broker.wait_for_subscription(b"market.", timeout=2.0)
             elapsed = loop.time() - t0
-            assert elapsed < 1.5
+            assert elapsed < 0.5
             assert broker._observed_subscriptions is not None
             assert broker._observed_subscriptions.get(b"market.foo") == 1
         finally:
@@ -115,7 +115,7 @@ class TestBrokerXpubVerbose:
         ctx = zmq.asyncio.Context()
         sub = ctx.socket(zmq.SUB)
         sub.connect(broker.xpub_endpoint)
-        n = 200
+        n = 1000
         try:
             for i in range(n):
                 sub.setsockopt(zmq.SUBSCRIBE, f"market.t{i}".encode())
@@ -141,6 +141,79 @@ class TestBrokerXpubVerbose:
             await asyncio.sleep(0.05)
             sub.setsockopt(zmq.SUBSCRIBE, b"market.btc")
             await asyncio.wait_for(asyncio.gather(waiter_a, waiter_b), timeout=3.0)
+        finally:
+            sub.setsockopt(zmq.LINGER, 0)
+            sub.close()
+            ctx.term()
+            await asyncio.wait_for(broker.stop(), timeout=2.0)
+
+    @pytest.mark.timeout(10)
+    async def test_resolve_endpoint_handles_zero_and_star_ports(self) -> None:
+        """OS-assigned port placeholders are resolved to concrete tcp endpoints."""
+        broker_zero = await _start_broker(xpub_verbose=False)
+        try:
+            assert broker_zero.xsub_endpoint != "tcp://127.0.0.1:0"
+            assert broker_zero.xpub_endpoint != "tcp://127.0.0.1:0"
+            assert broker_zero.xsub_endpoint.startswith("tcp://127.0.0.1:")
+            assert broker_zero.xpub_endpoint.startswith("tcp://127.0.0.1:")
+        finally:
+            await asyncio.wait_for(broker_zero.stop(), timeout=2.0)
+        broker_star = ZmqBrokerProcess(
+            xsub_endpoint="tcp://127.0.0.1:*",
+            xpub_endpoint="tcp://127.0.0.1:*",
+        )
+        await asyncio.wait_for(broker_star.start(), timeout=2.0)
+        try:
+            assert broker_star.xsub_endpoint.startswith("tcp://127.0.0.1:")
+            assert not broker_star.xsub_endpoint.endswith(":*")
+        finally:
+            await asyncio.wait_for(broker_star.stop(), timeout=2.0)
+
+    @pytest.mark.timeout(10)
+    async def test_resolve_endpoint_no_op_for_inproc(self) -> None:
+        """inproc:// endpoints are not rewritten by LAST_ENDPOINT lookup."""
+        broker = ZmqBrokerProcess(
+            xsub_endpoint="inproc://xsub-resolve-test",
+            xpub_endpoint="inproc://xpub-resolve-test",
+        )
+        await asyncio.wait_for(broker.start(), timeout=2.0)
+        try:
+            assert broker.xsub_endpoint == "inproc://xsub-resolve-test"
+            assert broker.xpub_endpoint == "inproc://xpub-resolve-test"
+        finally:
+            await asyncio.wait_for(broker.stop(), timeout=2.0)
+
+    @pytest.mark.timeout(10)
+    async def test_no_lost_wakeup_on_simultaneous_subscription(self) -> None:
+        """Subscription that arrives while waiter is mid-arming is not lost.
+
+        Stresses the race where the producer notifies between a waiter's
+        pre-check and its suspend point; if the broker uses set()+clear()
+        on a plain Event the waiter would block past the change. With a
+        Condition the producer's notify is serialized through the same lock
+        the waiter holds across the check/wait boundary.
+        """
+        broker = await _start_broker(xpub_verbose=True)
+        ctx = zmq.asyncio.Context()
+        sub = ctx.socket(zmq.SUB)
+        sub.connect(broker.xpub_endpoint)
+        try:
+
+            async def waiter() -> None:
+                await broker.wait_for_subscription(b"market.race", timeout=3.0)
+
+            for _ in range(10):
+                w = asyncio.create_task(waiter())
+                await asyncio.sleep(0)
+                sub.setsockopt(zmq.SUBSCRIBE, b"market.race")
+                await asyncio.wait_for(w, timeout=3.0)
+                sub.setsockopt(zmq.UNSUBSCRIBE, b"market.race")
+                assert broker._observed_subscriptions is not None
+                for _ in range(100):
+                    if b"market.race" not in broker._observed_subscriptions:
+                        break
+                    await asyncio.sleep(0.01)
+                assert b"market.race" not in broker._observed_subscriptions
         finally:
             sub.setsockopt(zmq.LINGER, 0)
             sub.close()

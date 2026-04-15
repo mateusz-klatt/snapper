@@ -169,7 +169,7 @@ class ZmqBrokerProcess(RegisterableProcess):
         self.proxy_task: asyncio.Task[None] | None = None
         self.running = False
         self._observed_subscriptions: dict[bytes, int] | None = None
-        self._subscription_event: asyncio.Event | None = None
+        self._observation_changed: asyncio.Condition | None = None
 
     async def start(self) -> None:
         """Start the async broker and begin forwarding messages.
@@ -195,7 +195,7 @@ class ZmqBrokerProcess(RegisterableProcess):
         if self.xpub_verbose:
             self.xpub_socket.setsockopt(zmq.XPUB_VERBOSE, 1)
             self._observed_subscriptions = {}
-            self._subscription_event = asyncio.Event()
+            self._observation_changed = asyncio.Condition()
         self.xpub_socket.bind(self.xpub_endpoint)
         self.xpub_endpoint = self._resolve_endpoint(self.xpub_socket, self.xpub_endpoint)
         self.proxy_task = asyncio.create_task(self._proxy_loop())
@@ -248,6 +248,45 @@ class ZmqBrokerProcess(RegisterableProcess):
             return actual
         return configured
 
+    async def _handle_subscription_frame(self, message: list[bytes]) -> bool:
+        r"""Forward a XPUB-side frame and update the observed-set if applicable.
+
+        Returns True when the frame was a subscription/unsubscription frame
+        (``b"\x01" + topic`` / ``b"\x00" + topic``) and was both forwarded
+        and recorded in ``_observed_subscriptions``. Returns False for non-
+        subscription frames (caller should perform a normal forward) or when
+        verbose tracking is disabled.
+
+        The forward happens BEFORE the dict mutation so a mid-flight cancel
+        never publishes a false ack of a subscription that did not reach
+        XSUB. Mutation is followed by ``notify_all()`` on a condition variable
+        — race-free against waiters that are between the dict pre-check and
+        the suspend point in ``wait_for_subscription``.
+        """
+        if (
+            self._observed_subscriptions is None
+            or self._observation_changed is None
+            or not message
+            or self.xsub_socket is None
+        ):
+            return False
+        frame = message[0]
+        if not frame or frame[:1] not in (b"\x01", b"\x00"):
+            return False
+        await self.xsub_socket.send_multipart(message)
+        topic = frame[1:]
+        if frame[:1] == b"\x01":
+            self._observed_subscriptions[topic] = self._observed_subscriptions.get(topic, 0) + 1
+        else:
+            count = self._observed_subscriptions.get(topic, 0)
+            if count <= 1:
+                self._observed_subscriptions.pop(topic, None)
+            else:
+                self._observed_subscriptions[topic] = count - 1
+        async with self._observation_changed:
+            self._observation_changed.notify_all()
+        return True
+
     async def _forward_polled_messages(self, events: dict[Any, int]) -> None:
         r"""Forward messages based on poll results.
 
@@ -274,27 +313,9 @@ class ZmqBrokerProcess(RegisterableProcess):
                 continue
             if socket == self.xpub_socket and self.xsub_socket:
                 message = await socket.recv_multipart(zmq.NOBLOCK)
-                if self._observed_subscriptions is not None and message:
-                    frame = message[0]
-                    if frame and frame[:1] in (b"\x01", b"\x00"):
-                        await self.xsub_socket.send_multipart(message)
-                        topic = frame[1:]
-                        if frame[:1] == b"\x01":
-                            self._observed_subscriptions[topic] = (
-                                self._observed_subscriptions.get(topic, 0) + 1
-                            )
-                        else:
-                            count = self._observed_subscriptions.get(topic, 0)
-                            if count <= 1:
-                                self._observed_subscriptions.pop(topic, None)
-                            else:
-                                self._observed_subscriptions[topic] = count - 1
-                        if self._subscription_event is not None:
-                            self._subscription_event.set()
-                            self._subscription_event.clear()
-                        continue
+                if await self._handle_subscription_frame(message):
+                    continue
                 await self.xsub_socket.send_multipart(message)
-                continue
 
     async def wait_for_subscription(self, topic_prefix: bytes, timeout: float) -> None:
         """Return when a SUB has subscribed to a topic starting with ``topic_prefix``.
@@ -302,6 +323,11 @@ class ZmqBrokerProcess(RegisterableProcess):
         Cheap defence-in-depth check used by the backtest ZMQ replay engine
         before issuing the echo-ack handshake. Only available when the broker
         was started with ``xpub_verbose=True``.
+
+        Race-free w.r.t. concurrent subscription frames: re-checks the dict
+        while holding the condition's lock before suspending. Producers acquire
+        the same lock around ``notify_all()``, so the change cannot land
+        between the consumer's pre-check and its ``wait()``.
 
         Args:
             topic_prefix: Byte prefix to match against observed subscription
@@ -313,22 +339,23 @@ class ZmqBrokerProcess(RegisterableProcess):
             TimeoutError: If no matching subscription is observed before
                 ``timeout`` elapses; message includes the current observed-set.
         """
-        if self._observed_subscriptions is None or self._subscription_event is None:
+        if self._observed_subscriptions is None or self._observation_changed is None:
             raise RuntimeError("broker was not started with xpub_verbose=True")
         deadline = asyncio.get_running_loop().time() + timeout
-        while True:
-            if any(topic.startswith(topic_prefix) for topic in self._observed_subscriptions):
-                return
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                raise TimeoutError(
-                    f"no subscription for prefix {topic_prefix!r} within {timeout}s; "
-                    f"observed={list(self._observed_subscriptions)}"
-                )
-            try:
-                await asyncio.wait_for(self._subscription_event.wait(), timeout=remaining)
-            except TimeoutError:
-                continue
+        async with self._observation_changed:
+            while True:
+                if any(topic.startswith(topic_prefix) for topic in self._observed_subscriptions):
+                    return
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"no subscription for prefix {topic_prefix!r} within {timeout}s; "
+                        f"observed={list(self._observed_subscriptions)}"
+                    )
+                try:
+                    await asyncio.wait_for(self._observation_changed.wait(), timeout=remaining)
+                except TimeoutError:
+                    continue
 
     async def _proxy_loop(self) -> None:
         """Forward messages between XSUB and XPUB sockets.
