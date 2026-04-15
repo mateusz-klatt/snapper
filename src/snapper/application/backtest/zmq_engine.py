@@ -1,0 +1,272 @@
+"""ZmqReplayEngine — backtest engine driven by an in-process ZMQ replay broker.
+
+Wires together the Phase 2b-core building blocks:
+
+- :func:`snapper.application.backtest.endpoints.allocate_replay_endpoints` for an
+  ephemeral per-run XPUB/XSUB broker (xpub_verbose=True).
+- :class:`snapper.application.backtest.drain.DrainCoordinator` for end-of-stream
+  parity between publisher and strategy.
+- :func:`snapper.strategies.backtest_strategy.make_backtest_replay_strategy` for
+  the replay-shimmed strategy (skips heartbeat, market-only subs, echo-ack
+  detection in _listen_loop).
+- :class:`snapper.messaging.publishers.replay_publisher.ReplayPublisher` for the
+  echo-ack handshake + candle streaming.
+
+Field-for-field parity with ``DirectDbEngine.run`` on the same config, but
+candles travel publisher → broker → strategy via ZMQ so the strategy's
+production message-bus path is exercised end-to-end.
+
+Cancellation, drain, and broker cleanup are bounded:
+
+- ``asyncio.wait({publisher_task, strategy._listen_task}, FIRST_COMPLETED)`` —
+  whichever finishes first decides the outcome; exceptions bubble up.
+- ``finally``: cancel both tasks, ``asyncio.wait(timeout=2.0)`` with leak
+  logging on tasks that refuse to terminate, then strategy.stop() and
+  broker.stop() in that order so the strategy's socket is closed before
+  the broker tears down its sockets.
+
+Empty-instrument config fast-fails with ValueError before any broker is
+allocated so misconfigured runs do not consume ephemeral ports.
+"""
+
+import asyncio
+from datetime import datetime
+from typing import Any
+from typing import cast
+
+from loguru import logger
+
+from snapper.application.backtest.batch_processor import process_time_batch
+from snapper.application.backtest.config import BacktestConfig
+from snapper.application.backtest.drain import DrainCoordinator
+from snapper.application.backtest.endpoints import allocate_replay_endpoints
+from snapper.application.backtest.result_collector import ResultCollector
+from snapper.application.portfolio.models import PortfolioTracker
+from snapper.data.repository import Repository
+from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.publishers.replay_publisher import ReplayPublisher
+from snapper.strategies.backtest_strategy import BacktestReplayState
+from snapper.strategies.backtest_strategy import make_backtest_replay_strategy
+from snapper.strategies.factory import StrategyFactory
+from snapper.strategies.models import StrategyConfig
+
+_BROKER_SUB_TIMEOUT_S: float = 5.0
+
+
+class ZmqReplayEngine:
+    """Replay engine that streams DB candles through a per-run ZMQ broker.
+
+    Same external contract as ``DirectDbEngine``: ``run(public_id, config,
+    collector) → (portfolio, latest_closes)``.
+    """
+
+    def __init__(self, repository: Repository, snapshot_as_of: datetime) -> None:
+        """Wire the engine to a repository + bitemporal anchor.
+
+        Args:
+            repository: Source of historical candles.
+            snapshot_as_of: Bitemporal snapshot for all DB reads.
+        """
+        self._repository = repository
+        self._snapshot_as_of = snapshot_as_of
+
+    async def run(
+        self,
+        run_public_id: str,
+        config: BacktestConfig,
+        collector: ResultCollector,
+    ) -> tuple[PortfolioTracker, dict[str, float]]:
+        """Execute a backtest run via the ZMQ replay path.
+
+        Args:
+            run_public_id: Public ID of the backtest run (also used as the
+                strategy instance name suffix).
+            config: Backtest configuration; ``config.instruments`` must be
+                non-empty.
+            collector: Result collector buffering signals/trades/equity.
+
+        Returns:
+            Tuple of (final portfolio state, latest close prices), matching
+            the DirectDbEngine signature so the runner can swap engines
+            without changing its post-run path.
+
+        Raises:
+            ValueError: If ``config.instruments`` is empty (fast-fail).
+            BacktestReadinessTimeoutError: If the strategy never ACKs.
+            BacktestDrainTimeoutError: If the strategy stalls mid-stream.
+            asyncio.CancelledError: If the engine is cancelled mid-run.
+        """
+        if not any(config.instruments.values()):
+            raise ValueError("config.instruments is empty — nothing to replay")
+
+        broker = None
+        strategy = None
+        publisher_task: asyncio.Task[None] | None = None
+        try:
+            broker, endpoints = await allocate_replay_endpoints()
+            drain = DrainCoordinator()
+            expected_topics = frozenset(
+                f"market.{exchange}.{instr}.candles.{config.timeframe}"
+                for exchange, instruments in config.instruments.items()
+                for instr in instruments
+            )
+
+            all_instruments: list[str] = []
+            for instruments in config.instruments.values():
+                all_instruments.extend(instruments)
+
+            strategy_config = StrategyConfig(
+                name=f"bt_{run_public_id[:8]}",
+                strategy_class=config.strategy_class,
+                inputs=sorted(expected_topics),
+                outputs=all_instruments,
+                exchange=cast(Any, "paper"),
+                params=dict(config.strategy_params),
+            )
+
+            state = BacktestReplayState(
+                run_public_id=run_public_id,
+                config=config,
+                snapshot_as_of=self._snapshot_as_of,
+                pending_batch=[],
+                portfolio=PortfolioTracker(cash=config.initial_balance),
+                latest_closes={},
+                collector=collector,
+                tracker=SequenceTracker(),
+                expected_topics=expected_topics,
+            )
+
+            inner_class = StrategyFactory.STRATEGY_CLASSES[config.strategy_class]
+            strategy = make_backtest_replay_strategy(
+                inner_class=inner_class,
+                inner_config=strategy_config,
+                state=state,
+                drain=drain,
+                local_xsub=endpoints.xsub,
+                local_xpub=endpoints.xpub,
+            )
+            await strategy.start()
+
+            await broker.wait_for_subscription(b"market.", timeout=_BROKER_SUB_TIMEOUT_S)
+
+            publisher = ReplayPublisher(
+                local_xsub=endpoints.xsub,
+                repository=self._repository,
+                config=config,
+                snapshot_as_of=self._snapshot_as_of,
+                drain=drain,
+                subscriber_ready=state.subscriber_ready,
+            )
+            publisher_task = asyncio.create_task(publisher.start())
+
+            listen_task = strategy._listen_task
+            assert listen_task is not None
+            tasks: set[asyncio.Task[Any]] = {publisher_task, listen_task}
+            done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+            self._log_completion(publisher_task, listen_task, drain)
+
+            cancelled = any(t.cancelled() for t in done)
+            exceptions = [t.exception() for t in done if not t.cancelled() and t.exception()]
+            if exceptions:
+                primary = exceptions[0]
+                for other in exceptions[1:]:
+                    logger.error("secondary task exception", exc_info=other)
+                assert primary is not None
+                raise primary
+            if cancelled:
+                raise asyncio.CancelledError
+
+            if state.pending_batch:
+                await process_time_batch(
+                    batch=state.pending_batch,
+                    run_public_id=state.run_public_id,
+                    config=state.config,
+                    strategy=strategy,
+                    portfolio=state.portfolio,
+                    latest_closes=state.latest_closes,
+                    collector=state.collector,
+                    tracker=state.tracker,
+                    snapshot_as_of=self._snapshot_as_of,
+                )
+                state.pending_batch = []
+
+            return state.portfolio, dict(state.latest_closes)
+        finally:
+            await self._cleanup(publisher_task, strategy, broker)
+
+    @staticmethod
+    def _log_completion(
+        publisher_task: asyncio.Task[None] | None,
+        listen_task: asyncio.Task[None],
+        drain: DrainCoordinator,
+    ) -> None:
+        """Diagnostic log so an operator can tell publisher-stall from strategy-death."""
+        publisher_done = publisher_task is not None and publisher_task.done()
+        publisher_exc: BaseException | None = None
+        if publisher_done and publisher_task is not None and not publisher_task.cancelled():
+            publisher_exc = publisher_task.exception()
+        listen_done = listen_task.done()
+        listen_exc: BaseException | None = None
+        if listen_done and not listen_task.cancelled():
+            listen_exc = listen_task.exception()
+        logger.info(
+            "engine: task completion — publisher done={} exc={} | listen done={} exc={} | "
+            "drain published={} processed={}",
+            publisher_done,
+            publisher_exc,
+            listen_done,
+            listen_exc,
+            drain.published_count,
+            drain.processed_count,
+        )
+
+    @staticmethod
+    async def _cleanup(
+        publisher_task: asyncio.Task[None] | None,
+        strategy: Any,
+        broker: Any,
+    ) -> None:
+        """Bounded cleanup: cancel tasks, wait ≤2s, log leaks, stop strategy + broker.
+
+        Uses ``asyncio.wait(tasks, timeout=2.0)`` (NOT
+        ``asyncio.wait_for(asyncio.shield(t), 2.0)`` which keeps cancelled
+        tasks alive past the timeout and silently leaks). Tasks still
+        running after 2s are logged with their name so an operator can
+        investigate; ``cancel()`` already fired so they are detached but
+        will eventually finish.
+        """
+        listen_task: asyncio.Task[None] | None = None
+        heartbeat_task: asyncio.Task[None] | None = None
+        if strategy is not None:
+            listen_task = getattr(strategy, "_listen_task", None)
+            heartbeat_task = getattr(strategy, "_heartbeat_task", None)
+        awaitable: set[asyncio.Task[Any]] = {
+            t for t in (publisher_task, listen_task, heartbeat_task) if t is not None
+        }
+        for t in awaitable:
+            if not t.done():
+                t.cancel()
+        if awaitable:
+            done, pending = await asyncio.wait(awaitable, timeout=2.0)
+            for t in pending:
+                logger.error(
+                    "cleanup: task {!r} did not terminate within 2s after cancel — leak",
+                    t.get_name(),
+                )
+            for t in done:
+                if not t.cancelled() and t.exception() is not None:
+                    logger.debug(
+                        "cleanup: task {!r} finished with exception (already surfaced)",
+                        t.get_name(),
+                    )
+        if strategy is not None:
+            try:
+                await strategy.stop()
+            except Exception:
+                logger.exception("cleanup: strategy.stop() raised — continuing teardown")
+        if broker is not None:
+            try:
+                await broker.stop()
+            except Exception:
+                logger.exception("cleanup: broker.stop() raised — continuing teardown")

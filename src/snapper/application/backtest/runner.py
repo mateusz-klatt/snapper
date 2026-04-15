@@ -23,6 +23,7 @@ from snapper.application.backtest.config import BacktestFillModel
 from snapper.application.backtest.direct_engine import DirectDbEngine
 from snapper.application.backtest.metrics import compute_metrics
 from snapper.application.backtest.result_collector import ResultCollector
+from snapper.application.backtest.zmq_engine import ZmqReplayEngine
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
@@ -179,9 +180,13 @@ class BacktestRunnerProcess(RegisterableProcess):
                 started_at=now,
             )
 
-            engine = DirectDbEngine(
-                repository, now, bt_repo=bt_repo, cancel_poll_ms=config.cancel_poll_ms
-            )
+            engine: DirectDbEngine | ZmqReplayEngine
+            if config.execution_mode == BacktestExecutionMode.ZMQ_REPLAY:
+                engine = ZmqReplayEngine(repository, now)
+            else:
+                engine = DirectDbEngine(
+                    repository, now, bt_repo=bt_repo, cancel_poll_ms=config.cancel_poll_ms
+                )
             collector = ResultCollector()
             await engine.run(run["public_id"], config, collector)
             await self._persist_artifacts(bt_repo, run["public_id"], collector, config)
@@ -202,12 +207,14 @@ class BacktestRunnerProcess(RegisterableProcess):
             )
         except asyncio.CancelledError:
             cancel_now = datetime.now(UTC)
-            await bt_repo.update_run_status(
-                public_id=run["public_id"],
-                new_status="cancelled",
-                bus_time=cancel_now,
-                session_id=self._tracker.session_id,
-                sequence_id=self._tracker.next_sequence(_BT_STATUS_STREAM),
+            await asyncio.shield(
+                bt_repo.update_run_status(
+                    public_id=run["public_id"],
+                    new_status="cancelled",
+                    bus_time=cancel_now,
+                    session_id=self._tracker.session_id,
+                    sequence_id=self._tracker.next_sequence(_BT_STATUS_STREAM),
+                )
             )
             logger.info("Backtest {} cancelled", self._run_public_id[:8])
             raise
@@ -216,29 +223,33 @@ class BacktestRunnerProcess(RegisterableProcess):
             error_msg = str(exc)[:1024]
             fail_evt_sid = self._tracker.session_id
             fail_evt_seq = self._tracker.next_sequence(_BT_EVENTS_STREAM)
-            await bt_repo.insert_event(
-                row={
-                    "run_public_id": run["public_id"],
-                    "event_type": "run_failed",
-                    "detail": {
-                        "error": str(exc),
-                        "traceback": traceback.format_exc()[:4096],
+            await asyncio.shield(
+                bt_repo.insert_event(
+                    row={
+                        "run_public_id": run["public_id"],
+                        "event_type": "run_failed",
+                        "detail": {
+                            "error": str(exc),
+                            "traceback": traceback.format_exc()[:4096],
+                        },
+                        "session_id": fail_evt_sid,
+                        "sequence_id": fail_evt_seq,
+                        "timestamp": fail_now,
                     },
-                    "session_id": fail_evt_sid,
-                    "sequence_id": fail_evt_seq,
-                    "timestamp": fail_now,
-                },
-                bus_time=fail_now,
-                session_id=fail_evt_sid,
-                sequence_id=fail_evt_seq,
+                    bus_time=fail_now,
+                    session_id=fail_evt_sid,
+                    sequence_id=fail_evt_seq,
+                )
             )
-            await bt_repo.update_run_status(
-                public_id=run["public_id"],
-                new_status="failed",
-                bus_time=fail_now,
-                session_id=self._tracker.session_id,
-                sequence_id=self._tracker.next_sequence(_BT_STATUS_STREAM),
-                error=error_msg,
+            await asyncio.shield(
+                bt_repo.update_run_status(
+                    public_id=run["public_id"],
+                    new_status="failed",
+                    bus_time=fail_now,
+                    session_id=self._tracker.session_id,
+                    sequence_id=self._tracker.next_sequence(_BT_STATUS_STREAM),
+                    error=error_msg,
+                )
             )
             logger.error("Backtest {} failed: {}", self._run_public_id[:8], error_msg)
             raise
