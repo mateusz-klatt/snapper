@@ -11,64 +11,32 @@ from datetime import UTC
 from datetime import datetime
 from time import monotonic
 from typing import Any
-from typing import NamedTuple
 from typing import cast
-from uuid import uuid7
 
 from loguru import logger
 
+from snapper.application.backtest.batch_processor import CandleEvent
+from snapper.application.backtest.batch_processor import candle_row_to_data
+from snapper.application.backtest.batch_processor import process_time_batch
 from snapper.application.backtest.config import BacktestConfig
-from snapper.application.backtest.fill_model import simulate_market_fill
 from snapper.application.backtest.result_collector import ResultCollector
 from snapper.application.portfolio.models import PortfolioTracker
 from snapper.core.types import BacktestRunStatusEnum
 from snapper.data.backtest_repository import BacktestRepository
 from snapper.data.repository import Repository
-from snapper.data.repository_types import CandleRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
-from snapper.messaging.schemas.data import CandleData
 from snapper.strategies.base import BaseStrategy
 from snapper.strategies.factory import StrategyFactory
 from snapper.strategies.models import StrategyConfig
 
 _CANCEL_PROBE_TIMEOUT_S: float = 1.0
 
-
-class CandleEvent(NamedTuple):
-    """A candle row with exchange/instrument context for sorting."""
-
-    open_at: datetime
-    exchange: str
-    instrument: str
-    row: CandleRow
-
-
-def candle_row_to_data(event: CandleEvent, timeframe: str) -> CandleData:
-    """Convert a CandleEvent to a CandleData schema object.
-
-    Args:
-        event: Candle event with row data.
-        timeframe: Candle timeframe string.
-
-    Returns:
-        CandleData suitable for strategy consumption.
-    """
-    row = event.row
-    return CandleData(
-        public_id=row["public_id"],
-        timestamp=row["timestamp"],
-        session_id=row["session_id"],
-        sequence_id=row["sequence_id"],
-        instrument=event.instrument,
-        exchange=cast(Any, event.exchange),
-        timeframe=timeframe,
-        open_at=row["open_at"],
-        open=row["open"],
-        high=row["high"],
-        low=row["low"],
-        close=row["close"],
-        volume=row["volume"],
-    )
+__all__ = [
+    "CandleEvent",
+    "DirectDbEngine",
+    "candle_row_to_data",
+    "iter_sorted_candle_chunks",
+]
 
 
 async def iter_sorted_candle_chunks(
@@ -288,79 +256,21 @@ class DirectDbEngine:
         collector: ResultCollector,
         tracker: SequenceTracker,
     ) -> None:
-        """Process all candle events at the same timestamp.
+        """Delegate to ``batch_processor.process_time_batch`` (Phase 2b Step 3).
 
-        Updates all close prices first, then feeds candles to strategy,
-        then records equity once. This ensures multi-instrument equity
-        snapshots use all close prices for the same timestamp.
-
-        Args:
-            batch: All CandleEvents at the same open_at.
-            run_public_id: Backtest run identifier.
-            config: Backtest configuration.
-            strategy: Strategy instance.
-            portfolio: Portfolio state (mutated).
-            latest_closes: Latest close prices (mutated).
-            collector: Result collector.
-            tracker: Sequence tracker.
+        Kept as a thin instance wrapper so existing call sites and unit tests
+        that drive ``await engine._process_time_batch(...)`` keep working
+        without translating call signatures. The pure module-level helper is
+        the single source of truth shared with ``ZmqReplayEngine``.
         """
-        for event in batch:
-            latest_closes[event.instrument] = float(event.row["close"])
-
-        signals_and_events: list[tuple[Any, CandleEvent]] = []
-        for event in batch:
-            candle_data = candle_row_to_data(event, config.timeframe)
-            payload = candle_data.model_dump_json()
-            signal = await strategy._handle_candle_data(event.instrument, payload)
-            if signal is not None:
-                signals_and_events.append((signal, event))
-
-        if batch[0].open_at < config.start_date:
-            return
-
-        for signal, event in signals_and_events:
-            sig_pid = str(uuid7())
-            fill = simulate_market_fill(
-                exchange=event.exchange,
-                instrument=event.instrument,
-                side=str(signal.side),
-                close_price=float(event.row["close"]),
-                fill_at=event.open_at,
-                portfolio=portfolio,
-                slippage_bps=config.slippage_bps,
-                commission_bps=config.commission_bps,
-                signal_strength=getattr(signal, "strength", None),
-                signal_reason=getattr(signal, "reason", None),
-            )
-            if fill is not None:
-                collector.record_trade(
-                    run_public_id=run_public_id,
-                    fill=fill,
-                    portfolio=portfolio,
-                    signal_public_id=sig_pid,
-                    session_id=tracker.session_id,
-                    sequence_id=tracker.next_sequence("bt"),
-                    bus_time=self._snapshot_as_of,
-                )
-            collector.record_signal(
-                run_public_id=run_public_id,
-                public_id=sig_pid,
-                signal_time=event.open_at,
-                signal_type=str(signal.side),
-                instrument=event.instrument,
-                price=float(event.row["close"]),
-                indicators=getattr(signal, "indicators", {}),
-                session_id=tracker.session_id,
-                sequence_id=tracker.next_sequence("bt"),
-                bus_time=self._snapshot_as_of,
-            )
-
-        collector.maybe_record_equity(
+        await process_time_batch(
+            batch=batch,
             run_public_id=run_public_id,
-            point_time=batch[0].open_at,
+            config=config,
+            strategy=strategy,
             portfolio=portfolio,
             latest_closes=latest_closes,
-            session_id=tracker.session_id,
-            sequence_id=tracker.next_sequence("bt"),
-            bus_time=self._snapshot_as_of,
+            collector=collector,
+            tracker=tracker,
+            snapshot_as_of=self._snapshot_as_of,
         )
