@@ -275,11 +275,21 @@ class ZmqReplayEngine:
                     )
         if strategy is not None:
             try:
-                await strategy.stop()
+                await asyncio.wait_for(strategy.stop(), timeout=5.0)
+            except TimeoutError:
+                logger.error(
+                    "cleanup: strategy.stop() exceeded 5s — proceeding to broker.stop "
+                    "to avoid leaking the per-run broker"
+                )
             except Exception:
                 logger.exception("cleanup: strategy.stop() raised — continuing teardown")
         if broker is not None:
             try:
-                await broker.stop()
+                await asyncio.wait_for(broker.stop(), timeout=5.0)
+            except TimeoutError:
+                logger.error(
+                    "cleanup: broker.stop() exceeded 5s — ports may stay bound until "
+                    "the worker process exits"
+                )
             except Exception:
                 logger.exception("cleanup: broker.stop() raised — continuing teardown")

@@ -9,6 +9,7 @@ Lifecycle: pending → running → completed | failed | cancelled.
 """
 
 import asyncio
+import contextlib
 import traceback
 from datetime import UTC
 from datetime import datetime
@@ -187,7 +188,7 @@ class BacktestRunnerProcess(RegisterableProcess):
                 if not is_single_running_conflict(e):
                     raise
                 fail_now = datetime.now(UTC)
-                await asyncio.shield(
+                conflict_task = asyncio.create_task(
                     bt_repo.update_run_status(
                         public_id=run["public_id"],
                         new_status="failed",
@@ -198,6 +199,8 @@ class BacktestRunnerProcess(RegisterableProcess):
                         error="another backtest is already running (uq_bt_single_running)",
                     )
                 )
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(conflict_task)
                 logger.info(
                     "Backtest {} rejected: another run in progress",
                     run["public_id"][:8],
@@ -234,7 +237,7 @@ class BacktestRunnerProcess(RegisterableProcess):
             )
         except asyncio.CancelledError:
             cancel_now = datetime.now(UTC)
-            await asyncio.shield(
+            cancel_task = asyncio.create_task(
                 bt_repo.update_run_status(
                     public_id=run["public_id"],
                     new_status="cancelled",
@@ -243,6 +246,8 @@ class BacktestRunnerProcess(RegisterableProcess):
                     sequence_id=self._tracker.next_sequence(_BT_STATUS_STREAM),
                 )
             )
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(cancel_task)
             logger.info("Backtest {} cancelled", self._run_public_id[:8])
             raise
         except Exception as exc:
@@ -250,7 +255,7 @@ class BacktestRunnerProcess(RegisterableProcess):
             error_msg = str(exc)[:1024]
             fail_evt_sid = self._tracker.session_id
             fail_evt_seq = self._tracker.next_sequence(_BT_EVENTS_STREAM)
-            await asyncio.shield(
+            event_task = asyncio.create_task(
                 bt_repo.insert_event(
                     row={
                         "run_public_id": run["public_id"],
@@ -268,7 +273,7 @@ class BacktestRunnerProcess(RegisterableProcess):
                     sequence_id=fail_evt_seq,
                 )
             )
-            await asyncio.shield(
+            status_task = asyncio.create_task(
                 bt_repo.update_run_status(
                     public_id=run["public_id"],
                     new_status="failed",
@@ -278,6 +283,9 @@ class BacktestRunnerProcess(RegisterableProcess):
                     error=error_msg,
                 )
             )
+            for task in (event_task, status_task):
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(task)
             logger.error("Backtest {} failed: {}", self._run_public_id[:8], error_msg)
             raise
 
