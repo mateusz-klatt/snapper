@@ -18,6 +18,7 @@ from typing import cast
 from loguru import logger
 from sqlalchemy.exc import IntegrityError
 
+from snapper.application.backtest.cancel import CancelProbe
 from snapper.application.backtest.config import BacktestConfig
 from snapper.application.backtest.config import BacktestExecutionMode
 from snapper.application.backtest.config import BacktestFillModel
@@ -203,13 +204,16 @@ class BacktestRunnerProcess(RegisterableProcess):
                 )
                 return
 
+            cancel_probe = CancelProbe(
+                bt_repo=bt_repo,
+                run_public_id=run["public_id"],
+                cancel_poll_ms=config.cancel_poll_ms,
+            )
             engine: DirectDbEngine | ZmqReplayEngine
             if config.execution_mode == BacktestExecutionMode.ZMQ_REPLAY:
-                engine = ZmqReplayEngine(repository, now)
+                engine = ZmqReplayEngine(repository, now, cancel_probe=cancel_probe)
             else:
-                engine = DirectDbEngine(
-                    repository, now, bt_repo=bt_repo, cancel_poll_ms=config.cancel_poll_ms
-                )
+                engine = DirectDbEngine(repository, now, cancel_probe=cancel_probe)
             collector = ResultCollector()
             await engine.run(run["public_id"], config, collector)
             await self._persist_artifacts(bt_repo, run["public_id"], collector, config)

@@ -50,6 +50,7 @@ from loguru import logger
 
 from snapper.application.backtest.batch_processor import CandleEvent
 from snapper.application.backtest.batch_processor import process_time_batch
+from snapper.application.backtest.cancel import CancelProbe
 from snapper.application.backtest.config import BacktestConfig
 from snapper.application.backtest.drain import DrainCoordinator
 from snapper.application.backtest.result_collector import ResultCollector
@@ -87,6 +88,7 @@ class BacktestReplayState:
     expected_topics: frozenset[str]
     acked_topics: set[str] = field(default_factory=set)
     subscriber_ready: asyncio.Event = field(default_factory=asyncio.Event)
+    cancel_probe: CancelProbe | None = None
 
 
 def _candle_data_to_event(data: CandleData) -> CandleEvent:
@@ -197,6 +199,8 @@ def make_backtest_replay_strategy(
             state.pending_batch = []
         state.pending_batch.append(event)
         drain.on_processed()
+        if state.cancel_probe is not None:
+            await state.cancel_probe.check()
 
     async def _listen_loop_override(self: BaseStrategy) -> None:
         """Echo-ack detection + per-time-batch flush + cleanup re-raise."""

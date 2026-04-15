@@ -37,6 +37,7 @@ from typing import cast
 from loguru import logger
 
 from snapper.application.backtest.batch_processor import process_time_batch
+from snapper.application.backtest.cancel import CancelProbe
 from snapper.application.backtest.config import BacktestConfig
 from snapper.application.backtest.drain import DrainCoordinator
 from snapper.application.backtest.endpoints import allocate_replay_endpoints
@@ -60,15 +61,26 @@ class ZmqReplayEngine:
     collector) → (portfolio, latest_closes)``.
     """
 
-    def __init__(self, repository: Repository, snapshot_as_of: datetime) -> None:
+    def __init__(
+        self,
+        repository: Repository,
+        snapshot_as_of: datetime,
+        cancel_probe: CancelProbe | None = None,
+    ) -> None:
         """Wire the engine to a repository + bitemporal anchor.
 
         Args:
             repository: Source of historical candles.
             snapshot_as_of: Bitemporal snapshot for all DB reads.
+            cancel_probe: Optional shared CancelProbe (Phase 2b-hardening
+                Step 3). When supplied, the strategy mixin's ``_listen_loop``
+                calls ``await probe.check()`` per processed candle so a
+                cancel_requested status is detected within ``cancel_poll_ms``
+                + ``probe_timeout_s``.
         """
         self._repository = repository
         self._snapshot_as_of = snapshot_as_of
+        self._cancel_probe = cancel_probe
 
     async def run(
         self,
@@ -134,6 +146,7 @@ class ZmqReplayEngine:
                 collector=collector,
                 tracker=SequenceTracker(),
                 expected_topics=expected_topics,
+                cancel_probe=self._cancel_probe,
             )
 
             inner_class = StrategyFactory.STRATEGY_CLASSES[config.strategy_class]

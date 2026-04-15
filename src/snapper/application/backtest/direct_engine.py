@@ -18,6 +18,7 @@ from loguru import logger
 from snapper.application.backtest.batch_processor import CandleEvent
 from snapper.application.backtest.batch_processor import candle_row_to_data
 from snapper.application.backtest.batch_processor import process_time_batch
+from snapper.application.backtest.cancel import CancelProbe
 from snapper.application.backtest.config import BacktestConfig
 from snapper.application.backtest.result_collector import ResultCollector
 from snapper.application.portfolio.models import PortfolioTracker
@@ -99,24 +100,28 @@ class DirectDbEngine:
         snapshot_as_of: datetime,
         bt_repo: BacktestRepository | None = None,
         cancel_poll_ms: int = 500,
+        cancel_probe: CancelProbe | None = None,
     ) -> None:
         """Initialize engine with repository, snapshot time, and optional cancel polling.
 
         Args:
             repository: Database repository for candle/instrument queries.
             snapshot_as_of: Temporal snapshot for all DB reads.
-            bt_repo: Optional BacktestRepository for cooperative cancel polling.
-                When provided, the engine probes ``get_run`` between time-batches
-                and raises ``asyncio.CancelledError`` on ``cancel_requested``.
-                Passing None disables polling (used by the CLI which has no
-                background cancel mechanism).
-            cancel_poll_ms: Minimum wall-time gap between cancel probes in
-                milliseconds. Probes are attempted between each time-batch but
-                skipped if the previous probe was within this window.
+            bt_repo: Optional BacktestRepository — kept for backwards
+                compatibility with callers that still construct an inline
+                probe via ``cancel_poll_ms``. Ignored when ``cancel_probe``
+                is supplied.
+            cancel_poll_ms: Throttle between probes when an inline probe is
+                used. Ignored when ``cancel_probe`` is supplied.
+            cancel_probe: Pre-built shared probe (Phase 2b-hardening Step 3).
+                When provided, the engine delegates entirely to it; both
+                Direct-DB and ZMQ replay engines can share the same instance
+                so cancel detection is uniform.
         """
         self._repository = repository
         self._snapshot_as_of = snapshot_as_of
-        self._bt_repo = bt_repo
+        self._cancel_probe: CancelProbe | None = cancel_probe
+        self._bt_repo: BacktestRepository | None = bt_repo
         self._cancel_poll_ms = cancel_poll_ms
         self._last_cancel_check_ms: float = 0.0
 
@@ -224,6 +229,9 @@ class DirectDbEngine:
             asyncio.CancelledError: When the run's status is
                 ``cancel_requested``.
         """
+        if self._cancel_probe is not None:
+            await self._cancel_probe.check()
+            return
         if self._bt_repo is None:
             return
         now_ms = monotonic() * 1000.0
