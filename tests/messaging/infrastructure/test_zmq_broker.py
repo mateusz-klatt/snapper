@@ -1205,3 +1205,97 @@ async def test_proxy_loop_handles_zmq_again(monkeypatch: pytest.MonkeyPatch) -> 
     mock_xsub.recv_multipart = raise_again
     await broker._proxy_loop()
     assert call_count >= 3
+
+
+def test_resolve_endpoint_returns_configured_when_socket_has_no_getsockopt() -> None:
+    """Test fallback resolution without getsockopt support.
+
+    Given: A socket stub without a getsockopt attribute.
+    When: _resolve_endpoint is called for an OS-assigned tcp endpoint.
+    Then: The configured endpoint is returned unchanged.
+    """
+    configured = "tcp://127.0.0.1:0"
+    assert ZmqBrokerProcess._resolve_endpoint(object(), configured) == configured
+
+
+def test_resolve_endpoint_handles_string_and_unknown_getsockopt_values() -> None:
+    """Test endpoint resolution for string and unknown LAST_ENDPOINT values.
+
+    Given: Socket stubs returning different LAST_ENDPOINT value types.
+    When: _resolve_endpoint inspects the getsockopt result.
+    Then: String endpoints are returned and unknown types fall back to configured.
+    """
+
+    class _SocketStub:
+        def __init__(self, value: object) -> None:
+            self.value = value
+
+        def getsockopt(self, opt: int) -> object:
+            assert opt == zmq.LAST_ENDPOINT
+            return self.value
+
+    configured = "tcp://127.0.0.1:0"
+    assert ZmqBrokerProcess._resolve_endpoint(_SocketStub("tcp://127.0.0.1:5555"), configured) == (
+        "tcp://127.0.0.1:5555"
+    )
+    assert ZmqBrokerProcess._resolve_endpoint(_SocketStub(1234), configured) == configured
+
+
+@pytest.mark.asyncio
+async def test_handle_subscription_frame_records_direct_subscribe() -> None:
+    """Test direct subscribe tracking in verbose mode.
+
+    Given: A verbose broker with an empty observed subscription map.
+    When: A subscribe frame is forwarded through _handle_subscription_frame.
+    Then: The topic count is recorded and the frame is sent to XSUB.
+    """
+    broker = ZmqBrokerProcess("inproc://xsub", "inproc://xpub", xpub_verbose=True)
+    broker.xsub_socket = AsyncMock()
+    broker._observed_subscriptions = {}
+    broker._observation_changed = asyncio.Condition()
+
+    handled = await broker._handle_subscription_frame([b"\x01market.topic"])
+
+    assert handled is True
+    assert broker._observed_subscriptions == {b"market.topic": 1}
+    broker.xsub_socket.send_multipart.assert_awaited_once_with([b"\x01market.topic"])
+
+
+@pytest.mark.asyncio
+async def test_handle_subscription_frame_decrements_without_removing_multi_subscriber_topic() -> (
+    None
+):
+    """Test unsubscribe handling for multiply subscribed topics.
+
+    Given: A verbose broker that has observed the same topic twice.
+    When: An unsubscribe frame is forwarded for that topic.
+    Then: The topic count is decremented instead of being removed.
+    """
+    broker = ZmqBrokerProcess("inproc://xsub", "inproc://xpub", xpub_verbose=True)
+    broker.xsub_socket = AsyncMock()
+    broker._observed_subscriptions = {b"market.topic": 2}
+    broker._observation_changed = asyncio.Condition()
+
+    handled = await broker._handle_subscription_frame([b"\x00market.topic"])
+
+    assert handled is True
+    assert broker._observed_subscriptions == {b"market.topic": 1}
+
+
+@pytest.mark.asyncio
+async def test_handle_subscription_frame_returns_false_for_non_subscription_payload() -> None:
+    """Test non-subscription payload handling in verbose mode.
+
+    Given: A verbose broker with subscription tracking enabled.
+    When: _handle_subscription_frame receives a payload without subscribe metadata.
+    Then: It returns False and does not forward the frame to XSUB.
+    """
+    broker = ZmqBrokerProcess("inproc://xsub", "inproc://xpub", xpub_verbose=True)
+    broker.xsub_socket = AsyncMock()
+    broker._observed_subscriptions = {}
+    broker._observation_changed = asyncio.Condition()
+
+    handled = await broker._handle_subscription_frame([b"market.topic"])
+
+    assert handled is False
+    broker.xsub_socket.send_multipart.assert_not_called()

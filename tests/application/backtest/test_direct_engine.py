@@ -550,6 +550,41 @@ class TestCooperativeCancel:
             assert mock_instance._handle_candle_data.await_count == len(events)
 
     @pytest.mark.asyncio
+    async def test_probe_timeout_helper_returns_without_cancelling(self) -> None:
+        """The direct timeout branch on _maybe_check_cancel returns cleanly."""
+
+        async def hanging_get_run(*_args: object, **_kwargs: object) -> object:
+            await asyncio.sleep(60)
+            return {"status": "running"}
+
+        bt_repo = AsyncMock()
+        bt_repo.get_run = AsyncMock(side_effect=hanging_get_run)
+        engine = DirectDbEngine(AsyncMock(), NOW, bt_repo=bt_repo, cancel_poll_ms=0)
+
+        with patch("snapper.application.backtest.direct_engine._CANCEL_PROBE_TIMEOUT_S", 0.01):
+            await engine._maybe_check_cancel("run-1")
+
+        assert bt_repo.get_run.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_cancel_probe_short_circuits_repository_polling(self) -> None:
+        """An injected CancelProbe bypasses repository polling inside _maybe_check_cancel."""
+        cancel_probe = AsyncMock()
+        bt_repo = AsyncMock()
+        engine = DirectDbEngine(
+            AsyncMock(),
+            NOW,
+            bt_repo=bt_repo,
+            cancel_poll_ms=0,
+            cancel_probe=cancel_probe,
+        )
+
+        await engine._maybe_check_cancel("run-1")
+
+        cancel_probe.check.assert_awaited_once()
+        bt_repo.get_run.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_no_polling_when_bt_repo_is_none(self) -> None:
         """Without bt_repo, engine never polls and runs to completion (CLI path)."""
         mock_strategy_class = MagicMock()

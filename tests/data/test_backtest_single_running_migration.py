@@ -6,6 +6,7 @@ that closed (SCD2) rows do not block follow-up runs, and that the
 downgrade path removes the index.
 """
 
+from collections.abc import Iterator
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -71,14 +72,17 @@ def _insert_run(
 
 
 @pytest.fixture
-def migrated_db(tmp_path: Path) -> tuple[sa.Engine, Config]:
+def migrated_db(tmp_path: Path) -> Iterator[tuple[sa.Engine, Config]]:
     """Provide a SQLite database upgraded through the latest migration."""
     db_path = tmp_path / "single_running.db"
     db_url = f"sqlite:///{db_path}"
     cfg = _make_alembic_config(db_url)
     command.upgrade(cfg, "head")
     engine = sa.create_engine(db_url, future=True)
-    return engine, cfg
+    try:
+        yield engine, cfg
+    finally:
+        engine.dispose()
 
 
 def _index_exists(engine: sa.Engine) -> bool:

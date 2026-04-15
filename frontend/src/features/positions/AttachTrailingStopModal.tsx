@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 import { Modal } from '../../components/ui/Modal'
 import { useCreateTrailingStop } from '../../hooks/queries'
+import { validateTrailingStopParams } from './validation'
 
 interface AttachTrailingStopModalProps {
   open: boolean
@@ -9,22 +10,6 @@ interface AttachTrailingStopModalProps {
   instrument: string
   side: 'LONG' | 'SHORT'
   averagePrice: number
-}
-
-export const validateTrailingStopParams = (
-  trailingPct: number | null,
-  minLockPct: number | null
-): string | null => {
-  if (trailingPct === null) return 'Trailing percentage is required'
-  if (!Number.isFinite(trailingPct)) return 'Invalid trailing percentage'
-  if (trailingPct <= 0 || trailingPct >= 100) return 'Trailing percentage must be between 0 and 100'
-
-  if (minLockPct !== null) {
-    if (!Number.isFinite(minLockPct)) return 'Invalid min lock percentage'
-    if (minLockPct < 0 || minLockPct >= 100) return 'Min lock percentage must be between 0 and 100'
-  }
-
-  return null
 }
 
 export const AttachTrailingStopModal: React.FC<AttachTrailingStopModalProps> = ({

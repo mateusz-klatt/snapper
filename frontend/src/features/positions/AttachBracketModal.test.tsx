@@ -3,7 +3,8 @@ import { render, screen, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
-import { AttachBracketModal, validateBracketPrices } from './AttachBracketModal'
+import { AttachBracketModal } from './AttachBracketModal'
+import { validateBracketPrices } from './validation'
 
 const mockMutate = vi.fn()
 const mockReset = vi.fn()

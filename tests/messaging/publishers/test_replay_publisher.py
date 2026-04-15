@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import pytest
 import zmq
@@ -308,3 +309,32 @@ class TestReplayPublisher:
                 await asyncio.wait_for(second_publisher.start(), timeout=10.0)
         finally:
             await asyncio.wait_for(broker.stop(), timeout=2.0)
+
+    @pytest.mark.timeout(10)
+    async def test_context_terminated_when_socket_creation_fails(self) -> None:
+        """start() terminates the ZMQ context even before a socket exists."""
+        repo = AsyncMock()
+        config = _make_config()
+        drain = DrainCoordinator()
+        ready = asyncio.Event()
+        publisher = ReplayPublisher(
+            local_xsub="tcp://127.0.0.1:1",
+            repository=repo,
+            config=config,
+            snapshot_as_of=NOW,
+            drain=drain,
+            subscriber_ready=ready,
+        )
+        mock_ctx = MagicMock()
+        mock_ctx.socket.side_effect = RuntimeError("socket create failed")
+
+        with (
+            patch(
+                "snapper.messaging.publishers.replay_publisher.zmq.asyncio.Context",
+                return_value=mock_ctx,
+            ),
+            pytest.raises(RuntimeError, match="socket create failed"),
+        ):
+            await publisher.start()
+
+        mock_ctx.term.assert_called_once()

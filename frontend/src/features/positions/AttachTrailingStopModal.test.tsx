@@ -2,7 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
-import { AttachTrailingStopModal, validateTrailingStopParams } from './AttachTrailingStopModal'
+import { AttachTrailingStopModal } from './AttachTrailingStopModal'
+import { validateTrailingStopParams } from './validation'
 
 const mockMutate = vi.fn()
 const mockReset = vi.fn()

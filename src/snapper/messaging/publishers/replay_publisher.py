@@ -150,6 +150,10 @@ class ReplayPublisher:
                 rounds without all expected topics being ACKed.
         """
         topics = self._build_market_topics()
+        timeout_message = (
+            f"strategy did not ack warmup after {WARMUP_MAX_RETRIES} retries "
+            f"({WARMUP_READY_TIMEOUT_S}s each); topics={topics}"
+        )
         for attempt in range(1, WARMUP_MAX_RETRIES + 1):
             for topic in topics:
                 warmup = self._build_warmup_candle(topic)
@@ -166,11 +170,8 @@ class ReplayPublisher:
                 )
                 return
             except TimeoutError:
-                if attempt == WARMUP_MAX_RETRIES:
-                    raise BacktestReadinessTimeoutError(
-                        f"strategy did not ack warmup after {WARMUP_MAX_RETRIES} retries "
-                        f"({WARMUP_READY_TIMEOUT_S}s each); topics={topics}"
-                    ) from None
+                continue
+        raise BacktestReadinessTimeoutError(timeout_message)
 
     async def _stream_candles(self, socket: zmq.asyncio.Socket) -> None:
         """Stream every historical candle in time-sorted order (Phase B).

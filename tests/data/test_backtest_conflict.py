@@ -1,5 +1,6 @@
 """Tests for is_single_running_conflict — dialect-aware unique-violation detection."""
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -113,13 +114,17 @@ def _insert_running_row(engine: sa.Engine, public_id: str) -> None:
 
 
 @pytest.fixture
-def migrated_db(tmp_path: Any) -> sa.Engine:
+def migrated_db(tmp_path: Any) -> Iterator[sa.Engine]:
     """SQLite database upgraded through migration 0004 inclusive."""
     db_url = f"sqlite:///{tmp_path / 'conflict.db'}"
     cfg = Config(str(ALEMBIC_INI))
     cfg.set_main_option("sqlalchemy.url", db_url)
     command.upgrade(cfg, "head")
-    return sa.create_engine(db_url, future=True)
+    engine = sa.create_engine(db_url, future=True)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
 
 
 class TestRealSqliteIntegrityError:

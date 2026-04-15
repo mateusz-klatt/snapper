@@ -11,10 +11,13 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 import snapper.data.repository as repo_module
+from snapper.application.backtest.config import BacktestExecutionMode
 from snapper.application.backtest.runner import BacktestRunnerProcess
 from snapper.application.backtest.runner import run_to_config_dict
+from snapper.data.backtest_conflict import SINGLE_RUNNING_INDEX
 from snapper.data.backtest_repository import BacktestRepository
 from snapper.data.repository_types import BacktestRunRow
 
@@ -137,6 +140,87 @@ class TestBacktestRunnerProcess:
     @patch("snapper.application.backtest.runner.get_repository")
     @patch("snapper.application.backtest.runner.DirectDbEngine")
     @patch("snapper.application.backtest.runner.BacktestConfig")
+    async def test_single_running_conflict_marks_failed_without_starting_engine(
+        self,
+        mock_config_cls: MagicMock,
+        mock_engine_cls: MagicMock,
+        mock_get_repo: MagicMock,
+    ) -> None:
+        """Unique-index conflict cleanly fails the run without starting the engine."""
+        run = _make_run_row()
+        mock_repo = MagicMock()
+        mock_repo.session_factory = MagicMock()
+        mock_get_repo.return_value = mock_repo
+
+        mock_config = MagicMock()
+        mock_config.strategy_class = "sma_cross"
+        mock_config_cls.model_validate.return_value = mock_config
+
+        orig = MagicMock()
+        orig.constraint_name = SINGLE_RUNNING_INDEX
+        orig.sqlstate = "23505"
+        conflict = IntegrityError("UPDATE backtest_runs", {}, orig)
+
+        with patch("snapper.application.backtest.runner.BacktestRepository") as mock_bt_repo_cls:
+            mock_bt_repo = AsyncMock()
+            mock_bt_repo.get_run = AsyncMock(return_value=run)
+            mock_bt_repo.insert_event = AsyncMock(return_value="evt-1")
+            mock_bt_repo.update_run_status = AsyncMock(side_effect=[conflict, 1])
+            mock_bt_repo_cls.return_value = mock_bt_repo
+
+            runner = BacktestRunnerProcess(run_public_id="run-1", db_url="sqlite://")
+            await runner.start()
+
+            mock_engine_cls.assert_not_called()
+            assert mock_bt_repo.update_run_status.await_count == 2
+            first_call = mock_bt_repo.update_run_status.await_args_list[0].kwargs
+            second_call = mock_bt_repo.update_run_status.await_args_list[1].kwargs
+            assert first_call["new_status"] == "running"
+            assert second_call["new_status"] == "failed"
+            assert "another backtest is already running" in (second_call["error"] or "")
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.backtest.runner.get_repository")
+    @patch("snapper.application.backtest.runner.DirectDbEngine")
+    @patch("snapper.application.backtest.runner.BacktestConfig")
+    async def test_unrelated_integrity_error_is_reraised(
+        self,
+        mock_config_cls: MagicMock,
+        mock_engine_cls: MagicMock,
+        mock_get_repo: MagicMock,
+    ) -> None:
+        """IntegrityError is re-raised when it is not the single-running conflict."""
+        run = _make_run_row()
+        mock_repo = MagicMock()
+        mock_repo.session_factory = MagicMock()
+        mock_get_repo.return_value = mock_repo
+
+        mock_config = MagicMock()
+        mock_config.strategy_class = "sma_cross"
+        mock_config_cls.model_validate.return_value = mock_config
+
+        orig = MagicMock()
+        orig.constraint_name = "uq_other"
+        orig.sqlstate = "23505"
+        unrelated = IntegrityError("UPDATE backtest_runs", {}, orig)
+
+        with patch("snapper.application.backtest.runner.BacktestRepository") as mock_bt_repo_cls:
+            mock_bt_repo = AsyncMock()
+            mock_bt_repo.get_run = AsyncMock(return_value=run)
+            mock_bt_repo.insert_event = AsyncMock(return_value="evt-1")
+            mock_bt_repo.update_run_status = AsyncMock(side_effect=unrelated)
+            mock_bt_repo_cls.return_value = mock_bt_repo
+
+            runner = BacktestRunnerProcess(run_public_id="run-1", db_url="sqlite://")
+            with pytest.raises(IntegrityError):
+                await runner.start()
+
+        mock_engine_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.backtest.runner.get_repository")
+    @patch("snapper.application.backtest.runner.DirectDbEngine")
+    @patch("snapper.application.backtest.runner.BacktestConfig")
     async def test_happy_path_pending_to_completed(
         self,
         mock_config_cls: MagicMock,
@@ -185,6 +269,52 @@ class TestBacktestRunnerProcess:
             assert status_calls[1].kwargs["completed_at"] is not None
 
             mock_bt_repo.insert_result.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.backtest.runner.get_repository")
+    @patch("snapper.application.backtest.runner.ZmqReplayEngine")
+    @patch("snapper.application.backtest.runner.DirectDbEngine")
+    @patch("snapper.application.backtest.runner.BacktestConfig")
+    async def test_zmq_replay_mode_selects_zmq_engine(
+        self,
+        mock_config_cls: MagicMock,
+        mock_direct_engine_cls: MagicMock,
+        mock_zmq_engine_cls: MagicMock,
+        mock_get_repo: MagicMock,
+    ) -> None:
+        """ZMQ replay runs instantiate ZmqReplayEngine instead of DirectDbEngine."""
+        run = _make_run_row()
+        mock_repo = MagicMock()
+        mock_repo.session_factory = MagicMock()
+        mock_get_repo.return_value = mock_repo
+
+        mock_config = MagicMock()
+        mock_config.strategy_class = "sma_cross"
+        mock_config.initial_balance = 10000.0
+        mock_config.execution_mode = BacktestExecutionMode.ZMQ_REPLAY
+        mock_config.cancel_poll_ms = 250
+        mock_config_cls.model_validate.return_value = mock_config
+
+        mock_engine = AsyncMock()
+        mock_engine.run = AsyncMock(return_value=(MagicMock(), {}))
+        mock_zmq_engine_cls.return_value = mock_engine
+
+        with patch("snapper.application.backtest.runner.BacktestRepository") as mock_bt_repo_cls:
+            mock_bt_repo = AsyncMock()
+            mock_bt_repo.get_run = AsyncMock(return_value=run)
+            mock_bt_repo.insert_event = AsyncMock(return_value="evt-1")
+            mock_bt_repo.update_run_status = AsyncMock(return_value=1)
+            mock_bt_repo.insert_signals_batch = AsyncMock()
+            mock_bt_repo.insert_trades_batch = AsyncMock()
+            mock_bt_repo.insert_equity_points_batch = AsyncMock()
+            mock_bt_repo.insert_result = AsyncMock(return_value="res-1")
+            mock_bt_repo_cls.return_value = mock_bt_repo
+
+            runner = BacktestRunnerProcess(run_public_id="run-1", db_url="sqlite://")
+            await runner.start()
+
+        mock_zmq_engine_cls.assert_called_once()
+        mock_direct_engine_cls.assert_not_called()
 
     @pytest.mark.asyncio
     @patch("snapper.application.backtest.runner.get_repository")

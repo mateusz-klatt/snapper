@@ -3,7 +3,6 @@
 import asyncio
 import gc
 import json
-import logging
 import time
 import warnings
 from collections.abc import Callable
@@ -2751,7 +2750,7 @@ class TestReplayHandling:
         assert strategy._last_data_ts is None
 
     @pytest.mark.asyncio
-    async def test_listen_loop_replay_end_single_message(self, caplog: LogCaptureFixture) -> None:
+    async def test_listen_loop_replay_end_single_message(self) -> None:
         """Verify replay.end logs replay ended message.
 
         Given: Strategy receiving only replay.end,
@@ -2793,10 +2792,11 @@ class TestReplayHandling:
                 raise AssertionError("Unexpected extra recv_multipart call")
 
         strategy.subscriber = cast(Any, SingleMessageSubscriber())
-        with caplog.at_level(logging.INFO):
+        with patch("snapper.strategies.system_events.logger.info") as mock_info:
             await strategy._listen_loop()
         assert strategy._last_data_ts is None
-        assert any("Replay ended" in record.message for record in caplog.records)
+        mock_info.assert_called_once()
+        assert "Replay ended" in mock_info.call_args.args[0]
 
     @pytest.mark.asyncio
     async def test_listen_loop_ignores_unknown_system_message(self) -> None:
@@ -2952,9 +2952,7 @@ class TestHeartbeatLoop:
         assert payload["lag_ms"] == 12500
 
     @pytest.mark.asyncio
-    async def test_heartbeat_loop_handles_publish_error(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    async def test_heartbeat_loop_handles_publish_error(self) -> None:
         """Verify heartbeat loop logs error on publish failure.
 
         Given: Strategy with failing publisher,
@@ -2988,17 +2986,18 @@ class TestHeartbeatLoop:
             return None
 
         with (
-            caplog.at_level("ERROR"),
+            patch("snapper.strategies.health.logger.error") as mock_error,
             patch("snapper.strategies.health.asyncio.sleep", new=fake_sleep),
             patch("snapper.strategies.health.time.time", return_value=120.0),
         ):
             await strategy._heartbeat_loop()
         assert failing_msg_publisher.calls == 1
         assert strategy._running is False
-        assert any("Heartbeat error" in message for message in caplog.messages)
+        mock_error.assert_called_once()
+        assert "Heartbeat error" in mock_error.call_args.args[0]
 
     @pytest.mark.asyncio
-    async def test_heartbeat_loop_cancelled(self, caplog: pytest.LogCaptureFixture) -> None:
+    async def test_heartbeat_loop_cancelled(self) -> None:
         """Verify heartbeat loop logs cancellation.
 
         Given: Running heartbeat loop,
@@ -3013,7 +3012,7 @@ class TestHeartbeatLoop:
             await real_sleep(0)
 
         with (
-            caplog.at_level("INFO"),
+            patch("snapper.strategies.health.logger.info") as mock_info,
             patch("snapper.strategies.health.asyncio.sleep", new=fast_sleep),
         ):
             task = asyncio.create_task(strategy._heartbeat_loop())
@@ -3022,7 +3021,8 @@ class TestHeartbeatLoop:
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
-        assert any("Heartbeat loop cancelled" in message for message in caplog.messages)
+        mock_info.assert_called_once()
+        assert "Heartbeat loop cancelled" in mock_info.call_args.args[0]
 
 
 class TestSetupPublisher:

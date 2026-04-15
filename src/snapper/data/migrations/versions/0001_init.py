@@ -20,6 +20,15 @@ from sqlalchemy import text
 
 _CK_EXCHANGE_LOWER = "exchange = LOWER(exchange)"
 _KNOWN_TO_MAX = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
+
+
+def _bind_datetime_literal(value: datetime, dialect_name: str) -> datetime | str:
+    """Return SQLite-safe bind values while preserving real datetimes elsewhere."""
+    if dialect_name == "sqlite":
+        return value.isoformat(sep=" ")
+    return value
+
+
 _KNOWN_TO_ACTIVE_PG = "known_to = '9999-12-31T23:59:59+00:00'"
 _KNOWN_TO_ACTIVE_SQLITE = "known_to = '9999-12-31 23:59:59.000000'"
 _CK_SESSION_ID = "session_id != ''"
@@ -1820,6 +1829,9 @@ def upgrade() -> None:
 
     conn = op.get_bind()
     now = datetime.now(tz=UTC)
+    dialect_name = conn.dialect.name
+    bind_now = _bind_datetime_literal(now, dialect_name)
+    bind_known_to = _bind_datetime_literal(_KNOWN_TO_MAX, dialect_name)
     seed_session_id = str(uuid7())
     seed_seq = 0
     symbol_public_ids: dict[str, str] = {}
@@ -1841,11 +1853,11 @@ def upgrade() -> None:
                 "base": entry[1],
                 "quote": entry[2],
                 "asset_type": entry[3],
-                "created_at": now,
+                "created_at": bind_now,
                 "session_id": seed_session_id,
                 "sequence_id": seed_seq,
-                "timestamp": now,
-                "known_to": _KNOWN_TO_MAX,
+                "timestamp": bind_now,
+                "known_to": bind_known_to,
             },
         )
     for alias in SYMBOL_ALIASES:
@@ -1864,11 +1876,11 @@ def upgrade() -> None:
                 "exchange": alias[1],
                 "channel": alias[2],
                 "exchange_symbol": alias[3],
-                "created_at": now,
+                "created_at": bind_now,
                 "session_id": seed_session_id,
                 "sequence_id": seed_seq,
-                "timestamp": now,
-                "known_to": _KNOWN_TO_MAX,
+                "timestamp": bind_now,
+                "known_to": bind_known_to,
             },
         )
     for cap in SYMBOL_CAPABILITIES:
@@ -1888,11 +1900,11 @@ def upgrade() -> None:
                 "can_market_data": cap[2],
                 "can_trade": cap[3],
                 "source": "seed",
-                "created_at": now,
+                "created_at": bind_now,
                 "session_id": seed_session_id,
                 "sequence_id": seed_seq,
-                "timestamp": now,
-                "known_to": _KNOWN_TO_MAX,
+                "timestamp": bind_now,
+                "known_to": bind_known_to,
             },
         )
 

@@ -4,9 +4,12 @@ import asyncio
 import json
 from datetime import UTC
 from datetime import datetime
+from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
+import zmq
+import zmq.asyncio
 
 from snapper.application.backtest.config import BacktestConfig
 from snapper.application.backtest.drain import DrainCoordinator
@@ -334,3 +337,148 @@ class TestStrategyFactory:
                 await strategy.stop()
         finally:
             await asyncio.wait_for(broker.stop(), timeout=2.0)
+
+    @pytest.mark.timeout(15)
+    async def test_start_reuses_existing_context_and_skips_non_market_inputs(self) -> None:
+        """Injected context is reused and non-market inputs never subscribe."""
+        broker, endpoints = await allocate_replay_endpoints()
+        existing_ctx = zmq.asyncio.Context()
+        try:
+            state = _make_state(expected_topics=frozenset({"market.kraken.BTC-USD.candles.1h"}))
+            drain = DrainCoordinator()
+            strategy = make_backtest_replay_strategy(
+                inner_class=_NoopStrategy,
+                inner_config=_strategy_config(
+                    inputs=["system.health", "market.kraken.BTC-USD.candles.1h"]
+                ),
+                state=state,
+                drain=drain,
+                local_xsub=endpoints.xsub,
+                local_xpub=endpoints.xpub,
+            )
+            strategy.zmq_context = existing_ctx
+            await strategy.start()
+            try:
+                assert strategy.zmq_context is existing_ctx
+                await broker.wait_for_subscription(b"market.", timeout=3.0)
+                with pytest.raises(TimeoutError):
+                    await broker.wait_for_subscription(b"system.", timeout=0.2)
+            finally:
+                listen = strategy._listen_task
+                if listen is not None:
+                    listen.cancel()
+                    with pytest.raises((asyncio.CancelledError, BaseException)):
+                        await asyncio.wait_for(listen, timeout=2.0)
+                await strategy.stop()
+        finally:
+            existing_ctx.term()
+            await asyncio.wait_for(broker.stop(), timeout=2.0)
+
+    @pytest.mark.timeout(10)
+    async def test_listen_loop_skips_non_market_frames(self) -> None:
+        """The replay listen loop ignores non-market frames."""
+        state = _make_state(expected_topics=frozenset({"market.kraken.BTC-USD.candles.1h"}))
+        strategy = make_backtest_replay_strategy(
+            inner_class=_NoopStrategy,
+            inner_config=_strategy_config(inputs=["market.kraken.BTC-USD.candles.1h"]),
+            state=state,
+            drain=DrainCoordinator(),
+            local_xsub="inproc://local-xsub",
+            local_xpub="inproc://local-xpub",
+        )
+        strategy.subscriber = MagicMock()
+        strategy.subscriber.recv_multipart = AsyncMock(
+            side_effect=[("system.health", b"ignored"), asyncio.CancelledError()]
+        )
+        strategy._running = True
+
+        with pytest.raises(asyncio.CancelledError):
+            await strategy._listen_loop()
+
+        assert state.pending_batch == []
+
+    @pytest.mark.timeout(10)
+    async def test_listen_loop_checks_cancel_probe_for_market_frames(self) -> None:
+        """A processed market frame probes cancellation when configured."""
+        state = _make_state(expected_topics=frozenset({"market.kraken.BTC-USD.candles.1h"}))
+        state.cancel_probe = AsyncMock()
+        strategy = make_backtest_replay_strategy(
+            inner_class=_NoopStrategy,
+            inner_config=_strategy_config(inputs=["market.kraken.BTC-USD.candles.1h"]),
+            state=state,
+            drain=DrainCoordinator(),
+            local_xsub="inproc://local-xsub",
+            local_xpub="inproc://local-xpub",
+        )
+        strategy.subscriber = MagicMock()
+        strategy.subscriber.recv_multipart = AsyncMock(
+            side_effect=[
+                ("market.kraken.BTC-USD.candles.1h", _candle_payload(T1, 100.0)),
+                asyncio.CancelledError(),
+            ]
+        )
+        strategy._running = True
+
+        with pytest.raises(asyncio.CancelledError):
+            await strategy._listen_loop()
+
+        state.cancel_probe.check.assert_awaited_once()
+        assert len(state.pending_batch) == 1
+
+    @pytest.mark.timeout(10)
+    async def test_listen_loop_marks_strategy_stopped_on_exception(self) -> None:
+        """Unexpected listen-loop errors clear the running flag before bubbling up."""
+        state = _make_state(expected_topics=frozenset({"market.kraken.BTC-USD.candles.1h"}))
+        strategy = make_backtest_replay_strategy(
+            inner_class=_NoopStrategy,
+            inner_config=_strategy_config(inputs=["market.kraken.BTC-USD.candles.1h"]),
+            state=state,
+            drain=DrainCoordinator(),
+            local_xsub="inproc://local-xsub",
+            local_xpub="inproc://local-xpub",
+        )
+        strategy.subscriber = MagicMock()
+        strategy.subscriber.recv_multipart = AsyncMock(side_effect=RuntimeError("listen failed"))
+        strategy._running = True
+
+        with pytest.raises(RuntimeError, match="listen failed"):
+            await strategy._listen_loop()
+
+        assert strategy._running is False
+
+    @pytest.mark.timeout(10)
+    async def test_listen_loop_returns_immediately_when_not_running(self) -> None:
+        """A stopped strategy exits the replay listen loop without polling sockets."""
+        state = _make_state(expected_topics=frozenset({"market.kraken.BTC-USD.candles.1h"}))
+        strategy = make_backtest_replay_strategy(
+            inner_class=_NoopStrategy,
+            inner_config=_strategy_config(inputs=["market.kraken.BTC-USD.candles.1h"]),
+            state=state,
+            drain=DrainCoordinator(),
+            local_xsub="inproc://local-xsub",
+            local_xpub="inproc://local-xpub",
+        )
+        strategy.subscriber = MagicMock()
+        strategy._running = False
+
+        await strategy._listen_loop()
+
+        strategy.subscriber.recv_multipart.assert_not_called()
+
+    async def test_factory_rejects_non_base_strategy_instance(self) -> None:
+        """Factory rejects classes that do not produce a BaseStrategy instance."""
+        await asyncio.sleep(0)
+
+        class _NotBase:
+            def __init__(self, config: StrategyConfig) -> None:
+                self.config = config
+
+        with pytest.raises(TypeError, match="non-BaseStrategy"):
+            make_backtest_replay_strategy(
+                inner_class=_NotBase,
+                inner_config=_strategy_config(inputs=["market.kraken.BTC-USD.candles.1h"]),
+                state=_make_state(expected_topics=frozenset({"market.kraken.BTC-USD.candles.1h"})),
+                drain=DrainCoordinator(),
+                local_xsub="inproc://local-xsub",
+                local_xpub="inproc://local-xpub",
+            )
