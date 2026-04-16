@@ -1504,13 +1504,15 @@ describe('queries', () => {
       appStoreModule.useAppStore.setState({ currentWalletPublicId: null })
     })
 
-    it('useBacktestComparison fetches when id is provided', async () => {
-      const { result } = renderHook(() => useBacktestComparison('cmp-1'), {
-        wrapper: createWrapper(),
-      })
+    it('useBacktestComparison fetches when id is provided + scopes key by wallet', async () => {
+      const { queryClient, wrapper } = createWrapperWithClient()
+      const { result } = renderHook(() => useBacktestComparison('cmp-1'), { wrapper })
 
       await waitFor(() => expect(result.current.isSuccess).toBe(true))
       expect(apiClient.getBacktestComparison).toHaveBeenCalledWith('cmp-1')
+      expect(
+        queryClient.getQueryCache().find({ queryKey: ['backtest-compare', 'wallet-1', 'cmp-1'] })
+      ).toBeDefined()
     })
 
     it('useBacktestComparison is disabled when id is undefined', () => {
@@ -1549,20 +1551,29 @@ describe('queries', () => {
       expect((apiClient.getBacktestComparison as Mock).mock.calls.length).toBe(4)
     })
 
-    it('useBacktestComparisons fetches list with default + custom paging', async () => {
-      const { result: defaultResult } = renderHook(() => useBacktestComparisons(), {
-        wrapper: createWrapper(),
-      })
+    it('useBacktestComparisons fetches list with default + custom paging + scoped key', async () => {
+      const { queryClient, wrapper } = createWrapperWithClient()
+      const { result: defaultResult } = renderHook(() => useBacktestComparisons(), { wrapper })
 
       await waitFor(() => expect(defaultResult.current.isSuccess).toBe(true))
       expect(apiClient.getBacktestComparisons).toHaveBeenCalledWith(20, 0)
+      expect(
+        queryClient
+          .getQueryCache()
+          .find({ queryKey: ['backtest-compare', 'list', 'wallet-1', 20, 0] })
+      ).toBeDefined()
 
       const { result: customResult } = renderHook(() => useBacktestComparisons(50, 100), {
-        wrapper: createWrapper(),
+        wrapper,
       })
 
       await waitFor(() => expect(customResult.current.isSuccess).toBe(true))
       expect(apiClient.getBacktestComparisons).toHaveBeenCalledWith(50, 100)
+      expect(
+        queryClient
+          .getQueryCache()
+          .find({ queryKey: ['backtest-compare', 'list', 'wallet-1', 50, 100] })
+      ).toBeDefined()
     })
 
     it('useCreateBacktestComparison passes BacktestCompareBody (not envelope) to apiClient', async () => {
