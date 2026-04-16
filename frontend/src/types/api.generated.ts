@@ -48,19 +48,45 @@ export type Paths = {
         put?: never;
         /**
          * Refresh Token
-         * @description Refresh session tokens.
+         * @description Refresh session tokens with optional wallet-scope change.
          *
-         *     Generates new access/refresh tokens and WebSocket token.
+         *     Order (plan §2.5 R14 gpt-5.4 fix #3 — verify → parse → validate →
+         *     blacklist → mint):
+         *
+         *     1. Verify refresh-token signature + blacklist status.
+         *     2. Parse optional body (422 on malformed UUID7 or mutually
+         *        exclusive fields — fires before any DB work via Pydantic
+         *        field + model validators on ``RefreshTokenPayload``).
+         *     3. Role-branched wallet-membership validation (404 when the
+         *        hinted wallet is outside the caller's visibility).
+         *     4. Blacklist the old refresh token ONLY after every validation
+         *        passes — a rejected hint leaves the old token usable for a
+         *        retry with a valid hint.
+         *     5. Mint new tokens from the post-validation principal. Response
+         *        ``user.active_wallet_public_id`` is projected from
+         *        ``principal.active_wallet_public_id`` (NOT ``token_data``)
+         *        so a hinted refresh surfaces the NEW wallet, matching the
+         *        freshly-minted token claims.
+         *
+         *     Empty body preserved byte-identically for the three zero-body
+         *     callers (``stores/auth.refreshToken``, WS ticket refresh,
+         *     ``apiClient.refreshAndRetry``): ``body is None`` → empty
+         *     ``RefreshTokenPayload()`` → validation is a no-op.
          *
          *     Args:
          *         request: FastAPI request with refresh_token cookie.
          *         response: FastAPI response for setting cookies.
+         *         body: Optional refresh-token command envelope (``None`` on
+         *             empty body).
+         *         repo: Repository for wallet-membership lookups.
          *
          *     Returns:
-         *         RefreshResponse with new tokens and user profile.
+         *         RefreshResponse with new tokens, WS token, CSRF token, and
+         *         user profile carrying ``active_wallet_public_id``.
          *
          *     Raises:
-         *         HTTPException: 401 if refresh token invalid.
+         *         HTTPException: 401 if refresh token invalid / missing,
+         *             404 when the wallet hint is outside caller visibility.
          */
         post: Operations["refresh_token_api_auth_refresh_post"];
         delete?: never;
@@ -6343,6 +6369,13 @@ export type Components = {
          *         primary_operator_public_id: The membership row marked
          *             ``is_primary=TRUE`` (``None`` when the user has no
          *             primary membership yet).
+         *         active_wallet_public_id: Currently-selected wallet (UI state,
+         *             round-tripped through token claims). ``None`` on the
+         *             login path (user hasn't picked a wallet yet); populated
+         *             on refresh and ``/me`` from the authenticated principal.
+         *             The frontend reads this field to route WS subscriptions
+         *             and REST requests against the same wallet scope the
+         *             backend authorises.
          */
         UserProfile: {
             /**
@@ -6381,6 +6414,8 @@ export type Components = {
             operator_public_ids?: string[];
             /** Primary Operator Public Id */
             primary_operator_public_id?: string | null;
+            /** Active Wallet Public Id */
+            active_wallet_public_id?: string | null;
         };
         /**
          * UserResponse
@@ -6853,6 +6888,67 @@ export type Components = {
             password: string;
             /** Remember Me */
             remember_me?: boolean;
+        };
+        /**
+         * RefreshTokenRequest
+         * @description Refresh-token request envelope.
+         *
+         *     Inherits the project's provenance envelope; ``payload`` carries
+         *     the optional domain command. Registered on the refresh route with
+         *     :func:`optional_json_body` so every existing zero-body caller
+         *     (``apiClient.refreshAndRetry``, ``stores/auth.refreshToken``,
+         *     WS ticket refresh) stays byte-identical.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         */
+        RefreshTokenRequest: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "refresh_token_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["RefreshTokenPayload"];
+        };
+        /**
+         * RefreshTokenPayload
+         * @description Optional refresh-token body (Phase 2c).
+         *
+         *     Both fields are optional; when absent the caller inherits the
+         *     existing JWT claims byte-identically. Set ``active_wallet_public_id``
+         *     to mint new tokens scoped to that wallet (after server-side
+         *     membership validation); set ``clear_active_wallet`` to explicitly
+         *     clear the claim to ``None`` ("All wallets" UI option).
+         *
+         *     Invariant: both fields MUST NOT be set simultaneously — enforced
+         *     by the ``@model_validator`` below (422 at parse time). The
+         *     ``active_wallet_public_id`` value must be a canonical UUID7 —
+         *     a Pydantic field validator rejects malformed input with 422
+         *     before any membership query fires.
+         *
+         *     Attributes:
+         *         active_wallet_public_id: Optional wallet to scope the new
+         *             tokens to. None means "leave the claim unchanged".
+         *         clear_active_wallet: Explicit clear signal. ``True`` mints
+         *             new tokens with ``active_wallet_public_id=None``. Cannot
+         *             co-exist with ``active_wallet_public_id``.
+         */
+        RefreshTokenPayload: {
+            /** Active Wallet Public Id */
+            active_wallet_public_id?: string | null;
+            /** Clear Active Wallet */
+            clear_active_wallet?: boolean;
         };
         /**
          * CreateUserRequest
@@ -7946,7 +8042,11 @@ export interface Operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": Components["schemas"]["RefreshTokenRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

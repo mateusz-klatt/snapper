@@ -631,6 +631,13 @@ export const LoginBodySchema = z
   })
   .strict()
 
+export const RefreshTokenPayloadSchema = z
+  .object({
+    active_wallet_public_id: z.string().nullable().optional(),
+    clear_active_wallet: z.boolean().optional(),
+  })
+  .strict()
+
 export const DeactivateUserBodySchema = z.object({}).strict()
 
 export const ChangePasswordBodySchema = z
@@ -1147,6 +1154,7 @@ export const UserProfileSchema = z
     created_at: z.iso.datetime(),
     operator_public_ids: z.array(z.string()).optional(),
     primary_operator_public_id: z.string().nullable().optional(),
+    active_wallet_public_id: z.string().nullable().optional(),
   })
   .strict()
 
@@ -1237,6 +1245,17 @@ export const LoginRequestSchema = z
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     payload: LoginBodySchema,
+  })
+  .strict()
+
+export const RefreshTokenRequestSchema = z
+  .object({
+    type: z.literal('refresh_token_request').optional(),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: RefreshTokenPayloadSchema,
   })
   .strict()
 
@@ -2001,6 +2020,7 @@ export type ZmqBridgeStats = z.infer<typeof ZmqBridgeStatsSchema>
 export type ZmqComponents = z.infer<typeof ZmqComponentsSchema>
 export type ZmqConfig = z.infer<typeof ZmqConfigSchema>
 export type LoginBody = z.infer<typeof LoginBodySchema>
+export type RefreshTokenPayload = z.infer<typeof RefreshTokenPayloadSchema>
 export type DeactivateUserBody = z.infer<typeof DeactivateUserBodySchema>
 export type ChangePasswordBody = z.infer<typeof ChangePasswordBodySchema>
 export type AdminResetPasswordBody = z.infer<typeof AdminResetPasswordBodySchema>
@@ -2062,6 +2082,7 @@ export type WalletResponse = z.infer<typeof WalletResponseSchema>
 export type WsStatsData = z.infer<typeof WsStatsDataSchema>
 export type ZmqHealthData = z.infer<typeof ZmqHealthDataSchema>
 export type LoginRequest = z.infer<typeof LoginRequestSchema>
+export type RefreshTokenRequest = z.infer<typeof RefreshTokenRequestSchema>
 export type DeactivateUserRequest = z.infer<typeof DeactivateUserRequestSchema>
 export type ChangePasswordRequest = z.infer<typeof ChangePasswordRequestSchema>
 export type AdminResetPasswordRequest = z.infer<typeof AdminResetPasswordRequestSchema>

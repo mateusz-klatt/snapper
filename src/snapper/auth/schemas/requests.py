@@ -8,12 +8,16 @@ Each is wrapped in a PayloadRequest envelope that carries provenance fields.
 """
 
 from typing import Literal
+from typing import Self
 
 from pydantic import Field
+from pydantic import field_validator
+from pydantic import model_validator
 
 from snapper.api.schemas.base import PayloadRequest
 from snapper.api.schemas.base import StrictBody
 from snapper.auth.domain.roles import UserRole
+from snapper.core.ids import is_uuid7
 
 
 class LoginBody(StrictBody):
@@ -162,3 +166,65 @@ class DeactivateUserRequest(PayloadRequest[Literal["deactivate_user_request"], D
     """
 
     type: Literal["deactivate_user_request"] = "deactivate_user_request"
+
+
+class RefreshTokenPayload(StrictBody):
+    """Optional refresh-token body (Phase 2c).
+
+    Both fields are optional; when absent the caller inherits the
+    existing JWT claims byte-identically. Set ``active_wallet_public_id``
+    to mint new tokens scoped to that wallet (after server-side
+    membership validation); set ``clear_active_wallet`` to explicitly
+    clear the claim to ``None`` ("All wallets" UI option).
+
+    Invariant: both fields MUST NOT be set simultaneously — enforced
+    by the ``@model_validator`` below (422 at parse time). The
+    ``active_wallet_public_id`` value must be a canonical UUID7 —
+    a Pydantic field validator rejects malformed input with 422
+    before any membership query fires.
+
+    Attributes:
+        active_wallet_public_id: Optional wallet to scope the new
+            tokens to. None means "leave the claim unchanged".
+        clear_active_wallet: Explicit clear signal. ``True`` mints
+            new tokens with ``active_wallet_public_id=None``. Cannot
+            co-exist with ``active_wallet_public_id``.
+    """
+
+    active_wallet_public_id: str | None = None
+    clear_active_wallet: bool = False
+
+    @field_validator("active_wallet_public_id")
+    @classmethod
+    def _validate_wallet_uuid7(cls, v: str | None) -> str | None:
+        """Fail fast at parse time if the wallet hint is not a UUID7."""
+        if v is None:
+            return v
+        if not is_uuid7(v):
+            raise ValueError("active_wallet_public_id must be a UUID7")
+        return v
+
+    @model_validator(mode="after")
+    def _validate_mutually_exclusive(self) -> Self:
+        """active_wallet_public_id and clear_active_wallet are exclusive."""
+        if self.active_wallet_public_id is not None and self.clear_active_wallet:
+            raise ValueError(
+                "active_wallet_public_id and clear_active_wallet are mutually exclusive"
+            )
+        return self
+
+
+class RefreshTokenRequest(PayloadRequest[Literal["refresh_token_request"], RefreshTokenPayload]):
+    """Refresh-token request envelope.
+
+    Inherits the project's provenance envelope; ``payload`` carries
+    the optional domain command. Registered on the refresh route with
+    :func:`optional_json_body` so every existing zero-body caller
+    (``apiClient.refreshAndRetry``, ``stores/auth.refreshToken``,
+    WS ticket refresh) stays byte-identical.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["refresh_token_request"] = "refresh_token_request"

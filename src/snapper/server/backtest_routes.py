@@ -140,6 +140,29 @@ def _run_to_detail_data(
     )
 
 
+_NO_ACTIVE_WALLET = "no active wallet selected"
+
+
+def _enforce_wallet_scope(principal: AuthPrincipal, run: BacktestRunRow | dict[str, Any]) -> None:
+    """Fail-closed wallet scope check for backtest read endpoints.
+
+    Plan §2.5 R18 gpt-5.4 F1 expansion: the pre-Phase-2c truthy guard
+    ``if principal.active_wallet_public_id and run[...] != ...`` becomes
+    a no-op when the wallet claim is cleared to ``None`` (which Phase
+    2c explicitly enables via ``clear_active_wallet: true``). Every
+    backtest read must instead fail-closed on no-active-wallet (400)
+    and 404 on cross-tenant mismatch to match the
+    ``create_backtest`` guard's shape.
+    """
+    if principal.active_wallet_public_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_NO_ACTIVE_WALLET,
+        )
+    if run["wallet_public_id"] != principal.active_wallet_public_id:
+        raise HTTPException(status_code=404, detail=_NOT_FOUND)
+
+
 def _project_inline_result(result_row: BacktestResultRow) -> BacktestResultInline:
     """Build the detail-view inline result with typed-column precedence.
 
@@ -345,6 +368,11 @@ async def list_backtests(
     ts = _resolve_as_of(as_of)
 
     wallet_id = principal.active_wallet_public_id
+    if wallet_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_NO_ACTIVE_WALLET,
+        )
     runs = await bt_repo.list_runs(
         as_of=ts,
         wallet_public_id=wallet_id,
@@ -394,11 +422,7 @@ async def get_backtest(
     run = await bt_repo.get_run(run_id, as_of=ts)
     if run is None:
         raise HTTPException(status_code=404, detail=_NOT_FOUND)
-    if (
-        principal.active_wallet_public_id
-        and run["wallet_public_id"] != principal.active_wallet_public_id
-    ):
-        raise HTTPException(status_code=404, detail=_NOT_FOUND)
+    _enforce_wallet_scope(principal, run)
 
     inline_result: BacktestResultInline | None = None
     if run["status"] == "completed":
@@ -449,11 +473,7 @@ async def cancel_backtest(
     run = await bt_repo.get_run(run_id, as_of=now)
     if run is None:
         raise HTTPException(status_code=404, detail=_NOT_FOUND)
-    if (
-        principal.active_wallet_public_id
-        and run["wallet_public_id"] != principal.active_wallet_public_id
-    ):
-        raise HTTPException(status_code=404, detail=_NOT_FOUND)
+    _enforce_wallet_scope(principal, run)
     if run["status"] not in _CANCELLABLE_STATUSES:
         raise HTTPException(
             status_code=409,
@@ -510,11 +530,7 @@ async def rerun_backtest(
     original = await bt_repo.get_run(run_id, as_of=now)
     if original is None:
         raise HTTPException(status_code=404, detail=_NOT_FOUND)
-    if (
-        principal.active_wallet_public_id
-        and original["wallet_public_id"] != principal.active_wallet_public_id
-    ):
-        raise HTTPException(status_code=404, detail=_NOT_FOUND)
+    _enforce_wallet_scope(principal, original)
 
     rerun_body = BacktestCreateBody(
         strategy_class=original["strategy_name"],
@@ -575,11 +591,7 @@ async def get_backtest_trades(
     run = await bt_repo.get_run(run_id, as_of=ts)
     if run is None:
         raise HTTPException(status_code=404, detail=_NOT_FOUND)
-    if (
-        principal.active_wallet_public_id
-        and run["wallet_public_id"] != principal.active_wallet_public_id
-    ):
-        raise HTTPException(status_code=404, detail=_NOT_FOUND)
+    _enforce_wallet_scope(principal, run)
 
     trades = await bt_repo.get_trades(run_id, as_of=ts, limit=limit, offset=offset)
     items = [
@@ -646,11 +658,7 @@ async def get_backtest_signals(
     run = await bt_repo.get_run(run_id, as_of=ts)
     if run is None:
         raise HTTPException(status_code=404, detail=_NOT_FOUND)
-    if (
-        principal.active_wallet_public_id
-        and run["wallet_public_id"] != principal.active_wallet_public_id
-    ):
-        raise HTTPException(status_code=404, detail=_NOT_FOUND)
+    _enforce_wallet_scope(principal, run)
 
     signals = await bt_repo.get_signals(run_id, as_of=ts, limit=limit, offset=offset)
     items = [
@@ -709,11 +717,7 @@ async def get_backtest_events(
     run = await bt_repo.get_run(run_id, as_of=ts)
     if run is None:
         raise HTTPException(status_code=404, detail=_NOT_FOUND)
-    if (
-        principal.active_wallet_public_id
-        and run["wallet_public_id"] != principal.active_wallet_public_id
-    ):
-        raise HTTPException(status_code=404, detail=_NOT_FOUND)
+    _enforce_wallet_scope(principal, run)
 
     events = await bt_repo.get_events(run_id, as_of=ts)
     items = [
@@ -777,11 +781,7 @@ async def get_backtest_equity(
     run = await bt_repo.get_run(run_id, as_of=ts)
     if run is None:
         raise HTTPException(status_code=404, detail=_NOT_FOUND)
-    if (
-        principal.active_wallet_public_id
-        and run["wallet_public_id"] != principal.active_wallet_public_id
-    ):
-        raise HTTPException(status_code=404, detail=_NOT_FOUND)
+    _enforce_wallet_scope(principal, run)
 
     points = await bt_repo.get_equity_points(run_id, as_of=ts, limit=limit, after=after)
     items = [

@@ -45,6 +45,42 @@ from pydantic import ValidationError
 _SCHEMA_REGISTRY: dict[str, dict[str, Any]] = {}
 
 
+def optional_json_body[ModelT: BaseModel](
+    model: type[ModelT],
+) -> Callable[..., Coroutine[Any, Any, ModelT | None]]:
+    """Create a FastAPI dependency that validates JSON when present.
+
+    Returns a sentinel ``None`` when the request body is empty (``b""``)
+    or omitted. Validates like :func:`json_body` for populated bodies;
+    malformed JSON still raises ``RequestValidationError``.
+
+    Used by endpoints that historically accepted no body but now want
+    to accept an optional body without breaking existing zero-body
+    callers (R15 blocker fix — the naive ``model()`` synthesis path
+    is infeasible under ``PayloadRequest[...]`` envelopes whose
+    required fields have no defaults).
+
+    Args:
+        model: The Pydantic model class to validate against.
+
+    Returns:
+        An async dependency callable returning ``ModelT | None``.
+    """
+
+    async def dependency(request: Request) -> ModelT | None:
+        """Read raw request body; return ``None`` when empty, else validate."""
+        raw = await request.body()
+        if not raw:
+            return None
+        try:
+            return model.model_validate_json(raw)
+        except ValidationError as exc:
+            errors = [{**err, "loc": ("body", *err["loc"])} for err in exc.errors()]
+            raise RequestValidationError(errors, body=raw.decode("utf-8")) from exc
+
+    return dependency
+
+
 def json_body[ModelT: BaseModel](model: type[ModelT]) -> Callable[..., Coroutine[Any, Any, ModelT]]:
     """Create a FastAPI dependency that validates raw JSON bytes via Pydantic JSON mode.
 
@@ -169,7 +205,7 @@ def _lift_defs(schema: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     return rewritten, lifted
 
 
-def openapi_schema(model: type[BaseModel]) -> dict[str, Any]:
+def openapi_schema(model: type[BaseModel], *, required: bool = True) -> dict[str, Any]:
     """Build ``openapi_extra`` dict restoring the requestBody schema.
 
     FastAPI does not generate requestBody for ``Depends()`` parameters.
@@ -182,6 +218,11 @@ def openapi_schema(model: type[BaseModel]) -> dict[str, Any]:
 
     Args:
         model: The Pydantic model whose JSON schema to embed.
+        required: Whether the requestBody is mandatory. Pass
+            ``required=False`` for endpoints using
+            :func:`optional_json_body` so the generated OpenAPI / typed
+            clients don't wrongly mark the body required (R14 gpt-5.4
+            fix #4).
 
     Returns:
         Dict suitable for the ``openapi_extra`` keyword argument.
@@ -192,7 +233,7 @@ def openapi_schema(model: type[BaseModel]) -> dict[str, Any]:
     _SCHEMA_REGISTRY.update(sub_schemas)
     return {
         "requestBody": {
-            "required": True,
+            "required": required,
             "content": {
                 "application/json": {
                     "schema": {"$ref": f"#/components/schemas/{name}"},

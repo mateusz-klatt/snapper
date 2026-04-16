@@ -40,6 +40,13 @@ class UserProfile(StrictDataSchema[Literal["user_profile"]]):
         primary_operator_public_id: The membership row marked
             ``is_primary=TRUE`` (``None`` when the user has no
             primary membership yet).
+        active_wallet_public_id: Currently-selected wallet (UI state,
+            round-tripped through token claims). ``None`` on the
+            login path (user hasn't picked a wallet yet); populated
+            on refresh and ``/me`` from the authenticated principal.
+            The frontend reads this field to route WS subscriptions
+            and REST requests against the same wallet scope the
+            backend authorises.
     """
 
     type: Literal["user_profile"] = "user_profile"
@@ -50,3 +57,4 @@ class UserProfile(StrictDataSchema[Literal["user_profile"]]):
     created_at: datetime
     operator_public_ids: list[str] = Field(default_factory=list)
     primary_operator_public_id: str | None = None
+    active_wallet_public_id: str | None = None

@@ -154,7 +154,7 @@ def _cancel_body() -> dict[str, Any]:
 def _create_client(
     bt_repo_mock: AsyncMock,
     role: UserRole = UserRole.ADMIN,
-    wallet: str | None = None,
+    wallet: str | None = "wallet-1",
     launch_error: Exception | None = None,
 ) -> TestClient:
     """Create test client with mocked BacktestRepository and auth bypassed."""

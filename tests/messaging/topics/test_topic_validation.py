@@ -14,10 +14,13 @@ from snapper.core.types import MarketDataTypeEnum
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.topics import validation
 from snapper.messaging.topics.builders import market_topic
+from snapper.messaging.topics.validation import BACKTEST_EVENTS
 from snapper.messaging.topics.validation import TopicValidationError
 from snapper.messaging.topics.validation import _is_valid_timeframe
 from snapper.messaging.topics.validation import _validate_accruals_topic
 from snapper.messaging.topics.validation import _validate_admin_topic
+from snapper.messaging.topics.validation import _validate_backtest_prefix
+from snapper.messaging.topics.validation import _validate_backtest_topic
 from snapper.messaging.topics.validation import _validate_candle_timeframe
 from snapper.messaging.topics.validation import _validate_exchange
 from snapper.messaging.topics.validation import _validate_instrument
@@ -3711,9 +3714,6 @@ class TestBacktestTopicFamily:
 
     def test_accepts_every_canonical_event(self) -> None:
         """Every ``BacktestProgressEvent`` value produces a valid topic."""
-        from snapper.messaging.topics.validation import BACKTEST_EVENTS
-        from snapper.messaging.topics.validation import _validate_backtest_topic
-
         for event in BACKTEST_EVENTS:
             topic = f"backtest.{self._WALLET}.{self._RUN}.{event}"
             valid, err = _validate_backtest_topic(topic)
@@ -3721,8 +3721,6 @@ class TestBacktestTopicFamily:
 
     def test_rejects_non_canonical_event(self) -> None:
         """Non-canonical event names like 'complete' or 'error' fail."""
-        from snapper.messaging.topics.validation import _validate_backtest_topic
-
         for bad in ("complete", "error", "STARTED"):
             topic = f"backtest.{self._WALLET}.{self._RUN}.{bad}"
             valid, _err = _validate_backtest_topic(topic)
@@ -3730,8 +3728,6 @@ class TestBacktestTopicFamily:
 
     def test_rejects_wrong_segment_count(self) -> None:
         """Only 4 segments accepted (category + wallet + run + event)."""
-        from snapper.messaging.topics.validation import _validate_backtest_topic
-
         valid, _ = _validate_backtest_topic(f"backtest.{self._WALLET}.{self._RUN}")
         assert not valid
         valid, _ = _validate_backtest_topic(f"backtest.{self._WALLET}.{self._RUN}.started.extra")
@@ -3739,24 +3735,18 @@ class TestBacktestTopicFamily:
 
     def test_rejects_non_uuid7_wallet_segment(self) -> None:
         """Malformed wallet segment fails UUID7 check."""
-        from snapper.messaging.topics.validation import _validate_backtest_topic
-
         valid, err = _validate_backtest_topic(f"backtest.not-a-uuid.{self._RUN}.started")
         assert not valid
         assert "wallet segment" in err.lower()
 
     def test_rejects_non_uuid7_run_segment(self) -> None:
         """Malformed run segment fails UUID7 check."""
-        from snapper.messaging.topics.validation import _validate_backtest_topic
-
         valid, err = _validate_backtest_topic(f"backtest.{self._WALLET}.not-a-uuid.started")
         assert not valid
         assert "run segment" in err.lower()
 
     def test_prefix_patterns_accepted(self) -> None:
         """Three prefix shapes accepted: root, wallet, wallet+run."""
-        from snapper.messaging.topics.validation import _validate_backtest_prefix
-
         for pattern in (
             "backtest.",
             f"backtest.{self._WALLET}.",
@@ -3767,16 +3757,12 @@ class TestBacktestTopicFamily:
 
     def test_prefix_rejects_malformed_wallet(self) -> None:
         """Non-UUID7 wallet segment in prefix is rejected."""
-        from snapper.messaging.topics.validation import _validate_backtest_prefix
-
         valid, err = _validate_backtest_prefix("backtest.not-a-uuid.")
         assert not valid
         assert "wallet" in err.lower()
 
     def test_prefix_rejects_too_many_segments(self) -> None:
         """More than 3 segments in a prefix is rejected."""
-        from snapper.messaging.topics.validation import _validate_backtest_prefix
-
         pattern = f"backtest.{self._WALLET}.{self._RUN}.started."
         valid, _ = _validate_backtest_prefix(pattern)
         assert not valid

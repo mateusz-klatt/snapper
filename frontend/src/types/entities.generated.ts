@@ -570,6 +570,18 @@ export interface Login {
 }
 
 /**
+ * RefreshToken request entity.
+ * Use with refreshTokenToAPI() transform.
+ */
+export interface RefreshToken {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  payload: Record<string, unknown>
+}
+
+/**
  * CreateUser request entity.
  * Use with createUserToAPI() transform.
  */

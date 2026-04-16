@@ -26,12 +26,15 @@ from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
+from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.requests import AdminResetPasswordRequest
 from snapper.auth.schemas.requests import ChangePasswordRequest
 from snapper.auth.schemas.requests import CreateUserRequest
 from snapper.auth.schemas.requests import DeactivateUserRequest
 from snapper.auth.schemas.requests import LoginRequest
+from snapper.auth.schemas.requests import RefreshTokenPayload
+from snapper.auth.schemas.requests import RefreshTokenRequest
 from snapper.auth.schemas.requests import UpdateUserRequest
 from snapper.auth.schemas.responses import LoginData
 from snapper.auth.schemas.responses import LoginResponse
@@ -41,9 +44,12 @@ from snapper.auth.schemas.responses import UserListResponse
 from snapper.auth.schemas.responses import UserResponse
 from snapper.auth.tokens import get_token_manager
 from snapper.auth.user_service import get_user_service
+from snapper.data.repository import Repository
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.server.dependencies import get_repository_dependency
 from snapper.server.json_body import json_body
 from snapper.server.json_body import openapi_schema
+from snapper.server.json_body import optional_json_body
 from snapper.server.rate_limiting import PASSWORD_CHANGE_RATE_LIMIT
 from snapper.server.rate_limiting import PASSWORD_RESET_RATE_LIMIT
 from snapper.server.rate_limiting import clear_failed_login_attempts
@@ -163,6 +169,7 @@ async def login(
         path="/",
     )
     sid, seq, _pid, ts = _mint_provenance(request)
+    user = user.model_copy(update={"active_wallet_public_id": principal.active_wallet_public_id})
     login_payload = LoginData(
         session_id=sid,
         sequence_id=seq,
@@ -181,34 +188,101 @@ async def login(
     )
 
 
-@router.post("/refresh")
+async def _apply_wallet_hint(
+    payload: RefreshTokenPayload,
+    principal: AuthPrincipal,
+    repo: Repository,
+) -> AuthPrincipal:
+    """Apply an optional wallet hint to the authenticated principal.
+
+    Role-branched membership validation (plan §2.5, R12 triple-convergent
+    security fix): ADMIN sees every active wallet via
+    ``list_active_wallets``; non-admins see only wallets their
+    operator memberships grant access to via
+    ``list_accessible_wallets_for_operators``. A hint that doesn't
+    match the caller's visibility returns 404 with a uniform message
+    so cross-tenant existence is not leaked.
+    """
+    if payload.active_wallet_public_id is not None:
+        now = datetime.now(UTC)
+        if principal.role == UserRole.ADMIN:
+            rows = await repo.list_active_wallets(now)
+        else:
+            rows = await repo.list_accessible_wallets_for_operators(
+                principal.operator_public_ids, now
+            )
+        if payload.active_wallet_public_id not in {w["public_id"] for w in rows}:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="wallet not found",
+            )
+        return principal.model_copy(
+            update={"active_wallet_public_id": payload.active_wallet_public_id}
+        )
+    if payload.clear_active_wallet:
+        return principal.model_copy(update={"active_wallet_public_id": None})
+    return principal
+
+
+@router.post(
+    "/refresh",
+    openapi_extra=openapi_schema(RefreshTokenRequest, required=False),
+)
 async def refresh_token(
     request: Request,
     response: Response,
+    body: Annotated[RefreshTokenRequest | None, Depends(optional_json_body(RefreshTokenRequest))],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
 ) -> RefreshResponse:
-    """Refresh session tokens.
+    """Refresh session tokens with optional wallet-scope change.
 
-    Generates new access/refresh tokens and WebSocket token.
+    Order (plan §2.5 R14 gpt-5.4 fix #3 — verify → parse → validate →
+    blacklist → mint):
+
+    1. Verify refresh-token signature + blacklist status.
+    2. Parse optional body (422 on malformed UUID7 or mutually
+       exclusive fields — fires before any DB work via Pydantic
+       field + model validators on ``RefreshTokenPayload``).
+    3. Role-branched wallet-membership validation (404 when the
+       hinted wallet is outside the caller's visibility).
+    4. Blacklist the old refresh token ONLY after every validation
+       passes — a rejected hint leaves the old token usable for a
+       retry with a valid hint.
+    5. Mint new tokens from the post-validation principal. Response
+       ``user.active_wallet_public_id`` is projected from
+       ``principal.active_wallet_public_id`` (NOT ``token_data``)
+       so a hinted refresh surfaces the NEW wallet, matching the
+       freshly-minted token claims.
+
+    Empty body preserved byte-identically for the three zero-body
+    callers (``stores/auth.refreshToken``, WS ticket refresh,
+    ``apiClient.refreshAndRetry``): ``body is None`` → empty
+    ``RefreshTokenPayload()`` → validation is a no-op.
 
     Args:
         request: FastAPI request with refresh_token cookie.
         response: FastAPI response for setting cookies.
+        body: Optional refresh-token command envelope (``None`` on
+            empty body).
+        repo: Repository for wallet-membership lookups.
 
     Returns:
-        RefreshResponse with new tokens and user profile.
+        RefreshResponse with new tokens, WS token, CSRF token, and
+        user profile carrying ``active_wallet_public_id``.
 
     Raises:
-        HTTPException: 401 if refresh token invalid.
+        HTTPException: 401 if refresh token invalid / missing,
+            404 when the wallet hint is outside caller visibility.
     """
     settings = request.app.state.settings
-    refresh_token = request.cookies.get("refresh_token")
-    if not refresh_token:
+    refresh_token_cookie = request.cookies.get("refresh_token")
+    if not refresh_token_cookie:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Refresh token not found",
         )
     token_manager = get_token_manager()
-    token_data = token_manager.verify_token(refresh_token)
+    token_data = token_manager.verify_token(refresh_token_cookie)
     if not token_data:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -221,9 +295,13 @@ async def refresh_token(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=_USER_NOT_FOUND,
         )
-    token_manager.blacklist_token(token_data.jti)
     principal = await user_service.build_auth_principal(user)
-    principal.active_wallet_public_id = token_data.active_wallet_public_id
+    principal = principal.model_copy(
+        update={"active_wallet_public_id": token_data.active_wallet_public_id}
+    )
+    payload = RefreshTokenPayload() if body is None else body.payload
+    principal = await _apply_wallet_hint(payload, principal, repo)
+    token_manager.blacklist_token(token_data.jti)
     new_token_pair = token_manager.create_tokens(
         principal,
         session_id=token_data.sid,
@@ -262,6 +340,7 @@ async def refresh_token(
     session_id = token_data.sid
     ws_token_result = ws_token_service.generate(user_id=user.username, session_id=session_id)
     sid, seq, _pid, ts = _mint_provenance(request)
+    user = user.model_copy(update={"active_wallet_public_id": principal.active_wallet_public_id})
     refresh_data = RefreshData(
         session_id=sid,
         sequence_id=seq,
@@ -307,6 +386,7 @@ async def get_current_user_profile(
             detail=_USER_NOT_FOUND,
         )
     sid, seq, pid, ts = _mint_provenance(request)
+    user = user.model_copy(update={"active_wallet_public_id": current_user.active_wallet_public_id})
     return UserResponse(
         session_id=sid,
         sequence_id=seq,
