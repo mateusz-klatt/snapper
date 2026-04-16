@@ -21,7 +21,6 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 import zmq
-from _pytest.logging import LogCaptureFixture
 
 from snapper.application.services.signals.service import signal_service
 from snapper.cli.app import _alembic_cfg
@@ -3389,7 +3388,7 @@ class TestListenLoopSystemMessages:
             mock_service.return_value = None
             strategy._handle_settings_update(envelope)
 
-    def test_handle_settings_update_exception(self, caplog: LogCaptureFixture) -> None:
+    def test_handle_settings_update_exception(self) -> None:
         """Verify settings update logs exception on error.
 
         Given: SettingsService._parse_value raises error,
@@ -3412,13 +3411,17 @@ class TestListenLoopSystemMessages:
             public_id="test-public-id",
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
         )
-        with patch("snapper.strategies.system_events.SettingsService.get_instance") as mock_service:
+        with (
+            patch("snapper.strategies.system_events.SettingsService.get_instance") as mock_service,
+            patch("snapper.strategies.system_events.logger.error") as mock_error,
+        ):
             mock_instance = MagicMock()
             mock_instance._parse_value.side_effect = RuntimeError("parse failed")
             mock_service.return_value = mock_instance
             strategy._handle_settings_update(envelope)
-        assert "Error handling settings update" in caplog.text
-        assert "parse failed" in caplog.text
+        mock_error.assert_called_once()
+        assert "Error handling settings update" in mock_error.call_args.args[0]
+        assert "parse failed" in mock_error.call_args.args[0]
 
     @pytest.mark.asyncio
     async def test_listen_loop_feed_heartbeat_tracking(self) -> None:
