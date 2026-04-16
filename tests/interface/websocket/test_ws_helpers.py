@@ -153,36 +153,37 @@ class TestRoleCategorySecurityMatrix:
     and topic patterns, with no over- or under-provisioning.
     """
 
-    def test_viewer_gets_market_and_system_only(self) -> None:
-        """VIEWER role receives only market and system categories.
+    def test_viewer_gets_market_system_and_backtest(self) -> None:
+        """VIEWER role receives read-only categories (market, system, backtest).
 
         Given: A VIEWER role,
         When: Getting allowed categories,
-        Then: Only market and system are allowed (no trade, strategy, admin).
+        Then: market, system, backtest are allowed (no trade, strategy, admin).
         """
         categories = role_allowed_categories(UserRole.VIEWER)
-        assert categories == {"market", "system"}
+        assert categories == {"market", "system", "backtest"}
 
-    def test_operator_gets_market_trade_strategy_system(self) -> None:
-        """OPERATOR role receives market, trade, strategy, and system categories.
+    def test_operator_gets_market_trade_strategy_system_backtest(self) -> None:
+        """OPERATOR receives market, trade, strategy, system, and backtest.
 
         Given: An OPERATOR role,
         When: Getting allowed categories,
-        Then: market, trade, strategy, system are allowed but NOT admin.
+        Then: market, trade, strategy, system, backtest allowed but NOT admin.
         """
         categories = role_allowed_categories(UserRole.OPERATOR)
-        assert categories == {"market", "trade", "strategy", "system"}
+        assert categories == {"market", "trade", "strategy", "system", "backtest"}
         assert "admin" not in categories
 
     def test_admin_gets_all_categories_including_admin(self) -> None:
-        """ADMIN role receives all categories including admin.
+        """ADMIN role receives all categories including admin + backtest.
 
         Given: An ADMIN role,
         When: Getting allowed categories,
-        Then: All five categories are allowed (market, trade, strategy, system, admin).
+        Then: All six categories are allowed
+            (market, trade, strategy, system, admin, backtest).
         """
         categories = role_allowed_categories(UserRole.ADMIN)
-        assert categories == {"market", "trade", "strategy", "system", "admin"}
+        assert categories == {"market", "trade", "strategy", "system", "admin", "backtest"}
 
     def test_admin_available_topics_include_admin_prefix(self) -> None:
         """ADMIN available topics include the admin. registry root.
