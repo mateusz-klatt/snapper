@@ -261,9 +261,11 @@ class PlanExecutorService(RegisterableProcess):
             native_instrument: Native exchange symbol for the cancel command.
         """
         params = plan.get("params") or {}
+        now = datetime.now(UTC)
         try:
             linked_plan_id = await self.repository.get_plan_public_id_for_client_order_id(
-                child_client_order_id
+                child_client_order_id,
+                as_of=now,
             )
         except Exception as exc:
             logger.error("Stranded cancel lookup failed for {}: {}", plan["public_id"], exc)
@@ -277,7 +279,6 @@ class PlanExecutorService(RegisterableProcess):
                 linked_plan_id,
             )
             return
-        now = datetime.now(UTC)
         try:
             already_pending = await self.repository.has_pending_cancel_command(
                 child_client_order_id, as_of=now

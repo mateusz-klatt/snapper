@@ -3578,7 +3578,7 @@ async def test_get_plan_public_id_for_client_order_id_found(tmp_path: Path) -> N
     """Resolving by client_order_id returns the plan linked on the create command.
 
     Given: a database with a ``create`` trade command linked to a plan,
-    When: get_plan_public_id_for_client_order_id is called,
+    When: get_plan_public_id_for_client_order_id is called with a matching as_of,
     Then: the linked plan public_id is returned.
     """
     db_path = tmp_path / "plan_cid.db"
@@ -3609,8 +3609,54 @@ async def test_get_plan_public_id_for_client_order_id_found(tmp_path: Path) -> N
             "wallet_public_id": "wallet-1",
         }
     )
-    found = await r.get_plan_public_id_for_client_order_id("cid-7")
+    found = await r.get_plan_public_id_for_client_order_id("cid-7", as_of=now)
     assert found == "plan-42"
+
+
+@pytest.mark.asyncio
+async def test_get_plan_public_id_for_client_order_id_future_as_of(
+    tmp_path: Path,
+) -> None:
+    """Resolving by client_order_id honors an explicit temporal point.
+
+    Given: a plan-linked create command whose bus_time is slightly in the future,
+    When: get_plan_public_id_for_client_order_id is called with that future as_of,
+    Then: the linked plan public_id is still returned.
+    """
+    db_path = tmp_path / "plan_cid_future.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    future_time = now + timedelta(seconds=5)
+    await r.insert_trade_command(
+        {
+            "command_type": "create",
+            "shard_key": "kraken.BTC-USD.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "manual",
+            "client_order_id": "cid-future-7",
+            "venue_client_id": "vcid-future-7",
+            "side": "buy",
+            "order_type": "limit",
+            "quantity": 0.5,
+            "price": 50000.0,
+            "status": "created",
+            "created_at": future_time,
+            "correlation_id": "corr-future-7",
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": future_time,
+            "plan_public_id": "plan-future-42",
+            "wallet_public_id": "wallet-1",
+        }
+    )
+    found = await r.get_plan_public_id_for_client_order_id(
+        "cid-future-7",
+        as_of=future_time,
+    )
+    assert found == "plan-future-42"
 
 
 @pytest.mark.asyncio
@@ -3619,7 +3665,10 @@ async def test_get_plan_public_id_for_client_order_id_missing(tmp_path: Path) ->
     db_path = tmp_path / "plan_cid_miss.db"
     r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
     await r.create_all()
-    found = await r.get_plan_public_id_for_client_order_id("does-not-exist")
+    found = await r.get_plan_public_id_for_client_order_id(
+        "does-not-exist",
+        as_of=datetime.now(UTC),
+    )
     assert found is None
 
 
@@ -3779,7 +3828,7 @@ async def test_get_plan_public_id_for_client_order_id_skips_null_plan(
             "wallet_public_id": "wallet-1",
         }
     )
-    found = await r.get_plan_public_id_for_client_order_id("cid-8")
+    found = await r.get_plan_public_id_for_client_order_id("cid-8", as_of=now)
     assert found is None
 
 

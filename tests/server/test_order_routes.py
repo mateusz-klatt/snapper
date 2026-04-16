@@ -4,6 +4,7 @@ from collections.abc import AsyncGenerator
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from unittest.mock import ANY
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
@@ -444,7 +445,10 @@ class TestCancelOrder:
             json=_cancel_order_body(),
         )
         assert response.status_code == 200
-        repo.get_plan_public_id_for_client_order_id.assert_awaited_once_with("cid-child-1")
+        repo.get_plan_public_id_for_client_order_id.assert_awaited_once_with(
+            "cid-child-1",
+            as_of=ANY,
+        )
         client.close()
 
     def test_cancel_by_client_order_id_not_found(self) -> None:

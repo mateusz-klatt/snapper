@@ -513,7 +513,10 @@ async def cancel_order_by_client_order_id(
     """
     del command
     tracker: SequenceTracker = request.app.state.rest_tracker
-    plan_public_id = await repo.get_plan_public_id_for_client_order_id(client_order_id)
+    plan_public_id = await repo.get_plan_public_id_for_client_order_id(
+        client_order_id,
+        as_of=datetime.now(UTC),
+    )
     if plan_public_id is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

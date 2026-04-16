@@ -1564,17 +1564,20 @@ class Repository(ABC):
     async def get_plan_public_id_for_client_order_id(
         self,
         client_order_id: str,
+        as_of: datetime,
     ) -> str | None:
         """Look up the plan public id that a client_order_id belongs to.
 
         Joins ``trade_commands`` where ``command_type='create'`` and
         ``plan_public_id IS NOT NULL``, returning the most recent
         active-version ``plan_public_id`` for the matching
-        ``client_order_id``. Used by UI cancel-by-client-order-id flows
-        to resolve the active plan from an Order row.
+        ``client_order_id`` as of ``as_of``. Used by UI
+        cancel-by-client-order-id flows to resolve the active plan from
+        an Order row.
 
         Args:
             client_order_id: Child order client id stamped on a plan.
+            as_of: Temporal point for active-version selection.
 
         Returns:
             The linked plan public id, or None if no plan-linked command
@@ -3587,6 +3590,7 @@ class SQLAlchemyRepository(Repository):
     async def get_plan_public_id_for_client_order_id(
         self,
         client_order_id: str,
+        as_of: datetime,
     ) -> str | None:
         """Resolve the plan public id linked to a child client_order_id.
 
@@ -3594,12 +3598,13 @@ class SQLAlchemyRepository(Repository):
         ``client_order_id`` matches, whose ``plan_public_id`` is
         non-null, and whose ``command_type`` is ``create`` so cancel
         rows on the same ``client_order_id`` do not hide the original
-        plan. Restricted to the active SCD2 version, ordered by
-        ``created_at`` desc with ``id`` as a deterministic tie-breaker
-        so callers always see the same answer across invocations.
+        plan. Ordered by ``created_at`` desc with ``id`` as a
+        deterministic tie-breaker so callers always see the same answer
+        across invocations at the requested temporal point.
 
         Args:
             client_order_id: Child order client id stamped by the plan.
+            as_of: Temporal point for active-version selection.
 
         Returns:
             The resolved plan public id, or None if no plan-linked
@@ -3612,7 +3617,7 @@ class SQLAlchemyRepository(Repository):
                     TradeCommand.client_order_id == client_order_id,
                     TradeCommand.plan_public_id.is_not(None),
                     TradeCommand.command_type == "create",
-                    *where_active(TradeCommand, datetime.now(UTC)),
+                    *where_active(TradeCommand, as_of),
                 )
                 .order_by(TradeCommand.created_at.desc(), TradeCommand.id.desc())
                 .limit(1)

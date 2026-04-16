@@ -347,7 +347,7 @@ async def test_forward_to_clients_throttled_increments_metrics(
     """
     topic = "market."
     websocket = AsyncMock()
-    now = time.time()
+    now = 123.0
     subscription = TopicSubscriptionModel(
         websocket=websocket,
         throttle_ms=200,
@@ -356,7 +356,8 @@ async def test_forward_to_clients_throttled_increments_metrics(
     )
     bridge.topic_subscriptions[topic] = [subscription]
     bridge.topic_metrics[topic] = TopicMetricsModel()
-    await bridge._forward_to_clients(topic, f"{topic}BTCUSD", _make_candle_json())
+    with patch("snapper.interface.websocket.bridge.time.time", return_value=now):
+        await bridge._forward_to_clients(topic, f"{topic}BTCUSD", _make_candle_json())
     assert bridge.topic_metrics[topic].throttled_count == 1
     send_mock = cast(AsyncMock, subscription.websocket.send_text)
     send_mock.assert_not_awaited()
@@ -374,7 +375,7 @@ async def test_forward_to_clients_throttled_without_metrics(
     """
     topic = "market."
     websocket = AsyncMock()
-    now = time.time()
+    now = 123.0
     subscription = TopicSubscriptionModel(
         websocket=websocket,
         throttle_ms=200,
@@ -382,7 +383,8 @@ async def test_forward_to_clients_throttled_without_metrics(
         client_id="throttled-nometrics",
     )
     bridge.topic_subscriptions[topic] = [subscription]
-    await bridge._forward_to_clients(topic, f"{topic}BTCUSD", _make_candle_json())
+    with patch("snapper.interface.websocket.bridge.time.time", return_value=now):
+        await bridge._forward_to_clients(topic, f"{topic}BTCUSD", _make_candle_json())
     websocket.send_text.assert_not_awaited()
 
 
