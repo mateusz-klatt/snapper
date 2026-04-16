@@ -2618,6 +2618,7 @@ struct UserProfile: Codable, Sendable {
     let createdAt: Date
     let operatorPublicIds: [String]?
     let primaryOperatorPublicId: String?
+    let activeWalletPublicId: String?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -2632,6 +2633,7 @@ struct UserProfile: Codable, Sendable {
         case createdAt = "created_at"
         case operatorPublicIds = "operator_public_ids"
         case primaryOperatorPublicId = "primary_operator_public_id"
+        case activeWalletPublicId = "active_wallet_public_id"
     }
 }
 
@@ -2919,6 +2921,34 @@ struct LoginBody: Codable, Sendable {
         case username
         case password
         case rememberMe = "remember_me"
+    }
+}
+
+struct RefreshTokenRequest: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: RefreshTokenPayload
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct RefreshTokenPayload: Codable, Sendable {
+    let activeWalletPublicId: String?
+    let clearActiveWallet: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case activeWalletPublicId = "active_wallet_public_id"
+        case clearActiveWallet = "clear_active_wallet"
     }
 }
 
