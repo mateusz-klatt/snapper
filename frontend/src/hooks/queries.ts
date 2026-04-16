@@ -1,6 +1,6 @@
 import React, { useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { apiClient } from '../lib/apiClient'
+import { apiClient, APIError } from '../lib/apiClient'
 import { useAppStore } from '../stores/app'
 import { useAuth } from '../stores/auth'
 import {
@@ -37,6 +37,7 @@ import type {
   ExecutionPlanResponse,
   BracketCreateBody,
   TrailingStopCreateBody,
+  BacktestCompareBody,
 } from '../types/api'
 
 const queryKeys = {
@@ -765,6 +766,42 @@ export const useCreateBacktest = () => {
       apiClient.createBacktest(body),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['backtests'] })
+    },
+  })
+}
+
+export const useBacktestComparison = (comparisonId: string | undefined) => {
+  const walletId = useAppStore(s => s.currentWalletPublicId)
+
+  return useQuery({
+    queryKey: ['backtest-compare', walletId, comparisonId],
+    queryFn: () => apiClient.getBacktestComparison(comparisonId as string),
+    enabled: !!comparisonId,
+    retry: (failureCount, error) => {
+      if (error instanceof APIError && error.status === 404) return false
+
+      return failureCount < 3
+    },
+  })
+}
+
+export const useBacktestComparisons = (limit: number = 20, offset: number = 0) => {
+  const walletId = useAppStore(s => s.currentWalletPublicId)
+
+  return useQuery({
+    queryKey: ['backtest-compare', 'list', walletId, limit, offset],
+    queryFn: () => apiClient.getBacktestComparisons(limit, offset),
+  })
+}
+
+export const useCreateBacktestComparison = () => {
+  const queryClient = useQueryClient()
+  const walletId = useAppStore(s => s.currentWalletPublicId)
+
+  return useMutation({
+    mutationFn: (body: BacktestCompareBody) => apiClient.createBacktestComparison(body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['backtest-compare', 'list', walletId] })
     },
   })
 }

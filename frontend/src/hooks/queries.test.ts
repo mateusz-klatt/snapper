@@ -40,9 +40,12 @@ import {
   useBacktestTrades,
   useBacktestSignals,
   useCreateBacktest,
+  useBacktestComparison,
+  useBacktestComparisons,
+  useCreateBacktestComparison,
 } from './queries'
 import { useAuth } from '../stores/auth'
-import { apiClient } from '../lib/apiClient'
+import { apiClient, APIError } from '../lib/apiClient'
 
 const ENV = {
   seq: 0,
@@ -275,6 +278,31 @@ vi.mock('../lib/apiClient', () => ({
     getBacktestSignals: vi.fn(() =>
       Promise.resolve({ type: 'backtest_signal_list', payload: [], count: 0 })
     ),
+    createBacktestComparison: vi.fn(() =>
+      Promise.resolve({
+        type: 'backtest_comparison_response',
+        payload: { public_id: 'cmp-new' },
+      })
+    ),
+    getBacktestComparison: vi.fn(() =>
+      Promise.resolve({
+        type: 'backtest_comparison_detail_response',
+        payload: { comparison: {}, run_a: {}, run_b: {} },
+      })
+    ),
+    getBacktestComparisons: vi.fn(() =>
+      Promise.resolve({ type: 'backtest_comparison_list', payload: [], count: 0 })
+    ),
+  },
+  APIError: class APIError extends Error {
+    constructor(
+      message: string,
+      public readonly status: number,
+      public readonly statusText: string
+    ) {
+      super(message)
+      this.name = 'APIError'
+    }
   },
 }))
 vi.mock('../stores/auth', () => ({
@@ -323,6 +351,9 @@ const mockedApiClient = apiClient as unknown as {
   getCredentials: Mock
   createCredential: Mock
   rotateCredential: Mock
+  createBacktestComparison: Mock
+  getBacktestComparison: Mock
+  getBacktestComparisons: Mock
 }
 const createQueryClient = () =>
   new QueryClient({
@@ -1459,6 +1490,117 @@ describe('queries', () => {
 
       await waitFor(() => expect(result.current.isSuccess).toBe(true))
       expect(apiClient.createBacktest).toHaveBeenCalled()
+    })
+  })
+
+  describe('useBacktestComparison*', () => {
+    let appStoreModule: typeof import('../stores/app')
+
+    beforeEach(async () => {
+      appStoreModule = await import('../stores/app')
+      appStoreModule.useAppStore.setState({ currentWalletPublicId: 'wallet-1' })
+    })
+    afterEach(() => {
+      appStoreModule.useAppStore.setState({ currentWalletPublicId: null })
+    })
+
+    it('useBacktestComparison fetches when id is provided', async () => {
+      const { result } = renderHook(() => useBacktestComparison('cmp-1'), {
+        wrapper: createWrapper(),
+      })
+
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      expect(apiClient.getBacktestComparison).toHaveBeenCalledWith('cmp-1')
+    })
+
+    it('useBacktestComparison is disabled when id is undefined', () => {
+      const { result } = renderHook(() => useBacktestComparison(undefined), {
+        wrapper: createWrapper(),
+      })
+
+      expect(result.current.fetchStatus).toBe('idle')
+    })
+
+    it('useBacktestComparison does NOT retry on 404', async () => {
+      const error = new APIError('Comparison not found', 404, 'Not Found')
+
+      ;(apiClient.getBacktestComparison as Mock).mockRejectedValue(error)
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: 3 } } })
+      const wrapper = ({ children }: { children: ReactNode }) =>
+        createElement(QueryClientProvider, { client: queryClient }, children)
+      const { result } = renderHook(() => useBacktestComparison('cmp-missing'), { wrapper })
+
+      await waitFor(() => expect(result.current.isError).toBe(true))
+      expect((apiClient.getBacktestComparison as Mock).mock.calls.length).toBe(1)
+    })
+
+    it('useBacktestComparison retries up to 3 times on 500', async () => {
+      const error = new APIError('Server error', 500, 'Internal Server Error')
+
+      ;(apiClient.getBacktestComparison as Mock).mockRejectedValue(error)
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: 3, retryDelay: 0 } },
+      })
+      const wrapper = ({ children }: { children: ReactNode }) =>
+        createElement(QueryClientProvider, { client: queryClient }, children)
+      const { result } = renderHook(() => useBacktestComparison('cmp-flake'), { wrapper })
+
+      await waitFor(() => expect(result.current.isError).toBe(true), { timeout: 2000 })
+      expect((apiClient.getBacktestComparison as Mock).mock.calls.length).toBe(4)
+    })
+
+    it('useBacktestComparisons fetches list with default + custom paging', async () => {
+      const { result: defaultResult } = renderHook(() => useBacktestComparisons(), {
+        wrapper: createWrapper(),
+      })
+
+      await waitFor(() => expect(defaultResult.current.isSuccess).toBe(true))
+      expect(apiClient.getBacktestComparisons).toHaveBeenCalledWith(20, 0)
+
+      const { result: customResult } = renderHook(() => useBacktestComparisons(50, 100), {
+        wrapper: createWrapper(),
+      })
+
+      await waitFor(() => expect(customResult.current.isSuccess).toBe(true))
+      expect(apiClient.getBacktestComparisons).toHaveBeenCalledWith(50, 100)
+    })
+
+    it('useCreateBacktestComparison passes BacktestCompareBody (not envelope) to apiClient', async () => {
+      const { result } = renderHook(() => useCreateBacktestComparison(), {
+        wrapper: createWrapper(),
+      })
+
+      await act(async () => {
+        result.current.mutate({
+          mode: 'auto',
+          config_hash: 'cfg-1',
+          anchor_run_public_id: 'r1',
+        })
+      })
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      expect(apiClient.createBacktestComparison).toHaveBeenCalledWith({
+        mode: 'auto',
+        config_hash: 'cfg-1',
+        anchor_run_public_id: 'r1',
+      })
+    })
+
+    it('useCreateBacktestComparison invalidates list cache scoped to current wallet on success', async () => {
+      const { queryClient, wrapper } = createWrapperWithClient()
+      const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries')
+      const { result } = renderHook(() => useCreateBacktestComparison(), { wrapper })
+
+      await act(async () => {
+        result.current.mutate({
+          mode: 'auto',
+          config_hash: 'cfg-1',
+          anchor_run_public_id: 'r1',
+        })
+      })
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      expect(invalidateSpy).toHaveBeenCalledWith({
+        queryKey: ['backtest-compare', 'list', 'wallet-1'],
+      })
     })
   })
 })
