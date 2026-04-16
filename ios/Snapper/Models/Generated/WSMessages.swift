@@ -3,6 +3,15 @@
 
 import Foundation
 
+enum BacktestProgressDataEvent: String, Codable, Sendable {
+    case started
+    case progress
+    case milestone
+    case completed
+    case failed
+    case cancelled
+}
+
 enum CandleDataExchange: String, Codable, Sendable {
     case kraken
     case krakenFutures = "kraken_futures"
@@ -139,6 +148,42 @@ struct WsMessageBase: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+    }
+}
+
+struct BacktestProgressData: Codable, Sendable {
+    let type: String
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let runPublicId: String
+    let walletPublicId: String
+    let event: String
+    let milestone: String?
+    let candlesDone: Int
+    let totalCandles: Int?
+    let signalsCount: Int
+    let tradesCount: Int
+    let equity: Double
+    let progressPct: Double
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case runPublicId = "run_public_id"
+        case walletPublicId = "wallet_public_id"
+        case event
+        case milestone
+        case candlesDone = "candles_done"
+        case totalCandles = "total_candles"
+        case signalsCount = "signals_count"
+        case tradesCount = "trades_count"
+        case equity
+        case progressPct = "progress_pct"
     }
 }
 

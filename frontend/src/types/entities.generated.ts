@@ -20,6 +20,27 @@ type TradeSide = 'buy' | 'sell'
 type Mode = 'live' | 'paper'
 
 /**
+ * Canonical BacktestProgress entity.
+ * From WebSocket BacktestProgressData.
+ */
+export interface BacktestProgress {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  runPublicId: string
+  walletPublicId: string
+  event: 'started' | 'progress' | 'milestone' | 'completed' | 'failed' | 'cancelled'
+  milestone?: '25pct' | '50pct' | '75pct' | null
+  candlesDone: number
+  totalCandles: number | null
+  signalsCount: number
+  tradesCount: number
+  equity: number
+  progressPct: number
+}
+
+/**
  * Canonical Candle entity.
  * From WebSocket CandleData.
  */
