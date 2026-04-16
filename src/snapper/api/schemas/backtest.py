@@ -378,6 +378,120 @@ class BacktestResultData(StrictDataSchema[Literal["backtest_result"]]):
     extra_metrics: dict[str, Any] = Field(default_factory=dict)
 
 
+class BacktestCompareBody(StrictBody):
+    """Phase 2c compare-request body (plan §4.3).
+
+    Auto-mode requires ``config_hash``; manual-mode requires both
+    ``run_a_public_id`` and ``run_b_public_id``.
+    """
+
+    mode: Literal["manual", "auto"]
+    run_a_public_id: str | None = None
+    run_b_public_id: str | None = None
+    config_hash: str | None = None
+    anchor_run_public_id: str | None = None
+
+
+class BacktestCompareRequest(
+    PayloadRequest[Literal["backtest_compare_request"], BacktestCompareBody]
+):
+    """Compare-request envelope."""
+
+    type: Literal["backtest_compare_request"] = "backtest_compare_request"
+
+
+class BacktestComparisonData(StrictDataSchema[Literal["backtest_comparison"]]):
+    """Comparison metadata — the immutable side of a compare request."""
+
+    type: Literal["backtest_comparison"] = "backtest_comparison"
+    wallet_public_id: str
+    run_a_public_id: str
+    run_b_public_id: str
+    config_hash: str | None = None
+    pairing_mode: str
+    anchor_run_public_id: str | None = None
+
+
+class MetricDiffRow(StrictBody):
+    """One row in the side-by-side metrics diff."""
+
+    name: str
+    run_a: float | None = None
+    run_b: float | None = None
+    delta: float | None = None
+    pct: float | None = None
+
+
+class EquityOverlayPoint(StrictBody):
+    """Aligned equity sample across both runs (one-sided legs nullable)."""
+
+    point_time: datetime
+    equity_a: float | None = None
+    equity_b: float | None = None
+
+
+class TradeDiffEntry(StrictBody):
+    """Matched trade from either leg (for common entries both legs set)."""
+
+    instrument: str
+    executed_at: datetime
+    side: str
+    quantity: float
+    price: float
+    leg: Literal["a", "b", "common"]
+    pnl_a: float | None = None
+    pnl_b: float | None = None
+    pnl_delta: float | None = None
+
+
+class SignalDiffEntry(StrictBody):
+    """Matched signal from either leg."""
+
+    instrument: str
+    signal_time: datetime
+    signal_type: str
+    leg: Literal["a", "b", "common"]
+
+
+class BacktestComparisonDetailResponseData(StrictDataSchema[Literal["backtest_comparison_detail"]]):
+    """Response payload for GET /api/backtests/compare/{id}."""
+
+    type: Literal["backtest_comparison_detail"] = "backtest_comparison_detail"
+    comparison: BacktestComparisonData
+    run_a: BacktestRunData
+    run_b: BacktestRunData
+    metrics_diff: list[MetricDiffRow]
+    equity_overlay: list[EquityOverlayPoint]
+    trades_diff: list[TradeDiffEntry]
+    signals_diff: list[SignalDiffEntry]
+
+
+class BacktestComparisonResponse(
+    PayloadResponse[Literal["backtest_comparison_response"], BacktestComparisonData]
+):
+    """Envelope for POST /api/backtests/compare."""
+
+    type: Literal["backtest_comparison_response"] = "backtest_comparison_response"
+
+
+class BacktestComparisonDetailResponse(
+    PayloadResponse[
+        Literal["backtest_comparison_detail_response"], BacktestComparisonDetailResponseData
+    ]
+):
+    """Envelope for GET /api/backtests/compare/{comparison_public_id}."""
+
+    type: Literal["backtest_comparison_detail_response"] = "backtest_comparison_detail_response"
+
+
+class BacktestComparisonListResponse(
+    PayloadListResponse[Literal["backtest_comparison_list"], BacktestComparisonData]
+):
+    """Envelope for GET /api/backtests/compare (wallet-scoped list)."""
+
+    type: Literal["backtest_comparison_list"] = "backtest_comparison_list"
+
+
 class BacktestTradeData(StrictDataSchema[Literal["backtest_trade"]]):
     """Backtest trade payload.
 

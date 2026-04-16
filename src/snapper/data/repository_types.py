@@ -1041,6 +1041,44 @@ class BacktestRunRow(TypedDict):
     process_name: str | None
 
 
+class BacktestComparisonInsertRow(TypedDict, total=False):
+    """Insert payload for backtest_comparisons (Phase 2c Step 4).
+
+    Pair is expected to be normalised to (min, max) lexically by the
+    caller before insert, so (A,B) and (B,A) collapse to the same
+    row under the partial unique index.
+    """
+
+    wallet_public_id: str
+    operator_public_id: str | None
+    created_by_user_id: str | None
+    run_a_public_id: str
+    run_b_public_id: str
+    config_hash: str | None
+    pairing_mode: str
+    anchor_run_public_id: str | None
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+
+
+class BacktestComparisonRow(TypedDict):
+    """Read projection for backtest_comparisons queries."""
+
+    public_id: str
+    timestamp: datetime
+    session_id: str
+    sequence_id: int
+    wallet_public_id: str
+    operator_public_id: str | None
+    created_by_user_id: str | None
+    run_a_public_id: str
+    run_b_public_id: str
+    config_hash: str | None
+    pairing_mode: str
+    anchor_run_public_id: str | None
+
+
 class BacktestEventInsertRow(TypedDict):
     """Insert payload for backtest_events."""
 

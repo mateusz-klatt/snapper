@@ -1561,6 +1561,8 @@ export type Paths = {
          *         as_of: Temporal query parameter.
          *         strategy: Optional strategy filter.
          *         run_status: Optional status filter.
+         *         config_hash: Phase 2c pairing-stable SHA-256 filter used by
+         *             the Step 4 auto-pair UI to fetch sibling runs.
          *         limit: Page size.
          *         offset: Page offset.
          *
@@ -1583,6 +1585,58 @@ export type Paths = {
          *         Created backtest run response.
          */
         post: Operations["create_backtest_api_backtests_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/backtests/compare": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Comparisons
+         * @description List recent comparisons for the caller's wallet.
+         */
+        get: Operations["list_comparisons_api_backtests_compare_get"];
+        put?: never;
+        /**
+         * Create Comparison
+         * @description Create (or return idempotent existing) backtest comparison.
+         *
+         *     Plan §4.3 duplicate-submit contract: SELECT on normalised pair
+         *     first; 200 with existing if found. If the INSERT races past that
+         *     SELECT and the unique-index fires an IntegrityError, catch it,
+         *     rollback (R18 sonnet F1 — SQLAlchemy async session requirement),
+         *     re-SELECT, return 200. Route registered BEFORE ``/{run_id}`` so
+         *     ``/compare`` is not captured as ``id="compare"`` (R14 sonnet
+         *     route-order fix).
+         */
+        post: Operations["create_comparison_api_backtests_compare_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/backtests/compare/{comparison_public_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Comparison
+         * @description Fetch a comparison + recomputed diff from current artifact rows.
+         */
+        get: Operations["get_comparison_api_backtests_compare__comparison_public_id__get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2430,6 +2484,153 @@ export type Components = {
              * @description Number of items in payload
              */
             count: number;
+        };
+        /**
+         * BacktestComparisonData
+         * @description Comparison metadata — the immutable side of a compare request.
+         */
+        BacktestComparisonData: {
+            /**
+             * Type
+             * @default backtest_comparison
+             * @constant
+             */
+            type: "backtest_comparison";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Wallet Public Id */
+            wallet_public_id: string;
+            /** Run A Public Id */
+            run_a_public_id: string;
+            /** Run B Public Id */
+            run_b_public_id: string;
+            /** Config Hash */
+            config_hash?: string | null;
+            /** Pairing Mode */
+            pairing_mode: string;
+            /** Anchor Run Public Id */
+            anchor_run_public_id?: string | null;
+        };
+        /**
+         * BacktestComparisonDetailResponse
+         * @description Envelope for GET /api/backtests/compare/{comparison_public_id}.
+         */
+        BacktestComparisonDetailResponse: {
+            /**
+             * Type
+             * @default backtest_comparison_detail_response
+             * @constant
+             */
+            type: "backtest_comparison_detail_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["BacktestComparisonDetailResponseData"];
+        };
+        /**
+         * BacktestComparisonDetailResponseData
+         * @description Response payload for GET /api/backtests/compare/{id}.
+         */
+        BacktestComparisonDetailResponseData: {
+            /**
+             * Type
+             * @default backtest_comparison_detail
+             * @constant
+             */
+            type: "backtest_comparison_detail";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            comparison: Components["schemas"]["BacktestComparisonData"];
+            run_a: Components["schemas"]["BacktestRunData"];
+            run_b: Components["schemas"]["BacktestRunData"];
+            /** Metrics Diff */
+            metrics_diff: Components["schemas"]["MetricDiffRow"][];
+            /** Equity Overlay */
+            equity_overlay: Components["schemas"]["EquityOverlayPoint"][];
+            /** Trades Diff */
+            trades_diff: Components["schemas"]["TradeDiffEntry"][];
+            /** Signals Diff */
+            signals_diff: Components["schemas"]["SignalDiffEntry"][];
+        };
+        /**
+         * BacktestComparisonListResponse
+         * @description Envelope for GET /api/backtests/compare (wallet-scoped list).
+         */
+        BacktestComparisonListResponse: {
+            /**
+             * Type
+             * @default backtest_comparison_list
+             * @constant
+             */
+            type: "backtest_comparison_list";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Payload */
+            payload: Components["schemas"]["BacktestComparisonData"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
+            count: number;
+        };
+        /**
+         * BacktestComparisonResponse
+         * @description Envelope for POST /api/backtests/compare.
+         */
+        BacktestComparisonResponse: {
+            /**
+             * Type
+             * @default backtest_comparison_response
+             * @constant
+             */
+            type: "backtest_comparison_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["BacktestComparisonData"];
         };
         /**
          * BacktestEquityPointInline
@@ -3568,6 +3769,21 @@ export type Components = {
             label?: string | null;
         };
         /**
+         * EquityOverlayPoint
+         * @description Aligned equity sample across both runs (one-sided legs nullable).
+         */
+        EquityOverlayPoint: {
+            /**
+             * Point Time
+             * Format: date-time
+             */
+            point_time: string;
+            /** Equity A */
+            equity_a?: number | null;
+            /** Equity B */
+            equity_b?: number | null;
+        };
+        /**
          * ExchangeListResponse
          * @description Exchange list response wrapper.
          *
@@ -4258,6 +4474,22 @@ export type Components = {
             session_id: string;
             /** Payload */
             payload: string;
+        };
+        /**
+         * MetricDiffRow
+         * @description One row in the side-by-side metrics diff.
+         */
+        MetricDiffRow: {
+            /** Name */
+            name: string;
+            /** Run A */
+            run_a?: number | null;
+            /** Run B */
+            run_b?: number | null;
+            /** Delta */
+            delta?: number | null;
+            /** Pct */
+            pct?: number | null;
         };
         /**
          * OperatorInfo
@@ -5717,6 +5949,26 @@ export type Components = {
             user_public_id?: string | null;
         };
         /**
+         * SignalDiffEntry
+         * @description Matched signal from either leg.
+         */
+        SignalDiffEntry: {
+            /** Instrument */
+            instrument: string;
+            /**
+             * Signal Time
+             * Format: date-time
+             */
+            signal_time: string;
+            /** Signal Type */
+            signal_type: string;
+            /**
+             * Leg
+             * @enum {string}
+             */
+            leg: "a" | "b" | "common";
+        };
+        /**
          * SignalListResponse
          * @description Signal list response wrapper.
          *
@@ -6086,6 +6338,36 @@ export type Components = {
              * @description ZMQ subscription pattern
              */
             pattern?: string | null;
+        };
+        /**
+         * TradeDiffEntry
+         * @description Matched trade from either leg (for common entries both legs set).
+         */
+        TradeDiffEntry: {
+            /** Instrument */
+            instrument: string;
+            /**
+             * Executed At
+             * Format: date-time
+             */
+            executed_at: string;
+            /** Side */
+            side: string;
+            /** Quantity */
+            quantity: number;
+            /** Price */
+            price: number;
+            /**
+             * Leg
+             * @enum {string}
+             */
+            leg: "a" | "b" | "common";
+            /** Pnl A */
+            pnl_a?: number | null;
+            /** Pnl B */
+            pnl_b?: number | null;
+            /** Pnl Delta */
+            pnl_delta?: number | null;
         };
         /**
          * TrailingStopStateData
@@ -7321,6 +7603,51 @@ export type Components = {
             slippage_bps?: number;
             /** Commission Bps */
             commission_bps?: number;
+        };
+        /**
+         * BacktestCompareRequest
+         * @description Compare-request envelope.
+         */
+        BacktestCompareRequest: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "backtest_compare_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["BacktestCompareBody"];
+        };
+        /**
+         * BacktestCompareBody
+         * @description Phase 2c compare-request body (plan §4.3).
+         *
+         *     Auto-mode requires ``config_hash``; manual-mode requires both
+         *     ``run_a_public_id`` and ``run_b_public_id``.
+         */
+        BacktestCompareBody: {
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "manual" | "auto";
+            /** Run A Public Id */
+            run_a_public_id?: string | null;
+            /** Run B Public Id */
+            run_b_public_id?: string | null;
+            /** Config Hash */
+            config_hash?: string | null;
+            /** Anchor Run Public Id */
+            anchor_run_public_id?: string | null;
         };
         /**
          * BacktestCancelCommand
@@ -9531,6 +9858,98 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["BacktestRunResponse"];
+                };
+            };
+        };
+    };
+    list_comparisons_api_backtests_compare_get: {
+        parameters: {
+            query?: {
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["BacktestComparisonListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_comparison_api_backtests_compare_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["BacktestCompareRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["BacktestComparisonResponse"];
+                };
+            };
+        };
+    };
+    get_comparison_api_backtests_compare__comparison_public_id__get: {
+        parameters: {
+            query?: {
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
+            };
+            header?: never;
+            path: {
+                comparison_public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["BacktestComparisonDetailResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };

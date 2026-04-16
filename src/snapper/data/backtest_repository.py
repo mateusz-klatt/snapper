@@ -15,6 +15,7 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from snapper.data.models import BacktestComparison
 from snapper.data.models import BacktestEquityPoint
 from snapper.data.models import BacktestEvent
 from snapper.data.models import BacktestResult
@@ -22,6 +23,8 @@ from snapper.data.models import BacktestRun
 from snapper.data.models import BacktestSignal
 from snapper.data.models import BacktestTrade
 from snapper.data.repository import where_active
+from snapper.data.repository_types import BacktestComparisonInsertRow
+from snapper.data.repository_types import BacktestComparisonRow
 from snapper.data.repository_types import BacktestEquityPointInsertRow
 from snapper.data.repository_types import BacktestEquityPointRow
 from snapper.data.repository_types import BacktestEventInsertRow
@@ -794,3 +797,130 @@ class BacktestRepository:
             if result is not None:
                 count += 1
         return count
+
+    async def create_comparison(
+        self,
+        row: BacktestComparisonInsertRow,
+        bus_time: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> tuple[int, str]:
+        """Insert a new backtest_comparisons row (Phase 2c Step 4).
+
+        Caller is responsible for pair normalisation ((min, max) by
+        lexical public_id) before calling.
+        """
+        async with self.session() as s:
+            comparison = BacktestComparison(
+                wallet_public_id=row["wallet_public_id"],
+                operator_public_id=row.get("operator_public_id"),
+                created_by_user_id=row.get("created_by_user_id"),
+                run_a_public_id=row["run_a_public_id"],
+                run_b_public_id=row["run_b_public_id"],
+                config_hash=row.get("config_hash"),
+                pairing_mode=row["pairing_mode"],
+                anchor_run_public_id=row.get("anchor_run_public_id"),
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=bus_time,
+            )
+            s.add(comparison)
+            await s.commit()
+            await s.refresh(comparison)
+            return comparison.id, comparison.public_id
+
+    async def get_comparison_by_pair(
+        self,
+        run_a_public_id: str,
+        run_b_public_id: str,
+        wallet_public_id: str,
+        as_of: datetime,
+    ) -> BacktestComparisonRow | None:
+        """Return the active comparison row for a normalised (A, B) pair.
+
+        Used by the duplicate-submit idempotency check — returns the
+        existing row so the handler can respond with 200 + existing
+        public_id instead of raising a unique-index violation.
+        """
+        async with self.session() as s:
+            row = (
+                (
+                    await s.execute(
+                        select(BacktestComparison).where(
+                            BacktestComparison.wallet_public_id == wallet_public_id,
+                            BacktestComparison.run_a_public_id == run_a_public_id,
+                            BacktestComparison.run_b_public_id == run_b_public_id,
+                            *where_active(BacktestComparison, as_of),
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if row is None:
+                return None
+            return _comparison_to_dict(row)
+
+    async def get_comparison(self, public_id: str, as_of: datetime) -> BacktestComparisonRow | None:
+        """Return a comparison by public_id at bus time."""
+        async with self.session() as s:
+            row = (
+                (
+                    await s.execute(
+                        select(BacktestComparison).where(
+                            BacktestComparison.public_id == public_id,
+                            *where_active(BacktestComparison, as_of),
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if row is None:
+                return None
+            return _comparison_to_dict(row)
+
+    async def list_comparisons(
+        self,
+        as_of: datetime,
+        wallet_public_id: str,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[BacktestComparisonRow]:
+        """List recent comparisons for a wallet, newest first."""
+        async with self.session() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(BacktestComparison)
+                        .where(
+                            BacktestComparison.wallet_public_id == wallet_public_id,
+                            *where_active(BacktestComparison, as_of),
+                        )
+                        .order_by(BacktestComparison.timestamp.desc())
+                        .limit(limit)
+                        .offset(offset)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return [_comparison_to_dict(r) for r in rows]
+
+
+def _comparison_to_dict(row: BacktestComparison) -> BacktestComparisonRow:
+    """Project a BacktestComparison ORM row into the TypedDict shape."""
+    return BacktestComparisonRow(
+        public_id=row.public_id,
+        timestamp=row.timestamp,
+        session_id=row.session_id,
+        sequence_id=row.sequence_id,
+        wallet_public_id=row.wallet_public_id,
+        operator_public_id=row.operator_public_id,
+        created_by_user_id=row.created_by_user_id,
+        run_a_public_id=row.run_a_public_id,
+        run_b_public_id=row.run_b_public_id,
+        config_hash=row.config_hash,
+        pairing_mode=row.pairing_mode,
+        anchor_run_public_id=row.anchor_run_public_id,
+    )

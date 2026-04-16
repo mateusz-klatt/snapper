@@ -654,6 +654,18 @@ export interface RemoveSetting {
 }
 
 /**
+ * BacktestCompare request entity.
+ * Use with backtestCompareToAPI() transform.
+ */
+export interface BacktestCompare {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  payload: Record<string, unknown>
+}
+
+/**
  * ProcessCreate request entity.
  * Use with processCreateToAPI() transform.
  */

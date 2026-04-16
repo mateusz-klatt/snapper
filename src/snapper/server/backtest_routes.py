@@ -19,8 +19,15 @@ from fastapi import Query
 from fastapi import Request
 from fastapi import status
 from loguru import logger
+from sqlalchemy.exc import IntegrityError as SqlIntegrityError
 
 from snapper.api.schemas.backtest import BacktestCancelCommand
+from snapper.api.schemas.backtest import BacktestCompareRequest
+from snapper.api.schemas.backtest import BacktestComparisonData
+from snapper.api.schemas.backtest import BacktestComparisonDetailResponse
+from snapper.api.schemas.backtest import BacktestComparisonDetailResponseData
+from snapper.api.schemas.backtest import BacktestComparisonListResponse
+from snapper.api.schemas.backtest import BacktestComparisonResponse
 from snapper.api.schemas.backtest import BacktestCreateBody
 from snapper.api.schemas.backtest import BacktestCreateCommand
 from snapper.api.schemas.backtest import BacktestEquityPointInline
@@ -37,6 +44,14 @@ from snapper.api.schemas.backtest import BacktestSignalData
 from snapper.api.schemas.backtest import BacktestSignalListResponse
 from snapper.api.schemas.backtest import BacktestTradeData
 from snapper.api.schemas.backtest import BacktestTradeListResponse
+from snapper.api.schemas.backtest import EquityOverlayPoint
+from snapper.api.schemas.backtest import MetricDiffRow
+from snapper.api.schemas.backtest import SignalDiffEntry
+from snapper.api.schemas.backtest import TradeDiffEntry
+from snapper.application.backtest.compare import compute_equity_overlay
+from snapper.application.backtest.compare import compute_metrics_diff
+from snapper.application.backtest.compare import compute_signals_diff
+from snapper.application.backtest.compare import compute_trades_diff
 from snapper.application.backtest.config import BacktestConfig
 from snapper.application.backtest.config import BacktestExecutionMode
 from snapper.application.backtest.config import BacktestFillModel
@@ -54,6 +69,7 @@ from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.data.backtest_repository import BacktestRepository
 from snapper.data.repository import Repository
+from snapper.data.repository_types import BacktestComparisonRow
 from snapper.data.repository_types import BacktestResultRow
 from snapper.data.repository_types import BacktestRunRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -427,6 +443,298 @@ async def list_backtests(
         sequence_id=seq,
         payload=items,
         count=len(items),
+    )
+
+
+_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
+def _normalise_pair(a: str, b: str) -> tuple[str, str]:
+    """Lexical (min, max) normalisation so (A,B) == (B,A)."""
+    return (a, b) if a < b else (b, a)
+
+
+async def _resolve_auto_pair(
+    bt_repo: BacktestRepository,
+    wallet_id: str,
+    config_hash: str,
+    anchor: str | None,
+    ts: datetime,
+) -> tuple[str, str]:
+    """Resolve the (run_a, run_b) pair for auto-mode (plan §4.3).
+
+    With an anchor: validate anchor belongs to caller's wallet, is
+    terminal, has the requested hash. Pair it with the most-recent
+    OTHER run matching the hash. Without an anchor: pair the
+    two most-recent terminal runs matching the hash.
+    """
+    candidates = await bt_repo.list_runs(
+        as_of=ts,
+        wallet_public_id=wallet_id,
+        config_hash=config_hash,
+        limit=50,
+    )
+    terminal = [r for r in candidates if r["status"] in _TERMINAL_STATUSES]
+    if anchor is not None:
+        anchor_row = next((r for r in candidates if r["public_id"] == anchor), None)
+        if anchor_row is None:
+            raise HTTPException(status_code=404, detail="anchor run not found")
+        if anchor_row["status"] not in _TERMINAL_STATUSES:
+            raise HTTPException(status_code=409, detail="anchor run is not terminal")
+        if anchor_row.get("config_hash") is None:
+            raise HTTPException(status_code=409, detail="anchor run has no config_hash")
+        if anchor_row.get("config_hash") != config_hash:
+            raise HTTPException(status_code=422, detail="anchor run config_hash mismatches request")
+        others = [r for r in terminal if r["public_id"] != anchor]
+        if not others:
+            raise HTTPException(status_code=409, detail="anchor has no counterpart")
+        return anchor_row["public_id"], others[0]["public_id"]
+    if len(terminal) < 2:
+        raise HTTPException(
+            status_code=409, detail=f"not enough runs with config_hash={config_hash}"
+        )
+    return terminal[0]["public_id"], terminal[1]["public_id"]
+
+
+async def _resolve_manual_pair(
+    bt_repo: BacktestRepository,
+    wallet_id: str,
+    run_a_id: str,
+    run_b_id: str,
+    ts: datetime,
+) -> tuple[str, str, str | None]:
+    """Validate both legs of a manual pair and return normalised ids + hash.
+
+    Returns (a_id, b_id, config_hash) where config_hash is populated
+    only when both legs share the same non-null hash (so manual
+    cross-config pairs persist with ``config_hash=NULL`` and stay
+    reachable only by run-id).
+    """
+    if run_a_id == run_b_id:
+        raise HTTPException(status_code=422, detail="cannot compare a run with itself")
+    a = await bt_repo.get_run(run_a_id, as_of=ts)
+    b = await bt_repo.get_run(run_b_id, as_of=ts)
+    if (
+        a is None
+        or b is None
+        or a["wallet_public_id"] != wallet_id
+        or b["wallet_public_id"] != wallet_id
+    ):
+        raise HTTPException(status_code=404, detail="run not found")
+    if a["status"] not in _TERMINAL_STATUSES or b["status"] not in _TERMINAL_STATUSES:
+        raise HTTPException(status_code=409, detail="both runs must be terminal")
+    hash_a = a.get("config_hash")
+    hash_b = b.get("config_hash")
+    shared_hash = hash_a if hash_a is not None and hash_a == hash_b else None
+    return a["public_id"], b["public_id"], shared_hash
+
+
+def _to_comparison_data(row: BacktestComparisonRow) -> BacktestComparisonData:
+    """Project a BacktestComparisonRow into the API schema."""
+    return BacktestComparisonData(
+        type="backtest_comparison",
+        public_id=row["public_id"],
+        timestamp=row["timestamp"],
+        session_id=row["session_id"],
+        sequence_id=row["sequence_id"],
+        wallet_public_id=row["wallet_public_id"],
+        run_a_public_id=row["run_a_public_id"],
+        run_b_public_id=row["run_b_public_id"],
+        config_hash=row.get("config_hash"),
+        pairing_mode=row["pairing_mode"],
+        anchor_run_public_id=row.get("anchor_run_public_id"),
+    )
+
+
+@router.post(
+    "/compare",
+    openapi_extra=openapi_schema(BacktestCompareRequest),
+    dependencies=[Depends(validate_csrf_token)],
+)
+async def create_comparison(
+    request: Request,
+    command: Annotated[BacktestCompareRequest, Depends(json_body(BacktestCompareRequest))],
+    principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_BACKTESTS))],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
+) -> BacktestComparisonResponse:
+    """Create (or return idempotent existing) backtest comparison.
+
+    Plan §4.3 duplicate-submit contract: SELECT on normalised pair
+    first; 200 with existing if found. If the INSERT races past that
+    SELECT and the unique-index fires an IntegrityError, catch it,
+    rollback (R18 sonnet F1 — SQLAlchemy async session requirement),
+    re-SELECT, return 200. Route registered BEFORE ``/{run_id}`` so
+    ``/compare`` is not captured as ``id="compare"`` (R14 sonnet
+    route-order fix).
+    """
+    bt_repo = _bt_repo(repo)
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    now = datetime.now(UTC)
+    sid = tracker.session_id
+    seq = tracker.next_sequence(_REST_STREAM)
+    body = command.payload
+    wallet_id = principal.active_wallet_public_id
+    if wallet_id is None:
+        raise HTTPException(status_code=400, detail=_NO_ACTIVE_WALLET)
+    ts = datetime.now(UTC)
+    if body.mode == "auto":
+        if body.config_hash is None:
+            raise HTTPException(status_code=422, detail="config_hash required for mode=auto")
+        raw_a, raw_b = await _resolve_auto_pair(
+            bt_repo, wallet_id, body.config_hash, body.anchor_run_public_id, ts
+        )
+        pair_hash: str | None = body.config_hash
+    else:
+        if body.run_a_public_id is None or body.run_b_public_id is None:
+            raise HTTPException(
+                status_code=422,
+                detail="run_a_public_id and run_b_public_id required for mode=manual",
+            )
+        raw_a, raw_b, pair_hash = await _resolve_manual_pair(
+            bt_repo, wallet_id, body.run_a_public_id, body.run_b_public_id, ts
+        )
+    norm_a, norm_b = _normalise_pair(raw_a, raw_b)
+    existing = await bt_repo.get_comparison_by_pair(norm_a, norm_b, wallet_id, ts)
+    if existing is not None:
+        return BacktestComparisonResponse(
+            type="backtest_comparison_response",
+            public_id=str(uuid7()),
+            timestamp=now,
+            session_id=sid,
+            sequence_id=seq,
+            payload=_to_comparison_data(existing),
+        )
+    try:
+        _id, public_id = await bt_repo.create_comparison(
+            row={
+                "wallet_public_id": wallet_id,
+                "operator_public_id": principal.primary_operator_public_id or None,
+                "created_by_user_id": principal.username,
+                "run_a_public_id": norm_a,
+                "run_b_public_id": norm_b,
+                "config_hash": pair_hash,
+                "pairing_mode": body.mode,
+                "anchor_run_public_id": body.anchor_run_public_id,
+                "session_id": sid,
+                "sequence_id": seq,
+                "timestamp": now,
+            },
+            bus_time=now,
+            session_id=sid,
+            sequence_id=seq,
+        )
+    except SqlIntegrityError:
+        retry = await bt_repo.get_comparison_by_pair(norm_a, norm_b, wallet_id, ts)
+        if retry is None:
+            raise HTTPException(status_code=500, detail="comparison race recovery failed") from None
+        return BacktestComparisonResponse(
+            type="backtest_comparison_response",
+            public_id=str(uuid7()),
+            timestamp=now,
+            session_id=sid,
+            sequence_id=seq,
+            payload=_to_comparison_data(retry),
+        )
+    created = await bt_repo.get_comparison(public_id, as_of=ts)
+    assert created is not None
+    return BacktestComparisonResponse(
+        type="backtest_comparison_response",
+        public_id=str(uuid7()),
+        timestamp=now,
+        session_id=sid,
+        sequence_id=seq,
+        payload=_to_comparison_data(created),
+    )
+
+
+@router.get("/compare")
+async def list_comparisons(
+    request: Request,
+    principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_BACKTESTS))],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
+    as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> BacktestComparisonListResponse:
+    """List recent comparisons for the caller's wallet."""
+    bt_repo = _bt_repo(repo)
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    sid = tracker.session_id
+    seq = tracker.next_sequence(_REST_STREAM)
+    ts = _resolve_as_of(as_of)
+    wallet_id = principal.active_wallet_public_id
+    if wallet_id is None:
+        raise HTTPException(status_code=400, detail=_NO_ACTIVE_WALLET)
+    rows = await bt_repo.list_comparisons(
+        as_of=ts, wallet_public_id=wallet_id, limit=limit, offset=offset
+    )
+    items = [_to_comparison_data(r) for r in rows]
+    return BacktestComparisonListResponse(
+        type="backtest_comparison_list",
+        public_id=str(uuid7()),
+        timestamp=datetime.now(UTC),
+        session_id=sid,
+        sequence_id=seq,
+        payload=items,
+        count=len(items),
+    )
+
+
+@router.get("/compare/{comparison_public_id}")
+async def get_comparison(
+    comparison_public_id: str,
+    request: Request,
+    principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_BACKTESTS))],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
+    as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
+) -> BacktestComparisonDetailResponse:
+    """Fetch a comparison + recomputed diff from current artifact rows."""
+    bt_repo = _bt_repo(repo)
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    sid = tracker.session_id
+    seq = tracker.next_sequence(_REST_STREAM)
+    ts = _resolve_as_of(as_of)
+    wallet_id = principal.active_wallet_public_id
+    if wallet_id is None:
+        raise HTTPException(status_code=400, detail=_NO_ACTIVE_WALLET)
+    comparison = await bt_repo.get_comparison(comparison_public_id, as_of=ts)
+    if comparison is None or comparison["wallet_public_id"] != wallet_id:
+        raise HTTPException(status_code=404, detail="Comparison not found")
+    run_a = await bt_repo.get_run(comparison["run_a_public_id"], as_of=ts)
+    run_b = await bt_repo.get_run(comparison["run_b_public_id"], as_of=ts)
+    if run_a is None or run_b is None:
+        raise HTTPException(status_code=404, detail="Underlying run not found")
+    result_a = await bt_repo.get_result(comparison["run_a_public_id"], as_of=ts)
+    result_b = await bt_repo.get_result(comparison["run_b_public_id"], as_of=ts)
+    equity_a = await bt_repo.get_equity_points(comparison["run_a_public_id"], as_of=ts)
+    equity_b = await bt_repo.get_equity_points(comparison["run_b_public_id"], as_of=ts)
+    trades_a = await bt_repo.get_trades(comparison["run_a_public_id"], as_of=ts)
+    trades_b = await bt_repo.get_trades(comparison["run_b_public_id"], as_of=ts)
+    signals_a = await bt_repo.get_signals(comparison["run_a_public_id"], as_of=ts)
+    signals_b = await bt_repo.get_signals(comparison["run_b_public_id"], as_of=ts)
+    detail = BacktestComparisonDetailResponseData(
+        type="backtest_comparison_detail",
+        public_id=str(uuid7()),
+        timestamp=datetime.now(UTC),
+        session_id=sid,
+        sequence_id=seq,
+        comparison=_to_comparison_data(comparison),
+        run_a=_run_to_data(run_a, sid, seq),
+        run_b=_run_to_data(run_b, sid, seq),
+        metrics_diff=[MetricDiffRow(**row) for row in compute_metrics_diff(result_a, result_b)],
+        equity_overlay=[
+            EquityOverlayPoint(**row) for row in compute_equity_overlay(equity_a, equity_b)
+        ],
+        trades_diff=[TradeDiffEntry(**row) for row in compute_trades_diff(trades_a, trades_b)],
+        signals_diff=[SignalDiffEntry(**row) for row in compute_signals_diff(signals_a, signals_b)],
+    )
+    return BacktestComparisonDetailResponse(
+        type="backtest_comparison_detail_response",
+        public_id=str(uuid7()),
+        timestamp=datetime.now(UTC),
+        session_id=sid,
+        sequence_id=seq,
+        payload=detail,
     )
 
 

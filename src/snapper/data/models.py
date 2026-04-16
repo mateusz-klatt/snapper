@@ -2038,3 +2038,38 @@ class BacktestEquityPoint(TemporalMixin, Base):
     cash: Mapped[float] = mapped_column(Float)
     position_value: Mapped[float] = mapped_column(Float, default=0.0)
     drawdown: Mapped[float] = mapped_column(Float, default=0.0)
+
+
+class BacktestComparison(TemporalMixin, Base):
+    """Persisted comparison request pairing two terminal backtest runs.
+
+    The diff payload is recomputed on GET from current artifact rows,
+    so this row stores only the request metadata: normalised (A, B)
+    pair + pairing_mode + optional anchor. Pair is normalised to
+    (min, max) by lexical public_id so (A,B) and (B,A) collapse.
+    """
+
+    __tablename__ = "backtest_comparisons"
+    __table_args__ = (
+        Index(
+            "ix_bc_wallet_hash_time",
+            "wallet_public_id",
+            "config_hash",
+            "timestamp",
+        ),
+        Index(
+            "ix_bc_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+    )
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
+    operator_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    created_by_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    run_a_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    run_b_public_id: Mapped[str] = mapped_column(UUIDColumn())
+    config_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    pairing_mode: Mapped[str] = mapped_column(String(16))
+    anchor_run_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)

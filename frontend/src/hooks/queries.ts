@@ -725,10 +725,7 @@ export const useBacktests = (strategy?: string, status?: string) => {
  * Disabled (enabled: false) when `configHash` is `null` — pre-0006
  * runs have no hash and auto-pair is not applicable.
  */
-export const useBacktestRunsByConfigHash = (
-  configHash: string | null,
-  limit: number = 20
-) => {
+export const useBacktestRunsByConfigHash = (configHash: string | null, limit: number = 20) => {
   return useQuery({
     queryKey: ['backtests', 'by-hash', configHash, limit],
     queryFn: () => apiClient.getBacktests(limit, 0, undefined, undefined, configHash),

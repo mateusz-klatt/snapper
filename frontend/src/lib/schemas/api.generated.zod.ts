@@ -5,6 +5,22 @@
 
 import { z } from 'zod'
 
+export const BacktestComparisonDataSchema = z
+  .object({
+    type: z.literal('backtest_comparison'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    wallet_public_id: z.string(),
+    run_a_public_id: z.string(),
+    run_b_public_id: z.string(),
+    config_hash: z.string().nullable().optional(),
+    pairing_mode: z.string(),
+    anchor_run_public_id: z.string().nullable().optional(),
+  })
+  .strict()
+
 export const BacktestEquityPointInlineSchema = z
   .object({
     point_time: z.iso.datetime(),
@@ -124,6 +140,14 @@ export const CredentialSummarySchema = z
     exchange: z.string(),
     credential_type: z.string(),
     label: z.string().nullable().optional(),
+  })
+  .strict()
+
+export const EquityOverlayPointSchema = z
+  .object({
+    point_time: z.iso.datetime(),
+    equity_a: z.number().nullable().optional(),
+    equity_b: z.number().nullable().optional(),
   })
   .strict()
 
@@ -248,6 +272,16 @@ export const MessageResponseSchema = z
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     payload: z.string(),
+  })
+  .strict()
+
+export const MetricDiffRowSchema = z
+  .object({
+    name: z.string(),
+    run_a: z.number().nullable().optional(),
+    run_b: z.number().nullable().optional(),
+    delta: z.number().nullable().optional(),
+    pct: z.number().nullable().optional(),
   })
   .strict()
 
@@ -475,6 +509,15 @@ export const SignalDataSchema = z
   })
   .strict()
 
+export const SignalDiffEntrySchema = z
+  .object({
+    instrument: z.string(),
+    signal_time: z.iso.datetime(),
+    signal_type: z.string(),
+    leg: z.enum(['a', 'b', 'common']),
+  })
+  .strict()
+
 export const StrategyProcessSchema = z
   .object({
     type: z.literal('strategy_process'),
@@ -509,6 +552,20 @@ export const TopicMetricSnapshotSchema = z
     last_message_ts: z.number(),
     throttle_ms: z.number().int().nullable().optional(),
     pattern: z.string().nullable().optional(),
+  })
+  .strict()
+
+export const TradeDiffEntrySchema = z
+  .object({
+    instrument: z.string(),
+    executed_at: z.iso.datetime(),
+    side: z.string(),
+    quantity: z.number(),
+    price: z.number(),
+    leg: z.enum(['a', 'b', 'common']),
+    pnl_a: z.number().nullable().optional(),
+    pnl_b: z.number().nullable().optional(),
+    pnl_delta: z.number().nullable().optional(),
   })
   .strict()
 
@@ -663,6 +720,16 @@ export const SettingUpdateBodySchema = z
 
 export const RemoveSettingBodySchema = z.object({}).strict()
 
+export const BacktestCompareBodySchema = z
+  .object({
+    mode: z.enum(['manual', 'auto']),
+    run_a_public_id: z.string().nullable().optional(),
+    run_b_public_id: z.string().nullable().optional(),
+    config_hash: z.string().nullable().optional(),
+    anchor_run_public_id: z.string().nullable().optional(),
+  })
+  .strict()
+
 export const BacktestCancelBodySchema = z
   .object({
     reason: z.string().optional(),
@@ -766,6 +833,29 @@ export const CreateWalletBodySchema = z
     label: z.string().min(1).max(128),
     description: z.string().max(512).nullable().optional(),
     is_paper: z.boolean().optional(),
+  })
+  .strict()
+
+export const BacktestComparisonListResponseSchema = z
+  .object({
+    type: z.literal('backtest_comparison_list'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: z.array(BacktestComparisonDataSchema),
+    count: z.number().int(),
+  })
+  .strict()
+
+export const BacktestComparisonResponseSchema = z
+  .object({
+    type: z.literal('backtest_comparison_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: BacktestComparisonDataSchema,
   })
   .strict()
 
@@ -1314,6 +1404,17 @@ export const RemoveSettingRequestSchema = z
   })
   .strict()
 
+export const BacktestCompareRequestSchema = z
+  .object({
+    type: z.literal('backtest_compare_request').optional(),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: BacktestCompareBodySchema,
+  })
+  .strict()
+
 export const BacktestCancelCommandSchema = z
   .object({
     type: z.literal('backtest_cancel_command').optional(),
@@ -1847,6 +1948,23 @@ export const BacktestRunDetailDataSchema = z
   })
   .strict()
 
+export const BacktestComparisonDetailResponseDataSchema = z
+  .object({
+    type: z.literal('backtest_comparison_detail'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    comparison: BacktestComparisonDataSchema,
+    run_a: BacktestRunDataSchema,
+    run_b: BacktestRunDataSchema,
+    metrics_diff: z.array(MetricDiffRowSchema),
+    equity_overlay: z.array(EquityOverlayPointSchema),
+    trades_diff: z.array(TradeDiffEntrySchema),
+    signals_diff: z.array(SignalDiffEntrySchema),
+  })
+  .strict()
+
 export const BacktestRunListResponseSchema = z
   .object({
     type: z.literal('backtest_run_list'),
@@ -1962,6 +2080,17 @@ export const BacktestRunDetailResponseSchema = z
   })
   .strict()
 
+export const BacktestComparisonDetailResponseSchema = z
+  .object({
+    type: z.literal('backtest_comparison_detail_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: BacktestComparisonDetailResponseDataSchema,
+  })
+  .strict()
+
 export const SystemStatusResponseSchema = z
   .object({
     type: z.literal('system_status_response'),
@@ -1974,6 +2103,7 @@ export const SystemStatusResponseSchema = z
   .strict()
 
 // Type exports
+export type BacktestComparisonData = z.infer<typeof BacktestComparisonDataSchema>
 export type BacktestEquityPointInline = z.infer<typeof BacktestEquityPointInlineSchema>
 export type BacktestEventData = z.infer<typeof BacktestEventDataSchema>
 export type BacktestSignalData = z.infer<typeof BacktestSignalDataSchema>
@@ -1982,6 +2112,7 @@ export type ConnectionStats = z.infer<typeof ConnectionStatsSchema>
 export type ContinuousCandleData = z.infer<typeof ContinuousCandleDataSchema>
 export type ContractData = z.infer<typeof ContractDataSchema>
 export type CredentialSummary = z.infer<typeof CredentialSummarySchema>
+export type EquityOverlayPoint = z.infer<typeof EquityOverlayPointSchema>
 export type ExchangeListResponse = z.infer<typeof ExchangeListResponseSchema>
 export type ExecutionData = z.infer<typeof ExecutionDataSchema>
 export type ExecutionPlanData = z.infer<typeof ExecutionPlanDataSchema>
@@ -1991,6 +2122,7 @@ export type HealthTopics = z.infer<typeof HealthTopicsSchema>
 export type InstrumentListResponse = z.infer<typeof InstrumentListResponseSchema>
 export type JsonPrimitive = z.infer<typeof JsonPrimitiveSchema>
 export type MessageResponse = z.infer<typeof MessageResponseSchema>
+export type MetricDiffRow = z.infer<typeof MetricDiffRowSchema>
 export type OperatorInfo = z.infer<typeof OperatorInfoSchema>
 export type OrderData = z.infer<typeof OrderDataSchema>
 export type OrphanSweepResultData = z.infer<typeof OrphanSweepResultDataSchema>
@@ -2007,9 +2139,11 @@ export type ScopeGrantInfo = z.infer<typeof ScopeGrantInfoSchema>
 export type SettingCategoriesResponse = z.infer<typeof SettingCategoriesResponseSchema>
 export type SettingRead = z.infer<typeof SettingReadSchema>
 export type SignalData = z.infer<typeof SignalDataSchema>
+export type SignalDiffEntry = z.infer<typeof SignalDiffEntrySchema>
 export type StrategyProcess = z.infer<typeof StrategyProcessSchema>
 export type SubscriptionsStats = z.infer<typeof SubscriptionsStatsSchema>
 export type TopicMetricSnapshot = z.infer<typeof TopicMetricSnapshotSchema>
+export type TradeDiffEntry = z.infer<typeof TradeDiffEntrySchema>
 export type TrailingStopStateData = z.infer<typeof TrailingStopStateDataSchema>
 export type UnderlyingAssetData = z.infer<typeof UnderlyingAssetDataSchema>
 export type UnderlyingInstrumentData = z.infer<typeof UnderlyingInstrumentDataSchema>
@@ -2028,6 +2162,7 @@ export type ChangePasswordBody = z.infer<typeof ChangePasswordBodySchema>
 export type AdminResetPasswordBody = z.infer<typeof AdminResetPasswordBodySchema>
 export type SettingUpdateBody = z.infer<typeof SettingUpdateBodySchema>
 export type RemoveSettingBody = z.infer<typeof RemoveSettingBodySchema>
+export type BacktestCompareBody = z.infer<typeof BacktestCompareBodySchema>
 export type BacktestCancelBody = z.infer<typeof BacktestCancelBodySchema>
 export type CreateCredentialBody = z.infer<typeof CreateCredentialBodySchema>
 export type RotateCredentialBody = z.infer<typeof RotateCredentialBodySchema>
@@ -2040,6 +2175,8 @@ export type HandoverScopeGrantBody = z.infer<typeof HandoverScopeGrantBodySchema
 export type TrailingStopCreateBody = z.infer<typeof TrailingStopCreateBodySchema>
 export type TrailingStopCancelBody = z.infer<typeof TrailingStopCancelBodySchema>
 export type CreateWalletBody = z.infer<typeof CreateWalletBodySchema>
+export type BacktestComparisonListResponse = z.infer<typeof BacktestComparisonListResponseSchema>
+export type BacktestComparisonResponse = z.infer<typeof BacktestComparisonResponseSchema>
 export type BacktestEquityPointListResponse = z.infer<typeof BacktestEquityPointListResponseSchema>
 export type BacktestEventListResponse = z.infer<typeof BacktestEventListResponseSchema>
 export type BacktestSignalListResponse = z.infer<typeof BacktestSignalListResponseSchema>
@@ -2090,6 +2227,7 @@ export type ChangePasswordRequest = z.infer<typeof ChangePasswordRequestSchema>
 export type AdminResetPasswordRequest = z.infer<typeof AdminResetPasswordRequestSchema>
 export type SettingUpdate = z.infer<typeof SettingUpdateSchema>
 export type RemoveSettingRequest = z.infer<typeof RemoveSettingRequestSchema>
+export type BacktestCompareRequest = z.infer<typeof BacktestCompareRequestSchema>
 export type BacktestCancelCommand = z.infer<typeof BacktestCancelCommandSchema>
 export type CreateCredentialCommand = z.infer<typeof CreateCredentialCommandSchema>
 export type RotateCredentialCommand = z.infer<typeof RotateCredentialCommandSchema>
@@ -2130,6 +2268,9 @@ export type LoginResponse = z.infer<typeof LoginResponseSchema>
 export type RefreshResponse = z.infer<typeof RefreshResponseSchema>
 export type AvailableProcessesResponse = z.infer<typeof AvailableProcessesResponseSchema>
 export type BacktestRunDetailData = z.infer<typeof BacktestRunDetailDataSchema>
+export type BacktestComparisonDetailResponseData = z.infer<
+  typeof BacktestComparisonDetailResponseDataSchema
+>
 export type BacktestRunListResponse = z.infer<typeof BacktestRunListResponseSchema>
 export type BacktestRunResponse = z.infer<typeof BacktestRunResponseSchema>
 export type ConfiguredProcessesResponse = z.infer<typeof ConfiguredProcessesResponseSchema>
@@ -2140,4 +2281,7 @@ export type BacktestCreateCommand = z.infer<typeof BacktestCreateCommandSchema>
 export type ProcessCreateRequest = z.infer<typeof ProcessCreateRequestSchema>
 export type ProcessStartRequest = z.infer<typeof ProcessStartRequestSchema>
 export type BacktestRunDetailResponse = z.infer<typeof BacktestRunDetailResponseSchema>
+export type BacktestComparisonDetailResponse = z.infer<
+  typeof BacktestComparisonDetailResponseSchema
+>
 export type SystemStatusResponse = z.infer<typeof SystemStatusResponseSchema>
