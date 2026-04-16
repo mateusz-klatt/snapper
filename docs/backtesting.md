@@ -94,3 +94,114 @@ The replay path adds a few primitives the live system does not need:
   write (`cancelled`, `failed`, fail-event insert) in `asyncio.shield`
   so a second cancel arriving mid-write does not interrupt the write
   coroutine.
+
+## Phase 2c — advanced metrics, live progress, comparison
+
+Phase 2c ships three interlocking surfaces:
+
+### Advanced metrics (migration 0005)
+
+Eight additional metric columns on `backtest_results` — five
+promoted from the `extra_metrics` JSON blob
+(`sortino_ratio`, `cagr`, `calmar_ratio`, `expectancy`,
+`avg_trade_pnl`) plus three net-new metrics computed in
+`snapper.application.backtest.metrics`:
+
+- **`max_drawdown_duration_seconds`** — longest peak-to-recovery
+  window; unrecovered runs use the final suffix from last peak to
+  end-of-curve. Degenerate input (fewer than two points, flat
+  curve, strictly monotone) returns `None` + a
+  `metric_warning` event.
+- **`exposure_ratio`** — fraction of total run duration during
+  which the portfolio held a non-zero position; leading-edge
+  interval attribution. Zero-trade runs with non-zero duration
+  return `0.0` (not degenerate).
+- **`turnover_ratio`** — total notional traded divided by mean
+  equity. Zero-trade returns `0.0`; non-positive mean equity
+  returns `None` + warning.
+
+Read-side fallback at `GET /api/backtests/{id}` collapses pre-0005
+`extra_metrics` JSON into the typed slots using explicit `is not
+None` coalescing (never Python truthiness — preserves legitimate
+`0.0` values). The response strips the five promoted names from the
+emitted `extra_metrics` so mixed-vintage rows never surface the
+same metric twice.
+
+### Live progress (4-segment WS topic family)
+
+Runner emits `BacktestProgressData` events on
+`backtest.{wallet_public_id}.{run_public_id}.{event}` where
+`event ∈ {started, progress, milestone, completed, failed,
+cancelled}`. The existing ZMQ→WS bridge forwards the envelope to
+every subscribed client.
+
+- `BacktestProgressEvent` is the canonical Literal source of truth
+  in `snapper.messaging.schemas.data`; topic validator, emitter,
+  and frontend handlers all derive from it.
+- `BacktestProgressEmitter` throttles `progress` at 250 ms,
+  emits `milestone` events exactly once per 25/50/75 pct bucket
+  (bypassing the throttle so milestones + progress at the same
+  step do not collide), and fires `started` / terminal events
+  once. Degrades gracefully when `total_candles=None` by disabling
+  milestones and pinning `progress_pct=0.0`.
+- Per-subscription RBAC: admins subscribe to any wallet prefix;
+  non-admin roles subscribe only to prefixes matching their
+  `active_wallet_public_id`. Foreign-wallet or bare `backtest.`
+  subscriptions are denied at the handler before the bridge is
+  touched.
+- `BacktestProgressData.milestone` carries a `@model_validator`
+  enforcing the cross-field invariant `milestone is not None iff
+  event == 'milestone'` so a malformed payload cannot reach the
+  frontend chip logic.
+
+### Config hash for auto-pair (migration 0006)
+
+Every new run persists a `config_hash` via
+`compute_fingerprint(config, for_pairing=True)` — SHA-256 over the
+10 pairing-stable fields
+(`strategy_class`, `instruments`, `start_date`, `end_date`,
+`initial_balance`, `strategy_params`, `timeframe`, `fill_model`,
+`slippage_bps`, `commission_bps`). `execution_mode`,
+`snapshot_as_of`, `warmup_bars`, and `buffer_size` are explicitly
+excluded so Direct-DB and ZMQ replay runs on the same config share
+a hash.
+
+`GET /api/backtests?config_hash={hash}` returns sibling runs for
+the auto-pair UI; the repository query is wallet-scoped and
+indexed on `(wallet_public_id, config_hash, timestamp)`.
+
+### Comparison (migration 0007)
+
+`POST /api/backtests/compare` creates (or returns existing) a
+comparison row; `GET /api/backtests/compare/{id}` returns the
+comparison metadata plus the diff **recomputed from current
+artifact rows** so metric-schema changes never stale a persisted
+diff. The diff surfaces four shapes:
+
+- `metrics_diff` — per-name `{run_a, run_b, delta, pct}` with
+  explicit `is not None` precedence.
+- `equity_overlay` — full-outer-joined equity samples on
+  `point_time` with nullable per-leg fields.
+- `trades_diff` — multiset matching on `(instrument, executed_at,
+  side, quantized_qty, quantized_price)` at `1e-8` precision so
+  IEEE drift collapses but real ticks stay distinct. Common
+  entries carry `pnl_a`/`pnl_b`/`pnl_delta`.
+- `signals_diff` — multiset on `(instrument, signal_time,
+  signal_type)`.
+
+Route ordering: compare endpoints are registered **before**
+`/{run_id}` so `/compare` is not captured as `id="compare"`. Pair
+is normalised to lexical `(min, max)` before insert. Duplicate
+submit is idempotent via SELECT-then-INSERT with an
+`IntegrityError` rollback+re-SELECT race recovery path.
+
+### No-active-wallet fail-closed
+
+Every backtest read endpoint (list, detail, trades, signals,
+events, equity, compare) returns **400 `no active wallet selected`**
+when `principal.active_wallet_public_id is None`. WS subscribes
+return `topic_denied`. The picker triggers a
+`selectWalletAndRefresh` on change that mints a new JWT carrying
+the chosen wallet claim before swapping the client scope, so REST
+and WS both authorise against the same wallet after the picker
+moves.
