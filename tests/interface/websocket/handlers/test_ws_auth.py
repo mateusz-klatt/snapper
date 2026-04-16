@@ -2242,7 +2242,7 @@ async def test_handle_subscribe_reports_invalid_topics() -> None:
                 topics=["market.kraken.BTC-USD.candles.1m"],
             ),
             manager,
-            UserRole.OPERATOR,
+            AuthPrincipal(username="u", role=UserRole.OPERATOR),
         )
     response = json.loads(websocket.sent[-1])
     assert response["type"] == "error"
@@ -2285,7 +2285,7 @@ async def test_handle_subscribe_success_partial() -> None:
                 topics=["market.kraken.BTC-USD.candles.1m", "signals.kraken.BTC-USD.live"],
             ),
             manager,
-            UserRole.VIEWER,
+            AuthPrincipal(username="u", role=UserRole.VIEWER),
         )
     response = json.loads(websocket.sent[-1])
     assert response["status"] == "partial"

@@ -196,6 +196,8 @@ def determine_topic_category(topic: str) -> str | None:
         "system.": "system",
         "admin": "admin",
         "admin.": "admin",
+        "backtest": "backtest",
+        "backtest.": "backtest",
     }
     direct_result = direct_prefix_map.get(topic)
     if direct_result is not None:
@@ -214,6 +216,8 @@ def determine_topic_category(topic: str) -> str | None:
         return "system"
     if topic.startswith("admin."):
         return "admin"
+    if topic.startswith("backtest."):
+        return "backtest"
     category_map = {
         "candle": "market",
         "tick": "market",

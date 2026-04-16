@@ -398,7 +398,7 @@ def _build_dispatch_table(
         Dictionary mapping message types to async handler callables.
     """
     return {
-        WSSubscribeRequest: lambda msg: handle_subscribe(websocket, msg, manager, user.role),
+        WSSubscribeRequest: lambda msg: handle_subscribe(websocket, msg, manager, user),
         WSUnsubscribeRequest: lambda msg: handle_unsubscribe(websocket, msg, manager),
         WSGetSubscriptionsRequest: lambda msg: handle_get_subscriptions(
             websocket, manager, user.role

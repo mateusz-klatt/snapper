@@ -11,6 +11,7 @@ from uuid import uuid7
 from fastapi import WebSocket
 
 from snapper.auth.domain.roles import UserRole
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.core.types import SubscriptionActionEnum
 from snapper.core.types import SubscriptionStatusEnum
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
@@ -24,6 +25,7 @@ from snapper.interface.websocket.schemas import WSSubscriptionsListResponse
 from snapper.interface.websocket.schemas import WSSubscriptionSuccessResponse
 from snapper.interface.websocket.schemas import WSUnsubscribeRequest
 from snapper.messaging.topics.schemas import REGISTRY_ROOTS
+from snapper.messaging.topics.validation import _validate_backtest_prefix
 from snapper.messaging.topics.validation import validate_subscription_pattern
 
 __all__ = [
@@ -31,6 +33,9 @@ __all__ = [
     "handle_unsubscribe",
     "handle_get_subscriptions",
 ]
+
+
+_BACKTEST_PREFIX = "backtest."
 
 
 def _validate_ws_topics(
@@ -41,6 +46,13 @@ def _validate_ws_topics(
     Applies standard topic validation and additionally rejects prefix
     patterns that are not TOPIC_REGISTRY roots (intermediate prefixes
     like ``market.kraken.`` are not allowed for WS clients).
+
+    Exception: the backtest family (``backtest.{wallet}.``,
+    ``backtest.{wallet}.{run}.``) legitimately subscribes to
+    wallet-scoped or run-scoped prefixes; those pass
+    :func:`_validate_backtest_prefix` instead of the registry-root
+    check. Per-prefix wallet-scope RBAC is enforced later in
+    :func:`handle_subscribe`.
 
     Args:
         raw_topics: Raw topic strings from client request.
@@ -58,7 +70,15 @@ def _validate_ws_topics(
         is_valid, error_msg_str = validate_subscription_pattern(cleaned)
         if not is_valid:
             invalid.append((cleaned, error_msg_str))
-        elif cleaned.endswith(".") and cleaned not in REGISTRY_ROOTS:
+            continue
+        if cleaned.endswith(".") and cleaned not in REGISTRY_ROOTS:
+            if cleaned.startswith(_BACKTEST_PREFIX):
+                bt_valid, bt_err = _validate_backtest_prefix(cleaned)
+                if bt_valid:
+                    valid.append(cleaned)
+                else:
+                    invalid.append((cleaned, bt_err))
+                continue
             registry_roots = ", ".join(sorted(REGISTRY_ROOTS))
             invalid.append(
                 (
@@ -72,23 +92,85 @@ def _validate_ws_topics(
     return valid, invalid
 
 
+def _enforce_backtest_wallet_scope(
+    topics: list[str], principal: AuthPrincipal
+) -> tuple[list[str], list[str]]:
+    """Split ``backtest.*`` topics into (allowed, denied) by wallet RBAC.
+
+    Authoritative matrix (plan §2.1.2):
+
+    ====== ============ ========================= ===============================
+    Role   ``backtest.`` ``backtest.{own_wallet}.`` ``backtest.{foreign_wallet}.*``
+    ====== ============ ========================= ===============================
+    VIEWER denied       accepted                  denied
+    OPER.  denied       accepted                  denied
+    ADMIN  accepted     accepted                  accepted
+    ====== ============ ========================= ===============================
+
+    Wallet segment is extracted from the second dotted segment (the
+    topic validator has already proven it is a UUID7). Non-backtest
+    topics pass through unchanged on the allowed side.
+
+    Args:
+        topics: Already-validated topics (shape-correct but scope
+            unchecked).
+        principal: Authenticated caller. ``principal.role`` drives
+            the matrix; ``principal.active_wallet_public_id`` is the
+            only wallet non-admin roles may subscribe to.
+
+    Returns:
+        Tuple of (wallet_allowed, wallet_denied) in original order.
+    """
+    wallet_allowed: list[str] = []
+    wallet_denied: list[str] = []
+    for topic in topics:
+        if not topic.startswith(_BACKTEST_PREFIX):
+            wallet_allowed.append(topic)
+            continue
+        if principal.role == UserRole.ADMIN:
+            wallet_allowed.append(topic)
+            continue
+        active_wallet = principal.active_wallet_public_id
+        if active_wallet is None:
+            wallet_denied.append(topic)
+            continue
+        body = topic[len(_BACKTEST_PREFIX) :]
+        body = body[:-1] if body.endswith(".") else body
+        segments = body.split(".") if body else []
+        if not segments:
+            wallet_denied.append(topic)
+            continue
+        if segments[0] == active_wallet:
+            wallet_allowed.append(topic)
+        else:
+            wallet_denied.append(topic)
+    return wallet_allowed, wallet_denied
+
+
 async def handle_subscribe(
     websocket: WebSocket,
     message: WSSubscribeRequest,
     manager: WebSocketConnectionManager,
-    role: UserRole,
+    principal: AuthPrincipal,
 ) -> None:
     """Handle topic subscription request.
 
-    Validates topic patterns, checks permissions, and registers
+    Validates topic patterns, checks category-level RBAC, enforces the
+    backtest per-subscription wallet-scope rule, and registers
     subscriptions with both the connection manager and ZMQ bridge.
+
+    Signature takes the full ``AuthPrincipal`` (not just the role) so
+    backtest subscriptions can be constrained to the caller's
+    ``active_wallet_public_id``. See :func:`_enforce_backtest_wallet_scope`
+    for the authoritative role/prefix matrix.
 
     Args:
         websocket: The WebSocket connection.
         message: Subscription request with topic list.
         manager: WebSocket connection manager.
-        role: User's role for permission checking.
+        principal: Authenticated caller — role + wallet scope.
     """
+    role = principal.role
     topics, invalid_topics = _validate_ws_topics(message.topics)
     if invalid_topics:
         error_details = [f"{topic}: {error}" for topic, error in invalid_topics]
@@ -101,10 +183,13 @@ async def handle_subscribe(
         )
         await websocket.send_text(error_msg.model_dump_json())
         return
+    topics, wallet_denied = _enforce_backtest_wallet_scope(topics, principal)
     allowed_topics = get_allowed_topics_for_role(role)
     allowed_set = set(allowed_topics)
     allowed_categories = role_allowed_categories(role)
     allowed, denied = filter_topics(topics, allowed_set, allowed_categories)
+    if wallet_denied:
+        denied = [*denied, *wallet_denied]
     if not allowed and denied:
         response = WSSubscriptionSuccessResponse(
             action=SubscriptionActionEnum.SUBSCRIBE,

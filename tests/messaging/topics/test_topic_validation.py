@@ -3701,3 +3701,98 @@ class TestAccrualsTopicValidation:
         """Verify 'accruals.' is an accepted subscription pattern."""
         valid, _err = validate_subscription_pattern("accruals.")
         assert valid
+
+
+class TestBacktestTopicFamily:
+    """Phase 2c backtest topic validator coverage (plan §2.1)."""
+
+    _WALLET = "01948f94-0001-7a00-8000-000000000001"
+    _RUN = "01948f94-0001-7a00-8000-000000000002"
+
+    def test_accepts_every_canonical_event(self) -> None:
+        """Every ``BacktestProgressEvent`` value produces a valid topic."""
+        from snapper.messaging.topics.validation import BACKTEST_EVENTS
+        from snapper.messaging.topics.validation import _validate_backtest_topic
+
+        for event in BACKTEST_EVENTS:
+            topic = f"backtest.{self._WALLET}.{self._RUN}.{event}"
+            valid, err = _validate_backtest_topic(topic)
+            assert valid, f"canonical event {event} rejected: {err}"
+
+    def test_rejects_non_canonical_event(self) -> None:
+        """Non-canonical event names like 'complete' or 'error' fail."""
+        from snapper.messaging.topics.validation import _validate_backtest_topic
+
+        for bad in ("complete", "error", "STARTED"):
+            topic = f"backtest.{self._WALLET}.{self._RUN}.{bad}"
+            valid, _err = _validate_backtest_topic(topic)
+            assert not valid, f"non-canonical event {bad!r} passed"
+
+    def test_rejects_wrong_segment_count(self) -> None:
+        """Only 4 segments accepted (category + wallet + run + event)."""
+        from snapper.messaging.topics.validation import _validate_backtest_topic
+
+        valid, _ = _validate_backtest_topic(f"backtest.{self._WALLET}.{self._RUN}")
+        assert not valid
+        valid, _ = _validate_backtest_topic(f"backtest.{self._WALLET}.{self._RUN}.started.extra")
+        assert not valid
+
+    def test_rejects_non_uuid7_wallet_segment(self) -> None:
+        """Malformed wallet segment fails UUID7 check."""
+        from snapper.messaging.topics.validation import _validate_backtest_topic
+
+        valid, err = _validate_backtest_topic(f"backtest.not-a-uuid.{self._RUN}.started")
+        assert not valid
+        assert "wallet segment" in err.lower()
+
+    def test_rejects_non_uuid7_run_segment(self) -> None:
+        """Malformed run segment fails UUID7 check."""
+        from snapper.messaging.topics.validation import _validate_backtest_topic
+
+        valid, err = _validate_backtest_topic(f"backtest.{self._WALLET}.not-a-uuid.started")
+        assert not valid
+        assert "run segment" in err.lower()
+
+    def test_prefix_patterns_accepted(self) -> None:
+        """Three prefix shapes accepted: root, wallet, wallet+run."""
+        from snapper.messaging.topics.validation import _validate_backtest_prefix
+
+        for pattern in (
+            "backtest.",
+            f"backtest.{self._WALLET}.",
+            f"backtest.{self._WALLET}.{self._RUN}.",
+        ):
+            valid, err = _validate_backtest_prefix(pattern)
+            assert valid, f"valid prefix {pattern!r} rejected: {err}"
+
+    def test_prefix_rejects_malformed_wallet(self) -> None:
+        """Non-UUID7 wallet segment in prefix is rejected."""
+        from snapper.messaging.topics.validation import _validate_backtest_prefix
+
+        valid, err = _validate_backtest_prefix("backtest.not-a-uuid.")
+        assert not valid
+        assert "wallet" in err.lower()
+
+    def test_prefix_rejects_too_many_segments(self) -> None:
+        """More than 3 segments in a prefix is rejected."""
+        from snapper.messaging.topics.validation import _validate_backtest_prefix
+
+        pattern = f"backtest.{self._WALLET}.{self._RUN}.started."
+        valid, _ = _validate_backtest_prefix(pattern)
+        assert not valid
+
+    def test_via_validate_topic_dispatcher(self) -> None:
+        """Canonical topic routes through the main dispatcher."""
+        topic = f"backtest.{self._WALLET}.{self._RUN}.completed"
+        valid, _ = validate_topic(topic)
+        assert valid
+
+    def test_via_validate_subscription_pattern(self) -> None:
+        """Subscription-pattern dispatcher accepts all 3 prefix shapes."""
+        for pattern in (
+            "backtest.",
+            f"backtest.{self._WALLET}.",
+            f"backtest.{self._WALLET}.{self._RUN}.",
+        ):
+            valid, _ = validate_subscription_pattern(pattern)
+            assert valid, f"subscription dispatcher rejected {pattern}"

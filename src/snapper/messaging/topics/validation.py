@@ -55,16 +55,36 @@ Validate subscription pattern::
 
 import logging
 import re
+import typing
 from collections.abc import Callable
 
+from snapper.core.ids import is_uuid7
 from snapper.core.types import MarketDataTypeEnum
 from snapper.core.types import OrderCommandEnum
 from snapper.infrastructure.symbols.functions import get_available_exchanges
 from snapper.infrastructure.symbols.functions import get_available_symbols
 from snapper.infrastructure.symbols.functions import get_market_data_exchanges
 from snapper.infrastructure.symbols.functions import get_market_subscribe_exchanges
+from snapper.messaging.schemas.data import BacktestProgressEvent
 
-__all__ = ["validate_topic", "validate_subscription_pattern", "TopicValidationError"]
+__all__ = [
+    "validate_topic",
+    "validate_subscription_pattern",
+    "TopicValidationError",
+    "BACKTEST_EVENTS",
+    "_validate_backtest_prefix",
+    "_validate_backtest_topic",
+]
+
+
+BACKTEST_EVENTS: frozenset[str] = frozenset(typing.get_args(BacktestProgressEvent))
+"""Canonical backtest event names derived from ``BacktestProgressEvent``.
+
+Single source of truth: the Literal type in
+``snapper.messaging.schemas.data.BacktestProgressEvent`` is mirrored
+here via ``typing.get_args`` so the topic validator, the emitter
+payload schema (Step 2b), and every test read from the same tuple.
+"""
 logger = logging.getLogger(__name__)
 
 
@@ -92,6 +112,7 @@ def _get_topic_prefix_validators() -> list[tuple[str, Callable[[str], tuple[bool
         ("system.", _validate_system_topic),
         ("admin.", _validate_admin_topic),
         ("accruals.", _validate_accruals_topic),
+        ("backtest.", _validate_backtest_topic),
     ]
 
 
@@ -772,7 +793,16 @@ def _validate_prefix_pattern(pattern: str) -> tuple[bool, str]:
     if any(not segment for segment in segments):
         return False, "Prefix segments cannot be empty"
     category = segments[0]
-    valid_categories = {"market", "orders", "signals", "strategy", "system", "admin", "accruals"}
+    valid_categories = {
+        "market",
+        "orders",
+        "signals",
+        "strategy",
+        "system",
+        "admin",
+        "accruals",
+        "backtest",
+    }
     if category not in valid_categories:
         return False, f"Unknown topic category: {category}"
     if category == "orders":
@@ -781,6 +811,8 @@ def _validate_prefix_pattern(pattern: str) -> tuple[bool, str]:
         return _validate_market_prefix(segments)
     if category == "signals" and len(segments) >= 2:
         return _validate_exchange_instrument_segments(segments, 1, _validate_signal_exchange)
+    if category == "backtest":
+        return _validate_backtest_prefix_segments(segments)
     return True, ""
 
 
@@ -882,3 +914,106 @@ def _is_valid_timeframe(timeframe: str) -> bool:
     """
     pattern = r"^\d+[mhdwM]$"
     return bool(re.match(pattern, timeframe))
+
+
+_BACKTEST_TOPIC_FORMAT_MSG = (
+    "Backtest topic must have 4 segments: "
+    "backtest.{wallet_public_id}.{run_public_id}.{event} — "
+    f"event must be one of: {', '.join(sorted(BACKTEST_EVENTS))}"
+)
+
+
+def _validate_backtest_topic(topic: str) -> tuple[bool, str]:
+    """Validate a fully-qualified backtest progress topic.
+
+    Expected shape: ``backtest.{wallet_public_id}.{run_public_id}.{event}``
+    with both UUID segments in canonical UUID7 format and the event
+    name drawn from the ``BacktestProgressEvent`` Literal (the
+    canonical single source of truth at
+    ``snapper.messaging.schemas.data``).
+
+    Args:
+        topic: Topic string starting with ``backtest.``.
+
+    Returns:
+        Tuple of (is_valid, error_message).
+    """
+    segments = topic.split(".")
+    if topic.endswith(".") or len(segments) != 4:
+        return False, _BACKTEST_TOPIC_FORMAT_MSG
+    if segments[0] != "backtest":
+        return False, f"Expected 'backtest' category, got '{segments[0]}'"
+    wallet_public_id, run_public_id, event = segments[1], segments[2], segments[3]
+    if not is_uuid7(wallet_public_id):
+        return (
+            False,
+            f"Backtest wallet segment '{wallet_public_id}' is not a valid UUID7",
+        )
+    if not is_uuid7(run_public_id):
+        return (
+            False,
+            f"Backtest run segment '{run_public_id}' is not a valid UUID7",
+        )
+    if event not in BACKTEST_EVENTS:
+        return (
+            False,
+            f"Invalid backtest event '{event}'. Must be: {', '.join(sorted(BACKTEST_EVENTS))}",
+        )
+    return True, ""
+
+
+def _validate_backtest_prefix_segments(segments: list[str]) -> tuple[bool, str]:
+    """Validate a backtest subscription prefix.
+
+    Three shapes are accepted (all end with ``.`` — the caller has
+    already stripped the trailing dot):
+
+    - ``backtest`` (1 seg) — root, admin-only at the handler level.
+    - ``backtest.{wallet_public_id}`` (2 seg) — wallet-scoped.
+    - ``backtest.{wallet_public_id}.{run_public_id}`` (3 seg) —
+      run-scoped.
+
+    UUID7 format is enforced for wallet + run segments so a malformed
+    prefix is rejected before any RBAC decision.
+
+    Args:
+        segments: Prefix segments (trailing dot already stripped by
+            ``_validate_prefix_pattern``).
+
+    Returns:
+        Tuple of (is_valid, error_message).
+    """
+    if len(segments) == 1:
+        return True, ""
+    if len(segments) >= 2 and not is_uuid7(segments[1]):
+        return False, f"Backtest wallet segment '{segments[1]}' is not a valid UUID7"
+    if len(segments) == 2:
+        return True, ""
+    if len(segments) == 3 and not is_uuid7(segments[2]):
+        return False, f"Backtest run segment '{segments[2]}' is not a valid UUID7"
+    if len(segments) > 3:
+        return False, "Backtest prefix has too many segments (max 3 before the event suffix)"
+    return True, ""
+
+
+def _validate_backtest_prefix(pattern: str) -> tuple[bool, str]:
+    """Validate a backtest subscription prefix string (with trailing dot).
+
+    Thin wrapper over :func:`_validate_backtest_prefix_segments` for
+    consumers (``subscribe.py`` + ``bridge.py``) that pass the raw
+    prefix string rather than pre-split segments.
+
+    Args:
+        pattern: Subscription prefix ending with ``.``.
+
+    Returns:
+        Tuple of (is_valid, error_message).
+    """
+    if not pattern.endswith("."):
+        return False, "Backtest prefix must end with dot"
+    segments = pattern[:-1].split(".")
+    if any(not segment for segment in segments):
+        return False, "Backtest prefix segments cannot be empty"
+    if segments[0] != "backtest":
+        return False, f"Expected 'backtest' prefix, got '{segments[0]}'"
+    return _validate_backtest_prefix_segments(segments)

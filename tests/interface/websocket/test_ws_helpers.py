@@ -137,6 +137,14 @@ class TestWebSocketHelpersRuntimeError:
         """
         assert determine_topic_category("market.kraken.") == "market"
 
+    def test_determine_topic_category_backtest(self) -> None:
+        """Phase 2c backtest topics resolve to ``backtest`` at every depth."""
+        assert determine_topic_category("backtest") == "backtest"
+        assert determine_topic_category("backtest.") == "backtest"
+        assert determine_topic_category("backtest.wallet-uuid.") == "backtest"
+        assert determine_topic_category("backtest.wallet-uuid.run-uuid.") == "backtest"
+        assert determine_topic_category("backtest.wallet.run.started") == "backtest"
+
 
 class TestRoleCategorySecurityMatrix:
     """Role x category x topic security boundary tests.

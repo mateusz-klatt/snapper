@@ -11,11 +11,21 @@ from unittest.mock import patch
 import pytest
 
 from snapper.auth.domain.roles import UserRole
+from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.interface.websocket.handlers.subscribe import handle_subscribe
 from snapper.interface.websocket.handlers.subscribe import handle_unsubscribe
 from snapper.interface.websocket.schemas import WSSubscribeRequest
 from snapper.interface.websocket.schemas import WSUnsubscribeRequest
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+
+
+def _principal(
+    role: UserRole, active_wallet_public_id: str | None = None, username: str = "test"
+) -> AuthPrincipal:
+    """Build a minimal AuthPrincipal for subscribe-handler tests."""
+    return AuthPrincipal(
+        username=username, role=role, active_wallet_public_id=active_wallet_public_id
+    )
 
 
 class TestHandleSubscribeEdgeCases:
@@ -60,7 +70,7 @@ class TestHandleSubscribeEdgeCases:
             sequence_id=0,
             topics=["invalid..topic", "another..bad"],
         )
-        await handle_subscribe(mock_websocket, message, mock_manager, UserRole.ADMIN)
+        await handle_subscribe(mock_websocket, message, mock_manager, _principal(UserRole.ADMIN))
         mock_websocket.send_text.assert_called_once()
         response = json.loads(mock_websocket.send_text.call_args[0][0])
         assert response["type"] == "error"
@@ -84,7 +94,7 @@ class TestHandleSubscribeEdgeCases:
             sequence_id=0,
             topics=["  ", ""],
         )
-        await handle_subscribe(mock_websocket, message, mock_manager, UserRole.ADMIN)
+        await handle_subscribe(mock_websocket, message, mock_manager, _principal(UserRole.ADMIN))
         mock_websocket.send_text.assert_called_once()
         response = json.loads(mock_websocket.send_text.call_args[0][0])
         assert response["type"] == "subscription_success"
@@ -107,7 +117,7 @@ class TestHandleSubscribeEdgeCases:
             sequence_id=0,
             topics=["admin.users", "admin.settings"],
         )
-        await handle_subscribe(mock_websocket, message, mock_manager, UserRole.VIEWER)
+        await handle_subscribe(mock_websocket, message, mock_manager, _principal(UserRole.VIEWER))
         mock_websocket.send_text.assert_called_once()
         response = json.loads(mock_websocket.send_text.call_args[0][0])
         assert response["type"] == "subscription_success"
@@ -141,7 +151,9 @@ class TestHandleSubscribeEdgeCases:
             "snapper.interface.websocket.handlers.subscribe.filter_topics",
             return_value=([valid_topic], []),
         ):
-            await handle_subscribe(mock_websocket, message, mock_manager, UserRole.ADMIN)
+            await handle_subscribe(
+                mock_websocket, message, mock_manager, _principal(UserRole.ADMIN)
+            )
         calls = mock_websocket.send_text.call_args_list
         found_error = False
         for call in calls:
@@ -190,7 +202,7 @@ class TestAdminCategorySubscription:
             sequence_id=0,
             topics=["admin.users"],
         )
-        await handle_subscribe(mock_websocket, message, mock_manager, UserRole.ADMIN)
+        await handle_subscribe(mock_websocket, message, mock_manager, _principal(UserRole.ADMIN))
         mock_websocket.send_text.assert_called_once()
         response = json.loads(mock_websocket.send_text.call_args[0][0])
         assert response["type"] == "subscription_success"
@@ -214,7 +226,7 @@ class TestAdminCategorySubscription:
             sequence_id=0,
             topics=["admin.users"],
         )
-        await handle_subscribe(mock_websocket, message, mock_manager, UserRole.OPERATOR)
+        await handle_subscribe(mock_websocket, message, mock_manager, _principal(UserRole.OPERATOR))
         mock_websocket.send_text.assert_called_once()
         response = json.loads(mock_websocket.send_text.call_args[0][0])
         assert response["type"] == "subscription_success"
@@ -238,7 +250,7 @@ class TestAdminCategorySubscription:
             sequence_id=0,
             topics=["admin."],
         )
-        await handle_subscribe(mock_websocket, message, mock_manager, UserRole.ADMIN)
+        await handle_subscribe(mock_websocket, message, mock_manager, _principal(UserRole.ADMIN))
         mock_websocket.send_text.assert_called_once()
         response = json.loads(mock_websocket.send_text.call_args[0][0])
         assert response["type"] == "subscription_success"
@@ -283,7 +295,7 @@ class TestIntermediatePrefixRejection:
             sequence_id=0,
             topics=["market.kraken."],
         )
-        await handle_subscribe(mock_websocket, message, mock_manager, UserRole.ADMIN)
+        await handle_subscribe(mock_websocket, message, mock_manager, _principal(UserRole.ADMIN))
         mock_websocket.send_text.assert_called_once()
         response = json.loads(mock_websocket.send_text.call_args[0][0])
         assert response["type"] == "error"
@@ -307,7 +319,7 @@ class TestIntermediatePrefixRejection:
             sequence_id=0,
             topics=["market."],
         )
-        await handle_subscribe(mock_websocket, message, mock_manager, UserRole.ADMIN)
+        await handle_subscribe(mock_websocket, message, mock_manager, _principal(UserRole.ADMIN))
         mock_websocket.send_text.assert_called_once()
         response = json.loads(mock_websocket.send_text.call_args[0][0])
         assert response["type"] == "subscription_success"

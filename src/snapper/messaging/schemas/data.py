@@ -810,3 +810,19 @@ class ExecutionPlanData(StrictDataSchema[Literal["execution_plan"]]):
     parent_plan_public_id: str | None
     last_error: str | None
     idempotency_key: str | None
+
+
+BacktestProgressEvent = Literal[
+    "started", "progress", "milestone", "completed", "failed", "cancelled"
+]
+"""Canonical single source of truth for backtest progress event names.
+
+Consumed by the topic validator
+(``snapper.messaging.topics.validation._validate_backtest_topic`` —
+which derives ``BACKTEST_EVENTS = frozenset(typing.get_args(...))``
+from this Literal so the enum and the topic layer cannot drift), the
+``BacktestProgressData.event`` payload field (Step 2b), the runner
+emitter, and the frontend WS handlers. Milestone is NOT an event
+value but a separate field on the payload with a ``@model_validator``
+enforcing ``milestone is not None iff event == 'milestone'``.
+"""

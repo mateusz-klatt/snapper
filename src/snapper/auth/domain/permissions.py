@@ -95,6 +95,7 @@ CATEGORY_PERMISSIONS: dict[str, frozenset[Permission]] = {
     "strategy": frozenset({Permission.START_STRATEGIES}),
     "system": frozenset({Permission.READ_SYSTEM_STATUS}),
     "admin": frozenset({Permission.MANAGE_USERS}),
+    "backtest": frozenset({Permission.READ_BACKTESTS}),
 }
 """Permission sets required for each WS topic category.
 

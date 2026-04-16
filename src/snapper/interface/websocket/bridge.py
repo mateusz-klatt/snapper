@@ -40,6 +40,7 @@ from snapper.messaging.schemas.messages import GapEnvelope
 from snapper.messaging.topics.builders import is_order_topic
 from snapper.messaging.topics.schemas import REGISTRY_ROOTS
 from snapper.messaging.topics.schemas import TOPIC_REGISTRY
+from snapper.messaging.topics.validation import _validate_backtest_prefix
 from snapper.utils.logging import set_log_context
 
 logger = logging.getLogger(__name__)
@@ -189,10 +190,17 @@ class ZmqWebSocketBridgeService:
             self.client_subscriptions[websocket] = set()
         for topic in topics:
             if topic.endswith(".") and topic not in REGISTRY_ROOTS:
-                logger.warning(
-                    "Rejected intermediate prefix subscription: %s (not a registry root)", topic
-                )
-                continue
+                if topic.startswith("backtest."):
+                    bt_valid, _ = _validate_backtest_prefix(topic)
+                    if not bt_valid:
+                        logger.warning("Rejected malformed backtest prefix subscription: %s", topic)
+                        continue
+                else:
+                    logger.warning(
+                        "Rejected intermediate prefix subscription: %s (not a registry root)",
+                        topic,
+                    )
+                    continue
             self.client_subscriptions[websocket].add(topic)
             if topic not in self.topic_subscriptions:
                 self.topic_subscriptions[topic] = []
@@ -697,15 +705,26 @@ class ZmqWebSocketBridgeService:
             True if subscription successful, False otherwise.
         """
         if topic.endswith(".") and topic not in REGISTRY_ROOTS:
-            logger.warning(
-                "Rejected intermediate prefix subscription: %s (not a registry root)", topic
-            )
-            await self._record_bridge_control(
-                "zmq_subscribe",
-                "error",
-                detail=f"Intermediate prefix rejected: {topic}",
-            )
-            return False
+            if topic.startswith("backtest."):
+                bt_valid, bt_err = _validate_backtest_prefix(topic)
+                if not bt_valid:
+                    logger.warning("Rejected malformed backtest prefix: %s (%s)", topic, bt_err)
+                    await self._record_bridge_control(
+                        "zmq_subscribe",
+                        "error",
+                        detail=f"Malformed backtest prefix rejected: {topic} ({bt_err})",
+                    )
+                    return False
+            else:
+                logger.warning(
+                    "Rejected intermediate prefix subscription: %s (not a registry root)", topic
+                )
+                await self._record_bridge_control(
+                    "zmq_subscribe",
+                    "error",
+                    detail=f"Intermediate prefix rejected: {topic}",
+                )
+                return False
         topic_config = self._find_matching_pattern(topic)
         if not topic_config:
             available = list(self.available_topics)
