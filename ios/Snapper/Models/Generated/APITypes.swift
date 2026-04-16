@@ -168,9 +168,21 @@ enum SignalDataSide: String, Codable, Sendable {
     case sell
 }
 
+enum SignalDiffEntryLeg: String, Codable, Sendable {
+    case a
+    case b
+    case common
+}
+
 enum StrategyProcessMode: String, Codable, Sendable {
     case thread
     case process
+}
+
+enum TradeDiffEntryLeg: String, Codable, Sendable {
+    case a
+    case b
+    case common
 }
 
 enum ZmqComponentsZmqContext: String, Codable, Sendable {
@@ -187,6 +199,11 @@ enum ZmqHealthDataStatus: String, Codable, Sendable {
     case healthy
     case warning
     case error
+}
+
+enum BacktestCompareBodyMode: String, Codable, Sendable {
+    case manual
+    case auto
 }
 
 enum CreateCredentialBodyCredentialType: String, Codable, Sendable {
@@ -276,6 +293,121 @@ struct AvailableProcessesResponse: Codable, Sendable {
         case sessionId = "session_id"
         case payload
         case count
+    }
+}
+
+struct BacktestComparisonData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let walletPublicId: String
+    let runAPublicId: String
+    let runBPublicId: String
+    let configHash: String?
+    let pairingMode: String
+    let anchorRunPublicId: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case walletPublicId = "wallet_public_id"
+        case runAPublicId = "run_a_public_id"
+        case runBPublicId = "run_b_public_id"
+        case configHash = "config_hash"
+        case pairingMode = "pairing_mode"
+        case anchorRunPublicId = "anchor_run_public_id"
+    }
+}
+
+struct BacktestComparisonDetailResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: BacktestComparisonDetailResponseData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct BacktestComparisonDetailResponseData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let comparison: BacktestComparisonData
+    let runA: BacktestRunData
+    let runB: BacktestRunData
+    let metricsDiff: [MetricDiffRow]
+    let equityOverlay: [EquityOverlayPoint]
+    let tradesDiff: [TradeDiffEntry]
+    let signalsDiff: [SignalDiffEntry]
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case comparison
+        case runA = "run_a"
+        case runB = "run_b"
+        case metricsDiff = "metrics_diff"
+        case equityOverlay = "equity_overlay"
+        case tradesDiff = "trades_diff"
+        case signalsDiff = "signals_diff"
+    }
+}
+
+struct BacktestComparisonListResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: [BacktestComparisonData]
+    /// Number of items in payload
+    let count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+        case count
+    }
+}
+
+struct BacktestComparisonResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: BacktestComparisonData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
     }
 }
 
@@ -423,6 +555,7 @@ struct BacktestRunData: Codable, Sendable {
     let fillModel: String?
     let slippageBps: Double?
     let commissionBps: Double?
+    let configHash: String?
     let startedAt: Date?
     let completedAt: Date?
     let error: String?
@@ -447,6 +580,7 @@ struct BacktestRunData: Codable, Sendable {
         case fillModel = "fill_model"
         case slippageBps = "slippage_bps"
         case commissionBps = "commission_bps"
+        case configHash = "config_hash"
         case startedAt = "started_at"
         case completedAt = "completed_at"
         case error
@@ -473,6 +607,7 @@ struct BacktestRunDetailData: Codable, Sendable {
     let fillModel: String?
     let slippageBps: Double?
     let commissionBps: Double?
+    let configHash: String?
     let startedAt: Date?
     let completedAt: Date?
     let error: String?
@@ -498,6 +633,7 @@ struct BacktestRunDetailData: Codable, Sendable {
         case fillModel = "fill_model"
         case slippageBps = "slippage_bps"
         case commissionBps = "commission_bps"
+        case configHash = "config_hash"
         case startedAt = "started_at"
         case completedAt = "completed_at"
         case error
@@ -967,6 +1103,18 @@ struct CredentialSummary: Codable, Sendable {
     }
 }
 
+struct EquityOverlayPoint: Codable, Sendable {
+    let pointTime: Date
+    let equityA: Double?
+    let equityB: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case pointTime = "point_time"
+        case equityA = "equity_a"
+        case equityB = "equity_b"
+    }
+}
+
 struct ExchangeListResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
@@ -1373,6 +1521,22 @@ struct MessageResponse: Codable, Sendable {
         case timestamp
         case sessionId = "session_id"
         case payload
+    }
+}
+
+struct MetricDiffRow: Codable, Sendable {
+    let name: String
+    let runA: Double?
+    let runB: Double?
+    let delta: Double?
+    let pct: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case runA = "run_a"
+        case runB = "run_b"
+        case delta
+        case pct
     }
 }
 
@@ -2240,6 +2404,20 @@ struct SignalData: Codable, Sendable {
     }
 }
 
+struct SignalDiffEntry: Codable, Sendable {
+    let instrument: String
+    let signalTime: Date
+    let signalType: String
+    let leg: String
+
+    enum CodingKeys: String, CodingKey {
+        case instrument
+        case signalTime = "signal_time"
+        case signalType = "signal_type"
+        case leg
+    }
+}
+
 struct SignalListResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
@@ -2435,6 +2613,30 @@ struct TopicMetricSnapshot: Codable, Sendable {
         case lastMessageTs = "last_message_ts"
         case throttleMs = "throttle_ms"
         case pattern
+    }
+}
+
+struct TradeDiffEntry: Codable, Sendable {
+    let instrument: String
+    let executedAt: Date
+    let side: String
+    let quantity: Double
+    let price: Double
+    let leg: String
+    let pnlA: Double?
+    let pnlB: Double?
+    let pnlDelta: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case instrument
+        case executedAt = "executed_at"
+        case side
+        case quantity
+        case price
+        case leg
+        case pnlA = "pnl_a"
+        case pnlB = "pnl_b"
+        case pnlDelta = "pnl_delta"
     }
 }
 
@@ -3184,6 +3386,40 @@ struct BacktestCreateBody: Codable, Sendable {
         case fillModel = "fill_model"
         case slippageBps = "slippage_bps"
         case commissionBps = "commission_bps"
+    }
+}
+
+struct BacktestCompareRequest: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: BacktestCompareBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct BacktestCompareBody: Codable, Sendable {
+    let mode: String
+    let runAPublicId: String?
+    let runBPublicId: String?
+    let configHash: String?
+    let anchorRunPublicId: String?
+
+    enum CodingKeys: String, CodingKey {
+        case mode
+        case runAPublicId = "run_a_public_id"
+        case runBPublicId = "run_b_public_id"
+        case configHash = "config_hash"
+        case anchorRunPublicId = "anchor_run_public_id"
     }
 }
 
