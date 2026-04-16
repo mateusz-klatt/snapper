@@ -214,6 +214,12 @@ class BacktestRunData(StrictDataSchema[Literal["backtest_run"]]):
 class BacktestResultInline(StrictBody):
     """Inline backtest aggregate metrics embedded in BacktestRunDetailData.
 
+    Phase 2c Step 1 promotes 5 metrics from ``extra_metrics`` to typed
+    nullable-float columns and adds 3 new metrics. Mixed-vintage reads
+    are handled at the route layer via an explicit null-coalescing
+    fallback (typed column else ``extra_metrics.get(name)``) — see
+    ``backtest_routes.py`` inline projection.
+
     Attributes:
         total_trades: Total exit trades.
         winning_trades: Profitable trades.
@@ -225,7 +231,15 @@ class BacktestResultInline(StrictBody):
         profit_factor: Gross profit divided by gross loss.
         final_equity: Final equity value.
         max_equity: Peak equity value.
-        extra_metrics: Additional computed metrics.
+        sortino_ratio: Annualized Sortino ratio.
+        cagr: Compound annual growth rate.
+        calmar_ratio: CAGR divided by max drawdown.
+        expectancy: Mean per-trade PnL.
+        avg_trade_pnl: Average PnL per exit trade.
+        max_drawdown_duration_seconds: Longest peak-to-recovery duration.
+        exposure_ratio: Fraction of run time holding a non-zero position.
+        turnover_ratio: Total notional traded divided by mean equity.
+        extra_metrics: Any non-promoted additional computed metrics.
     """
 
     total_trades: int
@@ -238,6 +252,14 @@ class BacktestResultInline(StrictBody):
     profit_factor: float | None = None
     final_equity: float
     max_equity: float
+    sortino_ratio: float | None = None
+    cagr: float | None = None
+    calmar_ratio: float | None = None
+    expectancy: float | None = None
+    avg_trade_pnl: float | None = None
+    max_drawdown_duration_seconds: float | None = None
+    exposure_ratio: float | None = None
+    turnover_ratio: float | None = None
     extra_metrics: JsonObject = Field(default_factory=dict)
 
 
@@ -304,6 +326,10 @@ class BacktestRunListResponse(PayloadListResponse[Literal["backtest_run_list"], 
 class BacktestResultData(StrictDataSchema[Literal["backtest_result"]]):
     """Backtest result metrics payload.
 
+    Phase 2c Step 1 extension: see ``BacktestResultInline`` for the 8
+    advanced metrics; this schema mirrors them so future standalone
+    result endpoints surface the same shape.
+
     Attributes:
         type: Payload discriminator.
         run_public_id: Associated run.
@@ -317,7 +343,15 @@ class BacktestResultData(StrictDataSchema[Literal["backtest_result"]]):
         profit_factor: Gross profit / gross loss.
         final_equity: Final equity value.
         max_equity: Peak equity value.
-        extra_metrics: Additional computed metrics.
+        sortino_ratio: Annualized Sortino ratio.
+        cagr: Compound annual growth rate.
+        calmar_ratio: CAGR divided by max drawdown.
+        expectancy: Mean per-trade PnL.
+        avg_trade_pnl: Average PnL per exit trade.
+        max_drawdown_duration_seconds: Longest peak-to-recovery duration.
+        exposure_ratio: Fraction of run time holding a non-zero position.
+        turnover_ratio: Total notional traded divided by mean equity.
+        extra_metrics: Any non-promoted additional computed metrics.
     """
 
     type: Literal["backtest_result"] = "backtest_result"
@@ -332,6 +366,14 @@ class BacktestResultData(StrictDataSchema[Literal["backtest_result"]]):
     profit_factor: float | None = None
     final_equity: float
     max_equity: float
+    sortino_ratio: float | None = None
+    cagr: float | None = None
+    calmar_ratio: float | None = None
+    expectancy: float | None = None
+    avg_trade_pnl: float | None = None
+    max_drawdown_duration_seconds: float | None = None
+    exposure_ratio: float | None = None
+    turnover_ratio: float | None = None
     extra_metrics: dict[str, Any] = Field(default_factory=dict)
 
 

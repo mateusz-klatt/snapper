@@ -1640,6 +1640,14 @@ def backtest_run(
                     profit_factor=metrics.profit_factor,
                     final_equity=metrics.final_equity,
                     max_equity=metrics.max_equity,
+                    sortino_ratio=metrics.sortino_ratio,
+                    cagr=metrics.cagr,
+                    calmar_ratio=metrics.calmar_ratio,
+                    expectancy=metrics.expectancy,
+                    avg_trade_pnl=metrics.avg_trade_pnl,
+                    max_drawdown_duration_seconds=metrics.max_drawdown_duration_seconds,
+                    exposure_ratio=metrics.exposure_ratio,
+                    turnover_ratio=metrics.turnover_ratio,
                     extra_metrics={},
                     session_id=tracker.session_id,
                     sequence_id=tracker.next_sequence("cli"),
@@ -1649,6 +1657,20 @@ def backtest_run(
                 session_id=tracker.session_id,
                 sequence_id=tracker.next_sequence("cli"),
             )
+            for warning in metrics.warnings:
+                await bt_repo.insert_event(
+                    row={
+                        "run_public_id": public_id,
+                        "event_type": "metric_warning",
+                        "detail": {"metric": warning.metric, "reason": warning.reason},
+                        "session_id": tracker.session_id,
+                        "sequence_id": tracker.next_sequence("cli"),
+                        "timestamp": persist_now,
+                    },
+                    bus_time=persist_now,
+                    session_id=tracker.session_id,
+                    sequence_id=tracker.next_sequence("cli"),
+                )
 
             final_now = datetime.now(UTC)
             await bt_repo.update_run_status(

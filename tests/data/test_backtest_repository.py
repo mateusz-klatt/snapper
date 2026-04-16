@@ -358,6 +358,88 @@ async def test_insert_and_get_result(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_insert_and_get_result_advanced_metrics_round_trip(tmp_path: Path) -> None:
+    """Given: all 8 Phase 2c typed metrics, When: insert + get, Then: non-null round-trip."""
+    repo = await _make_repo(tmp_path)
+    await repo.insert_result(
+        {
+            "run_public_id": "run-2",
+            "total_trades": 5,
+            "winning_trades": 3,
+            "losing_trades": 2,
+            "total_pnl": 100.0,
+            "max_drawdown": 0.05,
+            "sharpe_ratio": 1.2,
+            "win_rate": 0.6,
+            "profit_factor": 2.0,
+            "final_equity": 10100.0,
+            "max_equity": 10200.0,
+            "sortino_ratio": 1.8,
+            "cagr": 0.12,
+            "calmar_ratio": 2.4,
+            "expectancy": 20.0,
+            "avg_trade_pnl": 20.0,
+            "max_drawdown_duration_seconds": 3600.0,
+            "exposure_ratio": 0.75,
+            "turnover_ratio": 3.5,
+            "session_id": "s1",
+            "sequence_id": 2,
+            "timestamp": NOW,
+        },
+        bus_time=NOW,
+        session_id="s1",
+        sequence_id=41,
+    )
+    result = await repo.get_result("run-2", as_of=NOW + timedelta(seconds=1))
+    assert result is not None
+    assert result["sortino_ratio"] == pytest.approx(1.8)
+    assert result["cagr"] == pytest.approx(0.12)
+    assert result["calmar_ratio"] == pytest.approx(2.4)
+    assert result["expectancy"] == pytest.approx(20.0)
+    assert result["avg_trade_pnl"] == pytest.approx(20.0)
+    assert result["max_drawdown_duration_seconds"] == pytest.approx(3600.0)
+    assert result["exposure_ratio"] == pytest.approx(0.75)
+    assert result["turnover_ratio"] == pytest.approx(3.5)
+
+
+@pytest.mark.asyncio
+async def test_insert_result_advanced_metrics_default_none(tmp_path: Path) -> None:
+    """Given: omitted Phase 2c fields, When: insert + get, Then: all 8 read back as None."""
+    repo = await _make_repo(tmp_path)
+    await repo.insert_result(
+        {
+            "run_public_id": "run-3",
+            "total_trades": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "total_pnl": 0.0,
+            "max_drawdown": 0.0,
+            "final_equity": 10000.0,
+            "max_equity": 10000.0,
+            "session_id": "s1",
+            "sequence_id": 3,
+            "timestamp": NOW,
+        },
+        bus_time=NOW,
+        session_id="s1",
+        sequence_id=42,
+    )
+    result = await repo.get_result("run-3", as_of=NOW + timedelta(seconds=1))
+    assert result is not None
+    for name in (
+        "sortino_ratio",
+        "cagr",
+        "calmar_ratio",
+        "expectancy",
+        "avg_trade_pnl",
+        "max_drawdown_duration_seconds",
+        "exposure_ratio",
+        "turnover_ratio",
+    ):
+        assert result[name] is None, f"{name} should default to None"
+
+
+@pytest.mark.asyncio
 async def test_get_result_not_found(tmp_path: Path) -> None:
     """Given: no result, When: get_result, Then: None."""
     repo = await _make_repo(tmp_path)

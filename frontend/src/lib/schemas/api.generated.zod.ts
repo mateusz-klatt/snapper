@@ -1613,6 +1613,14 @@ export const BacktestResultInlineSchema = z
     profit_factor: z.number().nullable().optional(),
     final_equity: z.number(),
     max_equity: z.number(),
+    sortino_ratio: z.number().nullable().optional(),
+    cagr: z.number().nullable().optional(),
+    calmar_ratio: z.number().nullable().optional(),
+    expectancy: z.number().nullable().optional(),
+    avg_trade_pnl: z.number().nullable().optional(),
+    max_drawdown_duration_seconds: z.number().nullable().optional(),
+    exposure_ratio: z.number().nullable().optional(),
+    turnover_ratio: z.number().nullable().optional(),
     extra_metrics: z.record(z.string(), z.any()).optional(),
   })
   .strict()

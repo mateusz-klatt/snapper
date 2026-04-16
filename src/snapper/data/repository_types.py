@@ -1055,7 +1055,16 @@ class BacktestEventRow(TypedDict):
 
 
 class BacktestResultInsertRow(TypedDict, total=False):
-    """Insert payload for backtest_results."""
+    """Insert payload for backtest_results.
+
+    Phase 2c Step 1 promotes 5 metrics (``sortino_ratio``, ``cagr``,
+    ``calmar_ratio``, ``expectancy``, ``avg_trade_pnl``) from the
+    ``extra_metrics`` JSON blob to typed nullable-float columns, and
+    adds 3 new metrics (``max_drawdown_duration_seconds``,
+    ``exposure_ratio``, ``turnover_ratio``). All 8 fields are
+    ``float | None`` — degenerate inputs emit ``None`` plus a
+    ``metric_warning`` event (see metrics.py).
+    """
 
     run_public_id: str
     total_trades: int
@@ -1068,6 +1077,14 @@ class BacktestResultInsertRow(TypedDict, total=False):
     profit_factor: float | None
     final_equity: float
     max_equity: float
+    sortino_ratio: float | None
+    cagr: float | None
+    calmar_ratio: float | None
+    expectancy: float | None
+    avg_trade_pnl: float | None
+    max_drawdown_duration_seconds: float | None
+    exposure_ratio: float | None
+    turnover_ratio: float | None
     extra_metrics: dict[str, Any]
     session_id: str
     sequence_id: int
@@ -1075,7 +1092,13 @@ class BacktestResultInsertRow(TypedDict, total=False):
 
 
 class BacktestResultRow(TypedDict):
-    """Read projection for backtest_results."""
+    """Read projection for backtest_results.
+
+    Phase 2c Step 1 adds 8 advanced-metric fields. Pre-0005 rows leave
+    the 5 promoted fields as ``None`` (with the value still reachable
+    via ``extra_metrics``); post-0005 rows populate the typed columns
+    and the 5 promoted keys are absent from ``extra_metrics``.
+    """
 
     public_id: str
     timestamp: datetime
@@ -1092,6 +1115,14 @@ class BacktestResultRow(TypedDict):
     profit_factor: float | None
     final_equity: float
     max_equity: float
+    sortino_ratio: float | None
+    cagr: float | None
+    calmar_ratio: float | None
+    expectancy: float | None
+    avg_trade_pnl: float | None
+    max_drawdown_duration_seconds: float | None
+    exposure_ratio: float | None
+    turnover_ratio: float | None
     extra_metrics: dict[str, Any]
 
 

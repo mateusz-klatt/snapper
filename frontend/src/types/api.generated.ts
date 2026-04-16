@@ -2538,6 +2538,12 @@ export type Components = {
          * BacktestResultInline
          * @description Inline backtest aggregate metrics embedded in BacktestRunDetailData.
          *
+         *     Phase 2c Step 1 promotes 5 metrics from ``extra_metrics`` to typed
+         *     nullable-float columns and adds 3 new metrics. Mixed-vintage reads
+         *     are handled at the route layer via an explicit null-coalescing
+         *     fallback (typed column else ``extra_metrics.get(name)``) — see
+         *     ``backtest_routes.py`` inline projection.
+         *
          *     Attributes:
          *         total_trades: Total exit trades.
          *         winning_trades: Profitable trades.
@@ -2549,7 +2555,15 @@ export type Components = {
          *         profit_factor: Gross profit divided by gross loss.
          *         final_equity: Final equity value.
          *         max_equity: Peak equity value.
-         *         extra_metrics: Additional computed metrics.
+         *         sortino_ratio: Annualized Sortino ratio.
+         *         cagr: Compound annual growth rate.
+         *         calmar_ratio: CAGR divided by max drawdown.
+         *         expectancy: Mean per-trade PnL.
+         *         avg_trade_pnl: Average PnL per exit trade.
+         *         max_drawdown_duration_seconds: Longest peak-to-recovery duration.
+         *         exposure_ratio: Fraction of run time holding a non-zero position.
+         *         turnover_ratio: Total notional traded divided by mean equity.
+         *         extra_metrics: Any non-promoted additional computed metrics.
          */
         BacktestResultInline: {
             /** Total Trades */
@@ -2572,6 +2586,22 @@ export type Components = {
             final_equity: number;
             /** Max Equity */
             max_equity: number;
+            /** Sortino Ratio */
+            sortino_ratio?: number | null;
+            /** Cagr */
+            cagr?: number | null;
+            /** Calmar Ratio */
+            calmar_ratio?: number | null;
+            /** Expectancy */
+            expectancy?: number | null;
+            /** Avg Trade Pnl */
+            avg_trade_pnl?: number | null;
+            /** Max Drawdown Duration Seconds */
+            max_drawdown_duration_seconds?: number | null;
+            /** Exposure Ratio */
+            exposure_ratio?: number | null;
+            /** Turnover Ratio */
+            turnover_ratio?: number | null;
             extra_metrics?: Record<string, unknown>;
         };
         /**

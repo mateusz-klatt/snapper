@@ -257,9 +257,17 @@ class TestBacktestRunnerProcess:
             runner = BacktestRunnerProcess(run_public_id="run-1", db_url="sqlite://")
             await runner.start()
 
-            assert mock_bt_repo.insert_event.call_count == 1
-            event_call = mock_bt_repo.insert_event.call_args
-            assert event_call.kwargs["row"]["event_type"] == "run_started"
+            event_calls = mock_bt_repo.insert_event.call_args_list
+            event_types = [call.kwargs["row"]["event_type"] for call in event_calls]
+            assert event_types[0] == "run_started"
+            warning_events = [
+                call for call in event_calls if call.kwargs["row"]["event_type"] == "metric_warning"
+            ]
+            assert {call.kwargs["row"]["detail"]["metric"] for call in warning_events} == {
+                "max_drawdown_duration_seconds",
+                "exposure_ratio",
+                "turnover_ratio",
+            }
 
             status_calls = mock_bt_repo.update_run_status.call_args_list
             assert len(status_calls) == 2
@@ -417,6 +425,10 @@ class TestBacktestRunnerProcess:
             mock_metrics.calmar_ratio = 5.0
             mock_metrics.expectancy = 100.0
             mock_metrics.avg_trade_pnl = 100.0
+            mock_metrics.max_drawdown_duration_seconds = 3600.0
+            mock_metrics.exposure_ratio = 0.8
+            mock_metrics.turnover_ratio = 2.5
+            mock_metrics.warnings = []
             mock_compute.return_value = mock_metrics
 
             mock_bt_repo = AsyncMock()
@@ -438,7 +450,12 @@ class TestBacktestRunnerProcess:
             mock_bt_repo.insert_result.assert_called_once()
             result_row = mock_bt_repo.insert_result.call_args.args[0]
             assert result_row["total_trades"] == 5
-            assert result_row["extra_metrics"]["cagr"] == 0.5
+            assert result_row["cagr"] == 0.5
+            assert result_row["sortino_ratio"] == 2.0
+            assert result_row["max_drawdown_duration_seconds"] == 3600.0
+            assert result_row["exposure_ratio"] == 0.8
+            assert result_row["turnover_ratio"] == 2.5
+            assert result_row["extra_metrics"] == {}
 
     def test_get_status_returns_run_id(self) -> None:
         """get_status() includes run_public_id."""

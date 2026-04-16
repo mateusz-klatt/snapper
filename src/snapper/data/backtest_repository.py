@@ -81,7 +81,14 @@ def _event_to_dict(row: BacktestEvent) -> BacktestEventRow:
 
 
 def _result_to_dict(row: BacktestResult) -> BacktestResultRow:
-    """Project a BacktestResult ORM row into the TypedDict shape."""
+    """Project a BacktestResult ORM row into the TypedDict shape.
+
+    Carries the 8 advanced-metric columns added in migration 0005 —
+    pre-0005 rows have all 8 as ``None`` but the 5 promoted values
+    remain reachable via ``extra_metrics`` for read-side fallback at
+    the route layer (see ``backtest_routes.py`` inline-result
+    projection).
+    """
     return BacktestResultRow(
         public_id=row.public_id,
         timestamp=row.timestamp,
@@ -98,6 +105,14 @@ def _result_to_dict(row: BacktestResult) -> BacktestResultRow:
         profit_factor=row.profit_factor,
         final_equity=row.final_equity,
         max_equity=row.max_equity,
+        sortino_ratio=row.sortino_ratio,
+        cagr=row.cagr,
+        calmar_ratio=row.calmar_ratio,
+        expectancy=row.expectancy,
+        avg_trade_pnl=row.avg_trade_pnl,
+        max_drawdown_duration_seconds=row.max_drawdown_duration_seconds,
+        exposure_ratio=row.exposure_ratio,
+        turnover_ratio=row.turnover_ratio,
         extra_metrics=row.extra_metrics,
     )
 
@@ -537,6 +552,14 @@ class BacktestRepository:
                 profit_factor=row.get("profit_factor"),
                 final_equity=row.get("final_equity", 0.0),
                 max_equity=row.get("max_equity", 0.0),
+                sortino_ratio=row.get("sortino_ratio"),
+                cagr=row.get("cagr"),
+                calmar_ratio=row.get("calmar_ratio"),
+                expectancy=row.get("expectancy"),
+                avg_trade_pnl=row.get("avg_trade_pnl"),
+                max_drawdown_duration_seconds=row.get("max_drawdown_duration_seconds"),
+                exposure_ratio=row.get("exposure_ratio"),
+                turnover_ratio=row.get("turnover_ratio"),
                 extra_metrics=row.get("extra_metrics", {}),
                 session_id=session_id,
                 sequence_id=sequence_id,

@@ -1945,6 +1945,14 @@ class BacktestResult(TemporalMixin, Base):
     profit_factor: Mapped[float | None] = mapped_column(Float, nullable=True)
     final_equity: Mapped[float] = mapped_column(Float, default=0.0)
     max_equity: Mapped[float] = mapped_column(Float, default=0.0)
+    sortino_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cagr: Mapped[float | None] = mapped_column(Float, nullable=True)
+    calmar_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    expectancy: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_trade_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_drawdown_duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exposure_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    turnover_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
     extra_metrics: Mapped[JsonObject] = mapped_column(JSON, default=dict)
 
 

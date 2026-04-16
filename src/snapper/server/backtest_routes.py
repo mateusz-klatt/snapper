@@ -49,6 +49,7 @@ from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.data.backtest_repository import BacktestRepository
 from snapper.data.repository import Repository
+from snapper.data.repository_types import BacktestResultRow
 from snapper.data.repository_types import BacktestRunRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.dependencies import get_repository_dependency
@@ -135,6 +136,51 @@ def _run_to_detail_data(
         completed_at=run.get("completed_at"),
         error=run.get("error"),
         result=result,
+    )
+
+
+def _project_inline_result(result_row: BacktestResultRow) -> BacktestResultInline:
+    """Build the detail-view inline result with typed-column precedence.
+
+    Phase 2c Step 1 read-side fallback: for the 5 promoted metric names
+    (``sortino_ratio``, ``cagr``, ``calmar_ratio``, ``expectancy``,
+    ``avg_trade_pnl``), the typed column takes precedence over any value
+    the pre-0005 writer left inside ``extra_metrics``. The test is
+    explicit ``is not None`` to preserve a legitimate ``0.0`` typed
+    value against a stale non-zero JSON fallback. The 3 new metrics
+    (``max_drawdown_duration_seconds``, ``exposure_ratio``,
+    ``turnover_ratio``) have no JSON fallback — pre-0005 rows simply
+    emit ``None``.
+    """
+    extra = result_row.get("extra_metrics") or {}
+
+    def _promoted(name: str) -> float | None:
+        typed: float | None = result_row.get(name)  # type: ignore[assignment]
+        if typed is not None:
+            return typed
+        fallback = extra.get(name)
+        return float(fallback) if isinstance(fallback, int | float) else None
+
+    return BacktestResultInline(
+        total_trades=result_row["total_trades"],
+        winning_trades=result_row["winning_trades"],
+        losing_trades=result_row["losing_trades"],
+        total_pnl=result_row["total_pnl"],
+        max_drawdown=result_row["max_drawdown"],
+        sharpe_ratio=result_row.get("sharpe_ratio"),
+        win_rate=result_row.get("win_rate"),
+        profit_factor=result_row.get("profit_factor"),
+        final_equity=result_row["final_equity"],
+        max_equity=result_row["max_equity"],
+        sortino_ratio=_promoted("sortino_ratio"),
+        cagr=_promoted("cagr"),
+        calmar_ratio=_promoted("calmar_ratio"),
+        expectancy=_promoted("expectancy"),
+        avg_trade_pnl=_promoted("avg_trade_pnl"),
+        max_drawdown_duration_seconds=result_row.get("max_drawdown_duration_seconds"),
+        exposure_ratio=result_row.get("exposure_ratio"),
+        turnover_ratio=result_row.get("turnover_ratio"),
+        extra_metrics=extra,
     )
 
 
@@ -349,19 +395,7 @@ async def get_backtest(
     if run["status"] == "completed":
         result_row = await bt_repo.get_result(run["public_id"], as_of=ts)
         if result_row is not None:
-            inline_result = BacktestResultInline(
-                total_trades=result_row["total_trades"],
-                winning_trades=result_row["winning_trades"],
-                losing_trades=result_row["losing_trades"],
-                total_pnl=result_row["total_pnl"],
-                max_drawdown=result_row["max_drawdown"],
-                sharpe_ratio=result_row.get("sharpe_ratio"),
-                win_rate=result_row.get("win_rate"),
-                profit_factor=result_row.get("profit_factor"),
-                final_equity=result_row["final_equity"],
-                max_equity=result_row["max_equity"],
-                extra_metrics=result_row.get("extra_metrics", {}),
-            )
+            inline_result = _project_inline_result(result_row)
 
     return BacktestRunDetailResponse(
         type="backtest_run_detail_response",

@@ -345,13 +345,15 @@ class BacktestRunnerProcess(RegisterableProcess):
             profit_factor=metrics.profit_factor,
             final_equity=metrics.final_equity,
             max_equity=metrics.max_equity,
-            extra_metrics={
-                "sortino_ratio": metrics.sortino_ratio,
-                "cagr": metrics.cagr,
-                "calmar_ratio": metrics.calmar_ratio,
-                "expectancy": metrics.expectancy,
-                "avg_trade_pnl": metrics.avg_trade_pnl,
-            },
+            sortino_ratio=metrics.sortino_ratio,
+            cagr=metrics.cagr,
+            calmar_ratio=metrics.calmar_ratio,
+            expectancy=metrics.expectancy,
+            avg_trade_pnl=metrics.avg_trade_pnl,
+            max_drawdown_duration_seconds=metrics.max_drawdown_duration_seconds,
+            exposure_ratio=metrics.exposure_ratio,
+            turnover_ratio=metrics.turnover_ratio,
+            extra_metrics={},
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence(_BT_ARTIFACTS_STREAM),
             timestamp=now,
@@ -362,3 +364,17 @@ class BacktestRunnerProcess(RegisterableProcess):
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence(_BT_ARTIFACTS_STREAM),
         )
+        for warning in metrics.warnings:
+            await bt_repo.insert_event(
+                row={
+                    "run_public_id": run_public_id,
+                    "event_type": "metric_warning",
+                    "detail": {"metric": warning.metric, "reason": warning.reason},
+                    "session_id": self._tracker.session_id,
+                    "sequence_id": self._tracker.next_sequence(_BT_EVENTS_STREAM),
+                    "timestamp": now,
+                },
+                bus_time=now,
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence(_BT_EVENTS_STREAM),
+            )

@@ -331,6 +331,151 @@ class TestGetBacktest:
             bt.get_result.assert_not_called()
             client.close()
 
+    def test_get_run_detail_exposes_all_advanced_metrics(self) -> None:
+        """Phase 2c Step 1 DoD — 8 typed metrics surface on the detail response.
+
+        Fails hard if any future metric addition forgets to extend the
+        ``_project_inline_result`` helper.
+        """
+        bt = AsyncMock()
+        bt.get_run = AsyncMock(return_value=_make_run_row(status="completed"))
+        bt.get_result = AsyncMock(
+            return_value={
+                "total_trades": 10,
+                "winning_trades": 7,
+                "losing_trades": 3,
+                "total_pnl": 1234.5,
+                "max_drawdown": 0.12,
+                "sharpe_ratio": 1.6,
+                "win_rate": 0.7,
+                "profit_factor": 2.1,
+                "final_equity": 11234.5,
+                "max_equity": 11500.0,
+                "sortino_ratio": 1.9,
+                "cagr": 0.18,
+                "calmar_ratio": 1.5,
+                "expectancy": 123.45,
+                "avg_trade_pnl": 123.45,
+                "max_drawdown_duration_seconds": 7200.0,
+                "exposure_ratio": 0.8,
+                "turnover_ratio": 4.2,
+                "extra_metrics": {},
+            }
+        )
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            response = client.get("/api/backtests/run-1")
+            payload = response.json()["payload"]["result"]
+            assert payload["sortino_ratio"] == pytest.approx(1.9)
+            assert payload["cagr"] == pytest.approx(0.18)
+            assert payload["calmar_ratio"] == pytest.approx(1.5)
+            assert payload["expectancy"] == pytest.approx(123.45)
+            assert payload["avg_trade_pnl"] == pytest.approx(123.45)
+            assert payload["max_drawdown_duration_seconds"] == pytest.approx(7200.0)
+            assert payload["exposure_ratio"] == pytest.approx(0.8)
+            assert payload["turnover_ratio"] == pytest.approx(4.2)
+            client.close()
+
+    def test_get_run_detail_json_fallback_for_pre_0005_rows(self) -> None:
+        """Pre-0005 rows have the 5 promoted values only in extra_metrics.
+
+        Read-side fallback collapses JSON into the typed slot without
+        JSON truthiness collapsing a legitimate ``0.0`` typed column.
+        """
+        bt = AsyncMock()
+        bt.get_run = AsyncMock(return_value=_make_run_row(status="completed"))
+        bt.get_result = AsyncMock(
+            return_value={
+                "total_trades": 10,
+                "winning_trades": 5,
+                "losing_trades": 5,
+                "total_pnl": 0.0,
+                "max_drawdown": 0.1,
+                "sharpe_ratio": 1.0,
+                "win_rate": 0.5,
+                "profit_factor": 1.0,
+                "final_equity": 10000.0,
+                "max_equity": 10500.0,
+                "sortino_ratio": None,
+                "cagr": None,
+                "calmar_ratio": None,
+                "expectancy": None,
+                "avg_trade_pnl": None,
+                "max_drawdown_duration_seconds": None,
+                "exposure_ratio": None,
+                "turnover_ratio": None,
+                "extra_metrics": {
+                    "sortino_ratio": 1.4,
+                    "cagr": 0.08,
+                    "calmar_ratio": 0.8,
+                    "expectancy": 0.0,
+                    "avg_trade_pnl": 0.0,
+                },
+            }
+        )
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            response = client.get("/api/backtests/run-1")
+            payload = response.json()["payload"]["result"]
+            assert payload["sortino_ratio"] == pytest.approx(1.4)
+            assert payload["cagr"] == pytest.approx(0.08)
+            assert payload["calmar_ratio"] == pytest.approx(0.8)
+            assert payload["expectancy"] == pytest.approx(0.0)
+            assert payload["avg_trade_pnl"] == pytest.approx(0.0)
+            assert payload["max_drawdown_duration_seconds"] is None
+            assert payload["exposure_ratio"] is None
+            assert payload["turnover_ratio"] is None
+            client.close()
+
+    def test_get_run_detail_typed_zero_beats_json_fallback(self) -> None:
+        """Post-0005 row with ``expectancy=0.0`` must NOT be overridden by JSON.
+
+        Guards against Python truthiness trap (``x or y`` collapses 0.0).
+        """
+        bt = AsyncMock()
+        bt.get_run = AsyncMock(return_value=_make_run_row(status="completed"))
+        bt.get_result = AsyncMock(
+            return_value={
+                "total_trades": 5,
+                "winning_trades": 2,
+                "losing_trades": 3,
+                "total_pnl": 0.0,
+                "max_drawdown": 0.0,
+                "sharpe_ratio": None,
+                "win_rate": 0.4,
+                "profit_factor": 1.0,
+                "final_equity": 10000.0,
+                "max_equity": 10000.0,
+                "sortino_ratio": 0.0,
+                "cagr": 0.0,
+                "calmar_ratio": 0.0,
+                "expectancy": 0.0,
+                "avg_trade_pnl": 0.0,
+                "max_drawdown_duration_seconds": None,
+                "exposure_ratio": 0.0,
+                "turnover_ratio": 0.0,
+                "extra_metrics": {
+                    "sortino_ratio": 999.9,
+                    "cagr": 999.9,
+                    "calmar_ratio": 999.9,
+                    "expectancy": 999.9,
+                    "avg_trade_pnl": 999.9,
+                },
+            }
+        )
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            response = client.get("/api/backtests/run-1")
+            payload = response.json()["payload"]["result"]
+            assert payload["sortino_ratio"] == pytest.approx(0.0)
+            assert payload["cagr"] == pytest.approx(0.0)
+            assert payload["calmar_ratio"] == pytest.approx(0.0)
+            assert payload["expectancy"] == pytest.approx(0.0)
+            assert payload["avg_trade_pnl"] == pytest.approx(0.0)
+            assert payload["exposure_ratio"] == pytest.approx(0.0)
+            assert payload["turnover_ratio"] == pytest.approx(0.0)
+            client.close()
+
 
 class TestGetBacktestEquity:
     """Tests for GET /api/backtests/{run_id}/equity."""
