@@ -370,6 +370,14 @@ struct BacktestResultInline: Codable, Sendable {
     let profitFactor: Double?
     let finalEquity: Double
     let maxEquity: Double
+    let sortinoRatio: Double?
+    let cagr: Double?
+    let calmarRatio: Double?
+    let expectancy: Double?
+    let avgTradePnl: Double?
+    let maxDrawdownDurationSeconds: Double?
+    let exposureRatio: Double?
+    let turnoverRatio: Double?
     let extraMetrics: JsonObject?
 
     enum CodingKeys: String, CodingKey {
@@ -383,6 +391,14 @@ struct BacktestResultInline: Codable, Sendable {
         case profitFactor = "profit_factor"
         case finalEquity = "final_equity"
         case maxEquity = "max_equity"
+        case sortinoRatio = "sortino_ratio"
+        case cagr
+        case calmarRatio = "calmar_ratio"
+        case expectancy
+        case avgTradePnl = "avg_trade_pnl"
+        case maxDrawdownDurationSeconds = "max_drawdown_duration_seconds"
+        case exposureRatio = "exposure_ratio"
+        case turnoverRatio = "turnover_ratio"
         case extraMetrics = "extra_metrics"
     }
 }
