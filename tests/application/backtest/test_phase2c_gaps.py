@@ -12,6 +12,8 @@ Covers:
 - ``backtest_routes.create_backtest`` config_hash exception branch.
 """
 
+import asyncio
+import json
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -22,6 +24,7 @@ from unittest.mock import PropertyMock
 from unittest.mock import patch
 
 import pytest
+from typer.testing import CliRunner
 
 from snapper.application.backtest.batch_processor import CandleEvent
 from snapper.application.backtest.batch_processor import process_time_batch
@@ -33,9 +36,21 @@ from snapper.application.backtest.metrics import _compute_max_drawdown_duration_
 from snapper.application.backtest.progress import BacktestProgressEmitter
 from snapper.application.backtest.progress import noop_publish
 from snapper.application.backtest.result_collector import ResultCollector
+from snapper.application.backtest.runner import BacktestRunnerProcess
+from snapper.application.backtest.runner import _count_expected_batches
 from snapper.application.portfolio.models import PortfolioTracker
+from snapper.auth.domain.roles import UserRole
+from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.cli.app import app as cli_app
+from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import BacktestEquityPointInsertRow
+from snapper.interface.websocket.bridge import ZmqWebSocketBridgeService
+from snapper.interface.websocket.handlers.subscribe import handle_subscribe
+from snapper.interface.websocket.schemas import WSSubscribeRequest
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.topics.validation import _validate_backtest_prefix
+from snapper.messaging.topics.validation import _validate_backtest_topic
+from snapper.server.backtest_routes import create_backtest
 from snapper.strategies.factory import StrategyFactory
 
 NOW = datetime(2026, 4, 16, 12, 0, 0, tzinfo=UTC)
@@ -167,8 +182,6 @@ class TestRunnerCountExceptionFallback:
     @pytest.mark.asyncio
     async def test_repository_raises_returns_none(self) -> None:
         """Given: repository.get_candles raises; When: counted; Then: None returned + warning logged."""
-        from snapper.application.backtest.runner import _count_expected_batches
-
         with patch.dict(StrategyFactory.STRATEGY_CLASSES, {"sma_cross": MagicMock()}):
             config = BacktestConfig(
                 strategy_class="sma_cross",
@@ -196,13 +209,6 @@ class TestCliConfigHashFallback:
         SQLite DB with mocked engine + strategy so the only side effect
         observed is the ``except`` branch in ``cli/app.py:1574-1575``.
         """
-        import asyncio
-
-        from typer.testing import CliRunner
-
-        from snapper.cli.app import app as cli_app
-        from snapper.data.repository import SQLAlchemyRepository
-
         runner = CliRunner()
         db_path = tmp_path / "cli.db"
         db_url = f"sqlite+aiosqlite:///{db_path}"
@@ -280,10 +286,6 @@ class TestRunnerCancelEmitterBranch:
         the local ``emitter`` is still ``None`` when the except handler
         runs.
         """
-        import asyncio
-
-        from snapper.application.backtest.runner import BacktestRunnerProcess
-
         run = {
             "public_id": "run-early-cancel",
             "timestamp": NOW,
@@ -336,8 +338,6 @@ class TestRunnerCancelEmitterBranch:
     @pytest.mark.asyncio
     async def test_cancel_invokes_emitter_terminal(self) -> None:
         """Given: a CancelledError mid-run with an active emitter; Then: on_terminal('cancelled') fires."""
-        from snapper.application.backtest.runner import BacktestRunnerProcess
-
         run = {
             "public_id": "run-cancel",
             "timestamp": NOW,
@@ -377,7 +377,6 @@ class TestRunnerCancelEmitterBranch:
                 new=AsyncMock(return_value=10),
             ),
         ):
-            import asyncio
 
             mock_repo = MagicMock()
             mock_repo.session_factory = MagicMock()
@@ -402,8 +401,6 @@ class TestBridgeBacktestDualGateMalformed:
 
     def _make_bridge(self) -> Any:
         """Build a ZmqWebSocketBridgeService stub exercising the relaxation code."""
-        from snapper.interface.websocket.bridge import ZmqWebSocketBridgeService
-
         connection_manager = MagicMock()
         connection_manager.tracker = SequenceTracker()
         with patch("snapper.interface.websocket.bridge.get_settings") as mock_settings:
@@ -466,13 +463,6 @@ class TestSubscribeBacktestInvalidPrefix:
     @pytest.mark.asyncio
     async def test_malformed_backtest_prefix_is_rejected(self) -> None:
         """Given: a backtest prefix with a non-UUID7 wallet segment; Then: it lands in the error response."""
-        import json
-
-        from snapper.auth.domain.roles import UserRole
-        from snapper.auth.schemas.principal import AuthPrincipal
-        from snapper.interface.websocket.handlers.subscribe import handle_subscribe
-        from snapper.interface.websocket.schemas import WSSubscribeRequest
-
         ws = AsyncMock()
         manager = MagicMock()
         manager.get_client_subscriptions = MagicMock(return_value=set())
@@ -503,8 +493,6 @@ class TestBacktestTopicValidatorEdges:
 
     def test_wrong_category_segment_rejected(self) -> None:
         """Given: topic with wrong first segment; Then: 'Expected backtest' error."""
-        from snapper.messaging.topics.validation import _validate_backtest_topic
-
         topic = (
             "nobacktest.01948f94-0001-7a00-8000-000000000001."
             "01948f94-0001-7a00-8000-000000000002.started"
@@ -515,8 +503,6 @@ class TestBacktestTopicValidatorEdges:
 
     def test_prefix_run_segment_malformed(self) -> None:
         """Given: prefix with valid wallet but bad run segment; Then: rejected."""
-        from snapper.messaging.topics.validation import _validate_backtest_prefix
-
         pattern = "backtest.01948f94-0001-7a00-8000-000000000001.bad-run-id."
         valid, err = _validate_backtest_prefix(pattern)
         assert not valid
@@ -524,24 +510,18 @@ class TestBacktestTopicValidatorEdges:
 
     def test_prefix_missing_trailing_dot(self) -> None:
         """Given: prefix without trailing dot; Then: rejected."""
-        from snapper.messaging.topics.validation import _validate_backtest_prefix
-
         valid, err = _validate_backtest_prefix("backtest.01948f94")
         assert not valid
         assert "must end with dot" in err
 
     def test_prefix_with_empty_segments(self) -> None:
         """Given: prefix with an empty segment (double dot); Then: rejected."""
-        from snapper.messaging.topics.validation import _validate_backtest_prefix
-
         valid, err = _validate_backtest_prefix("backtest..")
         assert not valid
         assert "cannot be empty" in err
 
     def test_prefix_not_backtest_root(self) -> None:
         """Given: prefix starting with something other than 'backtest'; Then: rejected."""
-        from snapper.messaging.topics.validation import _validate_backtest_prefix
-
         valid, err = _validate_backtest_prefix("market.something.")
         assert not valid
         assert "Expected 'backtest' prefix" in err
@@ -553,8 +533,6 @@ class TestCreateBacktestConfigHashFallback:
     @pytest.mark.asyncio
     async def test_fingerprint_exception_stores_null(self) -> None:
         """Given: compute_fingerprint raises; When: create_backtest runs; Then: config_hash=None is stored."""
-        from snapper.server.backtest_routes import create_backtest
-
         bt = AsyncMock()
         bt.create_run = AsyncMock(return_value=(1, "run-new"))
         bt.get_run = AsyncMock(
@@ -609,9 +587,6 @@ class TestCreateBacktestConfigHashFallback:
         body.slippage_bps = 0.0
         body.commission_bps = 0.0
         command.payload = body
-
-        from snapper.auth.domain.roles import UserRole
-        from snapper.auth.schemas.principal import AuthPrincipal
 
         principal = AuthPrincipal(
             username="test",
