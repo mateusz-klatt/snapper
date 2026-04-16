@@ -37,6 +37,7 @@ from snapper.api.schemas.backtest import BacktestSignalData
 from snapper.api.schemas.backtest import BacktestSignalListResponse
 from snapper.api.schemas.backtest import BacktestTradeData
 from snapper.api.schemas.backtest import BacktestTradeListResponse
+from snapper.application.backtest.metrics import PROMOTED_METRIC_NAMES
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.auth.dependencies import require_permission
@@ -151,14 +152,22 @@ def _project_inline_result(result_row: BacktestResultRow) -> BacktestResultInlin
     (``max_drawdown_duration_seconds``, ``exposure_ratio``,
     ``turnover_ratio``) have no JSON fallback — pre-0005 rows simply
     emit ``None``.
+
+    Response ``extra_metrics`` strips the 5 promoted names so a pre-0005
+    row never emits them twice (once in the typed slot, once via the
+    unfiltered JSON blob). Parallel to the §4.3 comparison-diff set
+    subtraction that uses the same ``PROMOTED_METRIC_NAMES`` source of
+    truth. Defensive against a post-0005 writer mistakenly including
+    promoted keys in ``extra_metrics``.
     """
-    extra = result_row.get("extra_metrics") or {}
+    raw_extra = result_row.get("extra_metrics") or {}
+    filtered_extra = {k: v for k, v in raw_extra.items() if k not in PROMOTED_METRIC_NAMES}
 
     def _promoted(name: str) -> float | None:
         typed: float | None = result_row.get(name)  # type: ignore[assignment]
         if typed is not None:
             return typed
-        fallback = extra.get(name)
+        fallback = raw_extra.get(name)
         return float(fallback) if isinstance(fallback, int | float) else None
 
     return BacktestResultInline(
@@ -180,7 +189,7 @@ def _project_inline_result(result_row: BacktestResultRow) -> BacktestResultInlin
         max_drawdown_duration_seconds=result_row.get("max_drawdown_duration_seconds"),
         exposure_ratio=result_row.get("exposure_ratio"),
         turnover_ratio=result_row.get("turnover_ratio"),
-        extra_metrics=extra,
+        extra_metrics=filtered_extra,
     )
 
 

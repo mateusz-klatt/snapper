@@ -427,6 +427,64 @@ class TestGetBacktest:
             assert payload["turnover_ratio"] is None
             client.close()
 
+    def test_get_run_detail_strips_promoted_names_from_extra_metrics(self) -> None:
+        """Pre-0005 promoted-name JSON keys surface only via typed fields.
+
+        Defends against the double-emission gap where a mixed-vintage
+        row exposes the 5 promoted metrics once in the typed slot AND
+        again inside ``extra_metrics``. ``PROMOTED_METRIC_NAMES`` is
+        the source of truth for what gets stripped.
+        """
+        bt = AsyncMock()
+        bt.get_run = AsyncMock(return_value=_make_run_row(status="completed"))
+        bt.get_result = AsyncMock(
+            return_value={
+                "total_trades": 3,
+                "winning_trades": 2,
+                "losing_trades": 1,
+                "total_pnl": 50.0,
+                "max_drawdown": 0.05,
+                "sharpe_ratio": 1.1,
+                "win_rate": 0.66,
+                "profit_factor": 1.5,
+                "final_equity": 10050.0,
+                "max_equity": 10100.0,
+                "sortino_ratio": None,
+                "cagr": None,
+                "calmar_ratio": None,
+                "expectancy": None,
+                "avg_trade_pnl": None,
+                "max_drawdown_duration_seconds": None,
+                "exposure_ratio": None,
+                "turnover_ratio": None,
+                "extra_metrics": {
+                    "sortino_ratio": 1.4,
+                    "cagr": 0.08,
+                    "calmar_ratio": 0.8,
+                    "expectancy": 12.5,
+                    "avg_trade_pnl": 12.5,
+                    "custom_non_promoted": 42.0,
+                },
+            }
+        )
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            response = client.get("/api/backtests/run-1")
+            payload = response.json()["payload"]["result"]
+            assert payload["sortino_ratio"] == pytest.approx(1.4)
+            assert payload["cagr"] == pytest.approx(0.08)
+            assert payload["expectancy"] == pytest.approx(12.5)
+            promoted_keys = {
+                "sortino_ratio",
+                "cagr",
+                "calmar_ratio",
+                "expectancy",
+                "avg_trade_pnl",
+            }
+            assert set(payload["extra_metrics"]).isdisjoint(promoted_keys)
+            assert payload["extra_metrics"]["custom_non_promoted"] == pytest.approx(42.0)
+            client.close()
+
     def test_get_run_detail_typed_zero_beats_json_fallback(self) -> None:
         """Post-0005 row with ``expectancy=0.0`` must NOT be overridden by JSON.
 
