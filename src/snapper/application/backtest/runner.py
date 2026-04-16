@@ -25,6 +25,9 @@ from snapper.application.backtest.config import BacktestExecutionMode
 from snapper.application.backtest.config import BacktestFillModel
 from snapper.application.backtest.direct_engine import DirectDbEngine
 from snapper.application.backtest.metrics import compute_metrics
+from snapper.application.backtest.progress import BacktestProgressEmitter
+from snapper.application.backtest.progress import PublishFn
+from snapper.application.backtest.progress import noop_publish
 from snapper.application.backtest.result_collector import ResultCollector
 from snapper.application.backtest.zmq_engine import ZmqReplayEngine
 from snapper.application.process_manager.models import RegisterableProcess
@@ -93,16 +96,30 @@ class BacktestRunnerProcess(RegisterableProcess):
     persists artifacts + metrics, and sets terminal status.
     """
 
-    def __init__(self, run_public_id: str, db_url: str) -> None:
+    def __init__(
+        self,
+        run_public_id: str,
+        db_url: str,
+        progress_publish: PublishFn | None = None,
+    ) -> None:
         """Initialize the runner.
 
         Args:
             run_public_id: Public ID of the backtest run to execute.
             db_url: Database URL for repository access.
+            progress_publish: Optional Phase 2c WS progress publisher.
+                When supplied, the runner constructs a
+                ``BacktestProgressEmitter`` and fires ``started`` /
+                ``progress`` / ``milestone`` / terminal events on the
+                4-segment ``backtest.{wallet}.{run}.{event}`` topic
+                family. ``None`` falls back to the ``noop_publish``
+                sink so runner tests that don't care about WS keep
+                passing byte-identically.
         """
         self._run_public_id = run_public_id
         self._db_url = db_url
         self._tracker = SequenceTracker()
+        self._progress_publish: PublishFn = progress_publish or noop_publish
 
     @staticmethod
     def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
@@ -157,6 +174,7 @@ class BacktestRunnerProcess(RegisterableProcess):
             )
             return
 
+        emitter: BacktestProgressEmitter | None = None
         try:
             config = BacktestConfig.model_validate(run_to_config_dict(run))
 
@@ -212,11 +230,21 @@ class BacktestRunnerProcess(RegisterableProcess):
                 run_public_id=run["public_id"],
                 cancel_poll_ms=config.cancel_poll_ms,
             )
+            emitter = BacktestProgressEmitter(
+                run_public_id=run["public_id"],
+                wallet_public_id=run["wallet_public_id"],
+                total_candles=None,
+                tracker=self._tracker,
+                publish=self._progress_publish,
+            )
+            await emitter.on_started()
             engine: DirectDbEngine | ZmqReplayEngine
             if config.execution_mode == BacktestExecutionMode.ZMQ_REPLAY:
-                engine = ZmqReplayEngine(repository, now, cancel_probe=cancel_probe)
+                engine = ZmqReplayEngine(
+                    repository, now, cancel_probe=cancel_probe, emitter=emitter
+                )
             else:
-                engine = DirectDbEngine(repository, now, cancel_probe=cancel_probe)
+                engine = DirectDbEngine(repository, now, cancel_probe=cancel_probe, emitter=emitter)
             collector = ResultCollector()
             await engine.run(run["public_id"], config, collector)
             await self._persist_artifacts(bt_repo, run["public_id"], collector, config)
@@ -229,6 +257,7 @@ class BacktestRunnerProcess(RegisterableProcess):
                 sequence_id=self._tracker.next_sequence(_BT_STATUS_STREAM),
                 completed_at=final_now,
             )
+            await emitter.on_terminal("completed")
             logger.info(
                 "Backtest {} completed: {} trades, {} equity points",
                 self._run_public_id[:8],
@@ -248,6 +277,9 @@ class BacktestRunnerProcess(RegisterableProcess):
             )
             with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.shield(cancel_task)
+            if emitter is not None:
+                with contextlib.suppress(Exception):
+                    await emitter.on_terminal("cancelled")
             logger.info("Backtest {} cancelled", self._run_public_id[:8])
             raise
         except Exception as exc:
@@ -286,6 +318,9 @@ class BacktestRunnerProcess(RegisterableProcess):
             for task in (event_task, status_task):
                 with contextlib.suppress(asyncio.CancelledError):
                     await asyncio.shield(task)
+            if emitter is not None:
+                with contextlib.suppress(Exception):
+                    await emitter.on_terminal("failed")
             logger.error("Backtest {} failed: {}", self._run_public_id[:8], error_msg)
             raise
 

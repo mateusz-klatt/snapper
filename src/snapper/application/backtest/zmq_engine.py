@@ -41,6 +41,7 @@ from snapper.application.backtest.cancel import CancelProbe
 from snapper.application.backtest.config import BacktestConfig
 from snapper.application.backtest.drain import DrainCoordinator
 from snapper.application.backtest.endpoints import allocate_replay_endpoints
+from snapper.application.backtest.progress import BacktestProgressEmitter
 from snapper.application.backtest.result_collector import ResultCollector
 from snapper.application.portfolio.models import PortfolioTracker
 from snapper.data.repository import Repository
@@ -66,6 +67,7 @@ class ZmqReplayEngine:
         repository: Repository,
         snapshot_as_of: datetime,
         cancel_probe: CancelProbe | None = None,
+        emitter: BacktestProgressEmitter | None = None,
     ) -> None:
         """Wire the engine to a repository + bitemporal anchor.
 
@@ -77,10 +79,14 @@ class ZmqReplayEngine:
                 calls ``await probe.check()`` per processed candle so a
                 cancel_requested status is detected within ``cancel_poll_ms``
                 + ``probe_timeout_s``.
+            emitter: Optional Phase 2c progress emitter shared with
+                ``DirectDbEngine`` so both replay modes emit identical
+                WS progress events.
         """
         self._repository = repository
         self._snapshot_as_of = snapshot_as_of
         self._cancel_probe = cancel_probe
+        self._emitter = emitter
 
     async def run(
         self,
@@ -147,6 +153,7 @@ class ZmqReplayEngine:
                 tracker=SequenceTracker(),
                 expected_topics=expected_topics,
                 cancel_probe=self._cancel_probe,
+                emitter=self._emitter,
             )
 
             inner_class = StrategyFactory.STRATEGY_CLASSES[config.strategy_class]
@@ -201,6 +208,7 @@ class ZmqReplayEngine:
                     collector=state.collector,
                     tracker=state.tracker,
                     snapshot_as_of=self._snapshot_as_of,
+                    emitter=self._emitter,
                 )
                 state.pending_batch = []
 

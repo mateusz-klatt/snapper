@@ -31,6 +31,7 @@ from uuid import uuid7
 
 from snapper.application.backtest.config import BacktestConfig
 from snapper.application.backtest.fill_model import simulate_market_fill
+from snapper.application.backtest.progress import BacktestProgressEmitter
 from snapper.application.backtest.result_collector import ResultCollector
 from snapper.application.portfolio.models import PortfolioTracker
 from snapper.data.repository_types import CandleRow
@@ -86,6 +87,7 @@ async def process_time_batch(
     collector: ResultCollector,
     tracker: SequenceTracker,
     snapshot_as_of: datetime,
+    emitter: BacktestProgressEmitter | None = None,
 ) -> None:
     """Process all candle events at the same timestamp.
 
@@ -108,6 +110,11 @@ async def process_time_batch(
             batch (passed instead of read from a hidden engine attribute
             so the helper stays a pure function — same value for both
             Direct-DB and ZMQ replay engines).
+        emitter: Optional Phase 2c WS progress emitter. When supplied,
+            ``on_candle_processed`` is called after the equity sample
+            with the current equity + cumulative signal/trade counts.
+            ``None`` keeps the helper byte-identical with pre-Phase-2c
+            callers.
     """
     for event in batch:
         latest_closes[event.instrument] = float(event.row["close"])
@@ -169,3 +176,11 @@ async def process_time_batch(
         sequence_id=tracker.next_sequence("bt"),
         bus_time=snapshot_as_of,
     )
+
+    if emitter is not None:
+        current_equity = collector.equity_points[-1]["equity"] if collector.equity_points else 0.0
+        await emitter.on_candle_processed(
+            equity=current_equity,
+            signals_count=len(collector.signals),
+            trades_count=len(collector.trades),
+        )

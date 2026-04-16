@@ -15,6 +15,26 @@ export const WsMessageBaseSchema = z
   })
   .strict()
 
+export const BacktestProgressDataSchema = z
+  .object({
+    type: z.literal('backtest_progress'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    run_public_id: z.string(),
+    wallet_public_id: z.string(),
+    event: z.enum(['started', 'progress', 'milestone', 'completed', 'failed', 'cancelled']),
+    milestone: z.enum(['25pct', '50pct', '75pct']).nullable(),
+    candles_done: z.number().int(),
+    total_candles: z.number().int().nullable(),
+    signals_count: z.number().int(),
+    trades_count: z.number().int(),
+    equity: z.number(),
+    progress_pct: z.number(),
+  })
+  .strict()
+
 export const CandleDataSchema = z
   .object({
     type: z.literal('candle'),

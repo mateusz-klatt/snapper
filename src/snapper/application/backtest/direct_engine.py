@@ -20,6 +20,7 @@ from snapper.application.backtest.batch_processor import candle_row_to_data
 from snapper.application.backtest.batch_processor import process_time_batch
 from snapper.application.backtest.cancel import CancelProbe
 from snapper.application.backtest.config import BacktestConfig
+from snapper.application.backtest.progress import BacktestProgressEmitter
 from snapper.application.backtest.result_collector import ResultCollector
 from snapper.application.portfolio.models import PortfolioTracker
 from snapper.core.types import BacktestRunStatusEnum
@@ -101,6 +102,7 @@ class DirectDbEngine:
         bt_repo: BacktestRepository | None = None,
         cancel_poll_ms: int = 500,
         cancel_probe: CancelProbe | None = None,
+        emitter: BacktestProgressEmitter | None = None,
     ) -> None:
         """Initialize engine with repository, snapshot time, and optional cancel polling.
 
@@ -117,6 +119,11 @@ class DirectDbEngine:
                 When provided, the engine delegates entirely to it; both
                 Direct-DB and ZMQ replay engines can share the same instance
                 so cancel detection is uniform.
+            emitter: Optional Phase 2c progress emitter. When supplied the
+                engine calls ``emitter.on_candle_processed`` after each
+                time-batch drain so WS clients receive live progress.
+                ``None`` is a no-op — direct-DB parity tests that don't
+                wire WS keep working byte-identically.
         """
         self._repository = repository
         self._snapshot_as_of = snapshot_as_of
@@ -124,6 +131,7 @@ class DirectDbEngine:
         self._bt_repo: BacktestRepository | None = bt_repo
         self._cancel_poll_ms = cancel_poll_ms
         self._last_cancel_check_ms: float = 0.0
+        self._emitter: BacktestProgressEmitter | None = emitter
 
     async def run(
         self,
@@ -281,4 +289,5 @@ class DirectDbEngine:
             collector=collector,
             tracker=tracker,
             snapshot_as_of=self._snapshot_as_of,
+            emitter=self._emitter,
         )

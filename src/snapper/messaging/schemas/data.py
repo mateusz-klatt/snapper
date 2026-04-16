@@ -821,8 +821,68 @@ Consumed by the topic validator
 (``snapper.messaging.topics.validation._validate_backtest_topic`` —
 which derives ``BACKTEST_EVENTS = frozenset(typing.get_args(...))``
 from this Literal so the enum and the topic layer cannot drift), the
-``BacktestProgressData.event`` payload field (Step 2b), the runner
+``BacktestProgressData.event`` payload field (below), the runner
 emitter, and the frontend WS handlers. Milestone is NOT an event
 value but a separate field on the payload with a ``@model_validator``
 enforcing ``milestone is not None iff event == 'milestone'``.
 """
+
+
+BacktestProgressMilestone = Literal["25pct", "50pct", "75pct"]
+"""25/50/75 percent milestone buckets for backtest progress."""
+
+
+class BacktestProgressData(StrictDataSchema[Literal["backtest_progress"]]):
+    """Live backtest progress payload published to ZMQ + forwarded to WS.
+
+    Published on topic ``backtest.{wallet_public_id}.{run_public_id}.{event}``
+    where ``event`` matches ``BacktestProgressEvent``. The bridge
+    forwards the envelope verbatim to every WS client subscribed to the
+    wallet + run prefix the topic falls under.
+
+    Cross-field invariant (plan R18 sonnet F3): ``milestone`` is
+    non-null if-and-only-if ``event == "milestone"``. Without this
+    guard, a malformed payload ``(event="progress", milestone="25pct")``
+    would parse cleanly and the frontend milestone chip would fire on
+    every throttled progress tick. The validator closes both
+    directions.
+
+    Attributes:
+        type: Payload discriminator (``backtest_progress``).
+        run_public_id: UUID7 of the backtest run.
+        wallet_public_id: UUID7 of the owning wallet (for topic scope).
+        event: Progress event enum.
+        milestone: 25pct/50pct/75pct bucket (only on milestone events).
+        candles_done: Candles processed so far.
+        total_candles: Expected total (None when count query failed).
+        signals_count: Cumulative signals generated.
+        trades_count: Cumulative trades simulated.
+        equity: Current portfolio equity.
+        progress_pct: candles_done / total_candles (0.0 if total is None).
+    """
+
+    type: Literal["backtest_progress"] = "backtest_progress"
+    run_public_id: str
+    wallet_public_id: str
+    event: BacktestProgressEvent
+    milestone: BacktestProgressMilestone | None = None
+    candles_done: int
+    total_candles: int | None
+    signals_count: int
+    trades_count: int
+    equity: float
+    progress_pct: float
+
+    @model_validator(mode="after")
+    def _milestone_requires_event(self) -> Self:
+        """Cross-field invariant: ``milestone`` non-null iff event == 'milestone'.
+
+        Closes both directions so neither a milestone event without a
+        bucket nor a non-milestone event carrying a bucket slips past
+        Pydantic into the bridge.
+        """
+        if self.event == "milestone" and self.milestone is None:
+            raise ValueError("milestone event requires a milestone bucket value")
+        if self.event != "milestone" and self.milestone is not None:
+            raise ValueError("milestone field must be None when event != 'milestone'")
+        return self

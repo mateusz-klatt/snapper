@@ -53,6 +53,7 @@ from snapper.application.backtest.batch_processor import process_time_batch
 from snapper.application.backtest.cancel import CancelProbe
 from snapper.application.backtest.config import BacktestConfig
 from snapper.application.backtest.drain import DrainCoordinator
+from snapper.application.backtest.progress import BacktestProgressEmitter
 from snapper.application.backtest.result_collector import ResultCollector
 from snapper.application.portfolio.models import PortfolioTracker
 from snapper.data.repository_types import CandleRow
@@ -89,6 +90,7 @@ class BacktestReplayState:
     acked_topics: set[str] = field(default_factory=set)
     subscriber_ready: asyncio.Event = field(default_factory=asyncio.Event)
     cancel_probe: CancelProbe | None = None
+    emitter: BacktestProgressEmitter | None = None
 
 
 def _candle_data_to_event(data: CandleData) -> CandleEvent:
@@ -195,6 +197,7 @@ def make_backtest_replay_strategy(
                 collector=state.collector,
                 tracker=state.tracker,
                 snapshot_as_of=state.snapshot_as_of,
+                emitter=state.emitter,
             )
             state.pending_batch = []
         state.pending_batch.append(event)
