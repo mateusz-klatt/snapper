@@ -206,6 +206,7 @@ class BacktestRunData(StrictDataSchema[Literal["backtest_run"]]):
     fill_model: str = "market"
     slippage_bps: float = 0.0
     commission_bps: float = 0.0
+    config_hash: str | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     error: str | None = None

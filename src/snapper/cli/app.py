@@ -64,6 +64,7 @@ from sqlalchemy.pool import NullPool
 from snapper.application.backtest.config import BacktestConfig
 from snapper.application.backtest.config import BacktestExecutionMode
 from snapper.application.backtest.config import BacktestFillModel
+from snapper.application.backtest.config import compute_fingerprint
 from snapper.application.backtest.direct_engine import DirectDbEngine
 from snapper.application.backtest.metrics import compute_metrics
 from snapper.application.backtest.result_collector import ResultCollector
@@ -1568,6 +1569,10 @@ def backtest_run(
             slippage_bps=slippage_bps,
             commission_bps=commission_bps,
         )
+        try:
+            config_hash = compute_fingerprint(config, for_pairing=True)
+        except Exception:
+            config_hash = None
 
         _, public_id = await bt_repo.create_run(
             row={
@@ -1585,6 +1590,7 @@ def backtest_run(
                 "fill_model": fill_model,
                 "slippage_bps": slippage_bps,
                 "commission_bps": commission_bps,
+                "config_hash": config_hash,
                 "created_by_user_id": "cli",
                 "session_id": tracker.session_id,
                 "sequence_id": tracker.next_sequence("cli"),

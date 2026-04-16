@@ -22,7 +22,7 @@ type UserRole = Components['schemas']['UserRole']
  * - ``{ clear: true }`` — explicitly clear the JWT wallet claim to
  *   ``null`` ("All wallets" picker option).
  */
-export type RefreshWalletHint = { walletId: string } | { clear: true } | undefined
+type RefreshWalletHint = { walletId: string } | { clear: true } | undefined
 type WindowWithCallbacks = typeof globalThis & {
   authLogoutCallback?: () => void
   wsDisconnectCallback?: () => void
@@ -149,12 +149,14 @@ export const useAuthStore = create<AuthState>()(
         refreshToken: async (nextWallet?: RefreshWalletHint) => {
           try {
             let body: { active_wallet_public_id?: string; clear_active_wallet?: true } | undefined
+
             if (nextWallet !== undefined) {
               body =
                 'clear' in nextWallet
                   ? { clear_active_wallet: true }
                   : { active_wallet_public_id: nextWallet.walletId }
             }
+
             const envelope: {
               payload: {
                 message?: string
@@ -163,9 +165,10 @@ export const useAuthStore = create<AuthState>()(
                 csrf_token?: string
                 user?: User
               }
-            } = body === undefined
-              ? await apiClient.postJSON('/api/auth/refresh')
-              : await apiClient.postJSON('/api/auth/refresh', body)
+            } =
+              body === undefined
+                ? await apiClient.postJSON('/api/auth/refresh')
+                : await apiClient.postJSON('/api/auth/refresh', body)
             const data = envelope.payload
 
             if (typeof data.ws_token === 'string' && typeof data.ws_token_exp === 'string') {

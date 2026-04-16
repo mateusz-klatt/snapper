@@ -59,6 +59,7 @@ def _run_to_dict(row: BacktestRun) -> BacktestRunRow:
         fill_model=row.fill_model,
         slippage_bps=row.slippage_bps,
         commission_bps=row.commission_bps,
+        config_hash=row.config_hash,
         created_by_user_id=row.created_by_user_id,
         started_at=row.started_at,
         completed_at=row.completed_at,
@@ -227,6 +228,7 @@ class BacktestRepository:
                 fill_model=row.get("fill_model", "market"),
                 slippage_bps=row.get("slippage_bps", 0.0),
                 commission_bps=row.get("commission_bps", 0.0),
+                config_hash=row.get("config_hash"),
                 created_by_user_id=row.get("created_by_user_id"),
                 process_name=row.get("process_name"),
                 session_id=session_id,
@@ -271,6 +273,7 @@ class BacktestRepository:
         wallet_public_id: str | None = None,
         strategy: str | None = None,
         status: str | None = None,
+        config_hash: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[BacktestRunRow]:
@@ -281,6 +284,9 @@ class BacktestRepository:
             wallet_public_id: Optional wallet filter.
             strategy: Optional strategy_name filter.
             status: Optional status filter.
+            config_hash: Optional Phase 2c pairing-stable hash filter
+                — selects runs with the same ``compute_fingerprint(
+                config, for_pairing=True)`` digest for auto-pair UI.
             limit: Max rows to return.
             offset: Rows to skip.
 
@@ -295,6 +301,8 @@ class BacktestRepository:
                 conditions.append(BacktestRun.strategy_name == strategy)
             if status is not None:
                 conditions.append(BacktestRun.status == status)
+            if config_hash is not None:
+                conditions.append(BacktestRun.config_hash == config_hash)
             rows = (
                 (
                     await s.execute(
@@ -374,6 +382,7 @@ class BacktestRepository:
                 fill_model=existing.fill_model,
                 slippage_bps=existing.slippage_bps,
                 commission_bps=existing.commission_bps,
+                config_hash=existing.config_hash,
                 created_by_user_id=existing.created_by_user_id,
                 started_at=started_at or existing.started_at,
                 completed_at=completed_at or existing.completed_at,

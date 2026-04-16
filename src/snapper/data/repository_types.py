@@ -976,7 +976,15 @@ class PositionCycleInsertRow(TypedDict, total=False):
 
 
 class BacktestRunInsertRow(TypedDict, total=False):
-    """Insert payload for backtest_runs."""
+    """Insert payload for backtest_runs.
+
+    Phase 2c Step 3 adds ``config_hash`` — the caller (API route,
+    runner, or CLI) computes
+    ``compute_fingerprint(config, for_pairing=True)`` and passes the
+    resulting hex digest so the auto-pair comparison UI can group
+    runs. Hashing happens in the caller, not the repo — ``data/``
+    stays layer-pure and does not depend on ``application/``.
+    """
 
     wallet_public_id: str
     operator_public_id: str | None
@@ -994,6 +1002,7 @@ class BacktestRunInsertRow(TypedDict, total=False):
     fill_model: str
     slippage_bps: float
     commission_bps: float
+    config_hash: str | None
     created_by_user_id: str | None
     process_name: str | None
     session_id: str
@@ -1024,6 +1033,7 @@ class BacktestRunRow(TypedDict):
     fill_model: str
     slippage_bps: float
     commission_bps: float
+    config_hash: str | None
     created_by_user_id: str | None
     started_at: datetime | None
     completed_at: datetime | None

@@ -20,6 +20,7 @@ export const BacktestProgressBar: React.FC<Props> = ({ snapshot }) => {
   if (!snapshot) {
     return <div className='text-sm opacity-60'>Waiting for progress…</div>
   }
+
   const pct = Math.round((snapshot.progress_pct ?? 0) * 100)
   const milestoneLabel =
     snapshot.event === 'milestone' && snapshot.milestone

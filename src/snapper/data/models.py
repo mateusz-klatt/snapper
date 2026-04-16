@@ -1880,6 +1880,7 @@ class BacktestRun(TemporalMixin, Base):
     fill_model: Mapped[str] = mapped_column(String(32), default="market")
     slippage_bps: Mapped[float] = mapped_column(Float, default=0.0)
     commission_bps: Mapped[float] = mapped_column(Float, default=0.0)
+    config_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_by_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)

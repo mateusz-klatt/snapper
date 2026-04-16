@@ -698,7 +698,8 @@ class APIClient {
     limit = 20,
     offset = 0,
     strategy?: string,
-    status?: string
+    status?: string,
+    configHash?: string | null
   ): Promise<BacktestRunListResponse> {
     const params = new URLSearchParams()
 
@@ -706,6 +707,7 @@ class APIClient {
     params.set('offset', String(offset))
     if (strategy) params.set('strategy', strategy)
     if (status) params.set('status', status)
+    if (configHash) params.set('config_hash', configHash)
     const data = await this.getJSON(`/api/backtests?${params.toString()}`)
 
     return data as BacktestRunListResponse

@@ -8,6 +8,7 @@ import hashlib
 import json
 from datetime import datetime
 from enum import StrEnum
+from typing import Any
 
 from pydantic import field_validator
 
@@ -168,36 +169,62 @@ def compute_fingerprint(
     snapshot_as_of: datetime | None = None,
     warmup_bars: int = 0,
     buffer_size: int = 0,
+    *,
+    for_pairing: bool = False,
 ) -> str:
     """Compute deterministic SHA-256 fingerprint for a backtest configuration.
 
-    Used for dedup detection: same config + same data snapshot = same results.
+    Used for dedup detection (``for_pairing=False``, the default) and
+    for Phase 2c auto-pair comparison (``for_pairing=True``).
+
+    When ``for_pairing=True``, fields that do NOT affect
+    comparability are excluded from the serialised payload so two
+    runs with the same business config but different execution modes
+    or ephemeral knobs hash to the same value:
+
+    - ``execution_mode`` — Direct-DB and ZMQ replay are considered
+      comparable at the engine-output level.
+    - ``snapshot_as_of`` — per-invocation noise, not a config
+      attribute.
+    - ``warmup_bars`` / ``buffer_size`` — ephemeral engine knobs.
+
+    ``fill_model``, ``slippage_bps``, and ``commission_bps`` ARE
+    included in the pairing hash (R11 sonnet fix) because runs that
+    differ only in those three fields are NOT engine-comparable.
+
+    Default path (``for_pairing=False``) preserves the existing
+    byte-for-byte fingerprint semantics — every existing caller
+    (run provenance, dedup cache, tests) keeps its exact hash.
 
     Args:
         config: Backtest configuration.
         snapshot_as_of: Data snapshot timestamp (None = latest).
         warmup_bars: Number of warm-up candle bars.
         buffer_size: Additional buffer bars.
+        for_pairing: Phase 2c flag — when True, produce the
+            pairing-stable hash by omitting execution_mode +
+            snapshot_as_of + warmup_bars + buffer_size.
 
     Returns:
         Hex SHA-256 digest.
     """
     normalized_instruments = {k: sorted(v) for k, v in sorted(config.instruments.items())}
-    payload = {
+    payload: dict[str, Any] = {
         "strategy_class": config.strategy_class,
         "instruments": normalized_instruments,
         "start_date": config.start_date.isoformat(),
         "end_date": config.end_date.isoformat(),
-        "execution_mode": config.execution_mode,
         "initial_balance": config.initial_balance,
         "strategy_params": config.strategy_params,
         "timeframe": config.timeframe,
         "fill_model": config.fill_model,
         "slippage_bps": config.slippage_bps,
         "commission_bps": config.commission_bps,
-        "snapshot_as_of": snapshot_as_of.isoformat() if snapshot_as_of else None,
-        "warmup_bars": warmup_bars,
-        "buffer_size": buffer_size,
     }
+    if not for_pairing:
+        payload["execution_mode"] = config.execution_mode
+        payload["snapshot_as_of"] = snapshot_as_of.isoformat() if snapshot_as_of else None
+        payload["warmup_bars"] = warmup_bars
+        payload["buffer_size"] = buffer_size
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()

@@ -37,6 +37,10 @@ from snapper.api.schemas.backtest import BacktestSignalData
 from snapper.api.schemas.backtest import BacktestSignalListResponse
 from snapper.api.schemas.backtest import BacktestTradeData
 from snapper.api.schemas.backtest import BacktestTradeListResponse
+from snapper.application.backtest.config import BacktestConfig
+from snapper.application.backtest.config import BacktestExecutionMode
+from snapper.application.backtest.config import BacktestFillModel
+from snapper.application.backtest.config import compute_fingerprint
 from snapper.application.backtest.metrics import PROMOTED_METRIC_NAMES
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.models import ProcessConfigModel
@@ -100,6 +104,7 @@ def _run_to_data(
         fill_model=run["fill_model"],
         slippage_bps=run["slippage_bps"],
         commission_bps=run["commission_bps"],
+        config_hash=run.get("config_hash"),
         started_at=run.get("started_at"),
         completed_at=run.get("completed_at"),
         error=run.get("error"),
@@ -133,6 +138,7 @@ def _run_to_detail_data(
         fill_model=run["fill_model"],
         slippage_bps=run["slippage_bps"],
         commission_bps=run["commission_bps"],
+        config_hash=run.get("config_hash"),
         started_at=run.get("started_at"),
         completed_at=run.get("completed_at"),
         error=run.get("error"),
@@ -261,6 +267,26 @@ async def create_backtest(
         )
 
     body = command.payload
+    try:
+        pairing_config = BacktestConfig(
+            strategy_class=body.strategy_class,
+            instruments={body.exchange: [body.instrument_public_id]},
+            start_date=body.start_date,
+            end_date=body.end_date,
+            wallet_public_id=wallet_id,
+            operator_public_id=principal.primary_operator_public_id or None,
+            execution_mode=BacktestExecutionMode(body.execution_mode),
+            initial_balance=body.initial_cash,
+            strategy_params=dict(body.strategy_params),
+            timeframe=body.timeframe,
+            fill_model=BacktestFillModel(body.fill_model),
+            slippage_bps=body.slippage_bps,
+            commission_bps=body.commission_bps,
+        )
+        config_hash = compute_fingerprint(pairing_config, for_pairing=True)
+    except Exception as exc:
+        logger.warning("config_hash computation failed: {} — storing NULL", exc)
+        config_hash = None
     _, public_id = await bt_repo.create_run(
         row={
             "wallet_public_id": wallet_id,
@@ -278,6 +304,7 @@ async def create_backtest(
             "fill_model": body.fill_model,
             "slippage_bps": body.slippage_bps,
             "commission_bps": body.commission_bps,
+            "config_hash": config_hash,
             "created_by_user_id": principal.username,
             "process_name": process_name,
             "session_id": sid,
@@ -343,6 +370,13 @@ async def list_backtests(
     as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
     strategy: Annotated[str | None, Query(description="Filter by strategy name")] = None,
     run_status: Annotated[str | None, Query(alias="status", description="Filter by status")] = None,
+    config_hash: Annotated[
+        str | None,
+        Query(
+            description="Phase 2c pairing-stable hash filter (64-hex SHA-256)",
+            pattern=r"^[0-9a-f]{64}$",
+        ),
+    ] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> BacktestRunListResponse:
@@ -355,6 +389,8 @@ async def list_backtests(
         as_of: Temporal query parameter.
         strategy: Optional strategy filter.
         run_status: Optional status filter.
+        config_hash: Phase 2c pairing-stable SHA-256 filter used by
+            the Step 4 auto-pair UI to fetch sibling runs.
         limit: Page size.
         offset: Page offset.
 
@@ -378,6 +414,7 @@ async def list_backtests(
         wallet_public_id=wallet_id,
         strategy=strategy,
         status=run_status,
+        config_hash=config_hash,
         limit=limit,
         offset=offset,
     )

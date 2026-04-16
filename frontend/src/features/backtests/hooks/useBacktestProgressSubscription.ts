@@ -32,6 +32,7 @@ export function useBacktestProgressSubscription(
     if (!wsClient || !runPublicId || !walletId) {
       return
     }
+
     const prefix = `backtest.${walletId}.${runPublicId}.`
 
     wsClient.subscribe([prefix])
@@ -43,6 +44,7 @@ export function useBacktestProgressSubscription(
     const unsubscribeProgress = wsClient.onMessage('backtest_progress', message => {
       if (message.type !== 'backtest_progress') return
       const progress = message as BacktestProgressData
+
       if (progress.run_public_id === runPublicId) {
         setSnapshot(progress)
       }

@@ -2714,6 +2714,8 @@ export type Components = {
              * @default 0
              */
             commission_bps: number;
+            /** Config Hash */
+            config_hash?: string | null;
             /** Started At */
             started_at?: string | null;
             /** Completed At */
@@ -2796,6 +2798,8 @@ export type Components = {
              * @default 0
              */
             commission_bps: number;
+            /** Config Hash */
+            config_hash?: string | null;
             /** Started At */
             started_at?: string | null;
             /** Completed At */
@@ -9476,6 +9480,8 @@ export interface Operations {
                 strategy?: string | null;
                 /** @description Filter by status */
                 status?: string | null;
+                /** @description Phase 2c pairing-stable hash filter (64-hex SHA-256) */
+                config_hash?: string | null;
                 limit?: number;
                 offset?: number;
             };

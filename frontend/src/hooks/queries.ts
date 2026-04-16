@@ -716,6 +716,26 @@ export const useBacktests = (strategy?: string, status?: string) => {
   })
 }
 
+/**
+ * Phase 2c auto-pair candidate lookup — returns recent terminal
+ * runs sharing the same pairing-stable `config_hash` as the current
+ * run. Used by CompareLauncher (Step 4) to seed the manual-pair
+ * combobox and gate the "compare with most recent" button.
+ *
+ * Disabled (enabled: false) when `configHash` is `null` — pre-0006
+ * runs have no hash and auto-pair is not applicable.
+ */
+export const useBacktestRunsByConfigHash = (
+  configHash: string | null,
+  limit: number = 20
+) => {
+  return useQuery({
+    queryKey: ['backtests', 'by-hash', configHash, limit],
+    queryFn: () => apiClient.getBacktests(limit, 0, undefined, undefined, configHash),
+    enabled: configHash !== null,
+  })
+}
+
 export const useBacktest = (runId: string | undefined) => {
   return useQuery({
     queryKey: ['backtests', runId],
