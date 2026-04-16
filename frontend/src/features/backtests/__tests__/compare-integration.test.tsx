@@ -4,7 +4,6 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { AppRoutes } from '../../../components/AppRoutes'
 import { apiClient, APIError } from '../../../lib/apiClient'
 import { useAppStore } from '../../../stores/app'
-import type { ReactNode } from 'react'
 import type { BacktestRunData } from '../../../types/api'
 
 vi.mock('../../../lib/apiClient', async () => {
@@ -28,8 +27,14 @@ vi.mock('../hooks/useBacktestProgressSubscription', () => ({
   useBacktestProgressSubscription: () => null,
 }))
 
-vi.mock('../../../components/auth/ProtectedRoute', () => ({
-  default: ({ children }: { children: ReactNode }) => <>{children}</>,
+vi.mock('../../../stores/auth', () => ({
+  useAuth: vi.fn(() => ({
+    isAuthenticated: true,
+    user: { username: 'test', role: 'admin' },
+    canAccess: () => true,
+    hasRole: () => true,
+    hasPermission: () => true,
+  })),
 }))
 
 vi.mock('lightweight-charts', () => ({
@@ -164,7 +169,16 @@ describe('Compare flow integration', () => {
     expect(screen.getByTestId('signals-diff-list')).toBeDefined()
   })
 
-  it('wallet switch invalidates compare query and surfaces 404 message', async () => {
+  it('wallet switch re-fires compare query via wallet-scoped key + surfaces 404', async () => {
+    // Mechanism: setCurrentWalletPublicId(action) updates zustand state +
+    // calls apiClient.setWalletScope(id). useBacktestComparison subscribes
+    // to currentWalletPublicId; when it changes, the queryKey
+    // ['backtest-compare', walletId, id] changes -> TanStack Query registers
+    // a NEW query entry and fires it. The singleton queryClient.invalidate
+    // inside the action is belt-and-suspenders for non-wallet-keyed queries;
+    // compare hooks already scope by walletId so the key-change path alone
+    // proves wallet isolation. Test here uses a fresh QueryClient to pin
+    // the key-change behaviour deterministically.
     ;(apiClient.getBacktestComparison as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce({
         type: 'backtest_comparison_detail_response',
