@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { subscribeWithSelector } from 'zustand/middleware'
 import { apiClient } from '../lib/apiClient'
 import { queryClient } from '../lib/queryClient'
+import { useAuthStore } from './auth'
 import { AppState } from '../types/ui'
 
 const DARK_MODE_KEY = 'snapper-dark-mode'
@@ -26,6 +27,7 @@ interface AppStore extends AppState {
   clearAsOf: () => void
   setCurrentOperatorPublicId: (id: string | null) => void
   setCurrentWalletPublicId: (id: string | null) => void
+  selectWalletAndRefresh: (nextWalletId: string | null) => Promise<void>
 }
 
 export const useAppStore = create<AppStore>()(
@@ -69,6 +71,23 @@ export const useAppStore = create<AppStore>()(
     setCurrentWalletPublicId: (id: string | null) => {
       apiClient.setWalletScope(id)
       set({ currentWalletPublicId: id })
+      queryClient.invalidateQueries()
+    },
+    selectWalletAndRefresh: async (nextWalletId: string | null) => {
+      // Phase 2c wallet-picker sync (plan §2.5 R12 F2): mint a new
+      // JWT with the chosen wallet claim BEFORE swapping the client
+      // scope, so the next REST/WS call authorises against the new
+      // wallet. Using useAuthStore.getState() (not useAuth() hook —
+      // Zustand actions run outside React's hook context).
+      //
+      // On refresh failure the picker state is left unchanged so the
+      // user stays on the previous wallet; the refresh failure handler
+      // in auth store logs + throws so the caller sees the error.
+      const hint = nextWalletId === null ? { clear: true as const } : { walletId: nextWalletId }
+
+      await useAuthStore.getState().refreshToken(hint)
+      apiClient.setWalletScope(nextWalletId)
+      set({ currentWalletPublicId: nextWalletId })
       queryClient.invalidateQueries()
     },
   }))

@@ -9,6 +9,20 @@ import { storeWsTicket } from '../lib/wsTicketCache'
 
 type User = Components['schemas']['UserProfile']
 type UserRole = Components['schemas']['UserRole']
+
+/**
+ * Tagged-union arg for ``refreshToken`` (Phase 2c).
+ *
+ * - ``undefined`` — the three historical zero-body callers
+ *   (``apiClient.refreshAndRetry``, WS ticket refresh, the original
+ *   ``useAuth().refreshToken()`` call sites): POSTs no body,
+ *   preserving the existing JWT claims byte-identically.
+ * - ``{ walletId }`` — mint new tokens scoped to that wallet; server
+ *   validates membership and returns 404 on foreign wallet.
+ * - ``{ clear: true }`` — explicitly clear the JWT wallet claim to
+ *   ``null`` ("All wallets" picker option).
+ */
+export type RefreshWalletHint = { walletId: string } | { clear: true } | undefined
 type WindowWithCallbacks = typeof globalThis & {
   authLogoutCallback?: () => void
   wsDisconnectCallback?: () => void
@@ -22,7 +36,7 @@ interface AuthState {
   login: (credentials: LoginBody) => Promise<void>
   logout: () => Promise<void>
   silentLogout: () => void
-  refreshToken: () => Promise<void>
+  refreshToken: (nextWallet?: RefreshWalletHint) => Promise<void>
   clearError: () => void
   setLoading: (loading: boolean) => void
   hasRole: (role: UserRole) => boolean
@@ -132,8 +146,15 @@ export const useAuthStore = create<AuthState>()(
             error: null,
           })
         },
-        refreshToken: async () => {
+        refreshToken: async (nextWallet?: RefreshWalletHint) => {
           try {
+            let body: { active_wallet_public_id?: string; clear_active_wallet?: true } | undefined
+            if (nextWallet !== undefined) {
+              body =
+                'clear' in nextWallet
+                  ? { clear_active_wallet: true }
+                  : { active_wallet_public_id: nextWallet.walletId }
+            }
             const envelope: {
               payload: {
                 message?: string
@@ -142,7 +163,9 @@ export const useAuthStore = create<AuthState>()(
                 csrf_token?: string
                 user?: User
               }
-            } = await apiClient.postJSON('/api/auth/refresh')
+            } = body === undefined
+              ? await apiClient.postJSON('/api/auth/refresh')
+              : await apiClient.postJSON('/api/auth/refresh', body)
             const data = envelope.payload
 
             if (typeof data.ws_token === 'string' && typeof data.ws_token_exp === 'string') {

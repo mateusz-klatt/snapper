@@ -9,12 +9,28 @@ import { Orders } from '../features/orders/Orders'
 import { Positions } from '../features/positions/Positions'
 import { Signals } from '../features/signals/Signals'
 import { Backtests } from '../features/backtests/Backtests'
+import { BacktestDetailPage } from '../features/backtests/BacktestDetailPage'
+import { useHashSubpath } from '../hooks/useHashRouting'
 import { Health } from '../features/health/Health'
 import { Admin } from '../features/admin/Admin'
 import { Settings } from '../features/settings/Settings'
 
 interface AppRoutesProps {
   activeTab: string
+}
+
+/**
+ * Phase 2c: switches between the list view and the detail view
+ * based on the hash sub-path (`#backtests/{run_public_id}`).
+ */
+function BacktestsRouter(): React.ReactElement {
+  const subpath = useHashSubpath('backtests')
+
+  if (subpath.length === 1) {
+    return <BacktestDetailPage runPublicId={subpath[0]} />
+  }
+
+  return <Backtests />
 }
 
 export function AppRoutes({ activeTab }: Readonly<AppRoutesProps>): React.ReactElement {
@@ -71,7 +87,7 @@ export function AppRoutes({ activeTab }: Readonly<AppRoutesProps>): React.ReactE
       return (
         <ErrorBoundary componentName='Backtests'>
           <ProtectedRoute resource='backtests'>
-            <Backtests />
+            <BacktestsRouter />
           </ProtectedRoute>
         </ErrorBoundary>
       )

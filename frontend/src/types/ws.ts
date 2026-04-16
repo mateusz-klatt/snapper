@@ -1,4 +1,5 @@
 export type {
+  BacktestProgressData,
   TickData,
   CandleData,
   TradeData,
@@ -34,6 +35,7 @@ export type {
   WSPongResponse,
 } from './ws.generated'
 import type {
+  BacktestProgressData,
   TickData,
   CandleData,
   TradeData,
@@ -70,6 +72,7 @@ import type {
 } from './ws.generated'
 
 export type WebSocketMessages =
+  | BacktestProgressData
   | TickData
   | CandleData
   | TradeData

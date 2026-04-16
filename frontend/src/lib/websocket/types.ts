@@ -1,4 +1,5 @@
 import type {
+  BacktestProgressData,
   WebSocketMessages,
   TickData,
   CandleData,
@@ -40,6 +41,7 @@ export interface WebSocketMessageTypeMap {
   subscription_success: WSSubscriptionSuccessResponse
   subscriptions_list: WSSubscriptionsListResponse
   pong: WSPongResponse
+  backtest_progress: BacktestProgressData
 }
 export type WebSocketMessageType = keyof WebSocketMessageTypeMap
 export type AuthControlMessageType =

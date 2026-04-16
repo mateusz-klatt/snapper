@@ -6,7 +6,7 @@ import type { WalletInfo } from '../types/api'
 
 export const WalletPicker: React.FC = () => {
   const currentId = useAppStore(s => s.currentWalletPublicId)
-  const setId = useAppStore(s => s.setCurrentWalletPublicId)
+  const selectWalletAndRefresh = useAppStore(s => s.selectWalletAndRefresh)
   const { data } = useWallets()
   const wallets: WalletInfo[] = data?.payload ?? []
   const options = [
@@ -21,7 +21,12 @@ export const WalletPicker: React.FC = () => {
     <ThemeSelect
       id='wallet-picker'
       value={currentId ?? '__all__'}
-      onChange={v => setId(v === '__all__' ? null : v)}
+      onChange={v => {
+        // Phase 2c: picker change now mints a new JWT with the
+        // selected wallet claim before swapping client scope, so
+        // REST + WS both authorise against the same wallet.
+        void selectWalletAndRefresh(v === '__all__' ? null : v)
+      }}
       options={options}
       placeholder='Wallet'
       className='w-44'

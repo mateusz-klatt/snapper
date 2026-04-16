@@ -32,8 +32,12 @@ function useHashRouting<T extends string>(
 ): [T, (route: T) => void] {
   const getRouteFromHash = useCallback((): T => {
     const hash = globalThis.location.hash.slice(1)
+    // Phase 2c: match first segment before "/" so `#backtests/{uuid7}`
+    // resolves to the "backtests" tab. Backwards-compatible because no
+    // existing VALID_TABS identifier contains a slash.
+    const firstSegment = hash.split('/')[0]
 
-    return validRoutes.includes(hash as T) ? (hash as T) : defaultRoute
+    return validRoutes.includes(firstSegment as T) ? (firstSegment as T) : defaultRoute
   }, [validRoutes, defaultRoute])
   const [currentRoute, setCurrentRoute] = useState<T>(getRouteFromHash)
 
@@ -61,4 +65,40 @@ function useHashRouting<T extends string>(
 
 export function useTabRouting() {
   return useHashRouting(VALID_TABS, 'overview')
+}
+
+/**
+ * Parse the hash tail after `#<tab>/` into path segments.
+ *
+ * Returns `[]` when the current hash does not match the requested tab
+ * (including when it is just `#<tab>` with no sub-path). Subscribes to
+ * `hashchange` independently of `useHashRouting` so a detail view can
+ * mount/unmount without coupling to the tab-level navigator.
+ *
+ * Example:
+ *   `#backtests/01948f94-...` + `useHashSubpath("backtests")`
+ *   → `["01948f94-..."]`
+ */
+export function useHashSubpath(tab: string): string[] {
+  const compute = useCallback((): string[] => {
+    const hash = globalThis.location.hash.slice(1)
+    const segments = hash.split('/')
+
+    if (segments[0] !== tab) return []
+
+    return segments.slice(1).filter(Boolean)
+  }, [tab])
+  const [subpath, setSubpath] = useState<string[]>(compute)
+
+  useEffect(() => {
+    const handleHashChange = () => {
+      setSubpath(compute())
+    }
+
+    globalThis.addEventListener('hashchange', handleHashChange)
+
+    return () => globalThis.removeEventListener('hashchange', handleHashChange)
+  }, [compute])
+
+  return subpath
 }
