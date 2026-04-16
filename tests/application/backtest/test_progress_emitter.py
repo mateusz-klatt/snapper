@@ -204,8 +204,11 @@ class TestNoopPublish:
 
     @pytest.mark.asyncio
     async def test_noop_accepts_any_call(self) -> None:
-        """Noop publish returns cleanly and writes nothing."""
-        # Minimal valid data construction for noop sanity.
+        """Noop publish returns cleanly and writes nothing.
+
+        Minimal-valid ``BacktestProgressData`` is constructed below so
+        the noop sink can be exercised without wiring the emitter.
+        """
         data = BacktestProgressData(
             type="backtest_progress",
             public_id="p",

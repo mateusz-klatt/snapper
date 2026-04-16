@@ -51,6 +51,7 @@ def _make_run_row(
         fill_model="market",
         slippage_bps=0.0,
         commission_bps=0.0,
+        config_hash=None,
         created_by_user_id=None,
         started_at=None,
         completed_at=None,

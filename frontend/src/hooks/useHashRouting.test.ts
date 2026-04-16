@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
-import { useTabRouting, type ValidTab } from './useHashRouting'
+import { useTabRouting, useHashSubpath, type ValidTab } from './useHashRouting'
 
 describe('useHashRouting', () => {
   let originalHash: string
@@ -119,5 +119,46 @@ describe('useHashRouting', () => {
     })
     rerender()
     expect(result.current[0]).toBe('admin')
+  })
+})
+
+describe('useHashSubpath', () => {
+  let originalHash: string
+
+  beforeEach(() => {
+    originalHash = globalThis.location.hash
+    globalThis.location.hash = ''
+  })
+  afterEach(() => {
+    globalThis.location.hash = originalHash
+  })
+  it('returns [] when the hash does not match the requested tab', () => {
+    globalThis.location.hash = '#orders'
+    const { result } = renderHook(() => useHashSubpath('backtests'))
+
+    expect(result.current).toEqual([])
+  })
+  it('returns [] when the hash is just the tab with no sub-path', () => {
+    globalThis.location.hash = '#backtests'
+    const { result } = renderHook(() => useHashSubpath('backtests'))
+
+    expect(result.current).toEqual([])
+  })
+  it('returns the sub-path segments for a matching hash', () => {
+    globalThis.location.hash = '#backtests/run-1/equity'
+    const { result } = renderHook(() => useHashSubpath('backtests'))
+
+    expect(result.current).toEqual(['run-1', 'equity'])
+  })
+  it('updates when the hash changes', () => {
+    globalThis.location.hash = '#backtests'
+    const { result } = renderHook(() => useHashSubpath('backtests'))
+
+    expect(result.current).toEqual([])
+    act(() => {
+      globalThis.location.hash = '#backtests/run-2'
+      globalThis.dispatchEvent(new HashChangeEvent('hashchange'))
+    })
+    expect(result.current).toEqual(['run-2'])
   })
 })

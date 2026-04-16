@@ -10,7 +10,6 @@ rule for the two zero-tradeable metrics (``exposure_ratio`` and
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
-from typing import Any
 
 from snapper.application.backtest.metrics import PROMOTED_METRIC_NAMES
 from snapper.application.backtest.metrics import MetricWarning
@@ -18,42 +17,44 @@ from snapper.application.backtest.metrics import _compute_exposure_ratio
 from snapper.application.backtest.metrics import _compute_max_drawdown_duration_seconds
 from snapper.application.backtest.metrics import _compute_turnover_ratio
 from snapper.application.backtest.metrics import compute_metrics
+from snapper.data.repository_types import BacktestEquityPointInsertRow
+from snapper.data.repository_types import BacktestTradeInsertRow
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
-def _ep(hours: float, equity: float, position_value: float = 0.0) -> dict[str, Any]:
+def _ep(hours: float, equity: float, position_value: float = 0.0) -> BacktestEquityPointInsertRow:
     """Build an equity-point insert-row dict."""
-    return {
-        "run_public_id": "run-1",
-        "point_time": NOW + timedelta(hours=hours),
-        "equity": equity,
-        "cash": 0.0,
-        "position_value": position_value,
-        "drawdown": 0.0,
-        "session_id": "s1",
-        "sequence_id": int(hours),
-        "timestamp": NOW,
-    }
+    return BacktestEquityPointInsertRow(
+        run_public_id="run-1",
+        point_time=NOW + timedelta(hours=hours),
+        equity=equity,
+        cash=0.0,
+        position_value=position_value,
+        drawdown=0.0,
+        session_id="s1",
+        sequence_id=int(hours),
+        timestamp=NOW,
+    )
 
 
-def _trade(quantity: float, price: float, pnl: float | None = None) -> dict[str, Any]:
+def _trade(quantity: float, price: float, pnl: float | None = None) -> BacktestTradeInsertRow:
     """Build a trade insert-row dict."""
-    return {
-        "run_public_id": "run-1",
-        "executed_at": NOW,
-        "instrument": "BTC-USD",
-        "side": "sell" if pnl is not None else "buy",
-        "quantity": quantity,
-        "price": price,
-        "fee": 0.0,
-        "pnl": pnl,
-        "position_after": 0.0,
-        "signal_public_id": None,
-        "session_id": "s1",
-        "sequence_id": 1,
-        "timestamp": NOW,
-    }
+    return BacktestTradeInsertRow(
+        run_public_id="run-1",
+        executed_at=NOW,
+        instrument="BTC-USD",
+        side="sell" if pnl is not None else "buy",
+        quantity=quantity,
+        price=price,
+        fee=0.0,
+        pnl=pnl,
+        position_after=0.0,
+        signal_public_id=None,
+        session_id="s1",
+        sequence_id=1,
+        timestamp=NOW,
+    )
 
 
 class TestPromotedMetricNames:

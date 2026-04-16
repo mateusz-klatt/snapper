@@ -10,6 +10,7 @@ from collections import Counter
 from collections import defaultdict
 from datetime import datetime
 from typing import Any
+from typing import cast
 
 from snapper.application.backtest.metrics import PROMOTED_METRIC_NAMES
 from snapper.data.repository_types import BacktestEquityPointRow
@@ -48,10 +49,10 @@ def _promoted_lookup(result: BacktestResultRow | None, name: str) -> float | Non
     """
     if result is None:
         return None
-    typed = result.get(name)
-    if typed is not None:
+    typed = cast(Any, result).get(name)
+    if isinstance(typed, int | float):
         return float(typed)
-    extra = result.get("extra_metrics") or {}
+    extra = cast(dict[str, Any], cast(Any, result).get("extra_metrics") or {})
     fallback = extra.get(name)
     return float(fallback) if isinstance(fallback, int | float) else None
 
@@ -66,10 +67,10 @@ def _read_metric(result: BacktestResultRow | None, name: str) -> float | None:
         return None
     if name in PROMOTED_METRIC_NAMES:
         return _promoted_lookup(result, name)
-    value = result.get(name)
-    if value is None:
-        return None
-    return float(value) if isinstance(value, int | float) else None
+    value = cast(Any, result).get(name)
+    if isinstance(value, int | float):
+        return float(value)
+    return None
 
 
 def _delta_pct(a: float | None, b: float | None) -> tuple[float | None, float | None]:
@@ -98,6 +99,14 @@ def compute_metrics_diff(
     mixed-vintage pair (pre-0005 leg with JSON-only value vs
     post-0005 leg with typed column) produces exactly one row per
     promoted name.
+
+    Args:
+        result_a: Result row for the first leg (None when missing).
+        result_b: Result row for the second leg (None when missing).
+
+    Returns:
+        List of dicts with ``name``, ``run_a``, ``run_b``, ``delta``,
+        and ``pct`` keys — one per metric.
     """
     rows: list[dict[str, Any]] = []
     for name in _EXPLICIT_METRIC_NAMES:
@@ -105,8 +114,14 @@ def compute_metrics_diff(
         b = _read_metric(result_b, name)
         delta, pct = _delta_pct(a, b)
         rows.append({"name": name, "run_a": a, "run_b": b, "delta": delta, "pct": pct})
-    extra_a = (result_a or {}).get("extra_metrics") or {}
-    extra_b = (result_b or {}).get("extra_metrics") or {}
+    extra_a = cast(
+        dict[str, Any],
+        (cast(Any, result_a).get("extra_metrics") if result_a is not None else None) or {},
+    )
+    extra_b = cast(
+        dict[str, Any],
+        (cast(Any, result_b).get("extra_metrics") if result_b is not None else None) or {},
+    )
     extra_keys = (set(extra_a) | set(extra_b)) - PROMOTED_METRIC_NAMES
     for name in sorted(extra_keys):
         a_val = extra_a.get(name)
@@ -125,6 +140,14 @@ def compute_equity_overlay(
 
     One-sided samples carry ``None`` for the missing leg so the
     frontend can render gaps explicitly.
+
+    Args:
+        equity_a: Equity points from the first leg.
+        equity_b: Equity points from the second leg.
+
+    Returns:
+        Sorted list of dicts with ``point_time``, ``equity_a``,
+        ``equity_b`` keys.
     """
     by_time: dict[datetime, dict[str, float | None]] = {}
     for point in equity_a:
@@ -157,6 +180,14 @@ def compute_trades_diff(
     common pairs and ``|n_a - n_b|`` singletons on the surplus side.
     Trades within a bucket are sorted by ``public_id`` ascending so
     the match is deterministic.
+
+    Args:
+        trades_a: Trade rows from the first leg.
+        trades_b: Trade rows from the second leg.
+
+    Returns:
+        List of diff entries — ``leg="common"`` with ``pnl_delta`` or
+        ``leg="a"|"b"`` singletons.
     """
     buckets: dict[tuple[str, datetime, str, int, int], dict[str, list[BacktestTradeRow]]] = (
         defaultdict(lambda: {"a": [], "b": []})
@@ -203,6 +234,8 @@ def compute_trades_diff(
             )
         for leg_name, surplus in (("a", a_list[common_count:]), ("b", b_list[common_count:])):
             for trade in surplus:
+                raw_pnl = trade.get("pnl")
+                pnl_val = float(raw_pnl) if raw_pnl is not None else None
                 out.append(
                     {
                         "instrument": trade["instrument"],
@@ -211,16 +244,8 @@ def compute_trades_diff(
                         "quantity": float(trade["quantity"]),
                         "price": float(trade["price"]),
                         "leg": leg_name,
-                        "pnl_a": (
-                            float(trade["pnl"])
-                            if leg_name == "a" and trade.get("pnl") is not None
-                            else None
-                        ),
-                        "pnl_b": (
-                            float(trade["pnl"])
-                            if leg_name == "b" and trade.get("pnl") is not None
-                            else None
-                        ),
+                        "pnl_a": pnl_val if leg_name == "a" else None,
+                        "pnl_b": pnl_val if leg_name == "b" else None,
                         "pnl_delta": None,
                     }
                 )
@@ -230,7 +255,15 @@ def compute_trades_diff(
 def compute_signals_diff(
     signals_a: list[BacktestSignalRow], signals_b: list[BacktestSignalRow]
 ) -> list[dict[str, Any]]:
-    """Multiset match on (instrument, signal_time, signal_type)."""
+    """Multiset match on (instrument, signal_time, signal_type).
+
+    Args:
+        signals_a: Signals from the first leg.
+        signals_b: Signals from the second leg.
+
+    Returns:
+        List of diff entries with ``leg`` discriminator.
+    """
     key_a = Counter((s["instrument"], s["signal_time"], s["signal_type"]) for s in signals_a)
     key_b = Counter((s["instrument"], s["signal_time"], s["signal_type"]) for s in signals_b)
     out: list[dict[str, Any]] = []

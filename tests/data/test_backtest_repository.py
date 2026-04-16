@@ -445,3 +445,142 @@ async def test_get_result_not_found(tmp_path: Path) -> None:
     repo = await _make_repo(tmp_path)
     result = await repo.get_result("nonexistent", as_of=NOW)
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_create_and_get_comparison_round_trip(tmp_path: Path) -> None:
+    """Insert a comparison row and read it back through both lookup paths.
+
+    Given: A persisted backtest_comparisons row,
+    When: get_comparison and get_comparison_by_pair are queried,
+    Then: Both return the same projection with all fields preserved.
+    """
+    repo = await _make_repo(tmp_path)
+    _id, public_id = await repo.create_comparison(
+        row={
+            "wallet_public_id": "wallet-1",
+            "operator_public_id": "op-1",
+            "created_by_user_id": "user-1",
+            "run_a_public_id": "run-aa",
+            "run_b_public_id": "run-bb",
+            "config_hash": "h" * 64,
+            "pairing_mode": "auto",
+            "anchor_run_public_id": None,
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": NOW,
+        },
+        bus_time=NOW,
+        session_id="s1",
+        sequence_id=1,
+    )
+    by_id = await repo.get_comparison(public_id, as_of=NOW + timedelta(seconds=1))
+    assert by_id is not None
+    assert by_id["run_a_public_id"] == "run-aa"
+    assert by_id["run_b_public_id"] == "run-bb"
+    assert by_id["pairing_mode"] == "auto"
+
+    by_pair = await repo.get_comparison_by_pair(
+        "run-aa", "run-bb", "wallet-1", as_of=NOW + timedelta(seconds=1)
+    )
+    assert by_pair is not None
+    assert by_pair["public_id"] == public_id
+
+
+@pytest.mark.asyncio
+async def test_get_comparison_not_found(tmp_path: Path) -> None:
+    """Unknown public_id returns None.
+
+    Given: An empty backtest_comparisons table,
+    When: get_comparison is called with a missing public_id,
+    Then: None is returned.
+    """
+    repo = await _make_repo(tmp_path)
+    result = await repo.get_comparison("missing", as_of=NOW)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_comparison_by_pair_not_found(tmp_path: Path) -> None:
+    """Unknown pair returns None.
+
+    Given: An empty backtest_comparisons table,
+    When: get_comparison_by_pair is called,
+    Then: None is returned.
+    """
+    repo = await _make_repo(tmp_path)
+    result = await repo.get_comparison_by_pair("a", "b", "wallet-1", as_of=NOW)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_list_runs_filter_by_config_hash(tmp_path: Path) -> None:
+    """list_runs accepts a config_hash filter and only returns matching rows.
+
+    Given: Two runs with different config_hash values,
+    When: list_runs is queried with one of the hashes,
+    Then: Only the matching run is returned.
+    """
+    repo = await _make_repo(tmp_path)
+    for i, ch in enumerate(("hash-aaaa" + "0" * 55, "hash-bbbb" + "0" * 55)):
+        await repo.create_run(
+            {
+                "wallet_public_id": "w-1",
+                "strategy_name": "test",
+                "instrument_public_id": f"inst-{i}",
+                "exchange": "kraken",
+                "timeframe": "1h",
+                "start_date": NOW,
+                "end_date": NOW,
+                "config_hash": ch,
+                "session_id": "s1",
+                "sequence_id": i,
+                "timestamp": NOW,
+            },
+            bus_time=NOW,
+            session_id="s1",
+            sequence_id=i,
+        )
+    rows = await repo.list_runs(
+        as_of=NOW + timedelta(seconds=1),
+        wallet_public_id="w-1",
+        config_hash="hash-aaaa" + "0" * 55,
+    )
+    assert len(rows) == 1
+    assert rows[0]["instrument_public_id"] == "inst-0"
+
+
+@pytest.mark.asyncio
+async def test_list_comparisons_wallet_scoped(tmp_path: Path) -> None:
+    """Listing only returns comparisons for the requested wallet.
+
+    Given: Three comparisons across two wallets,
+    When: list_comparisons is called for wallet-1,
+    Then: Only the two wallet-1 rows are returned, newest first.
+    """
+    repo = await _make_repo(tmp_path)
+    for i, wallet in enumerate(("wallet-1", "wallet-2", "wallet-1")):
+        await repo.create_comparison(
+            row={
+                "wallet_public_id": wallet,
+                "operator_public_id": None,
+                "created_by_user_id": None,
+                "run_a_public_id": f"a-{i}",
+                "run_b_public_id": f"b-{i}",
+                "config_hash": None,
+                "pairing_mode": "manual",
+                "anchor_run_public_id": None,
+                "session_id": "s1",
+                "sequence_id": i,
+                "timestamp": NOW + timedelta(seconds=i),
+            },
+            bus_time=NOW + timedelta(seconds=i),
+            session_id="s1",
+            sequence_id=i,
+        )
+    rows = await repo.list_comparisons(
+        as_of=NOW + timedelta(minutes=1), wallet_public_id="wallet-1"
+    )
+    assert len(rows) == 2
+    assert all(r["wallet_public_id"] == "wallet-1" for r in rows)
+    assert rows[0]["timestamp"] >= rows[1]["timestamp"]

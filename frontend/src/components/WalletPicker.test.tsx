@@ -5,6 +5,7 @@ import React from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { WalletPicker } from './WalletPicker'
 import { useAppStore } from '../stores/app'
+import { useAuthStore } from '../stores/auth'
 
 let mockWalletsData: unknown = {
   payload: [
@@ -47,6 +48,9 @@ const createWrapper = () => {
 describe('WalletPicker', () => {
   beforeEach(() => {
     useAppStore.getState().setCurrentWalletPublicId(null)
+    useAuthStore.setState({
+      refreshToken: vi.fn().mockResolvedValue(undefined),
+    } as Partial<ReturnType<typeof useAuthStore.getState>>)
   })
   it('renders with "All wallets" selected by default', () => {
     render(<WalletPicker />, { wrapper: createWrapper() })
@@ -55,12 +59,15 @@ describe('WalletPicker', () => {
   })
   it('selects a wallet and updates the store', async () => {
     const user = userEvent.setup()
+    const { waitFor } = await import('@testing-library/react')
 
     render(<WalletPicker />, { wrapper: createWrapper() })
     await user.click(screen.getByRole('combobox'))
     await user.click(screen.getByRole('option', { name: 'default (paper)' }))
 
-    expect(useAppStore.getState().currentWalletPublicId).toBe('w-2')
+    await waitFor(() => {
+      expect(useAppStore.getState().currentWalletPublicId).toBe('w-2')
+    })
   })
   it('renders gracefully when data is undefined (loading)', () => {
     mockWalletsData = undefined
@@ -93,11 +100,14 @@ describe('WalletPicker', () => {
   it('resets to null when "All wallets" is selected', async () => {
     useAppStore.getState().setCurrentWalletPublicId('w-1')
     const user = userEvent.setup()
+    const { waitFor } = await import('@testing-library/react')
 
     render(<WalletPicker />, { wrapper: createWrapper() })
     await user.click(screen.getByRole('combobox'))
     await user.click(screen.getByRole('option', { name: 'All wallets' }))
 
-    expect(useAppStore.getState().currentWalletPublicId).toBeNull()
+    await waitFor(() => {
+      expect(useAppStore.getState().currentWalletPublicId).toBeNull()
+    })
   })
 })

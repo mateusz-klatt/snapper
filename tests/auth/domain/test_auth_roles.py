@@ -60,9 +60,10 @@ async def test_get_current_user_profile_returns_user_from_db() -> None:
         result = await get_current_user_profile(
             request=_make_rest_request(), current_user=principal
         )
-    assert result.payload is expected_profile
+    assert result.payload == expected_profile
     assert result.payload.username == "testuser"
     assert result.payload.role == UserRole.VIEWER
+    assert result.payload.active_wallet_public_id == principal.active_wallet_public_id
     mock_service.get_user_with_operators.assert_awaited_once_with("testuser")
 
 

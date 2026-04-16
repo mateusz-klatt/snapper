@@ -1601,6 +1601,17 @@ export type Paths = {
         /**
          * List Comparisons
          * @description List recent comparisons for the caller's wallet.
+         *
+         *     Args:
+         *         request: FastAPI request.
+         *         principal: Authenticated caller with READ_BACKTESTS.
+         *         repo: Database repository dependency.
+         *         as_of: Temporal query parameter.
+         *         limit: Page size.
+         *         offset: Page offset.
+         *
+         *     Returns:
+         *         Wallet-scoped comparison list newest-first.
          */
         get: Operations["list_comparisons_api_backtests_compare_get"];
         put?: never;
@@ -1615,6 +1626,15 @@ export type Paths = {
          *     re-SELECT, return 200. Route registered BEFORE ``/{run_id}`` so
          *     ``/compare`` is not captured as ``id="compare"`` (R14 sonnet
          *     route-order fix).
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker).
+         *         command: Validated compare-request envelope.
+         *         principal: Authenticated caller with READ_BACKTESTS.
+         *         repo: Database repository dependency.
+         *
+         *     Returns:
+         *         Envelope wrapping the created (or existing) comparison row.
          */
         post: Operations["create_comparison_api_backtests_compare_post"];
         delete?: never;
@@ -1633,6 +1653,17 @@ export type Paths = {
         /**
          * Get Comparison
          * @description Fetch a comparison + recomputed diff from current artifact rows.
+         *
+         *     Args:
+         *         comparison_public_id: UUID7 of the comparison row.
+         *         request: FastAPI request.
+         *         principal: Authenticated caller with READ_BACKTESTS.
+         *         repo: Database repository dependency.
+         *         as_of: Temporal query parameter.
+         *
+         *     Returns:
+         *         Envelope with comparison metadata, both run projections, and
+         *         metrics/equity/trades/signals diffs recomputed on GET.
          */
         get: Operations["get_comparison_api_backtests_compare__comparison_public_id__get"];
         put?: never;

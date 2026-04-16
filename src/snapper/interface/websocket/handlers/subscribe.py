@@ -25,7 +25,6 @@ from snapper.interface.websocket.schemas import WSSubscriptionsListResponse
 from snapper.interface.websocket.schemas import WSSubscriptionSuccessResponse
 from snapper.interface.websocket.schemas import WSUnsubscribeRequest
 from snapper.messaging.topics.schemas import REGISTRY_ROOTS
-from snapper.messaging.topics.validation import _validate_backtest_prefix
 from snapper.messaging.topics.validation import validate_subscription_pattern
 
 __all__ = [
@@ -71,14 +70,11 @@ def _validate_ws_topics(
         if not is_valid:
             invalid.append((cleaned, error_msg_str))
             continue
-        if cleaned.endswith(".") and cleaned not in REGISTRY_ROOTS:
-            if cleaned.startswith(_BACKTEST_PREFIX):
-                bt_valid, bt_err = _validate_backtest_prefix(cleaned)
-                if bt_valid:
-                    valid.append(cleaned)
-                else:
-                    invalid.append((cleaned, bt_err))
-                continue
+        if (
+            cleaned.endswith(".")
+            and cleaned not in REGISTRY_ROOTS
+            and not cleaned.startswith(_BACKTEST_PREFIX)
+        ):
             registry_roots = ", ".join(sorted(REGISTRY_ROOTS))
             invalid.append(
                 (

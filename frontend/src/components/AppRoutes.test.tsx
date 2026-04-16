@@ -31,6 +31,11 @@ vi.mock('../features/signals/Signals', () => ({
 vi.mock('../features/backtests/Backtests', () => ({
   Backtests: () => <div data-testid='backtests'>Backtests Component</div>,
 }))
+vi.mock('../features/backtests/BacktestDetailPage', () => ({
+  BacktestDetailPage: ({ runPublicId }: { runPublicId: string }) => (
+    <div data-testid='backtest-detail'>{runPublicId}</div>
+  ),
+}))
 vi.mock('../features/health/Health', () => ({
   Health: () => <div data-testid='health'>Health Component</div>,
 }))
@@ -100,10 +105,19 @@ describe('AppRoutes', () => {
     })
   })
   it('renders Backtests component for backtests tab', async () => {
+    globalThis.location.hash = '#backtests'
     renderWithProviders(<AppRoutes activeTab='backtests' />)
     await waitFor(() => {
       expect(screen.getByTestId('backtests')).toBeTruthy()
     })
+  })
+  it('renders BacktestDetailPage when hash has a sub-path', async () => {
+    globalThis.location.hash = '#backtests/run-xyz'
+    renderWithProviders(<AppRoutes activeTab='backtests' />)
+    await waitFor(() => {
+      expect(screen.getByTestId('backtest-detail')).toBeTruthy()
+    })
+    expect(screen.getByTestId('backtest-detail').textContent).toBe('run-xyz')
   })
   it('renders Health component for health tab', async () => {
     renderWithProviders(<AppRoutes activeTab='health' />)

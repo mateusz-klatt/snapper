@@ -46,7 +46,11 @@ from snapper.messaging.schemas.data import BacktestProgressEvent
 
 _PROGRESS_STREAM = "backtest_progress"
 _DEFAULT_THROTTLE_MS = 250
-_MILESTONE_THRESHOLDS: dict[str, float] = {"25pct": 0.25, "50pct": 0.50, "75pct": 0.75}
+_MILESTONE_THRESHOLDS: dict[Literal["25pct", "50pct", "75pct"], float] = {
+    "25pct": 0.25,
+    "50pct": 0.50,
+    "75pct": 0.75,
+}
 
 
 PublishFn = Callable[[str, BacktestProgressData], Awaitable[None]]
@@ -58,6 +62,10 @@ async def noop_publish(_topic: str, _data: BacktestProgressData) -> None:
     Keeps the emitter lifecycle intact (counters still advance,
     milestones still dedup) so a runner without WS transport never
     crashes, just silently drops the payloads.
+
+    Args:
+        _topic: Unused topic name.
+        _data: Unused progress payload.
     """
 
 
@@ -94,7 +102,11 @@ class BacktestProgressEmitter:
 
     @property
     def topic_prefix(self) -> str:
-        """ZMQ topic prefix shared by every event this emitter produces."""
+        """ZMQ topic prefix shared by every event this emitter produces.
+
+        Returns:
+            Dotted prefix ``backtest.{wallet_public_id}.{run_public_id}``.
+        """
         return f"backtest.{self.wallet_public_id}.{self.run_public_id}"
 
     def _progress_pct(self) -> float:
@@ -187,6 +199,10 @@ class BacktestProgressEmitter:
         Safe to call on every runner path — a second call after a prior
         terminal emission is a no-op so the cancel + failure handlers
         can both call into it defensively.
+
+        Args:
+            event: Terminal event kind — one of
+                ``completed``, ``failed``, ``cancelled``.
         """
         if self._terminal_emitted:
             return

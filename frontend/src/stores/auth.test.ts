@@ -673,6 +673,60 @@ describe('auth store', () => {
       expect(localStorageSpy).not.toHaveBeenCalledWith('auth_user_id', expect.anything())
       localStorageSpy.mockRestore()
     })
+
+    it('forwards walletId hint as active_wallet_public_id body', async () => {
+      vi.mocked(apiClient.postJSON).mockResolvedValueOnce({
+        payload: {
+          ws_token: 'token',
+          ws_token_exp: new Date(Date.now() + 3600000).toISOString(),
+          csrf_token: 'csrf',
+          user: {
+            type: 'user_profile' as const,
+            sequence_id: 0,
+            public_id: 'test-pid',
+            timestamp: '2024-01-01T00:00:00Z',
+            session_id: 'test-sid',
+            username: 'admin',
+            role: 'admin' as const,
+            is_active: true,
+            created_at: '2026-01-01T00:00:00Z',
+          },
+        },
+      })
+      const state = useAuthStore.getState()
+
+      await state.refreshToken({ walletId: 'wallet-7' })
+      expect(apiClient.postJSON).toHaveBeenCalledWith('/api/auth/refresh', {
+        active_wallet_public_id: 'wallet-7',
+      })
+    })
+
+    it('forwards clear hint as clear_active_wallet body', async () => {
+      vi.mocked(apiClient.postJSON).mockResolvedValueOnce({
+        payload: {
+          ws_token: 'token',
+          ws_token_exp: new Date(Date.now() + 3600000).toISOString(),
+          csrf_token: 'csrf',
+          user: {
+            type: 'user_profile' as const,
+            sequence_id: 0,
+            public_id: 'test-pid',
+            timestamp: '2024-01-01T00:00:00Z',
+            session_id: 'test-sid',
+            username: 'admin',
+            role: 'admin' as const,
+            is_active: true,
+            created_at: '2026-01-01T00:00:00Z',
+          },
+        },
+      })
+      const state = useAuthStore.getState()
+
+      await state.refreshToken({ clear: true })
+      expect(apiClient.postJSON).toHaveBeenCalledWith('/api/auth/refresh', {
+        clear_active_wallet: true,
+      })
+    })
   })
   describe('useAuth hook', () => {
     it('is exported and defined', async () => {

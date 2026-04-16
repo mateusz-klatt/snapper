@@ -309,14 +309,14 @@ def _compute_max_drawdown_duration_seconds(
             if not in_drawdown:
                 in_drawdown = True
                 current_drawdown_start = peak_time
-        elif eq >= peak_value:
-            if in_drawdown:
-                duration = (t - current_drawdown_start).total_seconds()
-                if duration > max_duration:
-                    max_duration = duration
-                in_drawdown = False
-            peak_value = eq
-            peak_time = t
+            continue
+        if in_drawdown:
+            duration = (t - current_drawdown_start).total_seconds()
+            if duration > max_duration:
+                max_duration = duration
+            in_drawdown = False
+        peak_value = eq
+        peak_time = t
     if in_drawdown:
         dangling = (times[-1] - current_drawdown_start).total_seconds()
         if dangling > max_duration:

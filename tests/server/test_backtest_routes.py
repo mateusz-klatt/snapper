@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
@@ -906,4 +907,589 @@ class TestRerunBacktest:
             response = client.post("/api/backtests/run-1/rerun")
             assert response.status_code == 200
             assert response.json()["payload"]["public_id"] == "run-rerun"
+            client.close()
+
+
+def _make_equity_row(equity: float = 10_000.0) -> dict[str, Any]:
+    """Build a minimal BacktestEquityPointRow dict."""
+    return {
+        "public_id": f"ep-{equity}",
+        "timestamp": NOW,
+        "session_id": "s1",
+        "sequence_id": 1,
+        "run_public_id": "run-1",
+        "point_time": NOW,
+        "equity": equity,
+        "cash": equity,
+        "position_value": 0.0,
+        "drawdown": 0.0,
+    }
+
+
+def _make_comparison_row(
+    public_id: str = "cmp-1",
+    run_a: str = "run-aa",
+    run_b: str = "run-bb",
+    pairing_mode: str = "auto",
+    config_hash: str | None = "h" * 64,
+) -> dict[str, Any]:
+    """Build a minimal BacktestComparisonRow dict."""
+    return {
+        "public_id": public_id,
+        "timestamp": NOW,
+        "session_id": "s1",
+        "sequence_id": 1,
+        "wallet_public_id": "wallet-1",
+        "operator_public_id": None,
+        "created_by_user_id": "test_user",
+        "run_a_public_id": run_a,
+        "run_b_public_id": run_b,
+        "config_hash": config_hash,
+        "pairing_mode": pairing_mode,
+        "anchor_run_public_id": None,
+    }
+
+
+def _wrap_compare(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build a compare-request envelope."""
+    return _wrap_command(payload, "backtest_compare_request")
+
+
+class TestNoActiveWalletGuards:
+    """Cover backtest_routes 400 fail-closed branches (lines 180, 424)."""
+
+    def test_list_no_active_wallet_returns_400(self) -> None:
+        """GET /api/backtests with no active wallet → 400.
+
+        Given: A principal with active_wallet_public_id=None,
+        When: GET /api/backtests is called,
+        Then: 400 with no active wallet detail.
+        """
+        bt = AsyncMock()
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt, wallet=None)
+            response = client.get("/api/backtests")
+            assert response.status_code == 400
+            client.close()
+
+    def test_get_detail_no_active_wallet_returns_400(self) -> None:
+        """GET /api/backtests/{id} with no active wallet → 400.
+
+        Given: A principal with active_wallet_public_id=None,
+        When: GET /api/backtests/run-1 is called and the run exists,
+        Then: 400 (fail-closed, not the legacy truthy bypass).
+        """
+        bt = AsyncMock()
+        bt.get_run = AsyncMock(return_value=_make_run_row())
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt, wallet=None)
+            response = client.get("/api/backtests/run-1")
+            assert response.status_code == 400
+            client.close()
+
+
+class TestCompareCreate:
+    """POST /api/backtests/compare — auto + manual flows."""
+
+    def test_no_active_wallet_returns_400(self) -> None:
+        """Caller without active wallet → 400.
+
+        Given: A principal with active_wallet_public_id=None,
+        When: POST /api/backtests/compare runs,
+        Then: 400 with no active wallet detail.
+        """
+        bt = AsyncMock()
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt, wallet=None)
+            body = _wrap_compare({"mode": "auto", "config_hash": "a" * 64})
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 400
+            client.close()
+
+    def test_auto_missing_config_hash_returns_422(self) -> None:
+        """Auto mode without config_hash → 422.
+
+        Given: mode=auto and config_hash omitted,
+        When: POST /api/backtests/compare runs,
+        Then: 422 with config_hash-required detail.
+        """
+        bt = AsyncMock()
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            body = _wrap_compare({"mode": "auto"})
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 422
+            client.close()
+
+    def test_auto_too_few_terminal_runs_returns_409(self) -> None:
+        """Auto mode with fewer than 2 terminal runs → 409.
+
+        Given: list_runs returns 1 terminal candidate,
+        When: POST /api/backtests/compare with mode=auto,
+        Then: 409 not enough runs.
+        """
+        bt = AsyncMock()
+        bt.list_runs = AsyncMock(
+            return_value=[_make_run_row(public_id="run-only", status="completed")]
+        )
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            body = _wrap_compare({"mode": "auto", "config_hash": "a" * 64})
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 409
+            client.close()
+
+    def test_auto_creates_pair_from_two_terminal(self) -> None:
+        """Two terminal runs → comparison created.
+
+        Given: list_runs returns 2 terminal candidates,
+        When: POST /api/backtests/compare with mode=auto,
+        Then: 200 with the created comparison payload.
+        """
+        bt = AsyncMock()
+        bt.list_runs = AsyncMock(
+            return_value=[
+                _make_run_row(public_id="run-a", status="completed"),
+                _make_run_row(public_id="run-b", status="completed"),
+            ]
+        )
+        bt.get_comparison_by_pair = AsyncMock(return_value=None)
+        bt.create_comparison = AsyncMock(return_value=(1, "cmp-new"))
+        bt.get_comparison = AsyncMock(return_value=_make_comparison_row(public_id="cmp-new"))
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            body = _wrap_compare({"mode": "auto", "config_hash": "a" * 64})
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 200
+            assert response.json()["payload"]["public_id"] == "cmp-new"
+            client.close()
+
+    def test_auto_anchor_not_found_404(self) -> None:
+        """Anchor public_id absent from candidates → 404.
+
+        Given: anchor_run_public_id not in list_runs result,
+        When: POST /api/backtests/compare,
+        Then: 404 anchor not found.
+        """
+        bt = AsyncMock()
+        bt.list_runs = AsyncMock(return_value=[])
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            body = _wrap_compare(
+                {
+                    "mode": "auto",
+                    "config_hash": "a" * 64,
+                    "anchor_run_public_id": "missing",
+                }
+            )
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 404
+            client.close()
+
+    def test_auto_anchor_not_terminal_409(self) -> None:
+        """Anchor present but not terminal → 409.
+
+        Given: anchor row exists but status='running',
+        When: POST /api/backtests/compare,
+        Then: 409 anchor not terminal.
+        """
+        bt = AsyncMock()
+        bt.list_runs = AsyncMock(
+            return_value=[_make_run_row(public_id="anchor-1", status="running")]
+        )
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            body = _wrap_compare(
+                {
+                    "mode": "auto",
+                    "config_hash": "a" * 64,
+                    "anchor_run_public_id": "anchor-1",
+                }
+            )
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 409
+            client.close()
+
+    def test_auto_anchor_null_hash_409(self) -> None:
+        """Anchor exists, terminal, but config_hash is None → 409.
+
+        Given: anchor present without config_hash,
+        When: POST /api/backtests/compare with auto mode,
+        Then: 409 anchor has no config_hash.
+        """
+        run_no_hash = _make_run_row(public_id="anchor-1", status="completed")
+        bt = AsyncMock()
+        bt.list_runs = AsyncMock(return_value=[run_no_hash])
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            body = _wrap_compare(
+                {
+                    "mode": "auto",
+                    "config_hash": "a" * 64,
+                    "anchor_run_public_id": "anchor-1",
+                }
+            )
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 409
+            client.close()
+
+    def test_auto_anchor_hash_mismatch_422(self) -> None:
+        """Anchor terminal with different config_hash → 422.
+
+        Given: anchor has config_hash != request,
+        When: POST /api/backtests/compare,
+        Then: 422 hash mismatch.
+        """
+        run = _make_run_row(public_id="anchor-1", status="completed")
+        run["config_hash"] = "b" * 64
+        bt = AsyncMock()
+        bt.list_runs = AsyncMock(return_value=[run])
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            body = _wrap_compare(
+                {
+                    "mode": "auto",
+                    "config_hash": "a" * 64,
+                    "anchor_run_public_id": "anchor-1",
+                }
+            )
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 422
+            client.close()
+
+    def test_auto_anchor_no_counterpart_409(self) -> None:
+        """Anchor valid but only candidate → 409.
+
+        Given: anchor is the only terminal candidate,
+        When: POST /api/backtests/compare,
+        Then: 409 no counterpart.
+        """
+        anchor = _make_run_row(public_id="anchor-1", status="completed")
+        anchor["config_hash"] = "a" * 64
+        bt = AsyncMock()
+        bt.list_runs = AsyncMock(return_value=[anchor])
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            body = _wrap_compare(
+                {
+                    "mode": "auto",
+                    "config_hash": "a" * 64,
+                    "anchor_run_public_id": "anchor-1",
+                }
+            )
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 409
+            client.close()
+
+    def test_auto_anchor_with_counterpart_creates(self) -> None:
+        """Anchor + other terminal → comparison created.
+
+        Given: anchor + one other terminal candidate,
+        When: POST /api/backtests/compare,
+        Then: 200 with created comparison.
+        """
+        anchor = _make_run_row(public_id="anchor-1", status="completed")
+        anchor["config_hash"] = "a" * 64
+        other = _make_run_row(public_id="other-1", status="completed")
+        other["config_hash"] = "a" * 64
+        bt = AsyncMock()
+        bt.list_runs = AsyncMock(return_value=[anchor, other])
+        bt.get_comparison_by_pair = AsyncMock(return_value=None)
+        bt.create_comparison = AsyncMock(return_value=(1, "cmp-new"))
+        bt.get_comparison = AsyncMock(return_value=_make_comparison_row())
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            body = _wrap_compare(
+                {
+                    "mode": "auto",
+                    "config_hash": "a" * 64,
+                    "anchor_run_public_id": "anchor-1",
+                }
+            )
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 200
+            client.close()
+
+    def test_manual_missing_run_id_returns_422(self) -> None:
+        """Manual mode without both run ids → 422.
+
+        Given: mode=manual but run_b_public_id omitted,
+        When: POST /api/backtests/compare,
+        Then: 422 required.
+        """
+        bt = AsyncMock()
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            body = _wrap_compare({"mode": "manual", "run_a_public_id": "x"})
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 422
+            client.close()
+
+    def test_manual_self_compare_returns_422(self) -> None:
+        """Manual mode with run_a == run_b → 422.
+
+        Given: identical run_a / run_b,
+        When: POST /api/backtests/compare,
+        Then: 422 self-compare.
+        """
+        bt = AsyncMock()
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            body = _wrap_compare(
+                {
+                    "mode": "manual",
+                    "run_a_public_id": "x",
+                    "run_b_public_id": "x",
+                }
+            )
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 422
+            client.close()
+
+    def test_manual_run_not_in_wallet_returns_404(self) -> None:
+        """Manual mode with foreign-wallet leg → 404.
+
+        Given: get_run returns None for one leg,
+        When: POST /api/backtests/compare,
+        Then: 404 run not found.
+        """
+        bt = AsyncMock()
+        bt.get_run = AsyncMock(return_value=None)
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            body = _wrap_compare(
+                {
+                    "mode": "manual",
+                    "run_a_public_id": "a",
+                    "run_b_public_id": "b",
+                }
+            )
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 404
+            client.close()
+
+    def test_manual_non_terminal_returns_409(self) -> None:
+        """Manual mode with running leg → 409.
+
+        Given: both legs found but one is status='running',
+        When: POST /api/backtests/compare,
+        Then: 409 must be terminal.
+        """
+        run_a = _make_run_row(public_id="a", status="completed")
+        run_b = _make_run_row(public_id="b", status="running")
+        bt = AsyncMock()
+        bt.get_run = AsyncMock(side_effect=[run_a, run_b])
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            body = _wrap_compare(
+                {
+                    "mode": "manual",
+                    "run_a_public_id": "a",
+                    "run_b_public_id": "b",
+                }
+            )
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 409
+            client.close()
+
+    def test_manual_creates_pair_with_shared_hash(self) -> None:
+        """Manual mode with two terminal runs sharing hash → 200.
+
+        Given: both legs terminal with same config_hash,
+        When: POST /api/backtests/compare,
+        Then: 200 + comparison created with config_hash populated.
+        """
+        run_a = _make_run_row(public_id="a", status="completed")
+        run_a["config_hash"] = "a" * 64
+        run_b = _make_run_row(public_id="b", status="completed")
+        run_b["config_hash"] = "a" * 64
+        bt = AsyncMock()
+        bt.get_run = AsyncMock(side_effect=[run_a, run_b])
+        bt.get_comparison_by_pair = AsyncMock(return_value=None)
+        bt.create_comparison = AsyncMock(return_value=(1, "cmp-new"))
+        bt.get_comparison = AsyncMock(return_value=_make_comparison_row())
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            body = _wrap_compare(
+                {
+                    "mode": "manual",
+                    "run_a_public_id": "a",
+                    "run_b_public_id": "b",
+                }
+            )
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 200
+            client.close()
+
+    def test_idempotent_returns_existing(self) -> None:
+        """SELECT-first finds existing pair → 200 returns it (no INSERT).
+
+        Given: get_comparison_by_pair returns an existing row,
+        When: POST /api/backtests/compare,
+        Then: 200 with existing public_id; create_comparison not called.
+        """
+        bt = AsyncMock()
+        bt.list_runs = AsyncMock(
+            return_value=[
+                _make_run_row(public_id="a", status="completed"),
+                _make_run_row(public_id="b", status="completed"),
+            ]
+        )
+        bt.get_comparison_by_pair = AsyncMock(
+            return_value=_make_comparison_row(public_id="cmp-existing")
+        )
+        bt.create_comparison = AsyncMock()
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            body = _wrap_compare({"mode": "auto", "config_hash": "a" * 64})
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 200
+            assert response.json()["payload"]["public_id"] == "cmp-existing"
+            bt.create_comparison.assert_not_called()
+            client.close()
+
+    def test_integrity_error_race_recovers_with_existing(self) -> None:
+        """IntegrityError race → re-SELECT returns 200 with the now-visible row.
+
+        Given: SELECT first returns None, INSERT raises IntegrityError,
+            re-SELECT finds the row,
+        When: POST /api/backtests/compare,
+        Then: 200 with the recovered public_id.
+        """
+        existing = _make_comparison_row(public_id="cmp-race")
+        bt = AsyncMock()
+        bt.list_runs = AsyncMock(
+            return_value=[
+                _make_run_row(public_id="a", status="completed"),
+                _make_run_row(public_id="b", status="completed"),
+            ]
+        )
+        bt.get_comparison_by_pair = AsyncMock(side_effect=[None, existing])
+        bt.create_comparison = AsyncMock(side_effect=IntegrityError("INSERT", {}, MagicMock()))
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            body = _wrap_compare({"mode": "auto", "config_hash": "a" * 64})
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 200
+            assert response.json()["payload"]["public_id"] == "cmp-race"
+            client.close()
+
+    def test_integrity_error_unrecoverable_500(self) -> None:
+        """IntegrityError with empty re-SELECT → 500.
+
+        Given: INSERT raises and re-SELECT also returns None,
+        When: POST /api/backtests/compare,
+        Then: 500 race recovery failed.
+        """
+        bt = AsyncMock()
+        bt.list_runs = AsyncMock(
+            return_value=[
+                _make_run_row(public_id="a", status="completed"),
+                _make_run_row(public_id="b", status="completed"),
+            ]
+        )
+        bt.get_comparison_by_pair = AsyncMock(side_effect=[None, None])
+        bt.create_comparison = AsyncMock(side_effect=IntegrityError("INSERT", {}, MagicMock()))
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            body = _wrap_compare({"mode": "auto", "config_hash": "a" * 64})
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 500
+            client.close()
+
+
+class TestCompareList:
+    """GET /api/backtests/compare — wallet-scoped list."""
+
+    def test_list_no_active_wallet_400(self) -> None:
+        """Caller without active wallet → 400."""
+        bt = AsyncMock()
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt, wallet=None)
+            response = client.get("/api/backtests/compare")
+            assert response.status_code == 400
+            client.close()
+
+    def test_list_returns_rows(self) -> None:
+        """Wallet-scoped repository call returns the projected list."""
+        bt = AsyncMock()
+        bt.list_comparisons = AsyncMock(
+            return_value=[_make_comparison_row(public_id=f"c{i}") for i in range(3)]
+        )
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            response = client.get("/api/backtests/compare")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["count"] == 3
+            client.close()
+
+
+class TestCompareDetail:
+    """GET /api/backtests/compare/{id} — recomputed diff."""
+
+    def test_no_active_wallet_400(self) -> None:
+        """Caller without active wallet → 400."""
+        bt = AsyncMock()
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt, wallet=None)
+            response = client.get("/api/backtests/compare/cmp-1")
+            assert response.status_code == 400
+            client.close()
+
+    def test_comparison_not_found_404(self) -> None:
+        """Repository returns None → 404."""
+        bt = AsyncMock()
+        bt.get_comparison = AsyncMock(return_value=None)
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            response = client.get("/api/backtests/compare/cmp-1")
+            assert response.status_code == 404
+            client.close()
+
+    def test_comparison_foreign_wallet_404(self) -> None:
+        """Comparison wallet ≠ caller wallet → 404 (no info leak)."""
+        cmp_row = _make_comparison_row()
+        cmp_row["wallet_public_id"] = "other-wallet"
+        bt = AsyncMock()
+        bt.get_comparison = AsyncMock(return_value=cmp_row)
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            response = client.get("/api/backtests/compare/cmp-1")
+            assert response.status_code == 404
+            client.close()
+
+    def test_underlying_run_missing_404(self) -> None:
+        """One run gone → 404 underlying run not found."""
+        bt = AsyncMock()
+        bt.get_comparison = AsyncMock(return_value=_make_comparison_row())
+        bt.get_run = AsyncMock(side_effect=[_make_run_row(), None])
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            response = client.get("/api/backtests/compare/cmp-1")
+            assert response.status_code == 404
+            client.close()
+
+    def test_diff_recomputed_from_artifacts(self) -> None:
+        """Happy path: returns comparison + diff payload computed on GET."""
+        bt = AsyncMock()
+        bt.get_comparison = AsyncMock(return_value=_make_comparison_row())
+        bt.get_run = AsyncMock(
+            side_effect=[
+                _make_run_row(public_id="run-a"),
+                _make_run_row(public_id="run-b"),
+            ]
+        )
+        bt.get_result = AsyncMock(return_value=None)
+        bt.get_equity_points = AsyncMock(return_value=[_make_equity_row()])
+        bt.get_trades = AsyncMock(return_value=[])
+        bt.get_signals = AsyncMock(return_value=[])
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            response = client.get("/api/backtests/compare/cmp-1")
+            assert response.status_code == 200
+            data = response.json()["payload"]
+            assert data["comparison"]["public_id"] == "cmp-1"
+            assert "metrics_diff" in data
+            assert "equity_overlay" in data
             client.close()

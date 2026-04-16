@@ -17,6 +17,7 @@ from snapper.server.json_body import _lift_defs
 from snapper.server.json_body import _strip_defaults
 from snapper.server.json_body import json_body
 from snapper.server.json_body import openapi_schema
+from snapper.server.json_body import optional_json_body
 from snapper.server.json_body import patch_openapi
 
 
@@ -92,6 +93,64 @@ class TestJsonBody:
 
         with pytest.raises(ValidationError):
             StrictModel.model_validate({"ts": "2024-06-15T12:00:00+00:00"})
+
+
+class TestOptionalJsonBody:
+    """Cover optional_json_body sentinel + validation paths (Phase 2c)."""
+
+    @pytest.mark.asyncio()
+    async def test_empty_body_returns_none(self) -> None:
+        """Empty body returns sentinel ``None`` (R15 contract).
+
+        Given: An empty request body,
+        When: optional_json_body dependency is called,
+        Then: Returns ``None`` instead of synthesising a model.
+        """
+
+        class Body(BaseModel):
+            model_config = ConfigDict(strict=True, extra="forbid")
+            x: int
+
+        dep = optional_json_body(Body)
+        req = _StubRequest(b"")
+        assert await dep(req) is None
+
+    @pytest.mark.asyncio()
+    async def test_populated_body_validates_like_json_body(self) -> None:
+        """Non-empty body validates exactly like ``json_body``.
+
+        Given: A populated valid JSON body,
+        When: optional_json_body dependency is called,
+        Then: The validated model is returned.
+        """
+
+        class Body(BaseModel):
+            model_config = ConfigDict(strict=True, extra="forbid")
+            x: int
+
+        dep = optional_json_body(Body)
+        req = _StubRequest(b'{"x": 42}')
+        result = await dep(req)
+        assert result is not None
+        assert result.x == 42
+
+    @pytest.mark.asyncio()
+    async def test_malformed_json_raises_request_validation_error(self) -> None:
+        """Malformed body still raises (NOT silently skipped).
+
+        Given: A non-empty body that fails validation,
+        When: optional_json_body dependency is called,
+        Then: RequestValidationError is raised (matches json_body).
+        """
+
+        class Body(BaseModel):
+            model_config = ConfigDict(strict=True, extra="forbid")
+            x: int
+
+        dep = optional_json_body(Body)
+        req = _StubRequest(b'{"x": "not_an_int"}')
+        with pytest.raises(RequestValidationError):
+            await dep(req)
 
 
 class TestStripDefaults:

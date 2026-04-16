@@ -66,7 +66,12 @@ def _msg(topics: list[str]) -> WSSubscribeRequest:
 
 @pytest.mark.asyncio
 async def test_viewer_denied_foreign_wallet_run_subscription() -> None:
-    """VIEWER subscribing to a foreign wallet's run prefix is denied."""
+    """VIEWER subscribing to a foreign wallet's run prefix is denied.
+
+    Given: VIEWER principal scoped to OWN_WALLET.
+    When: Subscribing to ``backtest.{FOREIGN_WALLET}.{RUN}.``.
+    Then: Prefix lands in denied_topics; bridge add_subscription not called.
+    """
     ws = AsyncMock()
     manager = _mock_manager()
     prefix = f"backtest.{_FOREIGN_WALLET}.{_RUN}."
@@ -79,7 +84,12 @@ async def test_viewer_denied_foreign_wallet_run_subscription() -> None:
 
 @pytest.mark.asyncio
 async def test_viewer_denied_bare_backtest_root() -> None:
-    """Bare ``backtest.`` is admin-only — VIEWER is denied."""
+    """Bare ``backtest.`` is admin-only — VIEWER is denied.
+
+    Given: VIEWER principal with an active wallet.
+    When: Subscribing to the root ``backtest.`` prefix.
+    Then: Prefix is denied (admin-only root).
+    """
     ws = AsyncMock()
     manager = _mock_manager()
     await handle_subscribe(ws, _msg(["backtest."]), manager, _principal(UserRole.VIEWER))
@@ -89,7 +99,12 @@ async def test_viewer_denied_bare_backtest_root() -> None:
 
 @pytest.mark.asyncio
 async def test_viewer_accepted_own_wallet_prefix() -> None:
-    """VIEWER can subscribe to their own wallet's prefix."""
+    """VIEWER can subscribe to their own wallet's prefix.
+
+    Given: VIEWER principal with ``active_wallet=OWN_WALLET``.
+    When: Subscribing to ``backtest.{OWN_WALLET}.``.
+    Then: Prefix is accepted and reaches the bridge.
+    """
     ws = AsyncMock()
     manager = _mock_manager()
     prefix = f"backtest.{_OWN_WALLET}."
@@ -101,7 +116,12 @@ async def test_viewer_accepted_own_wallet_prefix() -> None:
 
 @pytest.mark.asyncio
 async def test_operator_accepted_own_wallet_run_prefix() -> None:
-    """OPERATOR can subscribe to their own wallet + run prefix."""
+    """OPERATOR can subscribe to their own wallet + run prefix.
+
+    Given: OPERATOR principal with ``active_wallet=OWN_WALLET``.
+    When: Subscribing to ``backtest.{OWN_WALLET}.{RUN}.``.
+    Then: Prefix is accepted (wallet-scoped RBAC passes).
+    """
     ws = AsyncMock()
     manager = _mock_manager()
     prefix = f"backtest.{_OWN_WALLET}.{_RUN}."
@@ -113,7 +133,12 @@ async def test_operator_accepted_own_wallet_run_prefix() -> None:
 
 @pytest.mark.asyncio
 async def test_admin_accepted_foreign_wallet_prefix() -> None:
-    """ADMIN bypasses wallet scope and can subscribe to any wallet."""
+    """ADMIN bypasses wallet scope and can subscribe to any wallet.
+
+    Given: ADMIN principal with ``active_wallet=OWN_WALLET``.
+    When: Subscribing to ``backtest.{FOREIGN_WALLET}.{RUN}.``.
+    Then: Prefix is accepted — admins bypass wallet scoping.
+    """
     ws = AsyncMock()
     manager = _mock_manager()
     prefix = f"backtest.{_FOREIGN_WALLET}.{_RUN}."
@@ -127,7 +152,12 @@ async def test_admin_accepted_foreign_wallet_prefix() -> None:
 
 @pytest.mark.asyncio
 async def test_admin_accepted_bare_backtest_root() -> None:
-    """ADMIN can subscribe to the bare backtest root."""
+    """ADMIN can subscribe to the bare backtest root.
+
+    Given: ADMIN principal.
+    When: Subscribing to the ``backtest.`` root prefix.
+    Then: Prefix is accepted (admins get the root subscription).
+    """
     ws = AsyncMock()
     manager = _mock_manager()
     await handle_subscribe(ws, _msg(["backtest."]), manager, _principal(UserRole.ADMIN))
@@ -137,7 +167,12 @@ async def test_admin_accepted_bare_backtest_root() -> None:
 
 @pytest.mark.asyncio
 async def test_non_admin_without_active_wallet_denied() -> None:
-    """VIEWER with ``active_wallet_public_id=None`` cannot subscribe to any wallet."""
+    """VIEWER with ``active_wallet_public_id=None`` cannot subscribe to any wallet.
+
+    Given: VIEWER principal without an active wallet claim.
+    When: Subscribing to ``backtest.{OWN_WALLET}.``.
+    Then: Prefix lands in denied_topics (fail-closed).
+    """
     ws = AsyncMock()
     manager = _mock_manager()
     prefix = f"backtest.{_OWN_WALLET}."

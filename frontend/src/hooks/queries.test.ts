@@ -35,6 +35,7 @@ import {
   useCreateTrailingStop,
   useTrailingStopForCycle,
   useBacktests,
+  useBacktestRunsByConfigHash,
   useBacktest,
   useBacktestTrades,
   useBacktestSignals,
@@ -1347,6 +1348,25 @@ describe('queries', () => {
 
       await waitFor(() => expect(result.current.isSuccess).toBe(true))
       expect(apiClient.getBacktests).toHaveBeenCalled()
+    })
+  })
+
+  describe('useBacktestRunsByConfigHash', () => {
+    it('is disabled when configHash is null', () => {
+      const { result } = renderHook(() => useBacktestRunsByConfigHash(null), {
+        wrapper: createWrapper(),
+      })
+
+      expect(result.current.fetchStatus).toBe('idle')
+    })
+
+    it('fetches by config_hash when provided', async () => {
+      const { result } = renderHook(() => useBacktestRunsByConfigHash('cfg-1', 5), {
+        wrapper: createWrapper(),
+      })
+
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      expect(apiClient.getBacktests).toHaveBeenCalledWith(5, 0, undefined, undefined, 'cfg-1')
     })
   })
 

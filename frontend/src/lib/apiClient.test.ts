@@ -2457,6 +2457,19 @@ describe('cacheWsTicketFromResponse', () => {
       )
     })
 
+    it('getBacktests appends config_hash when provided', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ type: 'backtest_run_list', payload: [], count: 0 }),
+      })
+      await apiClient.getBacktests(20, 0, undefined, undefined, 'cfg-hash-abc')
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('config_hash=cfg-hash-abc'),
+        expect.objectContaining({ method: 'GET' })
+      )
+    })
+
     it('getBacktest sends GET by ID', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,

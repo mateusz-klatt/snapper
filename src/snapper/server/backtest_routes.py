@@ -209,9 +209,9 @@ def _project_inline_result(result_row: BacktestResultRow) -> BacktestResultInlin
     filtered_extra = {k: v for k, v in raw_extra.items() if k not in PROMOTED_METRIC_NAMES}
 
     def _promoted(name: str) -> float | None:
-        typed: float | None = result_row.get(name)  # type: ignore[assignment]
-        if typed is not None:
-            return typed
+        typed = cast(Any, result_row).get(name)
+        if isinstance(typed, int | float):
+            return float(typed)
         fallback = raw_extra.get(name)
         return float(fallback) if isinstance(fallback, int | float) else None
 
@@ -566,6 +566,15 @@ async def create_comparison(
     re-SELECT, return 200. Route registered BEFORE ``/{run_id}`` so
     ``/compare`` is not captured as ``id="compare"`` (R14 sonnet
     route-order fix).
+
+    Args:
+        request: FastAPI request (provides REST tracker).
+        command: Validated compare-request envelope.
+        principal: Authenticated caller with READ_BACKTESTS.
+        repo: Database repository dependency.
+
+    Returns:
+        Envelope wrapping the created (or existing) comparison row.
     """
     bt_repo = _bt_repo(repo)
     tracker: SequenceTracker = request.app.state.rest_tracker
@@ -656,7 +665,19 @@ async def list_comparisons(
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> BacktestComparisonListResponse:
-    """List recent comparisons for the caller's wallet."""
+    """List recent comparisons for the caller's wallet.
+
+    Args:
+        request: FastAPI request.
+        principal: Authenticated caller with READ_BACKTESTS.
+        repo: Database repository dependency.
+        as_of: Temporal query parameter.
+        limit: Page size.
+        offset: Page offset.
+
+    Returns:
+        Wallet-scoped comparison list newest-first.
+    """
     bt_repo = _bt_repo(repo)
     tracker: SequenceTracker = request.app.state.rest_tracker
     sid = tracker.session_id
@@ -688,7 +709,19 @@ async def get_comparison(
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
 ) -> BacktestComparisonDetailResponse:
-    """Fetch a comparison + recomputed diff from current artifact rows."""
+    """Fetch a comparison + recomputed diff from current artifact rows.
+
+    Args:
+        comparison_public_id: UUID7 of the comparison row.
+        request: FastAPI request.
+        principal: Authenticated caller with READ_BACKTESTS.
+        repo: Database repository dependency.
+        as_of: Temporal query parameter.
+
+    Returns:
+        Envelope with comparison metadata, both run projections, and
+        metrics/equity/trades/signals diffs recomputed on GET.
+    """
     bt_repo = _bt_repo(repo)
     tracker: SequenceTracker = request.app.state.rest_tracker
     sid = tracker.session_id
