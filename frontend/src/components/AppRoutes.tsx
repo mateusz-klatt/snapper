@@ -27,8 +27,12 @@ interface AppRoutesProps {
 function BacktestsRouter(): React.ReactElement {
   const subpath = useHashSubpath('backtests')
 
-  if (subpath.length === 2 && subpath[0] === 'compare') {
-    return <ComparePage comparisonPublicId={subpath[1]} />
+  if (subpath[0] === 'compare') {
+    if (subpath.length === 2) {
+      return <ComparePage comparisonPublicId={subpath[1]} />
+    }
+
+    return <Backtests />
   }
 
   if (subpath.length === 1) {

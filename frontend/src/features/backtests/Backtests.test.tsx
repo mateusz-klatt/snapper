@@ -261,7 +261,7 @@ describe('Backtests', () => {
     expect(anchor.getAttribute('href')).toBe('#backtests/run-abc123')
   })
 
-  it('row anchor click does not invoke cancel/rerun handlers (no nested-button bubble)', async () => {
+  it('cancel/rerun buttons are siblings of the row anchor, not descendants', async () => {
     mockGetBacktests.mockResolvedValue({
       type: 'backtest_run_list',
       session_id: 's1',
@@ -273,7 +273,11 @@ describe('Backtests', () => {
     })
     renderWithQuery(<Backtests />)
     const anchor = await screen.findByTestId('open-run-abc123')
+    const cancelBtn = await screen.findByTestId('cancel-run-abc123')
+    const rerunBtn = await screen.findByTestId('rerun-run-abc123')
 
+    expect(anchor.contains(cancelBtn)).toBe(false)
+    expect(anchor.contains(rerunBtn)).toBe(false)
     fireEvent.click(anchor)
     expect(mockCancelBacktest).not.toHaveBeenCalled()
     expect(mockRerunBacktest).not.toHaveBeenCalled()

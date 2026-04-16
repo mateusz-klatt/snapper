@@ -132,6 +132,15 @@ describe('AppRoutes', () => {
     })
     expect(screen.getByTestId('compare-page').textContent).toBe('cmp-1')
   })
+  it('falls back to Backtests list for malformed #backtests/compare (no id)', async () => {
+    globalThis.location.hash = '#backtests/compare'
+    renderWithProviders(<AppRoutes activeTab='backtests' />)
+    await waitFor(() => {
+      expect(screen.getByTestId('backtests')).toBeTruthy()
+    })
+    expect(screen.queryByTestId('backtest-detail')).toBeNull()
+    expect(screen.queryByTestId('compare-page')).toBeNull()
+  })
   it('renders Health component for health tab', async () => {
     renderWithProviders(<AppRoutes activeTab='health' />)
     await waitFor(() => {
