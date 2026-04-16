@@ -39,6 +39,7 @@ from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.data.backtest_conflict import is_single_running_conflict
 from snapper.data.backtest_repository import BacktestRepository
+from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import BacktestResultInsertRow
 from snapper.data.repository_types import BacktestRunRow
@@ -47,6 +48,47 @@ from snapper.messaging.infrastructure.publisher import SequenceTracker
 _BT_EVENTS_STREAM = "backtest_events"
 _BT_STATUS_STREAM = "backtest_status"
 _BT_ARTIFACTS_STREAM = "backtest_artifacts"
+
+
+async def _count_expected_batches(
+    config: BacktestConfig, repository: Repository, snapshot_as_of: datetime
+) -> int | None:
+    """Pre-compute the expected number of time-batch ticks for progress.
+
+    The runner fires ``on_candle_processed`` once per ``process_time_batch``
+    call, which is once per unique ``open_at`` timestamp across all
+    (exchange, instrument) pairs in the config. This helper counts those
+    unique timestamps up-front so the emitter can compute ``progress_pct``
+    and trigger 25 / 50 / 75 pct milestones.
+
+    Returns ``None`` on any query failure so the runner silently degrades
+    (milestones disabled, ``progress_pct`` pinned at 0.0) instead of
+    aborting the run. Matches plan §2.3: "``total_candles`` is
+    pre-computed by the runner via a cheap repository count before
+    ``engine.run()``; ``None`` only if the count query fails".
+    """
+    try:
+        open_times: set[datetime] = set()
+        for exchange, instruments in config.instruments.items():
+            for instrument in instruments:
+                rows = await repository.get_candles(
+                    instrument=instrument,
+                    timeframe=config.timeframe,
+                    start=None,
+                    end=config.end_date,
+                    exchange=cast(Any, exchange),
+                    as_of=snapshot_as_of,
+                    order="asc",
+                )
+                open_times.update(row["open_at"] for row in rows)
+    except Exception as exc:
+        logger.warning(
+            "Backtest {} pre-run candle count failed ({}) — milestones disabled",
+            config.strategy_class,
+            exc,
+        )
+        return None
+    return len(open_times) or None
 
 
 def run_to_config_dict(run: BacktestRunRow) -> dict[str, Any]:
@@ -230,10 +272,11 @@ class BacktestRunnerProcess(RegisterableProcess):
                 run_public_id=run["public_id"],
                 cancel_poll_ms=config.cancel_poll_ms,
             )
+            total_candles = await _count_expected_batches(config, repository, now)
             emitter = BacktestProgressEmitter(
                 run_public_id=run["public_id"],
                 wallet_public_id=run["wallet_public_id"],
-                total_candles=None,
+                total_candles=total_candles,
                 tracker=self._tracker,
                 publish=self._progress_publish,
             )
