@@ -88,6 +88,10 @@ import type {
   BacktestTradeListResponse,
   BacktestSignalListResponse,
   BacktestCreateBody,
+  BacktestCompareBody,
+  BacktestComparisonResponse,
+  BacktestComparisonDetailResponse,
+  BacktestComparisonListResponse,
 } from '../types/api'
 
 interface RequestOptions {
@@ -99,6 +103,26 @@ interface RequestOptions {
 }
 
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'DELETE', 'PATCH'])
+
+/**
+ * HTTP error thrown by getJSON/postJSON when the response is not OK.
+ *
+ * Preserves the response status + statusText so callers (notably
+ * ComparePage) can branch on `error instanceof APIError && error.status === 404`
+ * for wallet-scope misses, while existing `.message`-based assertions
+ * keep working because APIError extends Error and reuses the same
+ * message format.
+ */
+export class APIError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly statusText: string
+  ) {
+    super(message)
+    this.name = 'APIError'
+  }
+}
 
 class APIClient {
   private static instance: APIClient
@@ -278,6 +302,11 @@ class APIClient {
       body: body ? JSON.stringify(stampProvenance(body)) : undefined,
     })
   }
+  private async raiseHttpError(response: Response): Promise<never> {
+    const message = await this.extractErrorMessage(response)
+
+    throw new APIError(message, response.status, response.statusText)
+  }
   private async extractErrorMessage(response: Response): Promise<string> {
     try {
       const data = await response.json()
@@ -301,7 +330,7 @@ class APIClient {
     const response = await this.get(url, options)
 
     if (!response.ok) {
-      throw new Error(await this.extractErrorMessage(response))
+      await this.raiseHttpError(response)
     }
 
     return response.json()
@@ -310,7 +339,7 @@ class APIClient {
     const response = await this.post(url, body, options)
 
     if (!response.ok) {
-      throw new Error(await this.extractErrorMessage(response))
+      await this.raiseHttpError(response)
     }
 
     return response.json()
@@ -455,7 +484,7 @@ class APIClient {
     const response = await this.request(`/api/scope-grants?${params}`, { method: 'GET' })
 
     if (!response.ok) {
-      throw new Error(await this.extractErrorMessage(response))
+      await this.raiseHttpError(response)
     }
 
     const data = await response.json()
@@ -482,7 +511,7 @@ class APIClient {
     const response = await this.request(url, { method: 'GET' })
 
     if (!response.ok) {
-      throw new Error(await this.extractErrorMessage(response))
+      await this.raiseHttpError(response)
     }
 
     const data = await response.json()
@@ -747,6 +776,29 @@ class APIClient {
     )
 
     return data as BacktestSignalListResponse
+  }
+  async createBacktestComparison(body: BacktestCompareBody): Promise<BacktestComparisonResponse> {
+    const data = await this.postJSON('/api/backtests/compare', body)
+
+    return data as BacktestComparisonResponse
+  }
+  async getBacktestComparison(
+    comparisonPublicId: string
+  ): Promise<BacktestComparisonDetailResponse> {
+    const data = await this.getJSON(
+      `/api/backtests/compare/${encodeURIComponent(comparisonPublicId)}`
+    )
+
+    return data as BacktestComparisonDetailResponse
+  }
+  async getBacktestComparisons(limit = 20, offset = 0): Promise<BacktestComparisonListResponse> {
+    const params = new URLSearchParams()
+
+    params.set('limit', String(limit))
+    params.set('offset', String(offset))
+    const data = await this.getJSON(`/api/backtests/compare?${params.toString()}`)
+
+    return data as BacktestComparisonListResponse
   }
 }
 

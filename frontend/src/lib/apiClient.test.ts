@@ -2579,5 +2579,108 @@ describe('cacheWsTicketFromResponse', () => {
         expect.objectContaining({ method: 'GET' })
       )
     })
+
+    it('createBacktestComparison sends POST with auto-mode body', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          type: 'backtest_comparison_response',
+          payload: { public_id: 'cmp-1' },
+        }),
+      })
+      await apiClient.createBacktestComparison({
+        mode: 'auto',
+        config_hash: 'cfg-hash-abc',
+        anchor_run_public_id: 'r1',
+      })
+
+      const [url, init] = mockFetch.mock.calls[0]
+
+      expect(url).toContain('/api/backtests/compare')
+      expect(init.method).toBe('POST')
+      const sentBody = JSON.parse(init.body as string)
+
+      expect(sentBody.payload).toEqual({
+        mode: 'auto',
+        config_hash: 'cfg-hash-abc',
+        anchor_run_public_id: 'r1',
+      })
+      expect(sentBody.public_id).toBeTruthy()
+      expect(sentBody.session_id).toBeTruthy()
+    })
+
+    it('getBacktestComparison sends GET by id (URL-encoded)', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          type: 'backtest_comparison_detail_response',
+          payload: { comparison: { public_id: 'cmp 1' } },
+        }),
+      })
+      await apiClient.getBacktestComparison('cmp 1')
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/backtests/compare/cmp%201'),
+        expect.objectContaining({ method: 'GET' })
+      )
+    })
+
+    it('getBacktestComparisons sends GET with default + custom paging', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ type: 'backtest_comparison_list', payload: [], count: 0 }),
+      })
+      await apiClient.getBacktestComparisons()
+      expect(mockFetch).toHaveBeenLastCalledWith(
+        expect.stringContaining('/api/backtests/compare?limit=20&offset=0'),
+        expect.objectContaining({ method: 'GET' })
+      )
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ type: 'backtest_comparison_list', payload: [], count: 0 }),
+      })
+      await apiClient.getBacktestComparisons(50, 100)
+      expect(mockFetch).toHaveBeenLastCalledWith(
+        expect.stringContaining('/api/backtests/compare?limit=50&offset=100'),
+        expect.objectContaining({ method: 'GET' })
+      )
+    })
+
+    it('APIError preserves status + statusText on getJSON 404', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+        json: vi.fn().mockResolvedValue({ detail: 'Comparison not found' }),
+      })
+      await expect(apiClient.getBacktestComparison('missing')).rejects.toMatchObject({
+        name: 'APIError',
+        message: 'Comparison not found',
+        status: 404,
+        statusText: 'Not Found',
+      })
+    })
+
+    it('APIError preserves status + statusText on postJSON 422', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        statusText: 'Unprocessable Entity',
+        json: vi.fn().mockResolvedValue({ detail: 'cannot compare a run with itself' }),
+      })
+      await expect(
+        apiClient.createBacktestComparison({
+          mode: 'manual',
+          run_a_public_id: 'r1',
+          run_b_public_id: 'r1',
+        })
+      ).rejects.toMatchObject({
+        name: 'APIError',
+        message: 'cannot compare a run with itself',
+        status: 422,
+        statusText: 'Unprocessable Entity',
+      })
+    })
   })
 })
