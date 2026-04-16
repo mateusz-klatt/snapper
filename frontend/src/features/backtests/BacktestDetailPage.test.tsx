@@ -78,10 +78,11 @@ describe('BacktestDetailPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
   })
-  it('shows error when runPublicId is not a UUID7', () => {
+  it('shows error when runPublicId is not a UUID7 + suppresses the fetch', () => {
     renderWithQuery(<BacktestDetailPage runPublicId='not-a-uuid' />)
     expect(screen.getByText(/Invalid run id/i)).toBeDefined()
     expect(screen.getByText(/not-a-uuid/)).toBeDefined()
+    expect(apiClient.getBacktest).not.toHaveBeenCalled()
   })
   it('renders progress bar + UUID while loading the run', () => {
     ;(apiClient.getBacktest as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {}))
