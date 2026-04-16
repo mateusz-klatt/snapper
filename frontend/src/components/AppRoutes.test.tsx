@@ -36,6 +36,11 @@ vi.mock('../features/backtests/BacktestDetailPage', () => ({
     <div data-testid='backtest-detail'>{runPublicId}</div>
   ),
 }))
+vi.mock('../features/backtests/ComparePage', () => ({
+  ComparePage: ({ comparisonPublicId }: { comparisonPublicId: string }) => (
+    <div data-testid='compare-page'>{comparisonPublicId}</div>
+  ),
+}))
 vi.mock('../features/health/Health', () => ({
   Health: () => <div data-testid='health'>Health Component</div>,
 }))
@@ -118,6 +123,14 @@ describe('AppRoutes', () => {
       expect(screen.getByTestId('backtest-detail')).toBeTruthy()
     })
     expect(screen.getByTestId('backtest-detail').textContent).toBe('run-xyz')
+  })
+  it('renders ComparePage when hash matches #backtests/compare/{id}', async () => {
+    globalThis.location.hash = '#backtests/compare/cmp-1'
+    renderWithProviders(<AppRoutes activeTab='backtests' />)
+    await waitFor(() => {
+      expect(screen.getByTestId('compare-page')).toBeTruthy()
+    })
+    expect(screen.getByTestId('compare-page').textContent).toBe('cmp-1')
   })
   it('renders Health component for health tab', async () => {
     renderWithProviders(<AppRoutes activeTab='health' />)

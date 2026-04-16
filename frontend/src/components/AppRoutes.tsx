@@ -10,6 +10,7 @@ import { Positions } from '../features/positions/Positions'
 import { Signals } from '../features/signals/Signals'
 import { Backtests } from '../features/backtests/Backtests'
 import { BacktestDetailPage } from '../features/backtests/BacktestDetailPage'
+import { ComparePage } from '../features/backtests/ComparePage'
 import { useHashSubpath } from '../hooks/useHashRouting'
 import { Health } from '../features/health/Health'
 import { Admin } from '../features/admin/Admin'
@@ -25,6 +26,10 @@ interface AppRoutesProps {
  */
 function BacktestsRouter(): React.ReactElement {
   const subpath = useHashSubpath('backtests')
+
+  if (subpath.length === 2 && subpath[0] === 'compare') {
+    return <ComparePage comparisonPublicId={subpath[1]} />
+  }
 
   if (subpath.length === 1) {
     return <BacktestDetailPage runPublicId={subpath[0]} />

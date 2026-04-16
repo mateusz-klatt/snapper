@@ -42,14 +42,18 @@ const BacktestRow: React.FC<BacktestRowProps> = ({ run, onCancel, onRerun }) => 
       data-testid={`backtest-${run.public_id}`}
     >
       <div className='mb-3 flex items-center justify-between'>
-        <div className='flex items-center space-x-3'>
+        <a
+          href={`#backtests/${run.public_id}`}
+          className='flex cursor-pointer items-center space-x-3 hover:underline'
+          data-testid={`open-${run.public_id}`}
+        >
           <span className='font-semibold text-alpine-900'>{run.strategy_name}</span>
           <span className='text-sm text-muted-500'>{run.instrument_public_id}</span>
           <span className='text-sm text-muted-500'>{run.exchange}</span>
           <span className={clsx('text-sm font-medium', getStatusColor(run.status))}>
             {run.status}
           </span>
-        </div>
+        </a>
         <div className='flex items-center gap-2'>
           {canCancel && (
             <button

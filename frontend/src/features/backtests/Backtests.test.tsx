@@ -243,4 +243,39 @@ describe('Backtests', () => {
       expect(mockRerunBacktest).toHaveBeenCalledWith('run-abc123')
     })
   })
+
+  it('renders a navigable anchor on each row pointing at #backtests/{id}', async () => {
+    mockGetBacktests.mockResolvedValue({
+      type: 'backtest_run_list',
+      session_id: 's1',
+      sequence_id: 1,
+      public_id: 'resp-1',
+      timestamp: NOW,
+      payload: [makeRun()],
+      count: 1,
+    })
+    renderWithQuery(<Backtests />)
+    const anchor = await screen.findByTestId('open-run-abc123')
+
+    expect(anchor.tagName).toBe('A')
+    expect(anchor.getAttribute('href')).toBe('#backtests/run-abc123')
+  })
+
+  it('row anchor click does not invoke cancel/rerun handlers (no nested-button bubble)', async () => {
+    mockGetBacktests.mockResolvedValue({
+      type: 'backtest_run_list',
+      session_id: 's1',
+      sequence_id: 1,
+      public_id: 'resp-1',
+      timestamp: NOW,
+      payload: [makeRun({ status: 'running' })],
+      count: 1,
+    })
+    renderWithQuery(<Backtests />)
+    const anchor = await screen.findByTestId('open-run-abc123')
+
+    fireEvent.click(anchor)
+    expect(mockCancelBacktest).not.toHaveBeenCalled()
+    expect(mockRerunBacktest).not.toHaveBeenCalled()
+  })
 })
