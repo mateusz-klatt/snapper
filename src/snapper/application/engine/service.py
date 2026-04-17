@@ -373,7 +373,7 @@ class TradingEngineService:
                     "price": None,
                     "leverage": leverage,
                     "reduce_only": reduce_only,
-                    "status": "created",
+                    "status": TradeCommandStatusEnum.CREATED,
                     "created_at": now,
                     "correlation_id": order_public_id,
                     "session_id": session_id,

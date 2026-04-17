@@ -32,6 +32,7 @@ from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.config.settings import AppSettings
+from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.repository import Repository
 from snapper.data.repository_types import ExecutionPlanInsertRow
 from snapper.data.repository_types import TradeCommandInsertRow
@@ -228,7 +229,7 @@ async def create_order(
             "price": body.price,
             "leverage": body.leverage,
             "reduce_only": body.reduce_only,
-            "status": "created",
+            "status": TradeCommandStatusEnum.CREATED,
             "created_at": now,
             "correlation_id": plan_public_id,
             "session_id": sid,
@@ -369,7 +370,7 @@ async def _cancel_plan(
             "price": cast(float | None, params.get("price")),
             "leverage": cast(int | None, params.get("leverage")),
             "reduce_only": False,
-            "status": "created",
+            "status": TradeCommandStatusEnum.CREATED,
             "created_at": now,
             "correlation_id": plan_public_id,
             "session_id": sid,
