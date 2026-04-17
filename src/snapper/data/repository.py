@@ -73,6 +73,7 @@ from sqlalchemy.pool import StaticPool
 
 from snapper.core.json_types import JsonObject
 from snapper.core.types import AllExchange
+from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.archive_symbols import resolve_archive_symbols
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import AccrualLedger
@@ -257,6 +258,15 @@ class WalletConflictError(Exception):
         self.label = label
         self.is_paper = is_paper
         self.reason = reason
+
+
+_TRADE_COMMAND_TERMINAL_STATUSES: tuple[str, ...] = (
+    TradeCommandStatusEnum.FILLED,
+    TradeCommandStatusEnum.CANCELLED,
+    TradeCommandStatusEnum.EXPIRED,
+    TradeCommandStatusEnum.REJECTED,
+    TradeCommandStatusEnum.FAILED,
+)
 
 
 def where_active(model: type[Any], at: datetime) -> tuple[Any, Any]:
@@ -3682,7 +3692,7 @@ class SQLAlchemyRepository(Repository):
         Returns:
             True iff a live cancel command already exists.
         """
-        terminal_statuses = ("filled", "cancelled", "expired", "rejected", "failed")
+        terminal_statuses = _TRADE_COMMAND_TERMINAL_STATUSES
         async with self.session() as s:
             result = await s.execute(
                 select(TradeCommand.id)
@@ -3835,7 +3845,7 @@ class SQLAlchemyRepository(Repository):
         self, shard_key: str, as_of: datetime
     ) -> list[TradeCommandRow]:
         """Return non-terminal trade commands for a shard."""
-        terminal_statuses = ("filled", "cancelled", "expired", "rejected", "failed")
+        terminal_statuses = _TRADE_COMMAND_TERMINAL_STATUSES
         async with self.session() as s:
             result = await s.execute(
                 select(TradeCommand)
@@ -3901,7 +3911,7 @@ class SQLAlchemyRepository(Repository):
         Returns:
             List of active TradeCommandRow dicts.
         """
-        terminal_statuses = ("filled", "cancelled", "expired", "rejected", "failed")
+        terminal_statuses = _TRADE_COMMAND_TERMINAL_STATUSES
         async with self.session() as s:
             result = await s.execute(
                 select(TradeCommand)

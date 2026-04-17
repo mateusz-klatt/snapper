@@ -30,6 +30,7 @@ from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.core.types import ExecutionPlanStatusEnum
+from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.repository import Repository
 from snapper.data.repository_types import ExecutionPlanDecisionInsertRow
 from snapper.data.repository_types import ExecutionPlanInsertRow
@@ -454,7 +455,7 @@ async def cancel_bracket(
                 price=cast(Any, params.get("price")),
                 leverage=cast(Any, params.get("leverage")),
                 reduce_only=False,
-                status="created",
+                status=TradeCommandStatusEnum.CREATED,
                 created_at=now,
                 correlation_id=plan_public_id,
                 session_id=sid,

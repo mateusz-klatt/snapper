@@ -22,13 +22,20 @@ from typing import Literal
 from loguru import logger
 
 from snapper.core.types import FillStatusEnum
+from snapper.core.types import TradeCommandStatusEnum
 from snapper.core.types import TradeSideEnum
 from snapper.data.repository_types import AccrualLedgerRow
 from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import VenueEventRow
 
 TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
-    {"filled", "cancelled", "expired", "rejected", "failed"}
+    {
+        TradeCommandStatusEnum.FILLED,
+        TradeCommandStatusEnum.CANCELLED,
+        TradeCommandStatusEnum.EXPIRED,
+        TradeCommandStatusEnum.REJECTED,
+        TradeCommandStatusEnum.FAILED,
+    }
 )
 
 FILL_EVENT_TYPES: Final[frozenset[str]] = frozenset({"fill_observed"})
@@ -267,7 +274,7 @@ class TradeService:
 
     def _apply_order_accepted(self, shard: ShardState, event: VenueEventRow) -> None:
         """Update command state on venue acceptance."""
-        shard.command.status = "accepted"
+        shard.command.status = TradeCommandStatusEnum.ACCEPTED
         shard.command.exchange_order_id = event.get("exchange_order_id")
 
     def _apply_fill(self, shard: ShardState, event: VenueEventRow) -> None:
@@ -458,19 +465,26 @@ class TradeService:
         """Update command FSM based on fill status field."""
         status = event.get("status")
         if status == FillStatusEnum.FILLED:
-            shard.command.status = "filled"
+            shard.command.status = TradeCommandStatusEnum.FILLED
             shard.command.in_flight = False
         elif status == FillStatusEnum.PARTIAL:
-            shard.command.status = "partially_filled"
+            shard.command.status = TradeCommandStatusEnum.PARTIALLY_FILLED
 
     def _apply_order_terminal(self, shard: ShardState, event: VenueEventRow) -> None:
-        """Clear command in-flight on terminal venue event (reject, cancel, expire)."""
+        """Clear command in-flight on terminal venue event (reject, cancel, expire).
+
+        The venue may emit free-form ``status`` strings outside the
+        ``TradeCommandStatusEnum`` value set (exchange-specific
+        spellings like ``"canceled"``). The field stays typed as
+        ``str | None`` so such values assign cleanly; callers that
+        compare should use ``TradeCommandStatusEnum`` members which
+        equal their underlying string value thanks to ``StrEnum``.
+        """
         event_type = event["event_type"]
         if event_type == "order_rejected":
-            shard.command.status = "rejected"
+            shard.command.status = TradeCommandStatusEnum.REJECTED
         else:
-            status = event.get("status") or "cancelled"
-            shard.command.status = status
+            shard.command.status = event.get("status") or TradeCommandStatusEnum.CANCELLED
         shard.command.in_flight = False
 
     def restore_from_checkpoint(

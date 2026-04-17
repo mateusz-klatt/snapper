@@ -25,6 +25,7 @@ from snapper.core.types import FillStatusEnum
 from snapper.core.types import OrderCommandEnum
 from snapper.core.types import OrderExchange
 from snapper.core.types import OrderTypeEnum
+from snapper.core.types import TradeCommandStatusEnum
 from snapper.core.types import TradeSideEnum
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.interface.websocket.schemas import ExecutionMode
@@ -422,7 +423,7 @@ class TradingEngineService:
             if self._repository is not None:
                 await self._repository.update_trade_command_status(
                     public_id=order_public_id,
-                    new_status="direct_dispatched",
+                    new_status=TradeCommandStatusEnum.DIRECT_DISPATCHED,
                     bus_time=now,
                     session_id=session_id,
                     sequence_id=sequence_id,

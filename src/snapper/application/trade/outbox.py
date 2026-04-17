@@ -18,6 +18,7 @@ from datetime import datetime
 from loguru import logger
 
 from snapper.application.trade.divergence_detector import DivergenceDetector
+from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import TradeCommandRow
 
@@ -111,7 +112,7 @@ class OutboxDispatcher:
                 published = True
                 await self._repo.update_trade_command_status(
                     public_id=cmd["public_id"],
-                    new_status="dispatched",
+                    new_status=TradeCommandStatusEnum.DISPATCHED,
                     bus_time=datetime.now(UTC),
                     session_id=cmd["session_id"],
                     sequence_id=cmd["sequence_id"],
@@ -137,7 +138,7 @@ class OutboxDispatcher:
                     try:
                         await self._repo.update_trade_command_status(
                             public_id=cmd["public_id"],
-                            new_status="created",
+                            new_status=TradeCommandStatusEnum.CREATED,
                             bus_time=datetime.now(UTC),
                             session_id=cmd["session_id"],
                             sequence_id=cmd["sequence_id"],

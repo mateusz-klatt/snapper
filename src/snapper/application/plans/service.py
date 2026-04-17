@@ -35,6 +35,7 @@ from snapper.core.types import FillStatusEnum
 from snapper.core.types import OrderEventEnum
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
+from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import ExecutionPlanDecisionInsertRow
 from snapper.data.repository_types import ExecutionPlanRow
@@ -331,7 +332,7 @@ class PlanExecutorService(RegisterableProcess):
             "price": params.get("price"),
             "leverage": params.get("leverage"),
             "reduce_only": False,
-            "status": "created",
+            "status": TradeCommandStatusEnum.CREATED,
             "created_at": now,
             "correlation_id": plan["public_id"],
             "session_id": session_id,
@@ -521,7 +522,7 @@ class PlanExecutorService(RegisterableProcess):
                     price=cast(Any, cmd.get("price")),
                     leverage=cast(Any, cmd.get("leverage")),
                     reduce_only=bool(cmd.get("reduce_only", False)),
-                    status="created",
+                    status=TradeCommandStatusEnum.CREATED,
                     created_at=now,
                     correlation_id=plan["public_id"],
                     session_id=session_id,

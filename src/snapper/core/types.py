@@ -176,6 +176,34 @@ class BacktestRunStatusEnum(StrEnum):
     CANCELLED = "cancelled"
 
 
+class TradeCommandStatusEnum(StrEnum):
+    """Unified FSM status for TradeCommand DB rows + in-memory CommandState.
+
+    Covers both the durable-command outbox lifecycle (``created`` →
+    ``dispatched`` / ``direct_dispatched``) and the venue-side
+    transitions observed by ``TradeService`` in the in-memory
+    ``CommandState`` projection (``accepted``, ``filled``,
+    ``partially_filled``, ``rejected``, ``cancelled``, ``expired``,
+    ``failed``). A single enum is justified because the same command
+    object's status field carries values from both domains across its
+    lifetime: the engine inserts a ``TradeCommand`` row with
+    ``status=created``, the outbox transitions it to ``dispatched``,
+    and the venue events subsequently update the in-memory projection
+    to the terminal status.
+    """
+
+    CREATED = "created"
+    DISPATCHED = "dispatched"
+    DIRECT_DISPATCHED = "direct_dispatched"
+    ACCEPTED = "accepted"
+    FILLED = "filled"
+    PARTIALLY_FILLED = "partially_filled"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+    FAILED = "failed"
+
+
 class ExecutionPlanStatusEnum(StrEnum):
     """Lifecycle state of an ExecutionPlan row.
 
@@ -577,6 +605,7 @@ __all__ = [
     "SubscriptionActionEnum",
     "SubscriptionStatus",
     "SubscriptionStatusEnum",
+    "TradeCommandStatusEnum",
     "TradeSide",
     "TradeSideEnum",
     "UpsertResult",
