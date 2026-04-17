@@ -231,6 +231,7 @@ class PolygonExchangeClient(ExchangeClientBase):
         for attempt in range(max_retries):
             try:
                 await self._wait_for_rate_limit()
+                self._record_rest_call()
                 response = request_func()
                 return response
             except Exception as e:

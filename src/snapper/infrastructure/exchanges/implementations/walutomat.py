@@ -261,6 +261,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
         """
         if not self._http_client:
             raise RuntimeError("Not connected")
+        self._record_rest_call()
         response = await self._http_client.get(self.market_data_url)
         response.raise_for_status()
         data_list = response.json()
@@ -934,6 +935,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
         headers = self._get_auth_headers(endpoint, body)
         headers["Content-Type"] = "application/x-www-form-urlencoded"
         url = f"{self.api_base_url}/market_fx/orders"
+        self._record_rest_call()
         response = await client.post(url, content=body, headers=headers)
         response.raise_for_status()
         result = response.json()
@@ -986,6 +988,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
         headers = self._get_auth_headers(endpoint, body)
         headers["Content-Type"] = "application/x-www-form-urlencoded"
         url = f"{self.api_base_url}/market_fx/orders/close"
+        self._record_rest_call()
         response = await client.post(url, content=body, headers=headers)
         response.raise_for_status()
         result = response.json()
@@ -1016,6 +1019,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
         endpoint = f"/api/v2.0.0/market_fx/orders?orderId={order_id}"
         headers = self._get_auth_headers(endpoint, "")
         url = f"{self.api_base_url}/market_fx/orders?orderId={order_id}"
+        self._record_rest_call()
         response = await client.get(url, headers=headers)
         response.raise_for_status()
         result = response.json()
@@ -1088,6 +1092,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
         endpoint = "/api/v2.0.0/market_fx/orders/active"
         headers = self._get_auth_headers(endpoint, "")
         url = f"{self.api_base_url}/market_fx/orders/active"
+        self._record_rest_call()
         response = await client.get(url, headers=headers)
         response.raise_for_status()
         result = response.json()
@@ -1123,6 +1128,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
         endpoint = "/api/v2.0.0/account/balances"
         headers = self._get_auth_headers(endpoint, "")
         url = f"{self.api_base_url}/account/balances"
+        self._record_rest_call()
         response = await client.get(url, headers=headers)
         response.raise_for_status()
         result = response.json()

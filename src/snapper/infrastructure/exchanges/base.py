@@ -37,6 +37,7 @@ from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.contracts import to_fill_status
+from snapper.infrastructure.rest.tracker import get_rest_call_tracker
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
@@ -84,6 +85,17 @@ class ExchangeClientBase(ABC):
             tracker: SequenceTracker owned by the parent executor component.
         """
         self._tracker = tracker
+
+    def _record_rest_call(self) -> None:
+        """Report one outgoing REST call to the process-scoped tracker.
+
+        Called by each implementation's retry/request wrapper so every
+        retry attempt counts as one call (the tracker is observability,
+        not budgeting — retries do consume the upstream budget and we
+        want the metric to reflect that). Safe to call from any async
+        context; the tracker is thread-safe.
+        """
+        get_rest_call_tracker().record_call(self.exchange_name)
 
     @abstractmethod
     async def connect(self) -> None:

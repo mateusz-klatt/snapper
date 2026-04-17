@@ -450,6 +450,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         Returns:
             List of raw instrument dicts (tradable + active only).
         """
+        self._record_rest_call()
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(
                 _INSTRUMENTS_URL,

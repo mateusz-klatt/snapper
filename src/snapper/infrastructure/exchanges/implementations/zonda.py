@@ -633,6 +633,7 @@ class ZondaExchangeClient(ExchangeClientBase):
         """
         try:
             ccxt_symbol = native_to_ccxt(symbol)
+            self._record_rest_call()
             ticker_data = await asyncio.to_thread(self._ccxt_client.fetch_ticker, ccxt_symbol)
             return TickerSnapshot(
                 symbol=symbol,
@@ -742,6 +743,7 @@ class ZondaExchangeClient(ExchangeClientBase):
             order_params: dict[str, Any] = {}
             if request.client_order_id:
                 order_params["clientOrderId"] = request.client_order_id
+            self._record_rest_call()
             ccxt_order = await asyncio.to_thread(
                 self._ccxt_client.create_order,
                 ccxt_symbol,
@@ -794,6 +796,7 @@ class ZondaExchangeClient(ExchangeClientBase):
             raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
         try:
             ccxt_symbol = native_to_ccxt(symbol) if symbol else None
+            self._record_rest_call()
             open_orders = await asyncio.to_thread(self._ccxt_client.fetch_open_orders, ccxt_symbol)
             matched = [o for o in open_orders if o.get("id") == order_id]
             if not matched:
@@ -907,6 +910,7 @@ class ZondaExchangeClient(ExchangeClientBase):
         if not self.api_key or not self.api_secret:
             raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
         try:
+            self._record_rest_call()
             ccxt_balance = await asyncio.to_thread(self._ccxt_client.fetch_balance)
             balances: dict[str, AccountBalance] = {}
             for curr, bal in ccxt_balance.items():
@@ -1197,6 +1201,7 @@ class ZondaExchangeClient(ExchangeClientBase):
 
     async def _subscribe_instruments_impl(self) -> AsyncIterator[dict[str, Any]]:
         try:
+            self._record_rest_call()
             markets = await asyncio.to_thread(self._ccxt_client.load_markets)
             if not isinstance(markets, dict):
                 raise RuntimeError(f"Unexpected markets type: {type(markets)}")

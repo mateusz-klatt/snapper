@@ -214,6 +214,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             RuntimeError: If connection fails.
         """
         try:
+            self._record_rest_call()
             await asyncio.to_thread(self._ccxt_client.load_markets)
             self._market_client = Market(sandbox=self.sandbox)
             logger.info("Kraken Futures REST connection established")
@@ -327,6 +328,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         Returns:
             TickerSnapshot with current price data.
         """
+        self._record_rest_call()
         data = await asyncio.to_thread(self._ccxt_client.fetch_ticker, symbol)
         return TickerSnapshot(
             symbol=symbol,
@@ -354,6 +356,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         Returns:
             List of OhlcvSnapshot objects.
         """
+        self._record_rest_call()
         raw = await asyncio.to_thread(
             self._ccxt_client.fetch_ohlcv, symbol, timeframe, since, limit
         )
@@ -413,6 +416,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             kwargs["stopPrice"] = request.stop_price
         if request.reduce_only:
             kwargs["reduceOnly"] = True
+        self._record_rest_call()
         result = await asyncio.to_thread(cast(Trade, self._trade_client).create_order, **kwargs)
         send_status = result.get("sendStatus", {})
         order_id = send_status.get("order_id", "")
@@ -451,6 +455,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             Exception: If cancellation fails.
         """
         self._require_authenticated()
+        self._record_rest_call()
         result = await asyncio.to_thread(
             cast(Trade, self._trade_client).cancel_order, order_id=order_id
         )
@@ -497,6 +502,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             Exception: If order fetch fails.
         """
         self._require_authenticated()
+        self._record_rest_call()
         result = await asyncio.to_thread(
             cast(Trade, self._trade_client).get_orders_status, orderIds=[order_id]
         )
@@ -532,6 +538,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             Exception: If orders fetch fails.
         """
         self._require_authenticated()
+        self._record_rest_call()
         result = await asyncio.to_thread(cast(User, self._user_client).get_open_orders)
         raw_orders: list[dict[str, Any]] = result.get("openOrders", [])
         snapshots = [self._convert_sdk_order(o) for o in raw_orders]
@@ -613,6 +620,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             Exception: If balance fetch fails.
         """
         self._require_authenticated()
+        self._record_rest_call()
         result = await asyncio.to_thread(cast(User, self._user_client).get_wallets)
         accounts: dict[str, Any] = result.get("accounts", {})
         balances: dict[str, AccountBalance] = {}
@@ -640,6 +648,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             RuntimeError: If API credentials are missing.
         """
         self._require_authenticated()
+        self._record_rest_call()
         result = await asyncio.to_thread(cast(User, self._user_client).get_open_positions)
         raw_positions: list[dict[str, Any]] = result.get("openPositions", [])
         positions: list[OpenPositionSnapshot] = []
@@ -686,6 +695,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         if not self._market_client:
             self._market_client = Market(sandbox=self.sandbox)
+        self._record_rest_call()
         result = await asyncio.to_thread(
             self._market_client.get_historical_funding_rates,
             symbol,
@@ -754,6 +764,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         if not self._market_client:
             self._market_client = Market(sandbox=self.sandbox)
+        self._record_rest_call()
         result = await asyncio.to_thread(self._market_client.get_tickers)
         if not isinstance(result, dict):
             logger.warning(f"Unexpected SDK response type for tickers: {type(result)}")
@@ -1132,6 +1143,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         if not self._market_client:
             self._market_client = Market(sandbox=self.sandbox)
+        self._record_rest_call()
         result = await asyncio.to_thread(self._market_client.get_instruments)
         instruments: list[dict[str, Any]] = result.get("instruments", [])
         for inst in instruments:
