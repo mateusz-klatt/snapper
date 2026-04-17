@@ -747,6 +747,7 @@ class _EngineStub:
         strategy_tag: str | None = None,
         wallet_public_id: str = "",
         operator_public_id: str = "",
+        divergence_detector: Any = None,
     ) -> None:
         self.instrument = instrument
         self.execution_socket = execution_socket
@@ -758,6 +759,7 @@ class _EngineStub:
         self.outbox = outbox
         self.wallet_public_id = wallet_public_id
         self.operator_public_id = operator_public_id
+        self.divergence_detector = divergence_detector
         self.pending_client_order_id: str | None = None
         self._shard_key = f"{exchange}.{instrument}.live"
         self.execute_calls: list[dict[str, Any]] = []

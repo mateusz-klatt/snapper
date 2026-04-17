@@ -17,6 +17,7 @@ from datetime import datetime
 
 from loguru import logger
 
+from snapper.application.trade.divergence_detector import DivergenceDetector
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import TradeCommandRow
 
@@ -44,6 +45,7 @@ class OutboxDispatcher:
         publish_fn: PublishFn | None = None,
         poll_interval: float = 0.05,
         batch_size: int = 10,
+        divergence_detector: DivergenceDetector | None = None,
     ) -> None:
         """Initialize outbox dispatcher.
 
@@ -52,6 +54,9 @@ class OutboxDispatcher:
             publish_fn: Async callback to publish command to ZMQ.
             poll_interval: Fallback polling interval in seconds.
             batch_size: Maximum commands per poll cycle.
+            divergence_detector: Optional metric aggregator; when
+                supplied, each successful dispatch increments the
+                ``commands_published_durable_dispatched_total`` counter.
         """
         self._repo = repository
         self._publish_fn = publish_fn
@@ -59,6 +64,7 @@ class OutboxDispatcher:
         self._batch_size = batch_size
         self._wake = asyncio.Event()
         self._running = False
+        self._divergence_detector = divergence_detector
 
     def notify(self) -> None:
         """Signal the dispatcher that a new command was written.
@@ -112,6 +118,10 @@ class OutboxDispatcher:
                     dispatched_at=datetime.now(UTC),
                     attempt_count=cmd["attempt_count"] + 1,
                 )
+                if self._divergence_detector is not None:
+                    self._divergence_detector.observe_command_published(
+                        "durable_dispatched", cmd["exchange"], cmd["shard_key"]
+                    )
                 logger.debug(
                     f"OutboxDispatcher: dispatched command {cmd['public_id']} "
                     f"({cmd['exchange']}.{cmd['instrument']})"

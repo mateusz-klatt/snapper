@@ -39,6 +39,7 @@ from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
 from snapper.application.services.settings import SettingsService
 from snapper.application.trade.balance_service import BalanceService
+from snapper.application.trade.divergence_detector import DivergenceDetector
 from snapper.application.trade.outbox import OutboxDispatcher
 from snapper.application.trade.reconciler import ReconciliationLoop
 from snapper.application.trade.trade_service import TradeService
@@ -209,6 +210,7 @@ class TraderCoordinator(RegisterableProcess):
         self.trade_service: TradeService = TradeService()
         self.balance_service: BalanceService = BalanceService()
         self.outbox: OutboxDispatcher | None = None
+        self.divergence_detector: DivergenceDetector | None = None
         self._order_shard_keys: dict[str, str] = {}
         self._wallet_short_to_id: dict[str, str] = {}
 
@@ -306,12 +308,28 @@ class TraderCoordinator(RegisterableProcess):
         logger.info("Starting ZMQ Signal TraderCoordinator (Central - ONE per system)")
         logger.info(f"Signal Topics: {self.signal_topics}")
         await self._initialize_settings()
+        self._setup_divergence_detector()
         self._setup_external_execution()
         self._setup_trading_components()
         self._setup_signal_subscriber()
         self._setup_trade_services()
         await self._recover_engine_state()
         await self._run_trading_loop()
+
+    def _setup_divergence_detector(self) -> None:
+        """Construct the divergence detector iff the feature flag is set.
+
+        Reads ``AppSettings.enable_divergence_detector`` AFTER
+        ``_initialize_settings()`` has wired the DB-backed settings
+        layer. When off, ``self.divergence_detector`` stays ``None`` so
+        the hot paths short-circuit every observe call with a single
+        is-None branch.
+        """
+        if getattr(self.settings, "enable_divergence_detector", False):
+            self.divergence_detector = DivergenceDetector()
+            logger.info("TraderCoordinator: DivergenceDetector enabled (flag on)")
+        else:
+            self.divergence_detector = None
 
     async def _initialize_settings(self) -> None:
         """Upgrade settings to DB-backed instance for runtime access.
@@ -1064,6 +1082,7 @@ class TraderCoordinator(RegisterableProcess):
             strategy_tag=strategy_tag,
             wallet_public_id=wallet_public_id,
             operator_public_id=operator_public_id,
+            divergence_detector=getattr(self, "divergence_detector", None),
         )
 
     def _handle_settings_update(self, payload: bytes) -> None:
@@ -1337,6 +1356,9 @@ class TraderCoordinator(RegisterableProcess):
             "received_at": datetime.now(UTC),
         }
         self.trade_service.apply_venue_event(venue_event)
+        detector = getattr(self, "divergence_detector", None)
+        if detector is not None:
+            detector.observe_venue_event(shard_key, venue_event["id"])
         pos = self.trade_service.get_position(shard_key)
         new_qty = pos.position_qty
         self.balance_service.on_position_changed(
@@ -1851,32 +1873,46 @@ class TraderCoordinator(RegisterableProcess):
                 repository=self.repository,
                 publish_fn=self._outbox_publish,
                 poll_interval=0.05,
+                divergence_detector=getattr(self, "divergence_detector", None),
             )
             logger.info("TraderCoordinator: durable command mode (outbox active)")
         else:
             logger.info("TraderCoordinator: dual-write mode (direct ZMQ + DB audit)")
 
     def _create_reconciliation_tasks(self) -> list[asyncio.Task[None]]:
-        """Create per-exchange reconciliation loop tasks if durable mode is enabled.
+        """Create background tasks for reconciliation + divergence observability.
 
-        One ReconciliationLoop per configured exchange, each querying
-        TradeCommand.exchange with exact match. Runs in the coordinator
-        process sharing the TradeService for circuit breaker state.
+        Two independent concerns bundled here:
+
+        - Reconciliation loops (one per configured exchange, querying
+          ``TradeCommand.exchange``) spawn only in durable mode; they
+          share the ``TradeService`` for circuit-breaker state.
+        - The divergence-detector snapshot loop spawns whenever the
+          detector is enabled, INDEPENDENT of durable mode. Operators
+          need the detector running in dual-write-only mode to verify
+          the wiring before the cutover (see
+          ``docs/operations.md`` pre-flight flow).
 
         Returns:
-            List of asyncio tasks (empty if not in durable mode).
+            List of asyncio tasks (may be empty if both features are
+            disabled).
         """
+        tasks: list[asyncio.Task[None]] = []
+        detector = getattr(self, "divergence_detector", None)
+        if detector is not None:
+            tasks.append(asyncio.create_task(detector.periodic_snapshot_loop()))
+            logger.info("TraderCoordinator: DivergenceDetector snapshot loop spawned")
         use_durable = getattr(self.settings, "use_durable_commands", False)
         if not use_durable or not isinstance(self.repository, SQLAlchemyRepository):
-            return []
+            return tasks
         exchanges: list[str] = list(get_args(OrderExchange))
-        tasks: list[asyncio.Task[None]] = []
         for exchange_name in exchanges:
             recon = ReconciliationLoop(
                 exchange_name=exchange_name,
                 repository=self.repository,
                 trade_service=self.trade_service,
                 interval_seconds=60.0,
+                divergence_detector=detector,
             )
             tasks.append(asyncio.create_task(recon.run()))
         logger.info(f"TraderCoordinator: reconciliation loops enabled for {exchanges}")
@@ -2249,6 +2285,7 @@ class TraderCoordinator(RegisterableProcess):
                 strategy_tag=strategy_tag,
                 wallet_public_id=wallet_public_id,
                 operator_public_id=operator_public_id,
+                divergence_detector=getattr(self, "divergence_detector", None),
             )
             self.last_signal_time[engine_key] = 0.0
         self.last_signal_time[engine_key] = time.time()

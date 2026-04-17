@@ -572,6 +572,29 @@ class AppSettings:
         return self._get_db_setting("use_durable_commands", False)
 
     @property
+    def enable_divergence_detector(self) -> bool:
+        """Return whether the shadow-write divergence detector is enabled.
+
+        When True, an in-process metric aggregator tallies the seven
+        counters defined in
+        ``snapper.application.trade.divergence_detector`` and emits a
+        periodic INFO snapshot every 60 s. The detector is useful both
+        in dual-write-only mode (durable counters stay at 0, confirming
+        the wiring works before a cutover) AND during the
+        durable-cutover window (all seven counters populate) — it does
+        NOT require ``use_durable_commands=True`` to be useful.
+
+        NOTE: this flag is read at ``TraderCoordinator.start()`` and
+        wires the detector into the engine + outbox + reconciler
+        stacks. Changing it requires a coordinator restart to take
+        effect.
+
+        Returns:
+            True if the detector is enabled, False (default).
+        """
+        return self._get_db_setting("enable_divergence_detector", False)
+
+    @property
     def use_venue_reconciliation(self) -> bool:
         """Return whether executor-side venue reconciliation is enabled.
 
