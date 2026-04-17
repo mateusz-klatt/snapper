@@ -21,6 +21,7 @@ from snapper.application.trade.divergence_detector import DivergenceDetector
 from snapper.application.trade.outbox import OutboxDispatcher
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
+from snapper.core.types import FillStatusEnum
 from snapper.core.types import OrderCommandEnum
 from snapper.core.types import OrderExchange
 from snapper.core.types import OrderTypeEnum
@@ -212,7 +213,10 @@ class TradingEngineService:
             self.entry_price = (
                 old_abs * self.entry_price + fill.last_size * fill.last_price
             ) / new_abs
-        if fill.client_order_id == self.pending_client_order_id and fill.status == "filled":
+        if (
+            fill.client_order_id == self.pending_client_order_id
+            and fill.status == FillStatusEnum.FILLED
+        ):
             self.order_in_flight = False
             self.pending_client_order_id = None
             self._in_flight_since = None

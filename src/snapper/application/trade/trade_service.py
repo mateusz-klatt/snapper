@@ -21,6 +21,7 @@ from typing import Literal
 
 from loguru import logger
 
+from snapper.core.types import FillStatusEnum
 from snapper.core.types import TradeSideEnum
 from snapper.data.repository_types import AccrualLedgerRow
 from snapper.data.repository_types import TradeCommandRow
@@ -456,10 +457,10 @@ class TradeService:
     def _update_command_fill_status(self, shard: ShardState, event: VenueEventRow) -> None:
         """Update command FSM based on fill status field."""
         status = event.get("status")
-        if status == "filled":
+        if status == FillStatusEnum.FILLED:
             shard.command.status = "filled"
             shard.command.in_flight = False
-        elif status == "partial":
+        elif status == FillStatusEnum.PARTIAL:
             shard.command.status = "partially_filled"
 
     def _apply_order_terminal(self, shard: ShardState, event: VenueEventRow) -> None:

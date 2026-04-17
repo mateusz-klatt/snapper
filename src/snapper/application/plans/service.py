@@ -30,6 +30,8 @@ from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.core.json_types import JsonObject
+from snapper.core.types import FillStatusEnum
+from snapper.core.types import OrderEventEnum
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.data.repository import get_repository
@@ -841,7 +843,7 @@ class PlanExecutorService(RegisterableProcess):
         new_filled = incoming_cumulative
         total = float(plan["total_quantity"])
         qty_complete = new_filled + 1e-9 >= total
-        venue_filled = execution.status == "filled"
+        venue_filled = execution.status == FillStatusEnum.FILLED
         is_complete = qty_complete or venue_filled
         new_status = "completed" if is_complete else "active"
         now = datetime.now(UTC)
@@ -899,12 +901,12 @@ class PlanExecutorService(RegisterableProcess):
         status = order.status
         new_status: str | None = None
         last_error: str | None = None
-        if status == "cancelled":
+        if status == OrderEventEnum.CANCELLED:
             new_status = "cancelled"
-        elif status in ("rejected", "error"):
+        elif status in (OrderEventEnum.REJECTED, "error"):
             new_status = "failed"
             last_error = order.error or f"venue {status}"
-        elif status == "expired":
+        elif status == OrderEventEnum.EXPIRED:
             new_status = "expired"
         if new_status is None:
             return

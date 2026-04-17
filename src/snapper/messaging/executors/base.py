@@ -1580,14 +1580,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 if pending.db_order_id is not None:
                     db_status = (
                         ExchangeOrderStatusEnum.CLOSED
-                        if fill.status == "filled"
+                        if fill.status == FillStatusEnum.FILLED
                         else ExchangeOrderStatusEnum.OPEN
                     )
                     await self.exchange_client._log_order_update_to_db(
                         db_order_id=pending.db_order_id,
                         status=db_status,
                     )
-            if fill.status == "filled":
+            if fill.status == FillStatusEnum.FILLED:
                 self.pending_orders.pop(client_order_id, None)
                 self.client_by_exchange.pop(exchange_order_id, None)
                 logger.info(
