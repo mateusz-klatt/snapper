@@ -29,6 +29,7 @@ from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.core.types import ExecutionPlanStatusEnum
 from snapper.data.repository import Repository
 from snapper.data.repository_types import ExecutionPlanDecisionInsertRow
 from snapper.data.repository_types import ExecutionPlanInsertRow
@@ -284,7 +285,7 @@ async def create_bracket(
                     "position_cycle_public_id": body.position_cycle_public_id,
                 },
                 emitted_command_public_id=None,
-                new_status="armed",
+                new_status=ExecutionPlanStatusEnum.ARMED,
                 reason="Bracket created via API",
                 decision_importance="action",
             ),
@@ -398,7 +399,11 @@ async def cancel_bracket(
     child_ids = service._extract_child_ids(params)
     has_active_children = len(child_ids) > 0
 
-    new_status = "cancel_requested" if has_active_children else "cancelled"
+    new_status: str = (
+        ExecutionPlanStatusEnum.CANCEL_REQUESTED
+        if has_active_children
+        else ExecutionPlanStatusEnum.CANCELLED
+    )
 
     new_id = await repo.update_execution_plan_status(
         public_id=plan_public_id,
@@ -407,7 +412,7 @@ async def cancel_bracket(
         session_id=sid,
         sequence_id=tracker.next_sequence(_REST_STREAM),
         cancel_requested_at=now,
-        completed_at=now if new_status == "cancelled" else None,
+        completed_at=now if new_status == ExecutionPlanStatusEnum.CANCELLED else None,
     )
     if new_id is None:
         raise HTTPException(
@@ -466,7 +471,7 @@ async def cancel_bracket(
                 try:
                     await repo.update_execution_plan_status(
                         public_id=plan_public_id,
-                        new_status="failed",
+                        new_status=ExecutionPlanStatusEnum.FAILED,
                         bus_time=ts,
                         session_id=sid,
                         sequence_id=tracker.next_sequence(_REST_STREAM),

@@ -30,6 +30,7 @@ from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.core.json_types import JsonObject
+from snapper.core.types import ExecutionPlanStatusEnum
 from snapper.core.types import FillStatusEnum
 from snapper.core.types import OrderEventEnum
 from snapper.core.types import ProcessModeEnum
@@ -56,7 +57,14 @@ _EVALUATOR_REGISTRY: dict[str, type[PlanEvaluator]] = {
 
 _CHECKPOINT_INTERVAL_S = 10.0
 _SLOW_JOINER_STABILIZATION_S = 0.5
-_TERMINAL_STATUSES = frozenset({"completed", "cancelled", "failed", "expired"})
+_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {
+        ExecutionPlanStatusEnum.COMPLETED,
+        ExecutionPlanStatusEnum.CANCELLED,
+        ExecutionPlanStatusEnum.FAILED,
+        ExecutionPlanStatusEnum.EXPIRED,
+    }
+)
 
 
 @register_process(
@@ -188,7 +196,7 @@ class PlanExecutorService(RegisterableProcess):
                 self._watermarks[row["public_id"]] = checkpoint["last_venue_event_id"]
                 self._last_tick_timestamps[row["public_id"]] = checkpoint["last_tick_timestamp"]
             self._register_plan(row, evaluator)
-            if row["status"] == "cancel_requested":
+            if row["status"] == ExecutionPlanStatusEnum.CANCEL_REQUESTED:
                 await self._reemit_stranded_cancel(row)
         logger.info("Recovered {} plans from DB", len(self.plans))
 
@@ -414,7 +422,7 @@ class PlanExecutorService(RegisterableProcess):
                 session_id=self.tracker.session_id,
                 sequence_id=self.tracker.next_sequence("plan_transitions"),
                 last_error=last_error,
-                started_at=now if new_status == "active" else None,
+                started_at=now if new_status == ExecutionPlanStatusEnum.ACTIVE else None,
                 completed_at=now if new_status in _TERMINAL_STATUSES else None,
             )
         except Exception as exc:
@@ -458,7 +466,9 @@ class PlanExecutorService(RegisterableProcess):
                 missing_caps,
             )
             await self._transition_plan(
-                plan_public_id, "failed", f"Capability revoked: {missing_caps}"
+                plan_public_id,
+                ExecutionPlanStatusEnum.FAILED,
+                f"Capability revoked: {missing_caps}",
             )
             return
         cycle_pid = plan.get("position_cycle_public_id")
@@ -470,18 +480,22 @@ class PlanExecutorService(RegisterableProcess):
                     cycle_pid,
                     plan_public_id,
                 )
-                await self._transition_plan(plan_public_id, "cancelled", "cycle_closed_externally")
+                await self._transition_plan(
+                    plan_public_id,
+                    ExecutionPlanStatusEnum.CANCELLED,
+                    "cycle_closed_externally",
+                )
                 await self._log_decision(
                     plan_public_id=plan_public_id,
                     decision_type="cycle_closed_externally",
                     trigger_type="dispatch",
                     reason=f"Cycle {cycle_pid} closed before command dispatch",
                     importance="action",
-                    new_status="cancelled",
+                    new_status=ExecutionPlanStatusEnum.CANCELLED,
                 )
                 return
-        if plan["status"] == "armed":
-            await self._transition_plan(plan_public_id, "active")
+        if plan["status"] == ExecutionPlanStatusEnum.ARMED:
+            await self._transition_plan(plan_public_id, ExecutionPlanStatusEnum.ACTIVE)
             plan = self.plans.get(plan_public_id)
             if plan is None:
                 return
@@ -537,7 +551,9 @@ class PlanExecutorService(RegisterableProcess):
             logger.error("Command insert failed for plan {}: {}", plan_public_id, exc)
             if not child_ids:
                 await self._transition_plan(
-                    plan_public_id, "failed", f"Command insert failed: {exc}"
+                    plan_public_id,
+                    ExecutionPlanStatusEnum.FAILED,
+                    f"Command insert failed: {exc}",
                 )
             return
         if child_ids:
@@ -669,7 +685,7 @@ class PlanExecutorService(RegisterableProcess):
         TradeCommand flow, handled by the cancel route, not this sweep.
         """
         for public_id, plan in list(self.plans.items()):
-            if plan["status"] != "armed":
+            if plan["status"] != ExecutionPlanStatusEnum.ARMED:
                 continue
             cycle_pid = plan.get("position_cycle_public_id")
             if not isinstance(cycle_pid, str):
@@ -682,14 +698,18 @@ class PlanExecutorService(RegisterableProcess):
                     plan["plan_type"],
                     public_id,
                 )
-                await self._transition_plan(public_id, "cancelled", "cycle_closed_externally")
+                await self._transition_plan(
+                    public_id,
+                    ExecutionPlanStatusEnum.CANCELLED,
+                    "cycle_closed_externally",
+                )
                 await self._log_decision(
                     plan_public_id=public_id,
                     decision_type="cycle_closed_externally",
                     trigger_type="clock",
                     reason=f"Cycle {cycle_pid} closed (detected by clock sweep)",
                     importance="action",
-                    new_status="cancelled",
+                    new_status=ExecutionPlanStatusEnum.CANCELLED,
                 )
 
     async def _run_loop(self) -> None:
@@ -776,7 +796,7 @@ class PlanExecutorService(RegisterableProcess):
                 for public_id, plan in list(self.plans.items()):
                     if plan["status"] in _TERMINAL_STATUSES:
                         continue
-                    if plan["status"] == "paused":
+                    if plan["status"] == ExecutionPlanStatusEnum.PAUSED:
                         continue
                     evaluator = self.evaluators.get(public_id)
                     if evaluator is None:
@@ -845,7 +865,9 @@ class PlanExecutorService(RegisterableProcess):
         qty_complete = new_filled + 1e-9 >= total
         venue_filled = execution.status == FillStatusEnum.FILLED
         is_complete = qty_complete or venue_filled
-        new_status = "completed" if is_complete else "active"
+        new_status = (
+            ExecutionPlanStatusEnum.COMPLETED if is_complete else ExecutionPlanStatusEnum.ACTIVE
+        )
         now = datetime.now(UTC)
         try:
             await self.repository.update_execution_plan_status(
@@ -902,12 +924,12 @@ class PlanExecutorService(RegisterableProcess):
         new_status: str | None = None
         last_error: str | None = None
         if status == OrderEventEnum.CANCELLED:
-            new_status = "cancelled"
+            new_status = ExecutionPlanStatusEnum.CANCELLED
         elif status in (OrderEventEnum.REJECTED, "error"):
-            new_status = "failed"
+            new_status = ExecutionPlanStatusEnum.FAILED
             last_error = order.error or f"venue {status}"
         elif status == OrderEventEnum.EXPIRED:
-            new_status = "expired"
+            new_status = ExecutionPlanStatusEnum.EXPIRED
         if new_status is None:
             return
         now = datetime.now(UTC)

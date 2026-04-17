@@ -19,6 +19,7 @@ from typing import cast
 
 from snapper.application.plans.evaluator import PlanEvaluator
 from snapper.core.json_types import JsonObject
+from snapper.core.types import ExecutionPlanStatusEnum
 from snapper.data.repository_types import ExecutionPlanRow
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import TickData
@@ -53,7 +54,7 @@ class TrailingStopEvaluator(PlanEvaluator):
         Returns:
             List with one command dict on breach, empty otherwise.
         """
-        if plan["status"] != "armed":
+        if plan["status"] != ExecutionPlanStatusEnum.ARMED:
             return []
         last = tick.last
         if last is None:

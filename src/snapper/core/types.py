@@ -176,6 +176,28 @@ class BacktestRunStatusEnum(StrEnum):
     CANCELLED = "cancelled"
 
 
+class ExecutionPlanStatusEnum(StrEnum):
+    """Lifecycle state of an ExecutionPlan row.
+
+    Covers every state the PlanExecutorService transitions through:
+    ``armed`` (waiting for first tick / command), ``active`` (has
+    in-flight child commands), ``paused`` (operator intervention),
+    ``cancel_requested`` (cancel issued but children still racing),
+    terminal states ``completed`` / ``cancelled`` / ``failed`` /
+    ``expired``. Mirrors the state machine documented in
+    ``proprietary/plans/plan_execution_plans.md`` §2.
+    """
+
+    ARMED = "armed"
+    ACTIVE = "active"
+    PAUSED = "paused"
+    CANCEL_REQUESTED = "cancel_requested"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+    EXPIRED = "expired"
+
+
 class ComponentStatusEnum(StrEnum):
     """Infrastructure component status for ZMQ and WebSocket health checks."""
 
@@ -514,6 +536,7 @@ __all__ = [
     "ExchangeEnum",
     "ExecutionMode",
     "ExecutionModeEnum",
+    "ExecutionPlanStatusEnum",
     "FillStatus",
     "FillStatusEnum",
     "HealthStatus",
