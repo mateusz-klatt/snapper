@@ -17,7 +17,6 @@ from snapper.application.engine.config import EngineConfigModel
 from snapper.application.portfolio.models import PortfolioTracker
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
-from snapper.application.trade.divergence_detector import DivergenceDetector
 from snapper.application.trade.outbox import OutboxDispatcher
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
@@ -93,7 +92,6 @@ class TradingEngineService:
         strategy_tag: str | None = None,
         wallet_public_id: str = "",
         operator_public_id: str = "",
-        divergence_detector: DivergenceDetector | None = None,
     ) -> None:
         """Initialize trading engine for a specific instrument.
 
@@ -116,11 +114,6 @@ class TradingEngineService:
                 strategy this engine serves. Stored on the engine for audit
                 propagation onto every TradeCommand and OrderRequestData
                 this engine emits.
-            divergence_detector: Optional shadow-write metric aggregator.
-                When supplied, every ``_send_order`` path increments the
-                corresponding counter (created / dual_write / durable_notified).
-                ``None`` keeps the hot path zero-cost when the feature
-                flag is off.
         """
         self.instrument = instrument
         self.execution_socket = execution_socket
@@ -142,7 +135,6 @@ class TradingEngineService:
         self._strategy_tag = strategy_tag
         self.wallet_public_id = wallet_public_id
         self.operator_public_id = operator_public_id
-        self._divergence_detector = divergence_detector
         base = f"{exchange}.{instrument}.{self.mode}"
         if wallet_public_id:
             wallet_short = wallet_public_id.replace("-", "")[:12].lower()
@@ -383,15 +375,9 @@ class TradingEngineService:
                     "operator_public_id": self.operator_public_id or None,
                 }
             )
-            if self._divergence_detector is not None:
-                self._divergence_detector.observe_command_created(self.exchange, self._shard_key)
 
         if self._outbox is not None:
             self._outbox.notify()
-            if self._divergence_detector is not None:
-                self._divergence_detector.observe_command_published(
-                    "durable_notified", self.exchange, self._shard_key
-                )
             logger.debug(f"Durable command written, outbox notified: {order_public_id}")
         else:
             order = OrderRequestData(
@@ -416,10 +402,6 @@ class TradingEngineService:
                 operator_public_id=self.operator_public_id or None,
             )
             await self.execution_socket.send(topic, order, flags=zmq.NOBLOCK)
-            if self._divergence_detector is not None:
-                self._divergence_detector.observe_command_published(
-                    "dual_write", self.exchange, self._shard_key
-                )
             if self._repository is not None:
                 await self._repository.update_trade_command_status(
                     public_id=order_public_id,

@@ -17,7 +17,6 @@ from datetime import datetime
 
 from loguru import logger
 
-from snapper.application.trade.divergence_detector import DivergenceDetector
 from snapper.application.trade.trade_service import TradeService
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
@@ -43,7 +42,6 @@ class ReconciliationLoop:
         repository: SQLAlchemyRepository,
         trade_service: TradeService,
         interval_seconds: float = 60.0,
-        divergence_detector: DivergenceDetector | None = None,
     ) -> None:
         """Initialize reconciliation loop.
 
@@ -52,17 +50,12 @@ class ReconciliationLoop:
             repository: DB repository for state queries.
             trade_service: Trade service for circuit breaker feedback.
             interval_seconds: Polling interval in seconds.
-            divergence_detector: Optional metric aggregator; when
-                supplied, each cycle increments either the
-                ``reconciliation_ok_total`` or
-                ``reconciliation_failure_total`` counter.
         """
         self._exchange = exchange_name
         self._repo = repository
         self._trade_service = trade_service
         self._interval = interval_seconds
         self._running = False
-        self._divergence_detector = divergence_detector
 
     async def run(self) -> None:
         """Run the reconciliation loop until cancelled.
@@ -114,8 +107,6 @@ class ReconciliationLoop:
                 )
 
             for shard_key in seen_shards:
-                if self._divergence_detector is not None:
-                    self._divergence_detector.observe_reconciliation_verdict(shard_key, "ok")
                 self._trade_service.record_recon_success(shard_key)
             logger.debug(f"ReconciliationLoop[{self._exchange}] cycle completed OK")
         except Exception:
@@ -126,8 +117,6 @@ class ReconciliationLoop:
                 else ExecutionModeEnum.LIVE
             )
             fallback_shard = f"{self._exchange}.unknown.{mode}"
-            if self._divergence_detector is not None:
-                self._divergence_detector.observe_reconciliation_verdict(fallback_shard, "failure")
             halted = self._trade_service.record_recon_failure(fallback_shard)
             if halted:
                 logger.error(
