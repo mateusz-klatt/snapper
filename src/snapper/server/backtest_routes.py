@@ -465,8 +465,14 @@ async def _resolve_auto_pair(
 
     With an anchor: validate anchor belongs to caller's wallet, is
     terminal, has the requested hash. Pair it with the most-recent
-    OTHER run matching the hash. Without an anchor: pair the
-    two most-recent terminal runs matching the hash.
+    OTHER run matching the hash, preferring the opposite
+    ``execution_mode`` (Direct-DB anchor → pick ZMQ-replay counterpart
+    if available; same for the reverse). Falls back to any
+    most-recent-OTHER when no opposite-mode candidate exists. Without
+    an anchor: pair the two most-recent terminal runs, preferring one
+    Direct-DB plus one ZMQ-replay (the plan §3.2 line 763
+    "cross-execution-mode when available" contract). Falls back to the
+    two most-recent terminal runs when only one mode is present.
     """
     candidates = await bt_repo.list_runs(
         as_of=ts,
@@ -488,12 +494,21 @@ async def _resolve_auto_pair(
         others = [r for r in terminal if r["public_id"] != anchor]
         if not others:
             raise HTTPException(status_code=409, detail="anchor has no counterpart")
-        return anchor_row["public_id"], others[0]["public_id"]
+        anchor_mode = anchor_row.get("execution_mode")
+        opposite = [r for r in others if r.get("execution_mode") != anchor_mode]
+        counterpart = opposite[0] if opposite else others[0]
+        return anchor_row["public_id"], counterpart["public_id"]
     if len(terminal) < 2:
         raise HTTPException(
             status_code=409, detail=f"not enough runs with config_hash={config_hash}"
         )
-    return terminal[0]["public_id"], terminal[1]["public_id"]
+    head_mode = terminal[0].get("execution_mode")
+    cross_mode = next(
+        (r for r in terminal[1:] if r.get("execution_mode") != head_mode),
+        None,
+    )
+    partner = cross_mode if cross_mode is not None else terminal[1]
+    return terminal[0]["public_id"], partner["public_id"]
 
 
 async def _resolve_manual_pair(

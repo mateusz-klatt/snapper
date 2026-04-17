@@ -22,6 +22,7 @@ from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.app import create_app
 from snapper.server.app import get_repository_dependency
 from snapper.server.backtest_routes import _bt_repo
+from snapper.server.backtest_routes import _normalise_pair
 from snapper.server.backtest_routes import _resolve_as_of
 
 NOW = datetime(2026, 4, 14, 12, 0, 0, tzinfo=UTC)
@@ -1208,6 +1209,193 @@ class TestCompareCreate:
             )
             response = client.post("/api/backtests/compare", json=body)
             assert response.status_code == 200
+            client.close()
+
+    def test_auto_no_anchor_prefers_cross_execution_mode(self) -> None:
+        """Plan §3.2 line 763 — no-anchor auto-pair picks cross-mode partner.
+
+        Given:
+            Three recent terminal runs for the same config_hash —
+            most recent is a direct_db run, second-most-recent is
+            another direct_db run, third is a zmq_replay run.
+
+        When:
+            POST /api/backtests/compare with mode=auto and no anchor.
+
+        Then:
+            The pair resolves to (direct_db_most_recent,
+            zmq_replay) rather than the two same-mode direct_db runs
+            — Direct-DB and ZMQ-replay are comparable on the same
+            config by design and the plan mandates preferring the
+            cross-mode partner when available.
+        """
+        direct_new = _make_run_row(public_id="direct-new", status="completed")
+        direct_new["config_hash"] = "a" * 64
+        direct_new["execution_mode"] = "direct_db"
+        direct_old = _make_run_row(public_id="direct-old", status="completed")
+        direct_old["config_hash"] = "a" * 64
+        direct_old["execution_mode"] = "direct_db"
+        zmq_run = _make_run_row(public_id="zmq-run", status="completed")
+        zmq_run["config_hash"] = "a" * 64
+        zmq_run["execution_mode"] = "zmq_replay"
+        captured: dict[str, Any] = {}
+
+        async def fake_create_comparison(row: dict[str, Any], **_kwargs: Any) -> tuple[int, str]:
+            captured["run_a_public_id"] = row["run_a_public_id"]
+            captured["run_b_public_id"] = row["run_b_public_id"]
+            return 1, "cmp-new"
+
+        bt = AsyncMock()
+        bt.list_runs = AsyncMock(return_value=[direct_new, direct_old, zmq_run])
+        bt.get_comparison_by_pair = AsyncMock(return_value=None)
+        bt.create_comparison = fake_create_comparison
+        bt.get_comparison = AsyncMock(return_value=_make_comparison_row())
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            body = _wrap_compare({"mode": "auto", "config_hash": "a" * 64})
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 200
+            normalised = _normalise_pair("direct-new", "zmq-run")
+            assert captured["run_a_public_id"] == normalised[0]
+            assert captured["run_b_public_id"] == normalised[1]
+            client.close()
+
+    def test_auto_no_anchor_falls_back_to_same_mode_when_no_cross(self) -> None:
+        """Plan §3.2 line 763 — no-anchor auto-pair falls back when no cross-mode.
+
+        Given:
+            Two recent terminal runs, both direct_db.
+
+        When:
+            POST /api/backtests/compare with mode=auto and no anchor.
+
+        Then:
+            The pair resolves to (terminal[0], terminal[1]) as
+            before — the cross-mode preference is a preference, not a
+            requirement; a single-mode wallet is still allowed to
+            auto-compare its two most-recent runs.
+        """
+        r0 = _make_run_row(public_id="run-0", status="completed")
+        r0["config_hash"] = "a" * 64
+        r0["execution_mode"] = "direct_db"
+        r1 = _make_run_row(public_id="run-1", status="completed")
+        r1["config_hash"] = "a" * 64
+        r1["execution_mode"] = "direct_db"
+        captured: dict[str, Any] = {}
+
+        async def fake_create_comparison(row: dict[str, Any], **_kwargs: Any) -> tuple[int, str]:
+            captured["pair"] = (row["run_a_public_id"], row["run_b_public_id"])
+            return 1, "cmp-new"
+
+        bt = AsyncMock()
+        bt.list_runs = AsyncMock(return_value=[r0, r1])
+        bt.get_comparison_by_pair = AsyncMock(return_value=None)
+        bt.create_comparison = fake_create_comparison
+        bt.get_comparison = AsyncMock(return_value=_make_comparison_row())
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            body = _wrap_compare({"mode": "auto", "config_hash": "a" * 64})
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 200
+            assert captured["pair"] == _normalise_pair("run-0", "run-1")
+            client.close()
+
+    def test_auto_anchor_prefers_opposite_execution_mode(self) -> None:
+        """Plan §3.2 line 769 — anchored auto-pair picks opposite-mode counterpart.
+
+        Given:
+            Direct-DB anchor plus two candidates — a more-recent
+            direct_db non-anchor and an older zmq_replay run.
+
+        When:
+            POST /api/backtests/compare with mode=auto and the
+            direct_db anchor.
+
+        Then:
+            Counterpart resolves to the zmq_replay run, not the
+            direct_db run, even though the direct_db candidate is
+            more recent in list order. Plan line 769: anchored pair
+            prefers the **opposite** execution_mode when available.
+        """
+        anchor = _make_run_row(public_id="anchor-direct", status="completed")
+        anchor["config_hash"] = "a" * 64
+        anchor["execution_mode"] = "direct_db"
+        newer_direct = _make_run_row(public_id="direct-newer", status="completed")
+        newer_direct["config_hash"] = "a" * 64
+        newer_direct["execution_mode"] = "direct_db"
+        older_zmq = _make_run_row(public_id="zmq-older", status="completed")
+        older_zmq["config_hash"] = "a" * 64
+        older_zmq["execution_mode"] = "zmq_replay"
+        captured: dict[str, Any] = {}
+
+        async def fake_create_comparison(row: dict[str, Any], **_kwargs: Any) -> tuple[int, str]:
+            captured["pair"] = (row["run_a_public_id"], row["run_b_public_id"])
+            return 1, "cmp-new"
+
+        bt = AsyncMock()
+        bt.list_runs = AsyncMock(return_value=[anchor, newer_direct, older_zmq])
+        bt.get_comparison_by_pair = AsyncMock(return_value=None)
+        bt.create_comparison = fake_create_comparison
+        bt.get_comparison = AsyncMock(return_value=_make_comparison_row())
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            body = _wrap_compare(
+                {
+                    "mode": "auto",
+                    "config_hash": "a" * 64,
+                    "anchor_run_public_id": "anchor-direct",
+                }
+            )
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 200
+            assert captured["pair"] == _normalise_pair("anchor-direct", "zmq-older")
+            client.close()
+
+    def test_auto_anchor_falls_back_to_same_mode_when_no_opposite(self) -> None:
+        """Plan §3.2 line 769 — anchored auto-pair falls back when no opposite-mode.
+
+        Given:
+            Direct-DB anchor plus a single direct_db counterpart
+            (wallet has only Direct-DB runs for this config).
+
+        When:
+            POST /api/backtests/compare with mode=auto and the anchor.
+
+        Then:
+            Counterpart resolves to the only available same-mode
+            candidate — the preference is cross-mode but the gate is
+            availability. Asserts that a single-mode wallet still
+            creates the comparison successfully.
+        """
+        anchor = _make_run_row(public_id="anchor-direct", status="completed")
+        anchor["config_hash"] = "a" * 64
+        anchor["execution_mode"] = "direct_db"
+        counterpart = _make_run_row(public_id="direct-counter", status="completed")
+        counterpart["config_hash"] = "a" * 64
+        counterpart["execution_mode"] = "direct_db"
+        captured: dict[str, Any] = {}
+
+        async def fake_create_comparison(row: dict[str, Any], **_kwargs: Any) -> tuple[int, str]:
+            captured["pair"] = (row["run_a_public_id"], row["run_b_public_id"])
+            return 1, "cmp-new"
+
+        bt = AsyncMock()
+        bt.list_runs = AsyncMock(return_value=[anchor, counterpart])
+        bt.get_comparison_by_pair = AsyncMock(return_value=None)
+        bt.create_comparison = fake_create_comparison
+        bt.get_comparison = AsyncMock(return_value=_make_comparison_row())
+        with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+            client = _create_client(bt)
+            body = _wrap_compare(
+                {
+                    "mode": "auto",
+                    "config_hash": "a" * 64,
+                    "anchor_run_public_id": "anchor-direct",
+                }
+            )
+            response = client.post("/api/backtests/compare", json=body)
+            assert response.status_code == 200
+            assert captured["pair"] == _normalise_pair("anchor-direct", "direct-counter")
             client.close()
 
     def test_manual_missing_run_id_returns_422(self) -> None:
