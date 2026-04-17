@@ -1,7 +1,9 @@
 """Tests for RestCallTracker sliding-window rate + utilization semantics."""
 
+import asyncio
 import threading
 import time
+from collections import deque
 from collections.abc import Iterator
 from typing import Any
 
@@ -152,7 +154,7 @@ class TestRestCallTrackerRateAndUtilization:
         """
         tracker = RestCallTracker()
         stale = time.monotonic() - 120.0
-        tracker._events[ExchangeEnum.KRAKEN] = __import__("collections").deque([stale])
+        tracker._events[ExchangeEnum.KRAKEN] = deque([stale])
         tracker.record_call(ExchangeEnum.KRAKEN)
         events = tracker._events[ExchangeEnum.KRAKEN]
         assert len(events) == 1
@@ -385,6 +387,105 @@ class TestSingletonAccess:
         assert ExchangeEnum.ZONDA not in limits
         assert ExchangeEnum.KRAKEN_FUTURES not in limits
         assert ExchangeEnum.KRAKEN_EQUITIES not in limits
+
+
+class TestRestCallTrackerAcquire:
+    """Pre-emptive auto-backoff via ``acquire(exchange)``."""
+
+    @pytest.mark.asyncio
+    async def test_acquire_passes_through_when_no_limit(self) -> None:
+        """Exchanges without a published limit record immediately with no sleep.
+
+        Given:
+            Tracker has no entry for Zonda,
+
+        When:
+            ``acquire(ZONDA)`` is awaited,
+
+        Then:
+            The call is recorded and the coroutine returns quickly
+            (no asyncio.sleep fires) — observability-only for
+            undocumented exchanges.
+        """
+        tracker = RestCallTracker(limits={})
+        start = time.monotonic()
+        await tracker.acquire(ExchangeEnum.ZONDA)
+        elapsed = time.monotonic() - start
+        assert tracker.get_rate(ExchangeEnum.ZONDA, 1.0) == pytest.approx(1.0)
+        assert elapsed < 0.05
+
+    @pytest.mark.asyncio
+    async def test_acquire_does_not_sleep_under_limit(self) -> None:
+        """Utilization below 100 % returns without waiting.
+
+        Given:
+            Tracker with Kraken limit 15/s and 3 calls already
+            recorded,
+
+        When:
+            ``acquire(KRAKEN)`` is awaited,
+
+        Then:
+            The call returns in under 50 ms because 4/15 is well
+            below the 1 s-window threshold.
+        """
+        tracker = RestCallTracker(limits={ExchangeEnum.KRAKEN: 15.0})
+        for _ in range(3):
+            tracker.record_call(ExchangeEnum.KRAKEN)
+        start = time.monotonic()
+        await tracker.acquire(ExchangeEnum.KRAKEN)
+        elapsed = time.monotonic() - start
+        assert elapsed < 0.05
+        assert tracker.get_rate(ExchangeEnum.KRAKEN, 1.0) == pytest.approx(4.0)
+
+    @pytest.mark.asyncio
+    async def test_acquire_sleeps_when_at_limit(self) -> None:
+        """At the limit, acquire sleeps until the oldest event ages out.
+
+        Given:
+            Tracker with Kraken limit 2/s and 2 events injected at
+            roughly 400 ms ago,
+
+        When:
+            ``acquire(KRAKEN)`` is awaited,
+
+        Then:
+            The coroutine sleeps ~600 ms (1 s - 400 ms) so the
+            oldest event falls out of the window before the new
+            call is recorded — never exceeds the published limit.
+        """
+        tracker = RestCallTracker(limits={ExchangeEnum.KRAKEN: 2.0})
+        now = time.monotonic()
+        tracker._events[ExchangeEnum.KRAKEN] = deque([now - 0.4, now - 0.3])
+        start = time.monotonic()
+        await tracker.acquire(ExchangeEnum.KRAKEN)
+        elapsed = time.monotonic() - start
+        assert 0.4 < elapsed < 1.2
+        assert tracker.get_rate(ExchangeEnum.KRAKEN, 1.0) >= 1.0
+
+    @pytest.mark.asyncio
+    async def test_acquire_serialises_concurrent_callers(self) -> None:
+        """Concurrent ``acquire`` callers for the same exchange stay under the limit.
+
+        Given:
+            Tracker with Kraken limit 3/s, and 6 concurrent callers,
+
+        When:
+            All call ``acquire(KRAKEN)`` simultaneously,
+
+        Then:
+            The 4th-6th callers sleep until capacity frees up — total
+            elapsed time is roughly ``ceil(6 / 3) - 1 = 1`` second
+            because callers 4-6 have to wait for callers 1-3 to age
+            out of the 1 s window. Final rate never exceeded the
+            limit by more than 1 (acceptable micro-race window).
+        """
+        tracker = RestCallTracker(limits={ExchangeEnum.KRAKEN: 3.0})
+        start = time.monotonic()
+        await asyncio.gather(*[tracker.acquire(ExchangeEnum.KRAKEN) for _ in range(6)])
+        elapsed = time.monotonic() - start
+        assert elapsed >= 0.9
+        assert tracker.get_rate(ExchangeEnum.KRAKEN, 1.0) <= 4.0
 
 
 class TestExchangeClientBaseWiring:

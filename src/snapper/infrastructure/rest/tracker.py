@@ -40,6 +40,7 @@ is observability only — logging and (future) metrics endpoints read
 from it, but no outgoing request is blocked by this module.
 """
 
+import asyncio
 import threading
 import time
 from collections import deque
@@ -97,6 +98,7 @@ class RestCallTracker:
         )
         self._lock = threading.Lock()
         self._warned: dict[str, float] = {}
+        self._async_locks: dict[str, asyncio.Lock] = {}
 
     def record_call(self, exchange: str) -> None:
         """Record a REST call to ``exchange``.
@@ -191,6 +193,62 @@ class RestCallTracker:
         with self._lock:
             self._events.clear()
             self._warned.clear()
+            self._async_locks.clear()
+
+    async def acquire(self, exchange: str) -> None:
+        """Pre-emptively throttle to stay under the published limit.
+
+        Token-bucket-style wait: if the 1 s window already holds
+        ``limit`` or more recorded calls for this exchange, sleep until
+        the oldest entry falls out of the window, then record the call
+        atomically. Exchanges without a published limit pass through
+        unchanged (record immediately) — for those we have no ground
+        truth to pre-empt against and the existing
+        ``_with_retry`` / ccxt handlers remain the authoritative 429
+        response.
+
+        Serialisation per exchange: an ``asyncio.Lock`` guarantees
+        that concurrent callers do not all pass the capacity check in
+        the same microsecond and then all commit over the limit. The
+        lock is cheap — we serialise only the check-and-record slice,
+        not the actual outgoing REST I/O.
+
+        Args:
+            exchange: Exchange identifier (``ExchangeEnum`` value).
+        """
+        limit = self._limits.get(exchange)
+        if limit is None or limit <= 0:
+            self.record_call(exchange)
+            return
+        lock = self._async_locks.get(exchange)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._async_locks[exchange] = lock
+        async with lock:
+            while True:
+                now = time.monotonic()
+                cutoff = now - _WINDOW_S_1
+                with self._lock:
+                    events = self._events.get(exchange)
+                    if events is None:
+                        events = deque()
+                        self._events[exchange] = events
+                    while events and events[0] < cutoff:
+                        events.popleft()
+                    count = len(events)
+                    oldest = events[0] if events else now
+                if count < limit:
+                    break
+                sleep_for = max(0.005, oldest + _WINDOW_S_1 - now)
+                logger.debug(
+                    "REST pre-emptive backoff: exchange={} count={} limit={:.2f} sleep={:.3f}s",
+                    exchange,
+                    count,
+                    limit,
+                    sleep_for,
+                )
+                await asyncio.sleep(sleep_for)
+            self.record_call(exchange)
 
     def _maybe_warn(self, exchange: str, utilization: float) -> None:
         """Emit a warning log when utilization crosses a threshold.

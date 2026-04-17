@@ -294,6 +294,53 @@ class WsStatsResponse(PayloadResponse[Literal["ws_stats_response"], WsStatsData]
     type: Literal["ws_stats_response"] = "ws_stats_response"
 
 
+class RestRateExchangeStats(StrictBody):
+    """Per-exchange REST call statistics for the rate-rate endpoint.
+
+    Attributes:
+        rps_1s: Average requests per second over the last 1 second.
+        rps_10s: Average requests per second over the last 10 seconds.
+        rps_60s: Average requests per second over the last 60 seconds.
+        limit_rps: Published upstream limit in req/s. ``None`` when no
+            public limit is documented for this exchange.
+        utilization: ``rps_1s / limit_rps`` as a fraction in
+            ``[0.0, +inf)``. ``None`` when no published limit exists.
+    """
+
+    rps_1s: float = Field(description="Rolling 1s req/s rate")
+    rps_10s: float = Field(description="Rolling 10s req/s rate")
+    rps_60s: float = Field(description="Rolling 60s req/s rate")
+    limit_rps: float | None = Field(default=None, description="Published upstream limit in req/s")
+    utilization: float | None = Field(
+        default=None, description="rps_1s / limit_rps fraction, None when limit unknown"
+    )
+
+
+class RestRateData(StrictDataSchema[Literal["rest_rate"]]):
+    """Payload for the ``GET /api/metrics/rest-rate`` endpoint.
+
+    Attributes:
+        exchanges: Per-exchange sliding-window stats. Exchanges appear
+            in the map only after at least one REST call has been
+            recorded against them since process startup.
+    """
+
+    type: Literal["rest_rate"] = "rest_rate"
+    exchanges: dict[str, RestRateExchangeStats] = Field(
+        description="Per-exchange rolling REST call stats + utilization"
+    )
+
+
+class RestRateResponse(PayloadResponse[Literal["rest_rate_response"], RestRateData]):
+    """REST call rate observability endpoint response.
+
+    Attributes:
+        type: Payload item type discriminator.
+    """
+
+    type: Literal["rest_rate_response"] = "rest_rate_response"
+
+
 class SettingCategoriesResponse(PayloadListResponse[Literal["setting_categories"], str]):
     """Setting categories list response.
 
@@ -312,6 +359,9 @@ __all__ = [
     "HealthCheckData",
     "HealthCheckResponse",
     "HealthTopics",
+    "RestRateData",
+    "RestRateExchangeStats",
+    "RestRateResponse",
     "SettingCategoriesResponse",
     "SubscriptionsStats",
     "TopicMetricSnapshot",

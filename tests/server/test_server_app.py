@@ -458,6 +458,89 @@ class TestWebSocketEndpoints:
         assert "timestamp" in data
         assert data["payload"]["components"]["websocket_manager"] == "ok"
 
+    def test_rest_rate_metrics_empty_snapshot(self) -> None:
+        """REST rate endpoint returns empty exchange map on a fresh process.
+
+        Given:
+            No REST calls have been recorded since the tracker reset,
+
+        When:
+            GET /api/metrics/rest-rate is called,
+
+        Then:
+            Response is 200 with ``payload.exchanges == {}`` — the
+            tracker only materialises an exchange entry after the
+            first recorded call.
+        """
+        from snapper.infrastructure.rest.tracker import reset_rest_call_tracker_for_tests
+
+        reset_rest_call_tracker_for_tests()
+        response = self.client.get("/api/metrics/rest-rate")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["payload"]["type"] == "rest_rate"
+        assert data["payload"]["exchanges"] == {}
+
+    def test_rest_rate_metrics_reports_per_exchange(self) -> None:
+        """REST rate endpoint projects tracker snapshot into typed envelope.
+
+        Given:
+            The tracker has recorded 3 calls for Walutomat and 0 for
+            all other exchanges,
+
+        When:
+            GET /api/metrics/rest-rate is called,
+
+        Then:
+            Response payload has a single ``walutomat`` entry with
+            ``rps_1s >= 3.0``, ``limit_rps == 20.0``, and
+            ``utilization == rps_1s / 20.0``.
+        """
+        from snapper.core.types import ExchangeEnum
+        from snapper.infrastructure.rest.tracker import get_rest_call_tracker
+        from snapper.infrastructure.rest.tracker import reset_rest_call_tracker_for_tests
+
+        reset_rest_call_tracker_for_tests()
+        tracker = get_rest_call_tracker()
+        for _ in range(3):
+            tracker.record_call(ExchangeEnum.WALUTOMAT)
+        response = self.client.get("/api/metrics/rest-rate")
+        assert response.status_code == 200
+        payload = response.json()["payload"]
+        assert set(payload["exchanges"]) == {ExchangeEnum.WALUTOMAT}
+        wlm = payload["exchanges"][ExchangeEnum.WALUTOMAT]
+        assert wlm["rps_1s"] >= 3.0
+        assert wlm["limit_rps"] == 20.0
+        assert wlm["utilization"] == wlm["rps_1s"] / 20.0
+
+    def test_rest_rate_metrics_undocumented_exchange_reports_none_util(self) -> None:
+        """Exchange without a published limit reports limit_rps/utilization as null.
+
+        Given:
+            Tracker has calls recorded for Zonda (no published
+            limit),
+
+        When:
+            GET /api/metrics/rest-rate is called,
+
+        Then:
+            The zonda entry has ``limit_rps == None`` and
+            ``utilization == None`` — the caller must interpret
+            that as "no documented upstream limit", not "zero".
+        """
+        from snapper.core.types import ExchangeEnum
+        from snapper.infrastructure.rest.tracker import get_rest_call_tracker
+        from snapper.infrastructure.rest.tracker import reset_rest_call_tracker_for_tests
+
+        reset_rest_call_tracker_for_tests()
+        tracker = get_rest_call_tracker()
+        tracker.record_call(ExchangeEnum.ZONDA)
+        response = self.client.get("/api/metrics/rest-rate")
+        payload = response.json()["payload"]
+        zonda = payload["exchanges"][ExchangeEnum.ZONDA]
+        assert zonda["limit_rps"] is None
+        assert zonda["utilization"] is None
+
 
 class TestStaticFileServing:
     """Tests for static file serving behavior."""

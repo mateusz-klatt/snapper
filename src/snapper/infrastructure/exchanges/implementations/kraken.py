@@ -1216,7 +1216,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         attempt = 0
         while True:
             try:
-                self._record_rest_call()
+                await self._acquire_rest_slot()
                 result = await self._invoke_func(func, *args, **kwargs)
                 self._circuit_failures = 0
                 return result

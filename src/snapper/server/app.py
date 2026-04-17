@@ -85,6 +85,9 @@ from snapper.api.schemas.health import GapStats
 from snapper.api.schemas.health import HealthCheckData
 from snapper.api.schemas.health import HealthCheckResponse
 from snapper.api.schemas.health import HealthTopics
+from snapper.api.schemas.health import RestRateData
+from snapper.api.schemas.health import RestRateExchangeStats
+from snapper.api.schemas.health import RestRateResponse
 from snapper.api.schemas.health import SubscriptionsStats
 from snapper.api.schemas.health import TopicMetricSnapshot
 from snapper.api.schemas.health import WebSocketStats
@@ -127,6 +130,7 @@ from snapper.core.types import SpawnerProcessStatusEnum
 from snapper.data.backtest_repository import BacktestRepository
 from snapper.data.repository import Repository
 from snapper.data.repository import dispose_repositories
+from snapper.infrastructure.rest.tracker import get_rest_call_tracker
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
 from snapper.interface.websocket.helpers import build_allowed_origins
 from snapper.messaging.infrastructure.gap_detector import GapDetectorStats
@@ -1164,6 +1168,49 @@ def _create_monitoring_endpoints_router(
                     for k, v in stats.topics.items()
                 },
                 errors=error_messages,
+            ),
+        )
+
+    @router.get("/metrics/rest-rate")
+    async def rest_rate_metrics(
+        request: Request,
+        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_SYSTEM_STATUS))],
+        _csrf: Annotated[None, Depends(validate_csrf_token)],
+    ) -> RestRateResponse:
+        """Return rolling REST call rates + utilization per exchange.
+
+        Reads the process-scoped ``RestCallTracker`` snapshot and
+        projects it into the typed envelope used by the other
+        monitoring endpoints. Gated behind ``READ_SYSTEM_STATUS`` so a
+        viewer role can see rate-limit health without having any
+        trading permission.
+        """
+        tracker: SequenceTracker = request.app.state.rest_tracker
+        sid = tracker.session_id
+        seq = tracker.next_sequence(_REST_HEALTH_STREAM)
+        ts = dt.datetime.now(dt.UTC)
+        pid = str(uuid7())
+        snapshot = get_rest_call_tracker().snapshot()
+        exchanges: dict[str, RestRateExchangeStats] = {}
+        for exchange, row in snapshot.items():
+            exchanges[exchange] = RestRateExchangeStats(
+                rps_1s=float(row.get("rps_1s") or 0.0),
+                rps_10s=float(row.get("rps_10s") or 0.0),
+                rps_60s=float(row.get("rps_60s") or 0.0),
+                limit_rps=row.get("limit_rps"),
+                utilization=row.get("utilization"),
+            )
+        return RestRateResponse(
+            session_id=sid,
+            sequence_id=seq,
+            public_id=pid,
+            timestamp=ts,
+            payload=RestRateData(
+                session_id=sid,
+                sequence_id=seq,
+                public_id=str(uuid7()),
+                timestamp=ts,
+                exchanges=exchanges,
             ),
         )
 

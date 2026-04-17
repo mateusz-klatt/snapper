@@ -97,6 +97,18 @@ class ExchangeClientBase(ABC):
         """
         get_rest_call_tracker().record_call(self.exchange_name)
 
+    async def _acquire_rest_slot(self) -> None:
+        """Pre-emptively wait for REST budget before the next call.
+
+        Delegates to ``RestCallTracker.acquire`` which serialises
+        capacity checks per exchange and sleeps until the rolling 1 s
+        window dips below the published limit. Exchanges without a
+        published limit pass through immediately (the tracker has no
+        ground truth to pre-empt against; the existing
+        ``_with_retry`` / ccxt handlers still catch upstream 429s).
+        """
+        await get_rest_call_tracker().acquire(self.exchange_name)
+
     @abstractmethod
     async def connect(self) -> None:
         """Establish connection to the exchange.
