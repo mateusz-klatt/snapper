@@ -233,14 +233,83 @@ class FillStatusEnum(StrEnum):
     PARTIAL = "partial"
 
 
+class OrderTypeEnum(StrEnum):
+    """Domain order execution type for the trading core.
+
+    Covers the 4 order types the Snapper engine reasons about. Distinct
+    from ``infrastructure.exchanges.contracts.ExchangeOrderTypeEnum``
+    (wire-format) by design — exchange-side values include ICEBERG,
+    STOP_LOSS_LIMIT, TAKE_PROFIT_LIMIT, TRAILING_STOP, SETTLE_POSITION
+    etc. that the trading core never instantiates.
+    """
+
+    MARKET = "market"
+    LIMIT = "limit"
+    STOP = "stop"
+    STOP_LIMIT = "stop_limit"
+
+
+class OrderStatusEnum(StrEnum):
+    """Domain order lifecycle status.
+
+    Covers the 7-state lifecycle the Snapper engine reasons about.
+    Distinct from ``infrastructure.exchanges.contracts.ExchangeOrderStatusEnum``
+    (wire-format) by design — exchange-side values use American
+    spelling (``CANCELED``) and include ``PENDING``, ``CLOSED``,
+    ``PENDING_NEW``, ``EXPIRED`` that the trading core reduces to this
+    7-state set. The cross-spelling mapping is already handled in
+    ``infrastructure/exchanges/implementations/kraken.py`` and
+    ``infrastructure/exchanges/adapters/kraken_futures.py``.
+    """
+
+    NEW = "new"
+    SUBMITTED = "submitted"
+    OPEN = "open"
+    FILLED = "filled"
+    PARTIALLY_FILLED = "partially_filled"
+    CANCELLED = "cancelled"
+    REJECTED = "rejected"
+
+
+class OrderEventEnum(StrEnum):
+    """Order lifecycle event emitted on orders.events.* ZMQ topics.
+
+    Covers both ``OrderData`` (submit flow) and ``OrderEventData``
+    (cancel/replace confirmations). The ``EXECUTED`` member is routed
+    on a separate ``orders.events.*.*.executed`` topic via
+    ``ExecutionData`` (with ``FillStatus``) — the ``OrderEventType``
+    Literal alias at the bottom of this module intentionally excludes
+    it, keeping non-execution events on a single type.
+    """
+
+    SUBMITTED = "submitted"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    EXECUTED = "executed"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+    REPLACED = "replaced"
+
+
 TradeSide = Literal[TradeSideEnum.BUY, TradeSideEnum.SELL]
 """Direction of a trade: 'buy' for long entry, 'sell' for short/exit."""
 
-OrderType = Literal["market", "limit", "stop", "stop_limit"]
+OrderType = Literal[
+    OrderTypeEnum.MARKET,
+    OrderTypeEnum.LIMIT,
+    OrderTypeEnum.STOP,
+    OrderTypeEnum.STOP_LIMIT,
+]
 """Order execution type determining how the order is matched."""
 
 OrderStatus = Literal[
-    "new", "submitted", "open", "filled", "partially_filled", "cancelled", "rejected"
+    OrderStatusEnum.NEW,
+    OrderStatusEnum.SUBMITTED,
+    OrderStatusEnum.OPEN,
+    OrderStatusEnum.FILLED,
+    OrderStatusEnum.PARTIALLY_FILLED,
+    OrderStatusEnum.CANCELLED,
+    OrderStatusEnum.REJECTED,
 ]
 """Order lifecycle state from creation through completion or cancellation."""
 
@@ -253,7 +322,14 @@ CancelEventType = Literal["cancelled", "rejected"]
 ReplaceEventType = Literal["replaced", "rejected"]
 """Event types for replace command responses."""
 
-OrderEventType = Literal["submitted", "accepted", "rejected", "cancelled", "expired", "replaced"]
+OrderEventType = Literal[
+    OrderEventEnum.SUBMITTED,
+    OrderEventEnum.ACCEPTED,
+    OrderEventEnum.REJECTED,
+    OrderEventEnum.CANCELLED,
+    OrderEventEnum.EXPIRED,
+    OrderEventEnum.REPLACED,
+]
 """Order event type for ZMQ topic suffix (non-execution events).
 
 This type MUST match the suffix of the orders.events.{exchange}.{instrument}.{event}
@@ -417,7 +493,13 @@ OrderCommand = Literal[OrderCommandEnum.SUBMIT, OrderCommandEnum.CANCEL, OrderCo
 """Order command types for orders.commands.* ZMQ topics."""
 
 OrderEvent = Literal[
-    "submitted", "accepted", "rejected", "executed", "cancelled", "expired", "replaced"
+    OrderEventEnum.SUBMITTED,
+    OrderEventEnum.ACCEPTED,
+    OrderEventEnum.REJECTED,
+    OrderEventEnum.EXECUTED,
+    OrderEventEnum.CANCELLED,
+    OrderEventEnum.EXPIRED,
+    OrderEventEnum.REPLACED,
 ]
 """Order event types for orders.events.* ZMQ topics."""
 
@@ -446,10 +528,13 @@ __all__ = [
     "OrderCommand",
     "OrderCommandEnum",
     "OrderEvent",
+    "OrderEventEnum",
     "OrderEventType",
     "OrderExchange",
     "OrderStatus",
+    "OrderStatusEnum",
     "OrderType",
+    "OrderTypeEnum",
     "ProcessLifecycleEnum",
     "ProcessLifecycleType",
     "ProcessMode",
