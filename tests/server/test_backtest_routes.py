@@ -164,7 +164,6 @@ def _create_client(
     app.router.lifespan_context = _noop_lifespan
     mock_settings = MagicMock()
     mock_settings.db_url = "sqlite://"
-    mock_settings.allow_manual_orders = True
     app.state.settings = mock_settings
     app.state.rest_tracker = SequenceTracker()
 

@@ -201,8 +201,9 @@ gaps** (exchange has more filled quantity than the executor observed)
 and **disappeared orders** (pending orders absent from the open-orders
 snapshot).
 
-Feature-flagged behind `use_venue_reconciliation` (`AppSettings`,
-default `False`). Enable once the Phase 3 rollout gates are closed.
+Always-on — runs alongside the executor's order handler + heartbeat
+tasks (no feature flag; the defensive polling is cheap enough that
+gating it provided no value).
 
 **`_reconcile_fill_gap`** (`messaging/executors/base.py:1139-1211`)
 emits a corrective `ExecutionUpdate` covering the observed cum-qty

@@ -69,7 +69,6 @@ class DummyExecutor(ExchangeExecutorService[Any]):
                 zmq_broker_xpub="xpub",
                 zmq_broker_xsub="xsub",
                 master_password=None,
-                use_venue_reconciliation=False,
             ),
         )
 
@@ -2753,6 +2752,7 @@ class TestExecutorCoverage:
             patch.object(service, "_order_handler", new=AsyncMock(return_value=None)),
             patch.object(service, "_execution_handler", new=AsyncMock(return_value=None)),
             patch.object(service, "_heartbeat_loop", new=AsyncMock(return_value=None)),
+            patch.object(service, "_reconciliation_handler", new=AsyncMock(return_value=None)),
             patch.object(service, "_create_exchange_client", return_value=mock_exchange_client),
             patch(
                 "snapper.application.services.settings.get_settings_service",
@@ -3123,6 +3123,7 @@ class TestExecutorCoverage:
             patch.object(
                 service, "_execution_handler", new=AsyncMock(return_value=None)
             ) as execution_mock,
+            patch.object(service, "_reconciliation_handler", new=AsyncMock(return_value=None)),
             patch(
                 "snapper.application.services.settings.get_settings_service",
                 new=AsyncMock(return_value=mock_settings_service),

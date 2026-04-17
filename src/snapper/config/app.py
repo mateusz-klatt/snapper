@@ -334,31 +334,6 @@ class AppSettings:
         return self._get_db_setting("risk_r_per_trade", 0.005)
 
     @property
-    def allow_manual_orders(self) -> bool:
-        """Return whether manual order creation via the UI is enabled.
-
-        When False (default), the POST /api/orders endpoint rejects requests.
-        When True, authenticated users with CREATE_ORDERS permission can
-        submit manual orders through the frontend ManualOrderForm.
-
-        Returns:
-            True if manual orders are enabled.
-        """
-        return self._get_db_setting("allow_manual_orders", False)
-
-    @property
-    def allow_short_selling(self) -> bool:
-        """Return whether short selling is enabled.
-
-        When False (default), SELL signals flatten the position to zero.
-        When True, SELL signals open short positions with negative desired_units.
-
-        Returns:
-            True if short selling is enabled.
-        """
-        return self._get_db_setting("allow_short_selling", False)
-
-    @property
     def log_level(self) -> str:
         """Return application logging level.
 
@@ -593,19 +568,6 @@ class AppSettings:
             True if the detector is enabled, False (default).
         """
         return self._get_db_setting("enable_divergence_detector", False)
-
-    @property
-    def use_venue_reconciliation(self) -> bool:
-        """Return whether executor-side venue reconciliation is enabled.
-
-        When True, executors periodically poll exchange APIs to detect
-        fill gaps and disappeared orders. Feature-flagged for gradual
-        rollout.
-
-        Returns:
-            True if venue reconciliation enabled, False (default).
-        """
-        return self._get_db_setting("use_venue_reconciliation", False)
 
     @property
     def recon_balance_threshold(self) -> float:

@@ -3,7 +3,7 @@
 Spins up a real ZmqBrokerThread, PaperOrderExecutor, and TraderCoordinator
 in-process and connects them via random TCP loopback ports. The
 mock_settings_for_tests autouse fixture from the root conftest.py is
-extended here with broker endpoint overrides + allow_short_selling = True.
+extended here with broker endpoint overrides.
 
 The fixture is function-scoped (not session-scoped) so each test gets a
 clean broker, executor, trader, and SQLite DB. ZMQ contexts are torn down
@@ -93,9 +93,7 @@ def _patch_settings_for_e2e(
     mock_settings = snapper_settings.get_settings()
     mock_settings.zmq_broker_xsub = xsub_endpoint
     mock_settings.zmq_broker_xpub = xpub_endpoint
-    mock_settings.allow_short_selling = True
     mock_settings.has_db_access = True
-    mock_settings.use_venue_reconciliation = False
     mock_settings.use_durable_commands = False
 
     def _return_mock(_service: object = None) -> object:

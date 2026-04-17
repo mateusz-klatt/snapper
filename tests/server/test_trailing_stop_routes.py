@@ -133,7 +133,6 @@ def _create_client(mock_repo: Any) -> TestClient:
     app = create_app()
     app.router.lifespan_context = _noop_lifespan
     mock_settings = MagicMock()
-    mock_settings.allow_manual_orders = True
     app.state.settings = mock_settings
     app.state.rest_tracker = SequenceTracker()
 

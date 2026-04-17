@@ -2290,9 +2290,6 @@ class TraderCoordinator(RegisterableProcess):
             self.last_signal_time[engine_key] = 0.0
         self.last_signal_time[engine_key] = time.time()
         desired_units = strength if side == TradeSideEnum.BUY else -strength
-        allow_shorts = self.settings.has_db_access and self.settings.allow_short_selling
-        if not allow_shorts:
-            desired_units = max(desired_units, 0.0)
         logger.info(
             f"ZMQTrader: Processing signal from {strategy_name} - "
             f"{engine_key} {side} (strength={strength:.2f}, price={price:.2f}, "

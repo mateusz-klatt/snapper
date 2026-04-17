@@ -697,7 +697,6 @@ class TestTraderSignalHandling:
         }
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
         mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
-        mock_settings.allow_short_selling = False
         mock_get_settings.return_value = mock_settings
         mock_repo = AsyncMock()
         mock_get_repo.return_value = mock_repo
@@ -766,7 +765,6 @@ class TestTraderSignalHandling:
         }
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
         mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
-        mock_settings.allow_short_selling = False
         mock_get_settings.return_value = mock_settings
         mock_repo = AsyncMock()
         mock_get_repo.return_value = mock_repo
@@ -804,7 +802,7 @@ class TestTraderSignalHandling:
         call_args = mock_engine.execute_desired_units.call_args
         desired_units = call_args[0][0]
         price = call_args[0][1]
-        assert desired_units == pytest.approx(0.0)
+        assert desired_units == pytest.approx(-1.0)
         assert price == pytest.approx(52000.0)
 
     @patch("snapper.application.engine.trader.get_repository")
@@ -828,7 +826,6 @@ class TestTraderSignalHandling:
         }
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
         mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
-        mock_settings.allow_short_selling = False
         mock_get_settings.return_value = mock_settings
         mock_repo = AsyncMock()
         mock_get_repo.return_value = mock_repo
@@ -890,7 +887,6 @@ class TestTraderSignalHandling:
         }
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
         mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
-        mock_settings.allow_short_selling = False
         mock_get_settings.return_value = mock_settings
         mock_get_repo.return_value = AsyncMock()
         mock_socket = MagicMock()
@@ -962,7 +958,6 @@ class TestTraderSignalHandling:
         }
         mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
         mock_settings.zmq_broker_xpub = "tcp://127.0.0.1:7501"
-        mock_settings.allow_short_selling = False
         mock_settings.risk_r_per_trade = 0.02
         mock_settings.risk_max_leverage = 1.0
         mock_settings.risk_max_drawdown = 0.1

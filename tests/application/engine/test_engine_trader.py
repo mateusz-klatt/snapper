@@ -328,11 +328,19 @@ class TestTraderCoverage:
     async def test_on_signal_processes_sell_signal(
         self, mock_get_settings: MagicMock, mock_get_repository: MagicMock
     ) -> None:
-        """Verify sell signal triggers execution with zero units when shorts disabled.
+        """Verify sell signal triggers execution with negative desired_units.
 
-        Given: TraderCoordinator with mocked engine for BTC-USD, shorts disabled,
-        When: Sell signal is received,
-        Then: Engine execute_desired_units is called with 0.0 units.
+        Given:
+            TraderCoordinator with a mocked engine for BTC-USD (short
+            selling is always allowed now that the feature flag was
+            removed).
+
+        When:
+            A SELL signal with ``strength=1.0`` is received.
+
+        Then:
+            ``Engine.execute_desired_units`` is called with
+            ``-1.0`` — the opposite sign of BUY at the same strength.
         """
         mock_settings = MagicMock()
         mock_settings.instruments = {
@@ -342,7 +350,6 @@ class TestTraderCoverage:
             "polygon": [],
         }
         mock_settings.db_url = TEST_DB_URL
-        mock_settings.allow_short_selling = False
         mock_get_settings.return_value = mock_settings
         mock_repository = MagicMock()
         mock_get_repository.return_value = mock_repository
@@ -369,7 +376,7 @@ class TestTraderCoverage:
         await trader._on_signal(signal_msg)
         mock_engine.execute_desired_units.assert_called_once()
         args = mock_engine.execute_desired_units.call_args[0]
-        assert args[0] == pytest.approx(0.0)
+        assert args[0] == pytest.approx(-1.0)
 
     @pytest.mark.asyncio
     @patch("snapper.application.engine.trader.get_repository")
@@ -800,7 +807,6 @@ def _configure_settings(monkeypatch: pytest.MonkeyPatch) -> tuple[SimpleNamespac
         risk_r_per_trade=0.01,
         risk_max_leverage=2.0,
         risk_max_drawdown=0.15,
-        allow_short_selling=False,
         has_db_access=True,
     )
 
@@ -1126,7 +1132,7 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
         reason="test",
     )
     await coord_any._on_signal(signal_sell)
-    assert engine.execute_calls[1]["desired_units"] == pytest.approx(0.0)
+    assert engine.execute_calls[1]["desired_units"] == pytest.approx(-1.0)
     assert coord.last_signal_time[engine_key] <= time.time()
 
 
@@ -2224,7 +2230,6 @@ async def test_on_signal_converts_iso_timestamp(monkeypatch: pytest.MonkeyPatch)
         risk_max_drawdown=0.5,
         db_url=TEST_DB_URL,
         zmq_broker_xsub="inproc://broker",
-        allow_short_selling=False,
         has_db_access=True,
     )
     monkeypatch.setattr(trader_module, "get_settings", lambda: settings)
@@ -2277,7 +2282,6 @@ async def test_on_signal_drops_when_shard_halted(monkeypatch: pytest.MonkeyPatch
         risk_max_drawdown=0.5,
         db_url=TEST_DB_URL,
         zmq_broker_xsub="inproc://broker",
-        allow_short_selling=False,
         has_db_access=True,
     )
     monkeypatch.setattr(trader_module, "get_settings", lambda: settings)

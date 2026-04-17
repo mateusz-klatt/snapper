@@ -21,7 +21,6 @@ import pytest
 import zmq
 import zmq.asyncio
 
-import snapper.config.settings as snapper_settings
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import TradeSideEnum
 from snapper.messaging.schemas.data import OrderRequestData
@@ -93,7 +92,7 @@ class TestShortSellingE2E:
     """Paper-mode short selling end-to-end scenarios."""
 
     async def test_short_open_via_paper_executor(self, paper_e2e_stack: PaperE2EStack) -> None:
-        """SELL signal with allow_short_selling=True opens a short position.
+        """SELL signal opens a short position.
 
         Verifies the trader emits an OrderRequestData with side=SELL and a
         positive quantity onto the orders.commands topic when a SELL signal
@@ -140,34 +139,6 @@ class TestShortSellingE2E:
             sub.setsockopt(zmq.LINGER, 0)
             sub.close()
 
-    async def test_short_disabled_clamps_desired_units(
-        self,
-        paper_e2e_stack: PaperE2EStack,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """SELL signal with allow_short_selling=False produces no order.
-
-        Flips the flag back to False on the live mock_settings, then injects
-        a SELL signal when the position is flat. The trader should clamp
-        desired_units to 0 and emit nothing on orders.commands within the
-        observation window.
-        """
-        mock_settings = snapper_settings.get_settings()
-        monkeypatch.setattr(mock_settings, "allow_short_selling", False, raising=False)
-        sub = await _subscribe_to_orders_topic(
-            paper_e2e_stack.client_context, paper_e2e_stack.xpub_endpoint
-        )
-        try:
-            signal = _make_signal(TradeSideEnum.SELL, strength=1.0, price=50000.0)
-            await _publish_signal(
-                paper_e2e_stack.client_context, paper_e2e_stack.xsub_endpoint, signal
-            )
-            with pytest.raises(asyncio.TimeoutError):
-                await _wait_for_order_request(sub, timeout_s=2.0)
-        finally:
-            sub.setsockopt(zmq.LINGER, 0)
-            sub.close()
-
     async def test_short_cover_via_paper_executor(self, paper_e2e_stack: PaperE2EStack) -> None:
         """Open a short, then send a BUY signal that covers it.
 
@@ -210,7 +181,7 @@ class TestShortSellingE2E:
             sub.close()
 
     async def test_long_close_to_flat_via_sell(self, paper_e2e_stack: PaperE2EStack) -> None:
-        """Open a long, then close it via SELL with allow_short_selling=True.
+        """Open a long, then close it via SELL.
 
         Verifies that even with shorts enabled, a SELL signal that exactly
         balances an existing long produces a closing order. The split-flip

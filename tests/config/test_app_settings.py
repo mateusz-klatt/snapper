@@ -300,42 +300,6 @@ class TestAppSettingsRiskProperties:
         settings = AppSettings(bootstrap, settings_service=service)
         assert settings.has_db_access is True
 
-    def test_allow_manual_orders_default_false(self) -> None:
-        """Verify allow_manual_orders defaults to False.
-
-        Given service with no allow_manual_orders setting,
-        When accessing settings.allow_manual_orders,
-        Then False is returned.
-        """
-        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
-        service = MockSettingsService({})
-        settings = AppSettings(bootstrap, settings_service=service)
-        assert settings.allow_manual_orders is False
-
-    def test_allow_short_selling_default_false(self) -> None:
-        """Verify allow_short_selling defaults to False.
-
-        Given service with no allow_short_selling setting,
-        When accessing settings.allow_short_selling,
-        Then False is returned.
-        """
-        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
-        service = MockSettingsService({})
-        settings = AppSettings(bootstrap, settings_service=service)
-        assert settings.allow_short_selling is False
-
-    def test_allow_short_selling_returns_true(self) -> None:
-        """Verify allow_short_selling returns True when enabled.
-
-        Given service with allow_short_selling=True,
-        When accessing settings.allow_short_selling,
-        Then True is returned.
-        """
-        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
-        service = MockSettingsService({"allow_short_selling": True})
-        settings = AppSettings(bootstrap, settings_service=service)
-        assert settings.allow_short_selling is True
-
 
 class TestAppSettingsLoggingProperties:
     """Tests for AppSettings logging configuration property accessors."""
@@ -622,18 +586,6 @@ class TestServerProxyProperties:
         service = MockSettingsService({})
         settings = AppSettings(bootstrap, settings_service=service)
         assert settings.use_durable_commands is False
-
-    def test_use_venue_reconciliation_defaults_false(self) -> None:
-        """Verify use_venue_reconciliation defaults to False.
-
-        Given service without use_venue_reconciliation set,
-        When accessing settings.use_venue_reconciliation,
-        Then False is returned.
-        """
-        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
-        service = MockSettingsService({})
-        settings = AppSettings(bootstrap, settings_service=service)
-        assert settings.use_venue_reconciliation is False
 
     def test_recon_balance_threshold_defaults_to_one(self) -> None:
         """Verify recon_balance_threshold defaults to 1.0.

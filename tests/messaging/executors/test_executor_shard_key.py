@@ -32,7 +32,6 @@ class ShardKeyExecutor(ExchangeExecutorService[Any]):
             zmq_broker_xpub="xpub",
             zmq_broker_xsub="xsub",
             master_password=None,
-            use_venue_reconciliation=False,
             use_durable_commands=False,
         )
 

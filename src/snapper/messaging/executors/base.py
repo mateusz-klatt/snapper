@@ -464,8 +464,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             ]
             if supports_ws:
                 tasks.append(asyncio.create_task(self._execution_handler()))
-            if self.settings.use_venue_reconciliation:
-                tasks.append(asyncio.create_task(self._reconciliation_handler()))
+            tasks.append(asyncio.create_task(self._reconciliation_handler()))
             try:
                 await asyncio.gather(*tasks)
             except asyncio.CancelledError:

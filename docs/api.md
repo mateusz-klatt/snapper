@@ -358,7 +358,7 @@ X-CSRF-Token: <csrf_token>
 ### POST /api/orders
 
 Create a manual order via a `manual_once` execution plan. Requires
-`create:orders` permission and `allow_manual_orders` setting enabled.
+`create:orders` permission.
 
 **Request:**
 

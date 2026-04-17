@@ -31,7 +31,6 @@ from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
-from snapper.config.settings import AppSettings
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.repository import Repository
 from snapper.data.repository_types import ExecutionPlanInsertRow
@@ -123,13 +122,6 @@ async def create_order(
         HTTPException: 422 if params invalid, 403 if wallet not accessible,
             409 if idempotency key already used.
     """
-    settings: AppSettings = request.app.state.settings
-    if not settings.allow_manual_orders:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Manual orders are disabled. Enable allow_manual_orders in settings.",
-        )
-
     tracker: SequenceTracker = request.app.state.rest_tracker
     body = command.payload
     now = datetime.now(UTC)
