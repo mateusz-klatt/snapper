@@ -402,3 +402,68 @@ default_config={
     ...
 }
 ```
+
+## Trailing Stop Plans
+
+Trailing stops are server-side evaluated execution plans that ratchet a
+stop price as the market moves favorably and fire a market close when
+the stop is breached. Attach a trailing stop to an open
+`position_cycle` via `POST /api/trailing-stops` (see `docs/api.md`).
+
+### Parameters
+
+| Field | Type | Bounds | Meaning |
+|---|---|---|---|
+| `trailing_pct` | float | `0 < x < 100` | Distance from peak price, as percentage. `5.0` means "trigger 5 % below the highest favorable price seen". |
+| `min_lock_pct` | float | `0 <= x < 100` (default 0) | Profit threshold the market must cross before the trailing stop arms. `0` means "arm immediately on attach"; `5.0` means "wait until price has moved 5 % in your favor before tracking a stop". |
+
+### Behavior
+
+- **Peak ratchet:** every tick where the last price moves favorably
+  updates the peak; the stop level recomputes as
+  `peak * (1 - trailing_pct/100)` for longs or
+  `peak * (1 + trailing_pct/100)` for shorts.
+- **Stop monotonicity:** for longs, the stop only moves UP (never
+  down); for shorts the stop only moves DOWN. An adverse tick never
+  loosens the stop.
+- **min_lock dead zone:** while `min_lock_pct > 0` and the market has
+  not yet crossed that threshold, the trailing stop is attached and
+  armed but NOT tracking — a close is NOT emitted no matter how far
+  the price moves against you. A decision warning is logged on the
+  `trailing_stop_created` row at create time.
+- **Single trailing stop per cycle:** enforced by the partial unique
+  index `uq_ep_active_trailing_stop_per_cycle` (Alembic migration
+  `0009`). A second create on the same open cycle returns HTTP 409.
+- **Cycle close sweeps the plan:** if the cycle closes externally
+  (reconciliation flat, manual close, bracket fill),
+  `_sweep_cycle_closures()` cancels the trailing stop on the next
+  clock tick.
+- **Checkpoint persistence:** `peak_price` and `current_stop` are
+  persisted every 10 s via the plan-executor checkpoint loop. On
+  restart, state is restored and `peak_price` is floored at
+  `entry_price` (long: `max(peak, entry)`; short: `min(peak, entry)`).
+- **Downtime semantics:** if the service is down when the true market
+  price crosses the stop, the stop fires on the first tick received
+  after restart. There is no placed order on the exchange — the
+  evaluator is purely server-side.
+
+### Interaction with brackets
+
+A position cycle may carry both a `bracket` and a `trailing_stop`
+plan at the same time (the two partial unique indexes are disjoint
+per `plan_type`). Whichever fires first closes the cycle; the other
+is swept by the cycle-close handler.
+
+### Limitations
+
+- `entry_price` and `total_quantity` are frozen at attach time.
+  Dollar-cost averaging (scaling into a position) requires
+  `POST /cancel` + re-attach after the new average is known.
+- No exchange-side native trailing stops — every decision is made by
+  `PlanExecutorService` against live ticks.
+- Futures only (same capability gate as brackets:
+  `supports_reduce_only`). Not supported on Kraken spot.
+- No breakeven-move feature (ratchet stop to entry after N % profit).
+- No time-based activation (arm after N minutes regardless of price).
+- Live rollout gated on the same Phase 2 follow-ups (wallet-safe
+  routing + orphan-cycle admin) that brackets depend on.
