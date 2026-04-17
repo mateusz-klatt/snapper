@@ -48,7 +48,14 @@ router = APIRouter(prefix="/trailing-stops", tags=["trailing-stops"])
 
 _REST_STREAM = "trailing_stop_rest"
 _EVALUATOR = TrailingStopEvaluator()
-_TERMINAL_STATUSES = frozenset({"completed", "cancelled", "failed", "expired"})
+_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {
+        ExecutionPlanStatusEnum.COMPLETED,
+        ExecutionPlanStatusEnum.CANCELLED,
+        ExecutionPlanStatusEnum.FAILED,
+        ExecutionPlanStatusEnum.EXPIRED,
+    }
+)
 
 
 class TrailingStopStateData(StrictDataSchema[Literal["trailing_stop_state"]]):
@@ -265,7 +272,7 @@ async def create_trailing_stop(
             "total_quantity": current_qty,
             "side": side,
             "params": plan_params,
-            "status": "armed",
+            "status": ExecutionPlanStatusEnum.ARMED,
             "created_at": now,
             "position_cycle_public_id": cycle["public_id"],
             "idempotency_key": body.idempotency_key,

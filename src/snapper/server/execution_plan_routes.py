@@ -45,7 +45,14 @@ router = APIRouter(prefix="/execution-plans", tags=["execution-plans"])
 
 _REST_STREAM = "execution_plan_rest"
 _EVALUATOR = BracketEvaluator()
-_TERMINAL_STATUSES = frozenset({"completed", "cancelled", "failed", "expired"})
+_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {
+        ExecutionPlanStatusEnum.COMPLETED,
+        ExecutionPlanStatusEnum.CANCELLED,
+        ExecutionPlanStatusEnum.FAILED,
+        ExecutionPlanStatusEnum.EXPIRED,
+    }
+)
 
 
 def _get_plan_executor(request: Request) -> PlanExecutorService:
@@ -241,7 +248,7 @@ async def create_bracket(
             "total_quantity": current_qty,
             "side": side,
             "params": plan_params,
-            "status": "armed",
+            "status": ExecutionPlanStatusEnum.ARMED,
             "created_at": now,
             "position_cycle_public_id": cycle["public_id"],
             "idempotency_key": body.idempotency_key,

@@ -981,7 +981,7 @@ class PlanExecutorService(RegisterableProcess):
                 continue
             if plan["status"] in _TERMINAL_STATUSES:
                 continue
-            if plan["status"] == "paused":
+            if plan["status"] == ExecutionPlanStatusEnum.PAUSED:
                 continue
             evaluator = self.evaluators.get(public_id)
             if evaluator is None:
