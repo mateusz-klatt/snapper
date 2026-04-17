@@ -301,6 +301,44 @@ class TestEdgeCases:
             assert bar["open_at"] < result.failed_roll.roll_at
 
     @pytest.mark.asyncio
+    async def test_contracts_used_truncated_on_failed_roll(self) -> None:
+        """R1: contracts_used reports only the truncated chain on failed roll.
+
+        Given: a 3-contract chain where the 2->3 roll fails (no common
+        bar between ESU6 and ESZ6),
+        When: build runs with method='panama',
+        Then: result.failed_roll identifies ESU6 as from_contract AND
+        result.contracts_used enumerates only the contributing prefix
+        [ESM6, ESU6] — NOT the full active chain [ESM6, ESU6, ESZ6].
+        The truncated candle series consistently reflects the same
+        prefix: no bar has open_at >= failed_roll.roll_at.
+        """
+        c1 = _contract("ESM6", expiry_days=3)
+        c2 = _contract("ESU6", expiry_days=7)
+        c3 = _contract("ESZ6", expiry_days=11)
+        candles = {
+            "ESM6": [_candle(D1, 100.0), _candle(D2, 101.0), _candle(D3, 102.0)],
+            "ESU6": [_candle(D3, 102.5), _candle(D4, 103.0), _candle(D5, 104.0)],
+            "ESZ6": [_candle(D8, 120.0)],
+        }
+        repo = _mock_repo([c1, c2, c3], candles)
+        builder = ContinuousContractBuilder(repository=repo)
+        result = await builder.build(
+            underlying_public_id="u1",
+            exchange="kraken_equities",
+            contract_family="ES",
+            timeframe="1d",
+            start=D1,
+            end=D8,
+            method="panama",
+        )
+        assert result.failed_roll is not None
+        assert result.failed_roll.from_contract == "ESU6"
+        assert result.contracts_used == ["ESM6", "ESU6"]
+        for bar in result.candles:
+            assert bar["open_at"] < result.failed_roll.roll_at
+
+    @pytest.mark.asyncio
     async def test_unadjusted_no_overlap_succeeds(self) -> None:
         """Unadjusted method does not require common bar at roll point.
 

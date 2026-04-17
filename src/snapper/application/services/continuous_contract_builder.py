@@ -137,7 +137,7 @@ class ContinuousContractBuilder:
             )
             return BuildResult(
                 candles=candles,
-                contracts_used=[c["native_symbol"] for c in active],
+                contracts_used=[c["native_symbol"] for c in truncated],
                 roll_points=list(adjustments),
                 failed_roll=failed,
             )
