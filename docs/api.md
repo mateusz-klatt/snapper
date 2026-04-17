@@ -768,7 +768,7 @@ diagnosing orphaned cycles (open cycles without a matching trading engine).
 
 **Response (200):** List of open cycles with `cycle_public_id`, `shard_key`,
 `instrument_public_id`, `exchange`, `mode`, `wallet_public_id`, `direction`,
-`max_qty`, `opened_at`, and `age_hours`.
+`max_qty` (per-cycle peak, not lifetime), `opened_at`, and `age_hours`.
 
 ### POST /api/position-cycles/close-orphan
 

@@ -1780,6 +1780,11 @@ class PositionCycle(TemporalMixin, Base):
     instrument/wallet/mode are identical. Created when a shard's position
     goes flat -> non-flat, closed when it returns to zero, flipped (close +
     open) atomically when the sign reverses in a single fill.
+
+    Attributes:
+        max_qty: Per-cycle peak absolute quantity (NOT lifetime). Resets to
+            abs(opening_qty) on each new cycle. See column docstring for the
+            worked example + UI scope rule.
     """
 
     __tablename__ = "position_cycles"
@@ -1820,7 +1825,21 @@ class PositionCycle(TemporalMixin, Base):
     wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False, index=True)
     operator_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
     direction: Mapped[str] = mapped_column(String(8))
-    max_qty: Mapped[float] = mapped_column(Float)
+    max_qty: Mapped[float] = mapped_column(
+        Float,
+        doc=(
+            "Per-cycle peak absolute quantity (NOT lifetime). Accumulates "
+            "max(abs(position_qty)) across the fills of a SINGLE open->close "
+            "cycle. Resets to abs(opening_qty) on each new cycle on the same "
+            "shard. Example: cycle C1 opens with 1 unit, scales to 3 units, "
+            "closes -> max_qty=3. A subsequent cycle C2 on the same shard "
+            "opening with 2 units starts a fresh max_qty=2, NOT max(3, 2). "
+            "UI rendering MUST scope to the cycle's opened_at/closed_at "
+            "window; never sum or max across cycles. Updated monotonically "
+            "via update_position_cycle_max_qty - silent no-op if the new "
+            "value is not strictly greater than the current."
+        ),
+    )
     status: Mapped[str] = mapped_column(String(16), index=True)
     opened_at: Mapped[datetime] = mapped_column(TZDateTime())
     closed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)

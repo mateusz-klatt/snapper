@@ -572,6 +572,16 @@ inherit stale stop levels. Orphan cycles (open rows without a matching
 engine) can be detected and closed via admin endpoints at
 `/api/position-cycles/` (shipped 2026-04-13).
 
+**`max_qty` is per-cycle, not lifetime.** Each `position_cycles` row
+tracks the peak absolute quantity reached within its own
+`opened_at → closed_at` window. A new cycle on the same shard starts
+a fresh accumulator at `abs(opening_qty)`; it does not inherit or
+max against prior cycles' peaks. This matches the bracket-evaluator
+contract: a bracket attaching to cycle C1 is sized against C1's
+peak, not against all-time peak. A future UI surfacing `max_qty`
+must scope to the individual cycle row; summing or max-ing across
+cycles would conflate independent trading episodes.
+
 ## Security
 
 ### Settings Encryption
