@@ -1522,7 +1522,7 @@ def _create_underlying_router() -> APIRouter:
         "/underlyings/{ticker}/continuous",
         responses={
             400: {"description": "Invalid parameters"},
-            404: {"description": "Underlying not found or no contracts"},
+            404: {"description": "Underlying not found"},
             500: {"description": "Internal server error"},
         },
     )
@@ -1569,6 +1569,8 @@ def _create_underlying_router() -> APIRouter:
 
         Raises:
             HTTPException: 400 for invalid params, 404 if underlying not found.
+                Returns 200 with empty payload when the underlying exists but
+                has no contracts / no candles in the requested range.
         """
         try:
             if method not in ("unadjusted", "ratio", "panama"):

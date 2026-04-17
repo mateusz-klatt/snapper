@@ -2194,6 +2194,8 @@ export type Paths = {
          *
          *     Raises:
          *         HTTPException: 400 for invalid params, 404 if underlying not found.
+         *             Returns 200 with empty payload when the underlying exists but
+         *             has no contracts / no candles in the requested range.
          */
         get: Operations["get_continuous_series_api_underlyings__ticker__continuous_get"];
         put?: never;
@@ -10647,7 +10649,7 @@ export interface Operations {
                 };
                 content?: never;
             };
-            /** @description Underlying not found or no contracts */
+            /** @description Underlying not found */
             404: {
                 headers: {
                     [name: string]: unknown;

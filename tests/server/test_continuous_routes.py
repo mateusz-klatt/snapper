@@ -281,3 +281,35 @@ class TestGetContinuousSeries:
         )
         assert response.status_code == 422
         client.close()
+
+    def test_returns_200_empty_for_unknown_contract_family(self) -> None:
+        """R4: valid underlying + empty builder result returns 200 with empty payload.
+
+        Pins the contract that the endpoint never 404s on "no contracts in
+        range" — only on "underlying not found". The OpenAPI description
+        was tightened to match (dropping the "or no contracts" clause),
+        so this test guards against future refactors that accidentally
+        introduce a 404 for empty-series cases.
+        """
+        build_result = BuildResult(
+            candles=[],
+            contracts_used=[],
+            roll_points=[],
+            failed_roll=None,
+        )
+        repo = AsyncMock()
+        repo.get_underlying_by_ticker = AsyncMock(return_value=_make_underlying())
+
+        with patch("snapper.server.app.ContinuousContractBuilder") as mock_builder_cls:
+            mock_builder = AsyncMock()
+            mock_builder.build = AsyncMock(return_value=build_result)
+            mock_builder_cls.return_value = mock_builder
+            client = _create_client(repo)
+            response = client.get(f"/api/underlyings/SPX/continuous{_BASE_PARAMS}")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["type"] == "continuous_candle_list"
+        assert data["count"] == 0
+        assert data["payload"] == []
+        client.close()

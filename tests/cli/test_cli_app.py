@@ -3787,8 +3787,10 @@ def test_build_continuous_with_explicit_dates(
 def test_build_continuous_rejects_negative_rollover_days(cli_runner: CliRunner) -> None:
     """R2: --rollover-days=-1 must exit non-zero before builder is invoked.
 
-    typer.Option(min=0) rejects the value at CLI parse time with a usage
-    error naming the rollover field.
+    Given: build-continuous CLI command with typer.Option(min=0, max=365),
+    When: invoked with --rollover-days=-1,
+    Then: typer exits non-zero at parse time with the rollover field
+        named in the error output, without invoking the builder.
     """
     result = cli_runner.invoke(
         app,
@@ -3808,8 +3810,10 @@ def test_build_continuous_rejects_negative_rollover_days(cli_runner: CliRunner) 
 def test_build_continuous_rejects_excessive_rollover_days(cli_runner: CliRunner) -> None:
     """R2: --rollover-days=366 must exit non-zero before builder is invoked.
 
-    typer.Option(max=365) rejects the value at CLI parse time with a usage
-    error naming the rollover field.
+    Given: build-continuous CLI command with typer.Option(min=0, max=365),
+    When: invoked with --rollover-days=366,
+    Then: typer exits non-zero at parse time with the rollover field
+        named in the error output, without invoking the builder.
     """
     result = cli_runner.invoke(
         app,
