@@ -445,6 +445,80 @@ Key concepts:
     - `close_and_insert()` / `close_and_insert_sync()` — Repository helpers
         that atomically close the current row and insert a new version
 
+### Batch atomicity guarantees
+
+True SCD2 batch writes (`upsert_candles` at `repository.py:2552-2599`
++ `upsert_market_snapshots` at `:3019-3061`) and single-row close+insert
+methods (`revise_*`, `close_and_insert` at `:292-342`) commit as
+all-or-nothing transactions. The pattern is:
+
+```python
+async with self.session() as s:          # opens a transaction
+    for row in rows:
+        # SELECT ... FOR UPDATE the active version
+        # UPDATE close (set known_to = bus_time)
+        # s.add(new row)
+    await s.commit()                     # single commit
+```
+
+If any row in the loop raises (IntegrityError, serialization failure,
+connection drop, `await` cancellation), the transaction aborts and
+**no** close/insert pair from this batch lands in the DB. The batch
+must be retried in full; there is no partial-progress mode.
+
+Append-only batch writes do NOT use the SCD2 close-insert pattern and
+split into two shapes:
+
+-   `upsert_trades` (`repository.py:2601-2605`) delegates to the
+    dialect-aware `_upsert_batch` (`:2505-2550`). On native dialects
+    (SQLite / Postgres) it uses `INSERT ... ON CONFLICT DO NOTHING` in a
+    single `s.execute` — atomic per-batch, and duplicates are silently
+    skipped. On the fallback row-by-row path it wraps each row in a
+    `begin_nested()` SAVEPOINT; successful rows stay in the outer
+    transaction and are committed at the final `await s.commit()`,
+    while rows that hit `IntegrityError` are skipped. This trades
+    all-or-nothing for conflict tolerance.
+-   `upsert_ticks` (`repository.py:2607-2617`) is plain
+    `session.add_all(rows)` + single `await s.commit()`. Atomic
+    per-batch on every dialect — it is not routed through
+    `_upsert_batch` and has no duplicate-skipping behaviour.
+
+Serialization on the same natural key: on **PostgreSQL**, row-level
+`SELECT ... FOR UPDATE` serializes concurrent transactions via MVCC
+row locks — a second session waiting on a locked active row observes
+the first session's close+insert only after the first commits; both
+batches complete without error and produce a clean SCD2 chain.
+
+On **SQLite** (aiosqlite), `SELECT ... FOR UPDATE` is a no-op and the
+default `BEGIN DEFERRED` isolation does not acquire a write lock at
+SELECT time — two concurrent tasks can both read the same active
+row before either writes. The first writer to COMMIT wins; the second
+writer's INSERT then collides on the `public_id` UNIQUE index and
+raises `sqlalchemy.exc.IntegrityError`. The final DB state is still a
+valid SCD2 chain (exactly one active row, carried-forward `public_id`
+preserved, no orphan inserts) — one writer is simply reported the
+conflict via exception rather than implicitly serialized. Callers on
+SQLite that race on the same natural key must either retry the failed
+batch or rely on the single-publisher-per-exchange invariant to avoid
+the contention entirely.
+
+**At-scale implication:** under heavy multi-publisher contention on
+the same natural key, batches serialize strictly. If a long-running
+batch holds the lock for many milliseconds per row, throughput falls
+linearly in contention. The current single-publisher-per-exchange
+shape makes this a non-issue; revisit when Trade Runtime Phase 4
+(multi-instance) lands.
+
+**Non-atomic fallback (`_upsert_batch` row-by-row path):** the
+dialect-agnostic fallback at `repository.py:2540-2550` wraps each row
+in a `begin_nested()` SAVEPOINT and continues on `IntegrityError`.
+Successful rows are NOT committed immediately — they are held in the
+outer transaction and finalised only by the final `await s.commit()`.
+This trades all-or-nothing for conflict tolerance — the caller sees
+`inserted = N_successful`, not all-or-nothing. Used only for
+append-only paths where a duplicate key is a genuine no-op. Never
+used for SCD2 close-and-insert.
+
 ## Processes
 
 The system manages processes through Process Manager:
