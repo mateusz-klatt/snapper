@@ -286,7 +286,6 @@ def _build_mock_settings() -> Mock:
     mock_settings.ui_origin = ""
     mock_settings.session_same_site = "lax"
     mock_settings.session_domain = ""
-    mock_settings.use_durable_commands = False
     return mock_settings
 
 

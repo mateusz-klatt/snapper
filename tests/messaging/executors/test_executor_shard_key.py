@@ -32,7 +32,6 @@ class ShardKeyExecutor(ExchangeExecutorService[Any]):
             zmq_broker_xpub="xpub",
             zmq_broker_xsub="xsub",
             master_password=None,
-            use_durable_commands=False,
         )
 
     def _create_exchange_client(self) -> Any:

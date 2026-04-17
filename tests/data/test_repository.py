@@ -3879,8 +3879,7 @@ async def test_trade_command_query_projections_carry_leverage_and_reduce_only(
     """Verify trade command query projections expose leverage and reduce_only.
 
     Given: A database with a trade command persisted with leverage=4 and
-        reduce_only=True (the durable command path used when
-        use_durable_commands=True),
+        reduce_only=True (the durable outbox command path),
     When: get_undispatched_commands, get_active_commands_for_shard, and
         get_active_commands_for_exchange are called,
     Then: All three projections return rows that include the leverage and
@@ -3991,7 +3990,7 @@ async def test_update_trade_command_status_carries_forward_leverage_and_reduce_o
     """Verify update_trade_command_status SCD2 cycle preserves leverage/reduce_only.
 
     Given: A trade command persisted with leverage=4/reduce_only=True (the durable
-        command path used when use_durable_commands=True),
+        outbox command path),
     When: update_trade_command_status is called twice to cycle created → dispatched
         → accepted (each call closes the old SCD2 row and inserts a new one),
     Then: After both status transitions get_active_commands_for_shard still returns

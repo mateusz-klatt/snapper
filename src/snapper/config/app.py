@@ -535,18 +535,6 @@ class AppSettings:
         return self._get_db_setting("session_domain", "")
 
     @property
-    def use_durable_commands(self) -> bool:
-        """Return whether durable command mode is enabled.
-
-        When True, engine delegates order publishing to the outbox
-        dispatcher and VenueEvent writes are fail-closed.
-
-        Returns:
-            True if durable mode enabled, False (default) for dual-write.
-        """
-        return self._get_db_setting("use_durable_commands", False)
-
-    @property
     def recon_balance_threshold(self) -> float:
         """Return the absolute threshold for balance mismatch warnings.
 

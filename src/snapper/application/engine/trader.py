@@ -1838,15 +1838,17 @@ class TraderCoordinator(RegisterableProcess):
         self.signal_subscriber.subscribe("orders.events.")
 
     def _setup_trade_services(self) -> None:
-        """Initialize trade domain services and optional outbox dispatcher.
+        """Initialize trade domain services + outbox dispatcher.
 
         TradeService and BalanceService are initialized in __init__.
-        OutboxDispatcher is created when use_durable_commands is enabled
-        in settings. Otherwise, dual-write mode: engine publishes
-        directly to ZMQ while also writing TradeCommand to DB.
+        The durable outbox dispatcher always owns the dispatch path
+        when a real SQLAlchemyRepository is wired; the engine writes
+        TradeCommand rows and notifies the outbox, which in turn
+        publishes on ZMQ. Tests running without a SQL-backed repo
+        (e.g. MagicMock) skip outbox construction and the engine's
+        in-process ZMQ send path is exercised directly.
         """
-        use_durable = getattr(self.settings, "use_durable_commands", False)
-        if use_durable and isinstance(self.repository, SQLAlchemyRepository):
+        if isinstance(self.repository, SQLAlchemyRepository):
             self.outbox = OutboxDispatcher(
                 repository=self.repository,
                 publish_fn=self._outbox_publish,
@@ -1854,29 +1856,22 @@ class TraderCoordinator(RegisterableProcess):
             )
             logger.info("TraderCoordinator: durable command mode (outbox active)")
         else:
-            logger.info("TraderCoordinator: dual-write mode (direct ZMQ + DB audit)")
+            logger.info("TraderCoordinator: no SQL repo, outbox disabled for tests only")
 
     def _create_reconciliation_tasks(self) -> list[asyncio.Task[None]]:
-        """Create background tasks for reconciliation + divergence observability.
+        """Create per-exchange reconciliation background tasks.
 
-        Two independent concerns bundled here:
-
-        - Reconciliation loops (one per configured exchange, querying
-          ``TradeCommand.exchange``) spawn only in durable mode; they
-          share the ``TradeService`` for circuit-breaker state.
-        - The divergence-detector snapshot loop spawns whenever the
-          detector is enabled, INDEPENDENT of durable mode. Operators
-          need the detector running in dual-write-only mode to verify
-          the wiring before the cutover (see
-          ``docs/operations.md`` pre-flight flow).
+        Reconciliation loops (one per configured exchange, querying
+        ``TradeCommand.exchange``) share the ``TradeService`` for
+        circuit-breaker state. Skipped when no SQL-backed repository
+        is wired (tests running with MagicMock repos).
 
         Returns:
-            List of asyncio tasks (may be empty if both features are
-            disabled).
+            List of asyncio tasks, one per supported exchange; empty
+            list when the repository is not a ``SQLAlchemyRepository``.
         """
         tasks: list[asyncio.Task[None]] = []
-        use_durable = getattr(self.settings, "use_durable_commands", False)
-        if not use_durable or not isinstance(self.repository, SQLAlchemyRepository):
+        if not isinstance(self.repository, SQLAlchemyRepository):
             return tasks
         exchanges: list[str] = list(get_args(OrderExchange))
         for exchange_name in exchanges:

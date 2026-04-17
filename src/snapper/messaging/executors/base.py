@@ -1014,16 +1014,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             )
         except Exception:
             event_type = params["event_type"]
-            use_durable = getattr(self.settings, "use_durable_commands", False)
-            if use_durable:
-                logger.error(
-                    f"[{exchange_name}] FAIL-CLOSED: venue event {event_type} write failed "
-                    f"for {instrument}. Durable mode requires all events persisted."
-                )
-                raise
-            logger.exception(
-                f"[{exchange_name}] Failed to record venue event {event_type} for {instrument}"
+            logger.error(
+                f"[{exchange_name}] FAIL-CLOSED: venue event {event_type} write failed "
+                f"for {instrument}. Durable mode requires all events persisted."
             )
+            raise
 
     async def _reconciliation_handler(self) -> None:
         """Periodic exchange API reconciliation.

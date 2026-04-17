@@ -94,7 +94,6 @@ def _patch_settings_for_e2e(
     mock_settings.zmq_broker_xsub = xsub_endpoint
     mock_settings.zmq_broker_xpub = xpub_endpoint
     mock_settings.has_db_access = True
-    mock_settings.use_durable_commands = False
 
     def _return_mock(_service: object = None) -> object:
         return mock_settings

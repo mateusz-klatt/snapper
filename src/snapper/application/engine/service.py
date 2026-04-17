@@ -321,11 +321,14 @@ class TradingEngineService:
         leverage: int | None = None,
         reduce_only: bool = False,
     ) -> str:
-        """Publish order request to ZMQ execution topic.
+        """Publish order request via the durable-outbox path.
 
-        If a repository is configured, writes a durable TradeCommand to DB
-        before publishing to ZMQ (dual-write for migration safety).
-        Notifies the outbox dispatcher after DB commit.
+        Writes a durable ``TradeCommand`` row to DB and notifies the
+        ``OutboxDispatcher`` — the dispatcher owns the ZMQ publish.
+        The dual-write in-process fallback remains for unit tests that
+        construct the engine without an outbox (MagicMock repos, no
+        SQL backing); production always wires the outbox via
+        ``TraderCoordinator._setup_trade_services``.
 
         Args:
             side: Order side ("buy" or "sell").

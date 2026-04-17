@@ -403,25 +403,18 @@ snapper db-downgrade  # Rollback
 
 ## Trade Runtime
 
-The trade runtime supports two deployment modes controlled by the
-`use_durable_commands` database setting (default: `false`):
+The trade runtime always uses the durable (outbox-driven) dispatch
+path. `TradingEngineService` writes `TradeCommand` rows to the
+database; `OutboxDispatcher` polls the table and publishes undispatched
+commands to ZMQ. Executor `VenueEvent` writes are fail-closed — a
+failed persist raises before the executor acknowledges the venue event.
 
--   **Dual-write** (default) — `TradingEngineService` writes `TradeCommand` rows and also
-    publishes directly to ZMQ. Durable tables are populated in the background,
-    and `direct_dispatched` prevents the outbox from replaying already sent
-    commands.
--   **Durable** (outbox-driven) — `TradingEngineService` writes `TradeCommand` rows only.
-    `OutboxDispatcher` publishes from the database, and executor `VenueEvent`
-    writes become fail-closed on the accepted/fill paths.
-
-The `TraderCoordinator` class acts as the trade runtime coordinator and integrates
-`TradeService` (command lifecycle) and `BalanceService` (balance tracking) in both
-modes. When `use_durable_commands=true`, it also starts the outbox dispatcher and
-the reconciliation/circuit-breaker task. In dual-write mode, the runtime still
-writes `TradeCommand` rows, consumes `orders.events.*` to shadow-update trade
-projections, and persists checkpoints for recovery. Canonical `Order` and
-`Execution` rows are persisted on the exchange/executor path. Restart the trade
-runtime and executors after changing `use_durable_commands`.
+The `TraderCoordinator` class acts as the trade runtime coordinator
+and integrates `TradeService` (command lifecycle) and `BalanceService`
+(balance tracking). It spawns the outbox dispatcher (when a
+`SQLAlchemyRepository` is wired) plus per-exchange reconciliation
+loops that feed the circuit breaker. Canonical `Order` and `Execution`
+rows are persisted on the exchange/executor path.
 
 ## Bitemporal Model
 

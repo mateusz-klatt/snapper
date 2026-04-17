@@ -5746,27 +5746,6 @@ async def test_record_venue_event_paper_strategy_tag_shard_key() -> None:
 
 
 @pytest.mark.asyncio
-async def test_record_venue_event_handles_db_error() -> None:
-    """Venue event DB write failure is logged but does not propagate.
-
-    Given: an executor with a SQLAlchemyRepository that raises on insert,
-    When: _record_venue_event is called,
-    Then: no exception propagates to the caller.
-    """
-    ex: Any = MergedDummyExecutor()
-    mock_repo = AsyncMock(spec=SQLAlchemyRepository)
-    mock_repo.insert_venue_event = AsyncMock(side_effect=RuntimeError("DB down"))
-    ex.repository = mock_repo
-    await ex._record_venue_event(
-        {
-            "event_type": "fill_observed",
-            "exchange_name": "kraken",
-            "instrument": "BTC-USD",
-        }
-    )
-
-
-@pytest.mark.asyncio
 async def test_handle_cancellation_records_terminal_venue_event() -> None:
     """Cancellation records an order_terminal venue event.
 
@@ -5817,18 +5796,25 @@ async def test_handle_cancellation_without_pending_uses_execution_symbol() -> No
 
 
 @pytest.mark.asyncio
-async def test_record_venue_event_fail_closed_in_durable_mode() -> None:
-    """VenueEvent write failure raises in durable command mode.
+async def test_record_venue_event_fail_closed() -> None:
+    """VenueEvent write failure always fail-closes the executor.
 
-    Given: an executor with use_durable_commands=True and a failing repo,
-    When: _record_venue_event is called,
-    Then: RuntimeError propagates (fail-closed).
+    Given:
+        An executor wired to a failing ``SQLAlchemyRepository``.
+
+    When:
+        ``_record_venue_event`` is called.
+
+    Then:
+        ``RuntimeError`` propagates unchanged — the durable-only path
+        requires every venue event to persist before the executor
+        acknowledges it.
     """
     ex: Any = MergedDummyExecutor()
     mock_repo = AsyncMock(spec=SQLAlchemyRepository)
     mock_repo.insert_venue_event = AsyncMock(side_effect=RuntimeError("DB down"))
     ex.repository = mock_repo
-    ex.settings = SimpleNamespace(use_durable_commands=True)
+    ex.settings = SimpleNamespace()
     with pytest.raises(RuntimeError, match="DB down"):
         await ex._record_venue_event(
             {
@@ -5847,7 +5833,7 @@ def test_create_reconciliation_task_always_none() -> None:
     Then: None is returned because reconciliation runs in coordinator.
     """
     ex: Any = MergedDummyExecutor()
-    ex.settings = SimpleNamespace(use_durable_commands=True)
+    ex.settings = SimpleNamespace()
     task = ex._create_reconciliation_task("kraken")
     assert task is None
 

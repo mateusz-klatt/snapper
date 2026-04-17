@@ -1423,36 +1423,51 @@ async def test_sync_fill_to_trade_service() -> None:
     assert coord.balance_service.get_cash(engine._shard_key) != 0.0
 
 
-def test_setup_trade_services_with_sqlalchemy_repo() -> None:
-    """Coordinator setup runs in dual-write mode without outbox.
+def test_setup_trade_services_without_sqlalchemy_repo_skips_outbox() -> None:
+    """Outbox is skipped when the repository isn't SQL-backed.
 
-    Given: a TraderCoordinator with trade services,
-    When: _setup_trade_services is called,
-    Then: outbox remains None (outbox activates at cutover phase).
+    Given:
+        A TraderCoordinator wired with a plain ``MagicMock`` repository
+        (not a ``SQLAlchemyRepository``) — the test-only path.
+
+    When:
+        ``_setup_trade_services`` runs,
+
+    Then:
+        ``outbox`` stays ``None`` — there is no SQL engine to feed the
+        dispatcher, so the test-only in-process ZMQ fallback inside
+        ``TradingEngineService._send_order`` takes over.
     """
     coord = TraderCoordinator.__new__(TraderCoordinator)
     coord.trade_service = TradeService()
     coord.balance_service = BalanceService()
     coord.outbox = None
     coord.repository = MagicMock()
-    coord.settings = MagicMock(use_durable_commands=False)
+    coord.settings = MagicMock()
     coord._setup_trade_services()
     assert coord.outbox is None
 
 
-def test_setup_trade_services_durable_mode_creates_outbox() -> None:
-    """Coordinator creates outbox with publish_fn in durable mode.
+def test_setup_trade_services_creates_outbox_for_sql_repo() -> None:
+    """Coordinator always wires the outbox dispatcher when a SQL repo is present.
 
-    Given: a TraderCoordinator with use_durable_commands=True and SQLAlchemyRepository,
-    When: _setup_trade_services is called,
-    Then: outbox is created with a publish function.
+    Given:
+        A TraderCoordinator with a ``SQLAlchemyRepository`` (the
+        production configuration),
+
+    When:
+        ``_setup_trade_services`` runs,
+
+    Then:
+        An ``OutboxDispatcher`` is created with the coordinator's
+        publish function — the durable-only dispatch path.
     """
     coord = TraderCoordinator.__new__(TraderCoordinator)
     coord.trade_service = TradeService()
     coord.balance_service = BalanceService()
     coord.outbox = None
     coord.repository = MagicMock(spec=SQLAlchemyRepository)
-    coord.settings = MagicMock(use_durable_commands=True)
+    coord.settings = MagicMock()
     coord._setup_trade_services()
     assert coord.outbox is not None
 
@@ -1630,8 +1645,7 @@ async def test_outbox_publish_propagates_leverage_and_reduce_only() -> None:
     """Outbox publish forwards leverage and reduce_only into OrderRequestData.
 
     Given: a TraderCoordinator with a mocked msg_publisher and a TradeCommandRow
-        containing leverage=3 and reduce_only=True (mimicking the durable
-        command path used when use_durable_commands=True),
+        containing leverage=3 and reduce_only=True (the durable outbox path),
     When: _outbox_publish is called,
     Then: The published OrderRequestData carries the same leverage/reduce_only,
         so the executor (and downstream OrderData WS event + Order DB row)
@@ -1695,7 +1709,7 @@ async def test_run_trading_loop_includes_outbox_task() -> None:
     mock_outbox = MagicMock()
     mock_outbox.run = AsyncMock()
     coord.outbox = mock_outbox
-    coord.settings = MagicMock(use_durable_commands=False)
+    coord.settings = MagicMock()
     coord.repository = MagicMock()
     mock_sub = AsyncMock()
     mock_sub.recv_multipart = AsyncMock(side_effect=asyncio.CancelledError)
@@ -1865,18 +1879,25 @@ async def test_persist_checkpoint_handles_db_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_reconciliation_tasks_durable_mode() -> None:
-    """Coordinator creates per-exchange reconciliation tasks in durable mode.
+async def test_create_reconciliation_tasks_with_sql_repo() -> None:
+    """Coordinator creates per-exchange reconciliation tasks when SQL repo is wired.
 
-    Given: a TraderCoordinator with use_durable_commands=True and SQLAlchemyRepository,
-    When: _create_reconciliation_tasks is called,
-    Then: one task per known exchange is returned.
+    Given:
+        A TraderCoordinator with a ``SQLAlchemyRepository`` (the
+        production wiring).
+
+    When:
+        ``_create_reconciliation_tasks`` runs.
+
+    Then:
+        One task per known exchange is returned and can be cancelled
+        cleanly.
     """
     coord = TraderCoordinator.__new__(TraderCoordinator)
     coord.trade_service = TradeService()
     mock_repo = AsyncMock(spec=SQLAlchemyRepository)
     coord.repository = mock_repo
-    coord.settings = MagicMock(use_durable_commands=True)
+    coord.settings = MagicMock()
     tasks = coord._create_reconciliation_tasks()
     assert len(tasks) > 0
     for t in tasks:
@@ -1887,17 +1908,24 @@ async def test_create_reconciliation_tasks_durable_mode() -> None:
 
 @pytest.mark.asyncio
 async def test_run_trading_loop_with_recon_task() -> None:
-    """Trading loop includes reconciliation task when durable mode is active.
+    """Trading loop includes reconciliation task when a SQL repo is wired.
 
-    Given: a TraderCoordinator with durable mode enabled,
-    When: the trading loop starts and immediately cancels,
-    Then: no error occurs (reconciliation task runs alongside signals).
+    Given:
+        A TraderCoordinator with a ``SQLAlchemyRepository`` — the
+        production wiring that always spawns per-exchange
+        reconciliation loops.
+
+    When:
+        The trading loop starts and immediately cancels.
+
+    Then:
+        No error occurs (reconciliation tasks run alongside signals).
     """
     coord = TraderCoordinator.__new__(TraderCoordinator)
     coord.outbox = None
     mock_repo = AsyncMock(spec=SQLAlchemyRepository)
     coord.repository = mock_repo
-    coord.settings = MagicMock(use_durable_commands=True)
+    coord.settings = MagicMock()
     coord.trade_service = TradeService()
     mock_sub = AsyncMock()
     mock_sub.recv_multipart = AsyncMock(side_effect=asyncio.CancelledError)
