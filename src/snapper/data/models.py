@@ -2083,6 +2083,15 @@ class BacktestComparison(TemporalMixin, Base):
             sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
             postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
+        Index(
+            "uq_bc_active_pair_per_wallet",
+            "wallet_public_id",
+            "run_a_public_id",
+            "run_b_public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
     )
     wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), index=True)
     operator_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
