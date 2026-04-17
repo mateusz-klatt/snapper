@@ -20,10 +20,10 @@ from snapper.infrastructure.exchanges.adapters.kraken_futures import (
 )
 from snapper.infrastructure.exchanges.adapters.kraken_futures import parse_kraken_futures_trade
 from snapper.infrastructure.exchanges.adapters.kraken_futures import parse_kraken_futures_trade_list
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionFeeBreakdown
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 
 
 @pytest.fixture(autouse=True)
@@ -424,7 +424,7 @@ class TestParseKrakenFuturesFill:
         assert result.exec_type == "trade"
         assert result.symbol == "BTC-USD-PERP"
         assert result.side == OrderSideEnum.BUY
-        assert result.order_type == OrderTypeEnum.LIMIT
+        assert result.order_type == ExchangeOrderTypeEnum.LIMIT
         assert result.last_qty == pytest.approx(5.0)
         assert result.last_price == pytest.approx(66500.0)
         assert result.exec_id == "fill-001"
@@ -551,8 +551,8 @@ class TestParseKrakenFuturesOrderStatus:
         assert result.exec_type == "status"
         assert result.symbol == "BTC-USD-PERP"
         assert result.side == OrderSideEnum.BUY
-        assert result.order_type == OrderTypeEnum.LIMIT
-        assert result.order_status == OrderStatusEnum.OPEN
+        assert result.order_type == ExchangeOrderTypeEnum.LIMIT
+        assert result.order_status == ExchangeOrderStatusEnum.OPEN
         assert result.cum_qty == pytest.approx(3.0)
         assert result.order_qty == pytest.approx(10.0)
         assert result.limit_price == pytest.approx(66000.0)
@@ -576,7 +576,7 @@ class TestParseKrakenFuturesOrderStatus:
         }
         mapper = {"PF_ETHUSD": "ETH-USD-PERP"}
         result = parse_kraken_futures_order_status(data, lambda s: mapper[s])
-        assert result.order_status == OrderStatusEnum.CLOSED
+        assert result.order_status == ExchangeOrderStatusEnum.CLOSED
         assert result.exec_type == "status"
         assert result.side == OrderSideEnum.SELL
 
@@ -597,8 +597,8 @@ class TestParseKrakenFuturesOrderStatus:
         }
         mapper = {"PF_XBTUSD": "BTC-USD-PERP"}
         result = parse_kraken_futures_order_status(data, lambda s: mapper[s])
-        assert result.order_type == OrderTypeEnum.STOP_LOSS
-        assert result.order_status == OrderStatusEnum.OPEN
+        assert result.order_type == ExchangeOrderTypeEnum.STOP_LOSS
+        assert result.order_status == ExchangeOrderStatusEnum.OPEN
 
     def test_parse_take_profit_order_type(self) -> None:
         """Parse an order with take_profit type.
@@ -617,7 +617,7 @@ class TestParseKrakenFuturesOrderStatus:
         }
         mapper = {"PF_XBTUSD": "BTC-USD-PERP"}
         result = parse_kraken_futures_order_status(data, lambda s: mapper[s])
-        assert result.order_type == OrderTypeEnum.TAKE_PROFIT
+        assert result.order_type == ExchangeOrderTypeEnum.TAKE_PROFIT
         assert result.side == OrderSideEnum.SELL
 
     def test_zero_limit_price_becomes_none(self) -> None:

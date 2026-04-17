@@ -18,11 +18,11 @@ from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_ticker
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_trade
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_trade_list
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TimeInForceEnum
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
@@ -421,8 +421,8 @@ def test_parse_kraken_execution_valid() -> None:
     assert result.order_id == "OQCLSE-BW3P3-BUCMWZ"
     assert result.exec_type == "trade"
     assert result.side == OrderSideEnum.BUY
-    assert result.order_type == OrderTypeEnum.LIMIT
-    assert result.order_status == OrderStatusEnum.OPEN
+    assert result.order_type == ExchangeOrderTypeEnum.LIMIT
+    assert result.order_status == ExchangeOrderStatusEnum.OPEN
     assert result.cum_qty == pytest.approx(0.5)
     assert result.fees is not None
     assert len(result.fees) == 2
@@ -461,8 +461,8 @@ def test_parse_kraken_execution_list_valid() -> None:
     assert len(result) == 2
     assert result[0].symbol == "BTC-USD"
     assert result[1].symbol == "ETH-USD"
-    assert result[0].order_status == OrderStatusEnum.OPEN
-    assert result[1].order_status == OrderStatusEnum.CLOSED
+    assert result[0].order_status == ExchangeOrderStatusEnum.OPEN
+    assert result[1].order_status == ExchangeOrderStatusEnum.CLOSED
 
 
 def test_parse_kraken_execution_list_skips_bad_item(mock_symbol_mapper: Any) -> None:

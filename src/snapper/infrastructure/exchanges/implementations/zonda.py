@@ -51,11 +51,11 @@ from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
@@ -712,10 +712,10 @@ class ZondaExchangeClient(ExchangeClientBase):
             client_order_id=ccxt_order.get("clientOrderId"),
             symbol=symbol,
             side=OrderSideEnum(ccxt_order.get("side", "buy")),
-            type=OrderTypeEnum(ccxt_order.get("type", "limit")),
+            type=ExchangeOrderTypeEnum(ccxt_order.get("type", "limit")),
             amount=float(ccxt_order.get("amount") or 0),
             price=float(ccxt_order["price"]) if ccxt_order.get("price") else None,
-            status=OrderStatusEnum(ccxt_order.get("status", "open")),
+            status=ExchangeOrderStatusEnum(ccxt_order.get("status", "open")),
             filled=float(ccxt_order.get("filled") or 0),
             remaining=float(ccxt_order.get("remaining") or 0),
             timestamp=float(ccxt_order.get("timestamp") or time.time() * 1000) / 1000.0,
@@ -760,7 +760,7 @@ class ZondaExchangeClient(ExchangeClientBase):
                 type=request.type,
                 amount=float(request.amount),
                 price=float(request.price) if request.price else None,
-                status=OrderStatusEnum.PENDING,
+                status=ExchangeOrderStatusEnum.PENDING,
                 filled=0.0,
                 remaining=float(request.amount),
                 timestamp=time.time(),
@@ -802,10 +802,10 @@ class ZondaExchangeClient(ExchangeClientBase):
                     client_order_id=None,
                     symbol=symbol or "",
                     side=OrderSideEnum.BUY,
-                    type=OrderTypeEnum.LIMIT,
+                    type=ExchangeOrderTypeEnum.LIMIT,
                     amount=0.0,
                     price=None,
-                    status=OrderStatusEnum.CANCELED,
+                    status=ExchangeOrderStatusEnum.CANCELED,
                     filled=0.0,
                     remaining=0.0,
                     timestamp=time.time(),
@@ -818,7 +818,7 @@ class ZondaExchangeClient(ExchangeClientBase):
                 self._ccxt_client.cancel_order, order_id, ccxt_symbol, cancel_params
             )
             snapshot = self._convert_ccxt_order(order_data, symbol)
-            snapshot.status = OrderStatusEnum.CANCELED
+            snapshot.status = ExchangeOrderStatusEnum.CANCELED
             return snapshot
         except Exception as e:
             logger.error(f"Failed to cancel order {order_id}: {e}")
@@ -853,7 +853,7 @@ class ZondaExchangeClient(ExchangeClientBase):
     async def get_orders(
         self,
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         """Fetch orders with optional filtering.
@@ -874,11 +874,11 @@ class ZondaExchangeClient(ExchangeClientBase):
             raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
         try:
             ccxt_symbol = native_to_ccxt(symbol) if symbol else None
-            if status == OrderStatusEnum.OPEN:
+            if status == ExchangeOrderStatusEnum.OPEN:
                 ccxt_orders = await asyncio.to_thread(
                     self._ccxt_client.fetch_open_orders, ccxt_symbol, None, limit
                 )
-            elif status == OrderStatusEnum.CLOSED:
+            elif status == ExchangeOrderStatusEnum.CLOSED:
                 ccxt_orders = await asyncio.to_thread(
                     self._ccxt_client.fetch_closed_orders, ccxt_symbol, None, limit
                 )

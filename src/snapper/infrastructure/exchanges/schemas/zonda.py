@@ -11,10 +11,10 @@ from pydantic import Field
 from pydantic import field_validator
 
 from snapper.core.types import TradeSideEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.schemas.base import ExchangeResponse
@@ -346,8 +346,8 @@ class ZondaExecutionData(ExchangeResponse):
             exec_type="trade",
             symbol=self.market,
             side=self.side,
-            order_type=OrderTypeEnum.LIMIT,
-            order_status=OrderStatusEnum.FILLED,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.FILLED,
             timestamp=self.timestamp,
             exec_id=self.id,
             last_qty=self.quantity,

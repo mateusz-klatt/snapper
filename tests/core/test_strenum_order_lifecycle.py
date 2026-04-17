@@ -54,42 +54,83 @@ _ORDER_EVENT_TYPE_MEMBERS = {
 
 @pytest.mark.parametrize(("member", "value"), list(_ORDER_TYPE_VALUES.items()))
 def test_order_type_values(member: OrderTypeEnum, value: str) -> None:
-    """Given: OrderTypeEnum members. When: reading .value. Then: byte-identical strings."""
+    """Each OrderTypeEnum member carries its documented domain value.
+
+    Given: the 4-member OrderTypeEnum domain enum,
+    When: reading .value on every member,
+    Then: every value matches the corresponding string from the
+        original Literal alias byte-for-byte.
+    """
     assert member.value == value
     assert member == value
 
 
 @pytest.mark.parametrize(("member", "value"), list(_ORDER_STATUS_VALUES.items()))
 def test_order_status_values(member: OrderStatusEnum, value: str) -> None:
-    """Given: OrderStatusEnum members. When: reading .value. Then: byte-identical strings."""
+    """Each OrderStatusEnum member carries its documented domain value.
+
+    Given: the 7-state OrderStatusEnum domain enum,
+    When: reading .value on every member,
+    Then: every value matches the pre-rename Literal alias strings
+        (British-spelling CANCELLED, NEW/SUBMITTED/OPEN/FILLED/
+        PARTIALLY_FILLED/REJECTED).
+    """
     assert member.value == value
     assert member == value
 
 
 @pytest.mark.parametrize(("member", "value"), list(_ORDER_EVENT_VALUES.items()))
 def test_order_event_values(member: OrderEventEnum, value: str) -> None:
-    """Given: OrderEventEnum members. When: reading .value. Then: byte-identical strings."""
+    """Each OrderEventEnum member carries its documented wire value.
+
+    Given: the 7-event OrderEventEnum domain enum,
+    When: reading .value on every member,
+    Then: every value matches the pre-rename Literal alias strings
+        used as the ``orders.events.{exchange}.{instrument}.{event}``
+        ZMQ topic suffix.
+    """
     assert member.value == value
     assert member == value
 
 
 @pytest.mark.parametrize("member", list(_ORDER_TYPE_VALUES))
 def test_order_literal_accepts_enum_member_order_type(member: OrderTypeEnum) -> None:
-    """Given: an OrderTypeEnum member. When: assigned to OrderType-annotated variable. Then: it holds."""
+    """OrderType Literal alias accepts every OrderTypeEnum member.
+
+    Given: the OrderType Literal alias declared over enum members,
+    When: an OrderTypeEnum member is assigned to an OrderType-annotated
+        variable,
+    Then: the assignment holds at runtime and equality with the member
+        is preserved.
+    """
     value: OrderType = member
     assert value == member
 
 
 @pytest.mark.parametrize("member", list(_ORDER_STATUS_VALUES))
 def test_order_literal_accepts_enum_member_order_status(member: OrderStatusEnum) -> None:
-    """Given: an OrderStatusEnum member. When: assigned to OrderStatus-annotated variable. Then: it holds."""
+    """OrderStatus Literal alias accepts every OrderStatusEnum member.
+
+    Given: the OrderStatus Literal alias declared over enum members,
+    When: an OrderStatusEnum member is assigned to an
+        OrderStatus-annotated variable,
+    Then: the assignment holds at runtime and equality with the member
+        is preserved.
+    """
     value: OrderStatus = member
     assert value == member
 
 
 @pytest.mark.parametrize("member", list(_ORDER_EVENT_VALUES))
 def test_order_literal_accepts_enum_member_order_event(member: OrderEventEnum) -> None:
-    """Given: an OrderEventEnum member. When: assigned to OrderEvent-annotated variable. Then: it holds."""
+    """OrderEvent Literal alias accepts every OrderEventEnum member.
+
+    Given: the OrderEvent Literal alias declared over enum members,
+    When: an OrderEventEnum member is assigned to an
+        OrderEvent-annotated variable,
+    Then: the assignment holds at runtime and equality with the member
+        is preserved.
+    """
     value: OrderEvent = member
     assert value == member
 
@@ -138,7 +179,14 @@ def test_enum_round_trip_from_string(
     enum_cls: type[OrderTypeEnum] | type[OrderStatusEnum] | type[OrderEventEnum],
     member: OrderTypeEnum | OrderStatusEnum | OrderEventEnum,
 ) -> None:
-    """Given: a raw string value. When: constructing enum from value. Then: the same member is returned."""
+    """Every enum member round-trips through its raw-string value.
+
+    Given: a domain enum class and one of its members,
+    When: reconstructing the enum from the member's .value string,
+    Then: the returned instance IS the original member (identity,
+        not just equality), proving ``EnumClass(value)`` is a stable
+        inverse of ``member.value``.
+    """
     result = enum_cls(member.value)
     assert result is member
 

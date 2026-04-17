@@ -18,9 +18,9 @@ from scripts.test_live_orders import run_zonda
 from scripts.test_live_orders import safe_get_ticker
 from scripts.test_live_orders import snapshot_to_dict
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 
 
@@ -59,10 +59,10 @@ def test_snapshot_to_dict_converts_enums() -> None:
         client_order_id="cli-1",
         symbol="BTC-EUR",
         side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=0.001,
         price=50000.0,
-        status=OrderStatusEnum.OPEN,
+        status=ExchangeOrderStatusEnum.OPEN,
         filled=0.0,
         remaining=0.001,
         timestamp=1234567890.0,
@@ -204,10 +204,10 @@ async def test_run_walutomat_passive_buy(capsys: pytest.CaptureFixture[str]) -> 
         client_order_id="cli-1",
         symbol="EUR-PLN",
         side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=1.0,
         price=4.0,
-        status=OrderStatusEnum.PENDING,
+        status=ExchangeOrderStatusEnum.PENDING,
         filled=0.0,
         remaining=1.0,
         timestamp=1.0,

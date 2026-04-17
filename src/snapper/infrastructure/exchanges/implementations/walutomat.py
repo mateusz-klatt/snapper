@@ -50,12 +50,12 @@ from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionFeeBreakdown
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
@@ -97,7 +97,7 @@ class _TrackedOrder:
     cl_ord_id: str
     symbol: str
     side: OrderSideEnum
-    order_type: OrderTypeEnum
+    order_type: ExchangeOrderTypeEnum
     amount: float
     filled: float
     price: float
@@ -705,12 +705,12 @@ class WalutomatExchangeClient(ExchangeClientBase):
                             side=order.side,
                             order_type=order.type,
                             order_status=(
-                                OrderStatusEnum.FILLED
+                                ExchangeOrderStatusEnum.FILLED
                                 if math.isclose(order.filled, order.amount)
                                 else (
-                                    OrderStatusEnum.PARTIALLY_FILLED
+                                    ExchangeOrderStatusEnum.PARTIALLY_FILLED
                                     if order.filled > 0
-                                    else OrderStatusEnum.OPEN
+                                    else ExchangeOrderStatusEnum.OPEN
                                 )
                             ),
                             timestamp=datetime.now(UTC),
@@ -788,21 +788,21 @@ class WalutomatExchangeClient(ExchangeClientBase):
             has_new_fill = final.filled > tracked.filled
             fees = self._build_fees(final)
 
-            if final.status == OrderStatusEnum.OPEN:
+            if final.status == ExchangeOrderStatusEnum.OPEN:
                 logger.warning(
                     "Order {} disappeared from active list but API reports OPEN, "
                     "possible transient omission — skipping terminal event",
                     oid,
                 )
                 return
-            if final.status == OrderStatusEnum.CLOSED:
+            if final.status == ExchangeOrderStatusEnum.CLOSED:
                 yield ExecutionUpdate(
                     order_id=final.id,
                     exec_type="trade",
                     symbol=final.symbol,
                     side=final.side,
                     order_type=final.type,
-                    order_status=OrderStatusEnum.FILLED,
+                    order_status=ExchangeOrderStatusEnum.FILLED,
                     timestamp=datetime.now(UTC),
                     cum_qty=final.filled,
                     cl_ord_id=final.client_order_id or tracked.cl_ord_id,
@@ -811,7 +811,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
                     average_price=final.price,
                     fees=fees,
                 )
-            elif final.status == OrderStatusEnum.CANCELED:
+            elif final.status == ExchangeOrderStatusEnum.CANCELED:
                 if has_new_fill:
                     yield ExecutionUpdate(
                         order_id=final.id,
@@ -819,7 +819,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
                         symbol=final.symbol,
                         side=final.side,
                         order_type=final.type,
-                        order_status=OrderStatusEnum.PARTIALLY_FILLED,
+                        order_status=ExchangeOrderStatusEnum.PARTIALLY_FILLED,
                         timestamp=datetime.now(UTC),
                         cum_qty=final.filled,
                         cl_ord_id=final.client_order_id or tracked.cl_ord_id,
@@ -834,7 +834,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
                     symbol=final.symbol,
                     side=final.side,
                     order_type=final.type,
-                    order_status=OrderStatusEnum.CANCELED,
+                    order_status=ExchangeOrderStatusEnum.CANCELED,
                     timestamp=datetime.now(UTC),
                     cum_qty=final.filled,
                     cl_ord_id=final.client_order_id or tracked.cl_ord_id,
@@ -852,7 +852,11 @@ class WalutomatExchangeClient(ExchangeClientBase):
                 symbol=tracked.symbol,
                 side=tracked.side,
                 order_type=tracked.order_type,
-                order_status=(OrderStatusEnum.FILLED if is_filled else OrderStatusEnum.CANCELED),
+                order_status=(
+                    ExchangeOrderStatusEnum.FILLED
+                    if is_filled
+                    else ExchangeOrderStatusEnum.CANCELED
+                ),
                 timestamp=datetime.now(UTC),
                 cum_qty=tracked.filled,
                 cl_ord_id=tracked.cl_ord_id,
@@ -947,7 +951,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
             type=request.type,
             amount=request.amount,
             price=request.price,
-            status=OrderStatusEnum.PENDING,
+            status=ExchangeOrderStatusEnum.PENDING,
             filled=0.0,
             remaining=request.amount,
             timestamp=time.time(),
@@ -1036,11 +1040,11 @@ class WalutomatExchangeClient(ExchangeClientBase):
         volume = float(order_data["volume"])
 
         if order_data["status"] == "ACTIVE":
-            status = OrderStatusEnum.OPEN
+            status = ExchangeOrderStatusEnum.OPEN
         elif order_data.get("completion", 0) == 100:
-            status = OrderStatusEnum.CLOSED
+            status = ExchangeOrderStatusEnum.CLOSED
         else:
-            status = OrderStatusEnum.CANCELED
+            status = ExchangeOrderStatusEnum.CANCELED
 
         commission_str = order_data.get("commissionAmount", "0")
         commission = float(commission_str)
@@ -1050,7 +1054,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
             client_order_id=order_data.get("submitId"),
             symbol=walutomat_rest_to_native(order_data["currencyPair"]),
             side=OrderSideEnum.BUY if is_buy else OrderSideEnum.SELL,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=volume,
             price=float(order_data["limitPrice"]),
             status=status,
@@ -1064,7 +1068,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
     async def get_orders(
         self,
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         """Get list of active orders.

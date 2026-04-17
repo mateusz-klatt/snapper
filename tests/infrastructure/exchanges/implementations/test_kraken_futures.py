@@ -14,14 +14,14 @@ import pytest
 import snapper.infrastructure.exchanges.implementations.kraken_futures as mod
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import FundingRateSnapshot
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
@@ -610,7 +610,7 @@ class TestOrderMethods:
         request = ExchangeOrderRequest(
             symbol="BTC-USD-PERP",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=5.0,
             price=66000.0,
             client_order_id="my-order-1",
@@ -627,7 +627,7 @@ class TestOrderMethods:
         assert result.id == "ord-123"
         assert result.symbol == "BTC-USD-PERP"
         assert result.side == OrderSideEnum.BUY
-        assert result.status == OrderStatusEnum.OPEN
+        assert result.status == ExchangeOrderStatusEnum.OPEN
         assert result.amount == pytest.approx(5.0)
         assert result.price == pytest.approx(66000.0)
         assert result.client_order_id == "my-order-1"
@@ -662,7 +662,7 @@ class TestOrderMethods:
         )
         result = await auth_client.cancel_order("ord-123", symbol="BTC-USD-PERP")
         assert result.id == "ord-123"
-        assert result.status == OrderStatusEnum.CANCELED
+        assert result.status == ExchangeOrderStatusEnum.CANCELED
         assert result.symbol == "BTC-USD-PERP"
 
     @pytest.mark.asyncio
@@ -700,7 +700,7 @@ class TestOrderMethods:
         assert result.id == "ord-123"
         assert result.symbol == "BTC-USD-PERP"
         assert result.filled == pytest.approx(3.0)
-        assert result.status == OrderStatusEnum.OPEN
+        assert result.status == ExchangeOrderStatusEnum.OPEN
 
     @pytest.mark.asyncio
     async def test_get_order_not_found_raises(
@@ -1220,7 +1220,7 @@ class TestSymbolConversionInOrders:
         request = ExchangeOrderRequest(
             symbol="BTC-USD-PERP",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.MARKET,
+            type=ExchangeOrderTypeEnum.MARKET,
             amount=1.0,
         )
         with patch(
@@ -1350,7 +1350,7 @@ class TestCreateOrderStopPrice:
         request = ExchangeOrderRequest(
             symbol="BTC-USD-PERP",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.STOP_LOSS,
+            type=ExchangeOrderTypeEnum.STOP_LOSS,
             amount=1.0,
             stop_price=60000.0,
         )
@@ -1384,7 +1384,7 @@ class TestCreateOrderValidation:
         request = ExchangeOrderRequest(
             symbol="BTC-USD-PERP",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.STOP_LOSS_LIMIT,
+            type=ExchangeOrderTypeEnum.STOP_LOSS_LIMIT,
             amount=1.0,
             price=60000.0,
         )
@@ -1414,7 +1414,7 @@ class TestCreateOrderValidation:
         request = ExchangeOrderRequest(
             symbol="BTC-USD-PERP",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=1.0,
         )
         with (
@@ -1527,7 +1527,7 @@ class TestConvertSdkOrderVariants:
             return_value="BTC-USD-PERP",
         ):
             result = auth_client._convert_sdk_order(data)
-        assert result.type == OrderTypeEnum.MARKET
+        assert result.type == ExchangeOrderTypeEnum.MARKET
 
 
 class TestGetOrdersStatusAndLimit:
@@ -1571,7 +1571,7 @@ class TestGetOrdersStatusAndLimit:
             "snapper.infrastructure.exchanges.implementations.kraken_futures.kraken_futures_ws_to_native",
             return_value="BTC-USD-PERP",
         ):
-            result = await auth_client.get_orders(status=OrderStatusEnum.CLOSED)
+            result = await auth_client.get_orders(status=ExchangeOrderStatusEnum.CLOSED)
         assert len(result) == 1
         assert result[0].id == "ord-2"
 
@@ -2333,7 +2333,7 @@ class TestCreateOrderPostOnlyAndReduceOnly:
         request = ExchangeOrderRequest(
             symbol="BTC-USD-PERP",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=1.0,
             price=66000.0,
             post_only=True,
@@ -2366,7 +2366,7 @@ class TestCreateOrderPostOnlyAndReduceOnly:
         request = ExchangeOrderRequest(
             symbol="BTC-USD-PERP",
             side=OrderSideEnum.SELL,
-            type=OrderTypeEnum.MARKET,
+            type=ExchangeOrderTypeEnum.MARKET,
             amount=2.0,
             reduce_only=True,
         )
@@ -2712,7 +2712,7 @@ class TestKrakenFuturesLiveFixtures:
         request = ExchangeOrderRequest(
             symbol="ETH-USD-PERP",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=0.01,
             price=1000.0,
             client_order_id="test-passive-1",
@@ -2728,8 +2728,8 @@ class TestKrakenFuturesLiveFixtures:
         assert snap.id == "0f3e7d8a-pass-lmt-open-kraken00000"
         assert snap.symbol == "ETH-USD-PERP"
         assert snap.side == OrderSideEnum.BUY
-        assert snap.type == OrderTypeEnum.LIMIT
-        assert snap.status == OrderStatusEnum.OPEN
+        assert snap.type == ExchangeOrderTypeEnum.LIMIT
+        assert snap.status == ExchangeOrderStatusEnum.OPEN
         assert snap.filled == pytest.approx(0.0)
         assert snap.remaining == pytest.approx(0.01)
         assert snap.client_order_id == "test-passive-1"
@@ -2766,7 +2766,7 @@ class TestKrakenFuturesLiveFixtures:
         ):
             snap = await client.get_order("0f3e7d8a-pass-lmt-open-kraken00000")
         assert snap.id == "0f3e7d8a-pass-lmt-open-kraken00000"
-        assert snap.status == OrderStatusEnum.OPEN
+        assert snap.status == ExchangeOrderStatusEnum.OPEN
         assert snap.filled == pytest.approx(0.0)
         assert snap.side == OrderSideEnum.BUY
 
@@ -2786,7 +2786,7 @@ class TestKrakenFuturesLiveFixtures:
             "0f3e7d8a-pass-lmt-open-kraken00000", symbol="ETH-USD-PERP"
         )
         assert snap.id == "0f3e7d8a-pass-lmt-open-kraken00000"
-        assert snap.status == OrderStatusEnum.CANCELED
+        assert snap.status == ExchangeOrderStatusEnum.CANCELED
         assert snap.symbol == "ETH-USD-PERP"
 
     @pytest.mark.asyncio
@@ -2809,7 +2809,7 @@ class TestKrakenFuturesLiveFixtures:
         request = ExchangeOrderRequest(
             symbol="ETH-USD-PERP",
             side=OrderSideEnum.SELL,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=0.01,
             price=2500.0,
         )
@@ -2822,7 +2822,7 @@ class TestKrakenFuturesLiveFixtures:
         ):
             snap = await client.create_order(request)
         assert snap.id == "1a2b3c4d-tbok-lmt-open-kraken00000"
-        assert snap.status == OrderStatusEnum.OPEN
+        assert snap.status == ExchangeOrderStatusEnum.OPEN
         assert snap.side == OrderSideEnum.SELL
 
     @pytest.mark.asyncio
@@ -2856,7 +2856,7 @@ class TestKrakenFuturesLiveFixtures:
         ):
             snap = await client.get_order("1a2b3c4d-tbok-lmt-open-kraken00000")
         assert snap.id == "1a2b3c4d-tbok-lmt-open-kraken00000"
-        assert snap.status == OrderStatusEnum.OPEN
+        assert snap.status == ExchangeOrderStatusEnum.OPEN
         assert snap.side == OrderSideEnum.SELL
 
     @pytest.mark.asyncio
@@ -2874,7 +2874,7 @@ class TestKrakenFuturesLiveFixtures:
         snap = await client.cancel_order(
             "1a2b3c4d-tbok-lmt-open-kraken00000", symbol="ETH-USD-PERP"
         )
-        assert snap.status == OrderStatusEnum.CANCELED
+        assert snap.status == ExchangeOrderStatusEnum.CANCELED
 
     @pytest.mark.asyncio
     async def test_aggressive_create_immediate_fill(
@@ -2898,7 +2898,7 @@ class TestKrakenFuturesLiveFixtures:
         request = ExchangeOrderRequest(
             symbol="ETH-USD-PERP",
             side=OrderSideEnum.SELL,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=0.01,
             price=1800.0,
         )
@@ -2911,7 +2911,7 @@ class TestKrakenFuturesLiveFixtures:
         ):
             snap = await client.create_order(request)
         assert snap.id == "5e6f7a8b-aggr-fill-kraken000000000"
-        assert snap.status == OrderStatusEnum.OPEN
+        assert snap.status == ExchangeOrderStatusEnum.OPEN
         assert snap.side == OrderSideEnum.SELL
 
     @pytest.mark.asyncio
@@ -2945,7 +2945,7 @@ class TestKrakenFuturesLiveFixtures:
         ):
             snap = await client.get_order("5e6f7a8b-aggr-fill-kraken000000000")
         assert snap.id == "5e6f7a8b-aggr-fill-kraken000000000"
-        assert snap.status == OrderStatusEnum.CLOSED
+        assert snap.status == ExchangeOrderStatusEnum.CLOSED
         assert snap.filled == pytest.approx(0.01)
         assert snap.remaining == pytest.approx(0.0)
 
@@ -2969,7 +2969,7 @@ class TestKrakenFuturesLiveFixtures:
         request = ExchangeOrderRequest(
             symbol="ETH-USD-PERP",
             side=OrderSideEnum.SELL,
-            type=OrderTypeEnum.MARKET,
+            type=ExchangeOrderTypeEnum.MARKET,
             amount=0.01,
         )
         with (
@@ -2981,9 +2981,9 @@ class TestKrakenFuturesLiveFixtures:
         ):
             snap = await client.create_order(request)
         assert snap.id == "c9d0e1f2-mkt-sell-kraken0000000000"
-        assert snap.type == OrderTypeEnum.MARKET
+        assert snap.type == ExchangeOrderTypeEnum.MARKET
         assert snap.side == OrderSideEnum.SELL
-        assert snap.status == OrderStatusEnum.OPEN
+        assert snap.status == ExchangeOrderStatusEnum.OPEN
 
     @pytest.mark.asyncio
     async def test_market_fetch_filled(self, client: KrakenFuturesExchangeClient) -> None:
@@ -3014,8 +3014,8 @@ class TestKrakenFuturesLiveFixtures:
             return_value="ETH-USD-PERP",
         ):
             snap = await client.get_order("c9d0e1f2-mkt-sell-kraken0000000000")
-        assert snap.status == OrderStatusEnum.CLOSED
-        assert snap.type == OrderTypeEnum.MARKET
+        assert snap.status == ExchangeOrderStatusEnum.CLOSED
+        assert snap.type == ExchangeOrderTypeEnum.MARKET
         assert snap.filled == pytest.approx(0.01)
 
     @pytest.mark.asyncio
@@ -3040,7 +3040,7 @@ class TestKrakenFuturesLiveFixtures:
         request = ExchangeOrderRequest(
             symbol="ETH-USD-PERP",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=0.01,
             price=1000.0,
         )
@@ -3052,7 +3052,7 @@ class TestKrakenFuturesLiveFixtures:
             patch.object(client, "_log_order_to_db", new_callable=AsyncMock, return_value=None),
         ):
             snap_create = await client.create_order(request)
-        assert snap_create.status == OrderStatusEnum.OPEN
+        assert snap_create.status == ExchangeOrderStatusEnum.OPEN
         assert snap_create.id == "d3e4f5a6-cinf-lmt-kraken0000000000"
 
         client._trade_client.cancel_order = MagicMock(
@@ -3061,7 +3061,7 @@ class TestKrakenFuturesLiveFixtures:
         snap_cancel = await client.cancel_order(
             "d3e4f5a6-cinf-lmt-kraken0000000000", symbol="ETH-USD-PERP"
         )
-        assert snap_cancel.status == OrderStatusEnum.CANCELED
+        assert snap_cancel.status == ExchangeOrderStatusEnum.CANCELED
         assert snap_cancel.id == "d3e4f5a6-cinf-lmt-kraken0000000000"
 
     @pytest.mark.asyncio
@@ -3123,10 +3123,10 @@ class TestKrakenFuturesLiveFixtures:
         assert snap.client_order_id == "test-pass-buy-1775398727"
         assert snap.symbol == "BTC-USD-PERP"
         assert snap.side == OrderSideEnum.BUY
-        assert snap.type == OrderTypeEnum.LIMIT
+        assert snap.type == ExchangeOrderTypeEnum.LIMIT
         assert snap.amount == pytest.approx(0.0001)
         assert snap.price == pytest.approx(60163.2)
-        assert snap.status == OrderStatusEnum.OPEN
+        assert snap.status == ExchangeOrderStatusEnum.OPEN
         assert snap.filled == pytest.approx(0.0)
         assert snap.remaining == pytest.approx(0.0001)
 
@@ -3181,7 +3181,7 @@ class TestKrakenFuturesLiveFixtures:
         assert snap.side == OrderSideEnum.BUY
         assert snap.amount == pytest.approx(0.0001)
         assert snap.price == pytest.approx(60000.0)
-        assert snap.status == OrderStatusEnum.CANCELED
+        assert snap.status == ExchangeOrderStatusEnum.CANCELED
         assert snap.filled == pytest.approx(0.0)
 
     @pytest.mark.asyncio
@@ -3235,7 +3235,7 @@ class TestKrakenFuturesLiveFixtures:
         ):
             snap = await client.cancel_order("a178ba6f-reconcile", "BTC-USD-PERP")
         assert snap.id == "a178ba6f-reconcile"
-        assert snap.status == OrderStatusEnum.CLOSED
+        assert snap.status == ExchangeOrderStatusEnum.CLOSED
         assert snap.filled == pytest.approx(0.0001)
 
     @pytest.mark.asyncio
@@ -3261,7 +3261,7 @@ class TestKrakenFuturesLiveFixtures:
         client._trade_client.get_orders_status = MagicMock(return_value={"orders": []})
         snap = await client.cancel_order("a178ba6f-fallback", "BTC-USD-PERP")
         assert snap.id == "a178ba6f-fallback"
-        assert snap.status == OrderStatusEnum.OPEN
+        assert snap.status == ExchangeOrderStatusEnum.OPEN
         assert snap.symbol == "BTC-USD-PERP"
 
     @pytest.mark.asyncio
@@ -3308,7 +3308,7 @@ class TestKrakenFuturesLiveFixtures:
         assert snap.amount == pytest.approx(0.0001)
         assert snap.filled == pytest.approx(0.0001)
         assert snap.remaining == pytest.approx(0.0)
-        assert snap.status == OrderStatusEnum.CLOSED
+        assert snap.status == ExchangeOrderStatusEnum.CLOSED
         assert snap.price == pytest.approx(70000.0)
 
     def test_convert_sdk_order_size_field(self, client: KrakenFuturesExchangeClient) -> None:

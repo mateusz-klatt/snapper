@@ -25,13 +25,13 @@ from typing import Any
 
 from loguru import logger
 
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecType
 from snapper.infrastructure.exchanges.contracts import ExecutionFeeBreakdown
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.schemas.kraken_futures import KrakenFuturesFillSchema
@@ -217,32 +217,32 @@ def _tick_size_to_precision(tick_size: float) -> int:
 
 
 _SIDE_MAP: dict[str, OrderSideEnum] = {"buy": OrderSideEnum.BUY, "sell": OrderSideEnum.SELL}
-_STATUS_MAP: dict[str, OrderStatusEnum] = {
-    "placed": OrderStatusEnum.OPEN,
-    "partiallyFilled": OrderStatusEnum.OPEN,
-    "filled": OrderStatusEnum.CLOSED,
-    "cancelled": OrderStatusEnum.CANCELED,
-    "canceled": OrderStatusEnum.CANCELED,
-    "untouched": OrderStatusEnum.OPEN,
-    "ENTERED_BOOK": OrderStatusEnum.OPEN,
-    "FULLY_EXECUTED": OrderStatusEnum.CLOSED,
+_STATUS_MAP: dict[str, ExchangeOrderStatusEnum] = {
+    "placed": ExchangeOrderStatusEnum.OPEN,
+    "partiallyFilled": ExchangeOrderStatusEnum.OPEN,
+    "filled": ExchangeOrderStatusEnum.CLOSED,
+    "cancelled": ExchangeOrderStatusEnum.CANCELED,
+    "canceled": ExchangeOrderStatusEnum.CANCELED,
+    "untouched": ExchangeOrderStatusEnum.OPEN,
+    "ENTERED_BOOK": ExchangeOrderStatusEnum.OPEN,
+    "FULLY_EXECUTED": ExchangeOrderStatusEnum.CLOSED,
 }
-_ORDER_TYPE_MAP: dict[str, OrderTypeEnum] = {
-    "lmt": OrderTypeEnum.LIMIT,
-    "post": OrderTypeEnum.LIMIT,
-    "ioc": OrderTypeEnum.LIMIT,
-    "mkt": OrderTypeEnum.MARKET,
-    "stp": OrderTypeEnum.STOP_LOSS,
-    "take_profit": OrderTypeEnum.TAKE_PROFIT,
-    "trailing_stop": OrderTypeEnum.TRAILING_STOP,
+_ORDER_TYPE_MAP: dict[str, ExchangeOrderTypeEnum] = {
+    "lmt": ExchangeOrderTypeEnum.LIMIT,
+    "post": ExchangeOrderTypeEnum.LIMIT,
+    "ioc": ExchangeOrderTypeEnum.LIMIT,
+    "mkt": ExchangeOrderTypeEnum.MARKET,
+    "stp": ExchangeOrderTypeEnum.STOP_LOSS,
+    "take_profit": ExchangeOrderTypeEnum.TAKE_PROFIT,
+    "trailing_stop": ExchangeOrderTypeEnum.TRAILING_STOP,
 }
 
 
 _DIRECTION_MAP: dict[int, OrderSideEnum] = {0: OrderSideEnum.BUY, 1: OrderSideEnum.SELL}
-_WS_ORDER_TYPE_MAP: dict[str, OrderTypeEnum] = {
-    "limit": OrderTypeEnum.LIMIT,
-    "stop": OrderTypeEnum.STOP_LOSS,
-    "take_profit": OrderTypeEnum.TAKE_PROFIT,
+_WS_ORDER_TYPE_MAP: dict[str, ExchangeOrderTypeEnum] = {
+    "limit": ExchangeOrderTypeEnum.LIMIT,
+    "stop": ExchangeOrderTypeEnum.STOP_LOSS,
+    "take_profit": ExchangeOrderTypeEnum.TAKE_PROFIT,
 }
 
 
@@ -266,7 +266,7 @@ def parse_kraken_futures_fill(
     native_symbol = symbol_mapper(schema.instrument)
     ts = datetime.fromtimestamp(schema.time / 1000, tz=UTC)
     side = OrderSideEnum.BUY if schema.buy else OrderSideEnum.SELL
-    order_type = _ORDER_TYPE_MAP.get(schema.order_type or "", OrderTypeEnum.LIMIT)
+    order_type = _ORDER_TYPE_MAP.get(schema.order_type or "", ExchangeOrderTypeEnum.LIMIT)
     fee_currency = schema.fee_currency or "USD"
     fee_usd: float | None = schema.fee_paid if fee_currency == "USD" else None
     fees: list[ExecutionFeeBreakdown] | None = None
@@ -278,7 +278,7 @@ def parse_kraken_futures_fill(
         symbol=native_symbol,
         side=side,
         order_type=order_type,
-        order_status=OrderStatusEnum.OPEN,
+        order_status=ExchangeOrderStatusEnum.OPEN,
         timestamp=ts,
         last_qty=schema.qty,
         last_price=schema.price,
@@ -310,14 +310,14 @@ def parse_kraken_futures_order_status(
     ts_ms = schema.last_update_time if schema.last_update_time is not None else schema.time
     ts = datetime.fromtimestamp(ts_ms / 1000, tz=UTC)
     is_fully_filled = schema.filled >= schema.qty and schema.qty > 0
-    status = OrderStatusEnum.CLOSED if is_fully_filled else OrderStatusEnum.OPEN
+    status = ExchangeOrderStatusEnum.CLOSED if is_fully_filled else ExchangeOrderStatusEnum.OPEN
     exec_type: ExecType = "status"
     return ExecutionUpdate(
         order_id=schema.order_id,
         exec_type=exec_type,
         symbol=native_symbol,
         side=_DIRECTION_MAP.get(schema.direction, OrderSideEnum.BUY),
-        order_type=_WS_ORDER_TYPE_MAP.get(schema.type, OrderTypeEnum.LIMIT),
+        order_type=_WS_ORDER_TYPE_MAP.get(schema.type, ExchangeOrderTypeEnum.LIMIT),
         order_status=status,
         timestamp=ts,
         cum_qty=schema.filled,

@@ -21,9 +21,9 @@ from websockets.exceptions import ConnectionClosed
 
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.implementations import zonda as zonda_module
@@ -724,7 +724,7 @@ class TestZondaRestAPI:
             request = ExchangeOrderRequest(
                 symbol="BTC-EUR",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.LIMIT,
+                type=ExchangeOrderTypeEnum.LIMIT,
                 amount=1.0,
                 price=50000.0,
                 client_order_id="client123",
@@ -733,10 +733,10 @@ class TestZondaRestAPI:
             assert order.id == "order123"
             assert order.symbol == "BTC-EUR"
             assert order.side == OrderSideEnum.BUY
-            assert order.type == OrderTypeEnum.LIMIT
+            assert order.type == ExchangeOrderTypeEnum.LIMIT
             assert order.amount == pytest.approx(1.0)
             assert order.price == pytest.approx(50000.0)
-            assert order.status == OrderStatusEnum.PENDING
+            assert order.status == ExchangeOrderStatusEnum.PENDING
             assert order.filled == pytest.approx(0.0)
             assert order.remaining == pytest.approx(1.0)
             assert order.fee is None
@@ -755,7 +755,7 @@ class TestZondaRestAPI:
         request = ExchangeOrderRequest(
             symbol="BTC-EUR",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=1.0,
             price=50000.0,
         )
@@ -827,7 +827,7 @@ class TestZondaRestAPI:
         ):
             order = await client.cancel_order("order123", "BTC-EUR")
             assert order.id == "order123"
-            assert order.status == OrderStatusEnum.CANCELED
+            assert order.status == ExchangeOrderStatusEnum.CANCELED
             client._ccxt_client.cancel_order.assert_called_once_with(
                 "order123", "BTC/EUR", {"side": "buy", "price": 50000.0}
             )
@@ -893,10 +893,10 @@ class TestZondaRestAPI:
             "fetch_open_orders",
             return_value=mock_ccxt_orders,
         ):
-            orders = await client.get_orders("BTC-EUR", OrderStatusEnum.OPEN, 10)
+            orders = await client.get_orders("BTC-EUR", ExchangeOrderStatusEnum.OPEN, 10)
             assert len(orders) == 1
             assert orders[0].id == "order1"
-            assert orders[0].status == OrderStatusEnum.OPEN
+            assert orders[0].status == ExchangeOrderStatusEnum.OPEN
 
     @pytest.mark.asyncio
     async def test_get_orders_closed(self, client: ZondaExchangeClient) -> None:
@@ -927,10 +927,10 @@ class TestZondaRestAPI:
             "fetch_closed_orders",
             return_value=mock_ccxt_orders,
         ):
-            orders = await client.get_orders("BTC-EUR", OrderStatusEnum.CLOSED, 10)
+            orders = await client.get_orders("BTC-EUR", ExchangeOrderStatusEnum.CLOSED, 10)
             assert len(orders) == 1
             assert orders[0].id == "order2"
-            assert orders[0].status == OrderStatusEnum.CLOSED
+            assert orders[0].status == ExchangeOrderStatusEnum.CLOSED
 
     @pytest.mark.asyncio
     async def test_get_orders_all(self, client: ZondaExchangeClient) -> None:
@@ -987,7 +987,7 @@ class TestZondaRestAPI:
         ):
             result = await client.cancel_order("missing-id", "BTC-EUR")
             assert result.id == "missing-id"
-            assert result.status == OrderStatusEnum.CANCELED
+            assert result.status == ExchangeOrderStatusEnum.CANCELED
             assert result.symbol == "BTC-EUR"
 
     @pytest.mark.asyncio
@@ -1026,7 +1026,7 @@ class TestZondaRestAPI:
         ):
             order = await client.cancel_order("order-no-price", "BTC-EUR")
             assert order.id == "order-no-price"
-            assert order.status == OrderStatusEnum.CANCELED
+            assert order.status == ExchangeOrderStatusEnum.CANCELED
             client._ccxt_client.cancel_order.assert_called_once_with(
                 "order-no-price", "BTC/EUR", {"side": "sell"}
             )
@@ -2365,7 +2365,7 @@ async def test_create_order_without_client_order_id() -> None:
         request = ExchangeOrderRequest(
             symbol="BTC-EUR",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=1.0,
             price=100.0,
         )
@@ -2393,12 +2393,12 @@ async def test_create_order_market_with_none_fields() -> None:
         request = ExchangeOrderRequest(
             symbol="BTC-PLN",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.MARKET,
+            type=ExchangeOrderTypeEnum.MARKET,
             amount=0.0001,
         )
         order = await client.create_order(request)
         assert order.id == "e84893a8-2a1b-11f1-81a9-4ea2d0fa018b"
-        assert order.status == OrderStatusEnum.PENDING
+        assert order.status == ExchangeOrderStatusEnum.PENDING
         assert order.filled == pytest.approx(0.0)
         assert order.remaining == pytest.approx(0.0001)
         assert order.price is None
@@ -2426,13 +2426,13 @@ async def test_create_order_limit_maker_with_none_fields() -> None:
         request = ExchangeOrderRequest(
             symbol="BTC-PLN",
             side=OrderSideEnum.SELL,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=0.00002,
             price=999999.0,
         )
         order = await client.create_order(request)
         assert order.id == "4d0b4b98-2a1d-11f1-81a9-4ea2d0fa018b"
-        assert order.status == OrderStatusEnum.PENDING
+        assert order.status == ExchangeOrderStatusEnum.PENDING
         assert order.filled == pytest.approx(0.0)
         assert order.remaining == pytest.approx(0.00002)
         assert order.price == pytest.approx(999999.0)
@@ -2458,13 +2458,13 @@ async def test_create_order_empty_id_skips_db_logging() -> None:
         request = ExchangeOrderRequest(
             symbol="BTC-PLN",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=5e-05,
             price=100000.0,
         )
         order = await client.create_order(request)
         assert order.id == ""
-        assert order.status == OrderStatusEnum.PENDING
+        assert order.status == ExchangeOrderStatusEnum.PENDING
         assert order.db_order_id is None
         mock_log.assert_not_called()
 
@@ -2482,7 +2482,7 @@ async def test_create_order_raises_on_ccxt_error() -> None:
         request = ExchangeOrderRequest(
             symbol="BTC-EUR",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=1.0,
             price=100.0,
         )
@@ -3497,17 +3497,17 @@ class TestZondaLiveFixtures:
             request = ExchangeOrderRequest(
                 symbol="BTC-PLN",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.LIMIT,
+                type=ExchangeOrderTypeEnum.LIMIT,
                 amount=5e-05,
                 price=125689.99,
             )
             snap = await client.create_order(request)
         assert snap.id == "eb363fb9-2a1c-11f1-81a9-4ea2d0fa018b"
         assert snap.side == OrderSideEnum.BUY
-        assert snap.type == OrderTypeEnum.LIMIT
+        assert snap.type == ExchangeOrderTypeEnum.LIMIT
         assert snap.price == pytest.approx(125689.99)
         assert snap.amount == pytest.approx(5e-05)
-        assert snap.status == OrderStatusEnum.PENDING
+        assert snap.status == ExchangeOrderStatusEnum.PENDING
         assert snap.filled == pytest.approx(0.0)
         assert snap.remaining == pytest.approx(5e-05)
         assert snap.client_order_id is None
@@ -3547,7 +3547,7 @@ class TestZondaLiveFixtures:
         ):
             snap = await client.cancel_order("eb363fb9-2a1c-11f1-81a9-4ea2d0fa018b", "BTC-PLN")
         assert snap.id == "eb363fb9-2a1c-11f1-81a9-4ea2d0fa018b"
-        assert snap.status == OrderStatusEnum.CANCELED
+        assert snap.status == ExchangeOrderStatusEnum.CANCELED
         assert snap.side == OrderSideEnum.BUY
         assert snap.price == pytest.approx(125689.99)
 
@@ -3567,14 +3567,14 @@ class TestZondaLiveFixtures:
             request = ExchangeOrderRequest(
                 symbol="BTC-PLN",
                 side=OrderSideEnum.SELL,
-                type=OrderTypeEnum.LIMIT,
+                type=ExchangeOrderTypeEnum.LIMIT,
                 amount=5e-05,
                 price=250000.0,
             )
             snap = await client.create_order(request)
         assert snap.id == "a1b2c3d4-tbok-sell-open-zonda00000000"
         assert snap.side == OrderSideEnum.SELL
-        assert snap.status == OrderStatusEnum.PENDING
+        assert snap.status == ExchangeOrderStatusEnum.PENDING
         assert snap.filled == pytest.approx(0.0)
         assert snap.remaining == pytest.approx(5e-05)
 
@@ -3607,7 +3607,7 @@ class TestZondaLiveFixtures:
             ),
         ):
             snap = await client.cancel_order("a1b2c3d4-tbok-sell-open-zonda00000000", "BTC-PLN")
-        assert snap.status == OrderStatusEnum.CANCELED
+        assert snap.status == ExchangeOrderStatusEnum.CANCELED
         assert snap.side == OrderSideEnum.SELL
 
     @pytest.mark.asyncio
@@ -3626,12 +3626,12 @@ class TestZondaLiveFixtures:
             request = ExchangeOrderRequest(
                 symbol="BTC-PLN",
                 side=OrderSideEnum.SELL,
-                type=OrderTypeEnum.LIMIT,
+                type=ExchangeOrderTypeEnum.LIMIT,
                 amount=5e-05,
                 price=249000.0,
             )
             snap = await client.create_order(request)
-        assert snap.status == OrderStatusEnum.PENDING
+        assert snap.status == ExchangeOrderStatusEnum.PENDING
         assert snap.filled == pytest.approx(0.0)
         assert snap.remaining == pytest.approx(5e-05)
         assert snap.side == OrderSideEnum.SELL
@@ -3652,13 +3652,13 @@ class TestZondaLiveFixtures:
             request = ExchangeOrderRequest(
                 symbol="BTC-PLN",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.MARKET,
+                type=ExchangeOrderTypeEnum.MARKET,
                 amount=5e-05,
             )
             snap = await client.create_order(request)
-        assert snap.type == OrderTypeEnum.MARKET
+        assert snap.type == ExchangeOrderTypeEnum.MARKET
         assert snap.side == OrderSideEnum.BUY
-        assert snap.status == OrderStatusEnum.PENDING
+        assert snap.status == ExchangeOrderStatusEnum.PENDING
         assert snap.price is None
         assert snap.filled == pytest.approx(0.0)
         assert snap.remaining == pytest.approx(5e-05)
@@ -3679,13 +3679,13 @@ class TestZondaLiveFixtures:
             request = ExchangeOrderRequest(
                 symbol="BTC-PLN",
                 side=OrderSideEnum.SELL,
-                type=OrderTypeEnum.MARKET,
+                type=ExchangeOrderTypeEnum.MARKET,
                 amount=5e-05,
             )
             snap = await client.create_order(request)
-        assert snap.type == OrderTypeEnum.MARKET
+        assert snap.type == ExchangeOrderTypeEnum.MARKET
         assert snap.side == OrderSideEnum.SELL
-        assert snap.status == OrderStatusEnum.PENDING
+        assert snap.status == ExchangeOrderStatusEnum.PENDING
         assert snap.price is None
         assert snap.filled == pytest.approx(0.0)
         assert snap.remaining == pytest.approx(5e-05)
@@ -3706,13 +3706,13 @@ class TestZondaLiveFixtures:
             request = ExchangeOrderRequest(
                 symbol="BTC-PLN",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.MARKET,
+                type=ExchangeOrderTypeEnum.MARKET,
                 amount=5e-05,
             )
             snap = await client.create_order(request)
-        assert snap.type == OrderTypeEnum.MARKET
+        assert snap.type == ExchangeOrderTypeEnum.MARKET
         assert snap.side == OrderSideEnum.BUY
-        assert snap.status == OrderStatusEnum.PENDING
+        assert snap.status == ExchangeOrderStatusEnum.PENDING
         assert snap.price is None
 
     @pytest.mark.asyncio
@@ -3731,12 +3731,12 @@ class TestZondaLiveFixtures:
             request = ExchangeOrderRequest(
                 symbol="BTC-PLN",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.LIMIT,
+                type=ExchangeOrderTypeEnum.LIMIT,
                 amount=5e-05,
                 price=100000.0,
             )
             snap_create = await client.create_order(request)
-        assert snap_create.status == OrderStatusEnum.PENDING
+        assert snap_create.status == ExchangeOrderStatusEnum.PENDING
 
         open_order: dict[str, Any] = {
             "id": "99887766-cinf-open-zonda000000000",
@@ -3759,5 +3759,5 @@ class TestZondaLiveFixtures:
             ),
         ):
             snap_cancel = await client.cancel_order("99887766-cinf-open-zonda000000000", "BTC-PLN")
-        assert snap_cancel.status == OrderStatusEnum.CANCELED
+        assert snap_cancel.status == ExchangeOrderStatusEnum.CANCELED
         assert snap_cancel.id == "99887766-cinf-open-zonda000000000"

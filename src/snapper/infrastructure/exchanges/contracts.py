@@ -7,6 +7,7 @@ shared across all exchange implementations.
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 from snapper.core.types import FillStatus
@@ -20,8 +21,16 @@ class OrderSideEnum(Enum):
     SELL = "sell"
 
 
-class OrderTypeEnum(Enum):
-    """Enumeration of order types (limit, market, etc.)."""
+class ExchangeOrderTypeEnum(StrEnum):
+    """Exchange-wire-format order type.
+
+    Covers SDK-reported order types across all supported exchanges
+    (Kraken, Kraken Futures, Zonda, Walutomat, Polygon). Distinct
+    from ``snapper.core.types.OrderTypeEnum`` (domain trading-core
+    type) by design — exchange values include ICEBERG, STOP_LOSS_LIMIT,
+    TAKE_PROFIT_LIMIT, TRAILING_STOP_LIMIT, SETTLE_POSITION that the
+    trading core never reasons about.
+    """
 
     LIMIT = "limit"
     MARKET = "market"
@@ -35,8 +44,18 @@ class OrderTypeEnum(Enum):
     SETTLE_POSITION = "settle-position"
 
 
-class OrderStatusEnum(Enum):
-    """Enumeration of order statuses."""
+class ExchangeOrderStatusEnum(StrEnum):
+    """Exchange-wire-format order status.
+
+    Covers SDK-reported order statuses across all supported exchanges.
+    Distinct from ``snapper.core.types.OrderStatusEnum`` (domain
+    trading-core status) by design — exchange values use American
+    spelling (``CANCELED``) and include ``PENDING``, ``CLOSED``,
+    ``PENDING_NEW``, ``EXPIRED`` that the trading core reduces to its
+    7-state lifecycle. The cross-spelling mapping between domain
+    ``CANCELLED`` and exchange ``CANCELED`` is handled in
+    ``implementations/kraken.py`` and ``adapters/kraken_futures.py``.
+    """
 
     PENDING = "pending"
     OPEN = "open"
@@ -70,22 +89,22 @@ def to_fill_status(execution: ExecutionUpdate) -> FillStatus:
         'partial' when order is still open with partial fills,
         'filled' otherwise (closed, explicitly filled, or default).
     """
-    if execution.order_status == OrderStatusEnum.OPEN and (execution.cum_qty or 0) > 0:
+    if execution.order_status == ExchangeOrderStatusEnum.OPEN and (execution.cum_qty or 0) > 0:
         return FillStatusEnum.PARTIAL
     return FillStatusEnum.FILLED
 
 
-def normalize_order_status(status: OrderStatusEnum) -> OrderStatusEnum:
+def normalize_order_status(status: ExchangeOrderStatusEnum) -> ExchangeOrderStatusEnum:
     normalization_map = {
-        OrderStatusEnum.PENDING: OrderStatusEnum.OPEN,
-        OrderStatusEnum.PENDING_NEW: OrderStatusEnum.OPEN,
-        OrderStatusEnum.NEW: OrderStatusEnum.OPEN,
-        OrderStatusEnum.PARTIALLY_FILLED: OrderStatusEnum.OPEN,
-        OrderStatusEnum.FILLED: OrderStatusEnum.CLOSED,
-        OrderStatusEnum.OPEN: OrderStatusEnum.OPEN,
-        OrderStatusEnum.CLOSED: OrderStatusEnum.CLOSED,
-        OrderStatusEnum.CANCELED: OrderStatusEnum.CANCELED,
-        OrderStatusEnum.EXPIRED: OrderStatusEnum.EXPIRED,
+        ExchangeOrderStatusEnum.PENDING: ExchangeOrderStatusEnum.OPEN,
+        ExchangeOrderStatusEnum.PENDING_NEW: ExchangeOrderStatusEnum.OPEN,
+        ExchangeOrderStatusEnum.NEW: ExchangeOrderStatusEnum.OPEN,
+        ExchangeOrderStatusEnum.PARTIALLY_FILLED: ExchangeOrderStatusEnum.OPEN,
+        ExchangeOrderStatusEnum.FILLED: ExchangeOrderStatusEnum.CLOSED,
+        ExchangeOrderStatusEnum.OPEN: ExchangeOrderStatusEnum.OPEN,
+        ExchangeOrderStatusEnum.CLOSED: ExchangeOrderStatusEnum.CLOSED,
+        ExchangeOrderStatusEnum.CANCELED: ExchangeOrderStatusEnum.CANCELED,
+        ExchangeOrderStatusEnum.EXPIRED: ExchangeOrderStatusEnum.EXPIRED,
     }
     return normalization_map.get(status, status)
 
@@ -129,7 +148,7 @@ class ExchangeOrderRequest:
 
     symbol: str
     side: OrderSideEnum
-    type: OrderTypeEnum
+    type: ExchangeOrderTypeEnum
     amount: float
     price: float | None = None
     stop_price: float | None = None
@@ -158,8 +177,8 @@ type LiquidityIndicator = Literal["m", "t"]
 __all__ = [
     "to_fill_status",
     "OrderSideEnum",
-    "OrderTypeEnum",
-    "OrderStatusEnum",
+    "ExchangeOrderTypeEnum",
+    "ExchangeOrderStatusEnum",
     "TimeInForceEnum",
     "TickerSnapshot",
     "OhlcvSnapshot",
@@ -187,10 +206,10 @@ class ExchangeOrderSnapshot:
     client_order_id: str | None
     symbol: str
     side: OrderSideEnum
-    type: OrderTypeEnum
+    type: ExchangeOrderTypeEnum
     amount: float
     price: float | None
-    status: OrderStatusEnum
+    status: ExchangeOrderStatusEnum
     filled: float
     remaining: float
     timestamp: float
@@ -263,8 +282,8 @@ class ExecutionUpdate:
     exec_type: ExecType | None
     symbol: str
     side: OrderSideEnum
-    order_type: OrderTypeEnum
-    order_status: OrderStatusEnum
+    order_type: ExchangeOrderTypeEnum
+    order_status: ExchangeOrderStatusEnum
     timestamp: datetime
     cum_qty: float | None = None
     cum_cost: float | None = None

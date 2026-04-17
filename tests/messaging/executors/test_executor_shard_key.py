@@ -10,10 +10,10 @@ import pytest
 
 from snapper.application.engine.service import TradingEngineService
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.messaging.executors.base import ExchangeExecutorService
 from snapper.messaging.schemas.data import OrderRequestData
 
@@ -224,8 +224,8 @@ def _make_execution(**overrides: Any) -> ExecutionUpdate:
         "exec_type": "trade",
         "symbol": "BTC-USD",
         "side": OrderSideEnum.BUY,
-        "order_type": OrderTypeEnum.LIMIT,
-        "order_status": OrderStatusEnum.OPEN,
+        "order_type": ExchangeOrderTypeEnum.LIMIT,
+        "order_status": ExchangeOrderStatusEnum.OPEN,
         "timestamp": datetime.now(UTC),
         "cum_qty": 1.0,
         "average_price": 50000.0,

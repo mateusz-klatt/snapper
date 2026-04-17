@@ -20,10 +20,10 @@ import snapper.infrastructure.exchanges.implementations.walutomat as walutomat_m
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
 from snapper.infrastructure.exchanges.implementations.walutomat import _TrackedOrder
@@ -872,10 +872,10 @@ def _make_order_snapshot(
     client_order_id: str | None = "sub-1",
     symbol: str = "EUR-PLN",
     side: OrderSideEnum = OrderSideEnum.BUY,
-    order_type: OrderTypeEnum = OrderTypeEnum.LIMIT,
+    order_type: ExchangeOrderTypeEnum = ExchangeOrderTypeEnum.LIMIT,
     amount: float = 100.0,
     price: float = 4.50,
-    status: OrderStatusEnum = OrderStatusEnum.OPEN,
+    status: ExchangeOrderStatusEnum = ExchangeOrderStatusEnum.OPEN,
     filled: float = 0.0,
 ) -> ExchangeOrderSnapshot:
     """Build an ExchangeOrderSnapshot for execution polling tests."""
@@ -921,7 +921,7 @@ async def test_subscribe_executions_first_poll_seeds_without_yield() -> None:
 
     async def _mock_get_orders(
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         nonlocal poll_count
@@ -952,7 +952,7 @@ async def test_subscribe_executions_yields_fill_on_filled_increase() -> None:
 
     async def _mock_get_orders(
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         nonlocal poll_count
@@ -973,7 +973,7 @@ async def test_subscribe_executions_yields_fill_on_filled_increase() -> None:
     assert len(results) == 1
     assert results[0].order_id == "ord-1"
     assert results[0].cum_qty == 30.0
-    assert results[0].order_status == OrderStatusEnum.OPEN
+    assert results[0].order_status == ExchangeOrderStatusEnum.OPEN
     assert results[0].exec_type == "trade"
     assert results[0].cl_ord_id == "sub-1"
 
@@ -991,7 +991,7 @@ async def test_subscribe_executions_yields_filled_when_complete() -> None:
 
     async def _mock_get_orders(
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         nonlocal poll_count
@@ -1010,7 +1010,7 @@ async def test_subscribe_executions_yields_filled_when_complete() -> None:
         results.append(update)
 
     assert len(results) == 1
-    assert results[0].order_status == OrderStatusEnum.CLOSED
+    assert results[0].order_status == ExchangeOrderStatusEnum.CLOSED
     assert results[0].cum_qty == 100.0
     assert results[0].exec_type == "trade"
 
@@ -1028,7 +1028,7 @@ async def test_subscribe_executions_no_yield_when_no_change() -> None:
 
     async def _mock_get_orders(
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         nonlocal poll_count
@@ -1060,7 +1060,7 @@ async def test_subscribe_executions_handles_disappeared_filled_order() -> None:
 
     async def _mock_get_orders(
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         nonlocal poll_count
@@ -1079,7 +1079,7 @@ async def test_subscribe_executions_handles_disappeared_filled_order() -> None:
         results.append(update)
 
     assert len(results) == 1
-    assert results[0].order_status == OrderStatusEnum.CLOSED
+    assert results[0].order_status == ExchangeOrderStatusEnum.CLOSED
     assert results[0].exec_type == "trade"
     assert results[0].cum_qty == 100.0
 
@@ -1097,7 +1097,7 @@ async def test_subscribe_executions_handles_disappeared_partial_order() -> None:
 
     async def _mock_get_orders(
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         nonlocal poll_count
@@ -1116,7 +1116,7 @@ async def test_subscribe_executions_handles_disappeared_partial_order() -> None:
         results.append(update)
 
     assert len(results) == 1
-    assert results[0].order_status == OrderStatusEnum.CANCELED
+    assert results[0].order_status == ExchangeOrderStatusEnum.CANCELED
     assert results[0].exec_type == "canceled"
     assert results[0].cum_qty == 30.0
 
@@ -1134,7 +1134,7 @@ async def test_subscribe_executions_handles_disappeared_unfilled_order() -> None
 
     async def _mock_get_orders(
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         nonlocal poll_count
@@ -1153,7 +1153,7 @@ async def test_subscribe_executions_handles_disappeared_unfilled_order() -> None
         results.append(update)
 
     assert len(results) == 1
-    assert results[0].order_status == OrderStatusEnum.CANCELED
+    assert results[0].order_status == ExchangeOrderStatusEnum.CANCELED
     assert results[0].exec_type == "canceled"
     assert results[0].cum_qty == 0.0
 
@@ -1171,7 +1171,7 @@ async def test_subscribe_executions_handles_api_error() -> None:
 
     async def _mock_get_orders(
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         nonlocal poll_count
@@ -1209,7 +1209,7 @@ async def test_subscribe_executions_respects_poll_interval() -> None:
 
     async def _mock_get_orders(
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         nonlocal poll_count
@@ -1251,7 +1251,7 @@ async def test_subscribe_executions_uses_correct_field_names() -> None:
 
     async def _mock_get_orders(
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         nonlocal poll_count
@@ -1321,7 +1321,7 @@ async def test_subscribe_executions_new_order_no_yield_after_first_poll() -> Non
 
     async def _mock_get_orders(
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         nonlocal poll_count
@@ -1355,7 +1355,7 @@ async def test_subscribe_executions_new_order_with_prefilled_yields() -> None:
 
     async def _mock_get_orders(
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         nonlocal poll_count
@@ -1376,7 +1376,7 @@ async def test_subscribe_executions_new_order_with_prefilled_yields() -> None:
     assert len(results) == 1
     assert results[0].cum_qty == 50.0
     assert results[0].exec_type == "trade"
-    assert results[0].order_status == OrderStatusEnum.OPEN
+    assert results[0].order_status == ExchangeOrderStatusEnum.OPEN
 
 
 @pytest.mark.asyncio()
@@ -1392,7 +1392,7 @@ async def test_subscribe_executions_first_poll_failure_still_seeds_next() -> Non
 
     async def _mock_get_orders(
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         nonlocal poll_count
@@ -1429,7 +1429,7 @@ async def test_subscribe_executions_idles_when_no_tracked_orders() -> None:
 
     async def _mock_get_orders(
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         nonlocal poll_count
@@ -1460,7 +1460,7 @@ async def test_subscribe_executions_wake_event_interrupts_idle() -> None:
 
     async def _mock_get_orders(
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         nonlocal poll_count
@@ -1502,7 +1502,7 @@ async def test_subscribe_executions_active_interval_when_tracked() -> None:
 
     async def _mock_get_orders(
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         nonlocal poll_count
@@ -1561,7 +1561,7 @@ async def test_create_order_sets_wake_event() -> None:
         req = ExchangeOrderRequest(
             symbol="EUR-PLN",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=1.0,
             price=4.28,
         )
@@ -1628,7 +1628,7 @@ async def test_create_order_requires_connection() -> None:
     request = ExchangeOrderRequest(
         symbol="EUR-PLN",
         side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=100.0,
         price=4.2,
     )
@@ -1662,7 +1662,7 @@ async def test_create_order_without_price_does_not_send_limit(
     request = ExchangeOrderRequest(
         symbol="EUR-PLN",
         side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=1.0,
         price=None,
     )
@@ -1685,7 +1685,7 @@ async def test_create_order_requires_authentication() -> None:
     request = ExchangeOrderRequest(
         symbol="EUR-PLN",
         side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=100.0,
         price=4.2,
     )
@@ -1719,13 +1719,13 @@ async def test_create_order_success(monkeypatch: pytest.MonkeyPatch) -> None:
     request = ExchangeOrderRequest(
         symbol="EUR-PLN",
         side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=100.0,
         price=4.2,
     )
     order = await client.create_order(request)
     assert order.id == "abc123"
-    assert order.status == OrderStatusEnum.PENDING
+    assert order.status == ExchangeOrderStatusEnum.PENDING
     assert order.db_order_id == 42
     assert order.db_order_public_id == "pub-42"
     assert stub_client.post_calls[0][0].endswith("/market_fx/orders")
@@ -1771,7 +1771,7 @@ async def test_cancel_order_fetches_latest(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(client, "_get_auth_headers", auth_headers)
     result = await client.cancel_order("abc123")
     assert result.id == "abc123"
-    assert result.status == OrderStatusEnum.CANCELED
+    assert result.status == ExchangeOrderStatusEnum.CANCELED
     assert stub_client.post_calls[0][0].endswith("/market_fx/orders/close")
 
 
@@ -1825,7 +1825,7 @@ async def test_get_order_returns_matched_order(monkeypatch: pytest.MonkeyPatch) 
     result = await client.get_order("target")
     assert result.id == "target"
     assert result.symbol == "EUR-PLN"
-    assert result.status == OrderStatusEnum.OPEN
+    assert result.status == ExchangeOrderStatusEnum.OPEN
 
 
 @pytest.mark.asyncio()
@@ -1983,11 +1983,11 @@ def test_parse_order_active_status() -> None:
 
     Given: An order with status=ACTIVE,
     When: _parse_walutomat_order is called,
-    Then: OrderStatusEnum.OPEN is returned.
+    Then: ExchangeOrderStatusEnum.OPEN is returned.
     """
     data = _make_api_order(status="ACTIVE")
     result = WalutomatExchangeClient._parse_walutomat_order(data)
-    assert result.status == OrderStatusEnum.OPEN
+    assert result.status == ExchangeOrderStatusEnum.OPEN
 
 
 def test_parse_order_closed_complete_status() -> None:
@@ -1995,11 +1995,11 @@ def test_parse_order_closed_complete_status() -> None:
 
     Given: An order with status=CLOSED and completion=100,
     When: _parse_walutomat_order is called,
-    Then: OrderStatusEnum.CLOSED is returned.
+    Then: ExchangeOrderStatusEnum.CLOSED is returned.
     """
     data = _make_api_order(status="CLOSED", completion=100)
     result = WalutomatExchangeClient._parse_walutomat_order(data)
-    assert result.status == OrderStatusEnum.CLOSED
+    assert result.status == ExchangeOrderStatusEnum.CLOSED
 
 
 def test_parse_order_closed_partial_status() -> None:
@@ -2007,11 +2007,11 @@ def test_parse_order_closed_partial_status() -> None:
 
     Given: An order with status=CLOSED and completion=50,
     When: _parse_walutomat_order is called,
-    Then: OrderStatusEnum.CANCELED is returned.
+    Then: ExchangeOrderStatusEnum.CANCELED is returned.
     """
     data = _make_api_order(status="CLOSED", completion=50)
     result = WalutomatExchangeClient._parse_walutomat_order(data)
-    assert result.status == OrderStatusEnum.CANCELED
+    assert result.status == ExchangeOrderStatusEnum.CANCELED
 
 
 @pytest.mark.asyncio()
@@ -2092,7 +2092,7 @@ async def test_get_order_returns_completed_order(monkeypatch: pytest.MonkeyPatch
     client._http_client = cast(httpx.AsyncClient, stub_client)
     monkeypatch.setattr(client, "_get_auth_headers", lambda *_args, **_kwargs: {"X-API-Key": "key"})
     result = await client.get_order("ord-done")
-    assert result.status == OrderStatusEnum.CLOSED
+    assert result.status == ExchangeOrderStatusEnum.CLOSED
     assert math.isclose(result.filled, 100.0, rel_tol=1e-9)
 
 
@@ -2160,7 +2160,7 @@ async def test_cancel_order_returns_canceled_status(monkeypatch: pytest.MonkeyPa
     client._http_client = cast(httpx.AsyncClient, stub_client)
     monkeypatch.setattr(client, "_get_auth_headers", lambda *_args, **_kwargs: {"X-API-Key": "key"})
     result = await client.cancel_order("ord-1")
-    assert result.status == OrderStatusEnum.CANCELED
+    assert result.status == ExchangeOrderStatusEnum.CANCELED
 
 
 @pytest.mark.asyncio()
@@ -2180,7 +2180,7 @@ async def test_disappeared_order_queries_find_orders() -> None:
             order_id=order_id,
             filled=100.0,
             amount=100.0,
-            status=OrderStatusEnum.CLOSED,
+            status=ExchangeOrderStatusEnum.CLOSED,
         )
 
     client.get_order = mock_get_order
@@ -2190,7 +2190,7 @@ async def test_disappeared_order_queries_find_orders() -> None:
         cl_ord_id="sub-1",
         symbol="EUR-PLN",
         side=OrderSideEnum.BUY,
-        order_type=OrderTypeEnum.LIMIT,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
         amount=100.0,
         filled=50.0,
         price=4.50,
@@ -2216,7 +2216,7 @@ async def test_disappeared_order_uses_api_response() -> None:
             order_id=order_id,
             filled=100.0,
             amount=100.0,
-            status=OrderStatusEnum.CLOSED,
+            status=ExchangeOrderStatusEnum.CLOSED,
         )
 
     client.get_order = mock_get_order
@@ -2226,7 +2226,7 @@ async def test_disappeared_order_uses_api_response() -> None:
         cl_ord_id="sub-1",
         symbol="EUR-PLN",
         side=OrderSideEnum.BUY,
-        order_type=OrderTypeEnum.LIMIT,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
         amount=100.0,
         filled=50.0,
         price=4.50,
@@ -2257,7 +2257,7 @@ async def test_disappeared_order_fallback_on_error() -> None:
         cl_ord_id="sub-1",
         symbol="EUR-PLN",
         side=OrderSideEnum.BUY,
-        order_type=OrderTypeEnum.LIMIT,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
         amount=100.0,
         filled=30.0,
         price=4.50,
@@ -2267,7 +2267,7 @@ async def test_disappeared_order_fallback_on_error() -> None:
         events.append(event)
     assert len(events) == 1
     assert events[0].cum_qty == 30.0
-    assert events[0].order_status == OrderStatusEnum.CANCELED
+    assert events[0].order_status == ExchangeOrderStatusEnum.CANCELED
 
 
 @pytest.mark.asyncio()
@@ -2285,7 +2285,7 @@ async def test_disappeared_partial_fill_cancel_emits_two_events() -> None:
             order_id=order_id,
             filled=60.0,
             amount=100.0,
-            status=OrderStatusEnum.CANCELED,
+            status=ExchangeOrderStatusEnum.CANCELED,
         )
 
     client.get_order = mock_get_order
@@ -2295,7 +2295,7 @@ async def test_disappeared_partial_fill_cancel_emits_two_events() -> None:
         cl_ord_id="sub-1",
         symbol="EUR-PLN",
         side=OrderSideEnum.BUY,
-        order_type=OrderTypeEnum.LIMIT,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
         amount=100.0,
         filled=30.0,
         price=4.50,
@@ -2305,10 +2305,10 @@ async def test_disappeared_partial_fill_cancel_emits_two_events() -> None:
         events.append(event)
     assert len(events) == 2
     assert events[0].exec_type == "trade"
-    assert events[0].order_status == OrderStatusEnum.OPEN
+    assert events[0].order_status == ExchangeOrderStatusEnum.OPEN
     assert events[0].cum_qty == 60.0
     assert events[1].exec_type == "canceled"
-    assert events[1].order_status == OrderStatusEnum.CANCELED
+    assert events[1].order_status == ExchangeOrderStatusEnum.CANCELED
 
 
 @pytest.mark.asyncio()
@@ -2326,7 +2326,7 @@ async def test_disappeared_partial_cancel_no_new_fill_emits_one_event() -> None:
             order_id=order_id,
             filled=30.0,
             amount=100.0,
-            status=OrderStatusEnum.CANCELED,
+            status=ExchangeOrderStatusEnum.CANCELED,
         )
 
     client.get_order = mock_get_order
@@ -2336,7 +2336,7 @@ async def test_disappeared_partial_cancel_no_new_fill_emits_one_event() -> None:
         cl_ord_id="sub-1",
         symbol="EUR-PLN",
         side=OrderSideEnum.BUY,
-        order_type=OrderTypeEnum.LIMIT,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
         amount=100.0,
         filled=30.0,
         price=4.50,
@@ -2346,7 +2346,7 @@ async def test_disappeared_partial_cancel_no_new_fill_emits_one_event() -> None:
         events.append(event)
     assert len(events) == 1
     assert events[0].exec_type == "canceled"
-    assert events[0].order_status == OrderStatusEnum.CANCELED
+    assert events[0].order_status == ExchangeOrderStatusEnum.CANCELED
 
 
 @pytest.mark.asyncio()
@@ -2364,7 +2364,7 @@ async def test_disappeared_fully_filled_emits_single_trade() -> None:
             order_id=order_id,
             filled=100.0,
             amount=100.0,
-            status=OrderStatusEnum.CLOSED,
+            status=ExchangeOrderStatusEnum.CLOSED,
         )
 
     client.get_order = mock_get_order
@@ -2374,7 +2374,7 @@ async def test_disappeared_fully_filled_emits_single_trade() -> None:
         cl_ord_id="sub-1",
         symbol="EUR-PLN",
         side=OrderSideEnum.BUY,
-        order_type=OrderTypeEnum.LIMIT,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
         amount=100.0,
         filled=50.0,
         price=4.50,
@@ -2384,7 +2384,7 @@ async def test_disappeared_fully_filled_emits_single_trade() -> None:
         events.append(event)
     assert len(events) == 1
     assert events[0].exec_type == "trade"
-    assert events[0].order_status == OrderStatusEnum.CLOSED
+    assert events[0].order_status == ExchangeOrderStatusEnum.CLOSED
     assert events[0].cum_qty == 100.0
 
 
@@ -2403,7 +2403,7 @@ async def test_disappeared_order_still_open_skips_terminal() -> None:
             order_id=order_id,
             filled=0.0,
             amount=100.0,
-            status=OrderStatusEnum.OPEN,
+            status=ExchangeOrderStatusEnum.OPEN,
         )
 
     client.get_order = mock_get_order
@@ -2413,7 +2413,7 @@ async def test_disappeared_order_still_open_skips_terminal() -> None:
         cl_ord_id="sub-1",
         symbol="EUR-PLN",
         side=OrderSideEnum.BUY,
-        order_type=OrderTypeEnum.LIMIT,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
         amount=100.0,
         filled=0.0,
         price=4.50,
@@ -2440,7 +2440,7 @@ async def test_disappeared_order_unexpected_status_no_event() -> None:
             order_id=order_id,
             filled=0.0,
             amount=100.0,
-            status=OrderStatusEnum.EXPIRED,
+            status=ExchangeOrderStatusEnum.EXPIRED,
         )
 
     client.get_order = mock_get_order
@@ -2450,7 +2450,7 @@ async def test_disappeared_order_unexpected_status_no_event() -> None:
         cl_ord_id="sub-1",
         symbol="EUR-PLN",
         side=OrderSideEnum.BUY,
-        order_type=OrderTypeEnum.LIMIT,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
         amount=100.0,
         filled=0.0,
         price=4.50,
@@ -2475,7 +2475,7 @@ async def test_transiently_omitted_open_order_stays_tracked() -> None:
 
     async def _mock_get_orders(
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         nonlocal poll_count
@@ -2497,7 +2497,7 @@ async def test_transiently_omitted_open_order_stays_tracked() -> None:
         return _make_order_snapshot(
             order_id=order_id,
             filled=30.0,
-            status=OrderStatusEnum.OPEN,
+            status=ExchangeOrderStatusEnum.OPEN,
         )
 
     client.get_orders = _mock_get_orders
@@ -2523,7 +2523,7 @@ async def test_active_fill_event_has_fees() -> None:
 
     async def _mock_get_orders(
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         nonlocal poll_count
@@ -2565,7 +2565,7 @@ async def test_disappeared_order_fees_populated() -> None:
             order_id=order_id,
             filled=100.0,
             amount=100.0,
-            status=OrderStatusEnum.CLOSED,
+            status=ExchangeOrderStatusEnum.CLOSED,
         )
         snap.fee = 0.20
         snap.fee_currency = "EUR"
@@ -2578,7 +2578,7 @@ async def test_disappeared_order_fees_populated() -> None:
         cl_ord_id="sub-1",
         symbol="EUR-PLN",
         side=OrderSideEnum.BUY,
-        order_type=OrderTypeEnum.LIMIT,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
         amount=100.0,
         filled=50.0,
         price=4.50,
@@ -2606,7 +2606,7 @@ async def test_disappeared_order_fee_usd_equiv_not_set() -> None:
             order_id=order_id,
             filled=100.0,
             amount=100.0,
-            status=OrderStatusEnum.CLOSED,
+            status=ExchangeOrderStatusEnum.CLOSED,
         )
         snap.fee = 0.15
         snap.fee_currency = "PLN"
@@ -2619,7 +2619,7 @@ async def test_disappeared_order_fee_usd_equiv_not_set() -> None:
         cl_ord_id="sub-1",
         symbol="EUR-PLN",
         side=OrderSideEnum.BUY,
-        order_type=OrderTypeEnum.LIMIT,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
         amount=100.0,
         filled=50.0,
         price=4.50,
@@ -2696,7 +2696,7 @@ async def test_get_orders_filters_by_status(monkeypatch: pytest.MonkeyPatch) -> 
         return {"X-API-Key": "key"}
 
     monkeypatch.setattr(client, "_get_auth_headers", auth_headers)
-    orders = await client.get_orders(status=OrderStatusEnum.OPEN)
+    orders = await client.get_orders(status=ExchangeOrderStatusEnum.OPEN)
     assert orders == []
 
 
@@ -3228,7 +3228,7 @@ async def test_create_order_failure_raises(monkeypatch: pytest.MonkeyPatch) -> N
     request = ExchangeOrderRequest(
         symbol="EUR-PLN",
         side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=1.0,
         price=4.2,
     )
@@ -3322,7 +3322,7 @@ async def test_get_orders_filters_and_requires_auth(monkeypatch: pytest.MonkeyPa
     )
     client._http_client = cast(httpx.AsyncClient, stub_client)
     monkeypatch.setattr(client, "_get_auth_headers", lambda *_args, **_kwargs: {"X-API-Key": "key"})
-    orders = await client.get_orders(symbol="EUR-PLN", status=OrderStatusEnum.OPEN)
+    orders = await client.get_orders(symbol="EUR-PLN", status=ExchangeOrderStatusEnum.OPEN)
     assert len(orders) == 1
     assert orders[0].symbol == "EUR-PLN"
 
@@ -3582,7 +3582,7 @@ async def test_place_order_with_limit_price(monkeypatch: pytest.MonkeyPatch) -> 
     request = ExchangeOrderRequest(
         symbol="EUR/PLN",
         side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=100.0,
         price=4.5000,
     )
@@ -3775,7 +3775,7 @@ class TestWalutomatLiveFixtures:
         request = ExchangeOrderRequest(
             symbol="EUR-PLN",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=1.0,
             price=4.0613,
             client_order_id="test-pass-buy-1775398174",
@@ -3785,10 +3785,10 @@ class TestWalutomatLiveFixtures:
         assert snap.client_order_id == "test-pass-buy-1775398174"
         assert snap.symbol == "EUR-PLN"
         assert snap.side == OrderSideEnum.BUY
-        assert snap.type == OrderTypeEnum.LIMIT
+        assert snap.type == ExchangeOrderTypeEnum.LIMIT
         assert snap.amount == pytest.approx(1.0)
         assert snap.price == pytest.approx(4.0613)
-        assert snap.status == OrderStatusEnum.PENDING
+        assert snap.status == ExchangeOrderStatusEnum.PENDING
         assert snap.filled == pytest.approx(0.0)
         assert snap.remaining == pytest.approx(1.0)
 
@@ -3829,7 +3829,7 @@ class TestWalutomatLiveFixtures:
         assert snap.client_order_id == "test-pass-buy-1775398174"
         assert snap.symbol == "EUR-PLN"
         assert snap.side == OrderSideEnum.BUY
-        assert snap.status == OrderStatusEnum.OPEN
+        assert snap.status == ExchangeOrderStatusEnum.OPEN
         assert snap.filled == pytest.approx(0.0)
         assert snap.remaining == pytest.approx(1.0)
         assert snap.fee is None
@@ -3866,7 +3866,7 @@ class TestWalutomatLiveFixtures:
         monkeypatch.setattr(client, "_get_auth_headers", self._auth_headers)
         snap = await client.cancel_order("d10da06a-7d6f-40a9-952c-2a88396a136e")
         assert snap.id == "d10da06a-7d6f-40a9-952c-2a88396a136e"
-        assert snap.status == OrderStatusEnum.CANCELED
+        assert snap.status == ExchangeOrderStatusEnum.CANCELED
         assert snap.side == OrderSideEnum.BUY
         assert snap.filled == pytest.approx(0.0)
         assert snap.remaining == pytest.approx(1.0)
@@ -3893,7 +3893,7 @@ class TestWalutomatLiveFixtures:
         request = ExchangeOrderRequest(
             symbol="EUR-PLN",
             side=OrderSideEnum.SELL,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=1.0,
             price=4.4938,
             client_order_id="test-pass-sell-1775398177",
@@ -3901,7 +3901,7 @@ class TestWalutomatLiveFixtures:
         snap = await client.create_order(request)
         assert snap.id == "2977d227-9712-4077-8df2-58ae761ee86d"
         assert snap.side == OrderSideEnum.SELL
-        assert snap.status == OrderStatusEnum.PENDING
+        assert snap.status == ExchangeOrderStatusEnum.PENDING
 
     @pytest.mark.asyncio
     async def test_passive_sell_cancel(
@@ -3935,7 +3935,7 @@ class TestWalutomatLiveFixtures:
         monkeypatch.setattr(client, "_get_auth_headers", self._auth_headers)
         snap = await client.cancel_order("2977d227-9712-4077-8df2-58ae761ee86d")
         assert snap.id == "2977d227-9712-4077-8df2-58ae761ee86d"
-        assert snap.status == OrderStatusEnum.CANCELED
+        assert snap.status == ExchangeOrderStatusEnum.CANCELED
         assert snap.side == OrderSideEnum.SELL
         assert snap.filled == pytest.approx(0.0)
 
@@ -3973,7 +3973,7 @@ class TestWalutomatLiveFixtures:
         monkeypatch.setattr(client, "_get_auth_headers", self._auth_headers)
         snap = await client.get_order("wal-topbook-buy-001")
         assert snap.id == "wal-topbook-buy-001"
-        assert snap.status == OrderStatusEnum.CLOSED
+        assert snap.status == ExchangeOrderStatusEnum.CLOSED
         assert snap.filled == pytest.approx(100.0)
         assert snap.remaining == pytest.approx(0.0)
         assert snap.fee == pytest.approx(0.20)
@@ -4016,7 +4016,7 @@ class TestWalutomatLiveFixtures:
         monkeypatch.setattr(client, "_get_auth_headers", self._auth_headers)
         snap = await client.get_order("855c0bce-65ec-4ca5-8f4f-860c8e85f414")
         assert snap.id == "855c0bce-65ec-4ca5-8f4f-860c8e85f414"
-        assert snap.status == OrderStatusEnum.CLOSED
+        assert snap.status == ExchangeOrderStatusEnum.CLOSED
         assert snap.side == OrderSideEnum.SELL
         assert snap.filled == pytest.approx(1.0)
         assert snap.remaining == pytest.approx(0.0)
@@ -4060,7 +4060,7 @@ class TestWalutomatLiveFixtures:
         client._http_client = cast(httpx.AsyncClient, stub)
         monkeypatch.setattr(client, "_get_auth_headers", self._auth_headers)
         snap = await client.get_order("70296031-f26b-43db-94ae-7ab8902560c6")
-        assert snap.status == OrderStatusEnum.CLOSED
+        assert snap.status == ExchangeOrderStatusEnum.CLOSED
         assert snap.filled == pytest.approx(1.01)
         assert snap.remaining == pytest.approx(0.0)
         assert snap.fee == pytest.approx(0.01)
@@ -4097,7 +4097,7 @@ class TestWalutomatLiveFixtures:
         client._http_client = cast(httpx.AsyncClient, stub)
         monkeypatch.setattr(client, "_get_auth_headers", self._auth_headers)
         snap = await client.cancel_order("1821545b-6a7a-47b9-b099-15c9c7a5a70b")
-        assert snap.status == OrderStatusEnum.CANCELED
+        assert snap.status == ExchangeOrderStatusEnum.CANCELED
         assert snap.filled == pytest.approx(0.0)
         assert snap.remaining == pytest.approx(1.0)
 
@@ -4132,7 +4132,7 @@ class TestWalutomatLiveFixtures:
         client._http_client = cast(httpx.AsyncClient, stub)
         monkeypatch.setattr(client, "_get_auth_headers", self._auth_headers)
         snap = await client.cancel_order("wal-partial-001")
-        assert snap.status == OrderStatusEnum.CANCELED
+        assert snap.status == ExchangeOrderStatusEnum.CANCELED
         assert snap.filled == pytest.approx(50.0)
         assert snap.remaining == pytest.approx(50.0)
         assert snap.fee == pytest.approx(0.10)
@@ -4201,7 +4201,7 @@ class TestWalutomatLiveFixtures:
         request = ExchangeOrderRequest(
             symbol="EUR-PLN",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=50.0,
             price=4.2600,
         )
@@ -4228,7 +4228,7 @@ class TestWalutomatLiveFixtures:
         request = ExchangeOrderRequest(
             symbol="EUR-PLN",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=100.0,
             price=4.2850,
         )

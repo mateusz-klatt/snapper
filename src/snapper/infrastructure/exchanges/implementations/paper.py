@@ -51,11 +51,11 @@ from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
@@ -183,7 +183,7 @@ class PaperExchangeClient(ExchangeClientBase):
             type=request.type,
             amount=request.amount,
             price=request.price,
-            status=OrderStatusEnum.OPEN,
+            status=ExchangeOrderStatusEnum.OPEN,
             filled=0.0,
             remaining=request.amount,
             timestamp=timestamp,
@@ -210,7 +210,7 @@ class PaperExchangeClient(ExchangeClientBase):
                 symbol=order.symbol,
                 side=order.side,
                 order_type=order.type,
-                order_status=OrderStatusEnum.CLOSED,
+                order_status=ExchangeOrderStatusEnum.CLOSED,
                 timestamp=datetime.fromtimestamp(order.timestamp, tz=UTC),
                 order_qty=order.amount,
                 cum_qty=order.amount,
@@ -219,7 +219,7 @@ class PaperExchangeClient(ExchangeClientBase):
                 last_price=order.price or 0.0,
                 fee_usd_equiv=0.0,
             )
-            order.status = OrderStatusEnum.CLOSED
+            order.status = ExchangeOrderStatusEnum.CLOSED
             order.filled = order.amount
             order.remaining = 0.0
             await self._execution_queue.put(execution)
@@ -245,17 +245,17 @@ class PaperExchangeClient(ExchangeClientBase):
         logger.info(f"PAPER CANCEL: {order_id} ({symbol})")
         if order_id in self._orders:
             order = self._orders[order_id]
-            order.status = OrderStatusEnum.CANCELED
+            order.status = ExchangeOrderStatusEnum.CANCELED
             return order
         return ExchangeOrderSnapshot(
             id=order_id,
             client_order_id=None,
             symbol=symbol or "UNKNOWN",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=0.0,
             price=None,
-            status=OrderStatusEnum.CANCELED,
+            status=ExchangeOrderStatusEnum.CANCELED,
             filled=0.0,
             remaining=0.0,
             timestamp=time.time(),
@@ -284,10 +284,10 @@ class PaperExchangeClient(ExchangeClientBase):
             client_order_id=None,
             symbol=symbol or "UNKNOWN",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=0.0,
             price=None,
-            status=OrderStatusEnum.OPEN,
+            status=ExchangeOrderStatusEnum.OPEN,
             filled=0.0,
             remaining=0.0,
             timestamp=time.time(),
@@ -297,7 +297,7 @@ class PaperExchangeClient(ExchangeClientBase):
     async def get_orders(
         self,
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         """Get list of simulated orders with optional filtering.

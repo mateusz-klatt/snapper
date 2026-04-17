@@ -45,6 +45,7 @@ from snapper.core.types import MarketDataTypeEnum
 from snapper.core.types import OrderCommand
 from snapper.core.types import OrderCommandEnum
 from snapper.core.types import OrderEvent
+from snapper.core.types import OrderEventEnum
 from snapper.core.types import OrderExchange
 
 
@@ -591,7 +592,7 @@ def topic_for_message(data: StrictDataSchema[Any]) -> str:
         case OrderEventData():
             return order_event_topic(data.exchange, data.instrument, data.event)
         case ExecutionData():
-            return order_event_topic(data.exchange, data.instrument, "executed")
+            return order_event_topic(data.exchange, data.instrument, OrderEventEnum.EXECUTED)
         case SignalData():
             if data.exchange == ExchangeEnum.PAPER:
                 if not data.strategy_name:

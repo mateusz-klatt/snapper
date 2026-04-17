@@ -13,9 +13,9 @@ import pytest
 
 from snapper.config.app import AppSettings
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.implementations.paper import PaperExchangeClient
 from snapper.messaging.executors.paper import PaperOrderExecutor
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -133,7 +133,7 @@ class TestPaperOrderClientCoverage:
         request = ExchangeOrderRequest(
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.MARKET,
+            type=ExchangeOrderTypeEnum.MARKET,
             amount=0.5,
             client_order_id="test_order_123",
         )
@@ -141,7 +141,7 @@ class TestPaperOrderClientCoverage:
         assert result.symbol == "BTC-USD"
         assert result.side == OrderSideEnum.BUY
         assert result.amount == pytest.approx(0.5)
-        assert result.status == OrderStatusEnum.OPEN
+        assert result.status == ExchangeOrderStatusEnum.OPEN
         assert result.client_order_id == "test_order_123"
         await client.disconnect()
 
@@ -160,7 +160,7 @@ class TestPaperOrderClientCoverage:
         request = ExchangeOrderRequest(
             symbol="ETH-USD",
             side=OrderSideEnum.SELL,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=2.0,
             price=3500.50,
             client_order_id="test_order_456",
@@ -169,7 +169,7 @@ class TestPaperOrderClientCoverage:
         assert result.symbol == "ETH-USD"
         assert result.side == OrderSideEnum.SELL
         assert result.amount == pytest.approx(2.0)
-        assert result.status == OrderStatusEnum.OPEN
+        assert result.status == ExchangeOrderStatusEnum.OPEN
         assert result.price == pytest.approx(3500.50)
         await client.disconnect()
 
@@ -188,13 +188,13 @@ class TestPaperOrderClientCoverage:
         request = ExchangeOrderRequest(
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.MARKET,
+            type=ExchangeOrderTypeEnum.MARKET,
             amount=0.1,
             client_order_id=None,
         )
         result = await client.create_order(request)
         assert result.symbol == "BTC-USD"
-        assert result.status == OrderStatusEnum.OPEN
+        assert result.status == ExchangeOrderStatusEnum.OPEN
         await client.disconnect()
 
     @pytest.mark.asyncio
@@ -212,7 +212,7 @@ class TestPaperOrderClientCoverage:
         result = await client.get_order("paper_order_123", symbol="BTC-USD")
         assert result.id == "paper_order_123"
         assert result.symbol == "BTC-USD"
-        assert result.status == OrderStatusEnum.OPEN
+        assert result.status == ExchangeOrderStatusEnum.OPEN
         await client.disconnect()
 
     @pytest.mark.asyncio
@@ -246,7 +246,7 @@ class TestPaperOrderClientCoverage:
         await client.connect()
         result = await client.cancel_order("paper_order_789", symbol="BTC-USD")
         assert result.id == "paper_order_789"
-        assert result.status == OrderStatusEnum.CANCELED
+        assert result.status == ExchangeOrderStatusEnum.CANCELED
         assert result.symbol == "BTC-USD"
         await client.disconnect()
 
@@ -336,7 +336,7 @@ class TestPaperOrderClientCoverage:
             ExchangeOrderRequest(
                 symbol="BTC-USD",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.MARKET,
+                type=ExchangeOrderTypeEnum.MARKET,
                 amount=0.1,
                 client_order_id="order1",
             )
@@ -345,13 +345,13 @@ class TestPaperOrderClientCoverage:
             ExchangeOrderRequest(
                 symbol="ETH-USD",
                 side=OrderSideEnum.SELL,
-                type=OrderTypeEnum.LIMIT,
+                type=ExchangeOrderTypeEnum.LIMIT,
                 amount=1.0,
                 price=3000.0,
                 client_order_id="order2",
             )
         )
-        orders = await client.get_orders(status=OrderStatusEnum.OPEN)
+        orders = await client.get_orders(status=ExchangeOrderStatusEnum.OPEN)
         assert len(orders) == 2
         btc_orders = await client.get_orders(symbol="BTC-USD")
         assert len(btc_orders) == 1
@@ -376,14 +376,14 @@ class TestPaperOrderClientCoverage:
             ExchangeOrderRequest(
                 symbol="BTC-USD",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.MARKET,
+                type=ExchangeOrderTypeEnum.MARKET,
                 amount=0.1,
                 client_order_id="execution_test",
             )
         )
         async for execution in client.subscribe_executions():
             assert execution.symbol == "BTC-USD"
-            assert execution.order_status == OrderStatusEnum.CLOSED
+            assert execution.order_status == ExchangeOrderStatusEnum.CLOSED
             assert execution.cum_qty == pytest.approx(0.1)
             break
         await client.disconnect()
@@ -420,7 +420,7 @@ class TestPaperOrderClientCoverage:
             ExchangeOrderRequest(
                 symbol="BTC-USD",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.MARKET,
+                type=ExchangeOrderTypeEnum.MARKET,
                 amount=0.1,
             )
         )
@@ -444,11 +444,11 @@ class TestPaperOrderClientCoverage:
                 ExchangeOrderRequest(
                     symbol="BTC-USD",
                     side=OrderSideEnum.BUY,
-                    type=OrderTypeEnum.MARKET,
+                    type=ExchangeOrderTypeEnum.MARKET,
                     amount=0.1,
                 )
             )
-            assert order.status == OrderStatusEnum.OPEN
+            assert order.status == ExchangeOrderStatusEnum.OPEN
         assert not client._running
 
     @pytest.mark.asyncio
@@ -465,7 +465,7 @@ class TestPaperOrderClientCoverage:
         request = ExchangeOrderRequest(
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.MARKET,
+            type=ExchangeOrderTypeEnum.MARKET,
             amount=0.1,
         )
         with pytest.raises(RuntimeError, match="not connected"):

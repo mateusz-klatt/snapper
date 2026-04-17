@@ -17,10 +17,10 @@ from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.implementations.paper import PaperExchangeClient
 
@@ -114,7 +114,7 @@ async def test_create_order_requires_running() -> None:
             ExchangeOrderRequest(
                 symbol="BTC/USD",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.MARKET,
+                type=ExchangeOrderTypeEnum.MARKET,
                 amount=1.0,
                 price=None,
             )
@@ -240,10 +240,10 @@ async def test_simulate_fill_handles_queue_error() -> None:
         client_order_id=None,
         symbol="BTC/USD",
         side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.MARKET,
+        type=ExchangeOrderTypeEnum.MARKET,
         amount=1.0,
         price=10.0,
-        status=OrderStatusEnum.OPEN,
+        status=ExchangeOrderStatusEnum.OPEN,
         filled=0.0,
         remaining=1.0,
         timestamp=0.0,
@@ -269,10 +269,10 @@ async def test_cancel_order_sets_canceled_status() -> None:
         client_order_id=None,
         symbol="BTC/USD",
         side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=1.0,
         price=10.0,
-        status=OrderStatusEnum.OPEN,
+        status=ExchangeOrderStatusEnum.OPEN,
         filled=0.0,
         remaining=1.0,
         timestamp=0.0,
@@ -280,7 +280,7 @@ async def test_cancel_order_sets_canceled_status() -> None:
     )
     client._orders[order.id] = order
     result = await client.cancel_order(order.id, symbol=order.symbol)
-    assert result.status == OrderStatusEnum.CANCELED
+    assert result.status == ExchangeOrderStatusEnum.CANCELED
 
 
 @pytest.mark.asyncio
@@ -541,7 +541,7 @@ class TestPaperOrderValidation:
         request = ExchangeOrderRequest(
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=0.1,
             price=50000.0,
         )
@@ -579,7 +579,7 @@ class TestPaperCancelOrder:
         result = await paper_client.cancel_order("UNKNOWN123", symbol="BTC-USD")
         assert result.id == "UNKNOWN123"
         assert result.symbol == "BTC-USD"
-        assert result.status == OrderStatusEnum.CANCELED
+        assert result.status == ExchangeOrderStatusEnum.CANCELED
 
     @pytest.mark.asyncio
     async def test_cancel_existing_order_updates_status(
@@ -595,13 +595,13 @@ class TestPaperCancelOrder:
         request = ExchangeOrderRequest(
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=0.1,
             price=50000.0,
         )
         order = await paper_client.create_order(request)
         canceled = await paper_client.cancel_order(order.id, symbol="BTC-USD")
-        assert canceled.status == OrderStatusEnum.CANCELED
+        assert canceled.status == ExchangeOrderStatusEnum.CANCELED
         assert canceled.id == order.id
 
 
@@ -735,7 +735,7 @@ async def test_create_order_logs_and_executes_with_db_updates() -> None:
         request = ExchangeOrderRequest(
             symbol="BTC/USD",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=1.0,
             price=10.0,
         )
@@ -743,7 +743,7 @@ async def test_create_order_logs_and_executes_with_db_updates() -> None:
         execution = await asyncio.wait_for(client._execution_queue.get(), timeout=0.5)
     assert order.db_order_id == 123
     assert order.db_order_public_id == "order-pub-abc"
-    assert execution.order_status == OrderStatusEnum.CLOSED
+    assert execution.order_status == ExchangeOrderStatusEnum.CLOSED
 
 
 @pytest.mark.asyncio
@@ -760,14 +760,14 @@ async def test_get_order_known_and_unknown() -> None:
         ExchangeOrderRequest(
             symbol="BTC/USD",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=1,
             price=10,
         )
     )
     assert (await client.get_order(order.id)).id == order.id
     placeholder = await client.get_order("missing", symbol="ETH/USD")
-    assert placeholder.status == OrderStatusEnum.OPEN
+    assert placeholder.status == ExchangeOrderStatusEnum.OPEN
     assert placeholder.symbol == "ETH/USD"
 
 
@@ -783,18 +783,26 @@ async def test_get_orders_filters_and_limit() -> None:
     await client.connect()
     order1 = await client.create_order(
         ExchangeOrderRequest(
-            symbol="BTC/USD", side=OrderSideEnum.BUY, type=OrderTypeEnum.LIMIT, amount=1, price=10
+            symbol="BTC/USD",
+            side=OrderSideEnum.BUY,
+            type=ExchangeOrderTypeEnum.LIMIT,
+            amount=1,
+            price=10,
         )
     )
     order2 = await client.create_order(
         ExchangeOrderRequest(
-            symbol="ETH/USD", side=OrderSideEnum.SELL, type=OrderTypeEnum.LIMIT, amount=2, price=20
+            symbol="ETH/USD",
+            side=OrderSideEnum.SELL,
+            type=ExchangeOrderTypeEnum.LIMIT,
+            amount=2,
+            price=20,
         )
     )
     await client.cancel_order(order2.id, symbol="ETH/USD")
     by_symbol = await client.get_orders(symbol="BTC/USD")
     assert by_symbol == [order1]
-    canceled = await client.get_orders(status=OrderStatusEnum.CANCELED)
+    canceled = await client.get_orders(status=ExchangeOrderStatusEnum.CANCELED)
     assert canceled == [order2]
     limited = await client.get_orders(limit=1)
     assert len(limited) == 1
@@ -829,8 +837,8 @@ async def test_subscribe_executions_yields_queue_items() -> None:
         exec_type="trade",
         symbol="BTC/USD",
         side=OrderSideEnum.BUY,
-        order_type=OrderTypeEnum.MARKET,
-        order_status=OrderStatusEnum.CLOSED,
+        order_type=ExchangeOrderTypeEnum.MARKET,
+        order_status=ExchangeOrderStatusEnum.CLOSED,
         timestamp=datetime.now(tz=UTC),
         order_qty=1.0,
         cum_qty=1.0,

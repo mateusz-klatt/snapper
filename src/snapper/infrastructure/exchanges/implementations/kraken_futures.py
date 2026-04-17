@@ -47,14 +47,14 @@ from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import FundingRateSnapshot
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
@@ -111,28 +111,28 @@ def _enqueue_or_drop_oldest(queue: asyncio.Queue[Any], item: Any, label: str) ->
         queue.put_nowait(item)
 
 
-def _map_kraken_order_type(raw: str) -> OrderTypeEnum:
-    """Map Kraken Futures order type string to OrderTypeEnum.
+def _map_kraken_order_type(raw: str) -> ExchangeOrderTypeEnum:
+    """Map Kraken Futures order type string to ExchangeOrderTypeEnum.
 
     Args:
         raw: Kraken order type (e.g., ``lmt``, ``mkt``).
 
     Returns:
-        Corresponding OrderTypeEnum value.
+        Corresponding ExchangeOrderTypeEnum value.
     """
-    return _ORDER_TYPE_MAP.get(raw, OrderTypeEnum.LIMIT)
+    return _ORDER_TYPE_MAP.get(raw, ExchangeOrderTypeEnum.LIMIT)
 
 
-def _map_kraken_status(raw: str) -> OrderStatusEnum:
-    """Map Kraken Futures order status string to OrderStatusEnum.
+def _map_kraken_status(raw: str) -> ExchangeOrderStatusEnum:
+    """Map Kraken Futures order status string to ExchangeOrderStatusEnum.
 
     Args:
         raw: Kraken order status (e.g., ``placed``, ``filled``).
 
     Returns:
-        Corresponding OrderStatusEnum value.
+        Corresponding ExchangeOrderStatusEnum value.
     """
-    return _STATUS_MAP.get(raw, OrderStatusEnum.OPEN)
+    return _STATUS_MAP.get(raw, ExchangeOrderStatusEnum.OPEN)
 
 
 def _map_kraken_side(raw: str) -> OrderSideEnum:
@@ -384,12 +384,12 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         """
         self._require_authenticated()
         kraken_symbol = native_to_kraken_futures_ws(request.symbol)
-        supported_order_types: dict[OrderTypeEnum, str] = {
-            OrderTypeEnum.LIMIT: "lmt",
-            OrderTypeEnum.MARKET: "mkt",
-            OrderTypeEnum.STOP_LOSS: "stp",
-            OrderTypeEnum.TAKE_PROFIT: "take_profit",
-            OrderTypeEnum.TRAILING_STOP: "trailing_stop",
+        supported_order_types: dict[ExchangeOrderTypeEnum, str] = {
+            ExchangeOrderTypeEnum.LIMIT: "lmt",
+            ExchangeOrderTypeEnum.MARKET: "mkt",
+            ExchangeOrderTypeEnum.STOP_LOSS: "stp",
+            ExchangeOrderTypeEnum.TAKE_PROFIT: "take_profit",
+            ExchangeOrderTypeEnum.TRAILING_STOP: "trailing_stop",
         }
         if request.type not in supported_order_types:
             raise ValueError(
@@ -473,7 +473,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             client_order_id=None,
             symbol=symbol or "",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=0.0,
             price=None,
             status=_map_kraken_status(status_str),
@@ -514,7 +514,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
     async def get_orders(
         self,
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         """Fetch open orders from Kraken Futures.

@@ -22,6 +22,7 @@ from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import OrderCommandEnum
 from snapper.core.types import OrderExchange
+from snapper.core.types import OrderTypeEnum
 from snapper.core.types import TradeSideEnum
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.interface.websocket.schemas import ExecutionMode
@@ -383,7 +384,7 @@ class TradingEngineService:
                 instrument=self.instrument,
                 mode=self.mode,
                 side=side,
-                order_type="market",
+                order_type=OrderTypeEnum.MARKET,
                 quantity=size,
                 price=None,
                 client_order_id=order_public_id,

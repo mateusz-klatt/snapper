@@ -5,11 +5,11 @@ from datetime import datetime
 
 import pytest
 
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import FundingRateSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import to_fill_status
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenCandleSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenOhlcEventEnvelope
@@ -90,7 +90,7 @@ class TestToFillStatus:
     """Tests for to_fill_status helper function."""
 
     def _make_execution(
-        self, status: OrderStatusEnum, cum_qty: float | None = None
+        self, status: ExchangeOrderStatusEnum, cum_qty: float | None = None
     ) -> ExecutionUpdate:
         """Build a minimal ExecutionUpdate for fill-status testing.
 
@@ -106,7 +106,7 @@ class TestToFillStatus:
             exec_type="trade",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.LIMIT,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
             order_status=status,
             timestamp=datetime.now(UTC),
             cum_qty=cum_qty,
@@ -119,7 +119,7 @@ class TestToFillStatus:
         When: to_fill_status is called,
         Then: Returns 'partial'.
         """
-        execution = self._make_execution(OrderStatusEnum.OPEN, cum_qty=5.0)
+        execution = self._make_execution(ExchangeOrderStatusEnum.OPEN, cum_qty=5.0)
         assert to_fill_status(execution) == "partial"
 
     def test_filled_when_closed(self) -> None:
@@ -129,7 +129,7 @@ class TestToFillStatus:
         When: to_fill_status is called,
         Then: Returns 'filled'.
         """
-        execution = self._make_execution(OrderStatusEnum.CLOSED)
+        execution = self._make_execution(ExchangeOrderStatusEnum.CLOSED)
         assert to_fill_status(execution) == "filled"
 
     def test_filled_when_open_with_zero_cum_qty(self) -> None:
@@ -139,7 +139,7 @@ class TestToFillStatus:
         When: to_fill_status is called,
         Then: Returns 'filled' (no partial fills yet).
         """
-        execution = self._make_execution(OrderStatusEnum.OPEN, cum_qty=0.0)
+        execution = self._make_execution(ExchangeOrderStatusEnum.OPEN, cum_qty=0.0)
         assert to_fill_status(execution) == "filled"
 
     def test_filled_when_open_with_none_cum_qty(self) -> None:
@@ -149,7 +149,7 @@ class TestToFillStatus:
         When: to_fill_status is called,
         Then: Returns 'filled' (None treated as zero).
         """
-        execution = self._make_execution(OrderStatusEnum.OPEN, cum_qty=None)
+        execution = self._make_execution(ExchangeOrderStatusEnum.OPEN, cum_qty=None)
         assert to_fill_status(execution) == "filled"
 
 

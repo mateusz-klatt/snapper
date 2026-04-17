@@ -55,12 +55,12 @@ from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
@@ -80,13 +80,13 @@ from snapper.infrastructure.symbols.functions import native_to_kraken_websocket
 
 _CREDENTIALS_REQUIRED_MSG = "API credentials required for trading"
 _WS_CLIENT_CONNECTED_MSG = "WebSocket client should be connected"
-_CCXT_STATUS_MAP: Final[dict[str, OrderStatusEnum]] = {
-    "open": OrderStatusEnum.OPEN,
-    "closed": OrderStatusEnum.CLOSED,
-    "canceled": OrderStatusEnum.CANCELED,
-    "cancelled": OrderStatusEnum.CANCELED,
-    "expired": OrderStatusEnum.EXPIRED,
-    "pending": OrderStatusEnum.PENDING,
+_CCXT_STATUS_MAP: Final[dict[str, ExchangeOrderStatusEnum]] = {
+    "open": ExchangeOrderStatusEnum.OPEN,
+    "closed": ExchangeOrderStatusEnum.CLOSED,
+    "canceled": ExchangeOrderStatusEnum.CANCELED,
+    "cancelled": ExchangeOrderStatusEnum.CANCELED,
+    "expired": ExchangeOrderStatusEnum.EXPIRED,
+    "pending": ExchangeOrderStatusEnum.PENDING,
 }
 
 _CCXT_SIDE_MAP: Final[dict[str, OrderSideEnum]] = {
@@ -94,12 +94,12 @@ _CCXT_SIDE_MAP: Final[dict[str, OrderSideEnum]] = {
     TradeSideEnum.SELL: OrderSideEnum.SELL,
 }
 
-_CCXT_TYPE_MAP: Final[dict[str, OrderTypeEnum]] = {
-    "market": OrderTypeEnum.MARKET,
-    "limit": OrderTypeEnum.LIMIT,
-    "stop": OrderTypeEnum.STOP_LOSS,
-    "stop-loss": OrderTypeEnum.STOP_LOSS,
-    "take-profit": OrderTypeEnum.TAKE_PROFIT,
+_CCXT_TYPE_MAP: Final[dict[str, ExchangeOrderTypeEnum]] = {
+    "market": ExchangeOrderTypeEnum.MARKET,
+    "limit": ExchangeOrderTypeEnum.LIMIT,
+    "stop": ExchangeOrderTypeEnum.STOP_LOSS,
+    "stop-loss": ExchangeOrderTypeEnum.STOP_LOSS,
+    "take-profit": ExchangeOrderTypeEnum.TAKE_PROFIT,
 }
 
 
@@ -375,7 +375,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             type=request.type,
             amount=float(request.amount),
             price=float(request.price) if request.price else None,
-            status=OrderStatusEnum.PENDING,
+            status=ExchangeOrderStatusEnum.PENDING,
             filled=0.0,
             remaining=float(request.amount),
             timestamp=time.time(),
@@ -475,10 +475,10 @@ class KrakenExchangeClient(ExchangeClientBase):
                     client_order_id=None,
                     symbol=symbol,
                     side=OrderSideEnum.BUY,
-                    type=OrderTypeEnum.LIMIT,
+                    type=ExchangeOrderTypeEnum.LIMIT,
                     amount=float("0"),
                     price=None,
-                    status=OrderStatusEnum.CANCELED,
+                    status=ExchangeOrderStatusEnum.CANCELED,
                     filled=float("0"),
                     remaining=float("0"),
                     timestamp=time.time(),
@@ -522,7 +522,7 @@ class KrakenExchangeClient(ExchangeClientBase):
     async def _fetch_orders_from_exchange(
         self,
         symbol: str | None,
-        status: OrderStatusEnum | None,
+        status: ExchangeOrderStatusEnum | None,
         limit: int | None,
     ) -> list[dict[str, Any]]:
         """Fetch raw order data from exchange via CCXT.
@@ -538,7 +538,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         ccxt_symbol = native_to_ccxt(symbol) if symbol else None
         fetch_func = (
             self._ccxt_client.fetch_open_orders
-            if status == OrderStatusEnum.OPEN
+            if status == ExchangeOrderStatusEnum.OPEN
             else self._ccxt_client.fetch_orders
         )
         result: list[dict[str, Any]] = await self._with_retry(fetch_func, ccxt_symbol, None, limit)
@@ -547,7 +547,7 @@ class KrakenExchangeClient(ExchangeClientBase):
     async def get_orders(
         self,
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         """Fetch multiple orders with optional filtering.
@@ -1306,7 +1306,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             client_order_id=ccxt_order.get("clientOrderId"),
             symbol=native_symbol,
             side=_CCXT_SIDE_MAP.get(ccxt_order.get("side", ""), OrderSideEnum.BUY),
-            type=_CCXT_TYPE_MAP.get(ccxt_order.get("type", ""), OrderTypeEnum.LIMIT),
+            type=_CCXT_TYPE_MAP.get(ccxt_order.get("type", ""), ExchangeOrderTypeEnum.LIMIT),
             amount=float(ccxt_order.get("amount") or 0),
             price=float(ccxt_order["price"]) if ccxt_order.get("price") else None,
             status=_CCXT_STATUS_MAP[ccxt_order["status"]],
@@ -1334,7 +1334,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             type=request.type,
             amount=float(request.amount),
             price=float(request.price) if request.price else None,
-            status=OrderStatusEnum.PENDING,
+            status=ExchangeOrderStatusEnum.PENDING,
             filled=float("0"),
             remaining=float(request.amount),
             timestamp=time.time(),

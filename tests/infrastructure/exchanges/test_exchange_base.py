@@ -18,11 +18,11 @@ from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
@@ -78,7 +78,7 @@ class DummyExchangeClient(ExchangeClientBase):
             price=request.price,
             filled=0.0,
             remaining=0.0,
-            status=OrderStatusEnum.OPEN,
+            status=ExchangeOrderStatusEnum.OPEN,
             timestamp=datetime.now(UTC).timestamp(),
         )
 
@@ -89,12 +89,12 @@ class DummyExchangeClient(ExchangeClientBase):
             client_order_id="",
             symbol=symbol or "BTC-USD",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=1.0,
             price=50000.0,
             filled=0.0,
             remaining=0.0,
-            status=OrderStatusEnum.CANCELED,
+            status=ExchangeOrderStatusEnum.CANCELED,
             timestamp=datetime.now(UTC).timestamp(),
         )
 
@@ -105,19 +105,19 @@ class DummyExchangeClient(ExchangeClientBase):
             client_order_id="",
             symbol=symbol or "BTC-USD",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=1.0,
             price=50000.0,
             filled=0.5,
             remaining=0.0,
-            status=OrderStatusEnum.PARTIALLY_FILLED,
+            status=ExchangeOrderStatusEnum.PARTIALLY_FILLED,
             timestamp=datetime.now(UTC).timestamp(),
         )
 
     async def get_orders(
         self,
         symbol: str | None = None,
-        status: OrderStatusEnum | None = None,
+        status: ExchangeOrderStatusEnum | None = None,
         limit: int | None = None,
     ) -> list[ExchangeOrderSnapshot]:
         """Get list of orders."""
@@ -182,8 +182,8 @@ class DummyExchangeClient(ExchangeClientBase):
             exec_type="trade",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.LIMIT,
-            order_status=OrderStatusEnum.FILLED,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.FILLED,
             timestamp=datetime.now(UTC),
         )
 
@@ -223,7 +223,7 @@ async def test_log_order_to_db_returns_none_when_no_repository() -> None:
         client_order_id="client_123",
         symbol="BTC-USD",
         side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=1.0,
         price=50000.0,
     )
@@ -232,12 +232,12 @@ async def test_log_order_to_db_returns_none_when_no_repository() -> None:
         client_order_id="client_123",
         symbol="BTC-USD",
         side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=1.0,
         price=50000.0,
         filled=0.0,
         remaining=0.0,
-        status=OrderStatusEnum.OPEN,
+        status=ExchangeOrderStatusEnum.OPEN,
         timestamp=datetime.now(UTC).timestamp(),
     )
     result = await client._log_order_to_db(request, order)
@@ -267,7 +267,7 @@ async def test_log_order_to_db_logs_successfully(mock_resolve: AsyncMock) -> Non
         client_order_id="client_123",
         symbol="BTC-USD",
         side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=1.0,
         price=50000.0,
     )
@@ -276,12 +276,12 @@ async def test_log_order_to_db_logs_successfully(mock_resolve: AsyncMock) -> Non
         client_order_id="client_123",
         symbol="BTC-USD",
         side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=1.0,
         price=50000.0,
         filled=0.0,
         remaining=0.0,
-        status=OrderStatusEnum.OPEN,
+        status=ExchangeOrderStatusEnum.OPEN,
         timestamp=1234567890.0,
     )
     result = await client._log_order_to_db(request, order)
@@ -325,7 +325,7 @@ async def test_log_order_to_db_propagates_leverage_and_reduce_only(
         client_order_id="client_lev",
         symbol="BTC-USD",
         side=OrderSideEnum.SELL,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=1.0,
         price=50000.0,
         leverage=5,
@@ -336,12 +336,12 @@ async def test_log_order_to_db_propagates_leverage_and_reduce_only(
         client_order_id="client_lev",
         symbol="BTC-USD",
         side=OrderSideEnum.SELL,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=1.0,
         price=50000.0,
         filled=0.0,
         remaining=0.0,
-        status=OrderStatusEnum.OPEN,
+        status=ExchangeOrderStatusEnum.OPEN,
         timestamp=1234567890.0,
     )
     await client._log_order_to_db(request, order)
@@ -375,7 +375,7 @@ async def test_log_order_to_db_returns_none_when_symbol_not_resolved(
         client_order_id="client_123",
         symbol="BTC-USD",
         side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=1.0,
         price=50000.0,
     )
@@ -384,12 +384,12 @@ async def test_log_order_to_db_returns_none_when_symbol_not_resolved(
         client_order_id="client_123",
         symbol="BTC-USD",
         side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=1.0,
         price=50000.0,
         filled=0.0,
         remaining=0.0,
-        status=OrderStatusEnum.OPEN,
+        status=ExchangeOrderStatusEnum.OPEN,
         timestamp=1234567890.0,
     )
     result = await client._log_order_to_db(request, order)
@@ -422,7 +422,7 @@ async def test_log_order_to_db_parses_symbol_without_delimiter(_mock_resolve: As
         client_order_id="client_456",
         symbol="BTCUSD",
         side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=1.0,
         price=50000.0,
     )
@@ -431,12 +431,12 @@ async def test_log_order_to_db_parses_symbol_without_delimiter(_mock_resolve: As
         client_order_id="client_456",
         symbol="BTCUSD",
         side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=1.0,
         price=50000.0,
         filled=0.0,
         remaining=0.0,
-        status=OrderStatusEnum.OPEN,
+        status=ExchangeOrderStatusEnum.OPEN,
         timestamp=1234567890.0,
     )
     result = await client._log_order_to_db(request, order)
@@ -470,7 +470,7 @@ async def test_log_order_to_db_handles_exception(_mock_resolve: AsyncMock) -> No
         client_order_id="client_123",
         symbol="BTC-USD",
         side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=1.0,
         price=50000.0,
     )
@@ -479,12 +479,12 @@ async def test_log_order_to_db_handles_exception(_mock_resolve: AsyncMock) -> No
         client_order_id="client_123",
         symbol="BTC-USD",
         side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=1.0,
         price=50000.0,
         filled=0.0,
         remaining=0.0,
-        status=OrderStatusEnum.OPEN,
+        status=ExchangeOrderStatusEnum.OPEN,
         timestamp=datetime.now(UTC).timestamp(),
     )
     result = await client._log_order_to_db(request, order)
@@ -502,7 +502,7 @@ async def test_log_order_update_to_db_returns_none_when_no_repository() -> None:
     client = DummyExchangeClient(repository=None)
     result = await client._log_order_update_to_db(
         db_order_id=42,
-        status=OrderStatusEnum.FILLED,
+        status=ExchangeOrderStatusEnum.FILLED,
         exchange_order_id="order_123",
     )
     assert result is None
@@ -522,7 +522,7 @@ async def test_log_order_update_to_db_returns_new_order_id() -> None:
     client.set_tracker(SequenceTracker())
     result = await client._log_order_update_to_db(
         db_order_id=42,
-        status=OrderStatusEnum.FILLED,
+        status=ExchangeOrderStatusEnum.FILLED,
         exchange_order_id="order_123",
         error=None,
     )
@@ -550,7 +550,7 @@ async def test_log_order_update_to_db_stamps_provenance_from_tracker() -> None:
     client.set_tracker(tracker)
     result = await client._log_order_update_to_db(
         db_order_id=10,
-        status=OrderStatusEnum.FILLED,
+        status=ExchangeOrderStatusEnum.FILLED,
     )
     assert result == 55
     call_kwargs = mock_repo.update_order.call_args[1]
@@ -572,7 +572,7 @@ async def test_log_order_update_to_db_handles_exception() -> None:
     client.set_tracker(SequenceTracker())
     result = await client._log_order_update_to_db(
         db_order_id=42,
-        status=OrderStatusEnum.FILLED,
+        status=ExchangeOrderStatusEnum.FILLED,
     )
     assert result is None
 
@@ -591,8 +591,8 @@ async def test_log_execution_to_db_returns_early_when_no_repository() -> None:
         exec_type="trade",
         symbol="BTC-USD",
         side=OrderSideEnum.BUY,
-        order_type=OrderTypeEnum.LIMIT,
-        order_status=OrderStatusEnum.FILLED,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
+        order_status=ExchangeOrderStatusEnum.FILLED,
         timestamp=datetime.now(UTC),
         last_price=50000.0,
         last_qty=1.0,
@@ -621,8 +621,8 @@ async def test_log_execution_to_db_logs_successfully() -> None:
         exec_type="trade",
         symbol="BTC-USD",
         side=OrderSideEnum.BUY,
-        order_type=OrderTypeEnum.LIMIT,
-        order_status=OrderStatusEnum.FILLED,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
+        order_status=ExchangeOrderStatusEnum.FILLED,
         timestamp=datetime.now(UTC),
         exec_id="exec-123",
         trade_id=987654321,
@@ -664,8 +664,8 @@ async def test_log_execution_to_db_uses_fallback_values() -> None:
         exec_type="trade",
         symbol="BTC-USD",
         side=OrderSideEnum.BUY,
-        order_type=OrderTypeEnum.LIMIT,
-        order_status=OrderStatusEnum.FILLED,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
+        order_status=ExchangeOrderStatusEnum.FILLED,
         timestamp=datetime.now(UTC),
         last_price=None,
         average_price=49500.0,
@@ -703,8 +703,8 @@ async def test_log_execution_to_db_partial_fill_status() -> None:
         exec_type="trade",
         symbol="BTC-USD",
         side=OrderSideEnum.BUY,
-        order_type=OrderTypeEnum.LIMIT,
-        order_status=OrderStatusEnum.OPEN,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
+        order_status=ExchangeOrderStatusEnum.OPEN,
         timestamp=datetime.now(UTC),
         last_price=50000.0,
         last_qty=0.5,
@@ -737,8 +737,8 @@ async def test_log_execution_to_db_handles_exception() -> None:
         exec_type="trade",
         symbol="BTC-USD",
         side=OrderSideEnum.BUY,
-        order_type=OrderTypeEnum.LIMIT,
-        order_status=OrderStatusEnum.FILLED,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
+        order_status=ExchangeOrderStatusEnum.FILLED,
         timestamp=datetime.now(UTC),
     )
     await client._log_execution_to_db(
@@ -773,7 +773,7 @@ async def test_log_order_to_db_passes_provenance_when_tracker_set(
         client_order_id="client_prov",
         symbol="BTC-USD",
         side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=1.0,
         price=50000.0,
     )
@@ -782,12 +782,12 @@ async def test_log_order_to_db_passes_provenance_when_tracker_set(
         client_order_id="client_prov",
         symbol="BTC-USD",
         side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=1.0,
         price=50000.0,
         filled=0.0,
         remaining=0.0,
-        status=OrderStatusEnum.OPEN,
+        status=ExchangeOrderStatusEnum.OPEN,
         timestamp=1234567890.0,
     )
     result = await client._log_order_to_db(request, order)

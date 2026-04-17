@@ -34,6 +34,7 @@ from snapper.core.types import FillStatus
 from snapper.core.types import FillStatusEnum
 from snapper.core.types import HealthStatusEnum
 from snapper.core.types import OrderCommandEnum
+from snapper.core.types import OrderEventEnum
 from snapper.core.types import OrderEventType
 from snapper.core.types import OrderExchange
 from snapper.core.types import ReplaceEventType
@@ -45,11 +46,11 @@ from snapper.data.repository_types import RecordVenueEventParams
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecType
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import to_fill_status
 from snapper.infrastructure.symbols.functions import is_tradeable
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
@@ -298,7 +299,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.warning(f"[{exchange_name}] No repository, skipping recovery")
             return
         try:
-            exchange_open = await self.exchange_client.get_orders(status=OrderStatusEnum.OPEN)
+            exchange_open = await self.exchange_client.get_orders(
+                status=ExchangeOrderStatusEnum.OPEN
+            )
         except Exception as e:
             logger.error(f"[{exchange_name}] Failed to query exchange open orders: {e}")
             exchange_open = []
@@ -418,7 +421,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 f"{exchange_order_id} on exchange: {e}"
             )
             return None
-        terminal = (OrderStatusEnum.CLOSED, OrderStatusEnum.CANCELED, OrderStatusEnum.EXPIRED)
+        terminal = (
+            ExchangeOrderStatusEnum.CLOSED,
+            ExchangeOrderStatusEnum.CANCELED,
+            ExchangeOrderStatusEnum.EXPIRED,
+        )
         if snap.status in terminal:
             await self.exchange_client._log_order_update_to_db(
                 db_order_id=db_order["sequence_id"],
@@ -705,11 +712,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 f"instrument {order.instrument} not tradeable"
             )
             self.pending_orders.pop(order.client_order_id, None)
-            await self._publish_order_status(order, "rejected")
+            await self._publish_order_status(order, OrderEventEnum.REJECTED)
             return
         try:
             self.pending_orders[order.client_order_id] = PendingOrderState(request=order)
-            await self._publish_order_status(order, "submitted")
+            await self._publish_order_status(order, OrderEventEnum.SUBMITTED)
             exchange_order_id = await self._execute_live_order(order)
             if exchange_order_id:
                 self.client_by_exchange[exchange_order_id] = order.client_order_id
@@ -725,7 +732,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                         "strategy_tag": order.strategy_tag,
                     }
                 )
-                await self._publish_order_status(order, "accepted", exchange_order_id)
+                await self._publish_order_status(order, OrderEventEnum.ACCEPTED, exchange_order_id)
                 logger.info(
                     f"[{exchange_name}] Order {order.client_order_id} "
                     f"accepted as {exchange_order_id}, waiting for execution"
@@ -735,7 +742,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     f"[{exchange_name}] Order {order.client_order_id} rejected by exchange"
                 )
                 self.pending_orders.pop(order.client_order_id, None)
-                await self._publish_order_status(order, "rejected")
+                await self._publish_order_status(order, OrderEventEnum.REJECTED)
                 await self._record_venue_event(
                     {
                         "event_type": "order_rejected",
@@ -750,7 +757,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         except Exception as e:
             logger.error(f"[{exchange_name}] Error processing order {order.client_order_id}: {e}")
             self.pending_orders.pop(order.client_order_id, None)
-            await self._publish_order_status(order, "rejected")
+            await self._publish_order_status(order, OrderEventEnum.REJECTED)
             await self._record_venue_event(
                 {
                     "event_type": "order_rejected",
@@ -777,7 +784,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             result = await self.exchange_client.cancel_order(
                 cancel.exchange_order_id, cancel.instrument
             )
-            if result and result.status == OrderStatusEnum.CANCELED:
+            if result and result.status == ExchangeOrderStatusEnum.CANCELED:
                 client_id = self.client_by_exchange.pop(cancel.exchange_order_id, None)
                 if client_id:
                     pending = self.pending_orders.pop(client_id, None)
@@ -785,14 +792,14 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                         assert self.exchange_client is not None
                         await self.exchange_client._log_order_update_to_db(
                             db_order_id=pending.db_order_id,
-                            status=OrderStatusEnum.CANCELED,
+                            status=ExchangeOrderStatusEnum.CANCELED,
                         )
-                await self._publish_cancel_event(cancel, "cancelled")
+                await self._publish_cancel_event(cancel, OrderEventEnum.CANCELLED)
                 logger.info(
                     f"[{exchange_name}] Order {cancel.exchange_order_id} cancelled successfully"
                 )
             else:
-                await self._publish_cancel_event(cancel, "rejected")
+                await self._publish_cancel_event(cancel, OrderEventEnum.REJECTED)
                 logger.warning(
                     f"[{exchange_name}] Cancel request for {cancel.exchange_order_id} failed"
                 )
@@ -800,7 +807,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.error(
                 f"[{exchange_name}] Error cancelling order {cancel.exchange_order_id}: {e}"
             )
-            await self._publish_cancel_event(cancel, "rejected")
+            await self._publish_cancel_event(cancel, OrderEventEnum.REJECTED)
 
     async def _process_replace(self, replace: OrderReplaceData) -> None:
         """Replace/modify an existing order on the exchange.
@@ -816,7 +823,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             f"[{exchange_name}] Order replace not yet implemented for {replace.exchange_order_id}. "
             f"Consider cancel + new order workflow."
         )
-        await self._publish_replace_event(replace, "rejected")
+        await self._publish_replace_event(replace, OrderEventEnum.REJECTED)
 
     async def _publish_cancel_event(self, cancel: OrderCancelData, event: CancelEventType) -> None:
         """Publish cancel event to orders.events.*.*.cancelled or rejected.
@@ -902,7 +909,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             order_request = ExchangeOrderRequest(
                 symbol=order.instrument,
                 side=OrderSideEnum(order.side),
-                type=OrderTypeEnum(order.order_type),
+                type=ExchangeOrderTypeEnum(order.order_type),
                 amount=float(order.quantity),
                 price=float(order.price) if order.price else None,
                 client_order_id=order.client_order_id,
@@ -1047,7 +1054,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if self.exchange_client is None:
             return
         exchange_name = self._get_exchange_name()
-        exchange_orders = await self.exchange_client.get_orders(status=OrderStatusEnum.OPEN)
+        exchange_orders = await self.exchange_client.get_orders(status=ExchangeOrderStatusEnum.OPEN)
         exchange_by_id = {o.id: o for o in exchange_orders}
 
         for _eid, pending in list(self.pending_orders.items()):
@@ -1095,9 +1102,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             return
 
         if snapshot.status not in (
-            OrderStatusEnum.CLOSED,
-            OrderStatusEnum.CANCELED,
-            OrderStatusEnum.EXPIRED,
+            ExchangeOrderStatusEnum.CLOSED,
+            ExchangeOrderStatusEnum.CANCELED,
+            ExchangeOrderStatusEnum.EXPIRED,
         ):
             logger.info(
                 f"[{exchange_name}] Recon: order {exchange_oid} not in open list "
@@ -1109,16 +1116,16 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             await self._reconcile_fill_gap(exchange_name, exchange_oid, pending, snapshot)
 
         terminal_type: ExecType
-        terminal_status: OrderStatusEnum
-        if snapshot.status == OrderStatusEnum.CLOSED:
+        terminal_status: ExchangeOrderStatusEnum
+        if snapshot.status == ExchangeOrderStatusEnum.CLOSED:
             terminal_type = "filled"
-            terminal_status = OrderStatusEnum.CLOSED
-        elif snapshot.status == OrderStatusEnum.EXPIRED:
+            terminal_status = ExchangeOrderStatusEnum.CLOSED
+        elif snapshot.status == ExchangeOrderStatusEnum.EXPIRED:
             terminal_type = "expired"
-            terminal_status = OrderStatusEnum.EXPIRED
+            terminal_status = ExchangeOrderStatusEnum.EXPIRED
         else:
             terminal_type = "canceled"
-            terminal_status = OrderStatusEnum.CANCELED
+            terminal_status = ExchangeOrderStatusEnum.CANCELED
 
         logger.warning(
             f"[{exchange_name}] Recon: order {exchange_oid} "
@@ -1130,7 +1137,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             exec_type=terminal_type,
             symbol=pending.request.instrument,
             side=OrderSideEnum(pending.request.side),
-            order_type=OrderTypeEnum.MARKET,
+            order_type=ExchangeOrderTypeEnum.MARKET,
             order_status=terminal_status,
             timestamp=datetime.now(UTC),
         )
@@ -1200,8 +1207,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             exec_type="trade",
             symbol=pending.request.instrument,
             side=OrderSideEnum(pending.request.side),
-            order_type=OrderTypeEnum.LIMIT,
-            order_status=OrderStatusEnum.OPEN,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.OPEN,
             timestamp=datetime.now(UTC),
             cum_qty=exchange_order.filled,
             last_qty=gap,
@@ -1334,9 +1341,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self.client_by_exchange.pop(exchange_order_id, None)
         if pending and pending.db_order_id is not None and self.exchange_client is not None:
             status = (
-                OrderStatusEnum.CANCELED
+                ExchangeOrderStatusEnum.CANCELED
                 if execution.exec_type == "canceled"
-                else OrderStatusEnum.EXPIRED
+                else ExchangeOrderStatusEnum.EXPIRED
             )
             await self.exchange_client._log_order_update_to_db(
                 db_order_id=pending.db_order_id, status=status
@@ -1413,8 +1420,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         tolerance = max(1e-12, expected_qty * 1e-6)
         qty_complete = cum_qty >= expected_qty - tolerance
         exchange_terminal = execution.cum_qty is not None and execution.order_status in (
-            OrderStatusEnum.CLOSED,
-            OrderStatusEnum.CANCELED,
+            ExchangeOrderStatusEnum.CLOSED,
+            ExchangeOrderStatusEnum.CANCELED,
         )
         return (
             FillStatusEnum.FILLED if qty_complete or exchange_terminal else FillStatusEnum.PARTIAL
@@ -1468,7 +1475,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         fee_amount, fee_asset = self._resolve_fee(execution)
         now = datetime.now(UTC)
-        topic = order_event_topic(exchange_name, original_order.instrument, "executed")
+        topic = order_event_topic(exchange_name, original_order.instrument, OrderEventEnum.EXECUTED)
         client_id = original_order.client_order_id
         pending = self.pending_orders.get(client_id)
         prev_cum = pending.last_seen_cum_qty if pending else 0.0
@@ -1572,7 +1579,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     )
                 if pending.db_order_id is not None:
                     db_status = (
-                        OrderStatusEnum.CLOSED if fill.status == "filled" else OrderStatusEnum.OPEN
+                        ExchangeOrderStatusEnum.CLOSED
+                        if fill.status == "filled"
+                        else ExchangeOrderStatusEnum.OPEN
                     )
                     await self.exchange_client._log_order_update_to_db(
                         db_order_id=pending.db_order_id,

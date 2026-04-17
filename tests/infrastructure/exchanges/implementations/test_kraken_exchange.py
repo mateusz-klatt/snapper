@@ -23,11 +23,11 @@ from pytest import MonkeyPatch
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
@@ -340,16 +340,16 @@ class TestKrakenExchangeClient:
             order_request = ExchangeOrderRequest(
                 symbol="BTC-USD",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.MARKET,
+                type=ExchangeOrderTypeEnum.MARKET,
                 amount=float("0.1"),
             )
             order = await kraken_client.create_order(order_request)
             assert order.id == "test_order_123"
             assert order.symbol == "BTC-USD"
             assert order.side == OrderSideEnum.BUY
-            assert order.type == OrderTypeEnum.MARKET
+            assert order.type == ExchangeOrderTypeEnum.MARKET
             assert order.amount == float("0.1")
-            assert order.status == OrderStatusEnum.PENDING
+            assert order.status == ExchangeOrderStatusEnum.PENDING
             assert order.filled == pytest.approx(0.0)
             assert order.remaining == pytest.approx(0.1)
             assert order.fee is None
@@ -383,7 +383,7 @@ class TestKrakenExchangeClient:
             }
             result = await kraken_client.cancel_order("test_order_123", "BTC-USD")
             assert result.id == "test_order_123"
-            assert result.status == OrderStatusEnum.CANCELED
+            assert result.status == ExchangeOrderStatusEnum.CANCELED
             assert result.client_order_id == "cl-123"
             mock_client.cancel_order.assert_called_once_with("test_order_123", "BTC/USD")
             mock_client.fetch_order.assert_called_once_with("test_order_123", "BTC/USD")
@@ -499,7 +499,7 @@ class TestKrakenExchangeClient:
         order_request = ExchangeOrderRequest(
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.MARKET,
+            type=ExchangeOrderTypeEnum.MARKET,
             amount=float("0.1"),
         )
         with pytest.raises(RuntimeError, match="API credentials required"):
@@ -521,14 +521,14 @@ class TestKrakenExchangeClient:
             order_request = ExchangeOrderRequest(
                 symbol="BTC-USD",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.LIMIT,
+                type=ExchangeOrderTypeEnum.LIMIT,
                 amount=float("0.1"),
                 price=float("50000.0"),
                 client_order_id="client_123",
             )
             order = await kraken_client.create_order(order_request)
             assert order.id == "test_order_123"
-            assert order.status == OrderStatusEnum.PENDING
+            assert order.status == ExchangeOrderStatusEnum.PENDING
             assert order.client_order_id == "client_123"
             assert order.price == float("50000.0")
             mock_client.create_order.assert_called_once()
@@ -553,12 +553,12 @@ class TestKrakenExchangeClient:
             order_request = ExchangeOrderRequest(
                 symbol="BTC-USD",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.MARKET,
+                type=ExchangeOrderTypeEnum.MARKET,
                 amount=float("0.1"),
             )
             order = await kraken_client.create_order(order_request)
             assert order.id == ""
-            assert order.status == OrderStatusEnum.PENDING
+            assert order.status == ExchangeOrderStatusEnum.PENDING
             assert order.db_order_id is None
             mock_log.assert_not_called()
 
@@ -581,12 +581,12 @@ class TestKrakenExchangeClient:
             order_request = ExchangeOrderRequest(
                 symbol="BTC-USD",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.MARKET,
+                type=ExchangeOrderTypeEnum.MARKET,
                 amount=float("0.1"),
             )
             order = await kraken_client.create_order(order_request)
             assert order.id == ""
-            assert order.status == OrderStatusEnum.PENDING
+            assert order.status == ExchangeOrderStatusEnum.PENDING
             mock_log.assert_not_called()
 
     async def test_create_order_error(self, kraken_client: KrakenExchangeClient) -> None:
@@ -594,7 +594,7 @@ class TestKrakenExchangeClient:
         order_request = ExchangeOrderRequest(
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.MARKET,
+            type=ExchangeOrderTypeEnum.MARKET,
             amount=float("0.1"),
         )
         with (
@@ -651,7 +651,7 @@ class TestKrakenExchangeClient:
         with patch.object(kraken_client, "_ccxt_client", mock_client):
             order = await kraken_client.get_order("test_order_123", "BTC-USD")
             assert order.id == "test_order_123"
-            assert order.status == OrderStatusEnum.CLOSED
+            assert order.status == ExchangeOrderStatusEnum.CLOSED
             assert order.filled == float("0.1")
             mock_client.fetch_order.assert_called_once_with("test_order_123", "BTC/USD")
 
@@ -696,10 +696,10 @@ class TestKrakenExchangeClient:
             },
         ]
         with patch.object(kraken_client, "_ccxt_client", mock_client):
-            orders = await kraken_client.get_orders(status=OrderStatusEnum.OPEN, limit=10)
+            orders = await kraken_client.get_orders(status=ExchangeOrderStatusEnum.OPEN, limit=10)
             assert len(orders) == 1
             assert orders[0].id == "order_1"
-            assert orders[0].status == OrderStatusEnum.OPEN
+            assert orders[0].status == ExchangeOrderStatusEnum.OPEN
             mock_client.fetch_open_orders.assert_called_once_with(None, None, 10)
 
     @patch("snapper.infrastructure.exchanges.implementations.kraken.ccxt")
@@ -737,10 +737,10 @@ class TestKrakenExchangeClient:
             },
         ]
         with patch.object(kraken_client, "_ccxt_client", mock_client):
-            orders = await kraken_client.get_orders(status=OrderStatusEnum.CLOSED)
+            orders = await kraken_client.get_orders(status=ExchangeOrderStatusEnum.CLOSED)
             assert len(orders) == 1
             assert orders[0].id == "order_1"
-            assert orders[0].status == OrderStatusEnum.CLOSED
+            assert orders[0].status == ExchangeOrderStatusEnum.CLOSED
             mock_client.fetch_orders.assert_called_once_with(None, None, None)
 
     async def test_get_orders_error(self, kraken_client: KrakenExchangeClient) -> None:
@@ -959,8 +959,8 @@ class TestKrakenExchangeClient:
                 exec_type="new",
                 symbol="BTC-USD",
                 side=OrderSideEnum.BUY,
-                order_type=OrderTypeEnum.LIMIT,
-                order_status=OrderStatusEnum.NEW,
+                order_type=ExchangeOrderTypeEnum.LIMIT,
+                order_status=ExchangeOrderStatusEnum.NEW,
                 timestamp=datetime.now(UTC),
                 cum_qty=0.0,
                 cum_cost=0.0,
@@ -1165,7 +1165,7 @@ class TestKrakenCoverageImprovement:
         order_request = ExchangeOrderRequest(
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.MARKET,
+            type=ExchangeOrderTypeEnum.MARKET,
             amount=float("0.1"),
         )
         with pytest.raises(RuntimeError, match="API credentials required"):
@@ -1177,7 +1177,7 @@ class TestKrakenCoverageImprovement:
         order_request = ExchangeOrderRequest(
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.MARKET,
+            type=ExchangeOrderTypeEnum.MARKET,
             amount=float("0.1"),
         )
         with pytest.raises(RuntimeError, match="API credentials required"):
@@ -1195,13 +1195,13 @@ class TestKrakenCoverageImprovement:
             order_request = ExchangeOrderRequest(
                 symbol="BTC-USD",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.LIMIT,
+                type=ExchangeOrderTypeEnum.LIMIT,
                 amount=float("0.1"),
                 price=float("50000.0"),
                 client_order_id="client_order_123",
             )
             result = await kraken_client.create_order(order_request)
-            assert result.status == OrderStatusEnum.PENDING
+            assert result.status == ExchangeOrderStatusEnum.PENDING
             assert result.client_order_id == "client_order_123"
             assert result.price == float("50000.0")
 
@@ -1214,7 +1214,7 @@ class TestKrakenCoverageImprovement:
             order_request = ExchangeOrderRequest(
                 symbol="BTC-USD",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.MARKET,
+                type=ExchangeOrderTypeEnum.MARKET,
                 amount=float("0.1"),
             )
             with pytest.raises(Exception, match="ExchangeOrderSnapshot creation failed"):
@@ -1262,7 +1262,7 @@ class TestKrakenCoverageImprovement:
             mock_retry.return_value = mock_order_data
             result = await kraken_client.get_order("order_123", "BTC-USD")
             assert result.id == "order_123"
-            assert result.status == OrderStatusEnum.CLOSED
+            assert result.status == ExchangeOrderStatusEnum.CLOSED
 
     async def test_get_order_exception_handling(self, kraken_client: KrakenExchangeClient) -> None:
         """Verify get order exception handling."""
@@ -1298,10 +1298,10 @@ class TestKrakenCoverageImprovement:
         with patch.object(kraken_client, "_with_retry") as mock_retry:
             mock_retry.return_value = mock_orders_data
             result = await kraken_client.get_orders(
-                symbol="BTC-USD", status=OrderStatusEnum.OPEN, limit=10
+                symbol="BTC-USD", status=ExchangeOrderStatusEnum.OPEN, limit=10
             )
             assert len(result) == 1
-            assert result[0].status == OrderStatusEnum.OPEN
+            assert result[0].status == ExchangeOrderStatusEnum.OPEN
 
     async def test_get_orders_all_with_status_filter(
         self, kraken_client: KrakenExchangeClient
@@ -1337,9 +1337,9 @@ class TestKrakenCoverageImprovement:
         ]
         with patch.object(kraken_client, "_with_retry") as mock_retry:
             mock_retry.return_value = mock_orders_data
-            result = await kraken_client.get_orders(status=OrderStatusEnum.CLOSED)
+            result = await kraken_client.get_orders(status=ExchangeOrderStatusEnum.CLOSED)
             assert len(result) == 1
-            assert result[0].status == OrderStatusEnum.CLOSED
+            assert result[0].status == ExchangeOrderStatusEnum.CLOSED
 
     async def test_get_orders_exception_handling(self, kraken_client: KrakenExchangeClient) -> None:
         """Verify get orders exception handling."""
@@ -1513,7 +1513,7 @@ class TestKrakenCoverageImprovement:
         order_request = ExchangeOrderRequest(
             symbol="AAPL-USD",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=float("1"),
             price=float("150"),
             client_order_id="client-1",
@@ -1567,7 +1567,7 @@ class TestKrakenCoverageImprovement:
             result = await kraken_client.cancel_order("ABC123", "AAPL-USD")
         trade_client.cancel_order.assert_called_once_with(txid="ABC123")
         assert result.id == "ABC123"
-        assert result.status == OrderStatusEnum.CANCELED
+        assert result.status == ExchangeOrderStatusEnum.CANCELED
 
 
 class TestCloseWsClientBranches:
@@ -3863,7 +3863,7 @@ class TestKrakenAdditionalCoverage:
         order_request = ExchangeOrderRequest(
             symbol="FOO-BAR",
             side=OrderSideEnum.SELL,
-            type=OrderTypeEnum.MARKET,
+            type=ExchangeOrderTypeEnum.MARKET,
             amount=1.0,
             price=None,
         )
@@ -3912,8 +3912,8 @@ class TestKrakenAdditionalCoverage:
     @pytest.mark.asyncio
     async def test_get_orders_filters_status(self, kraken_client: KrakenExchangeClient) -> None:
         """Verify get orders filters status."""
-        open_order = MagicMock(status=OrderStatusEnum.OPEN)
-        closed_order = MagicMock(status=OrderStatusEnum.CLOSED)
+        open_order = MagicMock(status=ExchangeOrderStatusEnum.OPEN)
+        closed_order = MagicMock(status=ExchangeOrderStatusEnum.CLOSED)
         with (
             patch.object(kraken_client, "_with_retry", AsyncMock(return_value=[{}, {}])),
             patch.object(
@@ -3922,7 +3922,7 @@ class TestKrakenAdditionalCoverage:
                 side_effect=[open_order, closed_order],
             ),
         ):
-            result = await kraken_client.get_orders(status=OrderStatusEnum.CLOSED)
+            result = await kraken_client.get_orders(status=ExchangeOrderStatusEnum.CLOSED)
         assert result == [closed_order]
 
     @pytest.mark.asyncio
@@ -4021,7 +4021,7 @@ class TestKrakenFallbackToNativeAPI:
             order_request = ExchangeOrderRequest(
                 symbol="AAPLx-USD",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.LIMIT,
+                type=ExchangeOrderTypeEnum.LIMIT,
                 amount=float("10"),
                 price=float("150.0"),
                 client_order_id="CLIENT123",
@@ -4040,10 +4040,10 @@ class TestKrakenFallbackToNativeAPI:
             assert result.id == "ORDER123"
             assert result.symbol == "AAPLx-USD"
             assert result.side == OrderSideEnum.BUY
-            assert result.type == OrderTypeEnum.LIMIT
+            assert result.type == ExchangeOrderTypeEnum.LIMIT
             assert result.amount == float("10")
             assert result.price == float("150.0")
-            assert result.status == OrderStatusEnum.PENDING
+            assert result.status == ExchangeOrderStatusEnum.PENDING
 
     @pytest.mark.asyncio
     async def test_cancel_order_fallback_to_native_api(
@@ -4066,7 +4066,7 @@ class TestKrakenFallbackToNativeAPI:
             mock_trade_client.cancel_order.assert_called_once_with(txid="ORDER123")
             assert result.id == "ORDER123"
             assert result.symbol == "AAPLx-USD"
-            assert result.status == OrderStatusEnum.CANCELED
+            assert result.status == ExchangeOrderStatusEnum.CANCELED
 
     @pytest.mark.asyncio
     async def test_create_order_no_fallback_for_other_errors(
@@ -4080,7 +4080,7 @@ class TestKrakenFallbackToNativeAPI:
             order_request = ExchangeOrderRequest(
                 symbol="BTC-USD",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.MARKET,
+                type=ExchangeOrderTypeEnum.MARKET,
                 amount=float("0.1"),
             )
             with pytest.raises(ValueError, match="Different error"):
@@ -4152,7 +4152,7 @@ class TestKrakenFallbackToNativeAPI:
             order_request = ExchangeOrderRequest(
                 symbol="AAPLx-USD",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.LIMIT,
+                type=ExchangeOrderTypeEnum.LIMIT,
                 amount=float("10"),
                 price=float("150.0"),
             )
@@ -4222,7 +4222,7 @@ class TestKrakenExchangeClientSimpleEdgeCases:
         request = ExchangeOrderRequest(
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=1.0,
             price=50000.0,
         )
@@ -4243,7 +4243,7 @@ class TestKrakenExchangeClientSimpleEdgeCases:
         request = ExchangeOrderRequest(
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.LIMIT,
+            type=ExchangeOrderTypeEnum.LIMIT,
             amount=0.00001,
             price=1.0,
         )
@@ -4291,7 +4291,7 @@ class TestKrakenExchangeClientSimpleEdgeCases:
         with patch.object(client, "_ccxt_client") as mock_ccxt:
             mock_ccxt.fetch_open_orders = AsyncMock(side_effect=Exception("API Error"))
             with pytest.raises(Exception, match="API Error"):
-                await client.get_orders("BTC/USD", status=OrderStatusEnum.OPEN)
+                await client.get_orders("BTC/USD", status=ExchangeOrderStatusEnum.OPEN)
 
     @pytest.mark.asyncio
     async def test_get_ticker_api_error(self, client: KrakenExchangeClient) -> None:
@@ -4379,7 +4379,7 @@ class TestCcxtOrderLeverageAndPostOnly:
             request = ExchangeOrderRequest(
                 symbol="BTC-USD",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.LIMIT,
+                type=ExchangeOrderTypeEnum.LIMIT,
                 amount=1.0,
                 price=50000.0,
                 leverage=3,
@@ -4422,7 +4422,7 @@ class TestCcxtOrderLeverageAndPostOnly:
             request = ExchangeOrderRequest(
                 symbol="BTC-USD",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.LIMIT,
+                type=ExchangeOrderTypeEnum.LIMIT,
                 amount=1.0,
                 price=50000.0,
                 post_only=True,
@@ -4478,7 +4478,7 @@ class TestNativeOrderLeverageAndPostOnly:
             request = ExchangeOrderRequest(
                 symbol="AAPLx-USD",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.LIMIT,
+                type=ExchangeOrderTypeEnum.LIMIT,
                 amount=10.0,
                 price=150.0,
                 leverage=5,
@@ -4518,7 +4518,7 @@ class TestNativeOrderLeverageAndPostOnly:
             request = ExchangeOrderRequest(
                 symbol="AAPLx-USD",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.LIMIT,
+                type=ExchangeOrderTypeEnum.LIMIT,
                 amount=10.0,
                 price=150.0,
                 post_only=True,
@@ -4763,7 +4763,7 @@ class TestKrakenLiveFixtures:
             request = ExchangeOrderRequest(
                 symbol="BTC-EUR",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.LIMIT,
+                type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
                 price=29119.5,
                 client_order_id="019d5d4c-d6ab",
@@ -4773,10 +4773,10 @@ class TestKrakenLiveFixtures:
         assert snapshot.client_order_id == "019d5d4c-d6ab"
         assert snapshot.symbol == "BTC-EUR"
         assert snapshot.side == OrderSideEnum.BUY
-        assert snapshot.type == OrderTypeEnum.LIMIT
+        assert snapshot.type == ExchangeOrderTypeEnum.LIMIT
         assert snapshot.amount == pytest.approx(0.0001)
         assert snapshot.price == pytest.approx(29119.5)
-        assert snapshot.status == OrderStatusEnum.PENDING
+        assert snapshot.status == ExchangeOrderStatusEnum.PENDING
         assert snapshot.filled == pytest.approx(0.0)
         assert snapshot.remaining == pytest.approx(0.0001)
         assert snapshot.fee is None
@@ -4793,7 +4793,7 @@ class TestKrakenLiveFixtures:
             mock_ccxt.fetch_order = AsyncMock(return_value=dict(self.CCXT_PASSIVE_FETCH))
             snapshot = await client.get_order("OODTGX", "BTC-EUR")
         assert snapshot.id == "OODTGX"
-        assert snapshot.status == OrderStatusEnum.OPEN
+        assert snapshot.status == ExchangeOrderStatusEnum.OPEN
         assert snapshot.filled == pytest.approx(0.0)
         assert snapshot.remaining == pytest.approx(0.0001)
         assert snapshot.price == pytest.approx(29119.5)
@@ -4811,7 +4811,7 @@ class TestKrakenLiveFixtures:
             mock_ccxt.fetch_order = AsyncMock(return_value=dict(self.CCXT_PASSIVE_CANCEL_FETCH))
             snapshot = await client.cancel_order("OODTGX", "BTC-EUR")
         assert snapshot.id == "OODTGX"
-        assert snapshot.status == OrderStatusEnum.CANCELED
+        assert snapshot.status == ExchangeOrderStatusEnum.CANCELED
         assert snapshot.filled == pytest.approx(0.0)
         assert snapshot.remaining == pytest.approx(0.0001)
         assert snapshot.client_order_id == "019d5d4c-d6ab"
@@ -4834,14 +4834,14 @@ class TestKrakenLiveFixtures:
             request = ExchangeOrderRequest(
                 symbol="BTC-EUR",
                 side=OrderSideEnum.SELL,
-                type=OrderTypeEnum.LIMIT,
+                type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
                 price=58239.1,
                 post_only=True,
             )
             snapshot = await client.create_order(request)
         assert snapshot.id == "ONHBU2"
-        assert snapshot.status == OrderStatusEnum.PENDING
+        assert snapshot.status == ExchangeOrderStatusEnum.PENDING
         assert snapshot.filled == pytest.approx(0.0)
         call_args = mock_ccxt.create_order.call_args
         params = call_args[0][5]
@@ -4859,7 +4859,7 @@ class TestKrakenLiveFixtures:
             mock_ccxt.fetch_order = AsyncMock(return_value=dict(self.CCXT_TOPBOOK_FETCH_FILLED))
             snapshot = await client.get_order("ONHBU2", "BTC-EUR")
         assert snapshot.id == "ONHBU2"
-        assert snapshot.status == OrderStatusEnum.CLOSED
+        assert snapshot.status == ExchangeOrderStatusEnum.CLOSED
         assert snapshot.filled == pytest.approx(0.0001)
         assert snapshot.remaining == pytest.approx(0.0)
         assert snapshot.price == pytest.approx(58239.1)
@@ -4878,7 +4878,7 @@ class TestKrakenLiveFixtures:
             mock_ccxt.fetch_order = AsyncMock(return_value=dict(self.CCXT_TOPBOOK_CANCEL_UNFILLED))
             snapshot = await client.cancel_order("ONE2HB", "BTC-EUR")
         assert snapshot.id == "ONE2HB"
-        assert snapshot.status == OrderStatusEnum.CANCELED
+        assert snapshot.status == ExchangeOrderStatusEnum.CANCELED
         assert snapshot.filled == pytest.approx(0.0)
 
     @pytest.mark.asyncio
@@ -4900,13 +4900,13 @@ class TestKrakenLiveFixtures:
             request = ExchangeOrderRequest(
                 symbol="BTC-EUR",
                 side=OrderSideEnum.SELL,
-                type=OrderTypeEnum.LIMIT,
+                type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
                 price=58238.0,
             )
             snapshot = await client.create_order(request)
         assert snapshot.id == "O2CMWJ"
-        assert snapshot.status == OrderStatusEnum.PENDING
+        assert snapshot.status == ExchangeOrderStatusEnum.PENDING
         assert snapshot.filled == pytest.approx(0.0)
         assert snapshot.remaining == pytest.approx(0.0001)
         assert snapshot.fee is None
@@ -4923,7 +4923,7 @@ class TestKrakenLiveFixtures:
             mock_ccxt.fetch_order = AsyncMock(return_value=dict(self.CCXT_AGGRESSIVE_FETCH))
             snapshot = await client.get_order("O2CMWJ", "BTC-EUR")
         assert snapshot.id == "O2CMWJ"
-        assert snapshot.status == OrderStatusEnum.CLOSED
+        assert snapshot.status == ExchangeOrderStatusEnum.CLOSED
         assert snapshot.filled == pytest.approx(0.0001)
         assert snapshot.fee == pytest.approx(0.01456)
 
@@ -4943,13 +4943,13 @@ class TestKrakenLiveFixtures:
             request = ExchangeOrderRequest(
                 symbol="BTC-EUR",
                 side=OrderSideEnum.SELL,
-                type=OrderTypeEnum.MARKET,
+                type=ExchangeOrderTypeEnum.MARKET,
                 amount=0.0001,
             )
             snapshot = await client.create_order(request)
         assert snapshot.id == "OJWE3F"
-        assert snapshot.status == OrderStatusEnum.PENDING
-        assert snapshot.type == OrderTypeEnum.MARKET
+        assert snapshot.status == ExchangeOrderStatusEnum.PENDING
+        assert snapshot.type == ExchangeOrderTypeEnum.MARKET
         assert snapshot.filled == pytest.approx(0.0)
         assert snapshot.remaining == pytest.approx(0.0001)
         assert snapshot.price is None
@@ -4967,8 +4967,8 @@ class TestKrakenLiveFixtures:
             mock_ccxt.fetch_order = AsyncMock(return_value=dict(self.CCXT_MARKET_FETCH))
             snapshot = await client.get_order("OJWE3F", "BTC-EUR")
         assert snapshot.id == "OJWE3F"
-        assert snapshot.status == OrderStatusEnum.CLOSED
-        assert snapshot.type == OrderTypeEnum.MARKET
+        assert snapshot.status == ExchangeOrderStatusEnum.CLOSED
+        assert snapshot.type == ExchangeOrderTypeEnum.MARKET
         assert snapshot.fee == pytest.approx(0.02329)
 
     @pytest.mark.asyncio
@@ -4989,13 +4989,13 @@ class TestKrakenLiveFixtures:
             request = ExchangeOrderRequest(
                 symbol="BTC-EUR",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.LIMIT,
+                type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
                 price=29119.5,
             )
             create_snap = await client.create_order(request)
         assert create_snap.id == "OLKARR"
-        assert create_snap.status == OrderStatusEnum.PENDING
+        assert create_snap.status == ExchangeOrderStatusEnum.PENDING
 
         with patch.object(client, "_ccxt_client") as mock_ccxt:
             mock_ccxt.cancel_order = AsyncMock(return_value={"info": {"result": {"count": 1}}})
@@ -5004,7 +5004,7 @@ class TestKrakenLiveFixtures:
             )
             cancel_snap = await client.cancel_order("OLKARR", "BTC-EUR")
         assert cancel_snap.id == "OLKARR"
-        assert cancel_snap.status == OrderStatusEnum.CANCELED
+        assert cancel_snap.status == ExchangeOrderStatusEnum.CANCELED
         assert cancel_snap.filled == pytest.approx(0.0)
 
     @pytest.mark.asyncio
@@ -5035,7 +5035,7 @@ class TestKrakenLiveFixtures:
             request = ExchangeOrderRequest(
                 symbol="BTC-EUR",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.LIMIT,
+                type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
                 price=29119.5,
                 client_order_id="019d5d4c-d6ab",
@@ -5044,10 +5044,10 @@ class TestKrakenLiveFixtures:
         assert snapshot.id == "OODTGX"
         assert snapshot.symbol == "BTC-EUR"
         assert snapshot.side == OrderSideEnum.BUY
-        assert snapshot.type == OrderTypeEnum.LIMIT
+        assert snapshot.type == ExchangeOrderTypeEnum.LIMIT
         assert snapshot.amount == pytest.approx(0.0001)
         assert snapshot.price == pytest.approx(29119.5)
-        assert snapshot.status == OrderStatusEnum.PENDING
+        assert snapshot.status == ExchangeOrderStatusEnum.PENDING
         assert snapshot.filled == pytest.approx(0.0)
         assert snapshot.remaining == pytest.approx(0.0001)
         assert snapshot.client_order_id == "019d5d4c-d6ab"
@@ -5080,7 +5080,7 @@ class TestKrakenLiveFixtures:
             request = ExchangeOrderRequest(
                 symbol="BTC-EUR",
                 side=OrderSideEnum.SELL,
-                type=OrderTypeEnum.LIMIT,
+                type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
                 price=58239.1,
                 post_only=True,
@@ -5089,7 +5089,7 @@ class TestKrakenLiveFixtures:
         call_kwargs = mock_trade_client.create_order.call_args.kwargs
         assert call_kwargs["oflags"] == "post"
         assert snapshot.id == "ONHBU2"
-        assert snapshot.status == OrderStatusEnum.PENDING
+        assert snapshot.status == ExchangeOrderStatusEnum.PENDING
 
     @pytest.mark.asyncio
     async def test_native_aggressive_create(self, client: KrakenExchangeClient) -> None:
@@ -5119,7 +5119,7 @@ class TestKrakenLiveFixtures:
             request = ExchangeOrderRequest(
                 symbol="BTC-EUR",
                 side=OrderSideEnum.SELL,
-                type=OrderTypeEnum.LIMIT,
+                type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
                 price=58238.0,
             )
@@ -5127,7 +5127,7 @@ class TestKrakenLiveFixtures:
         assert snapshot.id == "O2CMWJ"
         assert snapshot.side == OrderSideEnum.SELL
         assert snapshot.price == pytest.approx(58238.0)
-        assert snapshot.status == OrderStatusEnum.PENDING
+        assert snapshot.status == ExchangeOrderStatusEnum.PENDING
 
     @pytest.mark.asyncio
     async def test_native_market_create(self, client: KrakenExchangeClient) -> None:
@@ -5157,13 +5157,13 @@ class TestKrakenLiveFixtures:
             request = ExchangeOrderRequest(
                 symbol="BTC-EUR",
                 side=OrderSideEnum.SELL,
-                type=OrderTypeEnum.MARKET,
+                type=ExchangeOrderTypeEnum.MARKET,
                 amount=0.0001,
             )
             snapshot = await client.create_order(request)
         assert snapshot.id == "OJWE3F"
-        assert snapshot.type == OrderTypeEnum.MARKET
-        assert snapshot.status == OrderStatusEnum.PENDING
+        assert snapshot.type == ExchangeOrderTypeEnum.MARKET
+        assert snapshot.status == ExchangeOrderStatusEnum.PENDING
         assert snapshot.price is None
 
     @pytest.mark.asyncio
@@ -5188,7 +5188,7 @@ class TestKrakenLiveFixtures:
             mock_trade_client.cancel_order.return_value = {"count": 1}
             snapshot = await client.cancel_order("OLKARR", symbol="BTC-EUR")
         assert snapshot.id == "OLKARR"
-        assert snapshot.status == OrderStatusEnum.CANCELED
+        assert snapshot.status == ExchangeOrderStatusEnum.CANCELED
         mock_trade_client.cancel_order.assert_called_once_with(txid="OLKARR")
 
     @pytest.mark.asyncio
@@ -5207,9 +5207,9 @@ class TestKrakenLiveFixtures:
         mock_ccxt.cancel_order.assert_called_once_with("OODTGX", "BTC/EUR")
         mock_ccxt.fetch_order.assert_called_once_with("OODTGX", "BTC/EUR")
         assert snapshot.id == "OODTGX"
-        assert snapshot.status == OrderStatusEnum.CANCELED
+        assert snapshot.status == ExchangeOrderStatusEnum.CANCELED
         assert snapshot.side == OrderSideEnum.BUY
-        assert snapshot.type == OrderTypeEnum.LIMIT
+        assert snapshot.type == ExchangeOrderTypeEnum.LIMIT
         assert snapshot.amount == pytest.approx(0.0001)
         assert snapshot.price == pytest.approx(29119.5)
         assert snapshot.filled == pytest.approx(0.0)
@@ -5233,7 +5233,7 @@ class TestKrakenLiveFixtures:
             request = ExchangeOrderRequest(
                 symbol="BTC-EUR",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.LIMIT,
+                type=ExchangeOrderTypeEnum.LIMIT,
                 amount=0.0001,
                 price=29119.5,
                 client_order_id="019d5d4c-d6ab",
@@ -5245,8 +5245,8 @@ class TestKrakenLiveFixtures:
             fetch_snap = await client.get_order("OODTGX", "BTC-EUR")
 
         assert create_snap.id == fetch_snap.id
-        assert create_snap.status == OrderStatusEnum.PENDING
-        assert fetch_snap.status == OrderStatusEnum.OPEN
+        assert create_snap.status == ExchangeOrderStatusEnum.PENDING
+        assert fetch_snap.status == ExchangeOrderStatusEnum.OPEN
         assert create_snap.price == fetch_snap.price
         assert create_snap.amount == fetch_snap.amount
         assert create_snap.side == fetch_snap.side

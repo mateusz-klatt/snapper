@@ -25,11 +25,11 @@ import snapper.messaging.executors.base as base_module
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionFeeBreakdown
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.messaging.executors.base import ExchangeExecutorService
 from snapper.messaging.executors.kraken import KrakenOrderExecutor
 from snapper.messaging.schemas.data import ExecutionData
@@ -1455,8 +1455,8 @@ class TestProcessExecution:
             exec_type="trade",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.MARKET,
-            order_status=OrderStatusEnum.FILLED,
+            order_type=ExchangeOrderTypeEnum.MARKET,
+            order_status=ExchangeOrderStatusEnum.FILLED,
             timestamp=datetime.now(UTC),
         )
         await service_any._process_execution(execution)
@@ -1506,8 +1506,8 @@ class TestProcessExecution:
             exec_type="canceled",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.MARKET,
-            order_status=OrderStatusEnum.CANCELED,
+            order_type=ExchangeOrderTypeEnum.MARKET,
+            order_status=ExchangeOrderStatusEnum.CANCELED,
             timestamp=datetime.now(UTC),
         )
         await service_any._process_execution(execution)
@@ -1561,8 +1561,8 @@ class TestProcessExecution:
             exec_type="expired",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.LIMIT,
-            order_status=OrderStatusEnum.CANCELED,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.CANCELED,
             timestamp=datetime.now(UTC),
         )
         await service_any._process_execution(execution)
@@ -1613,8 +1613,8 @@ class TestProcessExecution:
             exec_type="trade",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.LIMIT,
-            order_status=OrderStatusEnum.OPEN,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.OPEN,
             timestamp=datetime.now(UTC),
             cum_qty=0.5,
             average_price=50100.0,
@@ -2622,10 +2622,10 @@ class TestExecutorCoverage:
             client_order_id="test_order_123",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.MARKET,
+            type=ExchangeOrderTypeEnum.MARKET,
             amount=0.1,
             price=None,
-            status=OrderStatusEnum.OPEN,
+            status=ExchangeOrderStatusEnum.OPEN,
             filled=0.0,
             remaining=0.1,
             timestamp=datetime.now(UTC).timestamp(),
@@ -2973,8 +2973,8 @@ class TestExecutorCoverage:
             exec_type="filled",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.LIMIT,
-            order_status=OrderStatusEnum.FILLED,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.FILLED,
             timestamp=datetime.now(UTC),
             cum_qty=0.1,
             cum_cost=10.0,
@@ -3426,8 +3426,8 @@ class TestExecutorCoverage:
             exec_type="trade",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.MARKET,
-            order_status=OrderStatusEnum.OPEN,
+            order_type=ExchangeOrderTypeEnum.MARKET,
+            order_status=ExchangeOrderStatusEnum.OPEN,
             timestamp=datetime.now(UTC),
             cum_qty=0.1,
             cum_cost=10.0,
@@ -3826,8 +3826,8 @@ class TestExecutorWebSocketExecutions:
             exec_type="filled",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.MARKET,
-            order_status=OrderStatusEnum.FILLED,
+            order_type=ExchangeOrderTypeEnum.MARKET,
+            order_status=ExchangeOrderStatusEnum.FILLED,
             timestamp=datetime.now(UTC),
             cum_qty=0.1,
             cum_cost=4512.35,
@@ -3888,8 +3888,8 @@ class TestExecutorWebSocketExecutions:
             exec_type="trade",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.LIMIT,
-            order_status=OrderStatusEnum.PARTIALLY_FILLED,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.PARTIALLY_FILLED,
             timestamp=datetime.now(UTC),
             cum_qty=0.5,
             cum_cost=22500.0,
@@ -3945,8 +3945,8 @@ class TestExecutorWebSocketExecutions:
             exec_type="canceled",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.LIMIT,
-            order_status=OrderStatusEnum.CANCELED,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.CANCELED,
             timestamp=datetime.now(UTC),
             cum_qty=0.0,
             cum_cost=0.0,
@@ -3978,8 +3978,8 @@ class TestExecutorWebSocketExecutions:
             exec_type="filled",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.LIMIT,
-            order_status=OrderStatusEnum.FILLED,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.FILLED,
             timestamp=datetime.now(UTC),
             cum_qty=0.1,
             cum_cost=4500.0,
@@ -4462,7 +4462,7 @@ class TestCancelReplaceHandlers:
         service_any._publish_cancel_event = AsyncMock()
         mock_client = AsyncMock()
         mock_result = MagicMock()
-        mock_result.status = OrderStatusEnum.CANCELED
+        mock_result.status = ExchangeOrderStatusEnum.CANCELED
         mock_client.cancel_order = AsyncMock(return_value=mock_result)
         service_any.exchange_client = mock_client
         cancel_envelope = OrderCancelData(
@@ -4516,7 +4516,7 @@ class TestCancelReplaceHandlers:
         service_any.client_by_exchange = {"KRAKEN-123": order.client_order_id}
         mock_client = AsyncMock()
         mock_result = MagicMock()
-        mock_result.status = OrderStatusEnum.CANCELED
+        mock_result.status = ExchangeOrderStatusEnum.CANCELED
         mock_client.cancel_order = AsyncMock(return_value=mock_result)
         service_any.exchange_client = mock_client
         cancel_envelope = OrderCancelData(
@@ -4553,7 +4553,7 @@ class TestCancelReplaceHandlers:
         service_any._publish_cancel_event = AsyncMock()
         mock_client = AsyncMock()
         mock_result = MagicMock()
-        mock_result.status = OrderStatusEnum.OPEN
+        mock_result.status = ExchangeOrderStatusEnum.OPEN
         mock_client.cancel_order = AsyncMock(return_value=mock_result)
         service_any.exchange_client = mock_client
         cancel_envelope = OrderCancelData(
@@ -4965,8 +4965,8 @@ class TestDeltaFillSemantics:
             exec_type="trade",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.LIMIT,
-            order_status=OrderStatusEnum.OPEN,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.OPEN,
             timestamp=datetime.now(UTC),
             cum_qty=0.5,
             average_price=50100.0,
@@ -4998,8 +4998,8 @@ class TestDeltaFillSemantics:
             exec_type="trade",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.LIMIT,
-            order_status=OrderStatusEnum.OPEN,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.OPEN,
             timestamp=datetime.now(UTC),
             cum_qty=0.5,
             average_price=50050.0,
@@ -5027,8 +5027,8 @@ class TestDeltaFillSemantics:
             exec_type="trade",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.LIMIT,
-            order_status=OrderStatusEnum.OPEN,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.OPEN,
             timestamp=datetime.now(UTC),
             cum_qty=0.3,
             average_price=50000.0,
@@ -5045,8 +5045,8 @@ class TestDeltaFillSemantics:
             exec_type="trade",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.LIMIT,
-            order_status=OrderStatusEnum.OPEN,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.OPEN,
             timestamp=datetime.now(UTC),
             cum_qty=0.5,
             average_price=50050.0,
@@ -5064,8 +5064,8 @@ class TestDeltaFillSemantics:
             exec_type="trade",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.LIMIT,
-            order_status=OrderStatusEnum.CLOSED,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.CLOSED,
             timestamp=datetime.now(UTC),
             cum_qty=0.8,
             average_price=50075.0,
@@ -5096,8 +5096,8 @@ class TestDeltaFillSemantics:
             exec_type="trade",
             symbol="BTC-PLN",
             side=OrderSideEnum.SELL,
-            order_type=OrderTypeEnum.LIMIT,
-            order_status=OrderStatusEnum.FILLED,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.FILLED,
             timestamp=datetime.now(UTC),
             last_qty=0.00002073,
             last_price=248468.97,
@@ -5115,8 +5115,8 @@ class TestDeltaFillSemantics:
             exec_type="trade",
             symbol="BTC-PLN",
             side=OrderSideEnum.SELL,
-            order_type=OrderTypeEnum.LIMIT,
-            order_status=OrderStatusEnum.FILLED,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.FILLED,
             timestamp=datetime.now(UTC),
             last_qty=0.00007927,
             last_price=248468.97,
@@ -5146,8 +5146,8 @@ class TestDeltaFillSemantics:
             exec_type="trade",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.LIMIT,
-            order_status=OrderStatusEnum.CLOSED,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.CLOSED,
             timestamp=datetime.now(UTC),
             cum_qty=1.0,
             average_price=50000.0,
@@ -5177,8 +5177,8 @@ class TestDeltaFillSemantics:
             exec_type="canceled",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.LIMIT,
-            order_status=OrderStatusEnum.CANCELED,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.CANCELED,
             timestamp=datetime.now(UTC),
         )
         await ex._process_execution(execution)
@@ -5204,8 +5204,8 @@ class TestDeltaFillSemantics:
             exec_type="expired",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.LIMIT,
-            order_status=OrderStatusEnum.EXPIRED,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.EXPIRED,
             timestamp=datetime.now(UTC),
         )
         await ex._process_execution(execution)
@@ -5332,8 +5332,8 @@ class TestExecutorBasePersistence:
             exec_type="trade",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.LIMIT,
-            order_status=OrderStatusEnum.CLOSED,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.CLOSED,
             timestamp=datetime.now(UTC),
             cum_qty=1.0,
             average_price=50000.0,
@@ -5346,7 +5346,7 @@ class TestExecutorBasePersistence:
         mock_client._log_order_update_to_db.assert_awaited_once()
         call_args = mock_client._log_order_update_to_db.call_args
         assert call_args.kwargs["db_order_id"] == 42
-        assert call_args.kwargs["status"] == OrderStatusEnum.CLOSED
+        assert call_args.kwargs["status"] == ExchangeOrderStatusEnum.CLOSED
 
     @pytest.mark.asyncio
     async def test_process_execution_partial_logs_open_status(self) -> None:
@@ -5372,8 +5372,8 @@ class TestExecutorBasePersistence:
             exec_type="trade",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.LIMIT,
-            order_status=OrderStatusEnum.OPEN,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.OPEN,
             timestamp=datetime.now(UTC),
             cum_qty=0.5,
             average_price=50000.0,
@@ -5383,7 +5383,7 @@ class TestExecutorBasePersistence:
         )
         await ex._process_execution(execution)
         call_args = mock_client._log_order_update_to_db.call_args
-        assert call_args.kwargs["status"] == OrderStatusEnum.OPEN
+        assert call_args.kwargs["status"] == ExchangeOrderStatusEnum.OPEN
         assert order.client_order_id in ex.pending_orders
 
     @pytest.mark.asyncio
@@ -5407,8 +5407,8 @@ class TestExecutorBasePersistence:
             exec_type="trade",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.LIMIT,
-            order_status=OrderStatusEnum.CLOSED,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.CLOSED,
             timestamp=datetime.now(UTC),
             cum_qty=1.0,
             average_price=50000.0,
@@ -5442,8 +5442,8 @@ class TestExecutorBasePersistence:
             exec_type="canceled",
             symbol="BTC-USD",
             side=OrderSideEnum.BUY,
-            order_type=OrderTypeEnum.LIMIT,
-            order_status=OrderStatusEnum.CANCELED,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.CANCELED,
             timestamp=datetime.now(UTC),
         )
         result = await ex._handle_cancellation(
@@ -5453,7 +5453,7 @@ class TestExecutorBasePersistence:
         mock_client._log_order_update_to_db.assert_awaited_once()
         call_args = mock_client._log_order_update_to_db.call_args
         assert call_args.kwargs["db_order_id"] == 99
-        assert call_args.kwargs["status"] == OrderStatusEnum.CANCELED
+        assert call_args.kwargs["status"] == ExchangeOrderStatusEnum.CANCELED
 
     @pytest.mark.asyncio
     async def test_process_cancel_logs_db_update(self) -> None:
@@ -5473,7 +5473,7 @@ class TestExecutorBasePersistence:
         ex.client_by_exchange["ex-cancel-proc"] = order.client_order_id
         mock_client = AsyncMock()
         cancel_result = MagicMock()
-        cancel_result.status = OrderStatusEnum.CANCELED
+        cancel_result.status = ExchangeOrderStatusEnum.CANCELED
         mock_client.cancel_order = AsyncMock(return_value=cancel_result)
         ex.exchange_client = mock_client
         ex.msg_publisher = AsyncMock()
@@ -5543,7 +5543,7 @@ class TestExecutorRecovery:
             id="ex-1",
             filled=0.3,
             remaining=0.7,
-            status=OrderStatusEnum.OPEN,
+            status=ExchangeOrderStatusEnum.OPEN,
             db_order_id=None,
             db_order_public_id=None,
         )
@@ -5576,7 +5576,7 @@ class TestExecutorRecovery:
             id="ex-1",
             filled=1.0,
             remaining=0.0,
-            status=OrderStatusEnum.CLOSED,
+            status=ExchangeOrderStatusEnum.CLOSED,
         )
         mock_client.get_order = AsyncMock(return_value=closed_snap)
         mock_client._log_order_update_to_db = AsyncMock()
@@ -5623,7 +5623,7 @@ class TestExecutorRecovery:
             return_value=SimpleNamespace(
                 id="ex-1",
                 filled=0.0,
-                status=OrderStatusEnum.OPEN,
+                status=ExchangeOrderStatusEnum.OPEN,
             )
         )
         ex.exchange_client = mock_client

@@ -18,8 +18,8 @@ from unittest.mock import patch
 import pytest
 
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonRetryPolicy
 from snapper.infrastructure.exchanges.schemas.polygon import PolygonAgg
@@ -641,7 +641,7 @@ async def test_not_supported_methods_raise(polygon_client: PolygonExchangeClient
             ExchangeOrderRequest(
                 symbol="X:BTCUSD",
                 side=OrderSideEnum.BUY,
-                type=OrderTypeEnum.LIMIT,
+                type=ExchangeOrderTypeEnum.LIMIT,
                 amount=1.0,
             )
         )
@@ -872,7 +872,7 @@ class TestPolygonCreateCancelOrder:
         request = ExchangeOrderRequest(
             symbol="X:BTCUSD",
             side=OrderSideEnum.BUY,
-            type=OrderTypeEnum.MARKET,
+            type=ExchangeOrderTypeEnum.MARKET,
             amount=1.0,
         )
         with pytest.raises(NotImplementedError, match="market data only"):

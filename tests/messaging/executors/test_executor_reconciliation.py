@@ -12,9 +12,9 @@ import pytest
 
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.messaging.executors import base as base_module
 from snapper.messaging.executors.base import ExchangeExecutorService
 from snapper.messaging.executors.base import PendingOrderState
@@ -48,7 +48,7 @@ def _make_order_snapshot(
     order_id: str = "ex-1",
     filled: float = 0.0,
     price: float | None = 100.0,
-    status: OrderStatusEnum = OrderStatusEnum.OPEN,
+    status: ExchangeOrderStatusEnum = ExchangeOrderStatusEnum.OPEN,
 ) -> ExchangeOrderSnapshot:
     """Build an ExchangeOrderSnapshot for testing."""
     return ExchangeOrderSnapshot(
@@ -56,7 +56,7 @@ def _make_order_snapshot(
         client_order_id="cid-1",
         symbol="BTC-USD",
         side=OrderSideEnum.BUY,
-        type=OrderTypeEnum.LIMIT,
+        type=ExchangeOrderTypeEnum.LIMIT,
         amount=1.0,
         price=price,
         status=status,
@@ -100,7 +100,7 @@ class TestReconciliation:
         ex = _make_executor()
         ex.pending_orders["cid-1"] = _make_pending()
         ex.exchange_client.get_orders = AsyncMock(return_value=[])
-        canceled_snap = _make_order_snapshot(filled=0.0, status=OrderStatusEnum.CANCELED)
+        canceled_snap = _make_order_snapshot(filled=0.0, status=ExchangeOrderStatusEnum.CANCELED)
         ex.exchange_client.get_order = AsyncMock(return_value=canceled_snap)
         ex.exchange_client.get_balance = AsyncMock(return_value={})
         ex._process_execution = AsyncMock()
@@ -123,7 +123,9 @@ class TestReconciliation:
         ex = _make_executor()
         ex.pending_orders["cid-1"] = _make_pending(cum_qty=0.0)
         ex.exchange_client.get_orders = AsyncMock(return_value=[])
-        filled_snap = _make_order_snapshot(filled=1.0, price=100.0, status=OrderStatusEnum.CLOSED)
+        filled_snap = _make_order_snapshot(
+            filled=1.0, price=100.0, status=ExchangeOrderStatusEnum.CLOSED
+        )
         ex.exchange_client.get_order = AsyncMock(return_value=filled_snap)
         ex.exchange_client.get_balance = AsyncMock(return_value={})
         ex._process_execution = AsyncMock()
@@ -150,7 +152,7 @@ class TestReconciliation:
         ex.pending_orders["cid-1"] = _make_pending(cum_qty=0.0)
         ex.exchange_client.get_orders = AsyncMock(return_value=[])
         closed_no_price = _make_order_snapshot(
-            filled=1.0, price=None, status=OrderStatusEnum.CLOSED
+            filled=1.0, price=None, status=ExchangeOrderStatusEnum.CLOSED
         )
         ex.exchange_client.get_order = AsyncMock(return_value=closed_no_price)
         ex.exchange_client.get_balance = AsyncMock(return_value={})
@@ -175,7 +177,7 @@ class TestReconciliation:
         ex = _make_executor()
         ex.pending_orders["cid-1"] = _make_pending()
         ex.exchange_client.get_orders = AsyncMock(return_value=[])
-        expired_snap = _make_order_snapshot(filled=0.0, status=OrderStatusEnum.EXPIRED)
+        expired_snap = _make_order_snapshot(filled=0.0, status=ExchangeOrderStatusEnum.EXPIRED)
         ex.exchange_client.get_order = AsyncMock(return_value=expired_snap)
         ex.exchange_client.get_balance = AsyncMock(return_value={})
         ex._process_execution = AsyncMock()
@@ -197,7 +199,7 @@ class TestReconciliation:
         ex = _make_executor()
         ex.pending_orders["cid-1"] = _make_pending()
         ex.exchange_client.get_orders = AsyncMock(return_value=[])
-        open_snap = _make_order_snapshot(filled=0.0, status=OrderStatusEnum.OPEN)
+        open_snap = _make_order_snapshot(filled=0.0, status=ExchangeOrderStatusEnum.OPEN)
         ex.exchange_client.get_order = AsyncMock(return_value=open_snap)
         ex.exchange_client.get_balance = AsyncMock(return_value={})
         ex._process_execution = AsyncMock()

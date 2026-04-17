@@ -316,10 +316,10 @@ OrderStatus = Literal[
 FillStatus = Literal[FillStatusEnum.FILLED, FillStatusEnum.PARTIAL]
 """Result of an order execution: 'filled' for complete, 'partial' for ongoing."""
 
-CancelEventType = Literal["cancelled", "rejected"]
+CancelEventType = Literal[OrderEventEnum.CANCELLED, OrderEventEnum.REJECTED]
 """Event types for cancel command responses."""
 
-ReplaceEventType = Literal["replaced", "rejected"]
+ReplaceEventType = Literal[OrderEventEnum.REPLACED, OrderEventEnum.REJECTED]
 """Event types for replace command responses."""
 
 OrderEventType = Literal[

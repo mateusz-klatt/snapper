@@ -26,14 +26,14 @@ from loguru import logger
 
 from snapper.core.types import TradeSideEnum
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecType
 from snapper.infrastructure.exchanges.contracts import ExecutionFeeBreakdown
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
 from snapper.infrastructure.exchanges.contracts import LiquidityIndicator
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
-from snapper.infrastructure.exchanges.contracts import OrderStatusEnum
-from snapper.infrastructure.exchanges.contracts import OrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TimeInForceEnum
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
@@ -210,57 +210,57 @@ def _parse_order_side(side: str | None) -> OrderSideEnum:
     raise ValueError(f"Unknown order side: {side}")
 
 
-def _parse_order_type(order_type: str | None) -> OrderTypeEnum:
-    """Convert Kraken order type string to OrderTypeEnum.
+def _parse_order_type(order_type: str | None) -> ExchangeOrderTypeEnum:
+    """Convert Kraken order type string to ExchangeOrderTypeEnum.
 
     Args:
         order_type: Order type string (e.g., "limit", "market").
 
     Returns:
-        Corresponding OrderTypeEnum value.
+        Corresponding ExchangeOrderTypeEnum value.
 
     Raises:
         ValueError: If order type is unknown.
     """
     mapping = {
-        "limit": OrderTypeEnum.LIMIT,
-        "market": OrderTypeEnum.MARKET,
-        "iceberg": OrderTypeEnum.ICEBERG,
-        "stop-loss": OrderTypeEnum.STOP_LOSS,
-        "stop-loss-limit": OrderTypeEnum.STOP_LOSS_LIMIT,
-        "take-profit": OrderTypeEnum.TAKE_PROFIT,
-        "take-profit-limit": OrderTypeEnum.TAKE_PROFIT_LIMIT,
-        "trailing-stop": OrderTypeEnum.TRAILING_STOP,
-        "trailing-stop-limit": OrderTypeEnum.TRAILING_STOP_LIMIT,
-        "settle-position": OrderTypeEnum.SETTLE_POSITION,
+        "limit": ExchangeOrderTypeEnum.LIMIT,
+        "market": ExchangeOrderTypeEnum.MARKET,
+        "iceberg": ExchangeOrderTypeEnum.ICEBERG,
+        "stop-loss": ExchangeOrderTypeEnum.STOP_LOSS,
+        "stop-loss-limit": ExchangeOrderTypeEnum.STOP_LOSS_LIMIT,
+        "take-profit": ExchangeOrderTypeEnum.TAKE_PROFIT,
+        "take-profit-limit": ExchangeOrderTypeEnum.TAKE_PROFIT_LIMIT,
+        "trailing-stop": ExchangeOrderTypeEnum.TRAILING_STOP,
+        "trailing-stop-limit": ExchangeOrderTypeEnum.TRAILING_STOP_LIMIT,
+        "settle-position": ExchangeOrderTypeEnum.SETTLE_POSITION,
     }
     if order_type and order_type in mapping:
         return mapping[order_type]
     raise ValueError(f"Unknown order type: {order_type}")
 
 
-def _parse_order_status(status: str | None) -> OrderStatusEnum:
-    """Convert Kraken order status string to OrderStatusEnum.
+def _parse_order_status(status: str | None) -> ExchangeOrderStatusEnum:
+    """Convert Kraken order status string to ExchangeOrderStatusEnum.
 
     Args:
         status: Order status string (e.g., "open", "closed").
 
     Returns:
-        Corresponding OrderStatusEnum value.
+        Corresponding ExchangeOrderStatusEnum value.
 
     Raises:
         ValueError: If status is unknown.
     """
     mapping = {
-        "pending": OrderStatusEnum.PENDING,
-        "open": OrderStatusEnum.OPEN,
-        "closed": OrderStatusEnum.CLOSED,
-        "pending_new": OrderStatusEnum.PENDING_NEW,
-        "new": OrderStatusEnum.NEW,
-        "partially_filled": OrderStatusEnum.PARTIALLY_FILLED,
-        "filled": OrderStatusEnum.FILLED,
-        "canceled": OrderStatusEnum.CANCELED,
-        "expired": OrderStatusEnum.EXPIRED,
+        "pending": ExchangeOrderStatusEnum.PENDING,
+        "open": ExchangeOrderStatusEnum.OPEN,
+        "closed": ExchangeOrderStatusEnum.CLOSED,
+        "pending_new": ExchangeOrderStatusEnum.PENDING_NEW,
+        "new": ExchangeOrderStatusEnum.NEW,
+        "partially_filled": ExchangeOrderStatusEnum.PARTIALLY_FILLED,
+        "filled": ExchangeOrderStatusEnum.FILLED,
+        "canceled": ExchangeOrderStatusEnum.CANCELED,
+        "expired": ExchangeOrderStatusEnum.EXPIRED,
     }
     if status and status in mapping:
         return mapping[status]
