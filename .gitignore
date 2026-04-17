@@ -94,3 +94,5 @@ plan-*.md
 
 # Playwright MCP server cache (local browser snapshots, not source)
 .playwright-mcp/
+
+.claude/scheduled_tasks.lock
