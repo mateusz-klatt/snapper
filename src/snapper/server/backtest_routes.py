@@ -576,9 +576,13 @@ async def create_comparison(
 
     Plan §4.3 duplicate-submit contract: SELECT on normalised pair
     first; 200 with existing if found. If the INSERT races past that
-    SELECT and the unique-index fires an IntegrityError, catch it,
-    rollback (R18 sonnet F1 — SQLAlchemy async session requirement),
-    re-SELECT, return 200. Route registered BEFORE ``/{run_id}`` so
+    SELECT, the DB-enforced partial unique index
+    ``uq_bc_active_pair_per_wallet`` (migration 0010) raises
+    ``IntegrityError`` during the ``create_comparison`` commit;
+    ``SQLAlchemyRepository.session()`` rolls the failed session back
+    at the contextmanager boundary, then this handler opens a fresh
+    session via ``get_comparison_by_pair`` and returns the committed
+    winner with 200. Route registered BEFORE ``/{run_id}`` so
     ``/compare`` is not captured as ``id="compare"`` (R14 sonnet
     route-order fix).
 
