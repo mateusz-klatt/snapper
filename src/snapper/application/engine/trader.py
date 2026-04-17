@@ -572,7 +572,16 @@ class TraderCoordinator(RegisterableProcess):
     async def _recover_from_executions(
         self, now: datetime, checkpoint_recovered: set[str] | None = None
     ) -> list[ExecutionRow]:
-        """Replay DB executions to rebuild engine state.
+        """Shadow-replay DB executions through TradeService to rebuild state.
+
+        Mirrors the checkpoint path's delta-replay contract: each execution
+        row is wrapped in a synthetic VenueEventRow and dispatched via
+        ``self.trade_service.apply_venue_event``. After the loop the engine
+        is slaved to the rebuilt TradeService shard via
+        ``self._restore_engine_from_shard`` so engine, portfolio, and
+        TradeService stay in sync — previously this path bypassed
+        TradeService and left its projection flat, creating a latent
+        ``old_qty == 0`` hazard in the first live fill on a non-flat shard.
 
         Skips engine_keys already recovered from checkpoints.
 
@@ -617,17 +626,83 @@ class TraderCoordinator(RegisterableProcess):
             )
             if engine is None:
                 continue
-            for fill_row in fills:
-                self._apply_execution_row_to_engine(engine, fill_row)
+            shard_key = engine._shard_key
+            shard = self.trade_service._get_or_create_shard(shard_key)
+            start_id = shard.last_venue_event_id + 1
+            for offset, fill_row in enumerate(fills):
+                event = self._build_replay_venue_event(
+                    engine, fill_row, synthetic_id=start_id + offset
+                )
+                self.trade_service.apply_venue_event(event)
+            self._restore_engine_from_shard(engine, shard_key, engine.instrument)
             self.engines[engine_key] = engine
             self.last_signal_time[engine_key] = time.time()
             logger.info(
-                f"ZMQTrader: Recovered {engine_key}: "
+                f"ZMQTrader: Recovered {engine_key} via full-replay shadow: "
                 f"pos={engine.position_qty:.6f}, "
                 f"entry={engine.entry_price}, "
                 f"fills={len(fills)}"
             )
         return executions
+
+    def _build_replay_venue_event(
+        self,
+        engine: TradingEngineService,
+        fill_row: ExecutionRow,
+        *,
+        synthetic_id: int,
+    ) -> VenueEventRow:
+        """Build a synthetic VenueEventRow for a single execution row.
+
+        Used by ``_recover_from_executions`` to dispatch historical
+        executions through ``TradeService.apply_venue_event``. The
+        ``synthetic_id`` must be strictly monotonic within the replay
+        loop and bootstrapped from ``shard.last_venue_event_id + 1`` so
+        the stored watermark never collides with real ``venue_events.id``
+        writes that land after recovery.
+
+        Dedup fidelity is preserved via ``trade_id`` (``ExecutionRow``
+        has no ``exec_id`` field, so the synthetic event passes
+        ``exec_id=None`` and ``_dedup_fill`` keys on ``trade_id`` alone —
+        matches the existing checkpoint-replay dedup behaviour).
+
+        Args:
+            engine: Engine whose shard_key owns this event.
+            fill_row: Execution row loaded from the DB.
+            synthetic_id: Per-shard monotonic counter assigned by the
+                caller.
+
+        Returns:
+            A VenueEventRow suitable for ``apply_venue_event``.
+        """
+        return {
+            "id": synthetic_id,
+            "public_id": "",
+            "timestamp": fill_row["timestamp"],
+            "session_id": self._tracker.session_id,
+            "sequence_id": self._tracker.next_sequence("full_replay"),
+            "event_type": "fill_observed",
+            "shard_key": engine._shard_key,
+            "command_public_id": None,
+            "exchange": fill_row["exchange"],
+            "instrument": fill_row["instrument"],
+            "mode": "live",
+            "exchange_order_id": fill_row["exchange_order_id"],
+            "client_order_id": fill_row["client_order_id"],
+            "venue_client_id": None,
+            "side": fill_row["side"],
+            "status": fill_row["status"],
+            "fill_price": fill_row["price"],
+            "fill_size": fill_row["size"],
+            "cum_fill_size": None,
+            "fee": fill_row["fee"],
+            "fee_asset": fill_row["fee_asset"],
+            "exec_id": None,
+            "trade_id": fill_row["trade_id"],
+            "error": None,
+            "venue_timestamp": fill_row["executed_at"],
+            "received_at": fill_row["timestamp"],
+        }
 
     async def _recover_active_orders(self, now: datetime, executions: list[ExecutionRow]) -> None:
         """Phase 2+3: Process active orders across all exchanges."""
@@ -990,43 +1065,6 @@ class TraderCoordinator(RegisterableProcess):
             wallet_public_id=wallet_public_id,
             operator_public_id=operator_public_id,
         )
-
-    @staticmethod
-    def _apply_execution_row_to_engine(
-        engine: TradingEngineService, fill_row: ExecutionRow
-    ) -> None:
-        """Apply a single execution row to engine state during recovery.
-
-        Directly updates portfolio and position without going through
-        the full apply_fill path (which requires ExecutionData and
-        idempotency tracking not needed for DB replay).
-
-        Args:
-            engine: Engine to update.
-            fill_row: ExecutionRow dict from DB.
-        """
-        side = fill_row["side"]
-        size = fill_row["size"]
-        price = fill_row["price"]
-        fee = fill_row["fee"]
-        engine.portfolio.update_fill(engine.instrument, side, size, price, fee)
-        old_qty = engine.position_qty
-        if side == TradeSideEnum.BUY:
-            engine.position_qty += size
-        else:
-            engine.position_qty -= size
-        if abs(engine.position_qty) < 1e-12:
-            engine.position_qty = 0.0
-            engine.entry_price = None
-        elif old_qty <= 0 < engine.position_qty or old_qty >= 0 > engine.position_qty:
-            engine.entry_price = price
-        elif engine.entry_price is not None and abs(engine.position_qty) > abs(old_qty):
-            old_abs = abs(old_qty)
-            new_abs = abs(engine.position_qty)
-            engine.entry_price = (old_abs * engine.entry_price + size * price) / new_abs
-        trade_id = fill_row.get("trade_id")
-        if trade_id:
-            engine.seen_exec_ids[trade_id] = None
 
     def _handle_settings_update(self, payload: bytes) -> None:
         """Handle settings change event from ZMQ.
