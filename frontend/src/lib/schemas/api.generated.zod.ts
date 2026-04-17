@@ -434,6 +434,16 @@ export const ProcessStopDataSchema = z
 
 export const RelationshipTypeEnumSchema = z.enum(['exact', 'derivative', 'proxy'])
 
+export const RestRateExchangeStatsSchema = z
+  .object({
+    rps_1s: z.number(),
+    rps_10s: z.number(),
+    rps_60s: z.number(),
+    limit_rps: z.number().nullable().optional(),
+    utilization: z.number().nullable().optional(),
+  })
+  .strict()
+
 export const RollPointDetailSchema = z
   .object({
     from_contract: z.string(),
@@ -1104,6 +1114,17 @@ export const ProcessStopResponseSchema = z
   })
   .strict()
 
+export const RestRateDataSchema = z
+  .object({
+    type: z.literal('rest_rate'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    exchanges: z.record(z.string(), RestRateExchangeStatsSchema),
+  })
+  .strict()
+
 export const ContinuousSeriesPartialResponseSchema = z
   .object({
     type: z.literal('continuous_partial'),
@@ -1583,6 +1604,17 @@ export const ProcessCreateResponseSchema = z
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     payload: ProcessCreateDataSchema,
+  })
+  .strict()
+
+export const RestRateResponseSchema = z
+  .object({
+    type: z.literal('rest_rate_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: RestRateDataSchema,
   })
   .strict()
 
@@ -2134,6 +2166,7 @@ export type ProcessStartData = z.infer<typeof ProcessStartDataSchema>
 export type ProcessStatus = z.infer<typeof ProcessStatusSchema>
 export type ProcessStopData = z.infer<typeof ProcessStopDataSchema>
 export type RelationshipTypeEnum = z.infer<typeof RelationshipTypeEnumSchema>
+export type RestRateExchangeStats = z.infer<typeof RestRateExchangeStatsSchema>
 export type RollPointDetail = z.infer<typeof RollPointDetailSchema>
 export type ScopeGrantInfo = z.infer<typeof ScopeGrantInfoSchema>
 export type SettingCategoriesResponse = z.infer<typeof SettingCategoriesResponseSchema>
@@ -2199,6 +2232,7 @@ export type ProcessSummaryData = z.infer<typeof ProcessSummaryDataSchema>
 export type ProcessCreateData = z.infer<typeof ProcessCreateDataSchema>
 export type ProcessStartResponse = z.infer<typeof ProcessStartResponseSchema>
 export type ProcessStopResponse = z.infer<typeof ProcessStopResponseSchema>
+export type RestRateData = z.infer<typeof RestRateDataSchema>
 export type ContinuousSeriesPartialResponse = z.infer<typeof ContinuousSeriesPartialResponseSchema>
 export type HandoverScopeGrantResult = z.infer<typeof HandoverScopeGrantResultSchema>
 export type ScopeGrantListResponse = z.infer<typeof ScopeGrantListResponseSchema>
@@ -2244,6 +2278,7 @@ export type HealthCheckData = z.infer<typeof HealthCheckDataSchema>
 export type JsonObject = z.infer<typeof JsonObjectSchema>
 export type ProcessSummaryResponse = z.infer<typeof ProcessSummaryResponseSchema>
 export type ProcessCreateResponse = z.infer<typeof ProcessCreateResponseSchema>
+export type RestRateResponse = z.infer<typeof RestRateResponseSchema>
 export type HandoverScopeGrantResponse = z.infer<typeof HandoverScopeGrantResponseSchema>
 export type LoginData = z.infer<typeof LoginDataSchema>
 export type RefreshData = z.infer<typeof RefreshDataSchema>

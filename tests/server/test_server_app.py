@@ -26,6 +26,9 @@ from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.core.types import ExchangeEnum
+from snapper.infrastructure.rest.tracker import get_rest_call_tracker
+from snapper.infrastructure.rest.tracker import reset_rest_call_tracker_for_tests
 from snapper.interface.websocket.models import ConnectionStats
 from snapper.interface.websocket.models import WsStatsSnapshot
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -472,8 +475,6 @@ class TestWebSocketEndpoints:
             tracker only materialises an exchange entry after the
             first recorded call.
         """
-        from snapper.infrastructure.rest.tracker import reset_rest_call_tracker_for_tests
-
         reset_rest_call_tracker_for_tests()
         response = self.client.get("/api/metrics/rest-rate")
         assert response.status_code == 200
@@ -496,10 +497,6 @@ class TestWebSocketEndpoints:
             ``rps_1s >= 3.0``, ``limit_rps == 20.0``, and
             ``utilization == rps_1s / 20.0``.
         """
-        from snapper.core.types import ExchangeEnum
-        from snapper.infrastructure.rest.tracker import get_rest_call_tracker
-        from snapper.infrastructure.rest.tracker import reset_rest_call_tracker_for_tests
-
         reset_rest_call_tracker_for_tests()
         tracker = get_rest_call_tracker()
         for _ in range(3):
@@ -528,10 +525,6 @@ class TestWebSocketEndpoints:
             ``utilization == None`` — the caller must interpret
             that as "no documented upstream limit", not "zero".
         """
-        from snapper.core.types import ExchangeEnum
-        from snapper.infrastructure.rest.tracker import get_rest_call_tracker
-        from snapper.infrastructure.rest.tracker import reset_rest_call_tracker_for_tests
-
         reset_rest_call_tracker_for_tests()
         tracker = get_rest_call_tracker()
         tracker.record_call(ExchangeEnum.ZONDA)

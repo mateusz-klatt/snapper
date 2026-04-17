@@ -11,6 +11,7 @@ import pytest
 from loguru import logger
 
 from snapper.core.types import ExchangeEnum
+from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.rest.tracker import REST_RATE_LIMITS_PER_SECOND
 from snapper.infrastructure.rest.tracker import RestCallTracker
 from snapper.infrastructure.rest.tracker import get_rest_call_tracker
@@ -505,7 +506,6 @@ class TestExchangeClientBaseWiring:
             The shared tracker reports a rate for Walutomat, proving
             the helper wired through ``exchange_name`` correctly.
         """
-        from snapper.infrastructure.exchanges.base import ExchangeClientBase
 
         class _Stub(ExchangeClientBase):
             async def connect(self) -> None: ...

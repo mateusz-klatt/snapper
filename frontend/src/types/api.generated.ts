@@ -1621,9 +1621,13 @@ export type Paths = {
          *
          *     Plan §4.3 duplicate-submit contract: SELECT on normalised pair
          *     first; 200 with existing if found. If the INSERT races past that
-         *     SELECT and the unique-index fires an IntegrityError, catch it,
-         *     rollback (R18 sonnet F1 — SQLAlchemy async session requirement),
-         *     re-SELECT, return 200. Route registered BEFORE ``/{run_id}`` so
+         *     SELECT, the DB-enforced partial unique index
+         *     ``uq_bc_active_pair_per_wallet`` (migration 0010) raises
+         *     ``IntegrityError`` during the ``create_comparison`` commit;
+         *     ``SQLAlchemyRepository.session()`` rolls the failed session back
+         *     at the contextmanager boundary, then this handler opens a fresh
+         *     session via ``get_comparison_by_pair`` and returns the committed
+         *     winner with 200. Route registered BEFORE ``/{run_id}`` so
          *     ``/compare`` is not captured as ``id="compare"`` (R14 sonnet
          *     route-order fix).
          *
@@ -2377,6 +2381,32 @@ export type Paths = {
         };
         /** Zmq Health Check */
         get: Operations["zmq_health_check_api_zmq_health_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/metrics/rest-rate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Rest Rate Metrics
+         * @description Return rolling REST call rates + utilization per exchange.
+         *
+         *     Reads the process-scoped ``RestCallTracker`` snapshot and
+         *     projects it into the typed envelope used by the other
+         *     monitoring endpoints. Gated behind ``READ_SYSTEM_STATUS`` so a
+         *     viewer role can see rate-limit health without having any
+         *     trading permission.
+         */
+        get: Operations["rest_rate_metrics_api_metrics_rest_rate_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -5637,6 +5667,108 @@ export type Components = {
          * @enum {string}
          */
         RelationshipTypeEnum: "exact" | "derivative" | "proxy";
+        /**
+         * RestRateData
+         * @description Payload for the ``GET /api/metrics/rest-rate`` endpoint.
+         *
+         *     Attributes:
+         *         exchanges: Per-exchange sliding-window stats. Exchanges appear
+         *             in the map only after at least one REST call has been
+         *             recorded against them since process startup.
+         */
+        RestRateData: {
+            /**
+             * Type
+             * @default rest_rate
+             * @constant
+             */
+            type: "rest_rate";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /**
+             * Exchanges
+             * @description Per-exchange rolling REST call stats + utilization
+             */
+            exchanges: {
+                [key: string]: Components["schemas"]["RestRateExchangeStats"];
+            };
+        };
+        /**
+         * RestRateExchangeStats
+         * @description Per-exchange REST call statistics for the rate-rate endpoint.
+         *
+         *     Attributes:
+         *         rps_1s: Average requests per second over the last 1 second.
+         *         rps_10s: Average requests per second over the last 10 seconds.
+         *         rps_60s: Average requests per second over the last 60 seconds.
+         *         limit_rps: Published upstream limit in req/s. ``None`` when no
+         *             public limit is documented for this exchange.
+         *         utilization: ``rps_1s / limit_rps`` as a fraction in
+         *             ``[0.0, +inf)``. ``None`` when no published limit exists.
+         */
+        RestRateExchangeStats: {
+            /**
+             * Rps 1S
+             * @description Rolling 1s req/s rate
+             */
+            rps_1s: number;
+            /**
+             * Rps 10S
+             * @description Rolling 10s req/s rate
+             */
+            rps_10s: number;
+            /**
+             * Rps 60S
+             * @description Rolling 60s req/s rate
+             */
+            rps_60s: number;
+            /**
+             * Limit Rps
+             * @description Published upstream limit in req/s
+             */
+            limit_rps?: number | null;
+            /**
+             * Utilization
+             * @description rps_1s / limit_rps fraction, None when limit unknown
+             */
+            utilization?: number | null;
+        };
+        /**
+         * RestRateResponse
+         * @description REST call rate observability endpoint response.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         */
+        RestRateResponse: {
+            /**
+             * Type
+             * @default rest_rate_response
+             * @constant
+             */
+            type: "rest_rate_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["RestRateData"];
+        };
         /**
          * RollPointDetail
          * @description Roll point detail for partial failure response.
@@ -10902,6 +11034,26 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["ZmqHealthResponse"];
+                };
+            };
+        };
+    };
+    rest_rate_metrics_api_metrics_rest_rate_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["RestRateResponse"];
                 };
             };
         };

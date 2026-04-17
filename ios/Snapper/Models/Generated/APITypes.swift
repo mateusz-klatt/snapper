@@ -2195,6 +2195,64 @@ struct RefreshResponse: Codable, Sendable {
     }
 }
 
+struct RestRateData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    /// Per-exchange rolling REST call stats + utilization
+    let exchanges: [String: RestRateExchangeStats]
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case exchanges
+    }
+}
+
+struct RestRateExchangeStats: Codable, Sendable {
+    /// Rolling 1s req/s rate
+    let rps1S: Double
+    /// Rolling 10s req/s rate
+    let rps10S: Double
+    /// Rolling 60s req/s rate
+    let rps60S: Double
+    /// Published upstream limit in req/s
+    let limitRps: Double?
+    /// rps_1s / limit_rps fraction, None when limit unknown
+    let utilization: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case rps1S = "rps_1s"
+        case rps10S = "rps_10s"
+        case rps60S = "rps_60s"
+        case limitRps = "limit_rps"
+        case utilization
+    }
+}
+
+struct RestRateResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: RestRateData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
 struct RollPointDetail: Codable, Sendable {
     let fromContract: String
     let toContract: String
