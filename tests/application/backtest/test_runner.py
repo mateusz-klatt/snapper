@@ -726,3 +726,108 @@ async def _make_bt_repo(tmp_path: Path) -> BacktestRepository:
     r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
     await r.create_all()
     return BacktestRepository(r.session_factory)
+
+
+class TestRunnerProgressPublisher:
+    """Tests for the Codex F1 fix — runner owns a real ZMQ publisher."""
+
+    def test_override_is_used_verbatim(self) -> None:
+        """Test-injected publish override replaces the owned publisher.
+
+        Given:
+            A ``progress_publish`` argument supplied to the runner
+            constructor.
+
+        When:
+            ``_resolve_progress_publish`` is called.
+
+        Then:
+            The override is returned unchanged and no owned ZMQ
+            context or socket is opened — explicit override wins.
+        """
+
+        async def override(_topic: str, _data: Any) -> None:
+            await asyncio.sleep(0)
+
+        runner = BacktestRunnerProcess(
+            run_public_id="run-x",
+            db_url="sqlite://",
+            progress_publish=override,
+        )
+        resolved = runner._resolve_progress_publish()
+        assert resolved is override
+        assert runner._owned_zmq_context is None
+        assert runner._owned_validated_publisher is None
+        assert runner._owned_message_publisher is None
+
+    def test_production_path_opens_owned_publisher(self) -> None:
+        """Production default constructs a live ZMQ PUB socket.
+
+        Given:
+            No override passed (production entry point via
+            ``ProcessFactory.start_process`` which cannot serialise a
+            callable),
+
+        When:
+            ``_resolve_progress_publish`` is called,
+
+        Then:
+            An owned ``zmq.asyncio.Context`` + ``ValidatedPublisher`` +
+            ``MessagePublisher`` are created and stored on the runner
+            so the adapter can forward events through the real
+            broker. ``_teardown_owned_publisher`` cleanly releases
+            them.
+        """
+        runner = BacktestRunnerProcess(run_public_id="run-y", db_url="sqlite://")
+        adapter = runner._resolve_progress_publish()
+        assert adapter is not None
+        assert runner._owned_zmq_context is not None
+        assert runner._owned_validated_publisher is not None
+        assert runner._owned_message_publisher is not None
+        runner._teardown_owned_publisher()
+        assert runner._owned_zmq_context is None
+        assert runner._owned_validated_publisher is None
+        assert runner._owned_message_publisher is None
+
+    @pytest.mark.asyncio
+    async def test_publish_swallow_errors_dropped_event(self) -> None:
+        """Publish failure downgrades to a log line, runner keeps going.
+
+        Given:
+            The owned ``MessagePublisher.send`` raises (e.g. the
+            topic validator rejects a malformed wallet segment or
+            the broker disappears mid-run),
+
+        When:
+            The adapter returned by ``_resolve_progress_publish`` is
+            invoked with a payload that would fail validation,
+
+        Then:
+            The adapter catches the exception and returns without
+            raising, so progress remains best-effort observability
+            and a transient broker/topic issue never aborts the
+            backtest.
+        """
+        runner = BacktestRunnerProcess(run_public_id="run-z", db_url="sqlite://")
+        try:
+            adapter = runner._resolve_progress_publish()
+            from snapper.messaging.schemas.data import BacktestProgressData
+
+            payload = BacktestProgressData(
+                public_id="p",
+                timestamp=NOW,
+                session_id="s",
+                sequence_id=1,
+                run_public_id="r",
+                wallet_public_id="w",
+                event="started",
+                candles_done=0,
+                total_candles=None,
+                signals_count=0,
+                trades_count=0,
+                equity=0.0,
+                progress_pct=0.0,
+            )
+            await adapter("definitely.not.a.valid.backtest.topic", payload)
+        finally:
+            runner._teardown_owned_publisher()

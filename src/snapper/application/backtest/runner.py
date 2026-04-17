@@ -16,6 +16,8 @@ from datetime import datetime
 from typing import Any
 from typing import cast
 
+import zmq
+import zmq.asyncio
 from loguru import logger
 from sqlalchemy.exc import IntegrityError
 
@@ -33,6 +35,7 @@ from snapper.application.backtest.zmq_engine import ZmqReplayEngine
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
+from snapper.config.settings import get_bootstrap_settings
 from snapper.core.types import BacktestRunStatusEnum
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessModeEnum
@@ -43,7 +46,12 @@ from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import BacktestResultInsertRow
 from snapper.data.repository_types import BacktestRunRow
+from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
+from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
+from snapper.messaging.infrastructure.validated_socket import apply_hwm
+from snapper.messaging.schemas.data import BacktestProgressData
 
 _BT_EVENTS_STREAM = "backtest_events"
 _BT_STATUS_STREAM = "backtest_status"
@@ -149,19 +157,25 @@ class BacktestRunnerProcess(RegisterableProcess):
         Args:
             run_public_id: Public ID of the backtest run to execute.
             db_url: Database URL for repository access.
-            progress_publish: Optional Phase 2c WS progress publisher.
-                When supplied, the runner constructs a
-                ``BacktestProgressEmitter`` and fires ``started`` /
-                ``progress`` / ``milestone`` / terminal events on the
-                4-segment ``backtest.{wallet}.{run}.{event}`` topic
-                family. ``None`` falls back to the ``noop_publish``
-                sink so runner tests that don't care about WS keep
-                passing byte-identically.
+            progress_publish: Optional override for the Phase 2c WS
+                progress publisher. When supplied (typically by tests),
+                the runner uses it verbatim. When ``None`` (the
+                production path), ``start()`` constructs an owned ZMQ
+                PUB socket wired to the broker XSUB endpoint from
+                bootstrap settings and publishes
+                ``backtest.{wallet}.{run}.{event}`` frames through a
+                ``MessagePublisher``. The owned socket is closed in the
+                ``start()`` ``finally`` block. Passing
+                ``noop_publish`` explicitly opts out of the live
+                publisher for tests that only care about lifecycle.
         """
         self._run_public_id = run_public_id
         self._db_url = db_url
         self._tracker = SequenceTracker()
-        self._progress_publish: PublishFn = progress_publish or noop_publish
+        self._progress_publish_override: PublishFn | None = progress_publish
+        self._owned_zmq_context: zmq.asyncio.Context | None = None
+        self._owned_validated_publisher: ValidatedPublisher | None = None
+        self._owned_message_publisher: MessagePublisher | None = None
 
     @staticmethod
     def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
@@ -182,6 +196,63 @@ class BacktestRunnerProcess(RegisterableProcess):
             Dict with run_public_id.
         """
         return {"run_public_id": self._run_public_id}
+
+    def _resolve_progress_publish(self) -> PublishFn:
+        """Return the PublishFn the emitter will use.
+
+        Explicit test overrides win; otherwise the runner opens its own
+        ZMQ PUB socket against the broker XSUB endpoint from bootstrap
+        settings and returns a ``MessagePublisher.send``-shaped
+        adapter. The owned context + sockets are stored on ``self`` so
+        ``_teardown_owned_publisher`` can close them on exit.
+        """
+        if self._progress_publish_override is not None:
+            return self._progress_publish_override
+        bootstrap = get_bootstrap_settings()
+        broker_addr = bootstrap.zmq_broker_xsub
+        try:
+            context = zmq.asyncio.Context()
+            raw_socket = context.socket(zmq.PUB)
+            apply_hwm(raw_socket, sndhwm=HWM_MARKET_DATA)
+            raw_socket.connect(broker_addr)
+            validated = ValidatedPublisher(raw_socket)
+            msg_publisher = MessagePublisher(validated, self._tracker)
+        except Exception as exc:
+            logger.warning(
+                "Backtest {} progress publisher wiring failed ({}) — falling back to noop",
+                self._run_public_id[:8],
+                exc,
+            )
+            return noop_publish
+        self._owned_zmq_context = context
+        self._owned_validated_publisher = validated
+        self._owned_message_publisher = msg_publisher
+        run_short = self._run_public_id[:8]
+
+        async def _publish(topic: str, data: BacktestProgressData) -> None:
+            try:
+                await msg_publisher.send(topic, data)
+            except Exception as exc:
+                logger.warning(
+                    "Backtest {} progress publish on {} failed ({}) — dropped",
+                    run_short,
+                    topic,
+                    exc,
+                )
+
+        return _publish
+
+    def _teardown_owned_publisher(self) -> None:
+        """Close the owned ZMQ publisher + context if they were opened."""
+        if self._owned_validated_publisher is not None:
+            with contextlib.suppress(Exception):
+                self._owned_validated_publisher.close()
+            self._owned_validated_publisher = None
+        if self._owned_zmq_context is not None:
+            with contextlib.suppress(Exception):
+                self._owned_zmq_context.term()
+            self._owned_zmq_context = None
+        self._owned_message_publisher = None
 
     async def start(self) -> None:
         """Execute the backtest lifecycle.
@@ -216,6 +287,7 @@ class BacktestRunnerProcess(RegisterableProcess):
             )
             return
 
+        publish_fn = self._resolve_progress_publish()
         emitter: BacktestProgressEmitter | None = None
         try:
             config = BacktestConfig.model_validate(run_to_config_dict(run))
@@ -278,7 +350,7 @@ class BacktestRunnerProcess(RegisterableProcess):
                 wallet_public_id=run["wallet_public_id"],
                 total_candles=total_candles,
                 tracker=self._tracker,
-                publish=self._progress_publish,
+                publish=publish_fn,
             )
             await emitter.on_started()
             engine: DirectDbEngine | ZmqReplayEngine
@@ -366,6 +438,8 @@ class BacktestRunnerProcess(RegisterableProcess):
                     await emitter.on_terminal("failed")
             logger.error("Backtest {} failed: {}", self._run_public_id[:8], error_msg)
             raise
+        finally:
+            self._teardown_owned_publisher()
 
     async def _persist_artifacts(
         self,
