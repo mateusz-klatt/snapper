@@ -1538,7 +1538,10 @@ def _create_underlying_router() -> APIRouter:
         start: Annotated[datetime, Query(description="Series start time (UTC)")],
         end: Annotated[datetime, Query(description="Series end time (UTC)")],
         method: Annotated[str, Query(description="Adjustment method")] = "panama",
-        rollover_days_before: Annotated[int, Query(description="Days before expiry to roll")] = 0,
+        rollover_days_before: Annotated[
+            int,
+            Query(ge=0, le=365, description="Days before expiry to roll (0-365)"),
+        ] = 0,
         as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
     ) -> ContinuousCandleListResponse | ContinuousSeriesPartialResponse:
         """Build and return a continuous contract candle series.

@@ -3784,6 +3784,48 @@ def test_build_continuous_with_explicit_dates(
     assert captured_kwargs["end"].tzinfo == UTC
 
 
+def test_build_continuous_rejects_negative_rollover_days(cli_runner: CliRunner) -> None:
+    """R2: --rollover-days=-1 must exit non-zero before builder is invoked.
+
+    typer.Option(min=0) rejects the value at CLI parse time with a usage
+    error naming the rollover field.
+    """
+    result = cli_runner.invoke(
+        app,
+        [
+            "build-continuous",
+            "SPX",
+            "kraken_equities",
+            "ES",
+            "--rollover-days",
+            "-1",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "rollover-days" in result.output.lower() or "rollover_days" in result.output.lower()
+
+
+def test_build_continuous_rejects_excessive_rollover_days(cli_runner: CliRunner) -> None:
+    """R2: --rollover-days=366 must exit non-zero before builder is invoked.
+
+    typer.Option(max=365) rejects the value at CLI parse time with a usage
+    error naming the rollover field.
+    """
+    result = cli_runner.invoke(
+        app,
+        [
+            "build-continuous",
+            "SPX",
+            "kraken_equities",
+            "ES",
+            "--rollover-days",
+            "366",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "rollover-days" in result.output.lower() or "rollover_days" in result.output.lower()
+
+
 class TestBacktestList:
     """Tests for backtest-list CLI command."""
 

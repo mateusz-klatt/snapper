@@ -93,6 +93,11 @@ class ContinuousContractBuilder:
             msg = f"Invalid method: {method}. Must be unadjusted, ratio, or panama."
             raise ValueError(msg)
 
+        if not 0 <= rollover_days_before <= 365:
+            raise ValueError(
+                f"rollover_days_before must be in [0, 365], got {rollover_days_before}"
+            )
+
         now = as_of or datetime.now(UTC)
 
         contracts = await self._repo.get_contracts_for_underlying(

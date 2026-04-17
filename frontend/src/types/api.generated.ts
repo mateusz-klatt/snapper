@@ -10618,7 +10618,7 @@ export interface Operations {
                 end: string;
                 /** @description Adjustment method */
                 method?: string;
-                /** @description Days before expiry to roll */
+                /** @description Days before expiry to roll (0-365) */
                 rollover_days_before?: number;
                 /** @description Point-in-time query (UTC) */
                 as_of?: string | null;

@@ -253,3 +253,31 @@ class TestGetContinuousSeries:
         assert response.status_code == 400
         assert "Date range too large" in response.json()["detail"]
         client.close()
+
+    def test_rejects_negative_rollover_days(self) -> None:
+        """R2: rollover_days_before < 0 must be rejected with HTTP 422.
+
+        When: caller passes rollover_days_before=-1,
+        Then: FastAPI Query(ge=0) fails validation before the handler runs.
+        """
+        repo = AsyncMock()
+        client = _create_client(repo)
+        response = client.get(
+            f"/api/underlyings/SPX/continuous{_BASE_PARAMS}&rollover_days_before=-1"
+        )
+        assert response.status_code == 422
+        client.close()
+
+    def test_rejects_excessive_rollover_days(self) -> None:
+        """R2: rollover_days_before > 365 must be rejected with HTTP 422.
+
+        When: caller passes rollover_days_before=366,
+        Then: FastAPI Query(le=365) fails validation before the handler runs.
+        """
+        repo = AsyncMock()
+        client = _create_client(repo)
+        response = client.get(
+            f"/api/underlyings/SPX/continuous{_BASE_PARAMS}&rollover_days_before=366"
+        )
+        assert response.status_code == 422
+        client.close()

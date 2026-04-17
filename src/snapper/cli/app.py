@@ -1450,7 +1450,7 @@ def build_continuous(
     method: Annotated[str, typer.Option("--method", "-m")] = "panama",
     start: Annotated[str, typer.Option("--start")] = "",
     end: Annotated[str, typer.Option("--end")] = "",
-    rollover_days: Annotated[int, typer.Option("--rollover-days")] = 0,
+    rollover_days: Annotated[int, typer.Option("--rollover-days", min=0, max=365)] = 0,
 ) -> None:
     """Build and display continuous contract series for an underlying.
 

@@ -418,6 +418,42 @@ class TestEdgeCases:
             )
 
     @pytest.mark.asyncio
+    async def test_build_rejects_negative_rollover_days(self) -> None:
+        """R2: builder raises ValueError when rollover_days_before < 0."""
+        c1 = _contract("ESM6", expiry_days=3)
+        repo = _mock_repo([c1], {"ESM6": [_candle(D1, 100.0)]})
+        builder = ContinuousContractBuilder(repository=repo)
+        with pytest.raises(ValueError, match=r"rollover_days_before must be in \[0, 365\]"):
+            await builder.build(
+                underlying_public_id="u1",
+                exchange="kraken_equities",
+                contract_family="ES",
+                timeframe="1d",
+                start=D1,
+                end=D8,
+                method="panama",
+                rollover_days_before=-1,
+            )
+
+    @pytest.mark.asyncio
+    async def test_build_rejects_excessive_rollover_days(self) -> None:
+        """R2: builder raises ValueError when rollover_days_before > 365."""
+        c1 = _contract("ESM6", expiry_days=3)
+        repo = _mock_repo([c1], {"ESM6": [_candle(D1, 100.0)]})
+        builder = ContinuousContractBuilder(repository=repo)
+        with pytest.raises(ValueError, match=r"rollover_days_before must be in \[0, 365\]"):
+            await builder.build(
+                underlying_public_id="u1",
+                exchange="kraken_equities",
+                contract_family="ES",
+                timeframe="1d",
+                start=D1,
+                end=D8,
+                method="panama",
+                rollover_days_before=366,
+            )
+
+    @pytest.mark.asyncio
     async def test_invalid_method_raises(self) -> None:
         """Invalid adjustment method raises ValueError."""
         repo = _mock_repo([], {})
