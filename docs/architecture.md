@@ -192,6 +192,45 @@ Message types (in `messaging.schemas.data`):
 
 Every Data class carries `public_id: str` (UUID7), `type: Literal[...]`, and `timestamp: datetime`.
 
+### Venue reconciliation (executors)
+
+Executors can periodically poll exchange REST APIs to reconcile local
+pending-order state against the exchange's authoritative view. This
+detects two failure modes that WebSocket streams alone miss: **fill
+gaps** (exchange has more filled quantity than the executor observed)
+and **disappeared orders** (pending orders absent from the open-orders
+snapshot).
+
+Feature-flagged behind `use_venue_reconciliation` (`AppSettings`,
+default `False`). Enable once the Phase 3 rollout gates are closed.
+
+**`_reconcile_fill_gap`** (`messaging/executors/base.py:1139-1211`)
+emits a corrective `ExecutionUpdate` covering the observed cum-qty
+delta, stamping the synthetic execution with
+`exec_id=recon-<exchange_oid>-<monotonic_ns>` so downstream de-dup
+stays correct.
+
+**`_reconcile_disappeared_order`** (`messaging/executors/base.py:1074-1137`)
+calls `get_order()` on orders missing from the open-orders snapshot to
+determine their actual terminal status (CLOSED / CANCELED / EXPIRED),
+emits any residual fill gap first, then publishes the terminal
+`ExecutionUpdate`.
+
+#### Known limitation — market orders without price
+
+If a market order's exchange snapshot reports `price=None`, the
+fill-gap path logs an ERROR (`"no price on market order, skipping
+corrective fill"`) and skips the corrective emission. The executor
+does not subscribe to ticks and cannot approximate the fill price
+without degrading VWAP accuracy silently. Recovery is
+lifecycle-dependent: if the order stays open and a later snapshot
+populates `price`, the next reconciliation iteration emits the
+corrective fill; if the order reaches a terminal state first, the
+skipped gap persists until reconciled manually against the exchange's
+fill history. Operators seeing this ERROR log should not patch Snapper
+to approximate; the skip is an intentional trade-off (predictable
+behaviour + observable gap) over silent approximation drift.
+
 ### Application (`src/snapper/application/`)
 
 Business logic:

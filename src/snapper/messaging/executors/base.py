@@ -1145,8 +1145,38 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     ) -> None:
         """Emit a corrective fill if exchange shows more fills than local.
 
-        Uses the exchange order's limit price as an approximate fill
-        price. Market orders without price are skipped (logged as error).
+        Uses the exchange order's reported price as the approximate fill
+        price for the corrective ExecutionUpdate.
+
+        Known limitation — market orders without price:
+            If the exchange reports a market order whose snapshot has
+            ``price=None``, this method logs an ERROR
+            (``"no price on market order, skipping corrective fill"``) and
+            returns without emitting a corrective fill.
+
+            Rationale: the executor does not subscribe to ticks and thus
+            cannot approximate the fill price locally. Cross-process RPC
+            against the publisher adds latency + rate-limit cost and still
+            drifts relative to the true VWAP. Forcing an approximate price
+            would degrade position-projection accuracy silently.
+
+            Impact: the local position projection lags the exchange by the
+            gap quantity. Whether the gap recovers on a later iteration
+            depends on the order's lifecycle — if the order remains open
+            and a later snapshot populates ``price``, the next loop will
+            emit the corrective fill; if the order disappears from the
+            open-orders snapshot before that, ``_reconcile_disappeared_order``
+            calls this method once more before emitting a terminal event,
+            after which the order is no longer tracked and the skipped gap
+            persists until manually reconciled against the exchange's own
+            fill history.
+
+            Operational guidance: the ERROR log is the observability hook.
+            If the same ``(exchange, exchange_oid)`` pair appears across
+            multiple iterations without clearing, or if the order has
+            already reached a terminal state, reconcile the position
+            manually against the exchange's fill history. Do NOT
+            approximate inside Snapper — the skip is the correct behaviour.
         """
         if exchange_order.filled <= pending.last_seen_cum_qty:
             return
