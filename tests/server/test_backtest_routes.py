@@ -1493,3 +1493,57 @@ class TestCompareDetail:
             assert "metrics_diff" in data
             assert "equity_overlay" in data
             client.close()
+
+
+_NO_WALLET_DETAIL = "no active wallet selected"
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("GET", "/api/backtests/run-1"),
+        ("GET", "/api/backtests/run-1/trades"),
+        ("GET", "/api/backtests/run-1/signals"),
+        ("GET", "/api/backtests/run-1/events"),
+        ("GET", "/api/backtests/run-1/equity"),
+        ("POST_CANCEL", "/api/backtests/run-1/cancel"),
+        ("POST_RERUN", "/api/backtests/run-1/rerun"),
+    ],
+)
+def test_detail_routes_fail_closed_without_active_wallet(method: str, path: str) -> None:
+    """Phase 2c Step 2c regression — detail routes reject caller with no active wallet.
+
+    Given:
+        The principal has ``active_wallet_public_id=None`` (selected
+        "All wallets" in the UI / cleared the wallet claim on refresh)
+        and the backend repository returns a valid run row.
+
+    When:
+        The caller hits any of the 7 wallet-scoped ``/{run_id}/*``
+        routes (detail, trades, signals, events, equity, cancel,
+        rerun).
+
+    Then:
+        The ``_enforce_wallet_scope`` guard fires 400 with the
+        ``no active wallet selected`` detail before any repo mutation
+        happens. This pins Phase 2c v1.18 §2.5 fail-closed contract —
+        the pre-2c truthy guard (``if principal.active_wallet_public_id
+        and ...``) was a no-op under a cleared wallet claim and leaked
+        cross-tenant reads; the new guard must raise 400 on every
+        detail surface.
+    """
+    bt = AsyncMock()
+    bt.get_run = AsyncMock(return_value=_make_run_row())
+    bt.update_run_status = AsyncMock()
+    bt.create_run = AsyncMock()
+    with patch("snapper.server.backtest_routes._bt_repo", return_value=bt):
+        client = _create_client(bt, wallet=None)
+        if method == "GET":
+            response = client.get(path)
+        elif method == "POST_CANCEL":
+            response = client.post(path, json=_cancel_body())
+        else:
+            response = client.post(path)
+        assert response.status_code == 400
+        assert response.json()["detail"] == _NO_WALLET_DETAIL
+        client.close()
