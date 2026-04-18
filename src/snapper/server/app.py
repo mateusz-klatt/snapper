@@ -133,6 +133,7 @@ from snapper.data.repository import dispose_repositories
 from snapper.infrastructure.rest.tracker import get_rest_call_tracker
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
 from snapper.interface.websocket.helpers import build_allowed_origins
+from snapper.mcp.server import build_mcp_app
 from snapper.messaging.infrastructure.gap_detector import GapDetectorStats
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import CandleData
@@ -291,6 +292,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     settings_service = await _initialize_settings_service(settings)
     settings = get_settings_with_service(settings_service)
     app.state.settings = settings
+    app.state.settings_service = settings_service
     _configure_auth_services(settings_service)
     discover_processes()
     process_factory = ProcessLauncherService(settings)
@@ -392,6 +394,13 @@ def create_app() -> FastAPI:
     app.include_router(backtest_router, prefix=API_PREFIX)
     app.include_router(create_api_router(manager), prefix=API_PREFIX)
     app.include_router(create_authenticated_websocket_router(manager), prefix=API_PREFIX)
+
+    app.mount(
+        "/api/mcp",
+        build_mcp_app(
+            settings_service_getter=lambda: getattr(app.state, "settings_service", None),
+        ),
+    )
 
     patch_openapi(app)
 

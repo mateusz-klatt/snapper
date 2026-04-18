@@ -223,21 +223,28 @@ class TestCreateApp:
             patch.object(FastAPI, "mount") as mock_mount,
         ):
             create_app()
-        mock_mount.assert_called_once()
+        mount_paths = [call.args[0] for call in mock_mount.call_args_list]
+        assert "/" in mount_paths
+        assert "/api/mcp" in mount_paths
 
     def test_create_app_skips_static_when_missing(self) -> None:
         """Test static files mounting is skipped when directory missing.
 
         Given: Static directory does not exist,
         When: create_app is called,
-        Then: No static files are mounted.
+        Then: The only mount is the unconditional MCP sub-app; the
+            ``/`` static mount is skipped per the ``os.path.exists``
+            False branch. ``/api/mcp`` is always mounted because the
+            plan §3.12 flag-off semantics are implemented inside the
+            sub-app, not at mount time.
         """
         with (
             patch("snapper.server.app.os.path.exists", return_value=False),
             patch.object(FastAPI, "mount") as mock_mount,
         ):
             create_app()
-        mock_mount.assert_not_called()
+        mount_paths = [call.args[0] for call in mock_mount.call_args_list]
+        assert mount_paths == ["/api/mcp"]
 
 
 class TestCreateApiRouter:
