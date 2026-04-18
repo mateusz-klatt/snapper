@@ -24,6 +24,7 @@ from snapper.auth.schemas.tokens import TokenPair
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
+from snapper.data.repository import Repository
 
 BLACKLIST_GRACE_PERIOD_SECONDS: Final[float] = 10.0
 """Seconds a blacklisted token remains usable to handle concurrent requests."""
@@ -281,6 +282,58 @@ class TokenManager:
         past_time = datetime.now(UTC).timestamp() - self._blacklist_grace_period - 1
         self._blacklisted_tokens[jti] = past_time
         logger.info(f"Immediately blacklisted token: {jti}")
+
+    async def revoke_user_sessions(self, user_public_id: str, repository: Repository) -> int:
+        """Revoke every active session for a user (kill switch — plan §3.6.1).
+
+        Two-phase revocation pushes state into BOTH the DB inventory
+        AND the in-memory fast-path blacklist so ``verify_token``
+        rejects the next request regardless of which layer it
+        consults first:
+
+            1. Load every unrevoked JTI from ``user_active_tokens``
+               via :meth:`Repository.list_active_user_token_jtis`.
+            2. Flip ``revoked_at=NOW()`` on those rows via
+               :meth:`Repository.revoke_user_active_tokens` — atomic
+               per SQLAlchemy UPDATE.
+            3. For every JTI loaded in step 1, add it to
+               :attr:`_blacklisted_tokens` with grace period so
+               concurrent in-flight requests still complete but new
+               verifications fail.
+
+        Caller (``UserService.deactivate_user``) publishes the
+        ``admin.user_deactivated`` bus event AFTER commit — this
+        method deliberately does NOT publish the event itself so
+        the single-publisher contract (§3.6.1 resolution of R2-M1)
+        is preserved: any cross-instance TokenManager will evict on
+        receipt of the bus event, NOT on a competing publish from
+        here.
+
+        Args:
+            user_public_id: UUID of the user whose sessions are
+                being revoked.
+            repository: Active :class:`Repository` used for DB
+                state. Passed in (not looked up via singleton) so
+                the caller's transactional scope is respected — for
+                example the kill-switch can be driven from a
+                migration script that attaches its own session.
+
+        Returns:
+            Count of rows revoked (0 if user had no active
+            sessions — not an error).
+        """
+        jtis = await repository.list_active_user_token_jtis(user_public_id)
+        revoked_at = datetime.now(UTC)
+        count = await repository.revoke_user_active_tokens(user_public_id, revoked_at)
+        for jti in jtis:
+            self.blacklist_token(jti)
+        logger.info(
+            "revoke_user_sessions: user={} revoked_rows={} blacklisted_jtis={}",
+            user_public_id,
+            count,
+            len(jtis),
+        )
+        return count
 
     def invalidate_token(self, token: str) -> None:
         """Invalidate a token immediately.

@@ -104,6 +104,7 @@ from snapper.data.models import Trade
 from snapper.data.models import TradeCommand
 from snapper.data.models import TradeProjectionCheckpoint
 from snapper.data.models import UnderlyingAsset
+from snapper.data.models import UserActiveToken
 from snapper.data.models import UserOperatorMembership
 from snapper.data.models import UserTradingCaps
 from snapper.data.models import VenueEvent
@@ -1666,6 +1667,55 @@ class Repository(ABC):
 
         Returns:
             Count of cancel commands in the window.
+        """
+        ...
+
+    @abstractmethod
+    async def list_active_user_token_jtis(self, user_public_id: str) -> list[str]:
+        """Return every unrevoked JTI for a user's active tokens.
+
+        Reads the non-temporal ``user_active_tokens`` table and
+        returns the JWT IDs whose ``revoked_at`` is still NULL. Used
+        by :meth:`TokenManager.revoke_user_sessions` to load the
+        in-memory fast-path blacklist before flipping DB state —
+        every JTI the kill switch revokes must appear in both the
+        ``user_active_tokens.revoked_at`` column AND the
+        :attr:`TokenManager._blacklisted_tokens` cache so ``verify_token``
+        rejects it on the very next request regardless of which code
+        path checks first (plan §3.6.1).
+
+        Args:
+            user_public_id: UUID of the user whose tokens are being
+                revoked.
+
+        Returns:
+            List of JTI strings. Empty list if the user has no
+            active tokens (possible if every token already expired
+            naturally or was previously revoked).
+        """
+        ...
+
+    @abstractmethod
+    async def revoke_user_active_tokens(self, user_public_id: str, revoked_at: datetime) -> int:
+        """Mark every unrevoked token row for a user as revoked.
+
+        Sets ``revoked_at=revoked_at`` on every row where
+        ``user_public_id`` matches AND ``revoked_at IS NULL``. The
+        operation is a single UPDATE — atomic per SQLAlchemy
+        session. Rows are NOT deleted (audit preservation); the
+        daily ``token_cleanup_loop`` handles expired / long-revoked
+        rows.
+
+        Args:
+            user_public_id: UUID of the user whose tokens are being
+                revoked.
+            revoked_at: Timestamp to stamp on ``revoked_at``.
+                Typically ``datetime.now(UTC)`` at the kill-switch
+                entry.
+
+        Returns:
+            Number of rows updated (0 if no unrevoked tokens
+            existed — not an error).
         """
         ...
 
@@ -3831,6 +3881,37 @@ class SQLAlchemyRepository(Repository):
             )
             count = result.scalar_one()
             return int(count)
+
+    async def list_active_user_token_jtis(self, user_public_id: str) -> list[str]:
+        """Return every unrevoked JTI for a user's active tokens.
+
+        See :meth:`Repository.list_active_user_token_jtis` for contract.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(UserActiveToken.jti).where(
+                    UserActiveToken.user_public_id == user_public_id,
+                    UserActiveToken.revoked_at.is_(None),
+                )
+            )
+            return [row for (row,) in result.all()]
+
+    async def revoke_user_active_tokens(self, user_public_id: str, revoked_at: datetime) -> int:
+        """Mark every unrevoked token row for a user as revoked.
+
+        See :meth:`Repository.revoke_user_active_tokens` for contract.
+        """
+        async with self.session() as s:
+            result: Any = await s.execute(
+                update(UserActiveToken)
+                .where(
+                    UserActiveToken.user_public_id == user_public_id,
+                    UserActiveToken.revoked_at.is_(None),
+                )
+                .values(revoked_at=revoked_at)
+            )
+            await s.commit()
+            return int(result.rowcount or 0)
 
     async def get_plan_public_id_for_client_order_id(
         self,
