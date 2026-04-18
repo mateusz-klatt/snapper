@@ -447,6 +447,31 @@ class TestCancelOrder:
         assert response.status_code == 409
         client.close()
 
+    def test_cancel_with_child_concurrent_status_change_returns_409(self) -> None:
+        """409 path inside the caps-guarded cancel branch (with child_client_order_id).
+
+        Given: a plan with a child_client_order_id (has_active_children=True)
+            whose ``update_execution_plan_status`` returns ``None`` under
+            the caps guard,
+        When: the cancel endpoint is hit and the caps guard admits (no
+            caps row → unbounded),
+        Then: the route raises HTTP 409 inside the guard, propagating
+            through :class:`CapsViolationError` filtering — covers the
+            refactored inside-guard concurrent-change branch at
+            ``order_routes.py``.
+        """
+        repo = AsyncMock()
+        repo.get_execution_plan = AsyncMock(
+            return_value=_make_plan_row(status="active", with_child_order=True)
+        )
+        repo.update_execution_plan_status = AsyncMock(return_value=None)
+        repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-42")
+        client = _create_client(repo)
+        response = client.post("/api/orders/plan-1/cancel", json=_cancel_order_body())
+        assert response.status_code == 409
+        client.close()
+
     def test_cancel_with_child_order_emits_cancel_command(self) -> None:
         """Given plan with child_client_order_id, Then cancel TradeCommand is inserted.
 

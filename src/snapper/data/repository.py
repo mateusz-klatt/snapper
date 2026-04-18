@@ -3746,10 +3746,17 @@ class SQLAlchemyRepository(Repository):
             }
 
     async def count_user_open_commands(self, user_public_id: str) -> int:
-        """Count non-terminal submit/replace commands for a user.
+        """Count non-terminal submit-type commands for a user.
 
         All-time count per plan §3.5.3 (no time window). Cancel
         commands are excluded: they are not in-flight exposure.
+
+        The DB persists two submit-type vocabularies: REST routes and
+        plan helpers (bracket, trailing_stop) insert ``"create"``;
+        strategy/engine paths insert ``"submit"`` via
+        :class:`OrderCommandEnum`; replace paths insert ``"replace"``.
+        All three are counted against ``max_open_orders`` — the cap
+        limits user exposure regardless of origin surface.
         """
         terminal = _TRADE_COMMAND_TERMINAL_STATUSES
         async with self.session() as s:
@@ -3758,7 +3765,7 @@ class SQLAlchemyRepository(Repository):
                 .select_from(TradeCommand)
                 .where(
                     TradeCommand.user_public_id == user_public_id,
-                    TradeCommand.command_type.in_(("submit", "replace")),
+                    TradeCommand.command_type.in_(("create", "submit", "replace")),
                     TradeCommand.status.notin_(terminal),
                     TradeCommand.known_to == KNOWN_TO_MAX,
                 )
@@ -3769,11 +3776,16 @@ class SQLAlchemyRepository(Repository):
     async def get_user_recent_submits(
         self, user_public_id: str, since: datetime
     ) -> list[UserRecentSubmitRow]:
-        """Return submit/replace rows since ``since`` (for 24h notional sum).
+        """Return submit-type rows since ``since`` (for 24h notional sum).
 
         Excludes rows whose active status is ``rejected``. Returns
         the minimal projection the enforcer needs to compute
         rolling 24h USD notional.
+
+        Includes all three submit-type vocabularies (``create`` from
+        REST/plan inserts, ``submit`` from strategy/engine, ``replace``
+        from amends) — the 24h notional cap limits user exposure
+        regardless of origin surface.
         """
         async with self.session() as s:
             result = await s.execute(
@@ -3784,7 +3796,7 @@ class SQLAlchemyRepository(Repository):
                     TradeCommand.price,
                 ).where(
                     TradeCommand.user_public_id == user_public_id,
-                    TradeCommand.command_type.in_(("submit", "replace")),
+                    TradeCommand.command_type.in_(("create", "submit", "replace")),
                     TradeCommand.status != TradeCommandStatusEnum.REJECTED,
                     TradeCommand.created_at >= since,
                     TradeCommand.known_to == KNOWN_TO_MAX,

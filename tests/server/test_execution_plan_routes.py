@@ -635,6 +635,28 @@ class TestCancelBracket:
         assert response.status_code == 409
         client.close()
 
+    def test_cancel_with_children_concurrent_status_change_409(self) -> None:
+        """409 path inside the caps-guarded cancel branch (with active children).
+
+        Given: a bracket plan whose executor reports at least one
+            active child and whose ``update_execution_plan_status``
+            returns ``None`` inside the caps guard,
+        When: cancel is invoked,
+        Then: the route raises HTTP 409 from inside the caps guard
+            context — covers the refactored concurrent-change branch.
+        """
+        repo = AsyncMock()
+        plan = _make_plan_row(status="active")
+        plan["params"]["child_client_order_ids"] = ["cid-1"]
+        repo.get_execution_plan = AsyncMock(return_value=plan)
+        repo.update_execution_plan_status = AsyncMock(return_value=None)
+        repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value=None)
+        client = _create_client(repo)
+        client.app.state.plan_executor._extract_child_ids = MagicMock(return_value=["cid-1"])
+        response = client.post("/api/execution-plans/bracket-1/cancel", json=_cancel_bracket_body())
+        assert response.status_code == 409
+        client.close()
+
     def test_cancel_command_insert_failure_500(self) -> None:
         """Given cancel command insert fails, Then 500 + plan compensated to failed."""
         repo = AsyncMock()

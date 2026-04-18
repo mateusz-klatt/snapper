@@ -148,15 +148,25 @@ async def test_get_user_trading_caps_returns_none_when_absent(
 async def test_count_user_open_commands_counts_non_terminal_submits(
     repo: SQLAlchemyRepository,
 ) -> None:
-    """Only non-terminal submit/replace rows count; cancels excluded.
+    """Non-terminal submit-type rows (create/submit/replace) count; cancels excluded.
 
-    Given: a user with one dispatched submit, one terminal filled
-        submit, one dispatched cancel, and one replace row,
+    Given: a user with one dispatched ``create`` (REST/plan vocab),
+        one dispatched ``submit`` (strategy/engine vocab), one
+        dispatched ``replace``, one terminal filled ``submit``, and
+        one dispatched ``cancel``,
     When: ``count_user_open_commands`` runs,
-    Then: the count is 2 (the active submit + the replace); the
-        filled/terminal submit and the cancel row are excluded per
-        §3.5.3 (in-flight exposure basis).
+    Then: the count is 3 (the three non-terminal submit-type rows).
+        The filled row and the cancel row are excluded per §3.5.3
+        (in-flight exposure basis). The ``create`` row is counted —
+        REST/plan inserts persist this vocabulary and the cap must
+        see them to enforce ``max_open_orders``.
     """
+    await _insert_trade_command(
+        repo,
+        user_public_id="user-open",
+        command_type="create",
+        status=TradeCommandStatusEnum.DISPATCHED,
+    )
     await _insert_trade_command(
         repo,
         user_public_id="user-open",
@@ -182,20 +192,23 @@ async def test_count_user_open_commands_counts_non_terminal_submits(
         status=TradeCommandStatusEnum.DISPATCHED,
     )
     count = await repo.count_user_open_commands("user-open")
-    assert count == 2
+    assert count == 3
 
 
 @pytest.mark.asyncio
 async def test_get_user_recent_submits_filters_to_window(
     repo: SQLAlchemyRepository,
 ) -> None:
-    """Only submits inside the time window + not rejected are returned.
+    """Submit-type rows (create/submit/replace) inside the window are returned.
 
-    Given: two submits for a user — one inside the 1h window and
-        one outside — plus a rejected row inside the window,
+    Given: a user with an in-window ``submit`` (strategy vocab),
+        an in-window ``create`` (REST/plan vocab), an out-of-window
+        ``submit``, and an in-window ``submit`` with status=rejected,
     When: ``get_user_recent_submits`` runs with ``since=now-1h``,
-    Then: only the non-rejected in-window row is returned with
-        its projected ``instrument`` / ``quantity`` / ``price``.
+    Then: the two in-window non-rejected rows are returned. The
+        ``create`` row MUST be included — REST routes persist this
+        vocabulary and the 24h rolling notional cap would be
+        bypassed if the query filter missed it.
     """
     await _insert_trade_command(
         repo,
@@ -204,6 +217,14 @@ async def test_get_user_recent_submits_filters_to_window(
         created_at=_NOW,
         quantity=2.0,
         price=500.0,
+    )
+    await _insert_trade_command(
+        repo,
+        user_public_id="user-submits",
+        command_type="create",
+        created_at=_NOW - timedelta(minutes=15),
+        quantity=3.0,
+        price=200.0,
     )
     await _insert_trade_command(
         repo,
@@ -223,9 +244,9 @@ async def test_get_user_recent_submits_filters_to_window(
         price=1.0,
     )
     rows = await repo.get_user_recent_submits("user-submits", since=_NOW - timedelta(hours=1))
-    assert len(rows) == 1
-    assert rows[0]["quantity"] == 2.0
-    assert rows[0]["price"] == 500.0
+    assert len(rows) == 2
+    notionals = sorted(r["quantity"] * r["price"] for r in rows if r["price"] is not None)
+    assert notionals == [600.0, 1000.0]
 
 
 @pytest.mark.asyncio

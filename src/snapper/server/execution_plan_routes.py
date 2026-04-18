@@ -421,113 +421,128 @@ async def cancel_bracket(
         else ExecutionPlanStatusEnum.CANCELLED
     )
 
-    new_id = await repo.update_execution_plan_status(
-        public_id=plan_public_id,
-        new_status=new_status,
-        bus_time=ts,
-        session_id=sid,
-        sequence_id=tracker.next_sequence(_REST_STREAM),
-        cancel_requested_at=now,
-        completed_at=now if new_status == ExecutionPlanStatusEnum.CANCELLED else None,
-    )
-    if new_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Plan status changed concurrently",
-        )
-
     if has_active_children:
         native_instrument = cast(str | None, params.get("native_instrument"))
-        for child_cid in child_ids:
-            if native_instrument is None:
-                continue
-            exchange_order_id: str | None = None
-            try:
-                exchange_order_id = await repo.get_exchange_order_id_for_client_order_id(
-                    child_cid, as_of=now
+        cancel_submission = TradeCommandSubmission(
+            user_public_id=principal.user_public_id,
+            operator_public_id=plan.get("operator_public_id"),
+            wallet_public_id=plan["wallet_public_id"],
+            instrument_public_id=plan.get("instrument_public_id"),
+            command_type="cancel",
+            side=plan["side"],
+            order_type=str(params.get("venue_order_type", "market")),
+            quantity=None,
+            price=None,
+            source_surface="rest",
+            idempotency_key=None,
+        )
+        try:
+            async with caps_enforcer.guard(cancel_submission):
+                new_id = await repo.update_execution_plan_status(
+                    public_id=plan_public_id,
+                    new_status=new_status,
+                    bus_time=ts,
+                    session_id=sid,
+                    sequence_id=tracker.next_sequence(_REST_STREAM),
+                    cancel_requested_at=now,
+                    completed_at=(now if new_status == ExecutionPlanStatusEnum.CANCELLED else None),
                 )
-            except Exception as exc:
-                logger.error("Cancel venue lookup failed for {}: {}", plan_public_id, exc)
-            cancel_cmd = TradeCommandInsertRow(
-                command_type="cancel",
-                shard_key=plan["shard_key"],
-                exchange=plan["exchange"],
-                instrument=native_instrument,
-                mode=plan["mode"],
-                strategy_id=plan["plan_type"],
-                client_order_id=child_cid,
-                venue_client_id=child_cid,
-                side=plan["side"],
-                order_type=str(params.get("venue_order_type", "market")),
-                quantity=plan["total_quantity"],
-                price=cast(Any, params.get("price")),
-                leverage=cast(Any, params.get("leverage")),
-                reduce_only=False,
-                status=TradeCommandStatusEnum.CREATED,
-                created_at=now,
-                correlation_id=plan_public_id,
-                session_id=sid,
-                sequence_id=tracker.next_sequence(_REST_STREAM),
-                timestamp=ts,
-                wallet_public_id=plan["wallet_public_id"] or "",
-                operator_public_id=plan.get("operator_public_id"),
-                user_public_id=principal.user_public_id or principal.username,
-                plan_public_id=plan_public_id,
-                exchange_order_id=exchange_order_id,
-            )
-            try:
-                cancel_submission = TradeCommandSubmission(
-                    user_public_id=principal.user_public_id,
-                    operator_public_id=plan.get("operator_public_id"),
-                    wallet_public_id=plan["wallet_public_id"],
-                    instrument_public_id=plan.get("instrument_public_id"),
-                    command_type="cancel",
-                    side=plan["side"],
-                    order_type=str(params.get("venue_order_type", "market")),
-                    quantity=None,
-                    price=None,
-                    source_surface="rest",
-                    idempotency_key=None,
-                )
-                async with caps_enforcer.guard(cancel_submission):
-                    await repo.insert_trade_command(cancel_cmd, ownership=None)
-            except CapsViolationError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    detail={
-                        "error_code": "caps_violation",
-                        "cap_type": exc.cap_type,
-                        "attempted": exc.attempted,
-                        "limit": exc.limit,
-                    },
-                ) from exc
-            except Exception as exc:
-                logger.error(
-                    "Failed to insert cancel command for plan {} child {}: {}",
-                    plan_public_id,
-                    child_cid,
-                    exc,
-                )
-                try:
-                    await repo.update_execution_plan_status(
-                        public_id=plan_public_id,
-                        new_status=ExecutionPlanStatusEnum.FAILED,
-                        bus_time=ts,
+                if new_id is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Plan status changed concurrently",
+                    )
+                for child_cid in child_ids:
+                    if native_instrument is None:
+                        continue
+                    exchange_order_id: str | None = None
+                    try:
+                        exchange_order_id = await repo.get_exchange_order_id_for_client_order_id(
+                            child_cid, as_of=now
+                        )
+                    except Exception as exc:
+                        logger.error("Cancel venue lookup failed for {}: {}", plan_public_id, exc)
+                    cancel_cmd = TradeCommandInsertRow(
+                        command_type="cancel",
+                        shard_key=plan["shard_key"],
+                        exchange=plan["exchange"],
+                        instrument=native_instrument,
+                        mode=plan["mode"],
+                        strategy_id=plan["plan_type"],
+                        client_order_id=child_cid,
+                        venue_client_id=child_cid,
+                        side=plan["side"],
+                        order_type=str(params.get("venue_order_type", "market")),
+                        quantity=plan["total_quantity"],
+                        price=cast(Any, params.get("price")),
+                        leverage=cast(Any, params.get("leverage")),
+                        reduce_only=False,
+                        status=TradeCommandStatusEnum.CREATED,
+                        created_at=now,
+                        correlation_id=plan_public_id,
                         session_id=sid,
                         sequence_id=tracker.next_sequence(_REST_STREAM),
-                        last_error=f"Cancel command insert failed: {exc}",
-                        completed_at=now,
+                        timestamp=ts,
+                        wallet_public_id=plan["wallet_public_id"] or "",
+                        operator_public_id=plan.get("operator_public_id"),
+                        user_public_id=principal.user_public_id or principal.username,
+                        plan_public_id=plan_public_id,
+                        exchange_order_id=exchange_order_id,
                     )
-                except Exception as comp_exc:
-                    logger.error(
-                        "Compensation to failed also failed for plan {}: {}",
-                        plan_public_id,
-                        comp_exc,
-                    )
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Failed to emit cancel command",
-                ) from exc
+                    try:
+                        await repo.insert_trade_command(cancel_cmd, ownership=None)
+                    except Exception as exc:
+                        logger.error(
+                            "Failed to insert cancel command for plan {} child {}: {}",
+                            plan_public_id,
+                            child_cid,
+                            exc,
+                        )
+                        try:
+                            await repo.update_execution_plan_status(
+                                public_id=plan_public_id,
+                                new_status=ExecutionPlanStatusEnum.FAILED,
+                                bus_time=ts,
+                                session_id=sid,
+                                sequence_id=tracker.next_sequence(_REST_STREAM),
+                                last_error=f"Cancel command insert failed: {exc}",
+                                completed_at=now,
+                            )
+                        except Exception as comp_exc:
+                            logger.error(
+                                "Compensation to failed also failed for plan {}: {}",
+                                plan_public_id,
+                                comp_exc,
+                            )
+                        raise HTTPException(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail="Failed to emit cancel command",
+                        ) from exc
+        except CapsViolationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "error_code": "caps_violation",
+                    "cap_type": exc.cap_type,
+                    "attempted": exc.attempted,
+                    "limit": exc.limit,
+                },
+            ) from exc
+    else:
+        new_id = await repo.update_execution_plan_status(
+            public_id=plan_public_id,
+            new_status=new_status,
+            bus_time=ts,
+            session_id=sid,
+            sequence_id=tracker.next_sequence(_REST_STREAM),
+            cancel_requested_at=now,
+            completed_at=(now if new_status == ExecutionPlanStatusEnum.CANCELLED else None),
+        )
+        if new_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Plan status changed concurrently",
+            )
 
     await repo.insert_execution_plan_decision(
         row=ExecutionPlanDecisionInsertRow(

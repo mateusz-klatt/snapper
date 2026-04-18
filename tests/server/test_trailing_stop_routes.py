@@ -479,6 +479,30 @@ class TestCancelTrailingStop:
         response = client.post("/api/trailing-stops/ts-1/cancel", json=_cancel_body())
         assert response.status_code == 409
 
+    def test_cancel_with_children_concurrent_status_change_returns_409(self) -> None:
+        """409 path inside the caps-guarded cancel branch (with active children).
+
+        Given: a trailing-stop plan whose executor reports at least one
+            active child and whose ``update_execution_plan_status``
+            returns ``None`` inside the caps guard,
+        When: cancel is invoked,
+        Then: the route raises HTTP 409 from inside the caps guard
+            context — covers the refactored concurrent-change branch.
+        """
+        repo = AsyncMock()
+        plan = _make_plan_row(status="active")
+        plan["params"]["child_client_order_ids"] = ["child-1"]
+        repo.get_execution_plan = AsyncMock(return_value=plan)
+        repo.update_execution_plan_status = AsyncMock(return_value=None)
+        repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-1")
+
+        client = _create_client(repo)
+        executor = client.app.state.plan_executor
+        executor._extract_child_ids = MagicMock(return_value=["child-1"])
+
+        response = client.post("/api/trailing-stops/ts-1/cancel", json=_cancel_body())
+        assert response.status_code == 409
+
     def test_cancel_child_command_insert_fails_returns_500(self) -> None:
         """Given cancel command insert failure, Then 500 + plan set to failed."""
         repo = AsyncMock()
