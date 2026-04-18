@@ -105,6 +105,7 @@ from snapper.data.models import TradeCommand
 from snapper.data.models import TradeProjectionCheckpoint
 from snapper.data.models import UnderlyingAsset
 from snapper.data.models import UserOperatorMembership
+from snapper.data.models import UserTradingCaps
 from snapper.data.models import VenueEvent
 from snapper.data.models import VenueFeeSchedule
 from snapper.data.models import Wallet
@@ -148,6 +149,8 @@ from snapper.data.repository_types import TradeRow
 from snapper.data.repository_types import TradeUpsertRow
 from snapper.data.repository_types import UnderlyingAssetRow
 from snapper.data.repository_types import UserOperatorMembershipRow
+from snapper.data.repository_types import UserRecentSubmitRow
+from snapper.data.repository_types import UserTradingCapsRow
 from snapper.data.repository_types import VenueEventInsertRow
 from snapper.data.repository_types import VenueEventRow
 from snapper.data.repository_types import VenueFeeScheduleRow
@@ -1583,6 +1586,86 @@ class Repository(ABC):
         Raises:
             ShardOwnershipError: If ``ownership`` is not None and
                 ``row["shard_key"]`` is not owned by it.
+        """
+        ...
+
+    @abstractmethod
+    async def get_user_trading_caps(self, user_public_id: str) -> UserTradingCapsRow | None:
+        """Return the active ``user_trading_caps`` row for a user.
+
+        Consumed by
+        :class:`~snapper.application.trade.caps_enforcer.TradingCapsEnforcer`
+        before every user-bound insert. Returns ``None`` when the
+        user has no caps row (meaning "unbounded on all axes" —
+        the enforcer's policy is to admit in that case).
+
+        Args:
+            user_public_id: UUID of the user to look up.
+
+        Returns:
+            Active caps row projection or ``None``.
+        """
+        ...
+
+    @abstractmethod
+    async def count_user_open_commands(self, user_public_id: str) -> int:
+        """Count user's non-terminal trade-commands (``max_open_orders`` cap).
+
+        All-time count (no time window — see §3.5.3 R3-M2 resolution).
+        Non-terminal statuses: ``created``, ``dispatched``,
+        ``acked``, ``accepted``, ``partially_filled``. Only
+        command_type ``submit`` / ``replace`` rows count — cancels
+        are not in-flight exposure.
+
+        Args:
+            user_public_id: UUID of the user to count for.
+
+        Returns:
+            Count of the user's active, non-terminal commands.
+        """
+        ...
+
+    @abstractmethod
+    async def get_user_recent_submits(
+        self, user_public_id: str, since: datetime
+    ) -> list[UserRecentSubmitRow]:
+        """Return user's submit commands since a cut-off timestamp.
+
+        Used by the ``max_daily_notional_usd`` cap: the enforcer
+        sums ``quantity × price`` over these rows to get the
+        rolling 24h USD commitment (§3.5.3). Excludes rows whose
+        current status is ``rejected``.
+
+        Args:
+            user_public_id: UUID of the user.
+            since: Minimum ``created_at`` (typically
+                ``now - 24h``).
+
+        Returns:
+            List of projected rows (one per submit command).
+        """
+        ...
+
+    @abstractmethod
+    async def count_user_rolling_cancels(self, user_public_id: str, since: datetime) -> int:
+        """Count user's cancel commands since a cut-off.
+
+        Used by the ``max_cancels_per_minute`` cap (sliding 60s
+        window per §3.5.3). Counts every row where
+        ``command_type == 'cancel'`` AND
+        ``created_at >= since``, regardless of terminal status
+        (a cancel that was later rejected still counts against
+        the rate budget — this is intentional: the cap limits
+        SUBMIT frequency of cancel intents, not successful
+        cancellations).
+
+        Args:
+            user_public_id: UUID of the user.
+            since: Minimum ``created_at`` (typically
+                ``now - 60s``).
+
+        Returns:
+            Count of cancel commands in the window.
         """
         ...
 
@@ -3627,6 +3710,115 @@ class SQLAlchemyRepository(Repository):
             await s.commit()
             await s.refresh(cmd)
             return (cmd.id, cmd.public_id)
+
+    async def get_user_trading_caps(self, user_public_id: str) -> UserTradingCapsRow | None:
+        """Return the active ``user_trading_caps`` row or ``None``.
+
+        Reads the SCD2-active row (``known_to == KNOWN_TO_MAX``)
+        for the user. Consumed by
+        :class:`~snapper.application.trade.caps_enforcer.TradingCapsEnforcer`
+        before every user-bound insert.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(
+                    UserTradingCaps.public_id,
+                    UserTradingCaps.user_public_id,
+                    UserTradingCaps.max_order_quantity_per_instrument,
+                    UserTradingCaps.max_open_orders,
+                    UserTradingCaps.max_daily_notional_usd,
+                    UserTradingCaps.max_cancels_per_minute,
+                ).where(
+                    UserTradingCaps.user_public_id == user_public_id,
+                    UserTradingCaps.known_to == KNOWN_TO_MAX,
+                )
+            )
+            row = result.first()
+            if row is None:
+                return None
+            return {
+                "public_id": row[0],
+                "user_public_id": row[1],
+                "max_order_quantity_per_instrument": row[2],
+                "max_open_orders": row[3],
+                "max_daily_notional_usd": float(row[4]) if row[4] is not None else None,
+                "max_cancels_per_minute": row[5],
+            }
+
+    async def count_user_open_commands(self, user_public_id: str) -> int:
+        """Count non-terminal submit/replace commands for a user.
+
+        All-time count per plan §3.5.3 (no time window). Cancel
+        commands are excluded: they are not in-flight exposure.
+        """
+        terminal = _TRADE_COMMAND_TERMINAL_STATUSES
+        async with self.session() as s:
+            result = await s.execute(
+                select(func.count())
+                .select_from(TradeCommand)
+                .where(
+                    TradeCommand.user_public_id == user_public_id,
+                    TradeCommand.command_type.in_(("submit", "replace")),
+                    TradeCommand.status.notin_(terminal),
+                    TradeCommand.known_to == KNOWN_TO_MAX,
+                )
+            )
+            count = result.scalar_one()
+            return int(count)
+
+    async def get_user_recent_submits(
+        self, user_public_id: str, since: datetime
+    ) -> list[UserRecentSubmitRow]:
+        """Return submit/replace rows since ``since`` (for 24h notional sum).
+
+        Excludes rows whose active status is ``rejected``. Returns
+        the minimal projection the enforcer needs to compute
+        rolling 24h USD notional.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(
+                    TradeCommand.instrument,
+                    TradeCommand.exchange,
+                    TradeCommand.quantity,
+                    TradeCommand.price,
+                ).where(
+                    TradeCommand.user_public_id == user_public_id,
+                    TradeCommand.command_type.in_(("submit", "replace")),
+                    TradeCommand.status != TradeCommandStatusEnum.REJECTED,
+                    TradeCommand.created_at >= since,
+                    TradeCommand.known_to == KNOWN_TO_MAX,
+                )
+            )
+            return [
+                {
+                    "instrument": r.instrument,
+                    "exchange": r.exchange,
+                    "quantity": r.quantity,
+                    "price": r.price,
+                }
+                for r in result.all()
+            ]
+
+    async def count_user_rolling_cancels(self, user_public_id: str, since: datetime) -> int:
+        """Count cancel commands submitted by user since ``since``.
+
+        Includes rows regardless of terminal status — the cap
+        limits submit frequency of cancel intents, not success.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(func.count())
+                .select_from(TradeCommand)
+                .where(
+                    TradeCommand.user_public_id == user_public_id,
+                    TradeCommand.command_type == "cancel",
+                    TradeCommand.created_at >= since,
+                    TradeCommand.known_to == KNOWN_TO_MAX,
+                )
+            )
+            count = result.scalar_one()
+            return int(count)
 
     async def get_plan_public_id_for_client_order_id(
         self,

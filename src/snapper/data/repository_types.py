@@ -290,6 +290,46 @@ class TradeCommandRow(TypedDict):
     source_surface: str
 
 
+class UserTradingCapsRow(TypedDict):
+    """Active per-user trading-caps row projection (plan §3.5.3).
+
+    Every cap field is nullable — a NULL cap means unbounded for
+    that axis. Consumed by
+    :class:`~snapper.application.trade.caps_enforcer.TradingCapsEnforcer`
+    to evaluate submission admissibility.
+    """
+
+    public_id: str
+    user_public_id: str
+    max_order_quantity_per_instrument: JsonObject | None
+    max_open_orders: int | None
+    max_daily_notional_usd: float | None
+    max_cancels_per_minute: int | None
+
+
+class UserRecentSubmitRow(TypedDict):
+    """Row returned by ``get_user_recent_submits`` for notional-cap math.
+
+    Projects only the fields the enforcer needs to compute rolling
+    24h USD notional accounting. ``TradeCommand`` stores
+    ``instrument`` as the native symbol (e.g., ``"BTC-USD"``) plus
+    ``exchange``; these are carried so the enforcer can optionally
+    resolve to ``instrument_public_id`` for converter lookups on
+    market orders where ``price`` is NULL.
+
+    Phase A limitation: for market orders with ``price IS NULL``,
+    the enforcer skips the row from the rolling sum and emits a
+    WARN log. A follow-up plan can snapshot the submit-time USD
+    notional into a dedicated column when non-USD-quoted
+    instruments are onboarded.
+    """
+
+    instrument: str
+    exchange: str
+    quantity: float
+    price: float | None
+
+
 class VenueEventRow(TypedDict):
     """Row dict returned by venue event queries."""
 
