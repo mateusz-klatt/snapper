@@ -18,11 +18,18 @@ from snapper.auth.websocket_auth import get_ws_auth_manager
 
 
 class DummyWebSocket:
-    """Fake WebSocket for testing cookie access."""
+    """Fake WebSocket for testing cookie + header access.
+
+    Matches :class:`fastapi.WebSocket` for the fields the
+    :class:`WebSocketAuthManager.verify_session_cookie` path reads —
+    header (for the Bearer token fast-path per plan §3.7) and cookie
+    (for the browser fallback).
+    """
 
     def __init__(self) -> None:
         """Initialize the instance."""
         self.cookies: dict[str, str] = {}
+        self.headers: dict[str, str] = {}
 
 
 class DummyTokenManager:

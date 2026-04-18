@@ -1393,6 +1393,7 @@ class TestGetCurrentUser:
         """
         request = Mock(spec=Request)
         request.cookies = {}
+        request.headers = {}
         result = get_current_user(request)
         assert result is None
 
@@ -1406,6 +1407,7 @@ class TestGetCurrentUser:
         request = Mock(spec=Request)
         request.state = Mock()
         request.cookies = {"access_token": "valid_token"}
+        request.headers = {}
         now = int(datetime.now(UTC).timestamp())
         token_data = TokenClaims(
             sub="user123",
@@ -1437,6 +1439,7 @@ class TestGetCurrentUser:
         """
         request = Mock(spec=Request)
         request.cookies = {"access_token": "invalid_token"}
+        request.headers = {}
         with patch("snapper.auth.dependencies.get_token_manager") as mock_get_token_manager:
             mock_token_manager = Mock()
             mock_token_manager.verify_token.return_value = None

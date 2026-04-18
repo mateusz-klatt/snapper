@@ -98,10 +98,45 @@ class WebSocketAuthManager:
         self.authenticated_connections: dict[WebSocket, AuthPrincipal] = {}
         self._connection_states: dict[WebSocket, ConnectionState] = {}
 
+    @staticmethod
+    def _extract_ws_bearer_token(websocket: WebSocket) -> str | None:
+        """Pull a Bearer JWT off the WebSocket upgrade ``Authorization`` header.
+
+        Case-insensitive scheme match (RFC 7235); returns ``None`` when
+        the header is absent or the scheme is not ``Bearer`` so the
+        caller can fall through to cookie-based auth.
+
+        Args:
+            websocket: WebSocket whose ``headers`` carry the upgrade
+                request headers.
+
+        Returns:
+            The stripped token string, or ``None`` if not a Bearer
+            grant.
+        """
+        auth_header = websocket.headers.get("authorization")
+        if not auth_header:
+            return None
+        parts = auth_header.split(None, 1)
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            return None
+        token = parts[1].strip()
+        return token or None
+
     def verify_session_cookie(
         self, websocket: WebSocket
     ) -> tuple[AuthPrincipal, TokenClaims] | None:
-        """Verify session from WebSocket cookies.
+        """Verify session from WebSocket auth header or cookie.
+
+        Per plan §3.7: the ``Authorization: Bearer <jwt>`` request
+        header is consulted FIRST on the WebSocket upgrade; the
+        ``access_token`` cookie is the fallback. MCP / CLI clients
+        without cookie jars present the header; browser clients
+        continue to use the cookie.
+
+        The method name is preserved for call-site stability — the
+        semantics are now "verify session token transport, header or
+        cookie", not strictly "cookie".
 
         Args:
             websocket: WebSocket connection.
@@ -109,7 +144,7 @@ class WebSocketAuthManager:
         Returns:
             Tuple of (AuthPrincipal, TokenClaims) if valid, None otherwise.
         """
-        token = websocket.cookies.get("access_token")
+        token = self._extract_ws_bearer_token(websocket) or websocket.cookies.get("access_token")
         if not token:
             return None
         token_data = self.token_manager.verify_token(token)

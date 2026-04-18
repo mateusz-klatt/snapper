@@ -30,10 +30,42 @@ from snapper.config.settings import get_settings_with_service
 from snapper.interface.websocket.helpers import build_allowed_origins
 
 
+def _extract_bearer_token(request: Request) -> str | None:
+    """Extract a Bearer access token from the ``Authorization`` header.
+
+    Parses the HTTP ``Authorization: Bearer <jwt>`` header form. The
+    comparison is case-insensitive on the scheme name (RFC 7235); the
+    token payload itself is preserved verbatim. Returns ``None`` when
+    the header is absent or not a Bearer grant, so the caller can fall
+    back to cookie-based auth transparently.
+
+    Args:
+        request: FastAPI request whose ``headers`` are consulted.
+
+    Returns:
+        The stripped JWT string when a Bearer header is present,
+        otherwise ``None``.
+    """
+    auth_header = request.headers.get("authorization")
+    if not auth_header:
+        return None
+    parts = auth_header.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    token = parts[1].strip()
+    return token or None
+
+
 def get_current_user(
     request: Request,
 ) -> AuthPrincipal | None:
-    """Extract current auth principal from access token cookie.
+    """Extract current auth principal from Bearer header or cookie.
+
+    Per plan §3.7: the ``Authorization: Bearer <jwt>`` header is
+    consulted FIRST; the ``access_token`` cookie is the fallback. This
+    lets MCP clients (which have no cookie jar) authenticate against
+    the same `/api/*` surface as the browser UI while preserving the
+    existing cookie flow for the frontend.
 
     Args:
         request: FastAPI request object.
@@ -41,7 +73,7 @@ def get_current_user(
     Returns:
         AuthPrincipal if authenticated, None otherwise.
     """
-    access_token = request.cookies.get("access_token")
+    access_token = _extract_bearer_token(request) or request.cookies.get("access_token")
     if not access_token:
         return None
     token_manager = get_token_manager()
@@ -335,6 +367,14 @@ def validate_csrf_token(
     Validates origin, presence in both cookie and header,
     and signature integrity.
 
+    Per plan §3.7: requests carrying an ``Authorization: Bearer``
+    header bypass CSRF validation — they are not subject to
+    cookie-based request forgery because they present the access
+    token explicitly in a header the browser cannot forge via
+    cross-origin form submission. This preserves the cookie flow
+    for the frontend while allowing MCP / CLI clients to call
+    state-changing REST endpoints without minting CSRF tokens.
+
     Args:
         request: FastAPI request.
         csrf_token: Token from get_csrf_token dependency.
@@ -343,6 +383,8 @@ def validate_csrf_token(
         HTTPException: 403 if CSRF validation fails.
     """
     if request.method in ("GET", "HEAD", "OPTIONS"):
+        return
+    if _extract_bearer_token(request) is not None:
         return
     origin = request.headers.get("origin") or ""
     referer = request.headers.get("referer") or ""

@@ -21,12 +21,18 @@ class LoginData(StrictDataSchema[Literal["login"]]):
         message: Success message.
         expires_in: Access token TTL in seconds.
         user: Authenticated user profile.
+        access_token: JWT returned only when ``?return_tokens=true``
+            is set. ``None`` for the cookie-only browser flow.
+        refresh_token: JWT returned only when ``?return_tokens=true``
+            is set. ``None`` for the cookie-only browser flow.
     """
 
     type: Literal["login"] = "login"
     message: str
     expires_in: int
     user: UserProfile
+    access_token: str | None = None
+    refresh_token: str | None = None
 
 
 class LoginResponse(PayloadResponse[Literal["login_response"], LoginData]):
@@ -49,6 +55,10 @@ class RefreshData(StrictDataSchema[Literal["refresh"]]):
         ws_token_exp: WebSocket token expiration time.
         csrf_token: New CSRF token.
         user: User profile.
+        access_token: JWT returned only when ``?return_tokens=true``
+            is set. ``None`` for the cookie-only browser flow.
+        refresh_token: JWT returned only when ``?return_tokens=true``
+            is set. ``None`` for the cookie-only browser flow.
     """
 
     type: Literal["refresh"] = "refresh"
@@ -57,6 +67,8 @@ class RefreshData(StrictDataSchema[Literal["refresh"]]):
     ws_token_exp: datetime
     csrf_token: str
     user: UserProfile
+    access_token: str | None = None
+    refresh_token: str | None = None
 
 
 class RefreshResponse(PayloadResponse[Literal["refresh_response"], RefreshData]):

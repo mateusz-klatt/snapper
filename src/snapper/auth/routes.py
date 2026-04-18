@@ -78,6 +78,56 @@ def _mint_provenance(request: Request) -> tuple[str, int, str, datetime]:
     return tracker.session_id, tracker.next_sequence(_REST_STREAM), str(uuid7()), datetime.now(UTC)
 
 
+def _should_return_tokens(request: Request) -> bool:
+    """Return ``True`` when the caller opted into body-embedded tokens.
+
+    MCP / CLI clients have no cookie jar; they pass
+    ``?return_tokens=true`` on ``/api/auth/login`` or
+    ``/api/auth/refresh`` to receive the access + refresh JWTs in the
+    response body for subsequent ``Authorization: Bearer`` calls. The
+    browser flow omits the query param and gets cookie-only behavior
+    (unchanged). Per plan §3.7.
+
+    Args:
+        request: FastAPI request whose ``query_params`` are consulted.
+
+    Returns:
+        ``True`` if ``?return_tokens=true`` (case-insensitive),
+        ``False`` otherwise — including the canonical absent-param
+        default, which preserves the cookie-only browser flow.
+    """
+    value = request.query_params.get("return_tokens", "").strip().lower()
+    return value == "true"
+
+
+def _extract_refresh_bearer_token(request: Request) -> str | None:
+    """Pull a refresh JWT from the ``Authorization: Bearer`` header.
+
+    Per plan §3.7: ``POST /api/auth/refresh`` reads the bearer header
+    FIRST and falls back to the ``refresh_token`` cookie. MCP clients
+    without cookie jars exclusively use the header path; browser
+    clients continue to hit the cookie path untouched.
+
+    Args:
+        request: FastAPI request whose ``Authorization`` header is
+            inspected.
+
+    Returns:
+        The token string if a ``Bearer`` header is present, else
+        ``None``. The returned value is NOT verified — callers still
+        run it through :meth:`TokenManager.verify_token` per the
+        existing refresh flow.
+    """
+    auth_header = request.headers.get("authorization")
+    if not auth_header:
+        return None
+    parts = auth_header.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    token = parts[1].strip()
+    return token or None
+
+
 def _message_response(request: Request, message: str) -> MessageResponse:
     """Create a stamped MessageResponse with provenance from the REST tracker.
 
@@ -110,6 +160,12 @@ async def login(
     """Authenticate user and create session.
 
     Sets access_token, refresh_token, and csrf_token cookies.
+
+    Per plan §3.7: when the caller passes ``?return_tokens=true``,
+    the access / refresh JWTs are ALSO embedded in the response body
+    so MCP / CLI clients with no cookie jar can store them for
+    subsequent ``Authorization: Bearer`` calls. Cookies are still
+    set unconditionally for the browser flow.
 
     Args:
         request: FastAPI request.
@@ -170,6 +226,7 @@ async def login(
     )
     sid, seq, _pid, ts = _mint_provenance(request)
     user = user.model_copy(update={"active_wallet_public_id": principal.active_wallet_public_id})
+    return_tokens = _should_return_tokens(request)
     login_payload = LoginData(
         session_id=sid,
         sequence_id=seq,
@@ -178,6 +235,8 @@ async def login(
         message="Login successful",
         expires_in=15 * 60,
         user=user,
+        access_token=token_pair.access_token if return_tokens else None,
+        refresh_token=token_pair.refresh_token if return_tokens else None,
     )
     return LoginResponse(
         payload=login_payload,
@@ -259,8 +318,17 @@ async def refresh_token(
     ``apiClient.refreshAndRetry``): ``body is None`` → empty
     ``RefreshTokenPayload()`` → validation is a no-op.
 
+    Per plan §3.7: the refresh JWT is read from the
+    ``Authorization: Bearer`` header FIRST and the ``refresh_token``
+    cookie second. MCP / CLI clients without cookie jars use the
+    header path exclusively. Passing ``?return_tokens=true``
+    embeds the newly-minted access + refresh JWTs in the response
+    body (in addition to the existing cookie set) so the same
+    clients can rotate tokens without maintaining a cookie store.
+
     Args:
-        request: FastAPI request with refresh_token cookie.
+        request: FastAPI request with refresh_token cookie OR
+            ``Authorization: Bearer`` header.
         response: FastAPI response for setting cookies.
         body: Optional refresh-token command envelope (``None`` on
             empty body).
@@ -275,14 +343,16 @@ async def refresh_token(
             404 when the wallet hint is outside caller visibility.
     """
     settings = request.app.state.settings
-    refresh_token_cookie = request.cookies.get("refresh_token")
-    if not refresh_token_cookie:
+    refresh_token_value = _extract_refresh_bearer_token(request) or request.cookies.get(
+        "refresh_token"
+    )
+    if not refresh_token_value:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Refresh token not found",
         )
     token_manager = get_token_manager()
-    token_data = token_manager.verify_token(refresh_token_cookie)
+    token_data = token_manager.verify_token(refresh_token_value)
     if not token_data:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -341,6 +411,7 @@ async def refresh_token(
     ws_token_result = ws_token_service.generate(user_id=user.username, session_id=session_id)
     sid, seq, _pid, ts = _mint_provenance(request)
     user = user.model_copy(update={"active_wallet_public_id": principal.active_wallet_public_id})
+    return_tokens = _should_return_tokens(request)
     refresh_data = RefreshData(
         session_id=sid,
         sequence_id=seq,
@@ -351,6 +422,8 @@ async def refresh_token(
         ws_token_exp=ws_token_result.expires_at,
         csrf_token=csrf_token,
         user=user,
+        access_token=new_token_pair.access_token if return_tokens else None,
+        refresh_token=new_token_pair.refresh_token if return_tokens else None,
     )
     return RefreshResponse(
         payload=refresh_data,
