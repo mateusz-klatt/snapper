@@ -6892,6 +6892,54 @@ async def test_insert_trade_command_ownership_none_preserves_pre_phase4(
 
 
 @pytest.mark.asyncio
+async def test_get_undispatched_commands_stable_across_same_created_at(
+    tmp_path: Path,
+) -> None:
+    """OFFSET pagination is stable when multiple rows share ``created_at``.
+
+    Regression guard for the R1 review finding on Phase 4 Day 3:
+    plan-service dispatch inserts multiple commands under a single
+    ``now`` tick, so ties on ``created_at`` are realistic. Without
+    the ``id`` tie-breaker in ``ORDER BY``, paginating with OFFSET
+    could skip or duplicate rows → double-dispatch. The fix adds
+    ``TradeCommand.id`` as a deterministic secondary key.
+    """
+    db_path = tmp_path / "stable_offset.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    tied_now = datetime.now(UTC)
+    for i in range(6):
+        await r.insert_trade_command(
+            {
+                "command_type": "submit",
+                "shard_key": f"kraken.TIE-{i}.live",
+                "exchange": "kraken",
+                "instrument": f"TIE-{i}",
+                "mode": "live",
+                "strategy_id": "engine-buy",
+                "client_order_id": f"cid-t{i}",
+                "venue_client_id": f"vcid-t{i}",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 0.5,
+                "price": None,
+                "status": "created",
+                "created_at": tied_now,
+                "correlation_id": f"corr-t{i}",
+                "session_id": "s1",
+                "sequence_id": i + 1,
+                "timestamp": tied_now,
+            }
+        )
+    page1 = await r.get_undispatched_commands(as_of=datetime.now(UTC), limit=2, offset=0)
+    page2 = await r.get_undispatched_commands(as_of=datetime.now(UTC), limit=2, offset=2)
+    page3 = await r.get_undispatched_commands(as_of=datetime.now(UTC), limit=2, offset=4)
+    all_ids = [row["public_id"] for row in page1 + page2 + page3]
+    assert len(all_ids) == 6
+    assert len(set(all_ids)) == 6, "pages must not duplicate any row"
+
+
+@pytest.mark.asyncio
 async def test_get_undispatched_commands_offset_skips_rows(tmp_path: Path) -> None:
     """``offset=N`` skips the first N ``status='created'`` rows."""
     db_path = tmp_path / "offset.db"

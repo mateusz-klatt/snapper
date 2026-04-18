@@ -3834,12 +3834,20 @@ class SQLAlchemyRepository(Repository):
         :class:`OutboxDispatcher._dispatch_batch` to page through the
         ``created`` backlog while filtering for owned shards in Python
         — see plan §3.3 / §D4 for the starvation-bound contract.
+
+        Ordering is ``(created_at, id)`` for deterministic pagination:
+        plan-service dispatch inserts multiple commands within a single
+        ``now`` tick (see ``application/plans/service.py``) so ties on
+        ``created_at`` are realistic. Without the ``id`` tie-breaker,
+        ``OFFSET`` pagination could skip or duplicate rows across pages
+        → double-dispatch. Ticket: R1 review of Phase 4 Day 3 commit
+        c640505.
         """
         async with self.session() as s:
             result = await s.execute(
                 select(TradeCommand)
                 .where(TradeCommand.status == "created", *where_active(TradeCommand, as_of))
-                .order_by(TradeCommand.created_at)
+                .order_by(TradeCommand.created_at, TradeCommand.id)
                 .offset(offset)
                 .limit(limit)
             )
