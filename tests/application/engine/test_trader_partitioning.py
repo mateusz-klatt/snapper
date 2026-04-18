@@ -223,6 +223,44 @@ class TestOnSignalOwnershipFilter:
         assert engine._ownership.instance_count == 2
 
     @pytest.mark.asyncio
+    async def test_halt_guard_uses_canonical_shard_key_on_cold_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Halt check for a brand-new signal uses the same shard_key as engine creation.
+
+        Regression guard: Copilot R1 review of Day 2 flagged that
+        ``halt_key`` on the no-engine path previously used
+        ``parsed.signal_type`` (i.e., the strategy tag for paper
+        signals) instead of the canonical execution mode. For a paper
+        signal like ``signals.paper.BTC-USD.momentum`` that would
+        produce ``paper.BTC-USD.momentum`` while the actual shard_key
+        is ``paper.BTC-USD.paper.momentum`` — letting a halted shard
+        bypass :meth:`TradeService.is_halted` and proceed to engine
+        construction.
+        """
+        coord = _make_coordinator_with_ownership(monkeypatch, instance_id=0, instance_count=1)
+        coord._current_topic = "signals.paper.BTC-USD.momentum"
+        expected_shard_key = "paper.BTC-USD.paper.momentum"
+        coord.trade_service.halt_shard(expected_shard_key, reason="test")
+        paper_signal = SignalData(
+            type="signal",
+            public_id="sig-halt",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            session_id="",
+            sequence_id=0,
+            instrument="BTC-USD",
+            exchange="paper",
+            side="buy",
+            strength=0.5,
+            reason="test",
+            price=50000.0,
+            strategy_name="test",
+            fired_at=datetime.now(UTC),
+        )
+        await coord._on_signal(paper_signal)
+        assert coord.engines == {}
+
+    @pytest.mark.asyncio
     async def test_n_equals_one_preserves_pre_phase4_behavior(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -2408,10 +2408,7 @@ class TraderCoordinator(RegisterableProcess):
                 self._ownership.instance_count,
             )
             return
-        if engine_key in self.engines:
-            halt_key = self.engines[engine_key]._shard_key
-        else:
-            halt_key = f"{exchange}.{instrument}.{mode}"
+        halt_key = self.engines[engine_key]._shard_key if engine_key in self.engines else shard_key
         if self.trade_service.is_halted(halt_key):
             logger.warning(f"ZMQTrader: shard {halt_key} is halted, dropping signal")
             return
