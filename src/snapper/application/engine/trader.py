@@ -31,6 +31,7 @@ from sqlalchemy.exc import IntegrityError
 
 from snapper.application.engine.config import EngineConfigModel
 from snapper.application.engine.service import TradingEngineService
+from snapper.application.engine.service import _compute_shard_key
 from snapper.application.portfolio.models import PositionStateModel
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.process_parameters import TraderParameters
@@ -47,6 +48,7 @@ from snapper.config.settings import get_bootstrap_settings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
+from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import OrderCommandEnum
@@ -186,14 +188,25 @@ class TraderCoordinator(RegisterableProcess):
     def __init__(
         self,
         signal_topics: list[str] | None = None,
+        *,
+        settings: AppSettings | None = None,
     ):
         """Initialize the trader coordinator.
 
         Args:
             signal_topics: List of ZMQ topic prefixes to subscribe to.
                 Defaults to ["signals."] to receive all strategy signals.
+            settings: Optional pre-built :class:`AppSettings` for tests
+                that need to inject per-coordinator
+                ``coordinator_instance_id`` / ``coordinator_instance_count``
+                without going through the DB-backed settings service.
+                When ``None`` (production), :meth:`_initialize_settings`
+                upgrades ``self.settings`` via
+                :func:`get_settings_with_service` exactly as before
+                Phase 4. Phase 4 Day 2 contract — see plan §4 Day 4.
         """
         self.settings = get_settings()
+        self._injected_settings: AppSettings | None = settings
         self.signal_topics = signal_topics or ["signals."]
         self.repository = get_repository(self.settings.db_url)
         self.engines: dict[str, TradingEngineService] = {}
@@ -211,6 +224,7 @@ class TraderCoordinator(RegisterableProcess):
         self.outbox: OutboxDispatcher | None = None
         self._order_shard_keys: dict[str, str] = {}
         self._wallet_short_to_id: dict[str, str] = {}
+        self._ownership: ShardOwnership | None = None
 
     @staticmethod
     def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
@@ -302,10 +316,21 @@ class TraderCoordinator(RegisterableProcess):
 
         Sets up ZMQ connections, initializes trading components,
         and enters the main trading loop.
+
+        Phase 4: ``self._ownership`` is built AFTER settings resolve
+        (``_initialize_settings``) and BEFORE the trade service / outbox
+        / reconciliation loops are constructed — see plan §D8 + §4 Day 2.
         """
-        logger.info("Starting ZMQ Signal TraderCoordinator (Central - ONE per system)")
+        logger.info("Starting ZMQ Signal TraderCoordinator")
         logger.info(f"Signal Topics: {self.signal_topics}")
         await self._initialize_settings()
+        self._ownership = self._build_ownership()
+        logger.info(
+            "TraderCoordinator instance {}/{} owns ~{:.1f}% of shards",
+            self._ownership.instance_id,
+            self._ownership.instance_count,
+            100.0 / self._ownership.instance_count,
+        )
         self._setup_external_execution()
         self._setup_trading_components()
         self._setup_signal_subscriber()
@@ -313,13 +338,58 @@ class TraderCoordinator(RegisterableProcess):
         await self._recover_engine_state()
         await self._run_trading_loop()
 
+    def _build_ownership(self) -> ShardOwnership:
+        """Construct :class:`ShardOwnership` from current ``self.settings``.
+
+        Called from :meth:`start` after ``_initialize_settings`` has
+        upgraded (or test-injected) ``self.settings``. Validation is
+        fail-fast: ``instance_count < 1`` or ``instance_id`` outside
+        ``[0, instance_count)`` raises :class:`ValueError` with a
+        message naming the invalid value, which surfaces the operator
+        misconfiguration before any signal is dispatched.
+
+        Returns:
+            A validated :class:`ShardOwnership` for this coordinator.
+
+        Raises:
+            ValueError: If ``coordinator_instance_count < 1`` or
+                ``coordinator_instance_id`` is outside the half-open
+                range ``[0, instance_count)``.
+        """
+        instance_id = self.settings.coordinator_instance_id
+        instance_count = self.settings.coordinator_instance_count
+        if instance_count < 1:
+            raise ValueError(f"coordinator_instance_count must be >= 1, got {instance_count}")
+        if not 0 <= instance_id < instance_count:
+            raise ValueError(
+                f"coordinator_instance_id {instance_id} out of range [0, {instance_count})"
+            )
+        return ShardOwnership(
+            instance_id=instance_id,
+            instance_count=instance_count,
+        )
+
     async def _initialize_settings(self) -> None:
         """Upgrade settings to DB-backed instance for runtime access.
 
         Without this, accessing DB settings like risk_r_per_trade would
         raise RuntimeError because the bootstrap-only AppSettings does
         not have a SettingsService.
+
+        Phase 4 test-injection branch: when ``__init__`` received a
+        pre-built :class:`AppSettings` via the ``settings`` kwarg, the
+        DB-service upgrade is skipped and the injected instance becomes
+        ``self.settings``. This lets integration tests provide
+        per-coordinator ``coordinator_instance_id`` without spinning up
+        a DB-backed settings service per instance.
         """
+        if self._injected_settings is not None:
+            self.settings = self._injected_settings
+            self.repository = get_repository(self.settings.db_url)
+            await self._build_wallet_short_cache()
+            logger.info("ZMQTrader: using injected settings (test path)")
+            return
+
         settings_service = await get_settings_service(
             self.settings.db_url,
             self.settings.zmq_broker_xpub,
@@ -410,6 +480,14 @@ class TraderCoordinator(RegisterableProcess):
         recovered: set[str] = set()
         for cp in checkpoints:
             shard_key = cp["shard_key"]
+            if self._ownership is not None and not self._ownership.owns(shard_key):
+                logger.debug(
+                    "ZMQTrader: skipping checkpoint for foreign shard {} (owner {}/{})",
+                    shard_key,
+                    self._ownership.instance_id,
+                    self._ownership.instance_count,
+                )
+                continue
             parsed_shard = self._parse_shard_key(shard_key)
             if parsed_shard is None:
                 logger.warning(f"ZMQTrader: Invalid shard_key format: {shard_key}, skipping")
@@ -593,6 +671,7 @@ class TraderCoordinator(RegisterableProcess):
             All recovered execution rows (for fill-gap detection in phase 2).
         """
         skip_keys = checkpoint_recovered or set()
+        partitioned = self._ownership is not None and self._ownership.instance_count > 1
         try:
             executions = await self.repository.get_executions_for_recovery(as_of=now)
         except Exception as e:
@@ -605,7 +684,29 @@ class TraderCoordinator(RegisterableProcess):
         wallet_for_key: dict[str, str] = {}
         operator_for_key: dict[str, str] = {}
         for exe in executions:
+            if partitioned and exe["exchange"] == ExchangeEnum.PAPER:
+                logger.debug(
+                    "ZMQTrader: skipping paper execution recovery under N>1 "
+                    "(strategy_tag unavailable): instrument={}",
+                    exe["instrument"],
+                )
+                continue
             wallet_public_id = exe.get("wallet_public_id") or ""
+            recovery_shard_key = _compute_shard_key(
+                instrument=exe["instrument"],
+                exchange=cast(OrderExchange, exe["exchange"]),
+                mode=ExecutionModeEnum.LIVE,
+                wallet_public_id=wallet_public_id,
+                strategy_tag=None,
+            )
+            if self._ownership is not None and not self._ownership.owns(recovery_shard_key):
+                logger.debug(
+                    "ZMQTrader: skipping execution for foreign shard {} (owner {}/{})",
+                    recovery_shard_key,
+                    self._ownership.instance_id,
+                    self._ownership.instance_count,
+                )
+                continue
             key = self._build_engine_key(
                 exe["instrument"], exe["exchange"], "live", wallet_public_id
             )
@@ -707,6 +808,7 @@ class TraderCoordinator(RegisterableProcess):
     async def _recover_active_orders(self, now: datetime, executions: list[ExecutionRow]) -> None:
         """Phase 2+3: Process active orders across all exchanges."""
         valid_exchanges = get_args(OrderExchange)
+        partitioned = self._ownership is not None and self._ownership.instance_count > 1
         all_active: list[Any] = []
         for exchange_str in valid_exchanges:
             try:
@@ -719,8 +821,32 @@ class TraderCoordinator(RegisterableProcess):
         for db_order in all_active:
             instrument = db_order["instrument"]
             exchange_str = db_order["exchange"]
+            if partitioned and exchange_str == ExchangeEnum.PAPER:
+                logger.debug(
+                    "ZMQTrader: skipping paper active-order recovery under N>1 "
+                    "(strategy_tag unavailable): instrument={}, order_public_id={}",
+                    instrument,
+                    db_order.get("order_public_id") or "<unknown>",
+                )
+                continue
             order_wallet_public_id = db_order.get("wallet_public_id") or ""
             order_operator_public_id = db_order.get("operator_public_id") or ""
+            if self._ownership is not None:
+                recovery_shard_key = _compute_shard_key(
+                    instrument=instrument,
+                    exchange=cast(OrderExchange, exchange_str),
+                    mode=ExecutionModeEnum.LIVE,
+                    wallet_public_id=order_wallet_public_id,
+                    strategy_tag=None,
+                )
+                if not self._ownership.owns(recovery_shard_key):
+                    logger.debug(
+                        "ZMQTrader: skipping active order for foreign shard {} (owner {}/{})",
+                        recovery_shard_key,
+                        self._ownership.instance_id,
+                        self._ownership.instance_count,
+                    )
+                    continue
             key = self._build_engine_key(instrument, exchange_str, "live", order_wallet_public_id)
             if key not in self.engines:
                 engine = await self._create_engine_for_recovery(
@@ -1064,6 +1190,7 @@ class TraderCoordinator(RegisterableProcess):
             strategy_tag=strategy_tag,
             wallet_public_id=wallet_public_id,
             operator_public_id=operator_public_id,
+            ownership=self._ownership,
         )
 
     def _handle_settings_update(self, payload: bytes) -> None:
@@ -1093,6 +1220,24 @@ class TraderCoordinator(RegisterableProcess):
         - OrderData -> _handle_order_status
         - OrderEventData -> _handle_order_event
 
+        Phase 4 §3.2 v1.2 — under multi-instance partitioning
+        (``instance_count > 1``) the shared ZMQ broker delivers every
+        venue event to every coordinator. This method drops events that
+        don't belong to this coordinator BEFORE the handlers would
+        otherwise fall back to the flat ``{exchange}.{instrument}``
+        shard key and mutate local :class:`TradeService` state for
+        foreign-instance orders. Three gate states:
+
+        1. Empty ``client_order_id`` under N>1 — impossible to route
+           deterministically; drop. (N=1 preserves existing
+           fallthrough for legacy payload shapes.)
+        2. Unknown ``client_order_id`` under N>1 — belongs to another
+           coordinator (or is a late-arrival after this instance's
+           state was rebuilt without it); drop.
+        3. Known ``client_order_id`` with a shard NOT owned by this
+           instance — defensive check against inconsistency between
+           ``_order_shard_keys`` population and ownership; drop.
+
         Args:
             topic: ZMQ topic (e.g., "orders.events.kraken.BTC-USD.executed").
             payload: JSON-encoded message data.
@@ -1102,14 +1247,45 @@ class TraderCoordinator(RegisterableProcess):
         except MessageParseError as e:
             logger.error(f"ZMQTrader: Invalid orders.events payload on {topic}: {e}")
             return
+        if not isinstance(msg, ExecutionData | OrderData | OrderEventData):
+            logger.debug(f"ZMQTrader: Ignoring orders.events message type={msg.type} on {topic}")
+            return
+        client_order_id = msg.client_order_id
+        if self._ownership is not None and self._ownership.instance_count > 1:
+            if not client_order_id:
+                logger.debug(
+                    "ZMQTrader: dropping venue event with empty client_order_id "
+                    "under N>1 partitioning: topic={}",
+                    topic,
+                )
+                return
+            if client_order_id not in self._order_shard_keys:
+                logger.debug(
+                    "ZMQTrader: dropping venue event with unknown client_order_id "
+                    "under N>1 partitioning: cid={}, topic={}",
+                    client_order_id,
+                    topic,
+                )
+                return
+        if (
+            self._ownership is not None
+            and client_order_id
+            and client_order_id in self._order_shard_keys
+        ):
+            owned_shard_key = self._order_shard_keys[client_order_id]
+            if not self._ownership.owns(owned_shard_key):
+                logger.debug(
+                    "ZMQTrader: dropping venue event for foreign shard: cid={}, shard={}",
+                    client_order_id,
+                    owned_shard_key,
+                )
+                return
         if isinstance(msg, ExecutionData):
             await self._handle_execution_fill(topic, msg)
         elif isinstance(msg, OrderData):
             self._handle_order_status(topic, msg)
-        elif isinstance(msg, OrderEventData):
-            self._handle_order_event(topic, msg)
         else:
-            logger.debug(f"ZMQTrader: Ignoring orders.events message type={msg.type} on {topic}")
+            self._handle_order_event(topic, msg)
 
     def _find_engine_for_fill(self, fill: ExecutionData) -> TradingEngineService | None:
         """Find engine matching an execution fill by client_order_id or instrument.
@@ -2213,6 +2389,25 @@ class TraderCoordinator(RegisterableProcess):
         wallet_public_id = signal.wallet_public_id or ""
         operator_public_id = signal.operator_public_id or ""
         engine_key = self._build_engine_key(instrument, exchange, mode, wallet_public_id)
+        strategy_tag = parsed.signal_type if exchange == ExchangeEnum.PAPER else None
+        execution_mode = (
+            ExecutionModeEnum.PAPER if exchange == ExchangeEnum.PAPER else ExecutionModeEnum.LIVE
+        )
+        shard_key = _compute_shard_key(
+            instrument=instrument,
+            exchange=exchange,
+            mode=execution_mode,
+            wallet_public_id=wallet_public_id,
+            strategy_tag=strategy_tag,
+        )
+        if self._ownership is not None and not self._ownership.owns(shard_key):
+            logger.debug(
+                "ZMQTrader: dropping signal for foreign shard {} (owner {}/{})",
+                shard_key,
+                self._ownership.instance_id,
+                self._ownership.instance_count,
+            )
+            return
         if engine_key in self.engines:
             halt_key = self.engines[engine_key]._shard_key
         else:
@@ -2239,7 +2434,6 @@ class TraderCoordinator(RegisterableProcess):
             repo_for_engine = (
                 self.repository if isinstance(self.repository, SQLAlchemyRepository) else None
             )
-            strategy_tag = parsed.signal_type if exchange == ExchangeEnum.PAPER else None
             self.engines[engine_key] = TradingEngineService(
                 instrument,
                 execution_socket=self.msg_publisher,
@@ -2252,6 +2446,7 @@ class TraderCoordinator(RegisterableProcess):
                 strategy_tag=strategy_tag,
                 wallet_public_id=wallet_public_id,
                 operator_public_id=operator_public_id,
+                ownership=self._ownership,
             )
             self.last_signal_time[engine_key] = 0.0
         self.last_signal_time[engine_key] = time.time()

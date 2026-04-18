@@ -18,6 +18,7 @@ from snapper.application.portfolio.models import PortfolioTracker
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
 from snapper.application.trade.outbox import OutboxDispatcher
+from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import FillStatusEnum
@@ -33,6 +34,53 @@ from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderRequestData
 from snapper.messaging.topics.builders import order_command_topic
+
+
+def _compute_shard_key(
+    *,
+    instrument: str,
+    exchange: OrderExchange,
+    mode: ExecutionMode,
+    wallet_public_id: str,
+    strategy_tag: str | None,
+) -> str:
+    """Build the canonical ``shard_key`` for a trading engine.
+
+    The formula MUST be byte-identical to the ``_shard_key`` built
+    inside :meth:`TradingEngineService.__init__` at runtime, because
+    Phase 4 ownership checks (``TraderCoordinator._on_signal``,
+    ``_recover_engine_state``) compute the key BEFORE the engine is
+    constructed and compare hashes against
+    :class:`snapper.core.partitioning.ShardOwnership`. Drift between
+    the two call sites would split ownership across instances.
+
+    Structure:
+        - Base: ``{exchange}.{instrument}.{mode}``
+        - Wallet segment (appended when ``wallet_public_id`` is set):
+          ``.w{short}`` where ``short`` is the first 12 lowercase hex
+          characters of the wallet id with dashes stripped.
+        - Strategy tag (paper mode only, when non-empty):
+          ``.{strategy_tag}``
+
+    Args:
+        instrument: The traded symbol (e.g., ``"BTC-USD"``).
+        exchange: Order-capable exchange identifier.
+        mode: Execution mode — ``"live"`` or ``"paper"``.
+        wallet_public_id: Wallet id owning the engine's position.
+            Empty string to omit the wallet segment.
+        strategy_tag: Strategy discriminator for paper sharding.
+            Ignored for ``live`` mode. ``None`` / empty omits the tag.
+
+    Returns:
+        The canonical shard key string.
+    """
+    base = f"{exchange}.{instrument}.{mode}"
+    if wallet_public_id:
+        wallet_short = wallet_public_id.replace("-", "")[:12].lower()
+        base = f"{base}.w{wallet_short}"
+    if mode == ExecutionModeEnum.PAPER and strategy_tag:
+        return f"{base}.{strategy_tag}"
+    return base
 
 
 class TradingEngineService:
@@ -92,6 +140,7 @@ class TradingEngineService:
         strategy_tag: str | None = None,
         wallet_public_id: str = "",
         operator_public_id: str = "",
+        ownership: ShardOwnership | None = None,
     ) -> None:
         """Initialize trading engine for a specific instrument.
 
@@ -114,6 +163,12 @@ class TradingEngineService:
                 strategy this engine serves. Stored on the engine for audit
                 propagation onto every TradeCommand and OrderRequestData
                 this engine emits.
+            ownership: Phase 4 partitioning — the coordinator's
+                :class:`ShardOwnership` view, forwarded to
+                :meth:`Repository.insert_trade_command` as a
+                defense-in-depth guard against operational misconfig
+                (Day 3). ``None`` bypasses the guard (test fixtures,
+                CLI tools, and pre-Phase-4 single-instance deployments).
         """
         self.instrument = instrument
         self.execution_socket = execution_socket
@@ -135,14 +190,13 @@ class TradingEngineService:
         self._strategy_tag = strategy_tag
         self.wallet_public_id = wallet_public_id
         self.operator_public_id = operator_public_id
-        base = f"{exchange}.{instrument}.{self.mode}"
-        if wallet_public_id:
-            wallet_short = wallet_public_id.replace("-", "")[:12].lower()
-            base = f"{base}.w{wallet_short}"
-        self._shard_key = (
-            f"{base}.{strategy_tag}"
-            if self.mode == ExecutionModeEnum.PAPER and strategy_tag
-            else base
+        self._ownership = ownership
+        self._shard_key = _compute_shard_key(
+            instrument=instrument,
+            exchange=exchange,
+            mode=self.mode,
+            wallet_public_id=wallet_public_id,
+            strategy_tag=strategy_tag,
         )
 
     def _check_in_flight_timeout(self) -> None:

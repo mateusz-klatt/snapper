@@ -754,6 +754,7 @@ class _EngineStub:
         strategy_tag: str | None = None,
         wallet_public_id: str = "",
         operator_public_id: str = "",
+        ownership: Any = None,
     ) -> None:
         self.instrument = instrument
         self.execution_socket = execution_socket
@@ -765,6 +766,7 @@ class _EngineStub:
         self.outbox = outbox
         self.wallet_public_id = wallet_public_id
         self.operator_public_id = operator_public_id
+        self._ownership = ownership
         self.pending_client_order_id: str | None = None
         self._shard_key = f"{exchange}.{instrument}.live"
         self.execute_calls: list[dict[str, Any]] = []
@@ -806,6 +808,9 @@ def _configure_settings(monkeypatch: pytest.MonkeyPatch) -> tuple[SimpleNamespac
         risk_max_leverage=2.0,
         risk_max_drawdown=0.15,
         has_db_access=True,
+        coordinator_instance_id=0,
+        coordinator_instance_count=1,
+        coordinator_outbox_max_scan_rows=1000,
     )
 
     def _stub_get_settings() -> SimpleNamespace:
