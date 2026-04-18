@@ -96,12 +96,30 @@ snapper trade-zmq [OPTIONS]
 | Option | Type | Default | Description |
 | ------ | ---- | ------- | ----------- |
 | `--signal-topics` | string | `signals.` | Signal topics to subscribe |
+| `--instance-id` | int | `0` (or `$SNAPPER_COORDINATOR_INSTANCE_ID`) | Phase 4 partitioning: zero-based id for this coordinator in a multi-instance deployment. CLI flag > env var > default. |
+| `--instance-count` | int | `1` (or `$SNAPPER_COORDINATOR_INSTANCE_COUNT`) | Phase 4 partitioning: total coordinator instance count across the deployment. Must match across all coordinators. |
 
 **Example:**
 
 ```bash
 snapper trade-zmq --signal-topics "signals.paper.BTC-USD.rsi_btc_1h,signals.kraken.BTC-USD.live"
 ```
+
+**Multi-instance deployment (Phase 4):**
+
+```bash
+# Coordinator 0 of 2
+snapper trade-zmq --instance-id 0 --instance-count 2
+
+# Coordinator 1 of 2 (separate process, same DB + broker)
+snapper trade-zmq --instance-id 1 --instance-count 2
+```
+
+Each instance owns `~1/N` of the shard_keys via deterministic
+SHA-256 hashing. Default `--instance-count 1` is byte-identical to
+pre-Phase-4 behavior (every shard owned by the single coordinator).
+See [docs/operations.md](operations.md) for systemd template unit +
+scale-up/down/crash-recovery runbooks.
 
 ### `executor`
 

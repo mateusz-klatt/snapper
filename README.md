@@ -161,7 +161,7 @@ flowchart TB
 ```bash
 snapper server              # Start FastAPI server
 snapper broker              # Start ZMQ broker
-snapper trade-zmq           # Trade runtime / coordinator
+snapper trade-zmq           # Trade runtime / coordinator (pass --instance-id + --instance-count for N>=2, see docs/operations.md)
 snapper executor            # Order executor
 snapper feed                # Market data publisher
 ```

@@ -416,6 +416,16 @@ and integrates `TradeService` (command lifecycle) and `BalanceService`
 loops that feed the circuit breaker. Canonical `Order` and `Execution`
 rows are persisted on the exchange/executor path.
 
+Since Phase 4 (2026-04-18), multiple `TraderCoordinator` processes can
+run against the same DB + broker with deterministic SHA-256 shard
+partitioning via `snapper.core.partitioning.ShardOwnership`. Each
+coordinator owns `~1/N` of the `shard_key` set; signals, venue events,
+recovery, outbox dispatch, and reconciliation all filter by ownership
+so no two instances process the same shard. Default `--instance-count
+1` is byte-identical to pre-Phase-4 behavior. See
+[`docs/operations.md`](operations.md) for the systemd template recipe
+and scale-up / scale-down / crash-recovery procedures.
+
 ## Bitemporal Model
 
 All entity tables inherit `TemporalMixin` which provides `id`, `public_id`,
