@@ -54,6 +54,50 @@ from snapper.mcp.output_sanitizer import sanitize_output
 _MCP_SOURCE_SURFACE = "mcp"
 _MCP_TOOL_STREAM = "rest.mcp"
 
+_PG_UNIQUE_VIOLATION_SQLSTATE = "23505"
+_SQLITE_CONSTRAINT_UNIQUE_EXTCODE = 2067
+
+
+def _is_unique_constraint_violation(exc: IntegrityError) -> bool:
+    """Return ``True`` when ``exc`` is a named unique-constraint violation.
+
+    Structured inspection, driver-specific:
+
+        - PostgreSQL (asyncpg / psycopg3): SQLSTATE ``23505``
+          is the standard unique-violation code. Both drivers
+          surface it on the underlying exception as ``pgcode``.
+        - SQLite (aiosqlite): extended result code ``2067``
+          (``SQLITE_CONSTRAINT_UNIQUE``) identifies a unique
+          violation. Surfaced as ``sqlite_errorcode`` on the
+          ``sqlite3.IntegrityError`` instance Python's sqlite3
+          module raises.
+
+    Fragile free-text substring matching is deliberately avoided:
+    driver message formats change across versions, and unrelated
+    constraint failures could contain words like "unique" by
+    accident.
+
+    Args:
+        exc: The :class:`sqlalchemy.exc.IntegrityError` raised by
+            an insert. ``exc.orig`` is the driver-specific
+            exception carrying the structured error codes above.
+
+    Returns:
+        ``True`` only when the error codes match one of the
+        recognized unique-violation codes. Any unknown driver +
+        any non-unique integrity error (CHECK, FK, NOT NULL)
+        returns ``False`` and the caller re-raises verbatim so
+        upstream observability sees the real root cause.
+    """
+    orig = exc.orig
+    if orig is None:
+        return False
+    pgcode = getattr(orig, "pgcode", None)
+    if pgcode == _PG_UNIQUE_VIOLATION_SQLSTATE:
+        return True
+    sqlite_errorcode = getattr(orig, "sqlite_errorcode", None)
+    return sqlite_errorcode == _SQLITE_CONSTRAINT_UNIQUE_EXTCODE
+
 
 def _require_permission(claims: TokenClaims, permission: Permission) -> None:
     """Raise :class:`PermissionError` if the caller lacks ``permission``.
@@ -250,8 +294,7 @@ def register_mcp_tools(
             try:
                 _plan_id, plan_public_id = await repo.insert_execution_plan(plan_row)
             except IntegrityError as exc:
-                orig_str = str(exc.orig).lower() if exc.orig is not None else str(exc).lower()
-                if "idempotency_key" in orig_str or "uq_ep_idempotency_key" in orig_str:
+                if _is_unique_constraint_violation(exc):
                     raise HTTPException(
                         status_code=409,
                         detail="Idempotency key already used",

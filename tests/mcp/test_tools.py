@@ -317,26 +317,29 @@ class TestSubmitManualOrderTool:
         assert "lifespan startup" in str(exc.value)
 
     @pytest.mark.asyncio
-    async def test_idempotency_conflict_maps_to_http_409(self) -> None:
-        """Duplicate idempotency_key → HTTP 409 via IntegrityError inspection.
+    async def test_idempotency_conflict_postgres_sqlstate_maps_to_http_409(self) -> None:
+        """PostgreSQL unique-violation SQLSTATE 23505 → HTTP 409.
 
         Given: ``insert_execution_plan`` raises :class:`IntegrityError`
-            whose underlying driver exception names the
-            ``idempotency_key`` constraint,
+            whose driver-level ``orig`` exception carries
+            ``pgcode='23505'`` (PostgreSQL standard SQLSTATE for
+            unique-constraint violation),
         When: the write tool runs,
         Then: :class:`fastapi.HTTPException` with ``status_code=409``
-            bubbles up. Detection inspects the structured
-            IntegrityError, NOT a free-text substring match on the
-            outer exception message — so a future DB driver change
-            that reformats the message won't silently break this.
+            bubbles up. Detection uses structured inspection of
+            ``orig.pgcode``, NOT substring matching — a reformatted
+            message from a psycopg version bump won't silently break
+            this.
         """
         from fastapi import HTTPException
         from sqlalchemy.exc import IntegrityError
 
+        class _PgOrigError(Exception):
+            pgcode = "23505"
+
         repo = AsyncMock()
-        orig = Exception("UNIQUE constraint failed: execution_plans.idempotency_key")
         repo.insert_execution_plan = AsyncMock(
-            side_effect=IntegrityError("INSERT failed", params=None, orig=orig)
+            side_effect=IntegrityError("INSERT failed", params=None, orig=_PgOrigError())
         )
         repo.insert_trade_command = AsyncMock()
         server = _build_server(
@@ -354,7 +357,7 @@ class TestSubmitManualOrderTool:
                     "order_type": "market",
                     "quantity": 1.0,
                     "wallet_public_id": "wallet-1",
-                    "idempotency_key": "idem-dup",
+                    "idempotency_key": "idem-dup-pg",
                 },
             )
         cause = exc.value.__cause__
@@ -362,21 +365,71 @@ class TestSubmitManualOrderTool:
         assert cause.status_code == 409
 
     @pytest.mark.asyncio
-    async def test_plan_integrity_error_non_idempotency_reraises(self) -> None:
-        """IntegrityError on a different constraint → no 409 mapping.
+    async def test_idempotency_conflict_sqlite_extcode_maps_to_http_409(self) -> None:
+        """SQLite extended result code 2067 → HTTP 409.
 
-        Given: ``insert_execution_plan`` fails with an IntegrityError
-            whose constraint name is NOT related to idempotency,
+        Given: ``insert_execution_plan`` raises :class:`IntegrityError`
+            whose driver ``orig`` exception carries
+            ``sqlite_errorcode=2067``
+            (``SQLITE_CONSTRAINT_UNIQUE``),
         When: the write tool runs,
-        Then: the IntegrityError propagates untouched — we refuse to
-            squash arbitrary constraint failures into 409.
+        Then: HTTP 409 — parallel path to the PostgreSQL test using
+            the SQLite-native code.
+        """
+        from fastapi import HTTPException
+        from sqlalchemy.exc import IntegrityError
+
+        class _SqliteOrigError(Exception):
+            sqlite_errorcode = 2067
+
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock(
+            side_effect=IntegrityError("INSERT failed", params=None, orig=_SqliteOrigError())
+        )
+        repo.insert_trade_command = AsyncMock()
+        server = _build_server(
+            repository=repo,
+            caps_enforcer=self._make_enforcer_admit(),
+        )
+        with pytest.raises(ToolError) as exc:
+            await server._tool_manager.call_tool(
+                "submit_manual_order",
+                {
+                    "exchange": "kraken",
+                    "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
+                    "side": "buy",
+                    "order_type": "market",
+                    "quantity": 1.0,
+                    "wallet_public_id": "wallet-1",
+                    "idempotency_key": "idem-dup-sqlite",
+                },
+            )
+        cause = exc.value.__cause__
+        assert isinstance(cause, HTTPException)
+        assert cause.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_plan_integrity_error_non_unique_reraises(self) -> None:
+        """IntegrityError with non-unique-violation code → reraises verbatim.
+
+        Given: ``insert_execution_plan`` raises :class:`IntegrityError`
+            whose ``orig`` has NEITHER ``pgcode=23505`` NOR
+            ``sqlite_errorcode=2067`` (e.g., a CHECK or FK
+            violation — usually a bug, not a user conflict),
+        When: the write tool runs,
+        Then: the IntegrityError propagates untouched — we do not
+            squash arbitrary constraint failures into a misleading
+            409, preserving operator alerting signal.
         """
         from sqlalchemy.exc import IntegrityError
 
+        class _CheckOrigError(Exception):
+            pgcode = "23514"
+
         repo = AsyncMock()
-        orig = Exception("CHECK constraint failed: some_other_ck")
         repo.insert_execution_plan = AsyncMock(
-            side_effect=IntegrityError("INSERT failed", params=None, orig=orig)
+            side_effect=IntegrityError("INSERT failed", params=None, orig=_CheckOrigError())
         )
         server = _build_server(
             repository=repo,
@@ -396,7 +449,44 @@ class TestSubmitManualOrderTool:
                     "idempotency_key": "idem-broken",
                 },
             )
-        assert "some_other_ck" in str(exc.value)
+        assert "IntegrityError" in str(exc.value) or "INSERT failed" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_integrity_error_with_none_orig_reraises(self) -> None:
+        """IntegrityError without a driver exception reraises verbatim.
+
+        Given: an IntegrityError where ``exc.orig`` is ``None``
+            (rare — usually means SQLAlchemy synthesized the error
+            itself rather than wrapping a driver-level one),
+        When: the write tool runs,
+        Then: reraise — the structured inspection has nothing to
+            check, so we do not speculate about whether it was a
+            unique violation.
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock(
+            side_effect=IntegrityError("synthetic", params=None, orig=None)
+        )
+        server = _build_server(
+            repository=repo,
+            caps_enforcer=self._make_enforcer_admit(),
+        )
+        with pytest.raises(ToolError):
+            await server._tool_manager.call_tool(
+                "submit_manual_order",
+                {
+                    "exchange": "kraken",
+                    "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
+                    "side": "buy",
+                    "order_type": "market",
+                    "quantity": 1.0,
+                    "wallet_public_id": "wallet-1",
+                    "idempotency_key": "idem-none-orig",
+                },
+            )
 
     @pytest.mark.asyncio
     async def test_command_insert_failure_compensates_plan_to_failed(self) -> None:

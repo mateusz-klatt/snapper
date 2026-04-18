@@ -20,9 +20,11 @@ lifespan. The middleware composition is identical to production.
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from unittest.mock import AsyncMock
 from unittest.mock import Mock
 from unittest.mock import patch
 
+from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -36,6 +38,7 @@ from snapper.mcp.server import TOKEN_CLAIMS_CTX
 from snapper.mcp.server import BearerAuthMiddleware
 from snapper.mcp.server import FeatureFlagMiddleware
 from snapper.mcp.server import get_current_claims
+from snapper.mcp.tools import register_mcp_tools
 
 _TEST_TOKEN_PLACEHOLDER = "dummy.bearer.for.tests.only"
 
@@ -219,6 +222,77 @@ class TestEndToEndBearerToContextVar:
         )
         assert response.status_code == 503
         assert response.json()["error_code"] == "feature_disabled"
+
+    def test_real_tool_dispatched_via_bearer_middleware_stack(self) -> None:
+        """Bearer header → middleware → ContextVar → REAL tool via tool manager.
+
+        This is the canonical "bearer-to-tool" proof that R1
+        Recommendation 2 asked for. Instead of a stub handler that
+        just reads :func:`get_current_claims`, this test:
+
+            1. Builds a real :class:`FastMCP` instance and registers
+               the production tools via :func:`register_mcp_tools`
+               with :func:`get_current_claims` as the ``claims_getter``
+               (the same wiring ``build_mcp_app`` uses).
+            2. Mounts a Starlette app with the full middleware stack
+               (FeatureFlag + BearerAuth) whose handler dispatches
+               the JSON-RPC-shaped body through
+               ``FastMCP._tool_manager.call_tool``.
+            3. Sends an authenticated request asking for
+               ``list_instruments(exchange='kraken')`` and asserts
+               the tool's return value (sorted list) comes back —
+               proving the authenticated claims flowed through
+               ``BearerAuthMiddleware`` → ``TOKEN_CLAIMS_CTX`` →
+               ``get_current_claims`` inside the production tool,
+               which then called the repo.
+
+        If any link in that chain broke the test would either 401
+        (middleware didn't admit), 500 with ``misconfigured``
+        (ContextVar unset), or raise a permission error (claims
+        role didn't include READ_MARKET_DATA).
+        """
+        svc = Mock(spec=SettingsService)
+        svc.get_setting.return_value = True
+        repo = AsyncMock()
+        repo.get_exchange_instruments = AsyncMock(
+            return_value=["ETH-USD", "BTC-USD"],
+        )
+
+        mcp_server = FastMCP("test-e2e")
+        register_mcp_tools(
+            mcp_server,
+            repository_getter=lambda: repo,
+            caps_enforcer_getter=lambda: None,
+            claims_getter=get_current_claims,
+        )
+
+        async def _dispatch_tool(request: Request) -> JSONResponse:
+            body = await request.json()
+            result = await mcp_server._tool_manager.call_tool(body["tool"], body.get("args", {}))
+            return JSONResponse({"result": result}, status_code=200)
+
+        app = Starlette(routes=[Route("/mcp", _dispatch_tool, methods=["POST"])])
+        app.add_middleware(BearerAuthMiddleware)
+        app.add_middleware(FeatureFlagMiddleware, settings_service_getter=lambda: svc)
+
+        with patch("snapper.mcp.server.get_token_manager") as mock_get:
+            token_manager = Mock()
+            token_manager.verify_token.return_value = _make_claims("real-tool-caller")
+            mock_get.return_value = token_manager
+            client = TestClient(app)
+            response = client.post(
+                "/mcp",
+                headers={"Authorization": f"Bearer {_TEST_TOKEN_PLACEHOLDER}"},
+                json={"tool": "list_instruments", "args": {"exchange": "kraken"}},
+            )
+
+        assert response.status_code == 200
+        body = response.json()["result"]
+        assert body == {
+            "exchange": "kraken",
+            "instruments": ["BTC-USD", "ETH-USD"],
+        }
+        repo.get_exchange_instruments.assert_awaited_once()
 
     def test_echo_returns_none_when_contextvar_unexpectedly_unset(self) -> None:
         """Echo handler short-circuits to 200 + null on misconfiguration.
