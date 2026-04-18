@@ -345,7 +345,7 @@ class PlanExecutorService(RegisterableProcess):
             "exchange_order_id": exchange_order_id,
         }
         try:
-            await self.repository.insert_trade_command(cast(Any, row))
+            await self.repository.insert_trade_command(cast(Any, row), ownership=None)
             logger.info(
                 "PlanExecutorService: re-emitted stranded cancel for plan {} child {}",
                 plan["public_id"],
@@ -536,7 +536,7 @@ class PlanExecutorService(RegisterableProcess):
                     idempotency_key=f"{plan['public_id']}:{idx}",
                     supersedes_command_id=None,
                 )
-                await self.repository.insert_trade_command(row)
+                await self.repository.insert_trade_command(row, ownership=None)
                 self._client_order_id_index[client_order_id] = plan_public_id
                 child_ids.append(client_order_id)
                 await self._log_decision(

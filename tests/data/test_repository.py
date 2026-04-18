@@ -31,6 +31,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 import snapper.data.repository
 import snapper.data.repository as repo
 import snapper.data.repository as repository
+from snapper.core.partitioning import ShardOwnership
+from snapper.core.partitioning import ShardOwnershipError
 from snapper.data import repository as repo_module
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import InstrumentOrderCapability
@@ -6772,3 +6774,154 @@ async def test_get_all_open_position_cycles_empty(tmp_path: Path) -> None:
     now = datetime.now(UTC)
     cycles = await r.get_all_open_position_cycles(as_of=now)
     assert cycles == []
+
+
+@pytest.mark.asyncio
+async def test_insert_trade_command_raises_on_foreign_shard(tmp_path: Path) -> None:
+    """Insert raises :class:`ShardOwnershipError` for a foreign-shard row.
+
+    Phase 4 defense-in-depth guard: when ``ownership`` is provided and
+    the row's ``shard_key`` is not owned by it, the repository raises
+    BEFORE any DB write happens.
+    """
+    db_path = tmp_path / "guard_foreign.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    shard = "kraken.FOREIGN.live"
+    owner_id = ShardOwnership._hash(shard) % 2
+    foreign = ShardOwnership(instance_id=(owner_id + 1) % 2, instance_count=2)
+    with pytest.raises(ShardOwnershipError) as exc_info:
+        await r.insert_trade_command(
+            {
+                "command_type": "submit",
+                "shard_key": shard,
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "mode": "live",
+                "strategy_id": "engine-buy",
+                "client_order_id": "cid-g1",
+                "venue_client_id": "vcid-g1",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 0.5,
+                "price": None,
+                "status": "created",
+                "created_at": now,
+                "correlation_id": "corr-g1",
+                "session_id": "s1",
+                "sequence_id": 1,
+                "timestamp": now,
+            },
+            ownership=foreign,
+        )
+    assert exc_info.value.shard_key == shard
+    assert exc_info.value.instance_id == foreign.instance_id
+
+
+@pytest.mark.asyncio
+async def test_insert_trade_command_passes_with_owned_shard(tmp_path: Path) -> None:
+    """Insert succeeds when ownership covers the row's shard_key."""
+    db_path = tmp_path / "guard_owned.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    shard = "kraken.BTC-USD.live"
+    owner_id = ShardOwnership._hash(shard) % 2
+    owner = ShardOwnership(instance_id=owner_id, instance_count=2)
+    cmd_id, cmd_pid = await r.insert_trade_command(
+        {
+            "command_type": "submit",
+            "shard_key": shard,
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "engine-buy",
+            "client_order_id": "cid-g2",
+            "venue_client_id": "vcid-g2",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.5,
+            "price": None,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-g2",
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+        },
+        ownership=owner,
+    )
+    assert cmd_id > 0
+    assert len(cmd_pid) == 36
+
+
+@pytest.mark.asyncio
+async def test_insert_trade_command_ownership_none_preserves_pre_phase4(
+    tmp_path: Path,
+) -> None:
+    """Passing ``ownership=None`` (or omitting it) skips the guard entirely."""
+    db_path = tmp_path / "guard_none.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    cmd_id, _ = await r.insert_trade_command(
+        {
+            "command_type": "submit",
+            "shard_key": "any.shard.live",
+            "exchange": "kraken",
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "strategy_id": "engine-buy",
+            "client_order_id": "cid-g3",
+            "venue_client_id": "vcid-g3",
+            "side": "buy",
+            "order_type": "market",
+            "quantity": 0.5,
+            "price": None,
+            "status": "created",
+            "created_at": now,
+            "correlation_id": "corr-g3",
+            "session_id": "s1",
+            "sequence_id": 1,
+            "timestamp": now,
+        },
+        ownership=None,
+    )
+    assert cmd_id > 0
+
+
+@pytest.mark.asyncio
+async def test_get_undispatched_commands_offset_skips_rows(tmp_path: Path) -> None:
+    """``offset=N`` skips the first N ``status='created'`` rows."""
+    db_path = tmp_path / "offset.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    for i in range(5):
+        await r.insert_trade_command(
+            {
+                "command_type": "submit",
+                "shard_key": f"kraken.INST-{i}.live",
+                "exchange": "kraken",
+                "instrument": f"INST-{i}",
+                "mode": "live",
+                "strategy_id": "engine-buy",
+                "client_order_id": f"cid-o{i}",
+                "venue_client_id": f"vcid-o{i}",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 0.5,
+                "price": None,
+                "status": "created",
+                "created_at": now + timedelta(seconds=i),
+                "correlation_id": f"corr-o{i}",
+                "session_id": "s1",
+                "sequence_id": i + 1,
+                "timestamp": now,
+            }
+        )
+    page1 = await r.get_undispatched_commands(as_of=datetime.now(UTC), limit=2, offset=0)
+    page2 = await r.get_undispatched_commands(as_of=datetime.now(UTC), limit=2, offset=2)
+    assert [row["client_order_id"] for row in page1] == ["cid-o0", "cid-o1"]
+    assert [row["client_order_id"] for row in page2] == ["cid-o2", "cid-o3"]

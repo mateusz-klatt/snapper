@@ -72,6 +72,8 @@ from sqlalchemy.pool import NullPool
 from sqlalchemy.pool import StaticPool
 
 from snapper.core.json_types import JsonObject
+from snapper.core.partitioning import ShardOwnership
+from snapper.core.partitioning import ShardOwnershipError
 from snapper.core.types import AllExchange
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.archive_symbols import resolve_archive_symbols
@@ -1559,14 +1561,28 @@ class Repository(ABC):
     async def insert_trade_command(
         self,
         row: TradeCommandInsertRow,
+        *,
+        ownership: ShardOwnership | None = None,
     ) -> tuple[int, str]:
         """Insert a new trade command row.
 
         Args:
             row: Trade command insert payload.
+            ownership: Optional Phase 4 partitioning guard. When
+                provided, the row's ``shard_key`` MUST be owned by
+                this ownership view or :class:`ShardOwnershipError`
+                is raised before the DB write. Opt-in — callers that
+                legitimately write foreign-shard rows (HTTP handlers,
+                plan services) pass ``None`` and rely on downstream
+                filtering (outbox + coordinator) to route commands
+                to the owning coordinator.
 
         Returns:
             Tuple of (id, public_id) for the new command.
+
+        Raises:
+            ShardOwnershipError: If ``ownership`` is not None and
+                ``row["shard_key"]`` is not owned by it.
         """
         ...
 
@@ -3580,7 +3596,12 @@ class SQLAlchemyRepository(Repository):
             )
             return sorted(row[0] for row in result.fetchall())
 
-    async def insert_trade_command(self, row: TradeCommandInsertRow) -> tuple[int, str]:
+    async def insert_trade_command(
+        self,
+        row: TradeCommandInsertRow,
+        *,
+        ownership: ShardOwnership | None = None,
+    ) -> tuple[int, str]:
         """Insert a new trade command row and return (id, public_id).
 
         ``wallet_public_id`` is NOT NULL at the schema
@@ -3588,7 +3609,17 @@ class SQLAlchemyRepository(Repository):
         explicit wallet default to the empty-string legacy sentinel
         (the same default that :class:`ExchangeExecutorService` uses
         for single-wallet template instantiations).
+
+        Phase 4 partitioning guard (opt-in, Day 3): when ``ownership``
+        is non-None, the row's ``shard_key`` MUST be owned by it or
+        :class:`ShardOwnershipError` is raised before the DB write.
         """
+        if ownership is not None and not ownership.owns(row["shard_key"]):
+            raise ShardOwnershipError(
+                shard_key=row["shard_key"],
+                instance_id=ownership.instance_id,
+                instance_count=ownership.instance_count,
+            )
         async with self.session() as s:
             row_with_defaults: dict[str, Any] = {"wallet_public_id": "", **row}
             cmd = TradeCommand(**row_with_defaults)
@@ -3791,14 +3822,25 @@ class SQLAlchemyRepository(Repository):
             return new_cmd.id
 
     async def get_undispatched_commands(
-        self, as_of: datetime, limit: int = 10
+        self,
+        as_of: datetime,
+        limit: int = 10,
+        offset: int = 0,
     ) -> list[TradeCommandRow]:
-        """Return trade commands with status='created' for outbox dispatch."""
+        """Return trade commands with status='created' for outbox dispatch.
+
+        Phase 4 pagination: when ``offset > 0``, the query skips the
+        first ``offset`` rows. Used by
+        :class:`OutboxDispatcher._dispatch_batch` to page through the
+        ``created`` backlog while filtering for owned shards in Python
+        — see plan §3.3 / §D4 for the starvation-bound contract.
+        """
         async with self.session() as s:
             result = await s.execute(
                 select(TradeCommand)
                 .where(TradeCommand.status == "created", *where_active(TradeCommand, as_of))
                 .order_by(TradeCommand.created_at)
+                .offset(offset)
                 .limit(limit)
             )
             rows: list[TradeCommandRow] = []

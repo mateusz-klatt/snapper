@@ -2029,6 +2029,8 @@ class TraderCoordinator(RegisterableProcess):
                 repository=self.repository,
                 publish_fn=self._outbox_publish,
                 poll_interval=0.05,
+                ownership=self._ownership,
+                max_scan_rows=self.settings.coordinator_outbox_max_scan_rows,
             )
             logger.info("TraderCoordinator: durable command mode (outbox active)")
         else:
@@ -2056,6 +2058,7 @@ class TraderCoordinator(RegisterableProcess):
                 repository=self.repository,
                 trade_service=self.trade_service,
                 interval_seconds=60.0,
+                ownership=self._ownership,
             )
             tasks.append(asyncio.create_task(recon.run()))
         logger.info(f"TraderCoordinator: reconciliation loops enabled for {exchanges}")

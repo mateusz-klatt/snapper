@@ -18,6 +18,7 @@ from datetime import datetime
 from loguru import logger
 
 from snapper.application.trade.trade_service import TradeService
+from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
 from snapper.data.repository import SQLAlchemyRepository
@@ -29,11 +30,20 @@ class ReconciliationLoop:
     Runs as an asyncio task, polling the exchange at a configurable
     interval and comparing state with the local database.
 
+    Phase 4 (plan §3.4) — under multi-instance partitioning, every
+    coordinator runs a reconciliation loop per exchange but filters
+    the retrieved command set by ``ownership`` so each loop only
+    observes its own shards. Without the filter, two instances would
+    both record success/failure on the same stale command,
+    double-counting the circuit breaker and duplicating logs.
+
     Args:
         exchange_name: Name of the exchange to reconcile.
         repository: Database repository for reading/writing state.
         trade_service: Trade service for circuit breaker feedback.
         interval_seconds: Seconds between reconciliation cycles.
+        ownership: Phase 4 shard-ownership filter. ``None`` skips
+            filtering (pre-Phase-4 behavior / test fixtures).
     """
 
     def __init__(
@@ -42,6 +52,8 @@ class ReconciliationLoop:
         repository: SQLAlchemyRepository,
         trade_service: TradeService,
         interval_seconds: float = 60.0,
+        *,
+        ownership: ShardOwnership | None = None,
     ) -> None:
         """Initialize reconciliation loop.
 
@@ -50,11 +62,13 @@ class ReconciliationLoop:
             repository: DB repository for state queries.
             trade_service: Trade service for circuit breaker feedback.
             interval_seconds: Polling interval in seconds.
+            ownership: Optional shard-ownership filter for Phase 4.
         """
         self._exchange = exchange_name
         self._repo = repository
         self._trade_service = trade_service
         self._interval = interval_seconds
+        self._ownership = ownership
         self._running = False
 
     async def run(self) -> None:
@@ -88,6 +102,8 @@ class ReconciliationLoop:
             active_cmds = await self._repo.get_active_commands_for_exchange(
                 exchange=self._exchange, as_of=now
             )
+            if self._ownership is not None:
+                active_cmds = [cmd for cmd in active_cmds if self._ownership.owns(cmd["shard_key"])]
             stale_count = 0
             seen_shards: set[str] = set()
             for cmd in active_cmds:

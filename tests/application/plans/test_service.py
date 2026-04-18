@@ -2447,7 +2447,9 @@ class TestDispatchFailureIsolation:
         mock_repo = AsyncMock()
         call_count = 0
 
-        async def _insert_side_effect(row: object) -> tuple[int, str]:
+        async def _insert_side_effect(
+            row: object, *, ownership: object | None = None
+        ) -> tuple[int, str]:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -2496,7 +2498,9 @@ class TestDispatchFailureIsolation:
         mock_repo = AsyncMock()
         call_count = 0
 
-        async def _insert_side_effect(row: object) -> tuple[int, str]:
+        async def _insert_side_effect(
+            row: object, *, ownership: object | None = None
+        ) -> tuple[int, str]:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -2546,7 +2550,9 @@ class TestDispatchFailureIsolation:
         mock_repo.revise_execution_plan_params = AsyncMock()
         call_count = 0
 
-        async def _insert_side_effect(_row: object) -> tuple[int, str]:
+        async def _insert_side_effect(
+            _row: object, *, ownership: object | None = None
+        ) -> tuple[int, str]:
             nonlocal call_count
             call_count += 1
             if call_count == 2:

@@ -430,7 +430,8 @@ class TradingEngineService:
                     "timestamp": now,
                     "wallet_public_id": self.wallet_public_id or "",
                     "operator_public_id": self.operator_public_id or None,
-                }
+                },
+                ownership=self._ownership,
             )
 
         if self._outbox is not None:

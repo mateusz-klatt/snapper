@@ -1468,6 +1468,7 @@ def test_setup_trade_services_creates_outbox_for_sql_repo() -> None:
     coord.outbox = None
     coord.repository = MagicMock(spec=SQLAlchemyRepository)
     coord.settings = MagicMock()
+    coord._ownership = None
     coord._setup_trade_services()
     assert coord.outbox is not None
 
@@ -1898,6 +1899,7 @@ async def test_create_reconciliation_tasks_with_sql_repo() -> None:
     mock_repo = AsyncMock(spec=SQLAlchemyRepository)
     coord.repository = mock_repo
     coord.settings = MagicMock()
+    coord._ownership = None
     tasks = coord._create_reconciliation_tasks()
     assert len(tasks) > 0
     for t in tasks:
@@ -1927,6 +1929,7 @@ async def test_run_trading_loop_with_recon_task() -> None:
     coord.repository = mock_repo
     coord.settings = MagicMock()
     coord.trade_service = TradeService()
+    coord._ownership = None
     mock_sub = AsyncMock()
     mock_sub.recv_multipart = AsyncMock(side_effect=asyncio.CancelledError)
     coord.signal_subscriber = mock_sub

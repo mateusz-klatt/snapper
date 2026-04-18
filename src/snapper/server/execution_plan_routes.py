@@ -468,7 +468,7 @@ async def cancel_bracket(
                 exchange_order_id=exchange_order_id,
             )
             try:
-                await repo.insert_trade_command(cancel_cmd)
+                await repo.insert_trade_command(cancel_cmd, ownership=None)
             except Exception as exc:
                 logger.error(
                     "Failed to insert cancel command for plan {} child {}: {}",

@@ -232,7 +232,7 @@ async def create_order(
             "user_public_id": user_pid,
             "plan_public_id": plan_public_id,
         }
-        await repo.insert_trade_command(cmd_row)
+        await repo.insert_trade_command(cmd_row, ownership=None)
     except Exception as exc:
         logger.error("Failed to create trade command for plan {}: {}", plan_public_id, exc)
         await repo.update_execution_plan_status(
@@ -375,7 +375,7 @@ async def _cancel_plan(
             "exchange_order_id": exchange_order_id,
         }
         try:
-            await repo.insert_trade_command(cancel_cmd)
+            await repo.insert_trade_command(cancel_cmd, ownership=None)
         except Exception as exc:
             logger.error(
                 "Failed to insert cancel command for plan {}: {}",
