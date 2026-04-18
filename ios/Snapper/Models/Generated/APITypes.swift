@@ -1476,6 +1476,8 @@ struct LoginData: Codable, Sendable {
     let message: String
     let expiresIn: Int
     let user: UserProfile
+    let accessToken: String?
+    let refreshToken: String?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -1486,6 +1488,8 @@ struct LoginData: Codable, Sendable {
         case message
         case expiresIn = "expires_in"
         case user
+        case accessToken = "access_token"
+        case refreshToken = "refresh_token"
     }
 }
 
@@ -2163,6 +2167,8 @@ struct RefreshData: Codable, Sendable {
     let wsTokenExp: Date
     let csrfToken: String
     let user: UserProfile
+    let accessToken: String?
+    let refreshToken: String?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -2175,6 +2181,8 @@ struct RefreshData: Codable, Sendable {
         case wsTokenExp = "ws_token_exp"
         case csrfToken = "csrf_token"
         case user
+        case accessToken = "access_token"
+        case refreshToken = "refresh_token"
     }
 }
 

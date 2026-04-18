@@ -1639,6 +1639,8 @@ export const LoginDataSchema = z
     message: z.string(),
     expires_in: z.number().int(),
     user: UserProfileSchema,
+    access_token: z.string().nullable().optional(),
+    refresh_token: z.string().nullable().optional(),
   })
   .strict()
 
@@ -1654,6 +1656,8 @@ export const RefreshDataSchema = z
     ws_token_exp: z.iso.datetime(),
     csrf_token: z.string(),
     user: UserProfileSchema,
+    access_token: z.string().nullable().optional(),
+    refresh_token: z.string().nullable().optional(),
   })
   .strict()
 

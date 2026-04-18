@@ -19,6 +19,12 @@ export type Paths = {
          *
          *     Sets access_token, refresh_token, and csrf_token cookies.
          *
+         *     Per plan §3.7: when the caller passes ``?return_tokens=true``,
+         *     the access / refresh JWTs are ALSO embedded in the response body
+         *     so MCP / CLI clients with no cookie jar can store them for
+         *     subsequent ``Authorization: Bearer`` calls. Cookies are still
+         *     set unconditionally for the browser flow.
+         *
          *     Args:
          *         request: FastAPI request.
          *         response: FastAPI response for setting cookies.
@@ -73,8 +79,17 @@ export type Paths = {
          *     ``apiClient.refreshAndRetry``): ``body is None`` → empty
          *     ``RefreshTokenPayload()`` → validation is a no-op.
          *
+         *     Per plan §3.7: the refresh JWT is read from the
+         *     ``Authorization: Bearer`` header FIRST and the ``refresh_token``
+         *     cookie second. MCP / CLI clients without cookie jars use the
+         *     header path exclusively. Passing ``?return_tokens=true``
+         *     embeds the newly-minted access + refresh JWTs in the response
+         *     body (in addition to the existing cookie set) so the same
+         *     clients can rotate tokens without maintaining a cookie store.
+         *
          *     Args:
-         *         request: FastAPI request with refresh_token cookie.
+         *         request: FastAPI request with refresh_token cookie OR
+         *             ``Authorization: Bearer`` header.
          *         response: FastAPI response for setting cookies.
          *         body: Optional refresh-token command envelope (``None`` on
          *             empty body).
@@ -4469,6 +4484,10 @@ export type Components = {
          *         message: Success message.
          *         expires_in: Access token TTL in seconds.
          *         user: Authenticated user profile.
+         *         access_token: JWT returned only when ``?return_tokens=true``
+         *             is set. ``None`` for the cookie-only browser flow.
+         *         refresh_token: JWT returned only when ``?return_tokens=true``
+         *             is set. ``None`` for the cookie-only browser flow.
          */
         LoginData: {
             /**
@@ -4493,6 +4512,10 @@ export type Components = {
             /** Expires In */
             expires_in: number;
             user: Components["schemas"]["UserProfile"];
+            /** Access Token */
+            access_token?: string | null;
+            /** Refresh Token */
+            refresh_token?: string | null;
         };
         /**
          * LoginResponse
@@ -5616,6 +5639,10 @@ export type Components = {
          *         ws_token_exp: WebSocket token expiration time.
          *         csrf_token: New CSRF token.
          *         user: User profile.
+         *         access_token: JWT returned only when ``?return_tokens=true``
+         *             is set. ``None`` for the cookie-only browser flow.
+         *         refresh_token: JWT returned only when ``?return_tokens=true``
+         *             is set. ``None`` for the cookie-only browser flow.
          */
         RefreshData: {
             /**
@@ -5647,6 +5674,10 @@ export type Components = {
             /** Csrf Token */
             csrf_token: string;
             user: Components["schemas"]["UserProfile"];
+            /** Access Token */
+            access_token?: string | null;
+            /** Refresh Token */
+            refresh_token?: string | null;
         };
         /**
          * RefreshResponse

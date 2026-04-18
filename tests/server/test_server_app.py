@@ -35,11 +35,13 @@ from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server import process_runner
 from snapper.server.app import _build_strategy_payload
 from snapper.server.app import _reconcile_stale_backtests
+from snapper.server.app import _safe_get_caps_enforcer
 from snapper.server.app import create_api_router
 from snapper.server.app import create_app
 from snapper.server.app import get_repository_dependency
 from snapper.server.app import get_settings_dependency
 from snapper.server.app import lifespan
+from snapper.server.dependencies import reset_caps_enforcer_singleton
 from snapper.utils.logging import setup_logging
 from tests.server import dummy_processes
 
@@ -256,9 +258,6 @@ class TestCreateApp:
             "lifespan not ready" error at invocation time rather than
             the raw RuntimeError leaking out of mount construction.
         """
-        from snapper.server.app import _safe_get_caps_enforcer
-        from snapper.server.dependencies import reset_caps_enforcer_singleton
-
         reset_caps_enforcer_singleton()
         with patch("snapper.server.app.get_caps_enforcer_dependency") as mock_dep:
             mock_dep.side_effect = RuntimeError("Not a SQLAlchemyRepository")

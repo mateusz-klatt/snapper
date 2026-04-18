@@ -20,8 +20,10 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import HTTPException
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
+from sqlalchemy.exc import IntegrityError
 
 from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
@@ -331,8 +333,6 @@ class TestSubmitManualOrderTool:
             message from a psycopg version bump won't silently break
             this.
         """
-        from fastapi import HTTPException
-        from sqlalchemy.exc import IntegrityError
 
         class _PgOrigError(Exception):
             pgcode = "23505"
@@ -376,8 +376,6 @@ class TestSubmitManualOrderTool:
         Then: HTTP 409 — parallel path to the PostgreSQL test using
             the SQLite-native code.
         """
-        from fastapi import HTTPException
-        from sqlalchemy.exc import IntegrityError
 
         class _SqliteOrigError(Exception):
             sqlite_errorcode = 2067
@@ -422,7 +420,6 @@ class TestSubmitManualOrderTool:
             squash arbitrary constraint failures into a misleading
             409, preserving operator alerting signal.
         """
-        from sqlalchemy.exc import IntegrityError
 
         class _CheckOrigError(Exception):
             pgcode = "23514"
@@ -463,8 +460,6 @@ class TestSubmitManualOrderTool:
             check, so we do not speculate about whether it was a
             unique violation.
         """
-        from sqlalchemy.exc import IntegrityError
-
         repo = AsyncMock()
         repo.insert_execution_plan = AsyncMock(
             side_effect=IntegrityError("synthetic", params=None, orig=None)
