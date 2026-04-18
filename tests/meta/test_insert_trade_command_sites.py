@@ -2,10 +2,18 @@
 
 Every ``insert_trade_command`` call in ``src/snapper/**`` must pass
 an explicit ``ownership=`` kwarg matching plan §1.8. This test is
-repo-wide + forward-compatible: a future PR that adds an 8th call
+repo-wide + forward-compatible: a future PR that adds a new call
 site without updating §1.8 fails CI; a refactor that moves an
 existing call to a different file line does NOT fail (the matrix
 keys on ``(file, enclosing_function_name)``, not line numbers).
+
+Phase A note (plan §3.5 wiring): the 7 plan-§1.8 sites collapsed
+to 6 canonical entries when the two plan-service sites
+(``_reemit_single_stranded_cancel`` + ``_dispatch_commands``) were
+refactored onto a single shared ``_emit_trade_command`` helper so
+the :class:`TradingCapsEnforcer` wrap lives in one place instead
+of two. Both original callers still carry the same ``ownership=None``
+semantics — just through the helper.
 
 Value-shape policy (§1.8):
     - ``self._ownership`` (attribute access chain ending in
@@ -24,8 +32,7 @@ SRC_ROOT = Path(__file__).resolve().parents[2] / "src" / "snapper"
 
 CANONICAL_SITES: set[tuple[str, str]] = {
     ("src/snapper/application/engine/service.py", "_send_order"),
-    ("src/snapper/application/plans/service.py", "_reemit_single_stranded_cancel"),
-    ("src/snapper/application/plans/service.py", "_dispatch_commands"),
+    ("src/snapper/application/plans/service.py", "_emit_trade_command"),
     ("src/snapper/server/order_routes.py", "create_order"),
     ("src/snapper/server/order_routes.py", "_cancel_plan"),
     ("src/snapper/server/trailing_stop_routes.py", "cancel_trailing_stop"),
@@ -35,8 +42,7 @@ CANONICAL_SITES: set[tuple[str, str]] = {
 
 SITE_POLICY: dict[tuple[str, str], str] = {
     ("src/snapper/application/engine/service.py", "_send_order"): "ownership",
-    ("src/snapper/application/plans/service.py", "_reemit_single_stranded_cancel"): "none",
-    ("src/snapper/application/plans/service.py", "_dispatch_commands"): "none",
+    ("src/snapper/application/plans/service.py", "_emit_trade_command"): "none",
     ("src/snapper/server/order_routes.py", "create_order"): "none",
     ("src/snapper/server/order_routes.py", "_cancel_plan"): "none",
     ("src/snapper/server/trailing_stop_routes.py", "cancel_trailing_stop"): "none",

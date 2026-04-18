@@ -17,7 +17,9 @@ from snapper.application.engine.config import EngineConfigModel
 from snapper.application.portfolio.models import PortfolioTracker
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
+from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.outbox import OutboxDispatcher
+from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
@@ -28,6 +30,7 @@ from snapper.core.types import OrderTypeEnum
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.core.types import TradeSideEnum
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.interface.websocket.schemas import ExecutionMode
 from snapper.interface.websocket.schemas import TradeSide
 from snapper.messaging.infrastructure.publisher import MessagePublisher
@@ -141,6 +144,7 @@ class TradingEngineService:
         wallet_public_id: str = "",
         operator_public_id: str = "",
         ownership: ShardOwnership | None = None,
+        caps_enforcer: TradingCapsEnforcer | None = None,
     ) -> None:
         """Initialize trading engine for a specific instrument.
 
@@ -169,6 +173,14 @@ class TradingEngineService:
                 defense-in-depth guard against operational misconfig
                 (Day 3). ``None`` bypasses the guard (test fixtures,
                 CLI tools, and pre-Phase-4 single-instance deployments).
+            caps_enforcer: Phase A enforcer — when present,
+                ``_send_order`` wraps the insert with
+                :meth:`TradingCapsEnforcer.guard_service_principal`
+                so cap enforcement logic is exercised even on the
+                strategy hot path (bypass is explicit at the call
+                site per plan §3.5.2). ``None`` preserves the
+                pre-Phase-A direct-insert path (test fixtures that
+                construct the engine without DI).
         """
         self.instrument = instrument
         self.execution_socket = execution_socket
@@ -191,6 +203,7 @@ class TradingEngineService:
         self.wallet_public_id = wallet_public_id
         self.operator_public_id = operator_public_id
         self._ownership = ownership
+        self._caps_enforcer = caps_enforcer
         self._shard_key = _compute_shard_key(
             instrument=instrument,
             exchange=exchange,
@@ -198,6 +211,52 @@ class TradingEngineService:
             wallet_public_id=wallet_public_id,
             strategy_tag=strategy_tag,
         )
+
+    def _build_strategy_insert_row(
+        self,
+        *,
+        order_public_id: str,
+        reason: str,
+        side: str,
+        size: float,
+        leverage: int | None,
+        reduce_only: bool,
+        now: dt.datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> TradeCommandInsertRow:
+        """Return the TradeCommand insert row for a strategy submit.
+
+        Factored out of ``_send_order`` so the same row is used whether
+        the insert is wrapped by
+        :meth:`TradingCapsEnforcer.guard_service_principal` (production)
+        or issued directly (test fixtures without a caps enforcer).
+        """
+        return {
+            "command_type": OrderCommandEnum.SUBMIT,
+            "shard_key": self._shard_key,
+            "exchange": self.exchange,
+            "instrument": self.instrument,
+            "mode": self.mode,
+            "strategy_id": reason,
+            "client_order_id": order_public_id,
+            "venue_client_id": order_public_id,
+            "side": side,
+            "order_type": "market",
+            "quantity": size,
+            "price": None,
+            "leverage": leverage,
+            "reduce_only": reduce_only,
+            "status": TradeCommandStatusEnum.CREATED,
+            "created_at": now,
+            "correlation_id": order_public_id,
+            "session_id": session_id,
+            "sequence_id": sequence_id,
+            "timestamp": now,
+            "wallet_public_id": self.wallet_public_id or "",
+            "operator_public_id": self.operator_public_id or None,
+            "source_surface": "strategy",
+        }
 
     def _check_in_flight_timeout(self) -> None:
         """Clear in-flight guard if timeout has elapsed.
@@ -406,33 +465,50 @@ class TradingEngineService:
         sequence_id = self.execution_socket.tracker.next_sequence(topic)
 
         if self._repository is not None:
-            await self._repository.insert_trade_command(
-                {
-                    "command_type": OrderCommandEnum.SUBMIT,
-                    "shard_key": self._shard_key,
-                    "exchange": self.exchange,
-                    "instrument": self.instrument,
-                    "mode": self.mode,
-                    "strategy_id": reason,
-                    "client_order_id": order_public_id,
-                    "venue_client_id": order_public_id,
-                    "side": side,
-                    "order_type": "market",
-                    "quantity": size,
-                    "price": None,
-                    "leverage": leverage,
-                    "reduce_only": reduce_only,
-                    "status": TradeCommandStatusEnum.CREATED,
-                    "created_at": now,
-                    "correlation_id": order_public_id,
-                    "session_id": session_id,
-                    "sequence_id": sequence_id,
-                    "timestamp": now,
-                    "wallet_public_id": self.wallet_public_id or "",
-                    "operator_public_id": self.operator_public_id or None,
-                },
-                ownership=self._ownership,
+            strategy_submission = TradeCommandSubmission(
+                user_public_id=None,
+                operator_public_id=self.operator_public_id or None,
+                wallet_public_id=self.wallet_public_id or None,
+                instrument_public_id=None,
+                command_type=OrderCommandEnum.SUBMIT,
+                side=side,
+                order_type="market",
+                quantity=None,
+                price=None,
+                source_surface="strategy",
+                idempotency_key=None,
             )
+            if self._caps_enforcer is not None:
+                async with self._caps_enforcer.guard_service_principal(strategy_submission):
+                    await self._repository.insert_trade_command(
+                        self._build_strategy_insert_row(
+                            order_public_id=order_public_id,
+                            reason=reason,
+                            side=side,
+                            size=size,
+                            leverage=leverage,
+                            reduce_only=reduce_only,
+                            now=now,
+                            session_id=session_id,
+                            sequence_id=sequence_id,
+                        ),
+                        ownership=self._ownership,
+                    )
+            else:
+                await self._repository.insert_trade_command(
+                    self._build_strategy_insert_row(
+                        order_public_id=order_public_id,
+                        reason=reason,
+                        side=side,
+                        size=size,
+                        leverage=leverage,
+                        reduce_only=reduce_only,
+                        now=now,
+                        session_id=session_id,
+                        sequence_id=sequence_id,
+                    ),
+                    ownership=self._ownership,
+                )
 
         if self._outbox is not None:
             self._outbox.notify()

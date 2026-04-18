@@ -25,6 +25,9 @@ from snapper.api.schemas.brackets import BracketCreateCommand
 from snapper.api.schemas.orders import ExecutionPlanResponse
 from snapper.application.plans.bracket import BracketEvaluator
 from snapper.application.plans.service import PlanExecutorService
+from snapper.application.trade.caps_enforcer import CapsViolationError
+from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
+from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
@@ -37,6 +40,7 @@ from snapper.data.repository_types import ExecutionPlanInsertRow
 from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ExecutionPlanData
+from snapper.server.dependencies import get_caps_enforcer_dependency
 from snapper.server.dependencies import get_repository_dependency
 from snapper.server.json_body import json_body
 from snapper.server.json_body import openapi_schema
@@ -354,6 +358,7 @@ async def cancel_bracket(
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     command: Annotated[BracketCancelCommand, Depends(json_body(BracketCancelCommand))],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
+    caps_enforcer: Annotated[TradingCapsEnforcer, Depends(get_caps_enforcer_dependency)],
 ) -> ExecutionPlanResponse:
     """Cancel a bracket execution plan.
 
@@ -369,6 +374,9 @@ async def cancel_bracket(
         _csrf: CSRF token validation.
         command: Cancel command envelope.
         repo: Repository dependency.
+        caps_enforcer: Per-user :class:`TradingCapsEnforcer` used to
+            gate the cancel TradeCommand insert against §3.5
+            caps (cancel rate limit).
 
     Returns:
         ExecutionPlanResponse wrapping the updated plan.
@@ -468,7 +476,31 @@ async def cancel_bracket(
                 exchange_order_id=exchange_order_id,
             )
             try:
-                await repo.insert_trade_command(cancel_cmd, ownership=None)
+                cancel_submission = TradeCommandSubmission(
+                    user_public_id=principal.user_public_id,
+                    operator_public_id=plan.get("operator_public_id"),
+                    wallet_public_id=plan["wallet_public_id"],
+                    instrument_public_id=plan.get("instrument_public_id"),
+                    command_type="cancel",
+                    side=plan["side"],
+                    order_type=str(params.get("venue_order_type", "market")),
+                    quantity=None,
+                    price=None,
+                    source_surface="rest",
+                    idempotency_key=None,
+                )
+                async with caps_enforcer.guard(cancel_submission):
+                    await repo.insert_trade_command(cancel_cmd, ownership=None)
+            except CapsViolationError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={
+                        "error_code": "caps_violation",
+                        "cap_type": exc.cap_type,
+                        "attempted": exc.attempted,
+                        "limit": exc.limit,
+                    },
+                ) from exc
             except Exception as exc:
                 logger.error(
                     "Failed to insert cancel command for plan {} child {}: {}",

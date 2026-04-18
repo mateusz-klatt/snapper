@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 from datetime import UTC
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 from typing import cast
 from uuid import uuid7
@@ -25,8 +26,11 @@ from snapper.application.plans.bracket import BracketEvaluator
 from snapper.application.plans.evaluator import PlanEvaluator
 from snapper.application.plans.manual_once import ManualOnceEvaluator
 from snapper.application.plans.trailing_stop import TrailingStopEvaluator
+from snapper.application.pricing.usd_converter import USDConverter
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import register_process
+from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
+from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.core.json_types import JsonObject
@@ -36,6 +40,7 @@ from snapper.core.types import OrderEventEnum
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.core.types import TradeCommandStatusEnum
+from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import ExecutionPlanDecisionInsertRow
 from snapper.data.repository_types import ExecutionPlanRow
@@ -93,8 +98,20 @@ class PlanExecutorService(RegisterableProcess):
         evaluators: Evaluator instances keyed by plan public_id.
     """
 
-    def __init__(self) -> None:
-        """Initialize the plan executor service."""
+    def __init__(
+        self,
+        *,
+        caps_enforcer: TradingCapsEnforcer | None = None,
+    ) -> None:
+        """Initialize the plan executor service.
+
+        Args:
+            caps_enforcer: Optional :class:`TradingCapsEnforcer` for
+                pre-insert cap enforcement on emitted commands.
+                ``None`` bypasses enforcement — preserved so legacy
+                test fixtures that instantiate the service without
+                DI keep working.
+        """
         self.settings: AppSettings = get_settings()
         self.repository = get_repository(self.settings.db_url)
         self.tracker = SequenceTracker()
@@ -108,6 +125,7 @@ class PlanExecutorService(RegisterableProcess):
         self._running = False
         self._zmq_context: zmq.asyncio.Context | None = None
         self._subscriber: ValidatedSubscriber | None = None
+        self._caps_enforcer = caps_enforcer
 
     async def start(self) -> None:
         """Start the plan executor: set up subscriber, recover plans, run loops.
@@ -121,6 +139,9 @@ class PlanExecutorService(RegisterableProcess):
         starts emitting commands.
         """
         logger.info("PlanExecutorService starting")
+        if self._caps_enforcer is None and isinstance(self.repository, SQLAlchemyRepository):
+            pricing = USDConverter(repository=self.repository)
+            self._caps_enforcer = TradingCapsEnforcer(repository=self.repository, pricing=pricing)
         self._setup_subscriber()
         if self._subscriber is not None:
             await asyncio.sleep(_SLOW_JOINER_STABILIZATION_S)
@@ -258,6 +279,55 @@ class PlanExecutorService(RegisterableProcess):
             result.add(single)
         return list(result)
 
+    async def _emit_trade_command(
+        self,
+        row: TradeCommandInsertRow,
+        *,
+        plan: ExecutionPlanRow,
+        command_type: str,
+        side: str | None,
+        order_type: str | None,
+        quantity: float | None,
+    ) -> None:
+        """Insert a plan-originated trade command via the caps enforcer.
+
+        Builds a :class:`TradeCommandSubmission` from the plan's
+        creator (``plan["created_by_user_id"]``). When a user is
+        present, routes through :meth:`TradingCapsEnforcer.guard`
+        (per-user caps apply). When absent (system / strategy-created
+        plan), routes through
+        :meth:`TradingCapsEnforcer.guard_service_principal` so the
+        bypass is audit-visible at the call site.
+
+        When the service was constructed without a caps enforcer
+        (legacy test fixtures), the insert is issued directly —
+        matches pre-Phase-A behavior so existing tests continue to
+        pass unchanged.
+        """
+        if self._caps_enforcer is None:
+            await self.repository.insert_trade_command(row, ownership=None)
+            return
+        user_public_id = plan.get("created_by_user_id")
+        submission = TradeCommandSubmission(
+            user_public_id=user_public_id,
+            operator_public_id=plan.get("operator_public_id"),
+            wallet_public_id=plan.get("wallet_public_id"),
+            instrument_public_id=plan.get("instrument_public_id"),
+            command_type=command_type,
+            side=side,
+            order_type=order_type,
+            quantity=Decimal(str(quantity)) if quantity is not None else None,
+            price=None,
+            source_surface="rest",
+            idempotency_key=row.get("idempotency_key"),
+        )
+        if user_public_id is not None:
+            async with self._caps_enforcer.guard(submission):
+                await self.repository.insert_trade_command(row, ownership=None)
+        else:
+            async with self._caps_enforcer.guard_service_principal(submission):
+                await self.repository.insert_trade_command(row, ownership=None)
+
     async def _reemit_single_stranded_cancel(
         self,
         plan: ExecutionPlanRow,
@@ -345,7 +415,14 @@ class PlanExecutorService(RegisterableProcess):
             "exchange_order_id": exchange_order_id,
         }
         try:
-            await self.repository.insert_trade_command(cast(Any, row), ownership=None)
+            await self._emit_trade_command(
+                cast(TradeCommandInsertRow, row),
+                plan=plan,
+                command_type="cancel",
+                side=plan["side"],
+                order_type=str(params.get("venue_order_type", "market")),
+                quantity=plan["total_quantity"],
+            )
             logger.info(
                 "PlanExecutorService: re-emitted stranded cancel for plan {} child {}",
                 plan["public_id"],
@@ -536,7 +613,14 @@ class PlanExecutorService(RegisterableProcess):
                     idempotency_key=f"{plan['public_id']}:{idx}",
                     supersedes_command_id=None,
                 )
-                await self.repository.insert_trade_command(row, ownership=None)
+                await self._emit_trade_command(
+                    row,
+                    plan=plan,
+                    command_type=str(cmd.get("command_type", "create")),
+                    side=str(cmd["side"]),
+                    order_type=str(cmd.get("order_type", "market")),
+                    quantity=float(cast(Any, cmd["quantity"])),
+                )
                 self._client_order_id_index[client_order_id] = plan_public_id
                 child_ids.append(client_order_id)
                 await self._log_decision(

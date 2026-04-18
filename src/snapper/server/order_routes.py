@@ -11,6 +11,7 @@ and are scoped to the caller's accessible wallets.
 import datetime as dt
 from datetime import UTC
 from datetime import datetime
+from decimal import Decimal
 from typing import Annotated
 from typing import Any
 from typing import cast
@@ -27,6 +28,9 @@ from snapper.api.schemas.orders import CancelOrderCommand
 from snapper.api.schemas.orders import CreateOrderCommand
 from snapper.api.schemas.orders import ExecutionPlanResponse
 from snapper.application.plans.manual_once import ManualOnceEvaluator
+from snapper.application.trade.caps_enforcer import CapsViolationError
+from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
+from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
@@ -37,6 +41,7 @@ from snapper.data.repository_types import ExecutionPlanInsertRow
 from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ExecutionPlanData
+from snapper.server.dependencies import get_caps_enforcer_dependency
 from snapper.server.dependencies import get_repository_dependency
 from snapper.server.json_body import json_body
 from snapper.server.json_body import openapi_schema
@@ -100,6 +105,7 @@ async def create_order(
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     command: Annotated[CreateOrderCommand, Depends(json_body(CreateOrderCommand))],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
+    caps_enforcer: Annotated[TradingCapsEnforcer, Depends(get_caps_enforcer_dependency)],
 ) -> ExecutionPlanResponse:
     """Create a manual order via a manual_once execution plan.
 
@@ -114,6 +120,12 @@ async def create_order(
         _csrf: CSRF token validation.
         command: Create order command envelope.
         repo: Repository dependency.
+        caps_enforcer: Per-user :class:`TradingCapsEnforcer`
+            injected by :func:`get_caps_enforcer_dependency` —
+            wraps the TradeCommand insert with
+            :meth:`guard` so the caller's §3.5 caps
+            (quantity, open orders, daily USD notional) are
+            evaluated before persistence.
 
     Returns:
         ExecutionPlanResponse wrapping the newly-created plan.
@@ -232,7 +244,31 @@ async def create_order(
             "user_public_id": user_pid,
             "plan_public_id": plan_public_id,
         }
-        await repo.insert_trade_command(cmd_row, ownership=None)
+        submission = TradeCommandSubmission(
+            user_public_id=principal.user_public_id,
+            operator_public_id=body.operator_public_id,
+            wallet_public_id=body.wallet_public_id,
+            instrument_public_id=body.instrument_public_id,
+            command_type="create",
+            side=body.side,
+            order_type=venue_order_type,
+            quantity=Decimal(str(body.quantity)),
+            price=Decimal(str(body.price)) if body.price is not None else None,
+            source_surface="rest",
+            idempotency_key=body.idempotency_key,
+        )
+        async with caps_enforcer.guard(submission):
+            await repo.insert_trade_command(cmd_row, ownership=None)
+    except CapsViolationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error_code": "caps_violation",
+                "cap_type": exc.cap_type,
+                "attempted": exc.attempted,
+                "limit": exc.limit,
+            },
+        ) from exc
     except Exception as exc:
         logger.error("Failed to create trade command for plan {}: {}", plan_public_id, exc)
         await repo.update_execution_plan_status(
@@ -279,6 +315,7 @@ async def _cancel_plan(
     tracker: SequenceTracker,
     principal: AuthPrincipal,
     plan_public_id: str,
+    caps_enforcer: TradingCapsEnforcer,
 ) -> ExecutionPlanResponse:
     """Shared cancel-plan logic used by the by-id and by-client-order-id routes.
 
@@ -291,6 +328,9 @@ async def _cancel_plan(
         tracker: REST provenance tracker.
         principal: Authenticated caller.
         plan_public_id: Plan to cancel.
+        caps_enforcer: Per-user :class:`TradingCapsEnforcer` used to
+            gate the cancel TradeCommand insert against §3.5
+            caps (cancel rate limit).
 
     Returns:
         ExecutionPlanResponse wrapping the updated plan.
@@ -375,7 +415,31 @@ async def _cancel_plan(
             "exchange_order_id": exchange_order_id,
         }
         try:
-            await repo.insert_trade_command(cancel_cmd, ownership=None)
+            cancel_submission = TradeCommandSubmission(
+                user_public_id=principal.user_public_id,
+                operator_public_id=plan["operator_public_id"],
+                wallet_public_id=plan["wallet_public_id"],
+                instrument_public_id=plan.get("instrument_public_id"),
+                command_type="cancel",
+                side=plan["side"],
+                order_type=cast(str, params.get("venue_order_type", "market")),
+                quantity=None,
+                price=None,
+                source_surface="rest",
+                idempotency_key=None,
+            )
+            async with caps_enforcer.guard(cancel_submission):
+                await repo.insert_trade_command(cancel_cmd, ownership=None)
+        except CapsViolationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "error_code": "caps_violation",
+                    "cap_type": exc.cap_type,
+                    "attempted": exc.attempted,
+                    "limit": exc.limit,
+                },
+            ) from exc
         except Exception as exc:
             logger.error(
                 "Failed to insert cancel command for plan {}: {}",
@@ -435,6 +499,7 @@ async def cancel_order(
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     command: Annotated[CancelOrderCommand, Depends(json_body(CancelOrderCommand))],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
+    caps_enforcer: Annotated[TradingCapsEnforcer, Depends(get_caps_enforcer_dependency)],
 ) -> ExecutionPlanResponse:
     """Cancel an active execution plan.
 
@@ -449,6 +514,7 @@ async def cancel_order(
         _csrf: CSRF token validation.
         command: Cancel command envelope.
         repo: Repository dependency.
+        caps_enforcer: Per-user cap enforcer (see §3.5).
 
     Returns:
         ExecutionPlanResponse wrapping the updated plan.
@@ -464,6 +530,7 @@ async def cancel_order(
         tracker=tracker,
         principal=principal,
         plan_public_id=plan_public_id,
+        caps_enforcer=caps_enforcer,
     )
 
 
@@ -481,6 +548,7 @@ async def cancel_order_by_client_order_id(
     _csrf: Annotated[None, Depends(validate_csrf_token)],
     command: Annotated[CancelOrderCommand, Depends(json_body(CancelOrderCommand))],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
+    caps_enforcer: Annotated[TradingCapsEnforcer, Depends(get_caps_enforcer_dependency)],
 ) -> ExecutionPlanResponse:
     """Cancel an order by its ``client_order_id``.
 
@@ -496,6 +564,7 @@ async def cancel_order_by_client_order_id(
         _csrf: CSRF token validation.
         command: Cancel command envelope.
         repo: Repository dependency.
+        caps_enforcer: Per-user cap enforcer (see §3.5).
 
     Returns:
         ExecutionPlanResponse wrapping the updated plan.
@@ -520,4 +589,5 @@ async def cancel_order_by_client_order_id(
         tracker=tracker,
         principal=principal,
         plan_public_id=plan_public_id,
+        caps_enforcer=caps_enforcer,
     )

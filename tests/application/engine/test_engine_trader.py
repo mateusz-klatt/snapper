@@ -755,6 +755,7 @@ class _EngineStub:
         wallet_public_id: str = "",
         operator_public_id: str = "",
         ownership: Any = None,
+        caps_enforcer: Any = None,
     ) -> None:
         self.instrument = instrument
         self.execution_socket = execution_socket

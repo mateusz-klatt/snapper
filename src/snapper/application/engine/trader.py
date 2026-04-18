@@ -33,6 +33,7 @@ from snapper.application.engine.config import EngineConfigModel
 from snapper.application.engine.service import TradingEngineService
 from snapper.application.engine.service import _compute_shard_key
 from snapper.application.portfolio.models import PositionStateModel
+from snapper.application.pricing.usd_converter import USDConverter
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.process_parameters import TraderParameters
 from snapper.application.process_manager.registry import register_process
@@ -40,6 +41,7 @@ from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
 from snapper.application.services.settings import SettingsService
 from snapper.application.trade.balance_service import BalanceService
+from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.outbox import OutboxDispatcher
 from snapper.application.trade.reconciler import ReconciliationLoop
 from snapper.application.trade.trade_service import TradeService
@@ -225,6 +227,7 @@ class TraderCoordinator(RegisterableProcess):
         self._order_shard_keys: dict[str, str] = {}
         self._wallet_short_to_id: dict[str, str] = {}
         self._ownership: ShardOwnership | None = None
+        self._caps_enforcer: TradingCapsEnforcer | None = None
 
     @staticmethod
     def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
@@ -331,6 +334,7 @@ class TraderCoordinator(RegisterableProcess):
             self._ownership.instance_count,
             100.0 / self._ownership.instance_count,
         )
+        self._caps_enforcer = self._build_caps_enforcer()
         self._setup_external_execution()
         self._setup_trading_components()
         self._setup_signal_subscriber()
@@ -368,6 +372,25 @@ class TraderCoordinator(RegisterableProcess):
             instance_id=instance_id,
             instance_count=instance_count,
         )
+
+    def _build_caps_enforcer(self) -> TradingCapsEnforcer | None:
+        """Construct the process-singleton :class:`TradingCapsEnforcer`.
+
+        Wires ``USDConverter(repository)`` as the pricing oracle and
+        hands both to the enforcer. Called once at
+        :meth:`start` after settings resolve + ownership is built so
+        the enforcer is ready before any child engine is spawned.
+
+        Returns ``None`` when the repository is not a
+        :class:`SQLAlchemyRepository` — test fixtures that inject a
+        MagicMock repo fall through the enforcer entirely, which is
+        the same behavior the engine had before Phase A so pre-
+        existing coordinator tests stay byte-identical.
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return None
+        pricing = USDConverter(repository=self.repository)
+        return TradingCapsEnforcer(repository=self.repository, pricing=pricing)
 
     async def _initialize_settings(self) -> None:
         """Upgrade settings to DB-backed instance for runtime access.
@@ -1191,6 +1214,7 @@ class TraderCoordinator(RegisterableProcess):
             wallet_public_id=wallet_public_id,
             operator_public_id=operator_public_id,
             ownership=self._ownership,
+            caps_enforcer=self._caps_enforcer,
         )
 
     def _handle_settings_update(self, payload: bytes) -> None:
@@ -2447,6 +2471,7 @@ class TraderCoordinator(RegisterableProcess):
                 wallet_public_id=wallet_public_id,
                 operator_public_id=operator_public_id,
                 ownership=self._ownership,
+                caps_enforcer=self._caps_enforcer,
             )
             self.last_signal_time[engine_key] = 0.0
         self.last_signal_time[engine_key] = time.time()
