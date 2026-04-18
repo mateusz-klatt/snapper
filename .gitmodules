@@ -4,3 +4,6 @@
 [submodule "proprietary"]
 	path = proprietary
 	url = git@github.com:mateusz-klatt/proprietary.git
+[submodule "integrations/snapper-mcp"]
+	path = integrations/snapper-mcp
+	url = git@github.com:mateusz-klatt/snapper-mcp.git
