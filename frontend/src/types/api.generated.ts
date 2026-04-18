@@ -1029,6 +1029,12 @@ export type Paths = {
          *         _csrf: CSRF token validation.
          *         command: Create order command envelope.
          *         repo: Repository dependency.
+         *         caps_enforcer: Per-user :class:`TradingCapsEnforcer`
+         *             injected by :func:`get_caps_enforcer_dependency` —
+         *             wraps the TradeCommand insert with
+         *             :meth:`guard` so the caller's §3.5 caps
+         *             (quantity, open orders, daily USD notional) are
+         *             evaluated before persistence.
          *
          *     Returns:
          *         ExecutionPlanResponse wrapping the newly-created plan.
@@ -1068,6 +1074,7 @@ export type Paths = {
          *         _csrf: CSRF token validation.
          *         command: Cancel command envelope.
          *         repo: Repository dependency.
+         *         caps_enforcer: Per-user cap enforcer (see §3.5).
          *
          *     Returns:
          *         ExecutionPlanResponse wrapping the updated plan.
@@ -1108,6 +1115,7 @@ export type Paths = {
          *         _csrf: CSRF token validation.
          *         command: Cancel command envelope.
          *         repo: Repository dependency.
+         *         caps_enforcer: Per-user cap enforcer (see §3.5).
          *
          *     Returns:
          *         ExecutionPlanResponse wrapping the updated plan.
@@ -1188,6 +1196,9 @@ export type Paths = {
          *         _csrf: CSRF token validation.
          *         command: Cancel command envelope.
          *         repo: Repository dependency.
+         *         caps_enforcer: Per-user :class:`TradingCapsEnforcer` used to
+         *             gate the cancel TradeCommand insert against §3.5
+         *             caps (cancel rate limit).
          *
          *     Returns:
          *         ExecutionPlanResponse wrapping the updated plan.
@@ -1428,6 +1439,9 @@ export type Paths = {
          *         _csrf: CSRF token validation.
          *         command: Cancel command envelope.
          *         repo: Repository dependency.
+         *         caps_enforcer: Per-user :class:`TradingCapsEnforcer` used to
+         *             gate the cancel TradeCommand insert against §3.5
+         *             caps (cancel rate limit).
          *
          *     Returns:
          *         ExecutionPlanResponse wrapping the updated plan.
@@ -6904,12 +6918,24 @@ export type Components = {
          *
          *     Defines the available roles in the system with hierarchical
          *     access levels:
-         *     - VIEWER: Read-only access to market data and positions
-         *     - OPERATOR: Can execute trades and manage strategies
-         *     - ADMIN: Full system access including user management
+         *
+         *     - AI_DELEGATE: Narrow permission set for AI-integration users
+         *       (observe market/signals/orders, submit/cancel trades via MCP).
+         *       **Ordinally below VIEWER** in the role_hierarchy dicts consulted
+         *       by ``require_role()`` (``snapper.auth.dependencies``) and
+         *       ``WebSocketAuthManager.has_permission()``
+         *       (``snapper.auth.websocket_auth``) so any
+         *       ``require_role(>= VIEWER)`` guard rejects AI_DELEGATE by
+         *       ordinal comparison — intentional: access beyond the narrow
+         *       permission set MUST go through
+         *       ``require_permission(specific_perm)``.
+         *       See ``plan_ai_integration_phase_a.md`` §3.4.
+         *     - VIEWER: Read-only access to market data and positions.
+         *     - OPERATOR: Can execute trades and manage strategies.
+         *     - ADMIN: Full system access including user management.
          * @enum {string}
          */
-        UserRole: "viewer" | "operator" | "admin";
+        UserRole: "ai_delegate" | "viewer" | "operator" | "admin";
         /** ValidationError */
         ValidationError: {
             /** Location */
