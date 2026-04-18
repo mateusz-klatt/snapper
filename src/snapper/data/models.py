@@ -13,6 +13,7 @@ from sqlalchemy import DateTime
 from sqlalchemy import Float
 from sqlalchemy import Index
 from sqlalchemy import Integer
+from sqlalchemy import Numeric
 from sqlalchemy import String
 from sqlalchemy import Text
 from sqlalchemy import UniqueConstraint
@@ -120,6 +121,8 @@ __all__ = [
     "ExecutionPlanCheckpoint",
     "ExecutionPlanDecision",
     "PositionCycle",
+    "UserTradingCaps",
+    "UserActiveToken",
 ]
 
 
@@ -449,6 +452,9 @@ class User(TemporalMixin, Base):
     role: Mapped[str] = mapped_column(String(32))
     is_active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
+    created_by_user_public_id: Mapped[str | None] = mapped_column(
+        UUIDColumn(), nullable=True, index=True
+    )
 
 
 class UserLoginEvent(TemporalMixin, Base):
@@ -925,6 +931,7 @@ class TradeCommand(TemporalMixin, Base):
     supersedes_command_id: Mapped[str | None] = mapped_column(UUIDColumn())
     correlation_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id)
     plan_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True, index=True)
+    source_surface: Mapped[str] = mapped_column(String(20), nullable=False, server_default="rest")
 
 
 class VenueEvent(TemporalMixin, Base):
@@ -1776,6 +1783,9 @@ class ExecutionPlanDecision(TemporalMixin, Base):
     new_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     reason: Mapped[str] = mapped_column(String(512))
     decision_importance: Mapped[str] = mapped_column(String(16))
+    source_surface: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="strategy"
+    )
 
 
 class PositionCycle(TemporalMixin, Base):
@@ -2107,3 +2117,92 @@ class BacktestComparison(TemporalMixin, Base):
     config_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     pairing_mode: Mapped[str] = mapped_column(String(16))
     anchor_run_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+
+
+class UserTradingCaps(TemporalMixin, Base):
+    """Per-user trading safety caps enforced by ``TradingCapsEnforcer``.
+
+    Temporal (SCD2) — the active row for a user is the one with
+    ``known_to = KNOWN_TO_MAX``. Updates close + insert a new version
+    per the standard TemporalMixin lifecycle so cap history is
+    auditable.
+
+    All cap columns are nullable; a NULL cap means "unbounded" for
+    that axis. Default enforcement policy (plan §3.5.3):
+
+        - ``max_order_quantity_per_instrument``: JSON dict
+          ``{instrument_public_id: Decimal}`` OR a scalar Decimal
+          (applied to every instrument when scalar).
+        - ``max_open_orders``: all-time count of user's in-flight
+          commands (status IN created/dispatched/acked/accepted/
+          partially_filled). No time window — this is an in-flight
+          exposure cap, not a rate cap (R3-M2 resolution).
+        - ``max_daily_notional_usd``: rolling 24h sum of
+          ``submit_quantity * submit_price_usd`` over non-rejected
+          commands. Submit-time commitment basis; partial fills do
+          not change accounting (R2-B3 resolution).
+        - ``max_cancels_per_minute``: sliding 60-second count of
+          the user's cancel commands.
+
+    See ``plan_ai_integration_phase_a.md`` §3.5 + §4 Day 1 #4.
+    """
+
+    __tablename__ = "user_trading_caps"
+    __table_args__ = (
+        Index(
+            "ix_user_trading_caps_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_user_trading_caps_active",
+            "user_public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+    )
+    user_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    max_order_quantity_per_instrument: Mapped[JsonObject | None] = mapped_column(
+        JSON, nullable=True
+    )
+    max_open_orders: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_daily_notional_usd: Mapped[float | None] = mapped_column(Numeric(18, 2), nullable=True)
+    max_cancels_per_minute: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class UserActiveToken(Base):
+    """Non-temporal token inventory for kill-switch + fast-path blacklist.
+
+    Rows carry explicit lifecycle (``issued_at``, ``expires_at``,
+    ``revoked_at``) — NOT SCD2 versioned — so deactivation flips
+    ``revoked_at`` in place rather than closing + inserting a new
+    row (R2-M3 resolution). Cleaned by ``token_cleanup_loop``
+    (``snapper.application.admin.token_cleanup``) on a daily cycle.
+
+    The ``jti`` column enables ``TokenManager.revoke_user_sessions``
+    to push every active token's JWT ID into the in-memory
+    ``_blacklisted_tokens`` fast-path cache — since SHA-256 is not
+    reversible to the JTI but the JWT payload carries the JTI for
+    fast lookup in ``verify_token()`` (R2-M6 resolution).
+
+    ``token_hash`` is SHA-256 HEX of the full token so the DB-backed
+    inventory can be checked per-request in ``verify_token()``
+    without holding the raw JWT plaintext in storage.
+
+    See ``plan_ai_integration_phase_a.md`` §3.6.2.
+    """
+
+    __tablename__ = "user_active_tokens"
+    __table_args__ = (Index("ix_user_active_tokens_user_revoked", "user_public_id", "revoked_at"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False, unique=True)
+    user_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False, index=True)
+    jti: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    token_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)

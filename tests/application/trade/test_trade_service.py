@@ -209,6 +209,7 @@ def test_apply_order_rejected_clears_in_flight() -> None:
             "wallet_public_id": None,
             "operator_public_id": None,
             "user_public_id": None,
+            "source_surface": "strategy",
         },
     )
     assert svc.get_command_state("kraken.BTC-USD.live").in_flight is True
@@ -474,6 +475,7 @@ def test_snapshot_with_open_command() -> None:
             "wallet_public_id": None,
             "operator_public_id": None,
             "user_public_id": None,
+            "source_surface": "strategy",
         },
     )
     snap = svc.snapshot_for_checkpoint("kraken.BTC-USD.live")

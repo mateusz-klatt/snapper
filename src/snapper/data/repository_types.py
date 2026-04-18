@@ -287,6 +287,7 @@ class TradeCommandRow(TypedDict):
     wallet_public_id: str | None
     operator_public_id: str | None
     user_public_id: str | None
+    source_surface: str
 
 
 class VenueEventRow(TypedDict):
@@ -404,6 +405,7 @@ class TradeCommandInsertRow(TypedDict, total=False):
     user_public_id: str | None
     plan_public_id: str | None
     exchange_order_id: str | None
+    source_surface: str
 
 
 class VenueEventInsertRow(TypedDict, total=False):

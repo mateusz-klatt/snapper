@@ -61,6 +61,7 @@ def _make_cmd_row(
         "wallet_public_id": None,
         "operator_public_id": None,
         "user_public_id": None,
+        "source_surface": "strategy",
     }
 
 

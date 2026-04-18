@@ -3887,6 +3887,7 @@ class SQLAlchemyRepository(Repository):
                         "wallet_public_id": cmd.wallet_public_id,
                         "operator_public_id": cmd.operator_public_id,
                         "user_public_id": cmd.user_public_id,
+                        "source_surface": cmd.source_surface,
                     }
                 )
             return rows
@@ -3942,6 +3943,7 @@ class SQLAlchemyRepository(Repository):
                         "wallet_public_id": cmd.wallet_public_id,
                         "operator_public_id": cmd.operator_public_id,
                         "user_public_id": cmd.user_public_id,
+                        "source_surface": cmd.source_surface,
                     }
                 )
             return rows
@@ -4008,6 +4010,7 @@ class SQLAlchemyRepository(Repository):
                         "wallet_public_id": cmd.wallet_public_id,
                         "operator_public_id": cmd.operator_public_id,
                         "user_public_id": cmd.user_public_id,
+                        "source_surface": cmd.source_surface,
                     }
                 )
             return rows
