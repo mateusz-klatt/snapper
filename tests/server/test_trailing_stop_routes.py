@@ -11,6 +11,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from snapper.application.plans.trailing_stop import TrailingStopEvaluator
+from snapper.application.trade.caps_enforcer import CapsViolationError
+from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
@@ -18,6 +20,7 @@ from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.app import create_app
 from snapper.server.app import get_repository_dependency
+from snapper.server.dependencies import get_caps_enforcer_dependency
 
 
 async def _noop_lifespan(_app: FastAPI) -> AsyncGenerator[None]:
@@ -575,6 +578,48 @@ class TestCancelTrailingStop:
         client = _create_client(repo)
         response = client.post("/api/trailing-stops/ts-1/cancel", json=_cancel_body())
         assert response.status_code == 409
+
+    def test_cancel_caps_violation_returns_422(self) -> None:
+        """TradingCapsEnforcer rejection maps to 422 caps_violation.
+
+        Given: an active trailing stop with a live child order and a
+            stubbed :class:`TradingCapsEnforcer` whose ``guard()``
+            raises ``CapsViolationError('max_cancels_per_minute')``,
+        When: the client POSTs to the cancel endpoint,
+        Then: the response is HTTP 422 with a JSON detail carrying
+            ``error_code='caps_violation'`` + the enforcer's
+            ``cap_type``/``attempted``/``limit`` — proves the §9.2
+            error mapping in the cancel path is wired end-to-end.
+        """
+        repo = AsyncMock()
+        plan = _make_plan_row(status="active")
+        plan["params"]["child_client_order_ids"] = ["child-1"]
+        cancelled_plan = dict(plan)
+        cancelled_plan["status"] = "cancel_requested"
+        repo.get_execution_plan = AsyncMock(side_effect=[plan, cancelled_plan])
+        repo.update_execution_plan_status = AsyncMock(return_value=1)
+        repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-1")
+        repo.insert_execution_plan_decision = AsyncMock(return_value="dec-1")
+
+        stub_enforcer = MagicMock(spec=TradingCapsEnforcer)
+
+        class _GuardCtx:
+            async def __aenter__(self) -> None:
+                raise CapsViolationError("max_cancels_per_minute", attempted=11.0, limit=10.0)
+
+            async def __aexit__(self, *_args: Any) -> None:
+                """Re-raise path exits via context manager protocol."""
+
+        stub_enforcer.guard = MagicMock(return_value=_GuardCtx())
+
+        client = _create_client(repo)
+        client.app.state.plan_executor._extract_child_ids = MagicMock(return_value=["child-1"])
+        client.app.dependency_overrides[get_caps_enforcer_dependency] = lambda: stub_enforcer
+        response = client.post("/api/trailing-stops/ts-1/cancel", json=_cancel_body())
+        assert response.status_code == 422
+        body = response.json()
+        assert body["detail"]["error_code"] == "caps_violation"
+        assert body["detail"]["cap_type"] == "max_cancels_per_minute"
 
 
 class TestGetTrailingStop:

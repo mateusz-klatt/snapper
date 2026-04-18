@@ -19,6 +19,7 @@ MarketSnapshot fixtures so the behavior is exercised end-to-end
 without mocking the SQL layer.
 """
 
+import asyncio as _asyncio
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -143,7 +144,7 @@ async def test_non_usd_quote_raises_quote_currency_not_usd(
     conv = USDConverter(repo, now=_seed_time)
     with pytest.raises(PriceUnavailableError) as exc:
         await conv.to_usd(inst_id, Decimal("1"))
-    assert exc.value.reason == "quote_currency_not_usd"
+    assert exc.value.reason_code == "quote_currency_not_usd"
 
 
 @pytest.mark.asyncio
@@ -160,7 +161,7 @@ async def test_missing_instrument_raises_instrument_not_found(
     conv = USDConverter(repo, now=_seed_time)
     with pytest.raises(PriceUnavailableError) as exc:
         await conv.to_usd("ghost-instrument", Decimal("1"))
-    assert exc.value.reason == "instrument_not_found"
+    assert exc.value.reason_code == "instrument_not_found"
 
 
 @pytest.mark.asyncio
@@ -179,7 +180,7 @@ async def test_missing_snapshot_raises_snapshot_missing(
     conv = USDConverter(repo, now=_seed_time)
     with pytest.raises(PriceUnavailableError) as exc:
         await conv.to_usd(inst_id, Decimal("1"))
-    assert exc.value.reason == "snapshot_missing"
+    assert exc.value.reason_code == "snapshot_missing"
 
 
 @pytest.mark.asyncio
@@ -200,7 +201,7 @@ async def test_null_last_price_raises_last_price_null(
     conv = USDConverter(repo, now=_seed_time)
     with pytest.raises(PriceUnavailableError) as exc:
         await conv.to_usd(inst_id, Decimal("1"))
-    assert exc.value.reason == "last_price_null"
+    assert exc.value.reason_code == "last_price_null"
 
 
 @pytest.mark.asyncio
@@ -222,7 +223,7 @@ async def test_stale_snapshot_fresh_load_raises_price_stale(
     conv = USDConverter(repo, now=_seed_time)
     with pytest.raises(PriceUnavailableError) as exc:
         await conv.to_usd(inst_id, Decimal("1"))
-    assert exc.value.reason == "price_stale"
+    assert exc.value.reason_code == "price_stale"
 
 
 @pytest.mark.asyncio
@@ -255,7 +256,7 @@ async def test_stale_snapshot_via_cache_re_check_raises(
     clock["t"] = _seed_time() + timedelta(seconds=15)
     with pytest.raises(PriceUnavailableError) as exc:
         await conv.to_usd(inst_id, Decimal("1"))
-    assert exc.value.reason == "price_stale"
+    assert exc.value.reason_code == "price_stale"
 
 
 @pytest.mark.asyncio
@@ -366,8 +367,6 @@ async def test_concurrent_first_loads_share_one_db_round_trip(
         happens. Exercises the double-check-after-lock re-read
         branch that prevents a thundering-herd DB hit.
     """
-    import asyncio as _asyncio
-
     inst_id = "inst-concurrent"
     await _seed_instrument(repo, instrument_public_id=inst_id, quote="USD")
     await _seed_snapshot(repo, instrument_public_id=inst_id, last_price=42.0)
@@ -410,7 +409,7 @@ async def test_price_unavailable_error_carries_context(
     conv = USDConverter(repo, now=_seed_time)
     with pytest.raises(PriceUnavailableError) as exc:
         await conv.to_usd(inst_id, Decimal("1"))
-    assert exc.value.reason == "quote_currency_not_usd"
+    assert exc.value.reason_code == "quote_currency_not_usd"
     assert exc.value.instrument_public_id == inst_id
     assert "EUR" in exc.value.detail
     assert inst_id in str(exc.value)

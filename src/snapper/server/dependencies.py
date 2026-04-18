@@ -46,6 +46,9 @@ def get_caps_enforcer_dependency() -> TradingCapsEnforcer:
     instance, so concurrent HTTP requests share the per-user
     :class:`asyncio.Lock` dict that prevents cap-check TOCTOU.
 
+    Returns:
+        The cached :class:`TradingCapsEnforcer` singleton.
+
     Raises:
         RuntimeError: when the configured repository is not a
             :class:`SQLAlchemyRepository` — the caps enforcer needs

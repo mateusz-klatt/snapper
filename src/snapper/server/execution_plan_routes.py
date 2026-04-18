@@ -493,7 +493,7 @@ async def cancel_bracket(
                     await repo.insert_trade_command(cancel_cmd, ownership=None)
             except CapsViolationError as exc:
                 raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail={
                         "error_code": "caps_violation",
                         "cap_type": exc.cap_type,

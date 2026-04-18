@@ -1,0 +1,270 @@
+"""Repository-method coverage for Day 1c TradingCapsEnforcer accessors.
+
+Exercises the four new concrete methods on
+:class:`SQLAlchemyRepository` added in Day 1c:
+
+    - :meth:`get_user_trading_caps`
+    - :meth:`count_user_open_commands`
+    - :meth:`get_user_recent_submits`
+    - :meth:`count_user_rolling_cancels`
+
+Uses an in-memory aiosqlite DB + ``create_all()`` so the tests
+stay self-contained without the main conftest migration fixtures.
+"""
+
+from datetime import UTC
+from datetime import datetime
+from datetime import timedelta
+from decimal import Decimal
+
+import pytest
+
+from snapper.core.types import TradeCommandStatusEnum
+from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import TradeCommand
+from snapper.data.models import UserTradingCaps
+from snapper.data.repository import SQLAlchemyRepository
+
+_NOW = datetime(2026, 4, 18, 12, 0, 0, tzinfo=UTC)
+
+
+@pytest.fixture
+async def repo() -> SQLAlchemyRepository:
+    """Fresh in-memory repo with the AI Phase A schema applied."""
+    r = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+    await r.create_all()
+    return r
+
+
+async def _insert_caps(
+    repo: SQLAlchemyRepository,
+    *,
+    user_public_id: str,
+    max_open_orders: int | None = None,
+    max_daily_notional_usd: Decimal | None = None,
+    max_cancels_per_minute: int | None = None,
+) -> None:
+    """Seed an active :class:`UserTradingCaps` row."""
+    async with repo.session() as s:
+        caps = UserTradingCaps(
+            public_id=f"caps-{user_public_id}",
+            timestamp=_NOW,
+            known_to=KNOWN_TO_MAX,
+            session_id="seed",
+            sequence_id=1,
+            user_public_id=user_public_id,
+            max_order_quantity_per_instrument=None,
+            max_open_orders=max_open_orders,
+            max_daily_notional_usd=max_daily_notional_usd,
+            max_cancels_per_minute=max_cancels_per_minute,
+        )
+        s.add(caps)
+        await s.commit()
+
+
+async def _insert_trade_command(
+    repo: SQLAlchemyRepository,
+    *,
+    user_public_id: str,
+    command_type: str = "submit",
+    status: str = TradeCommandStatusEnum.DISPATCHED,
+    created_at: datetime | None = None,
+    quantity: float = 1.0,
+    price: float | None = 100.0,
+    instrument: str = "BTC-USD",
+    exchange: str = "kraken",
+) -> None:
+    """Seed a :class:`TradeCommand` row with defaults for cap-test scenarios."""
+    async with repo.session() as s:
+        cmd = TradeCommand(
+            timestamp=created_at or _NOW,
+            known_to=KNOWN_TO_MAX,
+            session_id="seed",
+            sequence_id=1,
+            command_type=command_type,
+            shard_key=f"{exchange}.{instrument}.live",
+            wallet_public_id="",
+            operator_public_id=None,
+            user_public_id=user_public_id,
+            exchange=exchange,
+            instrument=instrument,
+            mode="live",
+            strategy_id="manual",
+            client_order_id=f"cid-{command_type}-{status}",
+            venue_client_id=f"vcid-{command_type}-{status}",
+            side="buy",
+            order_type="market",
+            quantity=quantity,
+            price=price,
+            status=status,
+            created_at=created_at or _NOW,
+            correlation_id=f"corr-{command_type}",
+        )
+        s.add(cmd)
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_get_user_trading_caps_returns_row_when_present(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Active caps row is projected to the TypedDict schema.
+
+    Given: a seeded ``user_trading_caps`` row with numeric limits,
+    When: ``get_user_trading_caps`` is invoked,
+    Then: the returned dict carries every cap field verbatim and
+        the Numeric notional is normalized to ``float``.
+    """
+    await _insert_caps(
+        repo,
+        user_public_id="user-1",
+        max_open_orders=5,
+        max_daily_notional_usd=Decimal("10000"),
+        max_cancels_per_minute=20,
+    )
+    row = await repo.get_user_trading_caps("user-1")
+    assert row is not None
+    assert row["max_open_orders"] == 5
+    assert row["max_daily_notional_usd"] == 10000.0
+    assert row["max_cancels_per_minute"] == 20
+
+
+@pytest.mark.asyncio
+async def test_get_user_trading_caps_returns_none_when_absent(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """No caps row → ``None`` (enforcer treats as unbounded).
+
+    Given: a repo with no ``user_trading_caps`` rows,
+    When: ``get_user_trading_caps`` runs for a user,
+    Then: ``None`` is returned so the caps enforcer admits every
+        submission from that user.
+    """
+    result = await repo.get_user_trading_caps("ghost-user")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_count_user_open_commands_counts_non_terminal_submits(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Only non-terminal submit/replace rows count; cancels excluded.
+
+    Given: a user with one dispatched submit, one terminal filled
+        submit, one dispatched cancel, and one replace row,
+    When: ``count_user_open_commands`` runs,
+    Then: the count is 2 (the active submit + the replace); the
+        filled/terminal submit and the cancel row are excluded per
+        §3.5.3 (in-flight exposure basis).
+    """
+    await _insert_trade_command(
+        repo,
+        user_public_id="user-open",
+        command_type="submit",
+        status=TradeCommandStatusEnum.DISPATCHED,
+    )
+    await _insert_trade_command(
+        repo,
+        user_public_id="user-open",
+        command_type="submit",
+        status=TradeCommandStatusEnum.FILLED,
+    )
+    await _insert_trade_command(
+        repo,
+        user_public_id="user-open",
+        command_type="cancel",
+        status=TradeCommandStatusEnum.DISPATCHED,
+    )
+    await _insert_trade_command(
+        repo,
+        user_public_id="user-open",
+        command_type="replace",
+        status=TradeCommandStatusEnum.DISPATCHED,
+    )
+    count = await repo.count_user_open_commands("user-open")
+    assert count == 2
+
+
+@pytest.mark.asyncio
+async def test_get_user_recent_submits_filters_to_window(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Only submits inside the time window + not rejected are returned.
+
+    Given: two submits for a user — one inside the 1h window and
+        one outside — plus a rejected row inside the window,
+    When: ``get_user_recent_submits`` runs with ``since=now-1h``,
+    Then: only the non-rejected in-window row is returned with
+        its projected ``instrument`` / ``quantity`` / ``price``.
+    """
+    await _insert_trade_command(
+        repo,
+        user_public_id="user-submits",
+        command_type="submit",
+        created_at=_NOW,
+        quantity=2.0,
+        price=500.0,
+    )
+    await _insert_trade_command(
+        repo,
+        user_public_id="user-submits",
+        command_type="submit",
+        created_at=_NOW - timedelta(hours=3),
+        quantity=99.0,
+        price=1.0,
+    )
+    await _insert_trade_command(
+        repo,
+        user_public_id="user-submits",
+        command_type="submit",
+        status=TradeCommandStatusEnum.REJECTED,
+        created_at=_NOW,
+        quantity=999.0,
+        price=1.0,
+    )
+    rows = await repo.get_user_recent_submits("user-submits", since=_NOW - timedelta(hours=1))
+    assert len(rows) == 1
+    assert rows[0]["quantity"] == 2.0
+    assert rows[0]["price"] == 500.0
+
+
+@pytest.mark.asyncio
+async def test_count_user_rolling_cancels_includes_all_statuses(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Cancels in the sliding window count regardless of terminal state.
+
+    Given: three cancel rows for a user — one dispatched, one
+        rejected (failed at venue), both inside the 60s window,
+        plus one cancel outside the window,
+    When: ``count_user_rolling_cancels`` runs with
+        ``since=now-60s``,
+    Then: the count is 2 — terminal status of the cancel is not
+        filtered because the cap limits submit frequency of cancel
+        intents (rejected cancels still consume the rate budget).
+    """
+    await _insert_trade_command(
+        repo,
+        user_public_id="user-cancels",
+        command_type="cancel",
+        status=TradeCommandStatusEnum.DISPATCHED,
+        created_at=_NOW,
+    )
+    await _insert_trade_command(
+        repo,
+        user_public_id="user-cancels",
+        command_type="cancel",
+        status=TradeCommandStatusEnum.REJECTED,
+        created_at=_NOW - timedelta(seconds=30),
+    )
+    await _insert_trade_command(
+        repo,
+        user_public_id="user-cancels",
+        command_type="cancel",
+        status=TradeCommandStatusEnum.DISPATCHED,
+        created_at=_NOW - timedelta(minutes=5),
+    )
+    count = await repo.count_user_rolling_cancels(
+        "user-cancels", since=_NOW - timedelta(seconds=60)
+    )
+    assert count == 2

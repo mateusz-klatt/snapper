@@ -11,12 +11,15 @@ from unittest.mock import MagicMock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from snapper.application.trade.caps_enforcer import CapsViolationError
+from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.server.app import create_app
 from snapper.server.app import get_repository_dependency
+from snapper.server.dependencies import get_caps_enforcer_dependency
 
 
 async def _noop_lifespan(_app: FastAPI) -> AsyncGenerator[None]:
@@ -98,6 +101,18 @@ def _create_order_body() -> dict[str, Any]:
     }
 
 
+def _cancel_body() -> dict[str, Any]:
+    """Return a minimal CancelOrderCommand envelope for cap-violation tests."""
+    return {
+        "type": "cancel_order_command",
+        "session_id": "s1",
+        "sequence_id": 1,
+        "public_id": "req-cancel",
+        "timestamp": _ts().isoformat(),
+        "payload": {"reason": "unit-test"},
+    }
+
+
 def _cancel_order_body() -> dict[str, Any]:
     return {
         "type": "cancel_order_command",
@@ -153,6 +168,81 @@ class TestCreateOrder:
         assert data["type"] == "execution_plan_response"
         assert data["payload"]["plan_type"] == "manual_once"
         assert data["payload"]["status"] == "active"
+        client.close()
+
+    def test_create_order_caps_violation_returns_422(self) -> None:
+        """``TradingCapsEnforcer.guard`` rejection maps to 422 caps_violation.
+
+        Given: a stubbed enforcer whose ``guard()`` raises
+            ``CapsViolationError('max_open_orders')``,
+        When: the client POSTs a valid order,
+        Then: response is HTTP 422 carrying the structured error
+            body per §9.2 — verifies the cap-violation branch in
+            ``create_order``.
+        """
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-1"))
+        repo.update_execution_plan_status = AsyncMock(return_value=2)
+        repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+
+        class _CapsGuard:
+            async def __aenter__(self) -> None:
+                raise CapsViolationError("max_open_orders", attempted=6.0, limit=5.0)
+
+            async def __aexit__(self, *_args: Any) -> None:
+                """No-op exit — raise happens before yield."""
+
+        stub_enforcer = MagicMock(spec=TradingCapsEnforcer)
+        stub_enforcer.guard = MagicMock(return_value=_CapsGuard())
+
+        client = _create_client(repo)
+        client.app.dependency_overrides[get_caps_enforcer_dependency] = lambda: stub_enforcer
+        response = client.post("/api/orders", json=_create_order_body())
+        assert response.status_code == 422
+        body = response.json()
+        assert body["detail"]["error_code"] == "caps_violation"
+        assert body["detail"]["cap_type"] == "max_open_orders"
+        client.close()
+
+    def test_cancel_order_caps_violation_returns_422(self) -> None:
+        """Cancel-path ``CapsViolationError`` maps to 422 caps_violation.
+
+        Given: an active plan with a live child order and a stubbed
+            enforcer whose ``guard()`` raises
+            ``CapsViolationError('max_cancels_per_minute')``,
+        When: the client POSTs to the cancel endpoint,
+        Then: response is HTTP 422 carrying the structured error
+            body — verifies the cap-violation branch in
+            ``_cancel_plan``.
+        """
+        repo = AsyncMock()
+        plan = _make_plan_row(status="active")
+        plan["params"]["child_client_order_id"] = "child-1"
+        plan["params"]["native_instrument"] = "BTC-USD"
+        cancelled = dict(plan)
+        cancelled["status"] = "cancel_requested"
+        repo.get_execution_plan = AsyncMock(side_effect=[plan, cancelled])
+        repo.update_execution_plan_status = AsyncMock(return_value=1)
+        repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-1")
+        repo.insert_execution_plan_decision = AsyncMock(return_value="dec-1")
+
+        class _CapsGuard:
+            async def __aenter__(self) -> None:
+                raise CapsViolationError("max_cancels_per_minute", attempted=11.0, limit=10.0)
+
+            async def __aexit__(self, *_args: Any) -> None:
+                """No-op exit — raise happens before yield."""
+
+        stub_enforcer = MagicMock(spec=TradingCapsEnforcer)
+        stub_enforcer.guard = MagicMock(return_value=_CapsGuard())
+
+        client = _create_client(repo)
+        client.app.dependency_overrides[get_caps_enforcer_dependency] = lambda: stub_enforcer
+        response = client.post("/api/orders/plan-1/cancel", json=_cancel_body())
+        assert response.status_code == 422
+        body = response.json()
+        assert body["detail"]["error_code"] == "caps_violation"
+        assert body["detail"]["cap_type"] == "max_cancels_per_minute"
         client.close()
 
     def test_create_order_invalid_params(self) -> None:

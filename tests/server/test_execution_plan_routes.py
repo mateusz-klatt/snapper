@@ -10,6 +10,8 @@ from unittest.mock import MagicMock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from snapper.application.trade.caps_enforcer import CapsViolationError
+from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
@@ -17,6 +19,7 @@ from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.app import create_app
 from snapper.server.app import get_repository_dependency
+from snapper.server.dependencies import get_caps_enforcer_dependency
 from snapper.server.execution_plan_routes import _resolve_average_price
 
 
@@ -551,6 +554,45 @@ class TestCancelBracket:
         update_call = repo.update_execution_plan_status.await_args
         assert update_call[1]["new_status"] == "cancel_requested"
         repo.insert_trade_command.assert_awaited_once()
+        client.close()
+
+    def test_cancel_bracket_caps_violation_returns_422(self) -> None:
+        """Cancel path surfaces ``CapsViolationError`` as HTTP 422.
+
+        Given: an active bracket with a live child order and a
+            stubbed enforcer whose ``guard()`` raises
+            ``CapsViolationError('max_cancels_per_minute')``,
+        When: the client POSTs to the cancel endpoint,
+        Then: response is HTTP 422 carrying the §9.2 caps_violation
+            body — verifies the cap-violation branch in
+            ``cancel_bracket``.
+        """
+        repo = AsyncMock()
+        plan = _make_plan_row(status="active")
+        plan["params"]["child_client_order_ids"] = ["cid-1"]
+        repo.get_execution_plan = AsyncMock(return_value=plan)
+        repo.update_execution_plan_status = AsyncMock(return_value=1)
+        repo.insert_execution_plan_decision = AsyncMock(return_value="dec-1")
+        repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-1")
+
+        class _CapsGuard:
+            async def __aenter__(self) -> None:
+                raise CapsViolationError("max_cancels_per_minute", attempted=11.0, limit=10.0)
+
+            async def __aexit__(self, *_args: Any) -> None:
+                """No-op exit — raise happens before yield."""
+
+        stub_enforcer = MagicMock(spec=TradingCapsEnforcer)
+        stub_enforcer.guard = MagicMock(return_value=_CapsGuard())
+
+        client = _create_client(repo)
+        client.app.state.plan_executor._extract_child_ids = MagicMock(return_value=["cid-1"])
+        client.app.dependency_overrides[get_caps_enforcer_dependency] = lambda: stub_enforcer
+        response = client.post("/api/execution-plans/bracket-1/cancel", json=_cancel_bracket_body())
+        assert response.status_code == 422
+        body = response.json()
+        assert body["detail"]["error_code"] == "caps_violation"
+        assert body["detail"]["cap_type"] == "max_cancels_per_minute"
         client.close()
 
     def test_cancel_terminal_bracket_409(self) -> None:

@@ -79,7 +79,7 @@ def _caps(**overrides: object) -> UserTradingCapsRow:
         "max_cancels_per_minute": None,
     }
     for k, v in overrides.items():
-        base[k] = v  # type: ignore[literal-required]
+        cast(dict[str, object], base)[k] = v
     return base
 
 
@@ -143,7 +143,7 @@ async def test_guard_service_principal_bypasses_caps() -> None:
     enforcer = TradingCapsEnforcer(repo, _stub_pricing(), now=lambda: _NOW)
     async with enforcer.guard_service_principal(_submission(user=None)) as guard:
         assert isinstance(guard, Guard)
-        assert guard.assigned_public_id  # UUID7 still populated
+        assert guard.assigned_public_id
     cast(MagicMock, repo).get_user_trading_caps.assert_not_awaited()
 
 
@@ -535,7 +535,7 @@ async def test_per_user_lock_serializes_concurrent_submissions_for_same_user() -
         try:
             async with enforcer.guard(_submission()):
                 counter["n"] += 1
-                await asyncio.sleep(0)  # yield inside critical section
+                await asyncio.sleep(0)
             return True
         except CapsViolationError:
             return False

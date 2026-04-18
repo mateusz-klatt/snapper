@@ -174,6 +174,18 @@ class TradingCapsEnforcer:
     async def guard(self, submission: TradeCommandSubmission) -> AsyncIterator[Guard]:
         """User-bound enforcement context — fails closed on missing user.
 
+        Args:
+            submission: Pre-insert DTO carrying the acting user,
+                command type, instrument, and quantity that drive
+                cap evaluation.
+
+        Yields:
+            A :class:`Guard` echoing the submission + a pre-
+            generated UUID7 ``assigned_public_id``. The caller
+            performs the DB insert + commit inside the ``async
+            with`` block; the per-user lock releases on context
+            exit whether the body succeeded or raised.
+
         Given: a :class:`TradeCommandSubmission` with a non-None
             ``user_public_id``,
         When: the caller enters ``async with enforcer.guard(s):``,
@@ -210,6 +222,18 @@ class TradingCapsEnforcer:
     ) -> AsyncIterator[Guard]:
         """Strategy hot-path bypass — no caps, no lock, just UUID7.
 
+        Args:
+            submission: Pre-insert DTO for the service-principal
+                emission. ``user_public_id`` is expected to be
+                ``None`` here; other fields are echoed on the
+                yielded :class:`Guard` for the caller's insert
+                row construction.
+
+        Yields:
+            A :class:`Guard` carrying the original submission + a
+            freshly-generated UUID7 ``assigned_public_id``. No lock
+            is held and no cap state is consulted.
+
         Given: a :class:`TradeCommandSubmission` from a service
             principal (strategy engine) where no user is the
             actor,
@@ -239,17 +263,19 @@ class TradingCapsEnforcer:
         + notional caps. Cancel branch exercises only the
         cancels-per-minute cap per §3.5.3.
         """
-        caps = await self._repository.get_user_trading_caps(
-            submission.user_public_id  # type: ignore[arg-type]
-        )
+        assert (
+            submission.user_public_id is not None
+        ), "guard() rejected None user before reaching evaluator"
+        user_public_id = submission.user_public_id
+        caps = await self._repository.get_user_trading_caps(user_public_id)
         if caps is None:
             return
         if submission.command_type == "cancel":
-            await self._check_cancels_cap(submission, caps)
+            await self._check_cancels_cap(user_public_id, caps)
             return
         self._check_quantity_cap(submission, caps)
-        await self._check_open_orders_cap(submission, caps)
-        await self._check_notional_cap(submission, caps)
+        await self._check_open_orders_cap(user_public_id, caps)
+        await self._check_notional_cap(submission, user_public_id, caps)
 
     @staticmethod
     def _check_quantity_cap(submission: TradeCommandSubmission, caps: UserTradingCapsRow) -> None:
@@ -288,16 +314,18 @@ class TradingCapsEnforcer:
                 limit=float(limit),
             )
 
-    async def _check_open_orders_cap(
-        self, submission: TradeCommandSubmission, caps: UserTradingCapsRow
-    ) -> None:
-        """Reject if user's active submit+replace count would exceed cap."""
+    async def _check_open_orders_cap(self, user_public_id: str, caps: UserTradingCapsRow) -> None:
+        """Reject if user's active submit+replace count would exceed cap.
+
+        Args:
+            user_public_id: Acting user (already non-None — caller
+                narrowed the optional at guard entry).
+            caps: Active :class:`UserTradingCapsRow` for the user.
+        """
         limit = caps.get("max_open_orders")
         if limit is None:
             return
-        current = await self._repository.count_user_open_commands(
-            submission.user_public_id  # type: ignore[arg-type]
-        )
+        current = await self._repository.count_user_open_commands(user_public_id)
         if current + 1 > limit:
             raise CapsViolationError(
                 "max_open_orders",
@@ -306,7 +334,10 @@ class TradingCapsEnforcer:
             )
 
     async def _check_notional_cap(
-        self, submission: TradeCommandSubmission, caps: UserTradingCapsRow
+        self,
+        submission: TradeCommandSubmission,
+        user_public_id: str,
+        caps: UserTradingCapsRow,
     ) -> None:
         """Reject if new submission pushes rolling 24h USD above cap.
 
@@ -320,6 +351,17 @@ class TradingCapsEnforcer:
         :meth:`USDConverter.to_usd` (falls back to
         ``CapsViolationError(price_unavailable)`` if the oracle
         is stale / missing).
+
+        Args:
+            submission: The :class:`TradeCommandSubmission` being
+                evaluated.
+            user_public_id: Acting user (narrowed non-None).
+            caps: Active :class:`UserTradingCapsRow`.
+
+        Raises:
+            CapsViolationError: when the rolling sum + new
+                notional would exceed ``max_daily_notional_usd`` or
+                when the USD oracle is unavailable.
         """
         limit = caps.get("max_daily_notional_usd")
         if limit is None or submission.quantity is None:
@@ -333,14 +375,11 @@ class TradingCapsEnforcer:
         except PriceUnavailableError as exc:
             raise CapsViolationError(
                 "price_unavailable",
-                detail=f"{exc.reason}: {exc.detail}",
+                detail=f"{exc.reason_code}: {exc.detail}",
             ) from exc
 
         since = self._now() - ROLLING_NOTIONAL_WINDOW
-        rows = await self._repository.get_user_recent_submits(
-            submission.user_public_id,  # type: ignore[arg-type]
-            since,
-        )
+        rows = await self._repository.get_user_recent_submits(user_public_id, since)
         prior_sum = Decimal("0")
         skipped_market = 0
         for r in rows:
@@ -352,7 +391,7 @@ class TradingCapsEnforcer:
             logger.warning(
                 "caps_enforcer: notional sum skipped "
                 f"{skipped_market} market-order row(s) with price=None "
-                f"for user={submission.user_public_id}"
+                f"for user={user_public_id}"
             )
         total = prior_sum + new_notional
         if total > Decimal(str(limit)):
@@ -362,18 +401,18 @@ class TradingCapsEnforcer:
                 limit=float(limit),
             )
 
-    async def _check_cancels_cap(
-        self, submission: TradeCommandSubmission, caps: UserTradingCapsRow
-    ) -> None:
-        """Reject if user's 60s cancel-submit count would exceed cap."""
+    async def _check_cancels_cap(self, user_public_id: str, caps: UserTradingCapsRow) -> None:
+        """Reject if user's 60s cancel-submit count would exceed cap.
+
+        Args:
+            user_public_id: Acting user (narrowed non-None).
+            caps: Active :class:`UserTradingCapsRow`.
+        """
         limit = caps.get("max_cancels_per_minute")
         if limit is None:
             return
         since = self._now() - ROLLING_CANCELS_WINDOW
-        current = await self._repository.count_user_rolling_cancels(
-            submission.user_public_id,  # type: ignore[arg-type]
-            since,
-        )
+        current = await self._repository.count_user_rolling_cancels(user_public_id, since)
         if current + 1 > limit:
             raise CapsViolationError(
                 "max_cancels_per_minute",

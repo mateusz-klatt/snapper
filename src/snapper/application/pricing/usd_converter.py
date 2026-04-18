@@ -38,11 +38,11 @@ from decimal import Decimal
 
 from sqlalchemy import select
 
-from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Instrument
 from snapper.data.models import MarketSnapshot
 from snapper.data.models import Symbol
 from snapper.data.repository import Repository
+from snapper.data.repository import where_active
 
 CACHE_TTL_SECONDS = 60
 STALENESS_THRESHOLD_SECONDS = 300
@@ -69,7 +69,7 @@ class PriceUnavailableError(Exception):
 
     def __init__(self, reason: str, instrument_public_id: str, detail: str = "") -> None:
         """Initialize with structured reason + context."""
-        self.reason = reason
+        self.reason_code: str = reason
         self.instrument_public_id = instrument_public_id
         self.detail = detail
         msg = f"price unavailable ({reason}) for instrument {instrument_public_id}"
@@ -173,8 +173,8 @@ class USDConverter:
                 .join(Instrument, Instrument.symbol_public_id == Symbol.public_id)
                 .where(
                     Instrument.public_id == instrument_public_id,
-                    Instrument.known_to == KNOWN_TO_MAX,
-                    Symbol.known_to == KNOWN_TO_MAX,
+                    *where_active(Instrument, now),
+                    *where_active(Symbol, now),
                 )
             )
             quote = instr_q.scalar_one_or_none()
@@ -189,7 +189,7 @@ class USDConverter:
             snap_q = await session.execute(
                 select(MarketSnapshot.last_price, MarketSnapshot.timestamp).where(
                     MarketSnapshot.instrument_public_id == instrument_public_id,
-                    MarketSnapshot.known_to == KNOWN_TO_MAX,
+                    *where_active(MarketSnapshot, now),
                 )
             )
             row = snap_q.one_or_none()

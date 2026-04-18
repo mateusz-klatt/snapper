@@ -1015,8 +1015,8 @@ class TestGenerateIosPermissions:
         assert "manage:users" in content
         captured = capsys.readouterr()
         assert "Generated" in captured.out
-        assert "20 permissions" in captured.out
-        assert "3 roles" in captured.out
+        assert "21 permissions" in captured.out
+        assert "4 roles" in captured.out
         assert "11 resources" in captured.out
 
     def test_includes_all_roles(self, tmp_path: Path) -> None:
@@ -1046,7 +1046,7 @@ class TestGenerateIosPermissions:
 
         output = tmp_path / "ios" / "Snapper" / "Models" / "Generated" / "Permissions.swift"
         content = output.read_text()
-        assert '"overview": [.viewer, .operatorRole, .admin]' in content
+        assert '"overview": [.ai_delegate, .viewer, .operatorRole, .admin]' in content
         assert '"admin": [.admin]' in content
         assert '"settings": [.admin]' in content
         assert '"processes": [.operatorRole, .admin]' in content
@@ -2134,8 +2134,8 @@ class TestGeneratePermissions:
         assert "manage:users" in content
         captured = capsys.readouterr()
         assert "Generated" in captured.out
-        assert "20 permissions" in captured.out
-        assert "3 roles" in captured.out
+        assert "21 permissions" in captured.out
+        assert "4 roles" in captured.out
         assert "11 resources" in captured.out
 
     def test_includes_all_roles(self, tmp_path: Path) -> None:
@@ -2160,7 +2160,7 @@ class TestGeneratePermissions:
 
         output = tmp_path / "frontend" / "src" / "types" / "permissions.generated.ts"
         content = output.read_text()
-        assert "overview: ['viewer', 'operator', 'admin']" in content
+        assert "overview: ['ai_delegate', 'viewer', 'operator', 'admin']" in content
         assert "admin: ['admin']" in content
         assert "settings: ['admin']" in content
         assert "processes: ['operator', 'admin']" in content
