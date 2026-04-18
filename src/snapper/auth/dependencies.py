@@ -118,6 +118,7 @@ def require_role(role: UserRole) -> Any:
         Dependency function that validates role hierarchy.
     """
     role_hierarchy = {
+        UserRole.AI_DELEGATE: -1,
         UserRole.VIEWER: 0,
         UserRole.OPERATOR: 1,
         UserRole.ADMIN: 2,

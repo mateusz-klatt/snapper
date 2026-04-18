@@ -31,6 +31,7 @@ class Permission(StrEnum):
     READ_POSITIONS = "read:positions"
     MANAGE_POSITIONS = "manage:positions"
     READ_STRATEGIES = "read:strategies"
+    READ_SIGNALS = "read:signals"
     START_STRATEGIES = "start:strategies"
     STOP_STRATEGIES = "stop:strategies"
     CONFIGURE_STRATEGIES = "configure:strategies"
@@ -62,6 +63,18 @@ RESOURCE_PERMISSIONS: dict[str, Permission | None] = {
 
 
 ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
+    UserRole.AI_DELEGATE: {
+        Permission.READ_MARKET_DATA,
+        Permission.READ_ORDERS,
+        Permission.CREATE_ORDERS,
+        Permission.CANCEL_ORDERS,
+        Permission.READ_POSITIONS,
+        Permission.MANAGE_POSITIONS,
+        Permission.READ_STRATEGIES,
+        Permission.READ_SIGNALS,
+        Permission.READ_SYSTEM_STATUS,
+        Permission.READ_BACKTESTS,
+    },
     UserRole.VIEWER: {
         Permission.READ_MARKET_DATA,
         Permission.READ_ORDERS,

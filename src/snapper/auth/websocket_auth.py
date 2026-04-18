@@ -257,6 +257,7 @@ class WebSocketAuthManager:
         if not user:
             return False
         role_hierarchy = {
+            UserRole.AI_DELEGATE: -1,
             UserRole.VIEWER: 0,
             UserRole.OPERATOR: 1,
             UserRole.ADMIN: 2,
