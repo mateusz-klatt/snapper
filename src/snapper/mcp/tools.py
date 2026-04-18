@@ -38,7 +38,6 @@ from uuid import uuid7
 from fastapi import HTTPException
 from mcp.server.fastmcp import FastMCP
 
-from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
@@ -48,6 +47,7 @@ from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.repository import Repository
 from snapper.data.repository_types import ExecutionPlanInsertRow
 from snapper.data.repository_types import TradeCommandInsertRow
+from snapper.mcp.output_sanitizer import sanitize_output
 
 _MCP_SOURCE_SURFACE = "mcp"
 _MCP_TOOL_STREAM = "rest.mcp"
@@ -134,7 +134,10 @@ def register_mcp_tools(
                 "Repository not yet initialized; MCP tool dispatched before lifespan startup."
             )
         rows = await repo.get_exchange_instruments(exchange, as_of=datetime.now(UTC))
-        return {"exchange": exchange, "instruments": sorted(rows)}
+        sanitized: dict[str, Any] = sanitize_output(
+            {"exchange": exchange, "instruments": sorted(rows)}
+        )
+        return sanitized
 
     @mcp_server.tool()
     async def submit_manual_order(
@@ -214,81 +217,79 @@ def register_mcp_tools(
             source_surface=_MCP_SOURCE_SURFACE,
             idempotency_key=idempotency_key,
         )
-        try:
-            async with enforcer.guard(submission):
-                plan_row: ExecutionPlanInsertRow = {
-                    "plan_type": "manual_once",
-                    "created_by_user_id": claims.user_public_id or claims.username,
-                    "created_via": "api",
-                    "instrument_public_id": instrument_public_id,
-                    "exchange": exchange,
-                    "mode": "live",
-                    "shard_key": shard_key,
-                    "wallet_public_id": wallet_public_id,
-                    "operator_public_id": operator_public_id or claims.primary_operator_public_id,
-                    "total_quantity": quantity,
-                    "side": side,
-                    "params": {
-                        "order_type": order_type,
-                        "side": side,
-                        "child_client_order_id": client_order_id,
-                        "native_instrument": instrument,
-                        "venue_order_type": order_type,
-                        **({"price": price} if price is not None else {}),
-                    },
-                    "status": "pending",
-                    "created_at": now,
-                    "idempotency_key": idempotency_key,
-                    "session_id": _MCP_TOOL_STREAM,
-                    "sequence_id": 1,
-                    "timestamp": ts,
-                }
-                try:
-                    _plan_id, plan_public_id = await repo.insert_execution_plan(plan_row)
-                except Exception as exc:
-                    err_str = str(exc).lower()
-                    if "unique" in err_str or "duplicate" in err_str:
-                        raise HTTPException(
-                            status_code=409,
-                            detail="Idempotency key already used",
-                        ) from exc
-                    raise
-                cmd_row: TradeCommandInsertRow = {
-                    "command_type": "create",
-                    "shard_key": shard_key,
-                    "exchange": exchange,
-                    "instrument": instrument,
-                    "mode": "live",
-                    "strategy_id": "manual",
-                    "client_order_id": client_order_id,
-                    "venue_client_id": client_order_id,
-                    "side": side,
+        async with enforcer.guard(submission):
+            plan_row: ExecutionPlanInsertRow = {
+                "plan_type": "manual_once",
+                "created_by_user_id": claims.user_public_id or claims.username,
+                "created_via": "api",
+                "instrument_public_id": instrument_public_id,
+                "exchange": exchange,
+                "mode": "live",
+                "shard_key": shard_key,
+                "wallet_public_id": wallet_public_id,
+                "operator_public_id": operator_public_id or claims.primary_operator_public_id,
+                "total_quantity": quantity,
+                "side": side,
+                "params": {
                     "order_type": order_type,
-                    "quantity": quantity,
-                    "price": price,
-                    "leverage": None,
-                    "reduce_only": False,
-                    "status": TradeCommandStatusEnum.CREATED,
-                    "created_at": now,
-                    "correlation_id": plan_public_id,
-                    "session_id": _MCP_TOOL_STREAM,
-                    "sequence_id": 2,
-                    "timestamp": ts,
-                    "wallet_public_id": wallet_public_id,
-                    "operator_public_id": operator_public_id or claims.primary_operator_public_id,
-                    "user_public_id": claims.user_public_id or claims.username,
-                    "plan_public_id": plan_public_id,
-                    "source_surface": _MCP_SOURCE_SURFACE,
-                }
-                _cmd_id, command_public_id = await repo.insert_trade_command(
-                    cmd_row, ownership=None
-                )
-        except CapsViolationError:
-            raise
+                    "side": side,
+                    "child_client_order_id": client_order_id,
+                    "native_instrument": instrument,
+                    "venue_order_type": order_type,
+                    **({"price": price} if price is not None else {}),
+                },
+                "status": "pending",
+                "created_at": now,
+                "idempotency_key": idempotency_key,
+                "session_id": _MCP_TOOL_STREAM,
+                "sequence_id": 1,
+                "timestamp": ts,
+            }
+            try:
+                _plan_id, plan_public_id = await repo.insert_execution_plan(plan_row)
+            except Exception as exc:
+                err_str = str(exc).lower()
+                if "unique" in err_str or "duplicate" in err_str:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Idempotency key already used",
+                    ) from exc
+                raise
+            cmd_row: TradeCommandInsertRow = {
+                "command_type": "create",
+                "shard_key": shard_key,
+                "exchange": exchange,
+                "instrument": instrument,
+                "mode": "live",
+                "strategy_id": "manual",
+                "client_order_id": client_order_id,
+                "venue_client_id": client_order_id,
+                "side": side,
+                "order_type": order_type,
+                "quantity": quantity,
+                "price": price,
+                "leverage": None,
+                "reduce_only": False,
+                "status": TradeCommandStatusEnum.CREATED,
+                "created_at": now,
+                "correlation_id": plan_public_id,
+                "session_id": _MCP_TOOL_STREAM,
+                "sequence_id": 2,
+                "timestamp": ts,
+                "wallet_public_id": wallet_public_id,
+                "operator_public_id": operator_public_id or claims.primary_operator_public_id,
+                "user_public_id": claims.user_public_id or claims.username,
+                "plan_public_id": plan_public_id,
+                "source_surface": _MCP_SOURCE_SURFACE,
+            }
+            _cmd_id, command_public_id = await repo.insert_trade_command(cmd_row, ownership=None)
         assert plan_public_id is not None
         assert command_public_id is not None
-        return {
-            "plan_public_id": plan_public_id,
-            "command_public_id": command_public_id,
-            "source_surface": _MCP_SOURCE_SURFACE,
-        }
+        sanitized: dict[str, Any] = sanitize_output(
+            {
+                "plan_public_id": plan_public_id,
+                "command_public_id": command_public_id,
+                "source_surface": _MCP_SOURCE_SURFACE,
+            }
+        )
+        return sanitized
