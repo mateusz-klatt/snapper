@@ -17,6 +17,8 @@ from collections.abc import AsyncIterator
 from collections.abc import Awaitable
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Any
+from typing import cast
 
 import pytest
 import pytest_asyncio
@@ -26,6 +28,7 @@ import zmq.asyncio
 import snapper.application.engine.trader as snapper_trader
 import snapper.config.settings as snapper_settings
 from snapper.application.engine.trader import TraderCoordinator
+from snapper.config.app import AppSettings
 from snapper.messaging.executors.paper import PaperOrderExecutor
 from snapper.messaging.infrastructure.broker import ZmqBrokerThread
 
@@ -208,6 +211,133 @@ async def paper_e2e_stack(
         yield stack
     finally:
         await _stop_background_process(trader.stop(), trader_task)
+        await _stop_background_process(executor.stop(), executor_task)
+        with contextlib.suppress(Exception):
+            broker.stop()
+        with contextlib.suppress(Exception):
+            client_context.term()
+
+
+def _per_coordinator_settings(
+    base: Any,
+    instance_id: int,
+    instance_count: int = 2,
+) -> SimpleNamespace:
+    """Copy every attribute from ``base`` and overlay coordinator identity.
+
+    Used by :func:`two_coordinator_stack` to produce per-instance
+    settings that differ ONLY on ``coordinator_instance_id`` while
+    sharing ``coordinator_instance_count``. All other fields
+    (db_url, zmq endpoints, risk_*, etc.) come from the autouse mock
+    so the two coordinators land in the same broker + DB.
+    """
+    fields: dict[str, Any] = {k: getattr(base, k) for k in dir(base) if not k.startswith("_")}
+    fields["coordinator_instance_id"] = instance_id
+    fields["coordinator_instance_count"] = instance_count
+    return SimpleNamespace(**fields)
+
+
+@dataclass
+class TwoCoordinatorStack:
+    """Container for the N=2 partitioning integration stack.
+
+    Attributes:
+        broker: Running ZmqBrokerThread shared by both coordinators.
+        executor: Running PaperOrderExecutor (background task).
+        traders: Tuple of the two running TraderCoordinator instances
+            (trader_0 at instance_id=0, trader_1 at instance_id=1).
+        trader_tasks: Background tasks for each ``trader.start()`` loop.
+        executor_task: Background task for ``executor.start()``.
+        xsub_endpoint: Broker XSUB endpoint (publishers connect here).
+        xpub_endpoint: Broker XPUB endpoint (subscribers connect here).
+        client_context: zmq.asyncio.Context owned by the test for
+            signal injection / event observation.
+        base_mock: Raw autouse mock settings object — scenario tests
+            can build a third coordinator via
+            :func:`_per_coordinator_settings` for restart scenarios.
+    """
+
+    broker: ZmqBrokerThread
+    executor: PaperOrderExecutor
+    traders: tuple[TraderCoordinator, TraderCoordinator]
+    trader_tasks: tuple[asyncio.Task[None], asyncio.Task[None]]
+    executor_task: asyncio.Task[None]
+    xsub_endpoint: str
+    xpub_endpoint: str
+    client_context: zmq.asyncio.Context
+    base_mock: Any
+
+
+@pytest_asyncio.fixture
+async def two_coordinator_stack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[TwoCoordinatorStack]:
+    """Spin up broker + paper executor + TWO TraderCoordinator instances.
+
+    Both coordinators share the same ZMQ broker + SQLite DB. Each is
+    constructed with its own ``coordinator_instance_id`` (0, 1) via
+    the Phase 4 ``settings=`` kwarg on ``TraderCoordinator.__init__``.
+    The fixture reuses :func:`_patch_settings_for_e2e` for broker +
+    executor + module-level ``_bootstrap_settings`` patching
+    (essential — ``_setup_signal_subscriber`` reads the module-level
+    variable at :1826), then threads per-coordinator ownership via
+    ``settings=``.
+
+    Readiness: gives the broker proxy thread + both coordinator
+    subscribers time to establish subscriptions before yielding.
+    Simpler than the plan's canary-driven barrier; the same
+    ``_wait_for_executor_subscription`` sleep-based approach works
+    for the Phase 4 integration tests because they publish after the
+    yield (giving the subscribers extra time beyond the initial
+    sleep).
+    """
+    xsub_port = _free_tcp_port()
+    xpub_port = _free_tcp_port()
+    xsub_endpoint = f"tcp://127.0.0.1:{xsub_port}"
+    xpub_endpoint = f"tcp://127.0.0.1:{xpub_port}"
+    _patch_settings_for_e2e(monkeypatch, xsub_endpoint, xpub_endpoint)
+
+    base_mock = snapper_settings.get_settings()
+
+    broker = ZmqBrokerThread(xsub_endpoint=xsub_endpoint, xpub_endpoint=xpub_endpoint)
+    broker.start()
+
+    executor = PaperOrderExecutor()
+    executor._credentials = {"initial_balance": "1000000"}
+    executor_task = asyncio.create_task(executor.start())
+
+    trader_0 = TraderCoordinator(
+        signal_topics=["signals."],
+        settings=cast(AppSettings, _per_coordinator_settings(base_mock, 0)),
+    )
+    trader_1 = TraderCoordinator(
+        signal_topics=["signals."],
+        settings=cast(AppSettings, _per_coordinator_settings(base_mock, 1)),
+    )
+    trader_0_task = asyncio.create_task(trader_0.start())
+    trader_1_task = asyncio.create_task(trader_1.start())
+
+    client_context = zmq.asyncio.Context()
+
+    await _wait_for_executor_subscription(xsub_endpoint, "BTC-USD")
+    await asyncio.sleep(0.3)
+
+    stack = TwoCoordinatorStack(
+        broker=broker,
+        executor=executor,
+        traders=(trader_0, trader_1),
+        trader_tasks=(trader_0_task, trader_1_task),
+        executor_task=executor_task,
+        xsub_endpoint=xsub_endpoint,
+        xpub_endpoint=xpub_endpoint,
+        client_context=client_context,
+        base_mock=base_mock,
+    )
+    try:
+        yield stack
+    finally:
+        for trader, task in zip(stack.traders, stack.trader_tasks, strict=True):
+            await _stop_background_process(trader.stop(), task)
         await _stop_background_process(executor.stop(), executor_task)
         with contextlib.suppress(Exception):
             broker.stop()
