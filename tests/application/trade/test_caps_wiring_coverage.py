@@ -13,11 +13,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from snapper.application.engine.service import TradingEngineService
 from snapper.application.engine.trader import TraderCoordinator
+from snapper.application.plans.service import PlanExecutorService
 from snapper.application.pricing.usd_converter import USDConverter
 from snapper.application.trade.caps_enforcer import Guard
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.submission import TradeCommandSubmission
+from snapper.core.types import ExchangeEnum
+from snapper.data.repository import SQLAlchemyRepository
 
 
 def test_trader_coordinator_build_caps_enforcer_none_for_non_sqlalchemy_repo() -> None:
@@ -45,8 +49,6 @@ def test_trader_coordinator_build_caps_enforcer_returns_instance_for_sqlalchemy(
         happy-path branch where the enforcer + USDConverter get
         wired together for production.
     """
-    from snapper.data.repository import SQLAlchemyRepository
-
     coord = TraderCoordinator()
     coord.repository = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
     enforcer = coord._build_caps_enforcer()
@@ -65,9 +67,6 @@ async def test_trading_engine_send_order_with_enforcer_exercises_guard_branch() 
         ``Guard`` — covers engine/service.py lines 482-483 (the
         with-enforcer branch).
     """
-    from snapper.application.engine.service import TradingEngineService
-    from snapper.core.types import ExchangeEnum
-
     guard_calls = {"n": 0}
 
     class _GuardCtx:
@@ -140,9 +139,6 @@ async def test_plan_executor_start_lazy_constructs_caps_enforcer() -> None:
         run-loop are stubbed to isolate the lazy-construction
         branch.
     """
-    from snapper.application.plans.service import PlanExecutorService
-    from snapper.data.repository import SQLAlchemyRepository
-
     real_repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
     await real_repo.create_all()
 
@@ -168,8 +164,6 @@ async def test_plan_executor_emit_trade_command_service_principal_path() -> None
         ``guard``) — covers the service-principal branch of
         plans/service.py ``_emit_trade_command``.
     """
-    from snapper.application.plans.service import PlanExecutorService
-
     bypass_calls = {"n": 0}
 
     class _BypassCtx:
@@ -223,8 +217,6 @@ async def test_plan_executor_emit_trade_command_direct_path_when_no_enforcer() -
     Then: the insert happens without any enforcer wrap — covers
         the plans/service.py pre-Phase-A-compat branch.
     """
-    from snapper.application.plans.service import PlanExecutorService
-
     service = PlanExecutorService()
     service._caps_enforcer = None
     service.repository = MagicMock()
@@ -253,8 +245,6 @@ async def test_plan_executor_emit_trade_command_user_bound_path_uses_guard() -> 
         service-principal bypass) — covers the user-bound branch
         of ``_emit_trade_command``.
     """
-    from snapper.application.plans.service import PlanExecutorService
-
     guard_calls = {"n": 0}
 
     class _GuardCtx:
