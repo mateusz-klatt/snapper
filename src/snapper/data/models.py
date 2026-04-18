@@ -870,6 +870,12 @@ class TradeCommand(TemporalMixin, Base):
     __tablename__ = "trade_commands"
     __table_args__ = (
         Index("ix_trade_commands_status", "status"),
+        Index(
+            "ix_trade_commands_outbox_pagination",
+            "status",
+            "created_at",
+            "id",
+        ),
         Index("ix_trade_commands_shard_key", "shard_key"),
         Index(
             "uq_trade_commands_idempotency",

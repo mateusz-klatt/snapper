@@ -214,8 +214,105 @@ def test_coordinator_ownership_from_bootstrap_env(
     assert owned_by_0 | owned_by_1 == {"a", "b", "c", "d", "e", "f"}
 
 
+async def _force_checkpoint(
+    stack: TwoCoordinatorStack,
+    shard_key: str,
+    wallet_public_id: str = "",
+) -> None:
+    """Force a checkpoint for ``shard_key`` via direct repository write.
+
+    Circumvents the trade-runtime's async checkpoint emission policy
+    so scenario #2's positive-recovery variant can assert deterministic
+    state restoration after restart without fighting the 60s
+    checkpoint tick (plan §3.5).
+    """
+    from snapper.data.repository import get_repository
+
+    repo = get_repository(stack.base_mock.db_url)
+    now = datetime.now(UTC)
+    await repo.upsert_checkpoint(
+        {
+            "shard_key": shard_key,
+            "position_qty": 0.0,
+            "entry_price": None,
+            "position_opened_at": None,
+            "cash": 1_000_000.0,
+            "peak_equity": 1_000_000.0,
+            "realized_pnl": 0.0,
+            "turnover": 0.0,
+            "last_venue_event_id": 1,
+            "last_venue_event_at": now,
+            "open_command_ids": None,
+            "seen_exec_ids": "[]",
+            "checkpoint_at": now,
+            "session_id": "phase4-forced-checkpoint",
+            "sequence_id": 1,
+            "bus_time": now,
+            "wallet_public_id": wallet_public_id,
+        }
+    )
+
+
 class TestCoordinatorRestartOnlyRecoversOwned:
     """Scenario #2 — restart recovers exactly the owned shards."""
+
+    async def test_coordinator_restart_positively_recovers_forced_checkpoint(
+        self, two_coordinator_stack: TwoCoordinatorStack
+    ) -> None:
+        """Positive recovery: a forced checkpoint for an owned shard IS recovered.
+
+        Complements ``test_coordinator_restart_only_recovers_owned``
+        (which only proves the exclusion invariant). Writes a
+        checkpoint directly via the repository for a shard owned by
+        instance 1, restarts instance 1, asserts the restored
+        coordinator HAS that shard's engine in memory after the
+        recovery cycle completes.
+
+        This exercises the §3.5 sub-method 1 (checkpoint) path
+        end-to-end under N>1 — the contract that paper-N>1 recovery
+        RELIES on because sub-methods 2+3 are disabled for paper.
+        Recommended by the 3-model final review for converting the
+        disjoint-only assertion into a positive recovery guarantee.
+        """
+        trader_0, trader_1 = two_coordinator_stack.traders
+        _, instruments_1 = _pick_instruments_per_instance()
+        assert instruments_1, "test requires at least one shard owned by instance 1"
+        target_instrument = instruments_1[0]
+        target_shard = f"paper.{target_instrument}.paper.live"
+
+        await _force_checkpoint(two_coordinator_stack, target_shard)
+
+        trader_1_tasks = two_coordinator_stack.trader_tasks
+        from tests.integration.conftest import _stop_background_process
+
+        await _stop_background_process(trader_1.stop(), trader_1_tasks[1])
+
+        trader_0_keys_before = set(trader_0.engines.keys())
+
+        trader_1_new = TraderCoordinator(
+            signal_topics=["signals."],
+            settings=cast(
+                AppSettings,
+                _per_coordinator_settings(two_coordinator_stack.base_mock, 1),
+            ),
+        )
+        trader_1_new_task = asyncio.create_task(trader_1_new.start())
+        try:
+            expected_key = f"{target_instrument}@paper-live"
+            await _wait_for_engines(trader_1_new, {expected_key}, timeout=10.0)
+            restored = set(trader_1_new.engines.keys())
+            assert expected_key in restored, (
+                f"trader_1_new failed to recover forced-checkpoint shard "
+                f"{target_shard} (expected engine_key={expected_key}, "
+                f"got engines={restored})"
+            )
+            recovered_engine = trader_1_new.engines[expected_key]
+            assert recovered_engine._ownership is not None
+            assert recovered_engine._ownership.instance_id == 1
+            assert recovered_engine._ownership.instance_count == 2
+            assert set(trader_0.engines.keys()) == trader_0_keys_before
+        finally:
+            await _stop_background_process(trader_1_new.stop(), trader_1_new_task)
 
     async def test_coordinator_restart_only_recovers_owned(
         self, two_coordinator_stack: TwoCoordinatorStack

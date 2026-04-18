@@ -33,6 +33,17 @@ CANONICAL_SITES: set[tuple[str, str]] = {
 }
 
 
+SITE_POLICY: dict[tuple[str, str], str] = {
+    ("src/snapper/application/engine/service.py", "_send_order"): "ownership",
+    ("src/snapper/application/plans/service.py", "_reemit_single_stranded_cancel"): "none",
+    ("src/snapper/application/plans/service.py", "_dispatch_commands"): "none",
+    ("src/snapper/server/order_routes.py", "create_order"): "none",
+    ("src/snapper/server/order_routes.py", "_cancel_plan"): "none",
+    ("src/snapper/server/trailing_stop_routes.py", "cancel_trailing_stop"): "none",
+    ("src/snapper/server/execution_plan_routes.py", "cancel_bracket"): "none",
+}
+
+
 def _is_ownership_value_policy(value: ast.expr) -> bool:
     """Accept either ``self._ownership`` attribute chain or ``None``."""
     if isinstance(value, ast.Constant) and value.value is None:
@@ -41,6 +52,24 @@ def _is_ownership_value_policy(value: ast.expr) -> bool:
         base = value.value
         return isinstance(base, ast.Name) and base.id == "self"
     return False
+
+
+def _classify_ownership_value(value: ast.expr) -> str | None:
+    """Return ``"ownership"``, ``"none"``, or ``None`` for the given AST value.
+
+    Used by :func:`test_insert_site_policy_matches_plan_section_1_8` to
+    pin each canonical site to its expected policy value. Prevents a
+    future accidental swap (e.g., ``_send_order`` changing to
+    ``ownership=None``) from passing the weaker
+    "any-known-policy-value" check.
+    """
+    if isinstance(value, ast.Constant) and value.value is None:
+        return "none"
+    if isinstance(value, ast.Attribute) and value.attr == "_ownership":
+        base = value.value
+        if isinstance(base, ast.Name) and base.id == "self":
+            return "ownership"
+    return None
 
 
 def _find_enclosing_function(
@@ -111,6 +140,39 @@ def test_every_insert_trade_command_call_has_explicit_ownership_kwarg() -> None:
                 f"§1.8 policy (must be self._ownership OR None literal)"
             )
     assert not violations, "insert_trade_command call-site violations:\n" + "\n".join(violations)
+
+
+def test_insert_site_policy_matches_plan_section_1_8() -> None:
+    """Each canonical site uses its specific policy value.
+
+    Stronger than
+    :func:`test_every_insert_trade_command_call_has_explicit_ownership_kwarg`
+    which only accepts the set ``{self._ownership, None}``. This test
+    pins each ``(file, function)`` tuple to its expected value so a
+    future accidental swap — e.g., changing ``_send_order`` to
+    ``ownership=None`` would bypass the defense-in-depth guard — is
+    caught by CI rather than by a production incident.
+    """
+    violations: list[str] = []
+    for py_file in SRC_ROOT.rglob("*.py"):
+        for rel, fn_name, lineno, call in _collect_insert_sites(py_file):
+            site = (rel, fn_name)
+            if site not in SITE_POLICY:
+                continue
+            kwargs_by_name = {kw.arg: kw.value for kw in call.keywords if kw.arg is not None}
+            actual_value = kwargs_by_name.get("ownership")
+            if actual_value is None:
+                violations.append(f"{rel}:{lineno} in {fn_name}(): ownership= kwarg missing")
+                continue
+            actual_policy = _classify_ownership_value(actual_value)
+            expected_policy = SITE_POLICY[site]
+            if actual_policy != expected_policy:
+                violations.append(
+                    f"{rel}:{lineno} in {fn_name}(): expected "
+                    f"ownership={expected_policy!r} per §1.8, got "
+                    f"{actual_policy!r}"
+                )
+    assert not violations, "per-site policy violations (plan §1.8):\n" + "\n".join(violations)
 
 
 def test_insert_site_matrix_matches_plan_section_1_8() -> None:

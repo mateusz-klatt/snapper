@@ -154,6 +154,37 @@ Under N>1 paper mode, state that never produced a checkpoint is
 not recovered by the restarted coordinator. Paper strategies that
 need to survive restart MUST persist checkpoints.
 
+## Known limitation — REST orders with `wallet_public_id` under N>1
+
+Pre-existing behavior (predates Phase 4): the REST order endpoints
+at `src/snapper/server/order_routes.py` build the
+``TradeCommand.shard_key`` without the wallet segment, while the
+signal-driven engine's shard_key appends ``.w{wallet_short}`` via
+``_compute_shard_key`` when ``wallet_public_id`` is non-empty.
+
+At N=1 this is dormant because every shard is owned by the single
+coordinator, the outbox has no ownership filter, and the §3.2 CID
+guard is gated on ``instance_count > 1``.
+
+Under N>1, a REST order with a non-empty ``wallet_public_id``
+writes a TradeCommand whose shard_key hashes to a different
+instance than the engine for the same (exchange, instrument,
+wallet). The owning coordinator dispatches the command to the
+venue correctly, but the venue ACK is dropped by the §3.2 CID
+guard on every coordinator because the CID was never registered
+in ``_order_shard_keys`` (the REST path does not populate it).
+
+Consequence at N>1: REST orders with ``wallet_public_id`` reach
+the venue, but the coordinator's ``TradeService`` projection does
+not reflect fills/cancellations. Monitoring via the ``orders``
+and ``executions`` tables still works — only the in-memory
+coordinator state drifts.
+
+Mitigation until a forward fix lands: for N>1 deployments that
+need REST orders, either (a) set ``wallet_public_id=""`` on the
+REST request, or (b) stay on N=1 for workflows that mix signal-
+driven + REST-driven orders. Signal-only workflows are unaffected.
+
 ## Non-systemd deployments (contract)
 
 This plan's operational recipes are anchored on the systemd
