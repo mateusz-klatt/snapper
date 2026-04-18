@@ -286,6 +286,9 @@ def _build_mock_settings() -> Mock:
     mock_settings.ui_origin = ""
     mock_settings.session_same_site = "lax"
     mock_settings.session_domain = ""
+    mock_settings.coordinator_instance_id = 0
+    mock_settings.coordinator_instance_count = 1
+    mock_settings.coordinator_outbox_max_scan_rows = 1000
     return mock_settings
 
 

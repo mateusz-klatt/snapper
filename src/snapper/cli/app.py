@@ -41,6 +41,7 @@ Example:
 
 import asyncio
 import json as json_mod
+import os
 import signal
 import threading
 from datetime import UTC
@@ -88,6 +89,7 @@ from snapper.application.updaters.underlying_updater import UnderlyingUpdater
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.user_service import UserService
 from snapper.config.settings import BootstrapSettingsLoader
+from snapper.config.settings import get_bootstrap_settings
 from snapper.config.settings import get_settings
 from snapper.core.types import ExchangeEnum
 from snapper.data.archive_symbols import safe_path
@@ -251,12 +253,50 @@ def trade_zmq(
     signal_topics: str | None = typer.Option(
         None, help="Comma-separated signal topics to subscribe (default: signals.)"
     ),
+    instance_id: int | None = typer.Option(
+        None,
+        "--instance-id",
+        help=(
+            "Coordinator instance id (zero-based). Overrides the "
+            "SNAPPER_COORDINATOR_INSTANCE_ID env var when set. Default 0."
+        ),
+    ),
+    instance_count: int | None = typer.Option(
+        None,
+        "--instance-count",
+        help=(
+            "Total coordinator instance count. Overrides the "
+            "SNAPPER_COORDINATOR_INSTANCE_COUNT env var when set. Default 1."
+        ),
+    ),
 ) -> None:
     """Start the central trading coordinator.
 
     Args:
         signal_topics: Comma-separated list of ZMQ signal topics to subscribe.
+        instance_id: Zero-based identifier for this coordinator in a
+            multi-instance deployment. When provided, it is written to
+            ``os.environ`` so that the bootstrap settings loader picks
+            it up during :class:`BootstrapSettingsLoader` construction.
+        instance_count: Total coordinator count across the deployment.
+            Same env precedence as ``instance_id``.
+
+    Precedence: CLI flag > env var > default. When either flag is
+    passed, the settings caches are invalidated via ``cache_clear``
+    before any :func:`get_settings` call in this command body so the
+    fresh env value is observed (the factories at
+    ``snapper.config.settings`` are :func:`functools.lru_cache`-backed).
     """
+    flag_mutated = False
+    if instance_id is not None:
+        os.environ["SNAPPER_COORDINATOR_INSTANCE_ID"] = str(instance_id)
+        flag_mutated = True
+    if instance_count is not None:
+        os.environ["SNAPPER_COORDINATOR_INSTANCE_COUNT"] = str(instance_count)
+        flag_mutated = True
+    if flag_mutated:
+        get_bootstrap_settings.cache_clear()
+        get_settings.cache_clear()
     s = get_settings()
     if not validate_api_keys_for_trader(paper=False):
         typer.echo("Error validating configuration")

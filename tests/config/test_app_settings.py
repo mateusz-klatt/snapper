@@ -586,3 +586,118 @@ class TestServerProxyProperties:
         service = MockSettingsService({})
         settings = AppSettings(bootstrap, settings_service=service)
         assert settings.recon_balance_threshold == pytest.approx(1.0)
+
+
+class TestCoordinatorPartitioningProperties:
+    """Phase 4 ``coordinator_*`` delegate properties on :class:`AppSettings`.
+
+    The bootstrap field types differ from the :class:`AppSettings`
+    return types for ``coordinator_outbox_max_scan_rows`` (bootstrap
+    stores raw ``str | None`` for pydantic-settings compatibility;
+    ``AppSettings`` parses to ``int | None``). The other two are
+    straight int passthroughs. None of these consult the
+    :class:`SettingsService` — verified by constructing ``AppSettings``
+    with ``settings_service=None``.
+    """
+
+    def test_instance_id_delegates_to_bootstrap(self) -> None:
+        """``coordinator_instance_id`` passes through from bootstrap."""
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:",
+            SNAPPER_COORDINATOR_INSTANCE_ID="2",
+        )
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.coordinator_instance_id == 2
+
+    def test_instance_id_defaults_to_zero(self) -> None:
+        """Default bootstrap value surfaces as ``0``."""
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.coordinator_instance_id == 0
+
+    def test_instance_count_delegates_to_bootstrap(self) -> None:
+        """``coordinator_instance_count`` passes through from bootstrap."""
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:",
+            SNAPPER_COORDINATOR_INSTANCE_COUNT="5",
+        )
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.coordinator_instance_count == 5
+
+    def test_instance_count_defaults_to_one(self) -> None:
+        """Default bootstrap value surfaces as ``1``."""
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.coordinator_instance_count == 1
+
+    def test_max_scan_rows_parses_numeric_string(self) -> None:
+        """Numeric env string is parsed to an int."""
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:",
+            SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS="50",
+        )
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.coordinator_outbox_max_scan_rows == 50
+
+    def test_max_scan_rows_default_is_1000(self) -> None:
+        """The bootstrap default ``"1000"`` parses to the int ``1000``."""
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.coordinator_outbox_max_scan_rows == 1000
+
+    def test_max_scan_rows_empty_sentinel_is_none(self) -> None:
+        """Empty string disables the cap (``None``)."""
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:",
+            SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS="",
+        )
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.coordinator_outbox_max_scan_rows is None
+
+    def test_max_scan_rows_unbounded_sentinel_is_none(self) -> None:
+        """``"unbounded"`` disables the cap (``None``)."""
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:",
+            SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS="unbounded",
+        )
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.coordinator_outbox_max_scan_rows is None
+
+    def test_max_scan_rows_none_sentinel_is_none(self) -> None:
+        """``"none"`` (case-insensitive) disables the cap (``None``)."""
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:",
+            SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS="NONE",
+        )
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.coordinator_outbox_max_scan_rows is None
+
+    def test_max_scan_rows_non_int_raises(self) -> None:
+        """A non-numeric non-sentinel value raises :class:`ValueError`."""
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:",
+            SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS="abc",
+        )
+        settings = AppSettings(bootstrap, settings_service=None)
+        with pytest.raises(ValueError, match="must be positive int or 'unbounded'"):
+            _ = settings.coordinator_outbox_max_scan_rows
+
+    def test_max_scan_rows_negative_raises(self) -> None:
+        """A negative integer string raises :class:`ValueError`."""
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:",
+            SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS="-5",
+        )
+        settings = AppSettings(bootstrap, settings_service=None)
+        with pytest.raises(ValueError, match="must be >= 1 or 'unbounded'"):
+            _ = settings.coordinator_outbox_max_scan_rows
+
+    def test_max_scan_rows_zero_raises(self) -> None:
+        """``"0"`` is non-positive and raises :class:`ValueError`."""
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:",
+            SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS="0",
+        )
+        settings = AppSettings(bootstrap, settings_service=None)
+        with pytest.raises(ValueError, match="must be >= 1 or 'unbounded'"):
+            _ = settings.coordinator_outbox_max_scan_rows

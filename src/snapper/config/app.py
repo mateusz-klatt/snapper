@@ -158,6 +158,67 @@ class AppSettings:
         return self._bootstrap.zmq_broker_xpub
 
     @property
+    def coordinator_instance_id(self) -> int:
+        """Return this coordinator's zero-based instance identifier.
+
+        Sourced from ``SNAPPER_COORDINATOR_INSTANCE_ID`` env var (or
+        ``--instance-id`` CLI flag) via :class:`BootstrapSettingsLoader`.
+        NOT DB-backed — per-coordinator identity cannot live in shared
+        DB settings.
+
+        Returns:
+            Zero-based coordinator instance id. Default ``0``.
+        """
+        return self._bootstrap.coordinator_instance_id
+
+    @property
+    def coordinator_instance_count(self) -> int:
+        """Return the total number of coordinator instances.
+
+        Sourced from ``SNAPPER_COORDINATOR_INSTANCE_COUNT`` env var (or
+        ``--instance-count`` CLI flag). Operators raise this and
+        restart all coordinators during a full-cutover scale-up.
+
+        Returns:
+            Total coordinator instance count. Default ``1``.
+        """
+        return self._bootstrap.coordinator_instance_count
+
+    @property
+    def coordinator_outbox_max_scan_rows(self) -> int | None:
+        """Return the outbox scan cap as parsed ``int | None``.
+
+        The bootstrap field stores the raw env form (``str | None``)
+        because pydantic-settings parses env vars as strings. This
+        accessor parses it to ``int``, or returns ``None`` when the
+        operator sets the sentinel ``"unbounded"`` / ``""`` / ``"none"``
+        to disable the cap.
+
+        Returns:
+            Positive int scan cap, or ``None`` for unbounded scan.
+
+        Raises:
+            ValueError: If the raw value is not parseable as an int, or
+                parses to a non-positive value (and is not one of the
+                unbounded sentinels).
+        """
+        raw = self._bootstrap.coordinator_outbox_max_scan_rows
+        if raw is None or raw.strip().lower() in {"", "unbounded", "none"}:
+            return None
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise ValueError(
+                f"coordinator_outbox_max_scan_rows must be positive int or "
+                f"'unbounded', got {raw!r}"
+            ) from exc
+        if value <= 0:
+            raise ValueError(
+                f"coordinator_outbox_max_scan_rows must be >= 1 or 'unbounded', got {value}"
+            )
+        return value
+
+    @property
     def telemetry_recording_enabled(self) -> bool:
         """Return whether data-plane telemetry recording is enabled.
 

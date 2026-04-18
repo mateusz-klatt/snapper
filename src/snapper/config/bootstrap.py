@@ -63,6 +63,24 @@ class BootstrapSettingsLoader(BaseSettings):
         telemetry_recording_enabled: When True, data-plane messages
             (ping/pong, heartbeat, GET reads) are persisted to the
             telemetry table. Default is False (counters still increment).
+        coordinator_instance_id: Zero-based identifier for this
+            ``TraderCoordinator`` instance in a multi-instance
+            deployment. Default ``0``. Used with
+            ``coordinator_instance_count`` by
+            ``snapper.core.partitioning.ShardOwnership`` to decide
+            static-hash shard ownership.
+        coordinator_instance_count: Total number of coordinator
+            instances sharing the same DB/broker. Default ``1``
+            (single-instance; every shard is owned, partitioning is a
+            no-op). Operators raise this and restart all coordinators
+            during a full-cutover scale-up.
+        coordinator_outbox_max_scan_rows: Raw environment form of the
+            cap on how many rows ``OutboxDispatcher._dispatch_batch``
+            scans per poll while filtering for owned shards. Stored as
+            ``str | None`` because pydantic-settings parses env vars as
+            strings and the sentinel values ``""``, ``"unbounded"``,
+            and ``"none"`` need to survive round-trip. The parsed
+            ``int | None`` form lives on ``AppSettings``.
     """
 
     model_config = SettingsConfigDict(
@@ -81,3 +99,8 @@ class BootstrapSettingsLoader(BaseSettings):
     zmq_broker_xsub: str = Field(default="tcp://127.0.0.1:7500", alias="ZMQ_BROKER_XSUB")
     zmq_broker_xpub: str = Field(default="tcp://127.0.0.1:7501", alias="ZMQ_BROKER_XPUB")
     telemetry_recording_enabled: bool = Field(default=False, alias="TELEMETRY_RECORDING_ENABLED")
+    coordinator_instance_id: int = Field(default=0, alias="SNAPPER_COORDINATOR_INSTANCE_ID")
+    coordinator_instance_count: int = Field(default=1, alias="SNAPPER_COORDINATOR_INSTANCE_COUNT")
+    coordinator_outbox_max_scan_rows: str | None = Field(
+        default="1000", alias="SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS"
+    )
