@@ -190,7 +190,7 @@ export type AvailableTopics = string[];
 /**
  * Authenticated user role
  */
-export type UserRole = "viewer" | "operator" | "admin";
+export type UserRole = "ai_delegate" | "viewer" | "operator" | "admin";
 /**
  * Session expiration (ISO 8601)
  */

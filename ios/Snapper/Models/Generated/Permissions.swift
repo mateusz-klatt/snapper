@@ -11,6 +11,7 @@ enum Permission: String, CaseIterable, Codable, Sendable {
     case readPositions = "read:positions"
     case managePositions = "manage:positions"
     case readStrategies = "read:strategies"
+    case readSignals = "read:signals"
     case startStrategies = "start:strategies"
     case stopStrategies = "stop:strategies"
     case configureStrategies = "configure:strategies"
@@ -27,21 +28,22 @@ enum Permission: String, CaseIterable, Codable, Sendable {
 }
 
 let rolePermissions: [UserRole: [Permission]] = [
+    .ai_delegate: [.cancelOrders, .createOrders, .managePositions, .readBacktests, .readMarketData, .readOrders, .readPositions, .readSignals, .readStrategies, .readSystemStatus],
     .viewer: [.readBacktests, .readMarketData, .readOrders, .readPositions, .readStrategies, .readSystemStatus],
     .operatorRole: [.cancelOrders, .createOrders, .manageBacktests, .managePositions, .manageProcesses, .readBacktests, .readMarketData, .readOrders, .readPositions, .readStrategies, .readSystemStatus, .startStrategies, .stopStrategies],
-    .admin: [.cancelOrders, .configureStrategies, .configureSystem, .createOrders, .impersonateOperator, .manageBacktests, .managePositions, .manageProcesses, .manageScopeGrants, .manageUsers, .manageWalletCredentials, .readBacktests, .readMarketData, .readOrders, .readPositions, .readStrategies, .readSystemStatus, .readWalletCredentials, .startStrategies, .stopStrategies],
+    .admin: [.cancelOrders, .configureStrategies, .configureSystem, .createOrders, .impersonateOperator, .manageBacktests, .managePositions, .manageProcesses, .manageScopeGrants, .manageUsers, .manageWalletCredentials, .readBacktests, .readMarketData, .readOrders, .readPositions, .readSignals, .readStrategies, .readSystemStatus, .readWalletCredentials, .startStrategies, .stopStrategies],
 ]
 
 let resourceAccess: [String: [UserRole]] = [
-    "overview": [.viewer, .operatorRole, .admin],
-    "market": [.viewer, .operatorRole, .admin],
+    "overview": [.ai_delegate, .viewer, .operatorRole, .admin],
+    "market": [.ai_delegate, .viewer, .operatorRole, .admin],
     "processes": [.operatorRole, .admin],
-    "strategies": [.viewer, .operatorRole, .admin],
-    "orders": [.viewer, .operatorRole, .admin],
-    "positions": [.viewer, .operatorRole, .admin],
-    "signals": [.viewer, .operatorRole, .admin],
-    "health": [.viewer, .operatorRole, .admin],
+    "strategies": [.ai_delegate, .viewer, .operatorRole, .admin],
+    "orders": [.ai_delegate, .viewer, .operatorRole, .admin],
+    "positions": [.ai_delegate, .viewer, .operatorRole, .admin],
+    "signals": [.ai_delegate, .viewer, .operatorRole, .admin],
+    "health": [.ai_delegate, .viewer, .operatorRole, .admin],
     "admin": [.admin],
     "settings": [.admin],
-    "backtests": [.viewer, .operatorRole, .admin],
+    "backtests": [.ai_delegate, .viewer, .operatorRole, .admin],
 ]

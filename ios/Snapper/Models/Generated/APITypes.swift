@@ -10,6 +10,7 @@ enum RelationshipTypeEnum: String, Codable, Sendable {
 }
 
 enum UserRole: String, Codable, Sendable {
+    case aiDelegate = "ai_delegate"
     case viewer
     case operatorRole = "operator"
     case admin

@@ -628,7 +628,7 @@ export const UnderlyingInstrumentDataSchema = z
   })
   .strict()
 
-export const UserRoleSchema = z.enum(['viewer', 'operator', 'admin'])
+export const UserRoleSchema = z.enum(['ai_delegate', 'viewer', 'operator', 'admin'])
 
 export const ValidationErrorSchema = z
   .object({
