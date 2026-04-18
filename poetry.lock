@@ -4900,14 +4900,14 @@ cli = ["click (>=5.0)"]
 
 [[package]]
 name = "python-kraken-sdk"
-version = "3.2.7"
+version = "3.2.8"
 description = "Command-line tool and collection of REST and websocket clients to interact with the Kraken Crypto Asset Exchange."
 optional = false
 python-versions = ">=3.11"
 groups = ["main"]
 files = [
-    {file = "python_kraken_sdk-3.2.7-py3-none-any.whl", hash = "sha256:22245429419e69e1702d526f80f0740df80afec453f5f127876be736bb761fbe"},
-    {file = "python_kraken_sdk-3.2.7.tar.gz", hash = "sha256:d73810b105c139532918a32ee920fbf38be376a6e679a26c73ce3baf9682a680"},
+    {file = "python_kraken_sdk-3.2.8-py3-none-any.whl", hash = "sha256:a8f4cefdfa7039ac104deb562435944f7053bc4e1272396d27658c571c7f617a"},
+    {file = "python_kraken_sdk-3.2.8.tar.gz", hash = "sha256:77be18a944ebf419d402b7a899a0f4154f3634d4ef813a585874b6d64a6cc89a"},
 ]
 
 [package.dependencies]
@@ -7168,4 +7168,4 @@ cffi = ["cffi (>=1.17,<2.0) ; platform_python_implementation != \"PyPy\" and pyt
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.14"
-content-hash = "f8fde996f58faab7222462abc2825c5ccf4f4a2ce4488200ad286afe78da0849"
+content-hash = "ba52e483ca8e318496574f8c9c79297812d57a6aa44020e413998c5a99cd58dc"
