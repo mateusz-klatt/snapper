@@ -108,6 +108,7 @@ from snapper.application.process_manager.registry import discover_processes
 from snapper.application.services.continuous_contract_builder import ContinuousContractBuilder
 from snapper.application.services.settings import SettingsService
 from snapper.application.services.settings import get_settings_service
+from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.auth.dependencies import get_csrf_manager
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
@@ -153,6 +154,7 @@ from snapper.messaging.schemas.data import VenueFeeScheduleData
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
 from snapper.server.backtest_routes import router as backtest_router
 from snapper.server.credential_routes import router as credential_router
+from snapper.server.dependencies import get_caps_enforcer_dependency
 from snapper.server.dependencies import get_repository_dependency
 from snapper.server.execution_plan_routes import router as execution_plan_router
 from snapper.server.json_body import patch_openapi
@@ -327,6 +329,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         logger.info("Application shutdown complete")
 
 
+def _safe_get_caps_enforcer() -> TradingCapsEnforcer | None:
+    """Return the caps-enforcer singleton if available, else ``None``.
+
+    MCP tools wire the enforcer via a lazy getter so that the sub-app
+    can be mounted before the FastAPI lifespan has attached a
+    SQLAlchemyRepository to the dependency cache. The underlying
+    :func:`get_caps_enforcer_dependency` raises ``RuntimeError`` on
+    that condition; we convert the pre-startup window into ``None``
+    and let individual tools raise a clearer
+    "lifespan not ready" error at invocation time.
+
+    Returns:
+        The cached :class:`TradingCapsEnforcer` singleton, or ``None``
+        during the brief pre-lifespan window.
+    """
+    try:
+        return get_caps_enforcer_dependency()
+    except RuntimeError:
+        return None
+
+
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -399,6 +422,8 @@ def create_app() -> FastAPI:
         "/api/mcp",
         build_mcp_app(
             settings_service_getter=lambda: getattr(app.state, "settings_service", None),
+            repository_getter=get_repository_dependency,
+            caps_enforcer_getter=_safe_get_caps_enforcer,
         ),
     )
 

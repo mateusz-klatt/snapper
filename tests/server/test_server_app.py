@@ -246,6 +246,24 @@ class TestCreateApp:
         mount_paths = [call.args[0] for call in mock_mount.call_args_list]
         assert mount_paths == ["/api/mcp"]
 
+    def test_safe_get_caps_enforcer_returns_none_pre_lifespan(self) -> None:
+        """``_safe_get_caps_enforcer`` swallows pre-lifespan RuntimeError.
+
+        Given: the caps dependency raises RuntimeError (lifespan
+            hasn't attached a SQLAlchemyRepository to the cache yet),
+        When: the MCP-tool-safe wrapper is invoked,
+        Then: ``None`` is returned — individual tools raise a clearer
+            "lifespan not ready" error at invocation time rather than
+            the raw RuntimeError leaking out of mount construction.
+        """
+        from snapper.server.app import _safe_get_caps_enforcer
+        from snapper.server.dependencies import reset_caps_enforcer_singleton
+
+        reset_caps_enforcer_singleton()
+        with patch("snapper.server.app.get_caps_enforcer_dependency") as mock_dep:
+            mock_dep.side_effect = RuntimeError("Not a SQLAlchemyRepository")
+            assert _safe_get_caps_enforcer() is None
+
 
 class TestCreateApiRouter:
     """Tests for API router creation and endpoint accessibility."""

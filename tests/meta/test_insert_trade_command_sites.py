@@ -37,6 +37,7 @@ CANONICAL_SITES: set[tuple[str, str]] = {
     ("src/snapper/server/order_routes.py", "_cancel_plan"),
     ("src/snapper/server/trailing_stop_routes.py", "cancel_trailing_stop"),
     ("src/snapper/server/execution_plan_routes.py", "cancel_bracket"),
+    ("src/snapper/mcp/tools.py", "submit_manual_order"),
 }
 
 
@@ -47,6 +48,7 @@ SITE_POLICY: dict[tuple[str, str], str] = {
     ("src/snapper/server/order_routes.py", "_cancel_plan"): "none",
     ("src/snapper/server/trailing_stop_routes.py", "cancel_trailing_stop"): "none",
     ("src/snapper/server/execution_plan_routes.py", "cancel_bracket"): "none",
+    ("src/snapper/mcp/tools.py", "submit_manual_order"): "none",
 }
 
 

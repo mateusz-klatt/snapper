@@ -16,6 +16,7 @@ wrappers (Day 2c scope).
 """
 
 from collections.abc import Callable
+from contextvars import ContextVar
 from typing import Any
 
 from loguru import logger
@@ -27,12 +28,52 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp
 
 from snapper.application.services.settings import SettingsService
+from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.auth.dependencies import _extract_bearer_token
+from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.tokens import get_token_manager
+from snapper.data.repository import Repository
+from snapper.mcp.tools import register_mcp_tools
 
 _MCP_SERVER_NAME = "snapper"
 _MCP_SERVER_VERSION = "0.1.0"
 _FEATURE_FLAG_KEY = "ai_integration_enabled"
+
+TOKEN_CLAIMS_CTX: ContextVar[TokenClaims | None] = ContextVar("mcp_token_claims", default=None)
+"""ContextVar carrying the authenticated :class:`TokenClaims` to tool handlers.
+
+:class:`BearerAuthMiddleware` sets this after verifying the Bearer JWT;
+individual tool handlers read it via :func:`get_current_claims` to check
+per-tool permissions without needing to plumb the HTTP request through
+the FastMCP dispatch layer. ContextVars propagate through the asyncio
+task that serves a single MCP call, so the authenticated claims and the
+tool handler always see the same context.
+"""
+
+
+def get_current_claims() -> TokenClaims:
+    """Return the authenticated :class:`TokenClaims` for the current MCP call.
+
+    Intended to be called from within a FastMCP tool handler. Raises if
+    the ContextVar hasn't been set — which should never happen under
+    normal middleware wiring because :class:`BearerAuthMiddleware` is
+    composed above every tool dispatch and rejects before calling
+    downstream.
+
+    Returns:
+        The :class:`TokenClaims` stashed by the bearer auth middleware.
+
+    Raises:
+        RuntimeError: when the ContextVar is unset — signals a
+            middleware-chain misconfiguration.
+    """
+    claims = TOKEN_CLAIMS_CTX.get()
+    if claims is None:
+        raise RuntimeError(
+            "MCP tool dispatch ran without an authenticated token_claims "
+            "ContextVar — BearerAuthMiddleware is misconfigured."
+        )
+    return claims
 
 
 class FeatureFlagMiddleware(BaseHTTPMiddleware):
@@ -125,6 +166,16 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Any) -> Any:
         """Verify the Bearer token before dispatching to the MCP app.
 
+        The verified :class:`TokenClaims` is made available via two
+        mechanisms:
+
+            - ``request.state.token_claims`` — for any downstream
+              middleware / Starlette handler that wants to read it.
+            - :data:`TOKEN_CLAIMS_CTX` ContextVar — for FastMCP tool
+              handlers (which don't see the HTTP request object by
+              default). The ContextVar is reset on exit so the claims
+              don't leak across unrelated asyncio tasks.
+
         Args:
             request: Incoming Starlette request.
             call_next: Downstream ASGI app callable.
@@ -157,11 +208,17 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
                 },
             )
         request.state.token_claims = claims
-        return await call_next(request)
+        ctx_token = TOKEN_CLAIMS_CTX.set(claims)
+        try:
+            return await call_next(request)
+        finally:
+            TOKEN_CLAIMS_CTX.reset(ctx_token)
 
 
 def build_mcp_app(
     settings_service_getter: Callable[[], SettingsService | None],
+    repository_getter: Callable[[], Repository | None] | None = None,
+    caps_enforcer_getter: Callable[[], TradingCapsEnforcer | None] | None = None,
 ) -> Starlette:
     """Return the Starlette sub-app to be mounted under ``/api/mcp``.
 
@@ -172,8 +229,8 @@ def build_mcp_app(
            deployments don't even verify JWTs.
         2. :class:`BearerAuthMiddleware` — auth gate; populates
            ``request.state.token_claims`` before tool dispatch.
-        3. Downstream FastMCP Streamable HTTP app serving the JSON-
-           RPC protocol.
+        3. Downstream FastMCP Streamable HTTP app with tools
+           registered via :func:`register_mcp_tools`.
 
     Args:
         settings_service_getter: Zero-arg callable returning the
@@ -183,6 +240,19 @@ def build_mcp_app(
             FastAPI lifespan has initialized the settings service.
             The typical wiring is
             ``build_mcp_app(lambda: getattr(app.state, "settings_service", None))``.
+        repository_getter: Zero-arg callable returning the shared
+            :class:`Repository` singleton. Tools read-only methods
+            (``list_instruments``, ``list_positions``, etc.) call
+            through this. ``None`` at construction time is supported
+            and treated as "tools unavailable" at request time — so
+            the sub-app can still be mounted before lifespan startup
+            completes.
+        caps_enforcer_getter: Zero-arg callable returning the shared
+            :class:`TradingCapsEnforcer` singleton. Write tools
+            (``submit_manual_order``, ``cancel_order``) wrap inserts
+            in ``guard(submission)`` against this enforcer so
+            per-user caps apply to MCP-initiated writes identically
+            to REST-initiated writes.
 
     Returns:
         A Starlette sub-app ready for ``FastAPI.mount("/api/mcp", ...)``.
@@ -191,6 +261,12 @@ def build_mcp_app(
         _MCP_SERVER_NAME,
         instructions=f"Snapper MCP endpoint (v{_MCP_SERVER_VERSION}) — plan §3.2",
         stateless_http=True,
+    )
+    register_mcp_tools(
+        mcp_server,
+        repository_getter=repository_getter or (lambda: None),
+        caps_enforcer_getter=caps_enforcer_getter or (lambda: None),
+        claims_getter=get_current_claims,
     )
     downstream = mcp_server.streamable_http_app()
     downstream.add_middleware(BearerAuthMiddleware)
