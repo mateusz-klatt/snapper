@@ -6,10 +6,12 @@ import time
 from collections import deque
 from collections.abc import Iterator
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from loguru import logger
 
+import snapper.infrastructure.rest.tracker as tracker_module
 from snapper.core.types import ExchangeEnum
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.rest.tracker import REST_RATE_LIMITS_PER_SECOND
@@ -224,6 +226,33 @@ class TestRestCallTrackerSnapshot:
         assert row["utilization"] == pytest.approx(3.0 / 15.0)
 
 
+class TestRestCallTrackerReset:
+    """Reset helper clears all mutable tracker state."""
+
+    def test_reset_clears_events_warnings_and_async_locks(self) -> None:
+        """Reset drops recorded events, warnings, and throttling locks.
+
+        Given:
+            A tracker with mutable runtime state populated,
+
+        When:
+            ``reset`` is called,
+
+        Then:
+            Every mutable container becomes empty.
+        """
+        tracker = RestCallTracker(limits={ExchangeEnum.KRAKEN: 15.0})
+        tracker.record_call(ExchangeEnum.KRAKEN)
+        tracker._warned[ExchangeEnum.KRAKEN] = time.monotonic()
+        tracker._async_locks[ExchangeEnum.KRAKEN] = asyncio.Lock()
+
+        tracker.reset()
+
+        assert tracker._events == {}
+        assert tracker._warned == {}
+        assert tracker._async_locks == {}
+
+
 class TestRestCallTrackerWarningLog:
     """High-utilization warnings fire but stay rate-limited."""
 
@@ -346,6 +375,39 @@ class TestSingletonAccess:
         first = get_rest_call_tracker()
         second = get_rest_call_tracker()
         assert first is second
+
+    def test_returns_seeded_instance_when_created_before_inner_check(self) -> None:
+        """The inner singleton check reuses an instance seeded during lock entry.
+
+        Given:
+            The outer singleton check observed ``None``,
+
+        When:
+            Another execution path seeds the singleton before the
+            inner check runs,
+
+        Then:
+            ``get_rest_call_tracker`` returns that seeded instance.
+        """
+        seeded = RestCallTracker()
+        tracker_module._SingletonHolder.instance = None
+
+        class _SeedLock:
+            def __enter__(self) -> None:
+                tracker_module._SingletonHolder.instance = seeded
+
+            def __exit__(
+                self,
+                _exc_type: type[BaseException] | None,
+                _exc: BaseException | None,
+                _tb: object | None,
+            ) -> None:
+                return None
+
+        with patch("snapper.infrastructure.rest.tracker._SingletonHolder.lock", _SeedLock()):
+            resolved = get_rest_call_tracker()
+
+        assert resolved is seeded
 
     def test_reset_clears_singleton(self) -> None:
         """Reset helper gives each test a fresh tracker.

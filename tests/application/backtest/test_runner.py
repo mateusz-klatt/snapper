@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 import snapper.data.repository as repo_module
 from snapper.application.backtest.config import BacktestExecutionMode
 from snapper.application.backtest.runner import BacktestRunnerProcess
+from snapper.application.backtest.runner import noop_publish
 from snapper.application.backtest.runner import run_to_config_dict
 from snapper.data.backtest_conflict import SINGLE_RUNNING_INDEX
 from snapper.data.backtest_repository import BacktestRepository
@@ -785,6 +786,61 @@ class TestRunnerProgressPublisher:
         assert runner._owned_validated_publisher is not None
         assert runner._owned_message_publisher is not None
         runner._teardown_owned_publisher()
+        assert runner._owned_zmq_context is None
+        assert runner._owned_validated_publisher is None
+        assert runner._owned_message_publisher is None
+
+    def test_wiring_failure_falls_back_to_noop_publish(self) -> None:
+        """Publisher setup failure degrades to the noop progress sink.
+
+        Given:
+            The production path needs to create its own ZMQ publisher,
+
+        When:
+            Context construction raises during wiring,
+
+        Then:
+            ``_resolve_progress_publish`` returns ``noop_publish`` and
+            no owned publisher state is retained on the runner.
+        """
+        runner = BacktestRunnerProcess(run_public_id="run-fallback", db_url="sqlite://")
+        bootstrap = MagicMock()
+        bootstrap.zmq_broker_xsub = "tcp://127.0.0.1:5555"
+
+        with (
+            patch(
+                "snapper.application.backtest.runner.get_bootstrap_settings",
+                return_value=bootstrap,
+            ),
+            patch(
+                "snapper.application.backtest.runner.zmq.asyncio.Context",
+                side_effect=RuntimeError("boom"),
+            ),
+        ):
+            resolved = runner._resolve_progress_publish()
+
+        assert resolved is noop_publish
+        assert runner._owned_zmq_context is None
+        assert runner._owned_validated_publisher is None
+        assert runner._owned_message_publisher is None
+
+    def test_teardown_without_owned_resources_is_noop(self) -> None:
+        """Teardown keeps an uninitialised runner unchanged.
+
+        Given:
+            A runner that never opened its owned publisher,
+
+        When:
+            ``_teardown_owned_publisher`` is called,
+
+        Then:
+            The method returns cleanly and all owned handles stay
+            ``None``.
+        """
+        runner = BacktestRunnerProcess(run_public_id="run-empty", db_url="sqlite://")
+
+        runner._teardown_owned_publisher()
+
         assert runner._owned_zmq_context is None
         assert runner._owned_validated_publisher is None
         assert runner._owned_message_publisher is None
