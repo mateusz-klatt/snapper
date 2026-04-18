@@ -36,7 +36,9 @@ from typing import Any
 from uuid import uuid7
 
 from fastapi import HTTPException
+from loguru import logger
 from mcp.server.fastmcp import FastMCP
+from sqlalchemy.exc import IntegrityError
 
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.submission import TradeCommandSubmission
@@ -247,9 +249,9 @@ def register_mcp_tools(
             }
             try:
                 _plan_id, plan_public_id = await repo.insert_execution_plan(plan_row)
-            except Exception as exc:
-                err_str = str(exc).lower()
-                if "unique" in err_str or "duplicate" in err_str:
+            except IntegrityError as exc:
+                orig_str = str(exc.orig).lower() if exc.orig is not None else str(exc).lower()
+                if "idempotency_key" in orig_str or "uq_ep_idempotency_key" in orig_str:
                     raise HTTPException(
                         status_code=409,
                         detail="Idempotency key already used",
@@ -282,7 +284,32 @@ def register_mcp_tools(
                 "plan_public_id": plan_public_id,
                 "source_surface": _MCP_SOURCE_SURFACE,
             }
-            _cmd_id, command_public_id = await repo.insert_trade_command(cmd_row, ownership=None)
+            try:
+                _cmd_id, command_public_id = await repo.insert_trade_command(
+                    cmd_row, ownership=None
+                )
+            except Exception as exc:
+                logger.error(
+                    "MCP submit_manual_order command-insert failed for plan {}: {}",
+                    plan_public_id,
+                    exc,
+                )
+                try:
+                    await repo.update_execution_plan_status(
+                        public_id=plan_public_id,
+                        new_status="failed",
+                        bus_time=ts,
+                        session_id=_MCP_TOOL_STREAM,
+                        sequence_id=3,
+                        last_error=f"MCP TradeCommand insert failed: {exc}",
+                    )
+                except Exception as comp_exc:
+                    logger.error(
+                        "MCP plan compensation to failed also failed for plan {}: {}",
+                        plan_public_id,
+                        comp_exc,
+                    )
+                raise
         assert plan_public_id is not None
         assert command_public_id is not None
         sanitized: dict[str, Any] = sanitize_output(

@@ -70,7 +70,14 @@ def sanitize_output(value: Any) -> Any:
 
 
 def _sanitize_str(s: str) -> str:
-    """Strip control chars, HTML-escape, clip to 4096 chars.
+    """Strip control chars, clip to 4096 chars, then HTML-escape.
+
+    Order matters: **clip must happen BEFORE escape**. If we escaped
+    first and then clipped, a trailing ``<`` would expand to
+    ``&lt;`` and a clip at byte 4096 could truncate inside the entity,
+    producing malformed output like ``&lt`` — the entity is now
+    unrendered text. Clipping the filtered-but-unescaped string and
+    THEN escaping guarantees every entity in the output is complete.
 
     Args:
         s: Raw string from a tool response — may contain
@@ -83,7 +90,5 @@ def _sanitize_str(s: str) -> str:
         everything else below 0x20 and the DEL (0x7F) is removed.
     """
     filtered = "".join(ch for ch in s if ch not in _CONTROL_CHARS)
-    escaped = html.escape(filtered, quote=True)
-    if len(escaped) > _CLIP_LEN:
-        return escaped[:_CLIP_LEN]
-    return escaped
+    clipped = filtered[:_CLIP_LEN] if len(filtered) > _CLIP_LEN else filtered
+    return html.escape(clipped, quote=True)

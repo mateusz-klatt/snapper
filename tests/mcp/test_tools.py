@@ -318,20 +318,25 @@ class TestSubmitManualOrderTool:
 
     @pytest.mark.asyncio
     async def test_idempotency_conflict_maps_to_http_409(self) -> None:
-        """Duplicate idempotency_key from repo → HTTP 409.
+        """Duplicate idempotency_key → HTTP 409 via IntegrityError inspection.
 
-        Given: the repository's ``insert_execution_plan`` raises with
-            a unique-constraint violation string,
+        Given: ``insert_execution_plan`` raises :class:`IntegrityError`
+            whose underlying driver exception names the
+            ``idempotency_key`` constraint,
         When: the write tool runs,
         Then: :class:`fastapi.HTTPException` with ``status_code=409``
-            bubbles up so the MCP client can distinguish retry-safe
-            from retry-unsafe errors.
+            bubbles up. Detection inspects the structured
+            IntegrityError, NOT a free-text substring match on the
+            outer exception message — so a future DB driver change
+            that reformats the message won't silently break this.
         """
         from fastapi import HTTPException
+        from sqlalchemy.exc import IntegrityError
 
         repo = AsyncMock()
+        orig = Exception("UNIQUE constraint failed: execution_plans.idempotency_key")
         repo.insert_execution_plan = AsyncMock(
-            side_effect=RuntimeError("UNIQUE constraint failed: execution_plans.idempotency_key")
+            side_effect=IntegrityError("INSERT failed", params=None, orig=orig)
         )
         repo.insert_trade_command = AsyncMock()
         server = _build_server(
@@ -357,17 +362,22 @@ class TestSubmitManualOrderTool:
         assert cause.status_code == 409
 
     @pytest.mark.asyncio
-    async def test_plan_insert_non_unique_error_reraises_verbatim(self) -> None:
-        """Non-unique plan-insert failure → the original exception re-raises.
+    async def test_plan_integrity_error_non_idempotency_reraises(self) -> None:
+        """IntegrityError on a different constraint → no 409 mapping.
 
-        Given: ``insert_execution_plan`` fails with a generic error
-            not matching the uniqueness keywords,
-        When: ``submit_manual_order`` runs,
-        Then: the original exception propagates — so upstream
-            operator alerting is not silently swallowed.
+        Given: ``insert_execution_plan`` fails with an IntegrityError
+            whose constraint name is NOT related to idempotency,
+        When: the write tool runs,
+        Then: the IntegrityError propagates untouched — we refuse to
+            squash arbitrary constraint failures into 409.
         """
+        from sqlalchemy.exc import IntegrityError
+
         repo = AsyncMock()
-        repo.insert_execution_plan = AsyncMock(side_effect=RuntimeError("db unavailable"))
+        orig = Exception("CHECK constraint failed: some_other_ck")
+        repo.insert_execution_plan = AsyncMock(
+            side_effect=IntegrityError("INSERT failed", params=None, orig=orig)
+        )
         server = _build_server(
             repository=repo,
             caps_enforcer=self._make_enforcer_admit(),
@@ -386,4 +396,81 @@ class TestSubmitManualOrderTool:
                     "idempotency_key": "idem-broken",
                 },
             )
-        assert "db unavailable" in str(exc.value)
+        assert "some_other_ck" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_command_insert_failure_compensates_plan_to_failed(self) -> None:
+        """Command-insert failure → plan is flipped to ``status='failed'``.
+
+        Given: the plan insert succeeds but the trade-command insert
+            raises,
+        When: ``submit_manual_order`` runs,
+        Then: the tool calls ``update_execution_plan_status`` with
+            ``new_status='failed'`` before re-raising, preventing an
+            orphaned pending plan — matches REST ``create_order``
+            compensation in order_routes.py.
+        """
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-pid"))
+        repo.insert_trade_command = AsyncMock(side_effect=RuntimeError("broker down"))
+        repo.update_execution_plan_status = AsyncMock(return_value=2)
+        server = _build_server(
+            repository=repo,
+            caps_enforcer=self._make_enforcer_admit(),
+        )
+        with pytest.raises(ToolError) as exc:
+            await server._tool_manager.call_tool(
+                "submit_manual_order",
+                {
+                    "exchange": "kraken",
+                    "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
+                    "side": "buy",
+                    "order_type": "market",
+                    "quantity": 1.0,
+                    "wallet_public_id": "wallet-1",
+                    "idempotency_key": "idem-cmd-fail",
+                },
+            )
+        assert "broker down" in str(exc.value)
+        repo.update_execution_plan_status.assert_awaited_once()
+        compensation_kwargs = repo.update_execution_plan_status.await_args.kwargs
+        assert compensation_kwargs["public_id"] == "plan-pid"
+        assert compensation_kwargs["new_status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_compensation_failure_still_reraises_original(self) -> None:
+        """If plan-status compensation itself fails, original error still bubbles.
+
+        Given: command insert fails AND the compensation call
+            (``update_execution_plan_status``) also fails,
+        When: the tool runs,
+        Then: the ORIGINAL command-insert exception is what the
+            caller sees — the compensation failure is logged but
+            does not mask the real root cause.
+        """
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-pid"))
+        repo.insert_trade_command = AsyncMock(side_effect=RuntimeError("broker down"))
+        repo.update_execution_plan_status = AsyncMock(
+            side_effect=RuntimeError("compensation blew up")
+        )
+        server = _build_server(
+            repository=repo,
+            caps_enforcer=self._make_enforcer_admit(),
+        )
+        with pytest.raises(ToolError) as exc:
+            await server._tool_manager.call_tool(
+                "submit_manual_order",
+                {
+                    "exchange": "kraken",
+                    "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
+                    "side": "buy",
+                    "order_type": "market",
+                    "quantity": 1.0,
+                    "wallet_public_id": "wallet-1",
+                    "idempotency_key": "idem-dbl-fail",
+                },
+            )
+        assert "broker down" in str(exc.value)
