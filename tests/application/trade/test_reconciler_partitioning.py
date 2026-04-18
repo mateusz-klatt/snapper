@@ -27,11 +27,12 @@ def _cmd(shard_key: str, public_id: str = "cmd") -> dict[str, Any]:
 async def test_ownership_filters_foreign_shards_out_of_cycle() -> None:
     """Reconcile cycle records success ONLY for owned shards.
 
-    With two shards in the active set, one owned by this instance and
-    one foreign, only the owned shard_key appears in
-    ``record_recon_success`` calls. Without the filter, both instances
-    would record success for both shards → double-counted circuit
-    breaker.
+    Given: two shards in the active set — one owned by this
+        instance and one foreign,
+    When: ``_reconcile_cycle`` runs under N>1 with ownership set,
+    Then: only the owned shard_key appears in
+        ``record_recon_success`` calls (without the filter, both
+        instances would double-count the circuit breaker).
     """
     owned_shard = "kraken.MINE.live"
     foreign_shard = "kraken.FOREIGN.live"
@@ -59,7 +60,15 @@ async def test_ownership_filters_foreign_shards_out_of_cycle() -> None:
 
 @pytest.mark.asyncio
 async def test_no_ownership_preserves_pre_phase4_behavior() -> None:
-    """With ``ownership=None`` every shard is reconciled (pre-Phase-4 path)."""
+    """With ``ownership=None`` every shard is reconciled (pre-Phase-4 path).
+
+    Given: a ReconciliationLoop constructed without an ``ownership``
+        kwarg (default ``None``),
+    When: ``_reconcile_cycle`` runs against an active set of two
+        shards on different hash buckets,
+    Then: both shards appear in ``record_recon_success`` calls —
+        the byte-identical pre-Phase-4 behavior.
+    """
     repo = AsyncMock()
     repo.get_active_commands_for_exchange = AsyncMock(
         return_value=[
@@ -81,7 +90,14 @@ async def test_no_ownership_preserves_pre_phase4_behavior() -> None:
 
 @pytest.mark.asyncio
 async def test_all_foreign_no_success_recorded() -> None:
-    """When the active set is entirely foreign, no recon_success is recorded."""
+    """When the active set is entirely foreign, no recon_success is recorded.
+
+    Given: a ReconciliationLoop with ownership pointing at the
+        opposite bucket of the only active-command shard,
+    When: ``_reconcile_cycle`` runs,
+    Then: ``record_recon_success`` is never called — the filter
+        drops every row before the success-recording loop.
+    """
     foreign_shard = "kraken.FOREIGN.live"
     foreign_owner = ShardOwnership._hash(foreign_shard) % 2
     this_id = (foreign_owner + 1) % 2

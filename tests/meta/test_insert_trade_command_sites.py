@@ -116,12 +116,14 @@ def _collect_insert_sites(
 def test_every_insert_trade_command_call_has_explicit_ownership_kwarg() -> None:
     """Every call site passes ``ownership=`` with a known-policy value.
 
-    Policy (§1.8):
-        - Engine-bound sites use ``ownership=self._ownership``.
-        - HTTP / plan sites use ``ownership=None``.
-
-    Positional ownership is rejected; the kwarg must be visible so
-    human review + this meta-test can enforce per-site policy.
+    Given: an AST walk over every ``.py`` file under
+        ``src/snapper/**`` collecting ``insert_trade_command`` calls,
+    When: each call is inspected for an explicit ``ownership=``
+        kwarg with a policy-conformant value,
+    Then: the only accepted values are ``self._ownership``
+        (coordinator-bound) or the ``None`` literal (HTTP / plan
+        site) — positional ownership is rejected so human review
+        can always see the policy at the call site.
     """
     all_sites: list[tuple[str, str, int, ast.Call]] = []
     for py_file in SRC_ROOT.rglob("*.py"):
@@ -145,13 +147,13 @@ def test_every_insert_trade_command_call_has_explicit_ownership_kwarg() -> None:
 def test_insert_site_policy_matches_plan_section_1_8() -> None:
     """Each canonical site uses its specific policy value.
 
-    Stronger than
-    :func:`test_every_insert_trade_command_call_has_explicit_ownership_kwarg`
-    which only accepts the set ``{self._ownership, None}``. This test
-    pins each ``(file, function)`` tuple to its expected value so a
-    future accidental swap — e.g., changing ``_send_order`` to
-    ``ownership=None`` would bypass the defense-in-depth guard — is
-    caught by CI rather than by a production incident.
+    Given: the §1.8 ``SITE_POLICY`` dict pinning each
+        ``(file, function)`` tuple to ``"ownership"`` or ``"none"``,
+    When: every insert site collected via AST walk is classified,
+    Then: the actual policy value matches the expected one — a
+        future accidental swap (e.g., ``_send_order`` flipped to
+        ``ownership=None``) fails CI instead of silently bypassing
+        the defense-in-depth guard in production.
     """
     violations: list[str] = []
     for py_file in SRC_ROOT.rglob("*.py"):
@@ -178,9 +180,14 @@ def test_insert_site_policy_matches_plan_section_1_8() -> None:
 def test_insert_site_matrix_matches_plan_section_1_8() -> None:
     """Collected ``(file, function)`` set matches §1.8 canonical matrix.
 
-    Adding a new site in ``src/snapper/`` without updating
-    :data:`CANONICAL_SITES` → test fails. Removing an existing site
-    that's still in :data:`CANONICAL_SITES` → test also fails.
+    Given: the :data:`CANONICAL_SITES` set enumerating the 7
+        known insert sites per plan §1.8,
+    When: every ``insert_trade_command`` call in
+        ``src/snapper/**`` is collected via AST walk,
+    Then: the collected set equals the canonical set — adding a
+        new site without updating §1.8 fails CI, and removing a
+        listed site without cleaning the canonical matrix also
+        fails CI.
     """
     collected: set[tuple[str, str]] = set()
     for py_file in SRC_ROOT.rglob("*.py"):

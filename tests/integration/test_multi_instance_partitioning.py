@@ -34,6 +34,7 @@ from snapper.config.app import AppSettings
 from snapper.config.settings import get_bootstrap_settings
 from snapper.config.settings import get_settings
 from snapper.core.partitioning import ShardOwnership
+from snapper.data.repository import get_repository
 from snapper.messaging.schemas.data import SignalData
 from tests.integration.conftest import TwoCoordinatorStack
 from tests.integration.conftest import _per_coordinator_settings
@@ -176,20 +177,26 @@ def test_coordinator_ownership_from_bootstrap_env(
 ) -> None:
     """Scenario #3 — production topology config via env vars.
 
-    Proves the real ``BootstrapSettingsLoader`` → ``AppSettings``
-    delegate → ``_build_ownership`` path WITHOUT the ``settings=``
-    kwarg injection. Uses ``@pytest.mark.real_settings`` to opt out
-    of the autouse mock. Narrow scope: ownership-only — no signal
-    pipeline (scenarios #1/#2 already exercise that via the
-    injection path).
+    Given: two coordinators constructed back-to-back with
+        different ``SNAPPER_COORDINATOR_INSTANCE_ID`` env values
+        (0, 1) AND explicit ``get_bootstrap_settings.cache_clear`` +
+        ``get_settings.cache_clear`` between them
+        (``@pytest.mark.real_settings`` opts out of the autouse
+        mock so the real ``BootstrapSettingsLoader`` →
+        ``AppSettings`` → ``_build_ownership`` chain runs),
+    When: each coordinator calls ``_build_ownership`` and the
+        resulting :class:`ShardOwnership` is applied to a sample
+        key set,
+    Then: the two ownerships produce disjoint + complete coverage
+        of the sample — proving the production env-var topology
+        path works without the test-only ``settings=`` kwarg
+        injection that scenarios #1/#2 rely on.
 
-    Per plan §8 R8 scope narrowing: verifies env → BootstrapSettings
-    → AppSettings → _build_ownership produces distinct
-    ``ShardOwnership`` for two coordinators when only the env var
-    differs. Cache-clear discipline is exercised explicitly. The
-    autouse session-scoped ``isolated_sqlite_db`` fixture has already
-    pointed ``DB_URL`` at an isolated copy by the time this test
-    runs — consumed implicitly via env, not as a fixture parameter.
+    Per plan §8 R8 scope narrowing: ownership-only, no signal
+    pipeline (scenarios #1/#2 cover the pipeline via the injection
+    path). The autouse session-scoped ``isolated_sqlite_db``
+    fixture has already pointed ``DB_URL`` at an isolated copy by
+    the time this test runs.
     """
 
     def _make_coordinator(inst_id: int, inst_count: int) -> ShardOwnership:
@@ -226,8 +233,6 @@ async def _force_checkpoint(
     state restoration after restart without fighting the 60s
     checkpoint tick (plan §3.5).
     """
-    from snapper.data.repository import get_repository
-
     repo = get_repository(stack.base_mock.db_url)
     now = datetime.now(UTC)
     await repo.upsert_checkpoint(
@@ -283,7 +288,6 @@ class TestCoordinatorRestartOnlyRecoversOwned:
         await _force_checkpoint(two_coordinator_stack, target_shard)
 
         trader_1_tasks = two_coordinator_stack.trader_tasks
-        from tests.integration.conftest import _stop_background_process
 
         await _stop_background_process(trader_1.stop(), trader_1_tasks[1])
 
