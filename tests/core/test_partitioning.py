@@ -8,9 +8,12 @@ Covers:
       randomisation).
     - Uniform distribution of ownership over a synthetic key space.
     - Single-instance short-circuit (``instance_count=1`` always owns).
-    - :class:`ShardOwnershipError` string + attribute contract.
+    - :class:`ShardOwnershipError` string + attribute contract +
+      pickle / :func:`copy.copy` round-trip.
 """
 
+import copy
+import pickle
 import subprocess
 import sys
 from collections import Counter
@@ -208,3 +211,44 @@ class TestShardOwnershipError:
         assert exc.shard_key == "s"
         assert exc.instance_id == 3
         assert exc.instance_count == 5
+
+    def test_pickle_round_trip_preserves_fields(self) -> None:
+        """Round-trip through :mod:`pickle` reconstructs the same exception.
+
+        Regression guard against a subtle ``@dataclass``-on-``Exception``
+        pitfall: the generated ``__init__`` does not call
+        ``super().__init__()``, leaving ``BaseException.args`` empty. The
+        default ``BaseException.__reduce__`` would then serialise as
+        ``(ShardOwnershipError, ())`` and unpickling would call the
+        no-arg form → :class:`TypeError` for missing required fields.
+        :meth:`ShardOwnershipError.__post_init__` populates ``args`` to
+        fix this.
+        """
+        original = ShardOwnershipError(
+            shard_key="kraken.BTC-USD.live",
+            instance_id=1,
+            instance_count=2,
+        )
+        restored = pickle.loads(pickle.dumps(original))
+        assert isinstance(restored, ShardOwnershipError)
+        assert restored.shard_key == original.shard_key
+        assert restored.instance_id == original.instance_id
+        assert restored.instance_count == original.instance_count
+        assert str(restored) == str(original)
+
+    def test_copy_round_trip_preserves_fields(self) -> None:
+        """Round-trip through :func:`copy.copy` also works (uses ``__reduce__``)."""
+        original = ShardOwnershipError(
+            shard_key="paper.ETH-USD.paper.scalp",
+            instance_id=0,
+            instance_count=4,
+        )
+        restored = copy.copy(original)
+        assert restored.shard_key == original.shard_key
+        assert restored.instance_id == original.instance_id
+        assert restored.instance_count == original.instance_count
+
+    def test_args_exposes_constructor_values(self) -> None:
+        """``BaseException.args`` should carry the three fields verbatim."""
+        exc = ShardOwnershipError(shard_key="x.y.z", instance_id=2, instance_count=3)
+        assert exc.args == ("x.y.z", 2, 3)

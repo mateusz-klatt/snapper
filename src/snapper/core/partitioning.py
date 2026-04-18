@@ -125,6 +125,21 @@ class ShardOwnershipError(Exception):
     instance_id: int
     instance_count: int
 
+    def __post_init__(self) -> None:
+        """Populate ``self.args`` so pickle / :mod:`copy` round-trip.
+
+        ``@dataclass`` generates an ``__init__`` that never calls
+        ``super().__init__()``, so ``BaseException.args`` would stay as
+        the empty tuple set by ``BaseException.__new__``. The default
+        ``BaseException.__reduce__`` returns ``(type(self), self.args)``
+        — an empty ``args`` would make unpickling call
+        ``ShardOwnershipError()`` with zero arguments and blow up on the
+        required-field check. Delegating to ``super().__init__`` fixes
+        round-trip across :mod:`pickle`, :mod:`copy`, and any structured
+        logger that serialises exception args.
+        """
+        super().__init__(self.shard_key, self.instance_id, self.instance_count)
+
     def __str__(self) -> str:
         """Return a human-readable error message.
 

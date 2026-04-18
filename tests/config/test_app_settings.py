@@ -672,6 +672,30 @@ class TestCoordinatorPartitioningProperties:
         settings = AppSettings(bootstrap, settings_service=None)
         assert settings.coordinator_outbox_max_scan_rows is None
 
+    def test_max_scan_rows_whitespace_wrapped_unbounded(self) -> None:
+        """``"  unbounded  "`` with surrounding whitespace → ``None``.
+
+        Regression guard: the accessor documents a trim-then-match
+        contract. A future refactor that drops ``.strip()`` would only
+        be caught by this case (the non-whitespace cases would still
+        pass via raw-literal match).
+        """
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:",
+            SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS="  unbounded  ",
+        )
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.coordinator_outbox_max_scan_rows is None
+
+    def test_max_scan_rows_whitespace_wrapped_none(self) -> None:
+        """``"  NONE  "`` combines case-insensitive + trim contracts."""
+        bootstrap = BootstrapSettingsLoader(
+            DB_URL="sqlite:///:memory:",
+            SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS="  NONE  ",
+        )
+        settings = AppSettings(bootstrap, settings_service=None)
+        assert settings.coordinator_outbox_max_scan_rows is None
+
     def test_max_scan_rows_non_int_raises(self) -> None:
         """A non-numeric non-sentinel value raises :class:`ValueError`."""
         bootstrap = BootstrapSettingsLoader(
