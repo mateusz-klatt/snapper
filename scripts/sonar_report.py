@@ -50,6 +50,16 @@ class QualityGateReport(TypedDict):
     failing_conditions: list[QualityGateCondition]
 
 
+class DuplicationComponent(TypedDict):
+    """File-level duplication metrics from SonarCloud."""
+
+    path: str
+    duplicated_lines_density: str
+    duplicated_lines: str
+    new_duplicated_lines_density: str
+    new_duplicated_lines: str
+
+
 def _component_path(component: str) -> str:
     """Return project-relative component path."""
     return component.replace(f"{PROJECT_KEY}:", "")
@@ -66,6 +76,15 @@ def _measure_value(measure: dict[str, Any]) -> str:
         if isinstance(first_period, dict) and first_period.get("value") is not None:
             return str(first_period["value"])
     return "?"
+
+
+def _measure_map(measures: list[dict[str, Any]]) -> dict[str, str]:
+    """Normalize SonarCloud measure payloads into a metric mapping."""
+    return {
+        str(measure["metric"]): _measure_value(measure)
+        for measure in measures
+        if measure.get("metric") is not None
+    }
 
 
 def _optional_str(value: object) -> str | None:
@@ -284,7 +303,64 @@ def fetch_metrics(token: str) -> dict[str, str]:
     payload: dict[str, Any] = resp.json()
     component: dict[str, Any] = payload.get("component", {})
     measures: list[dict[str, Any]] = component.get("measures", [])
-    return {str(m["metric"]): _measure_value(m) for m in measures}
+    return _measure_map(measures)
+
+
+def fetch_duplication_components(token: str) -> list[DuplicationComponent]:
+    """Fetch file-level overall and new-code duplication metrics.
+
+    Args:
+        token: SonarCloud access token.
+
+    Returns:
+        File-level duplication metrics for every analyzed file.
+    """
+    all_components: list[DuplicationComponent] = []
+    page = 1
+    while True:
+        resp = httpx.get(
+            f"{BASE_URL}/measures/component_tree",
+            params={
+                "component": PROJECT_KEY,
+                "metricKeys": ",".join(
+                    [
+                        "duplicated_lines_density",
+                        "duplicated_lines",
+                        "new_duplicated_lines_density",
+                        "new_duplicated_lines",
+                    ]
+                ),
+                "qualifiers": "FIL",
+                "ps": PAGE_SIZE,
+                "p": page,
+            },
+            auth=(token, ""),
+            timeout=30,
+        )
+        resp.raise_for_status()
+        payload: dict[str, Any] = resp.json()
+        components: list[dict[str, Any]] = payload.get("components", [])
+        for component in components:
+            measure_map = _measure_map(component.get("measures", []))
+            path = str(component.get("path") or _component_path(str(component.get("key", ""))))
+            all_components.append(
+                {
+                    "path": path,
+                    "duplicated_lines_density": measure_map.get("duplicated_lines_density", "0"),
+                    "duplicated_lines": measure_map.get("duplicated_lines", "0"),
+                    "new_duplicated_lines_density": measure_map.get(
+                        "new_duplicated_lines_density", "0"
+                    ),
+                    "new_duplicated_lines": measure_map.get("new_duplicated_lines", "0"),
+                }
+            )
+        paging: dict[str, Any] = payload.get("paging", {})
+        total = int(paging.get("total", 0))
+        print(f"  page {page}: fetched {len(components)} files ({len(all_components)}/{total})")
+        if len(all_components) >= total or not components:
+            break
+        page += 1
+    return all_components
 
 
 def fetch_quality_gate(token: str) -> QualityGateReport:
@@ -388,23 +464,30 @@ def rating_label(value: str) -> str:
     return mapping.get(value, value)
 
 
-def print_report(
-    issues: list[dict[str, Any]],
-    metrics: dict[str, str],
-    quality_gate: QualityGateReport,
-) -> None:
-    """Print a summary report to stdout.
+def _metric_as_float(value: str) -> float:
+    """Parse a metric value as float, defaulting missing values to zero."""
+    if value in ("", "?"):
+        return 0.0
+    return float(value)
 
-    Args:
-        issues: Issues returned by SonarCloud issues search API.
-        metrics: Project metrics mapping.
-        quality_gate: Quality gate status and condition summary.
-    """
+
+def _metric_as_int(value: str) -> int:
+    """Parse a metric value as integer, defaulting missing values to zero."""
+    if value in ("", "?"):
+        return 0
+    return int(float(value))
+
+
+def _print_report_header() -> None:
+    """Print the report header."""
     print("\n" + "=" * 70)
     print(f"  SONARCLOUD REPORT - {PROJECT_KEY}")
     print(f"  Generated: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}")
     print("=" * 70)
 
+
+def _print_project_metrics(metrics: dict[str, str], quality_gate: QualityGateReport) -> None:
+    """Print project-wide SonarCloud metrics."""
     print("\n--- PROJECT METRICS ---")
     print(f"  Lines of code:       {int(metrics.get('ncloc', '0')):,}")
     print(f"  Bugs:                {metrics.get('bugs', '?')}")
@@ -427,35 +510,52 @@ def print_report(
     print(f"  Maintainability:     {rating_label(metrics.get('sqale_rating', '?'))}")
     print(f"  Quality gate:        {quality_gate['status']}")
 
+
+def _print_quality_gate_details(quality_gate: QualityGateReport) -> None:
+    """Print quality gate status and failing conditions."""
     print("\n--- QUALITY GATE DETAILS ---")
     print(f"  Period mode:         {quality_gate['period_mode'] or '?'}")
     print(f"  Period date:         {quality_gate['period_date'] or '?'}")
-    if not quality_gate["failing_conditions"]:
+    failing_conditions = quality_gate["failing_conditions"]
+    if not failing_conditions:
         print("  Failing conditions:  (none)")
-    else:
-        print("  Failing conditions:")
-        for condition in quality_gate["failing_conditions"]:
-            actual = _format_metric_value(condition["metric_key"], condition["actual_value"])
-            threshold = _format_metric_value(condition["metric_key"], condition["error_threshold"])
-            print(
-                f"    {_quality_metric_label(condition['metric_key']):<22} {actual} {condition['comparator'] or '?'} {threshold}"
-            )
+        return
+    print("  Failing conditions:")
+    for condition in failing_conditions:
+        actual = _format_metric_value(condition["metric_key"], condition["actual_value"])
+        threshold = _format_metric_value(condition["metric_key"], condition["error_threshold"])
+        print(
+            f"    {_quality_metric_label(condition['metric_key']):<22} {actual} {condition['comparator'] or '?'} {threshold}"
+        )
 
-    print(f"\n--- ISSUES SUMMARY ({len(issues)} total) ---")
 
+def _issue_directory(issue: dict[str, Any]) -> str:
+    """Return the containing directory for an issue component."""
+    component = str(issue.get("component", ""))
+    parts = component.replace(f"{PROJECT_KEY}:", "").split("/")
+    return "/".join(parts[:-1]) if len(parts) > 1 else "(root)"
+
+
+def _issue_counters(
+    issues: list[dict[str, Any]],
+) -> tuple[Counter[str], Counter[str], Counter[str], Counter[str]]:
+    """Aggregate issue counts by severity, type, rule, and directory."""
     severity_counts: Counter[str] = Counter()
     type_counts: Counter[str] = Counter()
     rule_counts: Counter[str] = Counter()
     dir_counts: Counter[str] = Counter()
-
     for issue in issues:
-        severity_counts[issue.get("severity", "UNKNOWN")] += 1
-        type_counts[issue.get("type", "UNKNOWN")] += 1
-        rule_counts[issue.get("rule", "UNKNOWN")] += 1
-        component = issue.get("component", "")
-        parts = component.replace(f"{PROJECT_KEY}:", "").split("/")
-        directory = "/".join(parts[:-1]) if len(parts) > 1 else "(root)"
-        dir_counts[directory] += 1
+        severity_counts[str(issue.get("severity", "UNKNOWN"))] += 1
+        type_counts[str(issue.get("type", "UNKNOWN"))] += 1
+        rule_counts[str(issue.get("rule", "UNKNOWN"))] += 1
+        dir_counts[_issue_directory(issue)] += 1
+    return severity_counts, type_counts, rule_counts, dir_counts
+
+
+def _print_issue_summary(issues: list[dict[str, Any]]) -> None:
+    """Print aggregate issue counts."""
+    print(f"\n--- ISSUES SUMMARY ({len(issues)} total) ---")
+    severity_counts, type_counts, rule_counts, dir_counts = _issue_counters(issues)
 
     print("\n  By severity:")
     for sev in ["BLOCKER", "CRITICAL", "MAJOR", "MINOR", "INFO"]:
@@ -465,10 +565,10 @@ def print_report(
             print(f"    {sev:<10} {count:>5}  {bar}")
 
     print("\n  By type:")
-    for typ in ["BUG", "VULNERABILITY", "CODE_SMELL"]:
-        count = type_counts.get(typ, 0)
+    for issue_type in ["BUG", "VULNERABILITY", "CODE_SMELL"]:
+        count = type_counts.get(issue_type, 0)
         if count:
-            print(f"    {typ:<16} {count:>5}")
+            print(f"    {issue_type:<16} {count:>5}")
 
     print("\n  Top 20 rules:")
     for rule, count in rule_counts.most_common(20):
@@ -478,10 +578,79 @@ def print_report(
     for directory, count in dir_counts.most_common(20):
         print(f"    {directory:<55} {count:>5}")
 
+
+def _duplication_values(component: DuplicationComponent, new_code: bool) -> tuple[str, str]:
+    """Return density and line-count metrics for overall or new-code duplication."""
+    if new_code:
+        return (
+            component["new_duplicated_lines_density"],
+            component["new_duplicated_lines"],
+        )
+    return component["duplicated_lines_density"], component["duplicated_lines"]
+
+
+def _top_duplication_components(
+    components: list[DuplicationComponent],
+    new_code: bool,
+) -> list[DuplicationComponent]:
+    """Return files with duplicated lines sorted by density and absolute count."""
+    return sorted(
+        [
+            component
+            for component in components
+            if _metric_as_int(_duplication_values(component, new_code)[1]) > 0
+        ],
+        key=lambda component: (
+            _metric_as_float(_duplication_values(component, new_code)[0]),
+            _metric_as_int(_duplication_values(component, new_code)[1]),
+            component["path"],
+        ),
+        reverse=True,
+    )
+
+
+def _print_duplication_table(
+    title: str,
+    components: list[DuplicationComponent],
+    new_code: bool,
+) -> None:
+    """Print a ranked file-level duplication table."""
+    print(f"\n  {title}:")
+    top_components = _top_duplication_components(components, new_code)
+    if not top_components:
+        print("    (none)")
+        return
+    print("    Density   Lines  File")
+    for component in top_components[:20]:
+        density_metric = "new_duplicated_lines_density" if new_code else "duplicated_lines_density"
+        density_value, lines_value = _duplication_values(component, new_code)
+        density = _format_metric_value(density_metric, density_value)
+        lines = _metric_as_int(lines_value)
+        print(f"    {density:>7}  {lines:>6}  {component['path']}")
+
+
+def _print_duplication_summary(components: list[DuplicationComponent]) -> None:
+    """Print top duplicated files for overall and new code metrics."""
+    print("\n--- DUPLICATION HOTSPOTS ---")
+    _print_duplication_table(
+        "Top 20 files by duplicated lines",
+        components,
+        False,
+    )
+    _print_duplication_table(
+        "Top 20 files by new duplicated lines",
+        components,
+        True,
+    )
+
+
+def _print_critical_issues(issues: list[dict[str, Any]]) -> None:
+    """Print details for blocker and critical issues."""
     print("\n  BLOCKER + CRITICAL issues (details):")
-    critical = [i for i in issues if i.get("severity") in ("BLOCKER", "CRITICAL")]
+    critical = [issue for issue in issues if issue.get("severity") in ("BLOCKER", "CRITICAL")]
     if not critical:
         print("    (none)")
+        return
     for issue in critical[:50]:
         component = issue.get(
             "component_path", issue.get("component", "").replace(f"{PROJECT_KEY}:", "")
@@ -505,6 +674,28 @@ def print_report(
                 )
         print()
 
+
+def print_report(
+    issues: list[dict[str, Any]],
+    metrics: dict[str, str],
+    quality_gate: QualityGateReport,
+    duplication_components: list[DuplicationComponent] | None = None,
+) -> None:
+    """Print a summary report to stdout.
+
+    Args:
+        issues: Issues returned by SonarCloud issues search API.
+        metrics: Project metrics mapping.
+        quality_gate: Quality gate status and condition summary.
+        duplication_components: File-level duplication metrics.
+    """
+    report_duplication_components = duplication_components or []
+    _print_report_header()
+    _print_project_metrics(metrics, quality_gate)
+    _print_quality_gate_details(quality_gate)
+    _print_duplication_summary(report_duplication_components)
+    _print_issue_summary(issues)
+    _print_critical_issues(issues)
     print("=" * 70)
 
 
@@ -513,6 +704,7 @@ def save_json(
     metrics: dict[str, str],
     quality_gate: QualityGateReport,
     output_dir: Path,
+    duplication_components: list[DuplicationComponent] | None = None,
 ) -> Path:
     """Save raw data to JSON for further analysis.
 
@@ -520,6 +712,7 @@ def save_json(
         issues: Issues returned by SonarCloud issues search API.
         metrics: Project metrics mapping.
         quality_gate: Quality gate status and condition summary.
+        duplication_components: File-level duplication metrics.
         output_dir: Directory where the report JSON should be written.
 
     Returns:
@@ -528,11 +721,13 @@ def save_json(
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M")
     path = output_dir / f"sonar_report_{stamp}.json"
+    report_duplication_components = duplication_components or []
     data = {
         "generated": datetime.now(UTC).isoformat(),
         "project": PROJECT_KEY,
         "metrics": metrics,
         "quality_gate": quality_gate,
+        "duplication_components": report_duplication_components,
         "total_issues": len(issues),
         "issues": issues,
     }
@@ -554,6 +749,9 @@ def main() -> int:
     print("Fetching quality gate status...")
     quality_gate = fetch_quality_gate(token)
 
+    print("Fetching file-level duplication metrics...")
+    duplication_components = fetch_duplication_components(token)
+
     print("Fetching all issues (this may take a moment)...")
     issues = fetch_all_issues(token)
 
@@ -561,10 +759,16 @@ def main() -> int:
     source_cache = fetch_source_cache(token, issues)
     detailed_issues = [_enrich_issue(issue, source_cache) for issue in issues]
 
-    print_report(detailed_issues, metrics, quality_gate)
+    print_report(detailed_issues, metrics, quality_gate, duplication_components)
 
     output_dir = Path(__file__).resolve().parent.parent / "reports"
-    json_path = save_json(detailed_issues, metrics, quality_gate, output_dir)
+    json_path = save_json(
+        detailed_issues,
+        metrics,
+        quality_gate,
+        output_dir,
+        duplication_components,
+    )
     print(f"\nRaw JSON saved to: {json_path}")
     print(f"({len(detailed_issues)} issues, {json_path.stat().st_size / 1024:.0f} KB)")
     return 0

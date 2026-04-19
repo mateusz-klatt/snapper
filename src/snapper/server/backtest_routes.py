@@ -82,6 +82,9 @@ router = APIRouter(prefix="/backtests", tags=["backtests"])
 _REST_STREAM = "backtest_rest"
 _CANCELLABLE_STATUSES = frozenset({"pending", "running"})
 _NOT_FOUND = "Backtest run not found"
+_BACKTEST_REQUEST_CONFLICT = "Backtest request conflict"
+_BACKTEST_REQUEST_FAILED = "Backtest request failed"
+_COMPARISON_OR_RUN_NOT_FOUND = "Comparison or run not found"
 
 
 def _bt_repo(repo: Repository) -> BacktestRepository:
@@ -168,20 +171,20 @@ _NO_ACTIVE_WALLET_RESPONSE: dict[int | str, dict[str, Any]] = {
 }
 _BACKTEST_NOT_FOUND_RESPONSE: dict[int | str, dict[str, Any]] = {404: {"description": _NOT_FOUND}}
 _BACKTEST_CONFLICT_RESPONSE: dict[int | str, dict[str, Any]] = {
-    409: {"description": "Backtest request conflict"}
+    409: {"description": _BACKTEST_REQUEST_CONFLICT}
 }
 _BACKTEST_VALIDATION_RESPONSE: dict[int | str, dict[str, Any]] = {
     422: {"description": "Backtest request validation failed"}
 }
 _BACKTEST_SERVER_ERROR_RESPONSE: dict[int | str, dict[str, Any]] = {
-    500: {"description": "Backtest request failed"}
+    500: {"description": _BACKTEST_REQUEST_FAILED}
 }
 _COMPARISON_NOT_FOUND_RESPONSE: dict[int | str, dict[str, Any]] = {
-    404: {"description": "Comparison or run not found"}
+    404: {"description": _COMPARISON_OR_RUN_NOT_FOUND}
 }
 _BACKTEST_CREATE_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {"description": _NO_ACTIVE_WALLET},
-    500: {"description": "Backtest request failed"},
+    500: {"description": _BACKTEST_REQUEST_FAILED},
 }
 _BACKTEST_LIST_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {"description": _NO_ACTIVE_WALLET}
@@ -193,19 +196,19 @@ _BACKTEST_READ_RESPONSES: dict[int | str, dict[str, Any]] = {
 _BACKTEST_CANCEL_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {"description": _NO_ACTIVE_WALLET},
     404: {"description": _NOT_FOUND},
-    409: {"description": "Backtest request conflict"},
-    500: {"description": "Backtest request failed"},
+    409: {"description": _BACKTEST_REQUEST_CONFLICT},
+    500: {"description": _BACKTEST_REQUEST_FAILED},
 }
 _BACKTEST_COMPARISON_READ_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {"description": _NO_ACTIVE_WALLET},
-    404: {"description": "Comparison or run not found"},
+    404: {"description": _COMPARISON_OR_RUN_NOT_FOUND},
 }
 _BACKTEST_COMPARISON_WRITE_RESPONSES: dict[int | str, dict[str, Any]] = {
     400: {"description": _NO_ACTIVE_WALLET},
-    404: {"description": "Comparison or run not found"},
-    409: {"description": "Backtest request conflict"},
+    404: {"description": _COMPARISON_OR_RUN_NOT_FOUND},
+    409: {"description": _BACKTEST_REQUEST_CONFLICT},
     422: {"description": "Backtest request validation failed"},
-    500: {"description": "Backtest request failed"},
+    500: {"description": _BACKTEST_REQUEST_FAILED},
 }
 
 

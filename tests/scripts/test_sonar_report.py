@@ -302,6 +302,94 @@ class TestFetchMetrics:
         assert "measures/component" in mock_get.call_args.args[0]
 
 
+class TestFetchDuplicationComponents:
+    """Tests for fetch_duplication_components."""
+
+    def test_fetches_file_level_duplication_metrics_across_pages(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Loads file metrics from component_tree and normalizes defaults."""
+        response_1 = MagicMock()
+        response_1.raise_for_status = MagicMock()
+        response_1.json = MagicMock(
+            return_value={
+                "components": [
+                    {
+                        "path": "src/app.py",
+                        "measures": [
+                            {"metric": "duplicated_lines_density", "value": "12.5"},
+                            {"metric": "duplicated_lines", "value": "10"},
+                            {
+                                "metric": "new_duplicated_lines_density",
+                                "periods": [{"value": "6.5"}],
+                            },
+                            {"metric": "new_duplicated_lines", "value": "4"},
+                        ],
+                    }
+                ],
+                "paging": {"total": 2},
+            }
+        )
+        response_2 = MagicMock()
+        response_2.raise_for_status = MagicMock()
+        response_2.json = MagicMock(
+            return_value={
+                "components": [
+                    {
+                        "key": f"{sonar_report.PROJECT_KEY}:src/fallback.py",
+                        "measures": [
+                            {"metric": "duplicated_lines", "value": "3"},
+                        ],
+                    }
+                ],
+                "paging": {"total": 2},
+            }
+        )
+
+        with patch(
+            "scripts.sonar_report.httpx.get", side_effect=[response_1, response_2]
+        ) as mock_get:
+            result = sonar_report.fetch_duplication_components("t")
+
+        assert result == [
+            {
+                "path": "src/app.py",
+                "duplicated_lines_density": "12.5",
+                "duplicated_lines": "10",
+                "new_duplicated_lines_density": "6.5",
+                "new_duplicated_lines": "4",
+            },
+            {
+                "path": "src/fallback.py",
+                "duplicated_lines_density": "0",
+                "duplicated_lines": "3",
+                "new_duplicated_lines_density": "0",
+                "new_duplicated_lines": "0",
+            },
+        ]
+        assert mock_get.call_args_list[0].kwargs["params"]["p"] == 1
+        assert mock_get.call_args_list[1].kwargs["params"]["p"] == 2
+        captured = capsys.readouterr()
+        assert "page 1" in captured.out
+        assert "page 2" in captured.out
+
+    def test_stops_when_duplication_component_page_is_empty(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Stops after the first empty component_tree page."""
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json = MagicMock(return_value={"components": [], "paging": {"total": 10}})
+
+        with patch("scripts.sonar_report.httpx.get", return_value=response) as mock_get:
+            result = sonar_report.fetch_duplication_components("t")
+
+        assert result == []
+        assert mock_get.call_count == 1
+        captured = capsys.readouterr()
+        assert "page 1" in captured.out
+
+
 class TestFetchAllIssues:
     """Tests for fetch_all_issues."""
 
@@ -487,6 +575,38 @@ class TestPrintReport:
         assert "Secondary locations:" in captured.out
         assert "src/helper.py:22 +1" in captured.out
 
+    def test_prints_duplication_hotspots_when_components_exist(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Prints ranked duplication tables when file-level metrics are present."""
+        metrics = {"ncloc": "10", "sqale_index": "0"}
+        quality_gate = _quality_gate()
+        duplication_components: list[sonar_report.DuplicationComponent] = [
+            {
+                "path": "src/alpha.py",
+                "duplicated_lines_density": "2.5",
+                "duplicated_lines": "3",
+                "new_duplicated_lines_density": "1.5",
+                "new_duplicated_lines": "2",
+            },
+            {
+                "path": "src/zero.py",
+                "duplicated_lines_density": "0",
+                "duplicated_lines": "0",
+                "new_duplicated_lines_density": "0",
+                "new_duplicated_lines": "0",
+            },
+        ]
+
+        with patch.object(sonar_report, "datetime", FrozenDateTime):
+            sonar_report.print_report([], metrics, quality_gate, duplication_components)
+
+        captured = capsys.readouterr()
+        assert "DUPLICATION HOTSPOTS" in captured.out
+        assert "Top 20 files by duplicated lines" in captured.out
+        assert "Density   Lines  File" in captured.out
+        assert "src/alpha.py" in captured.out
+
 
 class TestSaveJson:
     """Tests for save_json."""
@@ -507,6 +627,82 @@ class TestSaveJson:
         assert '"project"' in payload
         assert '"issues"' in payload
         assert '"quality_gate"' in payload
+
+    def test_writes_duplication_components_to_json(self, tmp_path: Path) -> None:
+        """Serializes file-level duplication metrics alongside the issue payload."""
+        output_dir = tmp_path / "out"
+        duplication_components: list[sonar_report.DuplicationComponent] = [
+            {
+                "path": "src/report.py",
+                "duplicated_lines_density": "4.0",
+                "duplicated_lines": "8",
+                "new_duplicated_lines_density": "2.0",
+                "new_duplicated_lines": "3",
+            }
+        ]
+
+        with patch.object(sonar_report, "datetime", FrozenDateTime):
+            path = sonar_report.save_json(
+                [], {"bugs": "0"}, _quality_gate(), output_dir, duplication_components
+            )
+
+        payload = path.read_text()
+        assert '"duplication_components"' in payload
+        assert '"src/report.py"' in payload
+
+
+class TestDuplicationHelpers:
+    """Tests for duplication-specific helper functions."""
+
+    def test_metric_parsers_and_duplication_value_helpers(self) -> None:
+        """Parses numeric metrics and returns the correct overall/new tuples."""
+        component: sonar_report.DuplicationComponent = {
+            "path": "src/a.py",
+            "duplicated_lines_density": "3.2",
+            "duplicated_lines": "4",
+            "new_duplicated_lines_density": "1.1",
+            "new_duplicated_lines": "2",
+        }
+
+        assert sonar_report._metric_as_float("") == pytest.approx(0.0)
+        assert sonar_report._metric_as_float("?") == pytest.approx(0.0)
+        assert sonar_report._metric_as_float("1.25") == pytest.approx(1.25)
+        assert sonar_report._metric_as_int("") == 0
+        assert sonar_report._metric_as_int("?") == 0
+        assert sonar_report._metric_as_int("7.9") == 7
+        assert sonar_report._duplication_values(component, False) == ("3.2", "4")
+        assert sonar_report._duplication_values(component, True) == ("1.1", "2")
+
+    def test_top_duplication_components_filters_zero_line_entries(self) -> None:
+        """Sorts by density/count and excludes files with zero duplicated lines."""
+        ranked = sonar_report._top_duplication_components(
+            [
+                {
+                    "path": "src/zero.py",
+                    "duplicated_lines_density": "9.9",
+                    "duplicated_lines": "0",
+                    "new_duplicated_lines_density": "9.9",
+                    "new_duplicated_lines": "0",
+                },
+                {
+                    "path": "src/a.py",
+                    "duplicated_lines_density": "3.2",
+                    "duplicated_lines": "4",
+                    "new_duplicated_lines_density": "1.1",
+                    "new_duplicated_lines": "2",
+                },
+                {
+                    "path": "src/b.py",
+                    "duplicated_lines_density": "5.0",
+                    "duplicated_lines": "6",
+                    "new_duplicated_lines_density": "0.5",
+                    "new_duplicated_lines": "1",
+                },
+            ],
+            False,
+        )
+
+        assert [component["path"] for component in ranked] == ["src/b.py", "src/a.py"]
 
 
 class TestMain:
@@ -529,6 +725,10 @@ class TestMain:
                 "scripts.sonar_report.fetch_quality_gate",
                 return_value=_quality_gate(),
             ) as mock_quality_gate,
+            patch(
+                "scripts.sonar_report.fetch_duplication_components",
+                return_value=[],
+            ) as mock_duplication,
             patch("scripts.sonar_report.fetch_all_issues", return_value=[]) as mock_issues,
             patch("scripts.sonar_report.fetch_source_cache", return_value={}) as mock_source_cache,
             patch("scripts.sonar_report.print_report") as mock_print,
@@ -539,6 +739,7 @@ class TestMain:
         assert mock_token.call_count == 1
         assert mock_metrics.call_count == 1
         assert mock_quality_gate.call_count == 1
+        assert mock_duplication.call_count == 1
         assert mock_issues.call_count == 1
         assert mock_source_cache.call_count == 1
         assert mock_print.call_count == 1
