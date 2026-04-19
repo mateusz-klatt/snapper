@@ -27,12 +27,9 @@ import snapper.server.authenticated_websocket as auth_ws
 from snapper.api.auth.errors.ws_token import WsTokenAlreadyUsedError
 from snapper.api.auth.errors.ws_token import WsTokenError
 from snapper.api.auth.schemas.ws_token import WsTokenPayload
-from snapper.api.auth.services.ws_token_service import WsTokenService
 from snapper.api.auth.services.ws_token_service import compute_sid_hash
 from snapper.api.auth.services.ws_token_service import get_ws_token_service
-from snapper.application.services.settings import SettingsService
 from snapper.auth import routes
-from snapper.auth.dependencies import CSRFManager
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
@@ -56,19 +53,12 @@ from snapper.auth.schemas.tokens import TokenPair
 from snapper.auth.schemas.user import UserProfile
 from snapper.auth.schemas.websocket import WebSocketAuthMessage
 from snapper.auth.schemas.websocket import WebSocketAuthResponse
-from snapper.auth.tokens import TokenManager
-from snapper.auth.tokens import WebSocketTokenRotator
 from snapper.auth.tokens import get_token_manager
-from snapper.auth.user_service import UserService
 from snapper.auth.user_service import get_user_service
 from snapper.auth.websocket_auth import AuthConnectionStats
 from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.auth.websocket_auth import get_ws_auth_manager
 from snapper.config.bootstrap import BootstrapSettingsLoader
-from snapper.data.repository import _repository_cache
-from snapper.data.repository import dispose_repositories
-from snapper.infrastructure.security.encryption import SettingsEncryptionService
-from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.interface.websocket.bridge import ZmqWebSocketBridgeService
 from snapper.interface.websocket.handlers.auth import AUTH_TIMEOUT_SECONDS
 from snapper.interface.websocket.handlers.auth import REAUTH_GRACE_PERIOD
@@ -104,29 +94,6 @@ pytest = cast(Any, pytest)
 create_app = cast(Any, create_app)
 create_authenticated_websocket_router = cast(Any, create_authenticated_websocket_router)
 has_trading_permission = cast(Any, has_trading_permission)
-
-
-def _cleanup_test_client_state() -> None:
-    """Release singleton and repository state after a TestClient lifespan ends."""
-    for singleton_cls in (
-        SymbolMapperService,
-        SettingsEncryptionService,
-        UserService,
-        WebSocketAuthManager,
-        TokenManager,
-        WebSocketTokenRotator,
-        WsTokenService,
-        CSRFManager,
-        SettingsService,
-    ):
-        with contextlib.suppress(Exception):
-            singleton_cls.clear_instance()
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(dispose_repositories())
-    finally:
-        loop.close()
-    _repository_cache.clear()
 
 
 @pytest.fixture
@@ -182,7 +149,6 @@ def test_client(mock_settings_for_tests: Any) -> Generator[Any]:
         app.dependency_overrides[require_authentication] = skip_authentication
         with TestClient(app) as client:
             yield client
-        _cleanup_test_client_state()
 
 
 WS_PATH = "/api/ws"
