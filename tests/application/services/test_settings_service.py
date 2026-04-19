@@ -200,10 +200,41 @@ class TestSettingsService:
         """
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
-            zmq_broker_xpub="tcp://127.0.0.1:7501",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
         )
         assert service.db_url == "sqlite+aiosqlite:///:memory:"
-        assert service.zmq_broker_xpub == "tcp://127.0.0.1:7501"
+        assert service.zmq_broker_xsub == "tcp://127.0.0.1:7500"
+
+    @pytest.mark.asyncio
+    async def test_setup_zmq_publisher_connects_to_xsub_endpoint(self) -> None:
+        """Day 3c R3 follow-up: PUB socket MUST connect to XSUB endpoint.
+
+        Per the broker proxy contract documented in
+        `BootstrapSettingsLoader` (publishers ──[connect]──> XSUB
+        ── proxy ── XPUB ──[connect]──> Subscribers), publishers
+        connect to the broker's XSUB side. The pre-fix code wired
+        `_setup_zmq_publisher` to `zmq_broker_xpub` (subscriber-
+        facing) which silently dropped every `system.settings`
+        broadcast since Day 1.
+
+        This test pins the endpoint so a future refactor that
+        flips it back to xpub fails CI loudly. Mirrors the
+        Day 3b R2 pinning pattern in
+        `test_build_user_service_publisher_connects_to_broker_xsub`.
+        """
+        SettingsService.clear_instance()
+        service = SettingsService(
+            db_url="sqlite+aiosqlite:///:memory:",
+            zmq_broker_xsub="tcp://test-broker-xsub:7500",
+        )
+        with patch("snapper.application.services.settings.zmq.asyncio.Context") as mock_context_cls:
+            mock_socket = MagicMock()
+            mock_context = MagicMock()
+            mock_context.socket.return_value = mock_socket
+            mock_context_cls.return_value = mock_context
+            await service._setup_zmq_publisher()
+        mock_socket.connect.assert_called_once_with("tcp://test-broker-xsub:7500")
+        SettingsService.clear_instance()
 
     @pytest.mark.asyncio
     async def test_shutdown_without_zmq_context(self) -> None:
@@ -215,7 +246,7 @@ class TestSettingsService:
         """
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
-            zmq_broker_xpub="tcp://127.0.0.1:7501",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
         )
         assert service._zmq_context is None
         assert service._msg_publisher is None
@@ -230,10 +261,10 @@ class TestSettingsService:
         """
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
-            zmq_broker_xpub="tcp://127.0.0.1:7501",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
         )
         assert service.db_url == "sqlite+aiosqlite:///:memory:"
-        assert service.zmq_broker_xpub == "tcp://127.0.0.1:7501"
+        assert service.zmq_broker_xsub == "tcp://127.0.0.1:7500"
 
     def test_get_setting_not_loaded(self) -> None:
         """Verify get_setting returns default when not loaded.
@@ -244,7 +275,7 @@ class TestSettingsService:
         """
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
-            zmq_broker_xpub="tcp://127.0.0.1:7501",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
         )
         result = service.get_setting("test_key", "default")
         assert result == "default"
@@ -258,7 +289,7 @@ class TestSettingsService:
         """
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
-            zmq_broker_xpub="tcp://127.0.0.1:7501",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
         )
         result = service.get_setting("test_key")
         assert result is None
@@ -272,7 +303,7 @@ class TestSettingsService:
         """
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
-            zmq_broker_xpub="tcp://127.0.0.1:7501",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
         )
         parser = cast(Any, service)._parse_value
         assert parser("true") is True
@@ -296,7 +327,7 @@ class TestSettingsService:
         """
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
-            zmq_broker_xpub="tcp://127.0.0.1:7501",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
         )
         repo = get_repository("sqlite+aiosqlite:///:memory:")
         await repo.create_all()
@@ -330,7 +361,7 @@ class TestSettingsService:
         """
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
-            zmq_broker_xpub="tcp://127.0.0.1:7501",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
         )
         publisher = self._StubMsgPublisher()
         cast(Any, service)._msg_publisher = publisher
@@ -356,7 +387,7 @@ class TestSettingsService:
         """
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
-            zmq_broker_xpub="tcp://127.0.0.1:7501",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
         )
         mock_vp = MagicMock()
         mock_vp.send_multipart = AsyncMock()
@@ -390,7 +421,7 @@ class TestSettingsService:
         """
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
-            zmq_broker_xpub="tcp://127.0.0.1:7501",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
         )
         await cast(Any, service)._broadcast_change(
             "unused", "value", "system", now=datetime.now(UTC)
@@ -410,7 +441,7 @@ class TestSettingsService:
         """
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
-            zmq_broker_xpub="tcp://127.0.0.1:7501",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
         )
         publisher = MagicMock()
         publisher.send = AsyncMock()
@@ -442,7 +473,7 @@ class TestSettingsService:
         """Verify the credential filter normalizes case before matching."""
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
-            zmq_broker_xpub="tcp://127.0.0.1:7501",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
         )
         publisher = MagicMock()
         publisher.send = AsyncMock()
@@ -463,7 +494,7 @@ class TestSettingsService:
         """
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
-            zmq_broker_xpub="tcp://127.0.0.1:7501",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
         )
         publisher = MagicMock()
         publisher.send = AsyncMock(side_effect=RuntimeError("fail"))
@@ -486,7 +517,7 @@ class TestSettingsService:
         """
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
-            zmq_broker_xpub="tcp://127.0.0.1:7501",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
         )
         repo = get_repository("sqlite+aiosqlite:///:memory:")
         await repo.create_all()
@@ -515,7 +546,7 @@ class TestSettingsService:
         """
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
-            zmq_broker_xpub="tcp://127.0.0.1:7501",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
         )
         repo = get_repository("sqlite+aiosqlite:///:memory:")
         await repo.create_all()
@@ -539,7 +570,7 @@ class TestSettingsService:
         """
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
-            zmq_broker_xpub="tcp://127.0.0.1:7501",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
         )
         repo = get_repository("sqlite+aiosqlite:///:memory:")
         await repo.create_all()
@@ -578,7 +609,7 @@ class TestSettingsService:
         """
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
-            zmq_broker_xpub="tcp://127.0.0.1:7501",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
         )
         repo = get_repository("sqlite+aiosqlite:///:memory:")
         await repo.create_all()
@@ -619,7 +650,7 @@ class TestSettingsService:
         """
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
-            zmq_broker_xpub="tcp://127.0.0.1:7501",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
         )
         repo = get_repository("sqlite+aiosqlite:///:memory:")
         await repo.create_all()
@@ -650,7 +681,7 @@ class TestSettingsService:
         """
         service = SettingsService(
             db_url="sqlite+aiosqlite:///:memory:",
-            zmq_broker_xpub="tcp://127.0.0.1:7501",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
         )
         repo = get_repository("sqlite+aiosqlite:///:memory:")
         await repo.create_all()
@@ -696,10 +727,10 @@ async def test_get_settings_service_reuses_instance() -> None:
 
         init_mock.side_effect = _mark_loaded
         service_a = await get_settings_service(
-            "sqlite+aiosqlite:///:memory:", "tcp://127.0.0.1:7501"
+            "sqlite+aiosqlite:///:memory:", "tcp://127.0.0.1:7500"
         )
         service_b = await get_settings_service(
-            "sqlite+aiosqlite:///:memory:", "tcp://127.0.0.1:7501"
+            "sqlite+aiosqlite:///:memory:", "tcp://127.0.0.1:7500"
         )
     assert service_a is service_b
     assert init_mock.await_count == 1
@@ -713,7 +744,7 @@ def test_singleton_new_returns_same_instance_for_same_params() -> None:
     Then: Both are same object.
     """
     db_url = "sqlite+aiosqlite:///:memory:"
-    zmq_url = "tcp://127.0.0.1:7501"
+    zmq_url = "tcp://127.0.0.1:7500"
     service1 = SettingsService(db_url, zmq_url)
     service2 = SettingsService(db_url, zmq_url)
     assert service1 is service2
@@ -770,7 +801,7 @@ def test_settings_bootstrap_access() -> None:
     assert s.server_host
     assert s.server_port
     assert s.zmq_broker_xsub
-    assert s.zmq_broker_xpub
+    assert s.zmq_broker_xsub
 
 
 @pytest.mark.real_settings
@@ -817,7 +848,7 @@ async def test_settings_with_service_database_access() -> None:
     bootstrap = get_settings()
     service = await get_settings_service(
         bootstrap.db_url,
-        bootstrap.zmq_broker_xpub,
+        bootstrap.zmq_broker_xsub,
     )
     s = get_settings_with_service(service)
     assert s.instruments
@@ -894,16 +925,16 @@ def test_settings_get_setting_without_service_raises() -> None:
 def test_settings_service_basic_creation() -> None:
     """Verify SettingsService creation sets properties.
 
-    Given: db_url and zmq_broker_xpub,
+    Given: db_url and zmq_broker_xsub,
     When: SettingsService created,
     Then: Properties set correctly.
     """
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
-        zmq_broker_xpub="tcp://127.0.0.1:7501",
+        zmq_broker_xsub="tcp://127.0.0.1:7500",
     )
     assert service.db_url == "sqlite+aiosqlite:///:memory:"
-    assert service.zmq_broker_xpub == "tcp://127.0.0.1:7501"
+    assert service.zmq_broker_xsub == "tcp://127.0.0.1:7500"
 
 
 def test_settings_service_skip_reinit_if_already_initialized() -> None:
@@ -915,13 +946,13 @@ def test_settings_service_skip_reinit_if_already_initialized() -> None:
     """
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
-        zmq_broker_xpub="tcp://127.0.0.1:7501",
+        zmq_broker_xsub="tcp://127.0.0.1:7500",
     )
     original_db_url = service.db_url
     SettingsService.__init__(
         service,
         db_url="sqlite+aiosqlite:///:memory:different",
-        zmq_broker_xpub="tcp://127.0.0.1:9999",
+        zmq_broker_xsub="tcp://127.0.0.1:9999",
     )
     assert service.db_url == original_db_url
 
@@ -936,7 +967,7 @@ async def test_update_setting_with_force_encrypt_cleartext_false() -> None:
     """
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
-        zmq_broker_xpub="tcp://127.0.0.1:7501",
+        zmq_broker_xsub="tcp://127.0.0.1:7500",
     )
     mock_session = MagicMock()
     select_result = MockResult([])
@@ -971,7 +1002,7 @@ async def test_broadcast_change_when_publisher_is_none() -> None:
     """
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
-        zmq_broker_xpub="tcp://127.0.0.1:7501",
+        zmq_broker_xsub="tcp://127.0.0.1:7500",
     )
     service._msg_publisher = None
     await service._broadcast_change(
@@ -989,7 +1020,7 @@ async def test_broadcast_change_when_send_multipart_raises() -> None:
     """
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
-        zmq_broker_xpub="tcp://127.0.0.1:7501",
+        zmq_broker_xsub="tcp://127.0.0.1:7500",
     )
     mock_publisher = MagicMock()
     mock_publisher.send = AsyncMock(side_effect=Exception("ZMQ error"))
@@ -1012,7 +1043,7 @@ async def test_get_settings_service_with_already_loaded_cache() -> None:
     """
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
-        zmq_broker_xpub="tcp://127.0.0.1:7501",
+        zmq_broker_xsub="tcp://127.0.0.1:7500",
     )
     with (
         patch.object(service, "_load_all_settings", new_callable=AsyncMock) as mock_load,
@@ -1021,7 +1052,7 @@ async def test_get_settings_service_with_already_loaded_cache() -> None:
         service._loaded = True
         result = await get_settings_service(
             db_url="sqlite+aiosqlite:///:memory:",
-            zmq_broker_xpub="tcp://127.0.0.1:7501",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
         )
         assert result is service
         assert not mock_load.called
@@ -1036,7 +1067,7 @@ def test_parse_value_for_bool() -> None:
     """
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
-        zmq_broker_xpub="tcp://127.0.0.1:7501",
+        zmq_broker_xsub="tcp://127.0.0.1:7500",
     )
     assert service._parse_value("true") is True
     assert service._parse_value("True") is True
@@ -1053,7 +1084,7 @@ def test_parse_value_for_int() -> None:
     """
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
-        zmq_broker_xpub="tcp://127.0.0.1:7501",
+        zmq_broker_xsub="tcp://127.0.0.1:7500",
     )
     assert service._parse_value("123") == 123
     assert service._parse_value("-456") == -456
@@ -1069,7 +1100,7 @@ def test_parse_value_for_float() -> None:
     """
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
-        zmq_broker_xpub="tcp://127.0.0.1:7501",
+        zmq_broker_xsub="tcp://127.0.0.1:7500",
     )
     assert service._parse_value("123.45") == pytest.approx(123.45)
     assert service._parse_value("-67.89") == pytest.approx(-67.89)
@@ -1085,7 +1116,7 @@ def test_parse_value_for_string() -> None:
     """
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
-        zmq_broker_xpub="tcp://127.0.0.1:7501",
+        zmq_broker_xsub="tcp://127.0.0.1:7500",
     )
     assert service._parse_value("hello") == "hello"
     assert service._parse_value("not a number") == "not a number"
@@ -1101,7 +1132,7 @@ def test_parse_value_for_json_list() -> None:
     """
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
-        zmq_broker_xpub="tcp://127.0.0.1:7501",
+        zmq_broker_xsub="tcp://127.0.0.1:7500",
     )
     result = service._parse_value('["a", "b", "c"]')
     assert result == ["a", "b", "c"]
@@ -1116,7 +1147,7 @@ def test_parse_value_for_json_dict() -> None:
     """
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
-        zmq_broker_xpub="tcp://127.0.0.1:7501",
+        zmq_broker_xsub="tcp://127.0.0.1:7500",
     )
     result = service._parse_value('{"key": "value"}')
     assert result == {"key": "value"}
@@ -1132,7 +1163,7 @@ async def test_shutdown_when_publisher_exists() -> None:
     """
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
-        zmq_broker_xpub="tcp://127.0.0.1:7501",
+        zmq_broker_xsub="tcp://127.0.0.1:7500",
     )
     mock_publisher = MagicMock()
     service._msg_publisher = mock_publisher
@@ -1153,7 +1184,7 @@ async def test_shutdown_when_publisher_is_none() -> None:
     """
     service = SettingsService(
         db_url="sqlite+aiosqlite:///:memory:",
-        zmq_broker_xpub="tcp://127.0.0.1:7501",
+        zmq_broker_xsub="tcp://127.0.0.1:7500",
     )
     service._msg_publisher = None
     mock_context = MagicMock()

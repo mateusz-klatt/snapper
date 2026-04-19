@@ -178,7 +178,7 @@ async def set_setting(
     settings = get_settings()
     settings_service = await get_settings_service(
         settings.db_url,
-        settings.zmq_broker_xpub,
+        settings.zmq_broker_xsub,
     )
     await settings_service.update_setting(
         key=key,

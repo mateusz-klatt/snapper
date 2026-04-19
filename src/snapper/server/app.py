@@ -227,7 +227,7 @@ async def _initialize_settings_service(settings: AppSettings) -> SettingsService
     """
     settings_service = await get_settings_service(
         settings.db_url,
-        settings.zmq_broker_xpub,
+        settings.zmq_broker_xsub,
     )
     logger.info("AppSettings initialized with database access (cached, ZMQ-synced)")
     return settings_service
@@ -352,15 +352,22 @@ async def _reconcile_stale_backtests(app: FastAPI) -> None:
 async def _shutdown_zmq_bridge(app: FastAPI) -> None:
     """Stop ZMQ bridge and await its task during shutdown.
 
+    Day 3c R3 follow-up: tolerates partial-init state where
+    `app.state.manager` was never attached (lifespan startup
+    raised before the WebSocket connection manager was wired).
+    Returns silently in that case so the rest of the lifespan
+    `finally` chain still runs.
+
     Args:
         app: FastAPI application instance.
     """
-    ws_manager: WebSocketConnectionManager = app.state.manager
-    if not (ws_manager.zmq_bridge and app.state.zmq_bridge_task):
+    ws_manager: WebSocketConnectionManager | None = getattr(app.state, "manager", None)
+    bridge_task = getattr(app.state, "zmq_bridge_task", None)
+    if ws_manager is None or not ws_manager.zmq_bridge or bridge_task is None:
         return
     await ws_manager.zmq_bridge.stop()
     try:
-        await app.state.zmq_bridge_task
+        await bridge_task
     except (Exception, asyncio.CancelledError) as e:
         logger.warning(f"ZMQ bridge task failed during shutdown: {e}")
 
@@ -383,22 +390,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """
     set_log_context("api")
     settings = get_settings()
-    settings_service = await _initialize_settings_service(settings)
-    settings = get_settings_with_service(settings_service)
-    app.state.settings = settings
-    app.state.settings_service = settings_service
-    _configure_auth_services(settings_service)
-    user_publisher, user_publisher_context = _build_user_service_publisher(settings.zmq_broker_xsub)
-    app.state.user_service_publisher = user_publisher
-    app.state.user_service_publisher_context = user_publisher_context
-    get_user_service().set_msg_publisher(user_publisher)
-    logger.info("UserService publisher wired to ZMQ broker for admin.user_deactivated")
-    await get_ws_auth_manager().start_admin_listener(settings.zmq_broker_xpub)
-    discover_processes()
-    process_factory = ProcessLauncherService(settings)
-    app.state.process_factory = process_factory
+    settings_service: SettingsService | None = None
+    process_factory: ProcessLauncherService | None = None
     app.state.zmq_bridge_task = None
     try:
+        settings_service = await _initialize_settings_service(settings)
+        settings = get_settings_with_service(settings_service)
+        app.state.settings = settings
+        app.state.settings_service = settings_service
+        _configure_auth_services(settings_service)
+        user_publisher, user_publisher_context = _build_user_service_publisher(
+            settings.zmq_broker_xsub
+        )
+        app.state.user_service_publisher = user_publisher
+        app.state.user_service_publisher_context = user_publisher_context
+        get_user_service().set_msg_publisher(user_publisher)
+        logger.info("UserService publisher wired to ZMQ broker for admin.user_deactivated")
+        await get_ws_auth_manager().start_admin_listener(settings.zmq_broker_xpub)
+        discover_processes()
+        process_factory = ProcessLauncherService(settings)
+        app.state.process_factory = process_factory
         logger.info("Starting application lifespan - checking autostart settings")
         await process_factory.sync_registry_to_database()
         if settings.server_api_only:
@@ -419,10 +430,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     finally:
         logger.info("Starting application shutdown sequence")
         await _shutdown_zmq_bridge(app)
-        await process_factory.stop_all_processes()
-        manager = app.state.manager
-        await manager.cleanup()
-        await settings_service.shutdown()
+        if process_factory is not None:
+            await process_factory.stop_all_processes()
+        manager = getattr(app.state, "manager", None)
+        if manager is not None:
+            await manager.cleanup()
+        if settings_service is not None:
+            await settings_service.shutdown()
         await get_ws_auth_manager().stop_admin_listener()
         _shutdown_user_service_publisher(app)
         _clear_runtime_singletons()

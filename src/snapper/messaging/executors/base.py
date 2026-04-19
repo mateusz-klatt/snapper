@@ -178,7 +178,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self.repository = get_repository(self.settings.db_url)
         settings_service = await get_settings_service(
             self.settings.db_url,
-            self.settings.zmq_broker_xpub,
+            self.settings.zmq_broker_xsub,
         )
         self.settings = get_settings_with_service(settings_service)
         logger.info("AppSettings service initialized with database access")

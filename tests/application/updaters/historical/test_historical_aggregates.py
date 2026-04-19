@@ -469,6 +469,7 @@ class DummySettings(SimpleNamespace):
     """Mock settings object for testing aggregates service."""
 
     db_url: str = TEST_DB_URL
+    zmq_broker_xsub: str = "tcp://127.0.0.1:5556"
     zmq_broker_xpub: str = "tcp://127.0.0.1:5555"
     master_password: str | None = None
     polygon_api_key: str | None = None
@@ -1651,6 +1652,7 @@ async def test_start_without_symbols_returns(monkeypatch: pytest.MonkeyPatch) ->
             instruments={"polygon": []},
             db_url=TEST_DB_URL,
             zmq_broker_xpub="xpub",
+            zmq_broker_xsub="xsub",
             master_password=None,
             polygon_api_key="dummy",
             backfill_days=1,
@@ -1704,6 +1706,7 @@ async def test_start_all_mapped_without_results(
             instruments={"polygon": []},
             db_url=TEST_DB_URL,
             zmq_broker_xpub="xpub",
+            zmq_broker_xsub="xsub",
             master_password=None,
             polygon_api_key="dummy",
             backfill_days=1,
@@ -1758,6 +1761,7 @@ async def test_start_skips_symbol_without_context(
             instruments={"polygon": ["X:UNKNOWN"]},
             db_url=TEST_DB_URL,
             zmq_broker_xpub="xpub",
+            zmq_broker_xsub="xsub",
             master_password=None,
             polygon_api_key="dummy",
             backfill_days=1,
@@ -1881,6 +1885,7 @@ async def test_start_all_mapped_uses_fetched_symbols(monkeypatch: pytest.MonkeyP
     dummy_settings = SimpleNamespace(
         db_url=TEST_DB_URL,
         zmq_broker_xpub="inproc://xpub",
+        zmq_broker_xsub="inproc://xsub",
         master_password="pw",
         polygon_api_key="key",
         instruments={"polygon": ["X:IGNORED"]},
@@ -1955,6 +1960,7 @@ async def test_process_symbol_caps_to_max_ts(monkeypatch: pytest.MonkeyPatch) ->
     dummy_settings = SimpleNamespace(
         db_url=TEST_DB_URL,
         zmq_broker_xpub="inproc://xpub",
+        zmq_broker_xsub="inproc://xsub",
         master_password="pw",
         polygon_api_key="key",
         instruments={},
@@ -2257,6 +2263,7 @@ def base_settings(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         polygon_api_key="key",
         db_url=TEST_DB_URL,
         zmq_broker_xpub="tcp://127.0.0.1:7501",
+        zmq_broker_xsub="tcp://127.0.0.1:7500",
         master_password="pwd",
     )
     monkeypatch.setattr(

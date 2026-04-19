@@ -415,7 +415,7 @@ class TraderCoordinator(RegisterableProcess):
 
         settings_service = await get_settings_service(
             self.settings.db_url,
-            self.settings.zmq_broker_xpub,
+            self.settings.zmq_broker_xsub,
         )
         self.settings = get_settings_with_service(settings_service)
         self.repository = get_repository(self.settings.db_url)

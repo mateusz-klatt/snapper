@@ -822,7 +822,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.info("Repository initialized")
             settings_service = await get_settings_service(
                 self.settings.db_url,
-                self.settings.zmq_broker_xpub,
+                self.settings.zmq_broker_xsub,
             )
             self.settings = get_settings_with_service(settings_service)
             logger.info("AppSettings service initialized with database access")

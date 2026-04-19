@@ -66,7 +66,7 @@ def service_fixture(
     settings = SimpleNamespace(
         polygon_api_key="api-key",
         db_url="sqlite:///:memory:",
-        zmq_broker_xpub="tcp://127.0.0.1:7501",
+        zmq_broker_xsub="tcp://127.0.0.1:7500",
         master_password="pwd",
     )
     monkeypatch.setattr(
@@ -152,7 +152,7 @@ async def test_start_requires_polygon_api_key(monkeypatch: pytest.MonkeyPatch) -
     settings = SimpleNamespace(
         polygon_api_key="",
         db_url="sqlite:///:memory:",
-        zmq_broker_xpub="tcp://127.0.0.1:7501",
+        zmq_broker_xsub="tcp://127.0.0.1:7500",
         master_password="pwd",
     )
     monkeypatch.setattr(

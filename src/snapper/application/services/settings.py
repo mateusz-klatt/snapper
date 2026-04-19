@@ -80,7 +80,15 @@ class SettingsService:
 
     Attributes:
         db_url: Database connection URL.
-        zmq_broker_xpub: ZMQ broker XPUB address for publishing changes.
+        zmq_broker_xsub: ZMQ broker XSUB address (publishers connect here
+            per the broker proxy contract documented in
+            `BootstrapSettingsLoader`). The legacy parameter name was
+            `zmq_broker_xpub` which mislabeled the field and was the
+            same-shape bug Day 3b R2 fix-up resolved on
+            `_build_user_service_publisher` — the SettingsService publisher
+            for `system.settings` had been silently dropping every
+            broadcast since Day 1 because PUB→XPUB does not deliver
+            through the XSUB/XPUB proxy.
     """
 
     _instance: SettingsService | None = None
@@ -90,7 +98,7 @@ class SettingsService:
     def __new__(
         cls,
         db_url: str,
-        zmq_broker_xpub: str,
+        zmq_broker_xsub: str,
     ) -> SettingsService:
         """Create or return existing singleton instance.
 
@@ -98,12 +106,13 @@ class SettingsService:
 
         Args:
             db_url: Database connection URL.
-            zmq_broker_xpub: ZMQ broker XPUB address.
+            zmq_broker_xsub: ZMQ broker XSUB endpoint (publishers connect
+                here per the broker proxy contract).
 
         Returns:
             SettingsService singleton instance.
         """
-        current_params = (db_url, zmq_broker_xpub)
+        current_params = (db_url, zmq_broker_xsub)
         if cls._instance is not None and cls._init_params == current_params:
             return cls._instance
         instance = super().__new__(cls)
@@ -114,7 +123,7 @@ class SettingsService:
     def __init__(
         self,
         db_url: str,
-        zmq_broker_xpub: str,
+        zmq_broker_xsub: str,
     ) -> None:
         """Initialize the settings service.
 
@@ -122,12 +131,13 @@ class SettingsService:
 
         Args:
             db_url: Database connection URL.
-            zmq_broker_xpub: ZMQ broker XPUB address.
+            zmq_broker_xsub: ZMQ broker XSUB endpoint (publishers connect
+                here per the broker proxy contract).
         """
         if self._initialized:
             return
         self.db_url = db_url
-        self.zmq_broker_xpub = zmq_broker_xpub
+        self.zmq_broker_xsub = zmq_broker_xsub
         self._cache: dict[str, JsonValue] = {}
         self._loaded = False
         self._zmq_context: zmq.asyncio.Context | None = None
@@ -216,13 +226,20 @@ class SettingsService:
             return str(value)
 
     async def _setup_zmq_publisher(self) -> None:
-        """Set up ZMQ publisher for broadcasting changes."""
+        """Set up ZMQ publisher for broadcasting changes.
+
+        Per the broker proxy contract (`Publishers ──[connect]──> XSUB
+        ── proxy ── XPUB ──[connect]──> Subscribers`), the PUB socket
+        connects to the broker's XSUB endpoint. The pre-Day-3c-R3
+        shape connected to `zmq_broker_xpub` (subscriber-facing) and
+        silently dropped every `system.settings` broadcast.
+        """
         self._zmq_context = zmq.asyncio.Context()
         raw_pub_socket = self._zmq_context.socket(zmq.PUB)
         apply_hwm(raw_pub_socket, sndhwm=HWM_MARKET_DATA)
-        raw_pub_socket.connect(self.zmq_broker_xpub)
+        raw_pub_socket.connect(self.zmq_broker_xsub)
         self._msg_publisher = MessagePublisher(ValidatedPublisher(raw_pub_socket), self._tracker)
-        logger.info(f"Settings service connected to ZMQ broker: {self.zmq_broker_xpub}")
+        logger.info(f"Settings service connected to ZMQ broker: {self.zmq_broker_xsub}")
         await asyncio.sleep(0)
 
     def get_setting(self, key: str, default: Any = None) -> Any:
@@ -393,21 +410,23 @@ class SettingsService:
     def get_instance(
         cls,
         db_url: str | None = None,
-        zmq_broker_xpub: str | None = None,
+        zmq_broker_xsub: str | None = None,
     ) -> SettingsService | None:
         """Get existing singleton or create new one.
 
         Args:
             db_url: Database URL (required for new instance).
-            zmq_broker_xpub: ZMQ broker address (required for new instance).
+            zmq_broker_xsub: ZMQ broker XSUB endpoint (publishers
+                connect here per the broker proxy contract). Required
+                for new instance.
 
         Returns:
             SettingsService instance or None if parameters missing.
         """
         if cls._instance is None:
-            if db_url is None or zmq_broker_xpub is None:
+            if db_url is None or zmq_broker_xsub is None:
                 return None
-            cls._instance = SettingsService(db_url, zmq_broker_xpub)
+            cls._instance = SettingsService(db_url, zmq_broker_xsub)
         return cls._instance
 
     @classmethod
@@ -422,7 +441,7 @@ class SettingsService:
 
 async def get_settings_service(
     db_url: str,
-    zmq_broker_xpub: str,
+    zmq_broker_xsub: str,
 ) -> SettingsService:
     """Get or create an initialized SettingsService.
 
@@ -431,12 +450,13 @@ async def get_settings_service(
 
     Args:
         db_url: Database connection URL.
-        zmq_broker_xpub: ZMQ broker XPUB address.
+        zmq_broker_xsub: ZMQ broker XSUB endpoint (publishers connect
+            here per the broker proxy contract).
 
     Returns:
         Initialized SettingsService instance.
     """
-    instance = SettingsService.get_instance(db_url, zmq_broker_xpub)
+    instance = SettingsService.get_instance(db_url, zmq_broker_xsub)
     assert instance is not None, "get_instance should never return None with required params"
     if not instance._loaded:
         await instance.initialize()

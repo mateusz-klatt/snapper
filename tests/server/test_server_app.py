@@ -276,6 +276,133 @@ class TestLifespan:
         assert shutdown_order == ["stop_admin_listener", "shutdown_publisher"]
 
     @pytest.mark.asyncio
+    async def test_lifespan_finally_runs_when_startup_raises_after_partial_init(
+        self,
+    ) -> None:
+        """Day 3c R3 follow-up: shutdown hooks fire even when startup raises mid-init.
+
+        Codex R3 self-criticism: in the original Day 3b/3c shape,
+        publisher build + listener start ran BEFORE the `try`
+        block. If `discover_processes` (or anything else after the
+        publisher socket was opened) raised, the `finally` block
+        was never reached → publisher socket + ZMQ context leaked.
+
+        Fix: all setup work moved INSIDE the `try`, with state
+        locals (`settings_service`, `process_factory`)
+        pre-initialised to ``None`` so the `finally` can guard them.
+        This test forces `discover_processes` to raise after the
+        publisher + listener have been started, then asserts
+        `_shutdown_user_service_publisher` and
+        `stop_admin_listener` STILL ran during teardown.
+        """
+        mock_app = MagicMock()
+        mock_manager = MagicMock()
+        mock_manager.cleanup = AsyncMock()
+        mock_zmq_bridge = MagicMock()
+        mock_zmq_bridge.start = AsyncMock()
+        mock_zmq_bridge.stop = AsyncMock()
+        mock_manager.zmq_bridge = mock_zmq_bridge
+        mock_app.state.manager = mock_manager
+        recorded: list[str] = []
+        mock_user_service = MagicMock()
+        mock_user_service.set_msg_publisher.side_effect = lambda _value: recorded.append(
+            "set_msg_publisher"
+        )
+        mock_ws_auth = MagicMock()
+
+        async def _start_listener(_xpub: str) -> None:
+            recorded.append("start_admin_listener")
+
+        async def _stop_listener() -> None:
+            recorded.append("stop_admin_listener")
+
+        mock_ws_auth.start_admin_listener = _start_listener
+        mock_ws_auth.stop_admin_listener = _stop_listener
+
+        def _shutdown_publisher(_app: FastAPI) -> None:
+            recorded.append("shutdown_publisher")
+
+        def _explode_discover() -> None:
+            recorded.append("discover_processes_raised")
+            raise RuntimeError("autostart registry corrupt")
+
+        with (
+            patch(
+                "snapper.server.app.discover_processes",
+                side_effect=_explode_discover,
+            ),
+            patch("snapper.server.app.ProcessLauncherService"),
+            patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
+            patch(
+                "snapper.server.app._build_user_service_publisher",
+                return_value=(MagicMock(), MagicMock()),
+            ),
+            patch(
+                "snapper.server.app._shutdown_user_service_publisher",
+                side_effect=_shutdown_publisher,
+            ),
+            patch(
+                "snapper.server.app.get_user_service",
+                return_value=mock_user_service,
+            ),
+            patch(
+                "snapper.server.app.get_ws_auth_manager",
+                return_value=mock_ws_auth,
+            ),
+        ):
+            mock_settings_service = MagicMock()
+            mock_settings_service.shutdown = AsyncMock()
+            mock_get_settings_service.return_value = mock_settings_service
+            with pytest.raises(RuntimeError, match="autostart registry corrupt"):
+                async with lifespan(mock_app):
+                    pass
+        assert "discover_processes_raised" in recorded
+        assert "stop_admin_listener" in recorded
+        assert "shutdown_publisher" in recorded
+        assert mock_settings_service.shutdown.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_lifespan_finally_tolerates_settings_service_init_failure(
+        self,
+    ) -> None:
+        """Day 3c R3 follow-up: finally runs even if settings_service init fails.
+
+        Worst-case partial init: `_initialize_settings_service`
+        itself raises (e.g. DB unreachable on boot). At that point
+        `settings_service` is still ``None``, `process_factory`
+        is still ``None``, and `app.state.manager` may also be
+        unattached. The `finally` MUST tolerate every missing
+        state without raising AttributeError or NoneType.
+
+        `mock_app.state` is constructed with `spec=[]` so attribute
+        access for `manager` (and other state attrs the lifespan
+        might read) raises AttributeError unless explicitly set —
+        forcing the `getattr(..., None)` guards to be exercised.
+        """
+        mock_app_state = MagicMock(spec=[])
+        mock_app = MagicMock()
+        mock_app.state = mock_app_state
+        with (
+            patch(
+                "snapper.server.app._initialize_settings_service",
+                new=AsyncMock(side_effect=RuntimeError("db unreachable")),
+            ),
+            patch("snapper.server.app._build_user_service_publisher"),
+            patch("snapper.server.app._shutdown_user_service_publisher") as mock_shutdown_pub,
+            patch(
+                "snapper.server.app.get_ws_auth_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                ),
+            ),
+            pytest.raises(RuntimeError, match="db unreachable"),
+        ):
+            async with lifespan(mock_app):
+                pass
+        mock_shutdown_pub.assert_called_once_with(mock_app)
+
+    @pytest.mark.asyncio
     async def test_lifespan_api_only_skips_engine(self) -> None:
         """Test api-only mode skips process autostart but starts bridge.
 
