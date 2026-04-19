@@ -251,7 +251,7 @@ def _configure_auth_services(settings_service: SettingsService) -> None:
 
 
 def _build_user_service_publisher(
-    zmq_broker_xpub: str,
+    zmq_broker_xsub: str,
 ) -> tuple[MessagePublisher, zmq.asyncio.Context]:
     """Open a fresh ZMQ PUB socket for `admin.user_deactivated` fanout.
 
@@ -260,8 +260,17 @@ def _build_user_service_publisher(
     here and disposed in the lifespan `finally` so the broker side never
     sees a half-closed socket between requests.
 
+    Per the broker contract documented in
+    `snapper.config.bootstrap.BootstrapSettingsLoader` and the
+    `ZmqBrokerProcess` proxy, publishers connect to the broker's XSUB
+    endpoint (publishers ──[connect]──> XSUB ── proxy ── XPUB
+    ──[connect]──> Subscribers). Wiring the PUB socket to the XPUB
+    endpoint silently drops every message — Day 3b R1 fix-up reviewer
+    (Copilot gpt-5.4) caught this regression on commit `f1c84d3`.
+
     Args:
-        zmq_broker_xpub: Address of the broker's XPUB endpoint.
+        zmq_broker_xsub: Address of the broker's XSUB endpoint
+            (publishers connect here per the broker contract).
 
     Returns:
         Tuple of `(MessagePublisher, zmq.asyncio.Context)`. The context
@@ -270,7 +279,7 @@ def _build_user_service_publisher(
     context = zmq.asyncio.Context()
     raw_socket = context.socket(zmq.PUB)
     apply_hwm(raw_socket, sndhwm=HWM_AUDIT)
-    raw_socket.connect(zmq_broker_xpub)
+    raw_socket.connect(zmq_broker_xsub)
     publisher = MessagePublisher(ValidatedPublisher(raw_socket), SequenceTracker())
     return publisher, context
 
@@ -379,7 +388,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     app.state.settings = settings
     app.state.settings_service = settings_service
     _configure_auth_services(settings_service)
-    user_publisher, user_publisher_context = _build_user_service_publisher(settings.zmq_broker_xpub)
+    user_publisher, user_publisher_context = _build_user_service_publisher(settings.zmq_broker_xsub)
     app.state.user_service_publisher = user_publisher
     app.state.user_service_publisher_context = user_publisher_context
     get_user_service().set_msg_publisher(user_publisher)

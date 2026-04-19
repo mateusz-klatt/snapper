@@ -486,6 +486,18 @@ class WebSocketAuthManager:
     async def close_user_connections(self, user_public_id: str, reason: str) -> int:
         """Close every authenticated WS matching `user_public_id` (code 4003).
 
+        Per-connection sequence:
+
+        1. `self.disconnect(ws)` first — synchronously cancels the
+           connection's `warn_task` + `hard_task` timers so a pending
+           expiration handler cannot wake during the `await
+           ws.close()` yield and try to write/close the socket
+           concurrently with the kill switch (Day 3b R2 review:
+           Copilot gpt-5.4 flagged the original
+           close-then-disconnect order as a race).
+        2. `await ws.close(code=4003, reason=…)` — the kill-switch
+           close itself.
+
         Iterates a snapshot so the `disconnect` side-effect (which
         mutates `authenticated_connections`) does not invalidate the
         iterator. A `ws.close()` failure (already-closed socket,
@@ -516,6 +528,7 @@ class WebSocketAuthManager:
         for ws, principal in tuple(self.authenticated_connections.items()):
             if principal.user_public_id != user_public_id:
                 continue
+            self.disconnect(ws)
             try:
                 await ws.close(code=_KILL_SWITCH_CLOSE_CODE, reason=truncated_reason)
             except Exception as exc:
@@ -524,7 +537,6 @@ class WebSocketAuthManager:
                     user_public_id,
                     exc,
                 )
-            self.disconnect(ws)
             closed += 1
         if closed:
             logger.info(

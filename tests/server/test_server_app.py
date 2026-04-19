@@ -139,6 +139,64 @@ class TestLifespan:
         mock_manager.cleanup.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_lifespan_passes_xsub_endpoint_to_user_service_publisher(
+        self,
+    ) -> None:
+        """Lifespan passes `settings.zmq_broker_xsub` to publisher (not xpub).
+
+        Day 3b R2 BLOCKER (Copilot gpt-5.4): the original lifespan
+        passed `settings.zmq_broker_xpub` — wrong endpoint per the
+        broker proxy contract (publishers connect to XSUB, not XPUB).
+        This test pins the call argument so a future refactor that
+        flips it back fails CI loudly.
+        """
+        mock_app = MagicMock()
+        mock_manager = MagicMock()
+        mock_manager.cleanup = AsyncMock()
+        mock_zmq_bridge = MagicMock()
+        mock_zmq_bridge.start = AsyncMock()
+        mock_zmq_bridge.stop = AsyncMock()
+        mock_manager.zmq_bridge = mock_zmq_bridge
+        mock_app.state.manager = mock_manager
+        api_only_settings = MagicMock()
+        api_only_settings.server_api_only = True
+        api_only_settings.zmq_broker_xsub = "tcp://test-broker-xsub:7500"
+        api_only_settings.zmq_broker_xpub = "tcp://test-broker-xpub:7501"
+        with (
+            patch("snapper.server.app.discover_processes"),
+            patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
+            patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
+            patch(
+                "snapper.server.app.get_settings_with_service",
+                return_value=api_only_settings,
+            ),
+            patch(
+                "snapper.server.app._build_user_service_publisher",
+                return_value=(MagicMock(), MagicMock()),
+            ) as mock_build,
+            patch("snapper.server.app._shutdown_user_service_publisher"),
+            patch(
+                "snapper.server.app.get_ws_auth_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                ),
+            ),
+        ):
+            mock_settings_service = MagicMock()
+            mock_settings_service.shutdown = AsyncMock()
+            mock_get_settings_service.return_value = mock_settings_service
+            mock_factory = MagicMock()
+            mock_factory.sync_registry_to_database = AsyncMock()
+            mock_factory.start_all_processes = AsyncMock()
+            mock_factory.spawn_per_wallet_executors = AsyncMock(return_value=0)
+            mock_factory.stop_all_processes = AsyncMock()
+            mock_factory_cls.return_value = mock_factory
+            async with lifespan(mock_app):
+                pass
+        mock_build.assert_called_once_with("tcp://test-broker-xsub:7500")
+
+    @pytest.mark.asyncio
     async def test_lifespan_pins_publisher_and_listener_relative_ordering(
         self,
     ) -> None:
@@ -381,25 +439,32 @@ class TestCreateApp:
             mock_dep.side_effect = RuntimeError("Not a SQLAlchemyRepository")
             assert _safe_get_caps_enforcer() is None
 
-    def test_build_user_service_publisher_connects_to_broker_xpub(self) -> None:
-        """Day 3b helper opens a PUB socket bound to the broker XPUB.
+    def test_build_user_service_publisher_connects_to_broker_xsub(self) -> None:
+        """Day 3b helper connects PUB socket to broker's XSUB endpoint.
 
-        Given: a broker XPUB endpoint is supplied,
-        When: the helper builds the publisher,
-        Then: a `MessagePublisher` wrapping a connected `ValidatedPublisher`
-            is returned along with the owning `zmq.asyncio.Context`. The
-            socket is connected (not bound) so the broker side never sees
-            a half-open binding from a transient lifespan failure.
+        Day 3b R2 review (Copilot gpt-5.4) BLOCKER finding: the
+        original implementation connected the PUB socket to
+        `zmq_broker_xpub` (subscriber-facing) which silently drops
+        every message because publishers MUST connect to the
+        broker's XSUB side per the proxy contract documented in
+        `BootstrapSettingsLoader` and `ZmqBrokerProcess`. The fix
+        renames the parameter to `zmq_broker_xsub` and the lifespan
+        passes `settings.zmq_broker_xsub` so the kill-switch
+        `admin.user_deactivated` event actually reaches subscribers.
+
+        This test pins the endpoint so a future refactor that
+        accidentally swaps the value back to `zmq_broker_xpub`
+        fails CI loudly instead of silently breaking the kill switch.
         """
         with patch("snapper.server.app.zmq.asyncio.Context") as mock_context_cls:
             mock_socket = MagicMock()
             mock_context = MagicMock()
             mock_context.socket.return_value = mock_socket
             mock_context_cls.return_value = mock_context
-            publisher, context = _build_user_service_publisher("tcp://broker:5555")
+            publisher, context = _build_user_service_publisher("tcp://broker:7500")
         assert context is mock_context
         mock_context.socket.assert_called_once()
-        mock_socket.connect.assert_called_once_with("tcp://broker:5555")
+        mock_socket.connect.assert_called_once_with("tcp://broker:7500")
         assert publisher is not None
 
     def test_shutdown_user_service_publisher_closes_socket_and_clears_singleton(

@@ -69,6 +69,41 @@ class TestCloseUserConnections:
     """`close_user_connections` is the kill-switch's fanout primitive."""
 
     @pytest.mark.asyncio
+    async def test_disconnect_runs_before_ws_close_to_cancel_timers_first(self) -> None:
+        """`disconnect()` (cancel timers) MUST run BEFORE `await ws.close()`.
+
+        Day 3b R2 review (Copilot gpt-5.4) MAJOR finding: with the
+        original `await ws.close()` then `disconnect()` order, the
+        event loop COULD process a pending `warn_task` /
+        `hard_task` timer during the close yield, racing the kill
+        switch. Cancelling timers FIRST eliminates the race —
+        `cancel()` is synchronous so it lands before the event-loop
+        yields to anything else.
+
+        Records the call sequence by attaching a side-effect to
+        each method and asserts the relative order.
+        """
+        manager = _make_manager()
+        order: list[str] = []
+        ws = MagicMock()
+
+        async def _close(*_args: object, **_kwargs: object) -> None:
+            await asyncio.sleep(0)
+            order.append("ws.close")
+
+        ws.close = AsyncMock(side_effect=_close)
+        manager.authenticated_connections[ws] = _make_principal("user-order")
+        original_disconnect = manager.disconnect
+
+        def _spy_disconnect(target: MagicMock) -> None:
+            order.append("disconnect")
+            original_disconnect(target)
+
+        manager.disconnect = _spy_disconnect
+        await manager.close_user_connections(user_public_id="user-order", reason="r")
+        assert order == ["disconnect", "ws.close"]
+
+    @pytest.mark.asyncio
     async def test_closes_only_matching_connections_and_returns_count(self) -> None:
         """Iterates by `user_public_id`, leaving other users untouched.
 
