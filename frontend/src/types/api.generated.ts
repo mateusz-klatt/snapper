@@ -9077,6 +9077,20 @@ export interface Operations {
                     "application/json": Components["schemas"]["ProcessCreateResponse"];
                 };
             };
+            /** @description Invalid process request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Process scope denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Template not found */
             404: {
                 headers: {
@@ -9154,6 +9168,20 @@ export interface Operations {
                 content: {
                     "application/json": Components["schemas"]["ProcessStartResponse"];
                 };
+            };
+            /** @description Invalid process request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Process scope denied */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -9567,6 +9595,13 @@ export interface Operations {
                 content: {
                     "application/json": Components["schemas"]["ExecutionPlanResponse"];
                 };
+            };
+            /** @description Order request validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -10082,6 +10117,20 @@ export interface Operations {
                     "application/json": Components["schemas"]["BacktestRunResponse"];
                 };
             };
+            /** @description no active wallet selected */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Backtest request failed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     list_comparisons_api_backtests_compare_get: {
@@ -10140,6 +10189,41 @@ export interface Operations {
                     "application/json": Components["schemas"]["BacktestComparisonResponse"];
                 };
             };
+            /** @description no active wallet selected */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Comparison or run not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Backtest request conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Backtest request validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Backtest request failed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_comparison_api_backtests_compare__comparison_public_id__get: {
@@ -10164,6 +10248,20 @@ export interface Operations {
                 content: {
                     "application/json": Components["schemas"]["BacktestComparisonDetailResponse"];
                 };
+            };
+            /** @description no active wallet selected */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Comparison or run not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -10198,6 +10296,20 @@ export interface Operations {
                 content: {
                     "application/json": Components["schemas"]["BacktestRunDetailResponse"];
                 };
+            };
+            /** @description no active wallet selected */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Backtest run not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -10234,6 +10346,27 @@ export interface Operations {
                     "application/json": Components["schemas"]["BacktestRunResponse"];
                 };
             };
+            /** @description no active wallet selected */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Backtest run not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Backtest request conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -10242,6 +10375,13 @@ export interface Operations {
                 content: {
                     "application/json": Components["schemas"]["HTTPValidationError"];
                 };
+            };
+            /** @description Backtest request failed */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -10264,6 +10404,20 @@ export interface Operations {
                 content: {
                     "application/json": Components["schemas"]["BacktestRunResponse"];
                 };
+            };
+            /** @description no active wallet selected */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Backtest run not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -10301,6 +10455,20 @@ export interface Operations {
                     "application/json": Components["schemas"]["BacktestTradeListResponse"];
                 };
             };
+            /** @description no active wallet selected */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Backtest run not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -10337,6 +10505,20 @@ export interface Operations {
                     "application/json": Components["schemas"]["BacktestSignalListResponse"];
                 };
             };
+            /** @description no active wallet selected */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Backtest run not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -10370,6 +10552,20 @@ export interface Operations {
                 content: {
                     "application/json": Components["schemas"]["BacktestEventListResponse"];
                 };
+            };
+            /** @description no active wallet selected */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Backtest run not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -10407,6 +10603,20 @@ export interface Operations {
                 content: {
                     "application/json": Components["schemas"]["BacktestEquityPointListResponse"];
                 };
+            };
+            /** @description no active wallet selected */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Backtest run not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

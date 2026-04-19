@@ -5,6 +5,7 @@ template DB file (~1ms). Use the ``db_template_path`` session fixture
 from conftest.py as the source.
 """
 
+import asyncio
 import shutil
 from pathlib import Path
 
@@ -24,6 +25,7 @@ async def create_test_repo(
     Returns:
         SQLAlchemyRepository connected to the copied DB.
     """
+    await asyncio.sleep(0)
     db_path = tmp_path / name
     shutil.copy2(template, db_path)
     return SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")

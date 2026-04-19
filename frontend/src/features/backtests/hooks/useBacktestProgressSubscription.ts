@@ -43,7 +43,7 @@ export function useBacktestProgressSubscription(
     })
     const unsubscribeProgress = wsClient.onMessage('backtest_progress', message => {
       if (message.type !== 'backtest_progress') return
-      const progress = message as BacktestProgressData
+      const progress: BacktestProgressData = message
 
       if (progress.run_public_id === runPublicId) {
         setSnapshot(progress)

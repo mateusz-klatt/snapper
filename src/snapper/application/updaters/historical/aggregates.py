@@ -194,38 +194,57 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
         symbols list and all_mapped mode.
         """
         set_log_context("bf:poly_agg")
-        settings_service = await get_settings_service(
-            self.settings.db_url,
-            self.settings.zmq_broker_xpub,
-        )
-        self.settings = get_settings_with_service(settings_service)
-        api_key = self.settings.polygon_api_key
-        if not api_key:
-            raise ValueError("Polygon API key not configured in settings")
-        self._db_sync = DatabaseRepository(self.settings.db_url)
-        self._db_async = get_repository(self.settings.db_url)
-        self._archive_symbols = self._db_sync.get_archive_symbols()
-        client = PolygonExchangeClient(api_key=api_key)
-        self._loader = PolygonHistoricalLoader(client, cache_root=_CACHE_ROOT)
-        if self._all_mapped:
-            symbols = self._get_all_mapped_symbols()
-            if not symbols:
-                logger.warning("No symbols with Polygon mapping found in database")
-                return
-            logger.info(f"Fetched {len(symbols)} symbols with Polygon mapping from database")
-        else:
-            symbols = self._requested_symbols or self.settings.instruments.get(
-                ExchangeEnum.POLYGON, []
+        try:
+            settings_service = await get_settings_service(
+                self.settings.db_url,
+                self.settings.zmq_broker_xpub,
             )
-            if not symbols:
-                logger.warning("No Polygon symbols configured for backfill")
-                return
-        for symbol in symbols:
-            context = self._resolve_symbol_context(symbol)
-            if context is None:
-                logger.warning("Skipping symbol without context", symbol=symbol)
-                continue
-            await self._process_symbol(context)
+            self.settings = get_settings_with_service(settings_service)
+            api_key = self.settings.polygon_api_key
+            if not api_key:
+                raise ValueError("Polygon API key not configured in settings")
+            self._db_sync = DatabaseRepository(self.settings.db_url)
+            self._db_async = get_repository(self.settings.db_url)
+            self._archive_symbols = self._db_sync.get_archive_symbols()
+            client = PolygonExchangeClient(api_key=api_key)
+            self._loader = PolygonHistoricalLoader(client, cache_root=_CACHE_ROOT)
+            if self._all_mapped:
+                symbols = self._get_all_mapped_symbols()
+                if not symbols:
+                    logger.warning("No symbols with Polygon mapping found in database")
+                    return
+                logger.info(f"Fetched {len(symbols)} symbols with Polygon mapping from database")
+            else:
+                symbols = self._requested_symbols or self.settings.instruments.get(
+                    ExchangeEnum.POLYGON, []
+                )
+                if not symbols:
+                    logger.warning("No Polygon symbols configured for backfill")
+                    return
+            for symbol in symbols:
+                context = self._resolve_symbol_context(symbol)
+                if context is None:
+                    logger.warning("Skipping symbol without context", symbol=symbol)
+                    continue
+                await self._process_symbol(context)
+        finally:
+            await self._dispose_resources()
+
+    async def _dispose_resources(self) -> None:
+        """Dispose repositories allocated during service startup."""
+        async_repo = self._db_async
+        sync_repo = self._db_sync
+        self._db_async = None
+        self._db_sync = None
+        self._loader = None
+
+        engine = getattr(async_repo, "engine", None)
+        if engine is not None:
+            await engine.dispose()
+
+        sync_dispose = getattr(sync_repo, "dispose", None)
+        if callable(sync_dispose):
+            sync_dispose()
 
     def _get_all_mapped_symbols(self) -> list[str]:
         """Get all symbols with Polygon mapping from database.

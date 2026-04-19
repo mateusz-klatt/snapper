@@ -2180,7 +2180,7 @@ class TraderCoordinator(RegisterableProcess):
     async def _accrue_all_due_boundaries(self) -> None:
         """Scan all engines and apply any missed accrual boundaries."""
         now = datetime.now(UTC)
-        for engine_key, engine in list(self.engines.items()):
+        for engine_key, engine in tuple(self.engines.items()):
             try:
                 await self._accrue_engine(engine_key, engine, now)
             except asyncio.CancelledError:

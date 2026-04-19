@@ -127,6 +127,8 @@ from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 from snapper.server.app import create_app
 
 _FORCE_UPDATE_HELP = "Force update even if recently updated"
+_CLI_SYMBOL_SOURCE_ALL_MAPPED = "all mapped"
+_CLI_SYMBOL_SOURCE_SETTINGS = "specified/settings"
 
 app = typer.Typer(add_completion=False, help="Snapper CLI")
 
@@ -1091,7 +1093,9 @@ def polygon_backfill_aggregates(
             save_csv=save_csv,
         )
         try:
-            symbol_source = "all mapped" if all_mapped else "specified/settings"
+            symbol_source = (
+                _CLI_SYMBOL_SOURCE_ALL_MAPPED if all_mapped else _CLI_SYMBOL_SOURCE_SETTINGS
+            )
             msg = (
                 f"Starting Polygon aggregates backfill "
                 f"({multiplier}{timespan}, {actual_days} days, {symbol_source})..."
@@ -1138,7 +1142,9 @@ def kraken_futures_backfill_candles(
             resume=resume,
         )
         try:
-            symbol_source = "all mapped" if all_symbols else "specified/settings"
+            symbol_source = (
+                _CLI_SYMBOL_SOURCE_ALL_MAPPED if all_symbols else _CLI_SYMBOL_SOURCE_SETTINGS
+            )
             typer.echo(
                 f"Starting Kraken Futures candle backfill "
                 f"({timeframe}, {days_back} days, {symbol_source})..."
@@ -1185,7 +1191,9 @@ def update_kraken_futures_funding_rates(
             all_symbols=all_symbols,
         )
         try:
-            symbol_source = "all mapped" if all_symbols else "specified/settings"
+            symbol_source = (
+                _CLI_SYMBOL_SOURCE_ALL_MAPPED if all_symbols else _CLI_SYMBOL_SOURCE_SETTINGS
+            )
             typer.echo(f"Starting Kraken Futures funding rate backfill ({symbol_source})...")
             await service.start()
             typer.echo("Kraken Futures funding rate backfill complete!")

@@ -32,6 +32,15 @@ const MODE_OPTIONS = [
 ]
 
 export const NewOrderModal: React.FC<NewOrderModalProps> = ({ open, onClose }) => {
+  const exchangeSelectId = 'new-order-exchange'
+  const instrumentSelectId = 'new-order-instrument'
+  const sideSelectId = 'new-order-side'
+  const orderTypeSelectId = 'new-order-type'
+  const quantityInputId = 'new-order-quantity'
+  const priceInputId = 'new-order-price'
+  const stopPriceInputId = 'new-order-stop-price'
+  const modeSelectId = 'new-order-mode'
+  const walletSelectId = 'new-order-wallet'
   const { data: exchanges } = useExchanges()
   const { data: walletsResponse } = useWallets()
   const createOrder = useCreateOrder()
@@ -273,12 +282,22 @@ export const NewOrderModal: React.FC<NewOrderModalProps> = ({ open, onClose }) =
           <div className='space-y-4'>
             <div className='grid grid-cols-2 gap-4'>
               <div>
-                <label className='block text-xs text-muted-500 mb-1'>Exchange</label>
-                <ThemeSelect value={exchange} onChange={setExchange} options={exchangeOptions} />
+                <label htmlFor={exchangeSelectId} className='block text-xs text-muted-500 mb-1'>
+                  Exchange
+                </label>
+                <ThemeSelect
+                  id={exchangeSelectId}
+                  value={exchange}
+                  onChange={setExchange}
+                  options={exchangeOptions}
+                />
               </div>
               <div>
-                <label className='block text-xs text-muted-500 mb-1'>Instrument</label>
+                <label htmlFor={instrumentSelectId} className='block text-xs text-muted-500 mb-1'>
+                  Instrument
+                </label>
                 <ThemeSelect
+                  id={instrumentSelectId}
                   value={instrument}
                   onChange={handleInstrumentChange}
                   options={instrumentOptions}
@@ -287,12 +306,22 @@ export const NewOrderModal: React.FC<NewOrderModalProps> = ({ open, onClose }) =
             </div>
             <div className='grid grid-cols-2 gap-4'>
               <div>
-                <label className='block text-xs text-muted-500 mb-1'>Side</label>
-                <ThemeSelect value={side} onChange={setSide} options={SIDE_OPTIONS} />
+                <label htmlFor={sideSelectId} className='block text-xs text-muted-500 mb-1'>
+                  Side
+                </label>
+                <ThemeSelect
+                  id={sideSelectId}
+                  value={side}
+                  onChange={setSide}
+                  options={SIDE_OPTIONS}
+                />
               </div>
               <div>
-                <label className='block text-xs text-muted-500 mb-1'>Order Type</label>
+                <label htmlFor={orderTypeSelectId} className='block text-xs text-muted-500 mb-1'>
+                  Order Type
+                </label>
                 <ThemeSelect
+                  id={orderTypeSelectId}
                   value={orderType}
                   onChange={setOrderType}
                   options={ORDER_TYPE_OPTIONS}
@@ -300,8 +329,11 @@ export const NewOrderModal: React.FC<NewOrderModalProps> = ({ open, onClose }) =
               </div>
             </div>
             <div>
-              <label className='block text-xs text-muted-500 mb-1'>Quantity</label>
+              <label htmlFor={quantityInputId} className='block text-xs text-muted-500 mb-1'>
+                Quantity
+              </label>
               <input
+                id={quantityInputId}
                 type='number'
                 step='any'
                 min='0'
@@ -313,8 +345,11 @@ export const NewOrderModal: React.FC<NewOrderModalProps> = ({ open, onClose }) =
             </div>
             {needsPrice && (
               <div>
-                <label className='block text-xs text-muted-500 mb-1'>Price</label>
+                <label htmlFor={priceInputId} className='block text-xs text-muted-500 mb-1'>
+                  Price
+                </label>
                 <input
+                  id={priceInputId}
                   type='number'
                   step='any'
                   min='0'
@@ -327,8 +362,11 @@ export const NewOrderModal: React.FC<NewOrderModalProps> = ({ open, onClose }) =
             )}
             {needsStopPrice && (
               <div>
-                <label className='block text-xs text-muted-500 mb-1'>Stop Price</label>
+                <label htmlFor={stopPriceInputId} className='block text-xs text-muted-500 mb-1'>
+                  Stop Price
+                </label>
                 <input
+                  id={stopPriceInputId}
                   type='number'
                   step='any'
                   min='0'
@@ -341,12 +379,22 @@ export const NewOrderModal: React.FC<NewOrderModalProps> = ({ open, onClose }) =
             )}
             <div className='grid grid-cols-2 gap-4'>
               <div>
-                <label className='block text-xs text-muted-500 mb-1'>Mode</label>
-                <ThemeSelect value={mode} onChange={setMode} options={MODE_OPTIONS} />
+                <label htmlFor={modeSelectId} className='block text-xs text-muted-500 mb-1'>
+                  Mode
+                </label>
+                <ThemeSelect
+                  id={modeSelectId}
+                  value={mode}
+                  onChange={setMode}
+                  options={MODE_OPTIONS}
+                />
               </div>
               <div>
-                <label className='block text-xs text-muted-500 mb-1'>Wallet</label>
+                <label htmlFor={walletSelectId} className='block text-xs text-muted-500 mb-1'>
+                  Wallet
+                </label>
                 <ThemeSelect
+                  id={walletSelectId}
                   value={walletPublicId}
                   onChange={setWalletPublicId}
                   options={walletOptions}

@@ -174,6 +174,7 @@ def make_backtest_replay_strategy(
         raw_pub = self.zmq_context.socket(zmq.PUB)
         raw_pub.connect(local_xsub)
         self.publisher = ValidatedPublisher(raw_pub)
+        await asyncio.sleep(0)
 
     async def _process_warmup_or_buffer(
         self: BaseStrategy, topic_str: str, payload_bytes: bytes

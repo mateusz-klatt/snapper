@@ -203,7 +203,7 @@ export const Orders: React.FC = () => {
       o.status,
       o.size.toFixed(4),
       o.price ? o.price.toFixed(2) : 'Market',
-      o.leverage != null ? `${o.leverage}` : '',
+      o.leverage?.toString() ?? '',
       o.reduceOnly === true ? 'true' : 'false',
       o.createdAt ? o.createdAt.toLocaleString() : '',
     ])

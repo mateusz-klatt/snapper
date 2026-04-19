@@ -537,6 +537,67 @@ async def test_start_all_mapped_returns_when_no_symbols(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
+async def test_start_disposes_allocated_repositories(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify start disposes repositories after processing completes.
+
+    Given: start allocates sync and async repositories,
+    When: the service finishes processing its symbol list,
+    Then: repository resources are disposed and service references cleared.
+    """
+    svc = PolygonAggregatesBackfillService(symbols=["X:BTCUSD"])
+    svc.settings = DummySettings(
+        polygon_api_key="key",
+        instruments={"polygon": ["X:BTCUSD"]},
+    )
+    async_engine = SimpleNamespace(dispose=AsyncMock())
+    async_repo = SimpleNamespace(engine=async_engine)
+    sync_repo = SimpleNamespace(
+        get_archive_symbols=lambda: _PermissiveArchiveSymbols(),
+        dispose=Mock(),
+    )
+    context = _symbol_context(
+        native_symbol="BTC-USD",
+        polygon_symbol="X:BTCUSD",
+        base_currency="BTC",
+        quote_currency="USD",
+    )
+    svc._resolve_symbol_context = Mock(return_value=context)
+    svc._process_symbol = AsyncMock()
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.get_settings_service",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.get_settings_with_service",
+        lambda _svc: svc.settings,
+    )
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.DatabaseRepository",
+        lambda _url: sync_repo,
+    )
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.get_repository",
+        lambda _url: async_repo,
+    )
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.PolygonExchangeClient",
+        lambda api_key: None,
+    )
+    monkeypatch.setattr(
+        "snapper.application.updaters.historical.aggregates.PolygonHistoricalLoader",
+        lambda client, cache_root: SimpleNamespace(),
+    )
+
+    await svc.start()
+
+    async_engine.dispose.assert_awaited_once()
+    sync_repo.dispose.assert_called_once_with()
+    assert svc._db_async is None
+    assert svc._db_sync is None
+    assert svc._loader is None
+
+
+@pytest.mark.asyncio
 async def test_process_symbol_with_empty_candles(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify _process_symbol handles empty candle result.
 

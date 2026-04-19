@@ -967,8 +967,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         if not isinstance(self.repository, SQLAlchemyRepository):
             return
-        exchange_name = params["exchange_name"]
-        instrument = params["instrument"]
+        event_type = params.get("event_type")
+        exchange_name = params.get("exchange_name")
+        instrument = params.get("instrument")
+        if event_type is None or exchange_name is None or instrument is None:
+            logger.error("Venue event params missing required identifiers: {}", params)
+            return
         mode = (
             ExecutionModeEnum.PAPER
             if exchange_name == ExchangeEnum.PAPER
@@ -986,7 +990,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         try:
             await self.repository.insert_venue_event(
                 {
-                    "event_type": params["event_type"],
+                    "event_type": event_type,
                     "shard_key": shard_key,
                     "wallet_public_id": self.wallet_public_id,
                     "exchange": exchange_name,
@@ -1013,7 +1017,6 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 }
             )
         except Exception:
-            event_type = params["event_type"]
             logger.error(
                 f"[{exchange_name}] FAIL-CLOSED: venue event {event_type} write failed "
                 f"for {instrument}. Durable mode requires all events persisted."
@@ -1051,7 +1054,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange_orders = await self.exchange_client.get_orders(status=ExchangeOrderStatusEnum.OPEN)
         exchange_by_id = {o.id: o for o in exchange_orders}
 
-        for _eid, pending in list(self.pending_orders.items()):
+        for _eid, pending in tuple(self.pending_orders.items()):
             exchange_oid = pending.exchange_order_id
             if not exchange_oid:
                 continue
@@ -1434,10 +1437,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Returns:
             Tuple of (fee_amount, fee_asset). Zero fee returns (0.0, "").
         """
-        if execution.fee_usd_equiv is not None and execution.fee_usd_equiv != 0.0:
+        if execution.fee_usd_equiv is not None and abs(execution.fee_usd_equiv) > 1e-12:
             return execution.fee_usd_equiv, "USD"
         if execution.fees:
-            nonzero = [e for e in execution.fees if e.quantity != 0.0]
+            nonzero = [e for e in execution.fees if abs(e.quantity) > 1e-12]
             if not nonzero:
                 return 0.0, ""
             if len(nonzero) > 1:

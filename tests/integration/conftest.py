@@ -32,6 +32,8 @@ from snapper.config.app import AppSettings
 from snapper.messaging.executors.paper import PaperOrderExecutor
 from snapper.messaging.infrastructure.broker import ZmqBrokerThread
 
+_SIGNAL_TOPIC_PREFIX = "signals."
+
 
 def _free_tcp_port() -> int:
     """Allocate a free TCP port on localhost.
@@ -102,6 +104,7 @@ def _patch_settings_for_e2e(
         return mock_settings
 
     async def _return_mock_service(*_args: object, **_kwargs: object) -> object:
+        await asyncio.sleep(0)
         return object()
 
     monkeypatch.setattr(
@@ -190,7 +193,7 @@ async def paper_e2e_stack(
     executor._credentials = {"initial_balance": "1000000"}
     executor_task = asyncio.create_task(executor.start())
 
-    trader = TraderCoordinator(signal_topics=["signals."])
+    trader = TraderCoordinator(signal_topics=[_SIGNAL_TOPIC_PREFIX])
     trader_task = asyncio.create_task(trader.start())
 
     client_context = zmq.asyncio.Context()
@@ -307,11 +310,11 @@ async def two_coordinator_stack(
     executor_task = asyncio.create_task(executor.start())
 
     trader_0 = TraderCoordinator(
-        signal_topics=["signals."],
+        signal_topics=[_SIGNAL_TOPIC_PREFIX],
         settings=cast(AppSettings, _per_coordinator_settings(base_mock, 0)),
     )
     trader_1 = TraderCoordinator(
-        signal_topics=["signals."],
+        signal_topics=[_SIGNAL_TOPIC_PREFIX],
         settings=cast(AppSettings, _per_coordinator_settings(base_mock, 1)),
     )
     trader_0_task = asyncio.create_task(trader_0.start())

@@ -163,6 +163,22 @@ def _run_to_detail_data(
 
 
 _NO_ACTIVE_WALLET = "no active wallet selected"
+_NO_ACTIVE_WALLET_RESPONSE: dict[int | str, dict[str, Any]] = {
+    400: {"description": _NO_ACTIVE_WALLET}
+}
+_BACKTEST_NOT_FOUND_RESPONSE: dict[int | str, dict[str, Any]] = {404: {"description": _NOT_FOUND}}
+_BACKTEST_CONFLICT_RESPONSE: dict[int | str, dict[str, Any]] = {
+    409: {"description": "Backtest request conflict"}
+}
+_BACKTEST_VALIDATION_RESPONSE: dict[int | str, dict[str, Any]] = {
+    422: {"description": "Backtest request validation failed"}
+}
+_BACKTEST_SERVER_ERROR_RESPONSE: dict[int | str, dict[str, Any]] = {
+    500: {"description": "Backtest request failed"}
+}
+_COMPARISON_NOT_FOUND_RESPONSE: dict[int | str, dict[str, Any]] = {
+    404: {"description": "Comparison or run not found"}
+}
 
 
 def _enforce_wallet_scope(principal: AuthPrincipal, run: BacktestRunRow | dict[str, Any]) -> None:
@@ -247,6 +263,10 @@ def _get_process_factory(request: Request) -> ProcessLauncherService:
     "",
     openapi_extra=openapi_schema(BacktestCreateCommand),
     dependencies=[Depends(validate_csrf_token)],
+    responses={
+        **_NO_ACTIVE_WALLET_RESPONSE,
+        **_BACKTEST_SERVER_ERROR_RESPONSE,
+    },
 )
 async def create_backtest(
     request: Request,
@@ -565,6 +585,13 @@ def _to_comparison_data(row: BacktestComparisonRow) -> BacktestComparisonData:
     "/compare",
     openapi_extra=openapi_schema(BacktestCompareRequest),
     dependencies=[Depends(validate_csrf_token)],
+    responses={
+        **_NO_ACTIVE_WALLET_RESPONSE,
+        **_COMPARISON_NOT_FOUND_RESPONSE,
+        **_BACKTEST_CONFLICT_RESPONSE,
+        **_BACKTEST_VALIDATION_RESPONSE,
+        **_BACKTEST_SERVER_ERROR_RESPONSE,
+    },
 )
 async def create_comparison(
     request: Request,
@@ -720,7 +747,13 @@ async def list_comparisons(
     )
 
 
-@router.get("/compare/{comparison_public_id}")
+@router.get(
+    "/compare/{comparison_public_id}",
+    responses={
+        **_NO_ACTIVE_WALLET_RESPONSE,
+        **_COMPARISON_NOT_FOUND_RESPONSE,
+    },
+)
 async def get_comparison(
     comparison_public_id: str,
     request: Request,
@@ -790,7 +823,13 @@ async def get_comparison(
     )
 
 
-@router.get("/{run_id}")
+@router.get(
+    "/{run_id}",
+    responses={
+        **_NO_ACTIVE_WALLET_RESPONSE,
+        **_BACKTEST_NOT_FOUND_RESPONSE,
+    },
+)
 async def get_backtest(
     run_id: str,
     request: Request,
@@ -841,6 +880,12 @@ async def get_backtest(
     "/{run_id}/cancel",
     openapi_extra=openapi_schema(BacktestCancelCommand),
     dependencies=[Depends(validate_csrf_token)],
+    responses={
+        **_NO_ACTIVE_WALLET_RESPONSE,
+        **_BACKTEST_NOT_FOUND_RESPONSE,
+        **_BACKTEST_CONFLICT_RESPONSE,
+        **_BACKTEST_SERVER_ERROR_RESPONSE,
+    },
 )
 async def cancel_backtest(
     run_id: str,
@@ -902,6 +947,10 @@ async def cancel_backtest(
 @router.post(
     "/{run_id}/rerun",
     dependencies=[Depends(validate_csrf_token)],
+    responses={
+        **_NO_ACTIVE_WALLET_RESPONSE,
+        **_BACKTEST_NOT_FOUND_RESPONSE,
+    },
 )
 async def rerun_backtest(
     run_id: str,
@@ -955,7 +1004,13 @@ async def rerun_backtest(
     return await create_backtest(request, rerun_command, principal, repo)
 
 
-@router.get("/{run_id}/trades")
+@router.get(
+    "/{run_id}/trades",
+    responses={
+        **_NO_ACTIVE_WALLET_RESPONSE,
+        **_BACKTEST_NOT_FOUND_RESPONSE,
+    },
+)
 async def get_backtest_trades(
     run_id: str,
     request: Request,
@@ -1022,7 +1077,13 @@ async def get_backtest_trades(
     )
 
 
-@router.get("/{run_id}/signals")
+@router.get(
+    "/{run_id}/signals",
+    responses={
+        **_NO_ACTIVE_WALLET_RESPONSE,
+        **_BACKTEST_NOT_FOUND_RESPONSE,
+    },
+)
 async def get_backtest_signals(
     run_id: str,
     request: Request,
@@ -1085,7 +1146,13 @@ async def get_backtest_signals(
     )
 
 
-@router.get("/{run_id}/events")
+@router.get(
+    "/{run_id}/events",
+    responses={
+        **_NO_ACTIVE_WALLET_RESPONSE,
+        **_BACKTEST_NOT_FOUND_RESPONSE,
+    },
+)
 async def get_backtest_events(
     run_id: str,
     request: Request,
@@ -1141,7 +1208,13 @@ async def get_backtest_events(
     )
 
 
-@router.get("/{run_id}/equity")
+@router.get(
+    "/{run_id}/equity",
+    responses={
+        **_NO_ACTIVE_WALLET_RESPONSE,
+        **_BACKTEST_NOT_FOUND_RESPONSE,
+    },
+)
 async def get_backtest_equity(
     run_id: str,
     request: Request,

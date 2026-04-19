@@ -6842,7 +6842,7 @@ async def dispose_repositories() -> None:
     repos_to_dispose: dict[int, object] = {
         id(cached_repo): cached_repo for cached_repo in _repository_cache.values()
     }
-    for live_repo in list(_live_sqlalchemy_repositories):
+    for live_repo in _live_sqlalchemy_repositories:
         repos_to_dispose[id(live_repo)] = live_repo
     for repo in repos_to_dispose.values():
         engine = getattr(repo, "engine", None)

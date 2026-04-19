@@ -113,11 +113,12 @@ def compute_metrics(
 
         gross_profit = sum(p for p in pnls if p > 0)
         gross_loss = abs(sum(p for p in pnls if p < 0))
-        metrics.profit_factor = (
-            gross_profit / gross_loss
-            if gross_loss > 0
-            else float("inf") if gross_profit > 0 else 0.0
-        )
+        if gross_loss > 0:
+            metrics.profit_factor = gross_profit / gross_loss
+        elif gross_profit > 0:
+            metrics.profit_factor = float("inf")
+        else:
+            metrics.profit_factor = 0.0
 
     if equity_points:
         equities = [ep["equity"] for ep in equity_points]

@@ -769,7 +769,7 @@ class PlanExecutorService(RegisterableProcess):
         child orders must go through the cancel_requested + cancel
         TradeCommand flow, handled by the cancel route, not this sweep.
         """
-        for public_id, plan in list(self.plans.items()):
+        for public_id, plan in tuple(self.plans.items()):
             if plan["status"] != ExecutionPlanStatusEnum.ARMED:
                 continue
             cycle_pid = plan.get("position_cycle_public_id")
@@ -878,7 +878,7 @@ class PlanExecutorService(RegisterableProcess):
             while self._running:
                 t0 = asyncio.get_event_loop().time()
                 now = datetime.now(UTC)
-                for public_id, plan in list(self.plans.items()):
+                for public_id, plan in tuple(self.plans.items()):
                     if plan["status"] in _TERMINAL_STATUSES:
                         continue
                     if plan["status"] == ExecutionPlanStatusEnum.PAUSED:
@@ -1060,7 +1060,7 @@ class PlanExecutorService(RegisterableProcess):
         if not plan_ids:
             return
         now = datetime.now(UTC)
-        for public_id in list(plan_ids):
+        for public_id in tuple(plan_ids):
             plan = self.plans.get(public_id)
             if plan is None:
                 continue

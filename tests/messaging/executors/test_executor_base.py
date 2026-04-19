@@ -5746,6 +5746,29 @@ async def test_record_venue_event_paper_strategy_tag_shard_key() -> None:
 
 
 @pytest.mark.asyncio
+async def test_record_venue_event_skips_when_required_identifiers_missing() -> None:
+    """Venue event write is skipped when required identifiers are missing.
+
+    Given: an executor with SQLAlchemyRepository,
+    When: _record_venue_event is called without required identifying fields,
+    Then: insert_venue_event is not called.
+    """
+    ex: Any = MergedDummyExecutor()
+    mock_repo = AsyncMock(spec=SQLAlchemyRepository)
+    mock_repo.insert_venue_event = AsyncMock(return_value=1)
+    ex.repository = mock_repo
+
+    await ex._record_venue_event(
+        {
+            "exchange_name": "kraken",
+            "instrument": "BTC-USD",
+        }
+    )
+
+    mock_repo.insert_venue_event.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_handle_cancellation_records_terminal_venue_event() -> None:
     """Cancellation records an order_terminal venue event.
 

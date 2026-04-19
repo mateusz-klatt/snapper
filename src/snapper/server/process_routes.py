@@ -32,6 +32,7 @@ import json
 from datetime import UTC
 from datetime import datetime
 from typing import Annotated
+from typing import Any
 from uuid import uuid7
 
 from fastapi import APIRouter
@@ -82,6 +83,12 @@ from snapper.server.json_body import json_body
 from snapper.server.json_body import openapi_schema
 
 _REST_STREAM = "rest.control"
+_PROCESS_BAD_REQUEST_RESPONSE: dict[int | str, dict[str, Any]] = {
+    400: {"description": "Invalid process request"}
+}
+_PROCESS_FORBIDDEN_RESPONSE: dict[int | str, dict[str, Any]] = {
+    403: {"description": "Process scope denied"}
+}
 
 
 def _mint_provenance(request: Request) -> tuple[str, int, str, datetime]:
@@ -496,6 +503,8 @@ async def get_process_summary(
     "",
     status_code=201,
     responses={
+        400: {"description": "Invalid process request"},
+        403: {"description": "Process scope denied"},
         404: {"description": "Template not found"},
         409: {"description": "Process name already exists"},
     },
@@ -638,7 +647,14 @@ async def get_process_schema(
     )
 
 
-@router.post("/{name}/start", openapi_extra=openapi_schema(ProcessStartRequest))
+@router.post(
+    "/{name}/start",
+    openapi_extra=openapi_schema(ProcessStartRequest),
+    responses={
+        **_PROCESS_BAD_REQUEST_RESPONSE,
+        **_PROCESS_FORBIDDEN_RESPONSE,
+    },
+)
 async def start_process(
     http_request: Request,
     name: str,

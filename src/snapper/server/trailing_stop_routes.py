@@ -53,6 +53,7 @@ router = APIRouter(prefix="/trailing-stops", tags=["trailing-stops"])
 
 _REST_STREAM = "trailing_stop_rest"
 _EVALUATOR = TrailingStopEvaluator()
+_TRAILING_STOP_NOT_FOUND = "Trailing stop plan not found"
 _TERMINAL_STATUSES: frozenset[str] = frozenset(
     {
         ExecutionPlanStatusEnum.COMPLETED,
@@ -403,7 +404,7 @@ async def cancel_trailing_stop(
     if plan is None or plan["plan_type"] != "trailing_stop":
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Trailing stop plan not found",
+            detail=_TRAILING_STOP_NOT_FOUND,
         )
 
     await resolve_target_wallets(
@@ -621,7 +622,7 @@ async def get_trailing_stop(
     if plan is None or plan["plan_type"] != "trailing_stop":
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Trailing stop plan not found",
+            detail=_TRAILING_STOP_NOT_FOUND,
         )
 
     await resolve_target_wallets(
@@ -677,7 +678,7 @@ async def list_trailing_stop_decisions(
     if plan is None or plan["plan_type"] != "trailing_stop":
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Trailing stop plan not found",
+            detail=_TRAILING_STOP_NOT_FOUND,
         )
 
     await resolve_target_wallets(

@@ -50,6 +50,7 @@ router = APIRouter(prefix="/execution-plans", tags=["execution-plans"])
 
 _REST_STREAM = "execution_plan_rest"
 _EVALUATOR = BracketEvaluator()
+_EXECUTION_PLAN_NOT_FOUND = "Execution plan not found"
 _TERMINAL_STATUSES: frozenset[str] = frozenset(
     {
         ExecutionPlanStatusEnum.COMPLETED,
@@ -395,7 +396,7 @@ async def cancel_bracket(
     if plan is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Execution plan not found",
+            detail=_EXECUTION_PLAN_NOT_FOUND,
         )
 
     await resolve_target_wallets(
@@ -613,7 +614,7 @@ async def get_bracket(
     if plan is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Execution plan not found",
+            detail=_EXECUTION_PLAN_NOT_FOUND,
         )
 
     await resolve_target_wallets(
@@ -669,7 +670,7 @@ async def list_bracket_decisions(
     if plan is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Execution plan not found",
+            detail=_EXECUTION_PLAN_NOT_FOUND,
         )
 
     await resolve_target_wallets(

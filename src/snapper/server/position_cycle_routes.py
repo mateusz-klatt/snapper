@@ -97,7 +97,6 @@ def _cycle_to_data(row: PositionCycleRow, now: datetime) -> PositionCycleData:
 
 @router.get(
     "/open",
-    response_model=PositionCycleListResponse,
     dependencies=[Depends(require_permission(Permission.MANAGE_USERS))],
 )
 async def list_open_cycles(
@@ -131,7 +130,6 @@ async def list_open_cycles(
 
 @router.post(
     "/close-orphan",
-    response_model=OrphanSweepResponse,
     dependencies=[
         Depends(validate_csrf_token),
         Depends(require_permission(Permission.MANAGE_USERS)),
@@ -190,7 +188,6 @@ async def close_orphan_cycle(
 
 @router.post(
     "/sweep-orphans",
-    response_model=OrphanSweepResponse,
     dependencies=[
         Depends(validate_csrf_token),
         Depends(require_permission(Permission.MANAGE_USERS)),

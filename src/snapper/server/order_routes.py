@@ -49,6 +49,9 @@ from snapper.server.scoping import resolve_target_wallets
 
 _REST_STREAM = "rest.orders"
 _EVALUATOR = ManualOnceEvaluator()
+_ORDER_VALIDATION_RESPONSE: dict[int | str, dict[str, Any]] = {
+    422: {"description": "Order request validation failed"}
+}
 
 _ORDER_TYPE_MAP: dict[str, str] = {
     "market": "market",
@@ -95,7 +98,11 @@ def _plan_to_data(plan: dict[str, Any]) -> ExecutionPlanData:
     )
 
 
-@router.post("", openapi_extra=openapi_schema(CreateOrderCommand))
+@router.post(
+    "",
+    openapi_extra=openapi_schema(CreateOrderCommand),
+    responses=_ORDER_VALIDATION_RESPONSE,
+)
 async def create_order(
     request: Request,
     principal: Annotated[

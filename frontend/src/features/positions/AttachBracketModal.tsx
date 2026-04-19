@@ -72,9 +72,11 @@ export const AttachBracketModal: React.FC<AttachBracketModalProps> = ({
     )
   }
 
+  const isEditingStep = !confirming
+
   return (
     <Modal open={open} onClose={handleClose} title={`Attach SL/TP — ${instrument}`} size='sm'>
-      {!confirming ? (
+      {isEditingStep ? (
         <div className='space-y-4'>
           <div className='rounded-lg border border-dark-600 bg-dark-700 p-3 text-sm'>
             <div className='flex justify-between'>

@@ -72,6 +72,8 @@ export const AttachTrailingStopModal: React.FC<AttachTrailingStopModalProps> = (
     )
   }
 
+  const isEditingStep = !confirming
+
   return (
     <Modal
       open={open}
@@ -79,7 +81,7 @@ export const AttachTrailingStopModal: React.FC<AttachTrailingStopModalProps> = (
       title={`Attach Trailing Stop — ${instrument}`}
       size='sm'
     >
-      {!confirming ? (
+      {isEditingStep ? (
         <div className='space-y-4'>
           <div className='rounded-lg border border-dark-600 bg-dark-700 p-3 text-sm'>
             <div className='flex justify-between'>

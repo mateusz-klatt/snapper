@@ -134,14 +134,14 @@ export const EquityOverlayChart: React.FC<Props> = ({ points, height = 300, clas
             className='inline-block h-2 w-3 rounded-sm'
             style={{ backgroundColor: SERIES_A_COLOR }}
           />
-          Run A
+          <span>Run A</span>
         </span>
         <span className='flex items-center gap-1'>
           <span
             className='inline-block h-2 w-3 rounded-sm'
             style={{ backgroundColor: SERIES_B_COLOR }}
           />
-          Run B
+          <span>Run B</span>
         </span>
       </div>
     </div>
