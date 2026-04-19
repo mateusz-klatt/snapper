@@ -801,7 +801,7 @@ def test_settings_bootstrap_access() -> None:
     assert s.server_host
     assert s.server_port
     assert s.zmq_broker_xsub
-    assert s.zmq_broker_xsub
+    assert s.zmq_broker_xpub
 
 
 @pytest.mark.real_settings
