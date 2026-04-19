@@ -672,28 +672,41 @@ async def deactivate_user(
     user_id: str,
     current_user: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_USERS))],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
-    _body: Annotated[DeactivateUserRequest, Depends(json_body(DeactivateUserRequest))],
+    body: Annotated[DeactivateUserRequest, Depends(json_body(DeactivateUserRequest))],
 ) -> MessageResponse:
-    """Deactivate a user account.
+    """Deactivate a user account through the canonical kill-switch flow.
+
+    Resolves the username path segment to a `user_public_id` and
+    delegates to `UserService.deactivate_user`, which is the SOLE
+    publisher of `admin.user_deactivated` (plan §3.6.1). The service
+    layer also drives `TokenManager.revoke_user_sessions` synchronously
+    so the local instance rejects subsequent requests immediately.
 
     Args:
         request: FastAPI request (provides REST tracker for provenance).
-        user_id: Target user ID to deactivate.
-        _body: Request envelope with provenance (payload is empty).
+        user_id: Target user identified by username in the URL path.
+        body: Request envelope; `body.payload.reason` is forwarded to
+            the bus event for audit.
         current_user: Authenticated user with MANAGE_USERS permission.
 
     Returns:
         Success message.
 
     Raises:
-        HTTPException: If user not found or trying to deactivate self.
+        HTTPException: 400 when the caller targets their own account;
+            404 when no active user matches `user_id`.
     """
     user_service = get_user_service()
     if user_id == current_user.username:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot deactivate your own account"
         )
-    success = await user_service.delete_user(user_id)
+    profile = await user_service.get_user_by_id(user_id)
+    if profile is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"User with ID '{user_id}' not found"
+        )
+    success = await user_service.deactivate_user(profile.public_id, body.payload.reason)
     if not success:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"User with ID '{user_id}' not found"

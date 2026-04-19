@@ -474,6 +474,39 @@ class SettingChangedData(StrictDataSchema[Literal["setting_changed"]]):
     updated_by: str | None = None
 
 
+class UserDeactivatedData(StrictDataSchema[Literal["user_deactivated"]]):
+    """Admin kill-switch event for a deactivated user (plan §3.6.5).
+
+    Published by `UserService.deactivate_user` as the SOLE publisher of
+    the `admin.user_deactivated` bus topic (plan §3.6.1 single-publisher
+    rule resolves R2-M1). Subscribers:
+
+    - `AuthenticatedWebSocketManager` — closes active WS connections
+      whose principal matches `user_public_id` with code 4003.
+    - `TokenManager` (cross-instance) — evicts every LRU cache entry
+      where the cached `user_public_id` matches, eliminating the 30s
+      multi-instance cache-staleness gap (plan §3.6.3, R4-M5+R5-M3).
+    - Audit consumers — preserves `reason` for the kill-switch trail.
+
+    `TokenManager.revoke_user_sessions` is invoked synchronously by
+    the publisher BEFORE this event so the local instance is already
+    guaranteed-rejecting; the bus event handles cross-instance fanout
+    only.
+
+    Attributes:
+        user_public_id: UUID7 of the deactivated user row.
+        deactivated_at: UTC timestamp of the kill-switch effective
+            moment (matches the bus_time of the SCD2 close+insert).
+        reason: Optional admin-supplied rationale, forwarded verbatim
+            from `DeactivateUserBody.reason`.
+    """
+
+    type: Literal["user_deactivated"] = "user_deactivated"
+    user_public_id: str
+    deactivated_at: datetime
+    reason: str | None = None
+
+
 class SymbolAliasUpdateData(StrictDataSchema[Literal["symbol_alias_update"]]):
     """Symbol alias cache invalidation message.
 

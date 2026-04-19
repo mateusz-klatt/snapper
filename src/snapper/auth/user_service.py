@@ -9,14 +9,17 @@ queryable via where_active for point-in-time audit.
 
 from datetime import UTC
 from datetime import datetime
+from uuid import uuid7
 
 import bcrypt
+from loguru import logger
 from sqlalchemy import select
 from sqlalchemy import update
 
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.user import UserProfile
+from snapper.auth.tokens import get_token_manager
 from snapper.config.settings import get_settings
 from snapper.data.models import User
 from snapper.data.models import UserLoginEvent
@@ -24,10 +27,14 @@ from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
 from snapper.data.repository import where_active_now
+from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.schemas.data import UserDeactivatedData
+from snapper.messaging.topics.builders import admin_topic
 
 _USERS_TOPIC = "users"
 _LOGIN_EVENTS_TOPIC = "login_events"
+_USER_DEACTIVATED_TOPIC = "user_deactivated"
 
 
 class UserService:
@@ -55,6 +62,20 @@ class UserService:
         settings = get_settings()
         self.repository = get_repository(settings.db_url)
         self._tracker = SequenceTracker()
+        self._msg_publisher: MessagePublisher | None = None
+
+    def set_msg_publisher(self, publisher: MessagePublisher | None) -> None:
+        """Inject the bus publisher used for `admin.user_deactivated`.
+
+        Called from the FastAPI lifespan once a ZMQ broker connection
+        is available. Injection (rather than self-managed socket) keeps
+        the singleton testable: tests substitute a stub implementing
+        `send(stream_key, data)` without binding a real ZMQ socket.
+
+        Args:
+            publisher: Configured `MessagePublisher` or `None` to clear.
+        """
+        self._msg_publisher = publisher
 
     def hash_password(self, password: str) -> str:
         """Hash password using bcrypt.
@@ -378,6 +399,116 @@ class UserService:
             await session.commit()
             await session.refresh(new_row)
             return self._db_user_to_auth_user(new_row)
+
+    async def deactivate_user(self, user_public_id: str, reason: str | None) -> bool:
+        """Deactivate a user as the SOLE publisher of `admin.user_deactivated`.
+
+        Implements the canonical kill-switch flow from plan §3.6.1:
+
+        1. SCD2 close+insert on the active `users` row with `is_active=False`.
+        2. `TokenManager.revoke_user_sessions(...)` — direct in-process call
+           that revokes every active token row in the `user_active_tokens`
+           inventory and seeds the local fast-path blacklist. The token
+           method commits its own transaction (`Repository.revoke_user_active_tokens`
+           opens its own session) and deliberately does NOT publish a bus
+           event so the single-publisher rule is preserved (resolves
+           R2-M1).
+        3. Commit the user SCD2 mutation. Token revocation has already
+           landed; if this commit fails the user row stays active but
+           tokens remain revoked — the safer failure mode (kill switch
+           wins over availability).
+        4. Publish `admin.user_deactivated` AFTER the commit so
+           subscribers always see the committed state. Cross-instance
+           `TokenManager` LRU eviction is driven exclusively by this
+           bus event (plan §3.6.3 R4-M5+R5-M3).
+
+        Args:
+            user_public_id: UUID7 of the user row to deactivate.
+            reason: Optional admin-supplied rationale, forwarded
+                verbatim to the bus payload for audit.
+
+        Returns:
+            ``True`` when the user was found and deactivated, ``False``
+            when no active row matches ``user_public_id``.
+        """
+        async with self.repository.session() as session:
+            stmt = select(User).where(
+                User.public_id == user_public_id,
+                *where_active_now(User),
+            )
+            result = await session.execute(stmt)
+            db_user = result.scalar_one_or_none()
+            if not db_user:
+                return False
+            now = datetime.now(UTC)
+            new_values: dict[str, object] = {
+                "username": db_user.username,
+                "email": db_user.email,
+                "password_hash": db_user.password_hash,
+                "role": db_user.role,
+                "is_active": False,
+                "created_at": db_user.created_at,
+                "session_id": self._tracker.session_id,
+                "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
+            }
+            await close_and_insert(
+                session=session,
+                model=User,
+                match_filters=[User.public_id == user_public_id],
+                new_values=new_values,
+                bus_time=now,
+            )
+            token_manager = get_token_manager()
+            await token_manager.revoke_user_sessions(user_public_id, self.repository)
+            await session.commit()
+        await self._publish_user_deactivated(
+            user_public_id=user_public_id,
+            reason=reason,
+            deactivated_at=now,
+        )
+        return True
+
+    async def _publish_user_deactivated(
+        self,
+        *,
+        user_public_id: str,
+        reason: str | None,
+        deactivated_at: datetime,
+    ) -> None:
+        """Emit `admin.user_deactivated` after the deactivation commit.
+
+        Best-effort: a missing publisher (singleton spun up before the
+        FastAPI lifespan attached one) logs a warning instead of
+        raising — the local in-process kill switch has already fired
+        and is sufficient for single-instance deployments. A send
+        failure also degrades to a logged exception so a transient
+        broker hiccup never rolls back a committed deactivation.
+        """
+        if self._msg_publisher is None:
+            logger.warning(
+                "admin.user_deactivated NOT broadcast for user_public_id={}: "
+                "UserService publisher unavailable (multi-instance kill-switch fanout disabled)",
+                user_public_id,
+            )
+            return
+        topic = admin_topic(_USER_DEACTIVATED_TOPIC)
+        payload = UserDeactivatedData(
+            public_id=str(uuid7()),
+            timestamp=deactivated_at,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence(topic),
+            user_public_id=user_public_id,
+            deactivated_at=deactivated_at,
+            reason=reason,
+        )
+        try:
+            await self._msg_publisher.send(topic, payload)
+        except Exception as exc:
+            logger.exception(
+                "Failed to broadcast admin.user_deactivated for user_public_id={}: {}",
+                user_public_id,
+                exc,
+            )
 
     async def delete_user(self, user_id: str) -> bool:
         """Soft-delete user via SCD Type 2 close+insert with is_active=False.

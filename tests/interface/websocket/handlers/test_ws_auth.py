@@ -3139,9 +3139,11 @@ class StubUserService:
         self.create_user_error: Exception | None = None
         self.updated_users: dict[str, UserProfile | None] = {}
         self.deleted_users: list[str] = []
+        self.deactivated_users: list[tuple[str, str | None]] = []
         self.change_password_calls: list[tuple[str, str, str]] = []
         self.change_password_success: bool = True
         self.delete_user_success: bool = True
+        self.deactivate_user_success: bool = True
         self.update_user_result: UserProfile | None = None
 
     async def authenticate_user(self, username: str, password: str) -> UserProfile | None:
@@ -3238,6 +3240,11 @@ class StubUserService:
         """Delete user by ID."""
         self.deleted_users.append(user_id)
         return self.delete_user_success
+
+    async def deactivate_user(self, user_public_id: str, reason: str | None) -> bool:
+        """Deactivate user via the Day 3b kill-switch flow."""
+        self.deactivated_users.append((user_public_id, reason))
+        return self.deactivate_user_success
 
     async def change_password(self, user_id: str, old_password: str, new_password: str) -> bool:
         """Change user password."""
@@ -3799,7 +3806,17 @@ async def test_deactivate_user_success(monkeypatch: Any) -> None:
     Then: Returns deactivation success message.
     """
     stub_service = StubUserService()
-    stub_service.delete_user_success = True
+    stub_service.deactivate_user_success = True
+    stub_service.user_by_id = UserProfile(
+        session_id="t-sid",
+        sequence_id=1,
+        public_id="user-2-public-id",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        username="user-2",
+        role=UserRole.VIEWER,
+        is_active=True,
+        created_at=datetime(2024, 1, 1, tzinfo=UTC),
+    )
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     mock_request = MagicMock()
     mock_request.app.state.rest_tracker = SequenceTracker()
@@ -3808,17 +3825,17 @@ async def test_deactivate_user_success(monkeypatch: Any) -> None:
         sequence_id=0,
         public_id="test-pid",
         timestamp=datetime(2024, 1, 1, tzinfo=UTC),
-        payload=DeactivateUserBody(),
+        payload=DeactivateUserBody(reason="audit"),
     )
     result = await routes.deactivate_user(
         request=mock_request,
         user_id="user-2",
-        _body=body,
+        body=body,
         current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
         _csrf=None,
     )
     assert result.payload == "User 'user-2' has been deactivated"
-    assert stub_service.deleted_users == ["user-2"]
+    assert stub_service.deactivated_users == [("user-2-public-id", "audit")]
 
 
 @pytest.mark.asyncio()
@@ -3844,7 +3861,7 @@ async def test_deactivate_user_self_forbidden(monkeypatch: Any) -> None:
         await routes.deactivate_user(
             request=mock_request,
             user_id="self",
-            _body=body,
+            body=body,
             current_user=AuthPrincipal(username="self", role=UserRole.ADMIN),
             _csrf=None,
         )
@@ -3860,7 +3877,7 @@ async def test_deactivate_user_not_found(monkeypatch: Any) -> None:
     Then: Raises HTTPException with 404 status.
     """
     stub_service = StubUserService()
-    stub_service.delete_user_success = False
+    stub_service.user_by_id = None
     monkeypatch.setattr(routes, "get_user_service", lambda: stub_service)
     mock_request = MagicMock()
     mock_request.app.state.rest_tracker = SequenceTracker()
@@ -3875,11 +3892,12 @@ async def test_deactivate_user_not_found(monkeypatch: Any) -> None:
         await routes.deactivate_user(
             request=mock_request,
             user_id="missing",
-            _body=body,
+            body=body,
             current_user=AuthPrincipal(username="admin", role=UserRole.ADMIN),
             _csrf=None,
         )
     assert exc.value.status_code == 404
+    assert stub_service.deactivated_users == []
 
 
 @pytest.mark.asyncio()

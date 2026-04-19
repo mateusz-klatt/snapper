@@ -37,6 +37,7 @@ Example:
 """
 
 import asyncio
+import contextlib
 import datetime as dt
 import os
 from collections.abc import AsyncGenerator
@@ -51,6 +52,7 @@ from typing import cast
 from uuid import uuid7
 
 import zmq
+import zmq.asyncio
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import FastAPI
@@ -121,6 +123,7 @@ from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import WebSocketTokenRotator
 from snapper.auth.tokens import get_token_manager
 from snapper.auth.user_service import UserService
+from snapper.auth.user_service import get_user_service
 from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
@@ -143,7 +146,11 @@ from snapper.interface.websocket.connection_manager import WebSocketConnectionMa
 from snapper.interface.websocket.helpers import build_allowed_origins
 from snapper.mcp.server import build_mcp_app
 from snapper.messaging.infrastructure.gap_detector import GapDetectorStats
+from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.infrastructure.validated_socket import HWM_AUDIT
+from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
+from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import ContinuousCandleData
 from snapper.messaging.schemas.data import ContinuousSeriesPartialResponse
@@ -242,6 +249,56 @@ def _configure_auth_services(settings_service: SettingsService) -> None:
     logger.info("WsTokenService initialized with database settings")
 
 
+def _build_user_service_publisher(
+    zmq_broker_xpub: str,
+) -> tuple[MessagePublisher, zmq.asyncio.Context]:
+    """Open a fresh ZMQ PUB socket for `admin.user_deactivated` fanout.
+
+    UserService is the SOLE publisher of `admin.user_deactivated` (plan
+    §3.6.1). The socket lives for the whole FastAPI lifespan: created
+    here and disposed in the lifespan `finally` so the broker side never
+    sees a half-closed socket between requests.
+
+    Args:
+        zmq_broker_xpub: Address of the broker's XPUB endpoint.
+
+    Returns:
+        Tuple of `(MessagePublisher, zmq.asyncio.Context)`. The context
+        is returned so the lifespan can `term()` it on shutdown.
+    """
+    context = zmq.asyncio.Context()
+    raw_socket = context.socket(zmq.PUB)
+    apply_hwm(raw_socket, sndhwm=HWM_AUDIT)
+    raw_socket.connect(zmq_broker_xpub)
+    publisher = MessagePublisher(ValidatedPublisher(raw_socket), SequenceTracker())
+    return publisher, context
+
+
+def _shutdown_user_service_publisher(app: FastAPI) -> None:
+    """Close UserService's `admin.user_deactivated` publisher socket.
+
+    Mirrors `SettingsService.shutdown` ordering: clear the singleton's
+    reference first so any in-flight `deactivate_user` call observes a
+    None publisher (graceful degradation), then close the socket and
+    terminate the context. ``contextlib.suppress(Exception)`` mirrors
+    the `SettingsService.shutdown` resilience contract.
+    """
+    user_service = get_user_service()
+    user_service.set_msg_publisher(None)
+    publisher = getattr(app.state, "user_service_publisher", None)
+    context = getattr(app.state, "user_service_publisher_context", None)
+    if publisher is not None:
+        with contextlib.suppress(Exception):
+            publisher.setsockopt(zmq.LINGER, 0)
+        with contextlib.suppress(Exception):
+            publisher.close()
+    if context is not None:
+        with contextlib.suppress(Exception):
+            context.term()
+    app.state.user_service_publisher = None
+    app.state.user_service_publisher_context = None
+
+
 def _clear_runtime_singletons() -> None:
     """Clear process-local auth and settings singletons during app shutdown."""
     for singleton_cls in (
@@ -321,6 +378,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     app.state.settings = settings
     app.state.settings_service = settings_service
     _configure_auth_services(settings_service)
+    user_publisher, user_publisher_context = _build_user_service_publisher(settings.zmq_broker_xpub)
+    app.state.user_service_publisher = user_publisher
+    app.state.user_service_publisher_context = user_publisher_context
+    get_user_service().set_msg_publisher(user_publisher)
+    logger.info("UserService publisher wired to ZMQ broker for admin.user_deactivated")
     discover_processes()
     process_factory = ProcessLauncherService(settings)
     app.state.process_factory = process_factory
@@ -350,6 +412,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         manager = app.state.manager
         await manager.cleanup()
         await settings_service.shutdown()
+        _shutdown_user_service_publisher(app)
         _clear_runtime_singletons()
         await dispose_repositories()
         logger.info("Application shutdown complete")

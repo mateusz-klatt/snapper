@@ -34,9 +34,11 @@ from snapper.interface.websocket.models import WsStatsSnapshot
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server import process_runner
 from snapper.server.app import _build_strategy_payload
+from snapper.server.app import _build_user_service_publisher
 from snapper.server.app import _clear_runtime_singletons
 from snapper.server.app import _reconcile_stale_backtests
 from snapper.server.app import _safe_get_caps_enforcer
+from snapper.server.app import _shutdown_user_service_publisher
 from snapper.server.app import create_api_router
 from snapper.server.app import create_app
 from snapper.server.app import get_repository_dependency
@@ -105,6 +107,11 @@ class TestLifespan:
             patch("snapper.server.app.discover_processes") as mock_discover,
             patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
             patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
+            patch(
+                "snapper.server.app._build_user_service_publisher",
+                return_value=(MagicMock(), MagicMock()),
+            ),
+            patch("snapper.server.app._shutdown_user_service_publisher"),
         ):
             mock_settings_service = MagicMock()
             mock_settings_service.shutdown = AsyncMock()
@@ -150,6 +157,11 @@ class TestLifespan:
                 "snapper.server.app.get_settings_with_service",
                 return_value=api_only_settings,
             ),
+            patch(
+                "snapper.server.app._build_user_service_publisher",
+                return_value=(MagicMock(), MagicMock()),
+            ),
+            patch("snapper.server.app._shutdown_user_service_publisher"),
         ):
             mock_settings_service = MagicMock()
             mock_settings_service.shutdown = AsyncMock()
@@ -182,6 +194,11 @@ class TestLifespan:
             patch("snapper.server.app.discover_processes") as mock_discover,
             patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
             patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
+            patch(
+                "snapper.server.app._build_user_service_publisher",
+                return_value=(MagicMock(), MagicMock()),
+            ),
+            patch("snapper.server.app._shutdown_user_service_publisher"),
         ):
             mock_settings_service = MagicMock()
             mock_get_settings_service.return_value = mock_settings_service
@@ -263,6 +280,69 @@ class TestCreateApp:
         with patch("snapper.server.app.get_caps_enforcer_dependency") as mock_dep:
             mock_dep.side_effect = RuntimeError("Not a SQLAlchemyRepository")
             assert _safe_get_caps_enforcer() is None
+
+    def test_build_user_service_publisher_connects_to_broker_xpub(self) -> None:
+        """Day 3b helper opens a PUB socket bound to the broker XPUB.
+
+        Given: a broker XPUB endpoint is supplied,
+        When: the helper builds the publisher,
+        Then: a `MessagePublisher` wrapping a connected `ValidatedPublisher`
+            is returned along with the owning `zmq.asyncio.Context`. The
+            socket is connected (not bound) so the broker side never sees
+            a half-open binding from a transient lifespan failure.
+        """
+        with patch("snapper.server.app.zmq.asyncio.Context") as mock_context_cls:
+            mock_socket = MagicMock()
+            mock_context = MagicMock()
+            mock_context.socket.return_value = mock_socket
+            mock_context_cls.return_value = mock_context
+            publisher, context = _build_user_service_publisher("tcp://broker:5555")
+        assert context is mock_context
+        mock_context.socket.assert_called_once()
+        mock_socket.connect.assert_called_once_with("tcp://broker:5555")
+        assert publisher is not None
+
+    def test_shutdown_user_service_publisher_closes_socket_and_clears_singleton(
+        self,
+    ) -> None:
+        """Shutdown helper releases the publisher and clears the service ref.
+
+        Given: a FastAPI app with a publisher + context attached,
+        When: the shutdown helper runs,
+        Then: (a) the publisher is closed; (b) the context is
+            terminated; (c) the UserService singleton's publisher ref
+            is cleared so any in-flight `deactivate_user` call after
+            shutdown observes a None publisher (graceful degradation).
+        """
+        mock_publisher = MagicMock()
+        mock_context = MagicMock()
+        mock_user_service = MagicMock()
+        mock_app = MagicMock()
+        mock_app.state.user_service_publisher = mock_publisher
+        mock_app.state.user_service_publisher_context = mock_context
+        with patch("snapper.server.app.get_user_service", return_value=mock_user_service):
+            _shutdown_user_service_publisher(mock_app)
+        mock_user_service.set_msg_publisher.assert_called_once_with(None)
+        mock_publisher.close.assert_called_once()
+        mock_context.term.assert_called_once()
+        assert mock_app.state.user_service_publisher is None
+        assert mock_app.state.user_service_publisher_context is None
+
+    def test_shutdown_user_service_publisher_handles_missing_state(self) -> None:
+        """Shutdown is a no-op-on-failure when state was never attached.
+
+        Given: an app whose state has neither publisher nor context
+            (lifespan startup raised before attaching them),
+        When: the shutdown helper runs,
+        Then: no exception escapes; the singleton is still cleared.
+        """
+        mock_user_service = MagicMock()
+        mock_app = MagicMock()
+        mock_app.state.user_service_publisher = None
+        mock_app.state.user_service_publisher_context = None
+        with patch("snapper.server.app.get_user_service", return_value=mock_user_service):
+            _shutdown_user_service_publisher(mock_app)
+        mock_user_service.set_msg_publisher.assert_called_once_with(None)
 
     def test_clear_runtime_singletons_continues_after_clear_error(self) -> None:
         """Test runtime singleton cleanup continues after one clear_instance failure.

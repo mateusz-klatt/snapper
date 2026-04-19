@@ -148,14 +148,21 @@ class AdminResetPasswordRequest(
 
 
 class DeactivateUserBody(StrictBody):
-    """Deactivate user command body (empty).
+    """Deactivate user command body.
 
-    Command-style endpoint: no domain fields needed, provenance
-    is carried on the PayloadRequest envelope.
+    Command-style endpoint with optional human-readable rationale that
+    is forwarded to the canonical `admin.user_deactivated` bus payload
+    (plan §3.6.5) so subscribers (`AuthenticatedWebSocketManager`,
+    cross-instance `TokenManager`, audit consumers) can record why the
+    kill switch fired.
 
     Attributes:
-        (none — empty body signals intent via URL path)
+        reason: Optional admin note explaining the deactivation. ``None``
+            when the request body is omitted entirely (back-compat with
+            the pre-Day-3b empty body).
     """
+
+    reason: str | None = None
 
 
 class DeactivateUserRequest(PayloadRequest[Literal["deactivate_user_request"], DeactivateUserBody]):
