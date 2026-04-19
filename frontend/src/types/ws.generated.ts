@@ -34,6 +34,7 @@ export type WebSocketMessages =
   | TradeData
   | UnderlyingAssetData
   | UnderlyingInstrumentData
+  | UserDeactivatedData
   | VenueFeeScheduleData
   | WSAuthCompleteResponse
   | WSAuthExpiredResponse
@@ -176,13 +177,15 @@ export type Type23 = "underlying_asset";
 export type Sector = string | null;
 export type Type24 = "underlying_instrument";
 export type ContractFamily2 = string | null;
-export type Type25 = "venue_fee_schedule";
+export type Type25 = "user_deactivated";
+export type Reason2 = string | null;
+export type Type26 = "venue_fee_schedule";
 export type InstrumentPublicId = string | null;
 export type MinVolume30D = number | null;
 /**
  * Message type discriminator
  */
-export type Type26 = "auth_complete";
+export type Type27 = "auth_complete";
 /**
  * Topics available for subscription
  */
@@ -198,59 +201,59 @@ export type SessionExpiresAt = string | null;
 /**
  * Message type discriminator
  */
-export type Type27 = "auth_expired";
+export type Type28 = "auth_expired";
 /**
  * Message type discriminator
  */
-export type Type28 = "auth_failed";
+export type Type29 = "auth_failed";
 /**
  * Failure reason
  */
-export type Reason2 = string | null;
+export type Reason3 = string | null;
 /**
  * Message type discriminator
  */
-export type Type29 = "auth_ok";
+export type Type30 = "auth_ok";
 /**
  * Message type discriminator
  */
-export type Type30 = "auth_required";
+export type Type31 = "auth_required";
 /**
  * Message type discriminator
  */
-export type Type31 = "authenticate";
+export type Type32 = "authenticate";
 /**
  * Message type discriminator
  */
-export type Type32 = "error";
+export type Type33 = "error";
 /**
  * Message type discriminator
  */
-export type Type33 = "get_subscriptions";
+export type Type34 = "get_subscriptions";
 /**
  * Message type discriminator
  */
-export type Type34 = "ping";
+export type Type35 = "ping";
 /**
  * Message type discriminator
  */
-export type Type35 = "pong";
+export type Type36 = "pong";
 /**
  * Message type discriminator
  */
-export type Type36 = "reauth_ok";
+export type Type37 = "reauth_ok";
 /**
  * Message type discriminator
  */
-export type Type37 = "reauth";
+export type Type38 = "reauth";
 /**
  * Message type discriminator
  */
-export type Type38 = "reauth_required";
+export type Type39 = "reauth_required";
 /**
  * Message type discriminator
  */
-export type Type39 = "subscribe";
+export type Type40 = "subscribe";
 /**
  * Topics to subscribe to
  */
@@ -258,7 +261,7 @@ export type Topics = string[];
 /**
  * Message type discriminator
  */
-export type Type40 = "subscription_success";
+export type Type41 = "subscription_success";
 /**
  * The subscription action performed
  */
@@ -286,7 +289,7 @@ export type Message = string | null;
 /**
  * Message type discriminator
  */
-export type Type41 = "subscriptions_list";
+export type Type42 = "subscriptions_list";
 /**
  * Current active subscriptions
  */
@@ -298,7 +301,7 @@ export type AvailableTopics1 = string[];
 /**
  * Message type discriminator
  */
-export type Type42 = "unsubscribe";
+export type Type43 = "unsubscribe";
 /**
  * Topics to unsubscribe from
  */
@@ -1157,6 +1160,42 @@ export interface UnderlyingInstrumentData {
   contract_family: ContractFamily2;
 }
 /**
+ * Admin kill-switch event for a deactivated user (plan §3.6.5).
+ *
+ * Published by `UserService.deactivate_user` as the SOLE publisher of
+ * the `admin.user_deactivated` bus topic (plan §3.6.1 single-publisher
+ * rule resolves R2-M1). Subscribers:
+ *
+ * - `AuthenticatedWebSocketManager` — closes active WS connections
+ *   whose principal matches `user_public_id` with code 4003.
+ * - `TokenManager` (cross-instance) — evicts every LRU cache entry
+ *   where the cached `user_public_id` matches, eliminating the 30s
+ *   multi-instance cache-staleness gap (plan §3.6.3, R4-M5+R5-M3).
+ * - Audit consumers — preserves `reason` for the kill-switch trail.
+ *
+ * `TokenManager.revoke_user_sessions` is invoked synchronously by
+ * the publisher BEFORE this event so the local instance is already
+ * guaranteed-rejecting; the bus event handles cross-instance fanout
+ * only.
+ *
+ * Attributes:
+ *     user_public_id: UUID7 of the deactivated user row.
+ *     deactivated_at: UTC timestamp of the kill-switch effective
+ *         moment (matches the bus_time of the SCD2 close+insert).
+ *     reason: Optional admin-supplied rationale, forwarded verbatim
+ *         from `DeactivateUserBody.reason`.
+ */
+export interface UserDeactivatedData {
+  type: Type25;
+  sequence_id: number;
+  public_id: string;
+  timestamp: string;
+  session_id: string;
+  user_public_id: string;
+  deactivated_at: string;
+  reason?: Reason2;
+}
+/**
  * Venue fee schedule row for REST API responses.
  *
  * Used by market-making evaluators to estimate profitability and
@@ -1172,7 +1211,7 @@ export interface UnderlyingInstrumentData {
  *     currency: Fee denomination currency.
  */
 export interface VenueFeeScheduleData {
-  type: Type25;
+  type: Type26;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1198,7 +1237,7 @@ export interface VenueFeeScheduleData {
  *     ws_token_exp: WebSocket token expiration (ISO 8601).
  */
 export interface WSAuthCompleteResponse {
-  type: Type26;
+  type: Type27;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1220,7 +1259,7 @@ export interface WSAuthCompleteResponse {
  *     type: Message type discriminator ('auth_expired').
  */
 export interface WSAuthExpiredResponse {
-  type: Type27;
+  type: Type28;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1236,12 +1275,12 @@ export interface WSAuthExpiredResponse {
  *     reason: Optional failure reason code.
  */
 export interface WSAuthFailedResponse {
-  type: Type28;
+  type: Type29;
   sequence_id: number;
   public_id: string;
   timestamp: string;
   session_id: string;
-  reason?: Reason2;
+  reason?: Reason3;
 }
 /**
  * Authentication success acknowledgment.
@@ -1253,7 +1292,7 @@ export interface WSAuthFailedResponse {
  *     exp: Token expiration timestamp (ISO 8601).
  */
 export interface WSAuthOkResponse {
-  type: Type29;
+  type: Type30;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1273,7 +1312,7 @@ export interface WSAuthOkResponse {
  *     timeout: Seconds until authentication timeout.
  */
 export interface WSAuthRequiredResponse {
-  type: Type30;
+  type: Type31;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1293,7 +1332,7 @@ export interface WSAuthRequiredResponse {
  *     ws_token: WebSocket authentication token.
  */
 export interface WSAuthenticateRequest {
-  type: Type31;
+  type: Type32;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1313,7 +1352,7 @@ export interface WSAuthenticateRequest {
  *     message: Human-readable error description.
  */
 export interface WSErrorResponse {
-  type: Type32;
+  type: Type33;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1330,7 +1369,7 @@ export interface WSErrorResponse {
  *     type: Message type discriminator ('get_subscriptions').
  */
 export interface WSGetSubscriptionsRequest {
-  type: Type33;
+  type: Type34;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1345,7 +1384,7 @@ export interface WSGetSubscriptionsRequest {
  *     type: Message type discriminator ('ping').
  */
 export interface WSPingRequest {
-  type: Type34;
+  type: Type35;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1362,7 +1401,7 @@ export interface WSPingRequest {
  *     active_connections: Number of active WebSocket connections.
  */
 export interface WSPongResponse {
-  type: Type35;
+  type: Type36;
   sequence_id: number;
   public_id: string;
   /**
@@ -1385,7 +1424,7 @@ export interface WSPongResponse {
  *     exp: New token expiration timestamp (ISO 8601).
  */
 export interface WSReauthOkResponse {
-  type: Type36;
+  type: Type37;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1405,7 +1444,7 @@ export interface WSReauthOkResponse {
  *     ws_token: New WebSocket authentication token.
  */
 export interface WSReauthRequest {
-  type: Type37;
+  type: Type38;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1425,7 +1464,7 @@ export interface WSReauthRequest {
  *     deadline: Deadline for reauthentication (ISO 8601).
  */
 export interface WSReauthRequiredResponse {
-  type: Type38;
+  type: Type39;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1443,7 +1482,7 @@ export interface WSReauthRequiredResponse {
  *     topics: List of topics to subscribe to.
  */
 export interface WSSubscribeRequest {
-  type: Type39;
+  type: Type40;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1465,7 +1504,7 @@ export interface WSSubscribeRequest {
  *     message: Optional additional details.
  */
 export interface WSSubscriptionSuccessResponse {
-  type: Type40;
+  type: Type41;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1489,7 +1528,7 @@ export interface WSSubscriptionSuccessResponse {
  *     total_available: Total number of available topics.
  */
 export interface WSSubscriptionsListResponse {
-  type: Type41;
+  type: Type42;
   sequence_id: number;
   public_id: string;
   timestamp: string;
@@ -1509,7 +1548,7 @@ export interface WSSubscriptionsListResponse {
  *     topics: List of topics to unsubscribe from.
  */
 export interface WSUnsubscribeRequest {
-  type: Type42;
+  type: Type43;
   sequence_id: number;
   public_id: string;
   timestamp: string;

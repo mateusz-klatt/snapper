@@ -499,6 +499,19 @@ export const UnderlyingInstrumentDataSchema = z
   })
   .strict()
 
+export const UserDeactivatedDataSchema = z
+  .object({
+    type: z.literal('user_deactivated'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    user_public_id: z.string(),
+    deactivated_at: z.iso.datetime(),
+    reason: z.string().nullable(),
+  })
+  .strict()
+
 export const VenueFeeScheduleDataSchema = z
   .object({
     type: z.literal('venue_fee_schedule'),

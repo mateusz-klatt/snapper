@@ -256,19 +256,27 @@ export type Paths = {
         put?: never;
         /**
          * Deactivate User
-         * @description Deactivate a user account.
+         * @description Deactivate a user account through the canonical kill-switch flow.
+         *
+         *     Resolves the username path segment to a `user_public_id` and
+         *     delegates to `UserService.deactivate_user`, which is the SOLE
+         *     publisher of `admin.user_deactivated` (plan §3.6.1). The service
+         *     layer also drives `TokenManager.revoke_user_sessions` synchronously
+         *     so the local instance rejects subsequent requests immediately.
          *
          *     Args:
          *         request: FastAPI request (provides REST tracker for provenance).
-         *         user_id: Target user ID to deactivate.
-         *         _body: Request envelope with provenance (payload is empty).
+         *         user_id: Target user identified by username in the URL path.
+         *         body: Request envelope; `body.payload.reason` is forwarded to
+         *             the bus event for audit.
          *         current_user: Authenticated user with MANAGE_USERS permission.
          *
          *     Returns:
          *         Success message.
          *
          *     Raises:
-         *         HTTPException: If user not found or trying to deactivate self.
+         *         HTTPException: 400 when the caller targets their own account;
+         *             404 when no active user matches `user_id`.
          */
         post: Operations["deactivate_user_api_auth_users__user_id__deactivate_post"];
         delete?: never;
@@ -7578,15 +7586,23 @@ export type Components = {
         };
         /**
          * DeactivateUserBody
-         * @description Deactivate user command body (empty).
+         * @description Deactivate user command body.
          *
-         *     Command-style endpoint: no domain fields needed, provenance
-         *     is carried on the PayloadRequest envelope.
+         *     Command-style endpoint with optional human-readable rationale that
+         *     is forwarded to the canonical `admin.user_deactivated` bus payload
+         *     (plan §3.6.5) so subscribers (`AuthenticatedWebSocketManager`,
+         *     cross-instance `TokenManager`, audit consumers) can record why the
+         *     kill switch fired.
          *
          *     Attributes:
-         *         (none — empty body signals intent via URL path)
+         *         reason: Optional admin note explaining the deactivation. ``None``
+         *             when the request body is omitted entirely (back-compat with
+         *             the pre-Day-3b empty body).
          */
-        DeactivateUserBody: Record<string, never>;
+        DeactivateUserBody: {
+            /** Reason */
+            reason?: string | null;
+        };
         /**
          * ChangePasswordRequest
          * @description Change password request envelope.

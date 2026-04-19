@@ -3304,6 +3304,7 @@ struct DeactivateUserRequest: Codable, Sendable {
 }
 
 struct DeactivateUserBody: Codable, Sendable {
+    let reason: String?
 }
 
 struct ChangePasswordRequest: Codable, Sendable {

@@ -619,6 +619,28 @@ struct TradeData: Codable, Sendable {
     }
 }
 
+struct UserDeactivatedData: Codable, Sendable {
+    let type: String
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let userPublicId: String
+    let deactivatedAt: Date
+    let reason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case userPublicId = "user_public_id"
+        case deactivatedAt = "deactivated_at"
+        case reason
+    }
+}
+
 struct VenueFeeScheduleData: Codable, Sendable {
     let type: String
     let sequenceId: Int

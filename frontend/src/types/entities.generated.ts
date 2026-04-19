@@ -521,6 +521,20 @@ export interface UnderlyingInstrument {
 }
 
 /**
+ * Canonical UserDeactivated entity.
+ * From WebSocket UserDeactivatedData.
+ */
+export interface UserDeactivated {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  userPublicId: string
+  deactivatedAt: Date
+  reason?: string | null
+}
+
+/**
  * Canonical VenueFeeSchedule entity.
  * From WebSocket VenueFeeScheduleData.
  */

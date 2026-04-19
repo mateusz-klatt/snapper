@@ -705,7 +705,11 @@ export const RefreshTokenPayloadSchema = z
   })
   .strict()
 
-export const DeactivateUserBodySchema = z.object({}).strict()
+export const DeactivateUserBodySchema = z
+  .object({
+    reason: z.string().nullable().optional(),
+  })
+  .strict()
 
 export const ChangePasswordBodySchema = z
   .object({
