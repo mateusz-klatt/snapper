@@ -20,7 +20,6 @@ running listener.
 import asyncio
 from datetime import UTC
 from datetime import datetime
-from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -133,8 +132,8 @@ class TestCloseUserConnections:
         assert ws not in manager.authenticated_connections
 
     @pytest.mark.asyncio
-    async def test_reason_truncated_to_120_chars(self) -> None:
-        """Close-frame `reason` field is limited per RFC 6455 (123-byte cap)."""
+    async def test_ascii_reason_truncated_to_123_bytes(self) -> None:
+        """Close-frame `reason` field is limited per RFC 6455 §5.5.1 (123 bytes)."""
         manager = _make_manager()
         ws = MagicMock()
         ws.close = AsyncMock()
@@ -145,7 +144,54 @@ class TestCloseUserConnections:
         assert await_args is not None
         called_kwargs = await_args.kwargs
         assert called_kwargs["code"] == 4003
-        assert len(called_kwargs["reason"]) == 120
+        assert len(called_kwargs["reason"].encode("utf-8")) == 123
+
+    @pytest.mark.asyncio
+    async def test_multibyte_reason_truncated_on_utf8_boundary(self) -> None:
+        """Multi-byte (CJK / emoji) reason is truncated by ENCODED bytes, not chars.
+
+        Codex + Copilot R1 BLOCKER: previously used `reason[:120]`
+        which counts codepoints. A CJK or emoji-heavy reason could
+        therefore push the encoded close frame above the 123-byte
+        protocol limit and make `ws.close()` itself fail (then get
+        swallowed by the warning path). The fix encodes first, slices
+        bytes, then decodes with `errors="ignore"` so a multi-byte
+        char split by truncation is dropped instead of corrupting
+        the frame.
+        """
+        manager = _make_manager()
+        ws = MagicMock()
+        ws.close = AsyncMock()
+        manager.authenticated_connections[ws] = _make_principal("user-mb")
+        cjk_reason = "中文" * 100
+        await manager.close_user_connections(user_public_id="user-mb", reason=cjk_reason)
+        await_args = ws.close.await_args
+        assert await_args is not None
+        called_reason = await_args.kwargs["reason"]
+        encoded_len = len(called_reason.encode("utf-8"))
+        assert encoded_len <= 123
+        assert called_reason == "" or called_reason[0] == "中"
+
+    @pytest.mark.asyncio
+    async def test_emoji_reason_truncated_on_utf8_boundary_no_partial_chars(self) -> None:
+        """4-byte emoji codepoints split by the truncation boundary are dropped cleanly.
+
+        Verifies `errors="ignore"` rather than `errors="strict"` so a
+        partial 4-byte emoji at byte index 122 is silently dropped
+        instead of raising `UnicodeDecodeError`.
+        """
+        manager = _make_manager()
+        ws = MagicMock()
+        ws.close = AsyncMock()
+        manager.authenticated_connections[ws] = _make_principal("user-em")
+        emoji_reason = "🚀" * 100
+        await manager.close_user_connections(user_public_id="user-em", reason=emoji_reason)
+        await_args = ws.close.await_args
+        assert await_args is not None
+        called_reason = await_args.kwargs["reason"]
+        encoded_len = len(called_reason.encode("utf-8"))
+        assert encoded_len <= 123
+        assert all(char == "🚀" for char in called_reason)
 
 
 class TestHandleUserDeactivated:
@@ -268,6 +314,27 @@ class TestAdminRecvOneFrame:
         assert result is None
         sleep_mock.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_unicode_decode_error_returns_none_does_not_kill_loop(self) -> None:
+        """Invalid UTF-8 in topic OR payload → ``None`` (loop continues).
+
+        Codex R1 MAJOR: previously the bytes→str decode happened
+        OUTSIDE the recv `try` block, so a `UnicodeDecodeError` could
+        escape the helper and unwind `_admin_listen_loop`. Combined
+        with the original `is_not_none` idempotency check on
+        `_admin_listen_task`, that meant a single bad frame could
+        kill the listener for the rest of the process lifetime.
+        Decode is now inside the try; invalid UTF-8 is logged +
+        suppressed.
+        """
+        manager = _make_manager()
+        subscriber = MagicMock()
+        invalid_utf8 = b"\xff\xfe\xfd"
+        subscriber.recv_multipart = AsyncMock(return_value=(invalid_utf8, b"{}"))
+        with patch("snapper.auth.websocket_auth.asyncio.sleep", new=AsyncMock()):
+            result = await manager._admin_recv_one_frame(subscriber)
+        assert result is None
+
 
 class TestAdminListenerLifecycle:
     """`start_admin_listener` + `stop_admin_listener` are idempotent + lifecycle-safe."""
@@ -328,6 +395,60 @@ class TestAdminListenerLifecycle:
         manager = _make_manager()
         await manager.stop_admin_listener()
         assert manager._admin_listen_task is None
+
+    @pytest.mark.asyncio
+    async def test_start_restarts_after_previous_task_finished(self) -> None:
+        """A previous listener task that finished early is reaped + restarted.
+
+        Codex R1 MAJOR: original idempotency check was
+        `is not None`, which kept stale `_admin_listen_task` /
+        `_admin_subscriber` / `_admin_zmq_context` refs around AFTER
+        the task crashed and exited. The fix treats `task.done()` as
+        restartable so the kill-switch path stays live across single-
+        listener failures.
+        """
+        manager = _make_manager()
+        mock_socket = MagicMock()
+        mock_context = MagicMock()
+        mock_context.socket.return_value = mock_socket
+        mock_context_cls = MagicMock(return_value=mock_context)
+        with patch("snapper.auth.websocket_auth.zmq.asyncio.Context", mock_context_cls):
+            await manager.start_admin_listener("tcp://broker:5555")
+            first_task = manager._admin_listen_task
+            assert first_task is not None
+            manager._admin_running = False
+            await first_task
+            assert first_task.done()
+            await manager.start_admin_listener("tcp://broker:5555")
+            second_task = manager._admin_listen_task
+        assert second_task is not first_task
+        assert mock_context_cls.call_count == 2
+        await manager.stop_admin_listener()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_start_stop_serialised_by_lock(self) -> None:
+        """`asyncio.Lock` prevents overlapping start/stop from racing.
+
+        Codex R1 MAJOR: without serialisation, a `stop` clearing the
+        task ref could let a concurrent `start` allocate a fresh
+        socket which the in-progress `stop` would then close — losing
+        the listener. The fix serialises both methods via
+        `_admin_listener_lock`.
+        """
+        manager = _make_manager()
+        mock_socket = MagicMock()
+        mock_context = MagicMock()
+        mock_context.socket.return_value = mock_socket
+        mock_context_cls = MagicMock(return_value=mock_context)
+        with patch("snapper.auth.websocket_auth.zmq.asyncio.Context", mock_context_cls):
+            await manager.start_admin_listener("tcp://broker:5555")
+            stop_then_start = asyncio.gather(
+                manager.stop_admin_listener(),
+                manager.start_admin_listener("tcp://broker:5555"),
+            )
+            await stop_then_start
+        assert manager._admin_listener_lock.locked() is False
+        await manager.stop_admin_listener()
 
     @pytest.mark.asyncio
     async def test_stop_swallows_close_errors(self) -> None:
@@ -439,7 +560,7 @@ class TestSnapshotIterationSafety:
         ``RuntimeError: dictionary changed size during iteration``.
         """
         manager = _make_manager()
-        targets: list[Any] = []
+        targets: list[MagicMock] = []
         for _ in range(5):
             ws = MagicMock()
             ws.close = AsyncMock()

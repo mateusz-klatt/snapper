@@ -14,9 +14,9 @@ invariant, payload schema, graceful degradation on missing/failing
 publisher.
 """
 
+from collections.abc import Generator
 from datetime import UTC
 from datetime import datetime
-from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -24,7 +24,6 @@ from unittest.mock import patch
 import pytest
 from fastapi import HTTPException
 
-from snapper.api.schemas.base import StrictDataSchema
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.routes import deactivate_user as deactivate_route
 from snapper.auth.schemas.principal import AuthPrincipal
@@ -34,8 +33,12 @@ from snapper.auth.schemas.user import UserProfile
 from snapper.auth.tokens import TokenManager
 from snapper.auth.user_service import UserService
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import User
+from snapper.data.repository import SQLAlchemyRepository
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import UserDeactivatedData
+
+_BCRYPT_FAKE_DIGEST = "bcrypt-fake"
 
 
 class _RecordingPublisher:
@@ -47,9 +50,9 @@ class _RecordingPublisher:
     """
 
     def __init__(self) -> None:
-        self.sent: list[tuple[str, StrictDataSchema[Any]]] = []
+        self.sent: list[tuple[str, UserDeactivatedData]] = []
 
-    async def send(self, stream_key: str, data: StrictDataSchema[Any]) -> None:
+    async def send(self, stream_key: str, data: UserDeactivatedData) -> None:
         self.sent.append((stream_key, data))
 
 
@@ -60,12 +63,12 @@ class _RaisingPublisher(_RecordingPublisher):
     deactivation — the local in-process kill switch has already won.
     """
 
-    async def send(self, stream_key: str, data: StrictDataSchema[Any]) -> None:
+    async def send(self, stream_key: str, data: UserDeactivatedData) -> None:
         await super().send(stream_key, data)
         raise RuntimeError("broker unreachable")
 
 
-def _make_db_user(public_id: str, *, is_active: bool = True) -> Any:
+def _make_db_user(public_id: str, *, is_active: bool = True) -> MagicMock:
     """Return a MagicMock User row with the columns `deactivate_user` reads."""
     db_user = MagicMock()
     db_user.id = 7
@@ -74,7 +77,7 @@ def _make_db_user(public_id: str, *, is_active: bool = True) -> Any:
     db_user.sequence_id = 1
     db_user.username = f"user-{public_id}"
     db_user.email = f"user-{public_id}@example.com"
-    db_user.password_hash = "bcrypt-fake"
+    db_user.password_hash = _BCRYPT_FAKE_DIGEST
     db_user.role = "viewer"
     db_user.is_active = is_active
     db_user.created_at = datetime(2026, 1, 1, tzinfo=UTC)
@@ -84,7 +87,7 @@ def _make_db_user(public_id: str, *, is_active: bool = True) -> Any:
 
 
 def _build_service(
-    *, existing_db_user: Any | None, revoke_count: int = 0
+    *, existing_db_user: MagicMock | None, revoke_count: int = 0
 ) -> tuple[UserService, AsyncMock, AsyncMock, AsyncMock, MagicMock]:
     """Construct a UserService whose repo + token manager are wired to mocks.
 
@@ -117,7 +120,7 @@ def _build_service(
 
 
 @pytest.fixture(autouse=True)
-def _patch_token_manager_lookup() -> Any:
+def _patch_token_manager_lookup() -> Generator[MagicMock]:
     """Keep `get_token_manager` patched throughout each test body.
 
     `UserService.deactivate_user` resolves the manager via
@@ -212,7 +215,7 @@ class TestDeactivateUserOrchestration:
         publish_observation: list[bool] = []
 
         class _ObservingPublisher(_RecordingPublisher):
-            async def send(self, stream_key: str, data: StrictDataSchema[Any]) -> None:
+            async def send(self, stream_key: str, data: UserDeactivatedData) -> None:
                 publish_observation.append(commit_observed[0])
                 await super().send(stream_key, data)
 
@@ -292,7 +295,7 @@ class TestDeactivateUserOrchestration:
         _patch_token_manager_lookup.return_value = tm
         ordering: list[str] = []
 
-        async def _record_revoke(_uid: str, _repo: Any) -> int:
+        async def _record_revoke(_uid: str, _repo: object) -> int:
             ordering.append("revoke")
             return 0
 
@@ -307,6 +310,125 @@ class TestDeactivateUserOrchestration:
         with patch("snapper.auth.user_service.close_and_insert", new=AsyncMock()):
             await service.deactivate_user("user-6", reason=None)
         assert ordering == ["revoke", "commit"]
+
+    @pytest.mark.asyncio
+    async def test_revoke_failure_does_not_publish_and_propagates(
+        self, _patch_token_manager_lookup: MagicMock
+    ) -> None:
+        """Token revocation failure rolls back uncommitted user mutation + skips publish.
+
+        Codex+Copilot R1 MAJOR: this is a load-bearing failure
+        contract from §3.6.1 step 2 — if revoke raises, the SCD2
+        close+insert (still uncommitted) MUST be discarded by the
+        session's `__aexit__` rollback, the bus event MUST NOT fire
+        (the deactivation never landed), and the exception MUST
+        propagate so the route returns 5xx instead of a fake 200.
+        """
+        existing = _make_db_user("user-revoke-fail")
+        service, _session, commit, revoke, tm = _build_service(existing_db_user=existing)
+        _patch_token_manager_lookup.return_value = tm
+        revoke.side_effect = RuntimeError("blacklist seed failed")
+        publisher = _RecordingPublisher()
+        service.set_msg_publisher(publisher)
+        with (
+            patch("snapper.auth.user_service.close_and_insert", new=AsyncMock()),
+            pytest.raises(RuntimeError, match="blacklist seed failed"),
+        ):
+            await service.deactivate_user("user-revoke-fail", reason="bad")
+        commit.assert_not_called()
+        assert publisher.sent == []
+
+    @pytest.mark.asyncio
+    async def test_commit_failure_does_not_publish_and_propagates(
+        self, _patch_token_manager_lookup: MagicMock
+    ) -> None:
+        """Commit failure leaves tokens revoked + skips publish + propagates.
+
+        Codex+Copilot R1 MAJOR: §3.6.1 step 3 says if the user
+        commit fails AFTER token revocation already committed in its
+        own subtransaction, the kill switch wins (tokens stay
+        revoked, user row stays active) — the safer failure mode.
+        The bus event MUST NOT fire because no `admin.user_deactivated`
+        actually happened from a subscriber's POV. The exception MUST
+        propagate so the route returns 5xx.
+        """
+        existing = _make_db_user("user-commit-fail")
+        service, _session, commit, revoke, tm = _build_service(existing_db_user=existing)
+        _patch_token_manager_lookup.return_value = tm
+        commit.side_effect = RuntimeError("DB commit lost connection")
+        publisher = _RecordingPublisher()
+        service.set_msg_publisher(publisher)
+        with (
+            patch("snapper.auth.user_service.close_and_insert", new=AsyncMock()),
+            pytest.raises(RuntimeError, match="DB commit lost connection"),
+        ):
+            await service.deactivate_user("user-commit-fail", reason="net flap")
+        revoke.assert_awaited_once_with("user-commit-fail", service.repository)
+        assert publisher.sent == []
+
+
+class TestDeactivateUserRaceLoss:
+    """Race-loss safety verified against a real in-memory aiosqlite DB.
+
+    Codex R1 BLOCKER: original `deactivate_user` query filtered by
+    `where_active_now(User)` only — it did NOT filter by
+    `User.is_active`. So if Admin B deactivated a user between Admin
+    A's route lookup and Admin A's service call, the service would
+    find the new SCD2 row (is_active=False but still known_to=MAX),
+    process it again, re-revoke (no-op), and re-publish a duplicate
+    `admin.user_deactivated` event. The fix adds `User.is_active` +
+    `with_for_update()` to the SELECT so the query returns None for
+    already-inactive users → the route surfaces 404, not 200.
+    """
+
+    @pytest.mark.asyncio
+    async def test_already_inactive_user_returns_false_no_revoke_no_publish(self) -> None:
+        """Real-DB SELECT honours the `is_active=True` filter in deactivate_user."""
+        UserService.clear_instance()
+        TokenManager.clear_instance()
+        TokenManager._initialized = False
+        repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+        await repo.create_all()
+        seed_time = datetime(2026, 1, 1, tzinfo=UTC)
+        async with repo.session() as s:
+            s.add(
+                User(
+                    public_id="user-already-inactive",
+                    session_id="seed",
+                    sequence_id=1,
+                    timestamp=seed_time,
+                    known_to=KNOWN_TO_MAX,
+                    username="ghost",
+                    email="ghost@example.com",
+                    password_hash=_BCRYPT_FAKE_DIGEST,
+                    role="viewer",
+                    is_active=False,
+                    created_at=seed_time,
+                )
+            )
+            await s.commit()
+        with patch("snapper.auth.user_service.get_repository", return_value=repo):
+            service = UserService()
+        publisher = _RecordingPublisher()
+        service.set_msg_publisher(publisher)
+        revoke_mock = AsyncMock(return_value=0)
+        tm_stub = MagicMock()
+        tm_stub.revoke_user_sessions = revoke_mock
+        with patch("snapper.auth.user_service.get_token_manager", return_value=tm_stub):
+            result = await service.deactivate_user("user-already-inactive", reason=None)
+        assert result is False
+        assert publisher.sent == []
+        revoke_mock.assert_not_awaited()
+        async with repo.session() as s:
+            count = (
+                await s.execute(
+                    User.__table__.select().where(
+                        User.public_id == "user-already-inactive",
+                        User.known_to == KNOWN_TO_MAX,
+                    )
+                )
+            ).all()
+        assert len(count) == 1
 
 
 def _make_rest_request() -> MagicMock:

@@ -139,6 +139,85 @@ class TestLifespan:
         mock_manager.cleanup.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_lifespan_pins_publisher_and_listener_relative_ordering(
+        self,
+    ) -> None:
+        """Pin the relative order of publisher injection vs listener start/stop.
+
+        Day 3c R1 MINOR (Codex+Copilot): the existing lifespan
+        tests stub the helpers but don't assert call sequence. The
+        ordering is load-bearing per plan §3.6.1 — the WS subscriber
+        must come up after the publisher socket is injected (so any
+        immediate publish event reaches a live subscriber) and the
+        subscriber must shut down before the publisher socket so the
+        broker side never sees a half-broken pair. Records calls via
+        a parent `MagicMock` and asserts the exact order.
+        """
+        mock_app = MagicMock()
+        mock_manager = MagicMock()
+        mock_manager.cleanup = AsyncMock()
+        mock_zmq_bridge = MagicMock()
+        mock_zmq_bridge.start = AsyncMock()
+        mock_zmq_bridge.stop = AsyncMock()
+        mock_manager.zmq_bridge = mock_zmq_bridge
+        mock_app.state.manager = mock_manager
+        recorded: list[str] = []
+        mock_user_service = MagicMock()
+        mock_user_service.set_msg_publisher.side_effect = lambda _value: recorded.append(
+            "set_msg_publisher"
+        )
+        mock_ws_auth = MagicMock()
+
+        async def _start_listener(_xpub: str) -> None:
+            recorded.append("start_admin_listener")
+
+        async def _stop_listener() -> None:
+            recorded.append("stop_admin_listener")
+
+        mock_ws_auth.start_admin_listener = _start_listener
+        mock_ws_auth.stop_admin_listener = _stop_listener
+
+        def _shutdown_publisher(_app: FastAPI) -> None:
+            recorded.append("shutdown_publisher")
+
+        with (
+            patch("snapper.server.app.discover_processes"),
+            patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
+            patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
+            patch(
+                "snapper.server.app._build_user_service_publisher",
+                return_value=(MagicMock(), MagicMock()),
+            ),
+            patch(
+                "snapper.server.app._shutdown_user_service_publisher",
+                side_effect=_shutdown_publisher,
+            ),
+            patch(
+                "snapper.server.app.get_user_service",
+                return_value=mock_user_service,
+            ),
+            patch(
+                "snapper.server.app.get_ws_auth_manager",
+                return_value=mock_ws_auth,
+            ),
+        ):
+            mock_settings_service = MagicMock()
+            mock_settings_service.shutdown = AsyncMock()
+            mock_get_settings_service.return_value = mock_settings_service
+            mock_factory = MagicMock()
+            mock_factory.sync_registry_to_database = AsyncMock()
+            mock_factory.start_all_processes = AsyncMock()
+            mock_factory.spawn_per_wallet_executors = AsyncMock(return_value=0)
+            mock_factory.stop_all_processes = AsyncMock()
+            mock_factory_cls.return_value = mock_factory
+            async with lifespan(mock_app):
+                pass
+        startup_order = recorded[: recorded.index("stop_admin_listener")]
+        shutdown_order = recorded[recorded.index("stop_admin_listener") :]
+        assert startup_order == ["set_msg_publisher", "start_admin_listener"]
+        assert shutdown_order == ["stop_admin_listener", "shutdown_publisher"]
+
+    @pytest.mark.asyncio
     async def test_lifespan_api_only_skips_engine(self) -> None:
         """Test api-only mode skips process autostart but starts bridge.
 
@@ -348,6 +427,35 @@ class TestCreateApp:
         mock_context.term.assert_called_once()
         assert mock_app.state.user_service_publisher is None
         assert mock_app.state.user_service_publisher_context is None
+
+    def test_shutdown_user_service_publisher_singleton_clear_before_close_before_term(
+        self,
+    ) -> None:
+        """Disposal order MUST be singleton-clear → publisher.close → context.term.
+
+        Day 3b R1 MINOR (Copilot gpt-5.4): the in-flight
+        `deactivate_user` call MUST observe a None publisher BEFORE
+        the socket is closed; the socket MUST be closed BEFORE the
+        context terminates so libzmq sees a clean LINGER cycle. The
+        existing test verified each call happened but did not pin
+        relative order — this test does.
+        """
+        recorded: list[str] = []
+        mock_publisher = MagicMock()
+        mock_publisher.close.side_effect = lambda: recorded.append("close")
+        mock_publisher.setsockopt.side_effect = lambda *_args: None
+        mock_context = MagicMock()
+        mock_context.term.side_effect = lambda: recorded.append("term")
+        mock_user_service = MagicMock()
+        mock_user_service.set_msg_publisher.side_effect = lambda _value: recorded.append(
+            "set_msg_publisher"
+        )
+        mock_app = MagicMock()
+        mock_app.state.user_service_publisher = mock_publisher
+        mock_app.state.user_service_publisher_context = mock_context
+        with patch("snapper.server.app.get_user_service", return_value=mock_user_service):
+            _shutdown_user_service_publisher(mock_app)
+        assert recorded == ["set_msg_publisher", "close", "term"]
 
     def test_shutdown_user_service_publisher_handles_missing_state(self) -> None:
         """Shutdown is a no-op-on-failure when state was never attached.

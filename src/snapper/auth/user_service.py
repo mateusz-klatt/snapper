@@ -432,9 +432,14 @@ class UserService:
             when no active row matches ``user_public_id``.
         """
         async with self.repository.session() as session:
-            stmt = select(User).where(
-                User.public_id == user_public_id,
-                *where_active_now(User),
+            stmt = (
+                select(User)
+                .where(
+                    User.public_id == user_public_id,
+                    User.is_active,
+                    *where_active_now(User),
+                )
+                .with_for_update()
             )
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
