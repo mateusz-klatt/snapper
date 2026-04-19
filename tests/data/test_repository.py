@@ -2649,6 +2649,97 @@ async def test_insert_order_defaults_leverage_and_reduce_only(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_insert_order_rejects_row_and_kwargs_combination(tmp_path: Path) -> None:
+    """Verify insert_order rejects passing both row and keyword fields.
+
+    Given: An order payload dict and duplicated keyword fields,
+    When: insert_order is called with both forms,
+    Then: A ValueError is raised before any database write occurs.
+    """
+    repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'guard_order.db'}")
+    now = datetime.now(UTC)
+    row: OrderInsertRow = {
+        "instrument_public_id": "inst-guard",
+        "wallet_public_id": "00000000-0000-7000-8000-000000000001",
+        "client_order_id": "guard-order",
+        "exchange_order_id": None,
+        "created_at": now,
+        "side": "buy",
+        "order_type": "limit",
+        "price": 50000.0,
+        "size": 1.0,
+        "status": "open",
+        "session_id": "s1",
+        "sequence_id": 99,
+        "timestamp": now,
+    }
+
+    with pytest.raises(
+        ValueError, match="insert_order accepts either row or keyword fields, not both"
+    ):
+        await repo.insert_order(
+            row=row,
+            instrument_public_id=row["instrument_public_id"],
+            wallet_public_id=row["wallet_public_id"],
+            client_order_id=row["client_order_id"],
+            exchange_order_id=row["exchange_order_id"],
+            created_at=row["created_at"],
+            side=row["side"],
+            order_type=row["order_type"],
+            price=row["price"],
+            size=row["size"],
+            status=row["status"],
+            session_id=row["session_id"],
+            sequence_id=row["sequence_id"],
+            timestamp=row["timestamp"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_insert_execution_rejects_row_and_kwargs_combination(tmp_path: Path) -> None:
+    """Verify insert_execution rejects passing both row and keyword fields.
+
+    Given: An execution payload dict and duplicated keyword fields,
+    When: insert_execution is called with both forms,
+    Then: A ValueError is raised before any database write occurs.
+    """
+    repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'guard_execution.db'}")
+    now = datetime.now(UTC)
+    row: ExecutionInsertRow = {
+        "order_public_id": "order-guard",
+        "wallet_public_id": "00000000-0000-7000-8000-000000000001",
+        "timestamp": now,
+        "side": "buy",
+        "status": "filled",
+        "price": 50000.0,
+        "size": 1.0,
+        "fee": 1.0,
+        "fee_asset": "USD",
+        "session_id": "s1",
+        "sequence_id": 100,
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="insert_execution accepts either row or keyword fields, not both",
+    ):
+        await repo.insert_execution(
+            row=row,
+            order_public_id=row["order_public_id"],
+            wallet_public_id=row["wallet_public_id"],
+            timestamp=row["timestamp"],
+            side=row["side"],
+            status=row["status"],
+            price=row["price"],
+            size=row["size"],
+            fee=row["fee"],
+            fee_asset=row["fee_asset"],
+            session_id=row["session_id"],
+            sequence_id=row["sequence_id"],
+        )
+
+
+@pytest.mark.asyncio
 async def test_update_order_carries_forward_leverage_and_reduce_only(tmp_path: Path) -> None:
     """Verify update_order SCD2 cycle preserves leverage and reduce_only.
 

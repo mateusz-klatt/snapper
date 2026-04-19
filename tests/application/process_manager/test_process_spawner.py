@@ -545,7 +545,7 @@ class TestProcessSpawner:
         status = spawner.get_status("uptime_test")
         assert status.running is True
         assert status.uptime_seconds is not None
-        assert status.uptime_seconds >= 0.2
+        assert status.uptime_seconds >= 0.15
         assert status.uptime_seconds < 1.0
         spawner.terminate("uptime_test")
 

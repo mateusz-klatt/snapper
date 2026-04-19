@@ -6,6 +6,7 @@ import time
 from collections import deque
 from collections.abc import Iterator
 from typing import Any
+from unittest.mock import AsyncMock
 from unittest.mock import patch
 
 import pytest
@@ -472,10 +473,15 @@ class TestRestCallTrackerAcquire:
         """
         tracker = RestCallTracker(limits={})
         start = time.monotonic()
-        await tracker.acquire(ExchangeEnum.ZONDA)
+        with patch(
+            "snapper.infrastructure.rest.tracker.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as sleep_mock:
+            await tracker.acquire(ExchangeEnum.ZONDA)
         elapsed = time.monotonic() - start
         assert tracker.get_rate(ExchangeEnum.ZONDA, 1.0) == pytest.approx(1.0)
-        assert elapsed < 0.05
+        sleep_mock.assert_not_awaited()
+        assert elapsed < 0.1
 
     @pytest.mark.asyncio
     async def test_acquire_does_not_sleep_under_limit(self) -> None:
