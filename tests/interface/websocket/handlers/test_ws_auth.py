@@ -27,9 +27,12 @@ import snapper.server.authenticated_websocket as auth_ws
 from snapper.api.auth.errors.ws_token import WsTokenAlreadyUsedError
 from snapper.api.auth.errors.ws_token import WsTokenError
 from snapper.api.auth.schemas.ws_token import WsTokenPayload
+from snapper.api.auth.services.ws_token_service import WsTokenService
 from snapper.api.auth.services.ws_token_service import compute_sid_hash
 from snapper.api.auth.services.ws_token_service import get_ws_token_service
+from snapper.application.services.settings import SettingsService
 from snapper.auth import routes
+from snapper.auth.dependencies import CSRFManager
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
@@ -53,12 +56,19 @@ from snapper.auth.schemas.tokens import TokenPair
 from snapper.auth.schemas.user import UserProfile
 from snapper.auth.schemas.websocket import WebSocketAuthMessage
 from snapper.auth.schemas.websocket import WebSocketAuthResponse
+from snapper.auth.tokens import TokenManager
+from snapper.auth.tokens import WebSocketTokenRotator
 from snapper.auth.tokens import get_token_manager
+from snapper.auth.user_service import UserService
 from snapper.auth.user_service import get_user_service
 from snapper.auth.websocket_auth import AuthConnectionStats
 from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.auth.websocket_auth import get_ws_auth_manager
 from snapper.config.bootstrap import BootstrapSettingsLoader
+from snapper.data.repository import _repository_cache
+from snapper.data.repository import dispose_repositories
+from snapper.infrastructure.security.encryption import SettingsEncryptionService
+from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.interface.websocket.bridge import ZmqWebSocketBridgeService
 from snapper.interface.websocket.handlers.auth import AUTH_TIMEOUT_SECONDS
 from snapper.interface.websocket.handlers.auth import REAUTH_GRACE_PERIOD
@@ -96,12 +106,51 @@ create_authenticated_websocket_router = cast(Any, create_authenticated_websocket
 has_trading_permission = cast(Any, has_trading_permission)
 
 
+def _cleanup_test_client_state() -> None:
+    """Release singleton and repository state after a TestClient lifespan ends."""
+    for singleton_cls in (
+        SymbolMapperService,
+        SettingsEncryptionService,
+        UserService,
+        WebSocketAuthManager,
+        TokenManager,
+        WebSocketTokenRotator,
+        WsTokenService,
+        CSRFManager,
+        SettingsService,
+    ):
+        with contextlib.suppress(Exception):
+            singleton_cls.clear_instance()
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(dispose_repositories())
+    finally:
+        loop.close()
+    _repository_cache.clear()
+
+
 @pytest.fixture
 def test_client(mock_settings_for_tests: Any) -> Generator[Any]:
     """Provide a TestClient with mocked authentication."""
     with (
         patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
         patch("snapper.server.app.discover_processes", return_value=None),
+        patch(
+            "snapper.server.provenance_middleware.ClientProvenanceMiddleware._record_control",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "snapper.server.provenance_middleware.ClientProvenanceMiddleware._record_telemetry",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "snapper.interface.websocket.dispatcher._record_ws_control",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "snapper.interface.websocket.dispatcher._record_ws_telemetry",
+            new=AsyncMock(return_value=None),
+        ),
     ):
         mock_factory = MagicMock()
         mock_factory.sync_registry_to_database = AsyncMock(return_value=None)
@@ -133,6 +182,7 @@ def test_client(mock_settings_for_tests: Any) -> Generator[Any]:
         app.dependency_overrides[require_authentication] = skip_authentication
         with TestClient(app) as client:
             yield client
+        _cleanup_test_client_state()
 
 
 WS_PATH = "/api/ws"
@@ -142,6 +192,16 @@ OPERATOR_USERNAME = "operator"
 OPERATOR_PASSWORD = "OpSnapper2026!"
 VIEWER_USERNAME = "viewer"
 VIEWER_PASSWORD = "ViewSnapper2026!"
+
+_TEST_WS_USER_DATA: dict[str, tuple[str, UserRole, str]] = {
+    ADMIN_USERNAME: (ADMIN_PASSWORD, UserRole.ADMIN, "00000000-0000-7000-8000-0000000000a1"),
+    OPERATOR_USERNAME: (
+        OPERATOR_PASSWORD,
+        UserRole.OPERATOR,
+        "00000000-0000-7000-8000-0000000000a2",
+    ),
+    VIEWER_USERNAME: (VIEWER_PASSWORD, UserRole.VIEWER, "00000000-0000-7000-8000-0000000000a3"),
+}
 
 
 def _receive_json(websocket: Any) -> dict[str, Any]:
@@ -153,24 +213,35 @@ def _connect_with_cookie(test_client: Any, token: str) -> Any:
     return test_client.websocket_connect(WS_PATH)
 
 
-def _prepare_ws_token(test_client: Any, *, username: str, password: str) -> str:
-    test_client.cookies.clear()
-    login_response = test_client.post(
-        "/api/auth/login",
-        json={
-            "type": "login_request",
-            "session_id": "",
-            "sequence_id": 0,
-            "public_id": "test-pid",
-            "timestamp": "2024-01-01T00:00:00Z",
-            "payload": {"username": username, "password": password},
-        },
+def _issue_test_auth_tokens(test_client: Any, *, username: str, password: str) -> tuple[str, str]:
+    user_data = _TEST_WS_USER_DATA.get(username)
+    assert user_data is not None, f"Unknown websocket test user: {username}"
+    expected_password, role, user_public_id = user_data
+    assert password == expected_password
+    session_id = f"ws-test-session-{username}"
+    token_manager = get_token_manager()
+    ws_token_service = get_ws_token_service()
+    token_pair = token_manager.create_tokens(
+        AuthPrincipal(
+            username=username,
+            role=role,
+            email=f"{username}@example.test",
+            is_active=True,
+            user_public_id=user_public_id,
+        ),
+        session_id=session_id,
     )
-    assert login_response.status_code == 200
-    response = test_client.post("/api/auth/refresh")
-    assert response.status_code == 200
-    data = cast(dict[str, Any], response.json())
-    return cast(str, data["payload"]["ws_token"])
+    ws_token = ws_token_service.generate(user_id=username, session_id=session_id).token
+    test_client.cookies.clear()
+    test_client.cookies.set("access_token", token_pair.access_token)
+    test_client.cookies.set("refresh_token", token_pair.refresh_token)
+    test_client.cookies.set("csrf_token", f"csrf-{username}")
+    return ws_token, token_pair.access_token
+
+
+def _prepare_ws_token(test_client: Any, *, username: str, password: str) -> str:
+    ws_token, _ = _issue_test_auth_tokens(test_client, username=username, password=password)
+    return ws_token
 
 
 def _complete_handshake(websocket: Any, ws_token: str) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -456,24 +527,7 @@ def test_websocket_stats_endpoint(test_client: Any) -> None:
 
 
 def _prepare_ws_token_v2(test_client: Any, *, username: str, password: str) -> tuple[str, str]:
-    login_response = test_client.post(
-        "/api/auth/login",
-        json={
-            "type": "login_request",
-            "session_id": "",
-            "sequence_id": 0,
-            "public_id": "test-pid",
-            "timestamp": "2024-01-01T00:00:00Z",
-            "payload": {"username": username, "password": password},
-        },
-    )
-    assert login_response.status_code == 200
-    response = test_client.post("/api/auth/refresh")
-    assert response.status_code == 200
-    data = cast(dict[str, Any], response.json())
-    access_token = cast(str, test_client.cookies.get("access_token"))
-    assert access_token
-    return cast(str, data["payload"]["ws_token"]), access_token
+    return _issue_test_auth_tokens(test_client, username=username, password=password)
 
 
 def test_authentication_failure(test_client: Any) -> None:

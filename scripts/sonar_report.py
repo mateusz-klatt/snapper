@@ -1,19 +1,195 @@
 """Fetch and summarize SonarCloud issues for the snapper project."""
 
+import html
 import json
 import os
+import re
 import sys
 from collections import Counter
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from typing import TypedDict
 
 import httpx
 
 BASE_URL = "https://sonarcloud.io/api"
 PROJECT_KEY = "mateusz-klatt_snapper"
 PAGE_SIZE = 500
+SOURCE_CONTEXT_RADIUS = 2
+
+
+class SourceLine(TypedDict):
+    """Normalized source line payload from SonarCloud."""
+
+    line: int
+    code: str
+    duplicated: bool
+    is_new: bool
+
+
+class QualityGateCondition(TypedDict):
+    """Single quality gate condition entry."""
+
+    status: str
+    metric_key: str
+    comparator: str | None
+    error_threshold: str | None
+    actual_value: str | None
+    period_index: int | None
+
+
+class QualityGateReport(TypedDict):
+    """Normalized quality gate response summary."""
+
+    status: str
+    period_mode: str | None
+    period_date: str | None
+    conditions: list[QualityGateCondition]
+    failing_conditions: list[QualityGateCondition]
+
+
+def _component_path(component: str) -> str:
+    """Return project-relative component path."""
+    return component.replace(f"{PROJECT_KEY}:", "")
+
+
+def _measure_value(measure: dict[str, Any]) -> str:
+    """Extract direct or period-based metric value as string."""
+    direct_value = measure.get("value")
+    if direct_value is not None:
+        return str(direct_value)
+    periods = measure.get("periods", [])
+    if periods:
+        first_period = periods[0]
+        if isinstance(first_period, dict) and first_period.get("value") is not None:
+            return str(first_period["value"])
+    return "?"
+
+
+def _optional_str(value: object) -> str | None:
+    """Return stringified value or None when missing."""
+    if value is None:
+        return None
+    return str(value)
+
+
+def _optional_int(value: object) -> int | None:
+    """Return integer value or None when missing."""
+    if value is None:
+        return None
+    return int(str(value))
+
+
+def _strip_code_markup(code: str) -> str:
+    """Convert SonarCloud HTML-marked source code to plain text."""
+    return re.sub(r"<[^>]+>", "", html.unescape(code))
+
+
+def _quality_metric_label(metric_key: str) -> str:
+    """Return human-readable label for a quality gate metric key."""
+    labels = {
+        "new_reliability_rating": "New reliability",
+        "new_security_rating": "New security",
+        "new_maintainability_rating": "New maintainability",
+        "new_coverage": "New coverage",
+        "new_duplicated_lines_density": "New duplication",
+        "new_security_hotspots_reviewed": "New hotspots reviewed",
+    }
+    return labels.get(metric_key, metric_key)
+
+
+def _format_metric_value(metric_key: str, value: str | None) -> str:
+    """Format a Sonar metric value for console output."""
+    if value in (None, ""):
+        return "?"
+    text_value = str(value)
+    if metric_key.endswith("_rating"):
+        return rating_label(text_value)
+    percent_metrics = {
+        "coverage",
+        "new_coverage",
+        "duplicated_lines_density",
+        "new_duplicated_lines_density",
+        "new_security_hotspots_reviewed",
+    }
+    if metric_key in percent_metrics:
+        return f"{float(text_value):.1f}%"
+    return text_value
+
+
+def _extract_snippet(
+    source_cache: dict[str, list[SourceLine]],
+    component: str,
+    start_line: int,
+    end_line: int,
+) -> list[SourceLine]:
+    """Return source snippet around the issue location."""
+    source_lines = source_cache.get(component, [])
+    if not source_lines:
+        return []
+    line_map = {entry["line"]: entry for entry in source_lines}
+    snippet: list[SourceLine] = []
+    for line_number in range(
+        max(1, start_line - SOURCE_CONTEXT_RADIUS), end_line + SOURCE_CONTEXT_RADIUS + 1
+    ):
+        source_line = line_map.get(line_number)
+        if source_line is not None:
+            snippet.append(source_line)
+    return snippet
+
+
+def _enrich_issue(
+    issue: dict[str, Any],
+    source_cache: dict[str, list[SourceLine]],
+) -> dict[str, Any]:
+    """Attach normalized path and source snippets to a Sonar issue."""
+    component = str(issue.get("component", ""))
+    text_range = issue.get("textRange") or {}
+    start_line = int(text_range.get("startLine") or issue.get("line") or 1)
+    end_line = int(text_range.get("endLine") or start_line)
+    issue["component_path"] = _component_path(component)
+    issue["primary_snippet"] = _extract_snippet(source_cache, component, start_line, end_line)
+    flow_details: list[dict[str, Any]] = []
+    for flow in issue.get("flows", []):
+        for location in flow.get("locations", []):
+            flow_component = str(location.get("component", component))
+            flow_text_range = location.get("textRange") or {}
+            flow_start = int(flow_text_range.get("startLine") or 1)
+            flow_end = int(flow_text_range.get("endLine") or flow_start)
+            flow_details.append(
+                {
+                    "component": flow_component,
+                    "component_path": _component_path(flow_component),
+                    "start_line": flow_start,
+                    "end_line": flow_end,
+                    "start_offset": flow_text_range.get("startOffset"),
+                    "end_offset": flow_text_range.get("endOffset"),
+                    "message": location.get("msg"),
+                    "snippet": _extract_snippet(source_cache, flow_component, flow_start, flow_end),
+                }
+            )
+    issue["flow_details"] = flow_details
+    return issue
+
+
+def _print_issue_snippet(
+    snippet: list[SourceLine],
+    start_line: int,
+    end_line: int,
+    indent: str,
+) -> None:
+    """Render source snippet lines in console output."""
+    for source_line in snippet:
+        marker = ">" if start_line <= source_line["line"] <= end_line else " "
+        flags: list[str] = []
+        if source_line["duplicated"]:
+            flags.append("dup")
+        if source_line["is_new"]:
+            flags.append("new")
+        suffix = f" [{' '.join(flags)}]" if flags else ""
+        print(f"{indent}{marker} {source_line['line']:>5} | {source_line['code']}{suffix}")
 
 
 def get_token() -> str:
@@ -88,13 +264,16 @@ def fetch_metrics(token: str) -> dict[str, str]:
                     "vulnerabilities",
                     "code_smells",
                     "coverage",
+                    "new_coverage",
                     "duplicated_lines_density",
+                    "new_duplicated_lines_density",
                     "ncloc",
                     "security_hotspots",
                     "reliability_rating",
                     "security_rating",
                     "sqale_rating",
                     "sqale_index",
+                    "alert_status",
                 ]
             ),
         },
@@ -105,7 +284,95 @@ def fetch_metrics(token: str) -> dict[str, str]:
     payload: dict[str, Any] = resp.json()
     component: dict[str, Any] = payload.get("component", {})
     measures: list[dict[str, Any]] = component.get("measures", [])
-    return {str(m["metric"]): str(m["value"]) for m in measures}
+    return {str(m["metric"]): _measure_value(m) for m in measures}
+
+
+def fetch_quality_gate(token: str) -> QualityGateReport:
+    """Fetch SonarCloud quality gate status and conditions.
+
+    Args:
+        token: SonarCloud access token.
+
+    Returns:
+        Normalized quality gate status, period, and condition details.
+    """
+    resp = httpx.get(
+        f"{BASE_URL}/qualitygates/project_status",
+        params={"projectKey": PROJECT_KEY},
+        auth=(token, ""),
+        timeout=30,
+    )
+    resp.raise_for_status()
+    payload: dict[str, Any] = resp.json()
+    project_status: dict[str, Any] = payload.get("projectStatus", {})
+    periods: list[dict[str, Any]] = project_status.get("periods", [])
+    first_period = periods[0] if periods else {}
+    conditions: list[QualityGateCondition] = []
+    for condition in project_status.get("conditions", []):
+        normalized_condition: QualityGateCondition = {
+            "status": str(condition.get("status", "?")),
+            "metric_key": str(condition.get("metricKey", "?")),
+            "comparator": _optional_str(condition.get("comparator")),
+            "error_threshold": _optional_str(condition.get("errorThreshold")),
+            "actual_value": _optional_str(condition.get("actualValue")),
+            "period_index": _optional_int(condition.get("periodIndex")),
+        }
+        conditions.append(normalized_condition)
+    return {
+        "status": str(project_status.get("status", "?")),
+        "period_mode": _optional_str(first_period.get("mode")),
+        "period_date": _optional_str(first_period.get("date")),
+        "conditions": conditions,
+        "failing_conditions": [
+            condition for condition in conditions if condition["status"] != "OK"
+        ],
+    }
+
+
+def fetch_source_cache(token: str, issues: list[dict[str, Any]]) -> dict[str, list[SourceLine]]:
+    """Fetch source lines for every file referenced by current issues.
+
+    Args:
+        token: SonarCloud access token.
+        issues: Issue payloads returned by SonarCloud.
+
+    Returns:
+        Mapping of component key to normalized source lines.
+    """
+    components: set[str] = set()
+    for issue in issues:
+        component = issue.get("component")
+        if component:
+            components.add(str(component))
+        for flow in issue.get("flows", []):
+            for location in flow.get("locations", []):
+                flow_component = location.get("component")
+                if flow_component:
+                    components.add(str(flow_component))
+    source_cache: dict[str, list[SourceLine]] = {}
+    total = len(components)
+    for index, component in enumerate(sorted(components), start=1):
+        resp = httpx.get(
+            f"{BASE_URL}/sources/lines",
+            params={"key": component},
+            auth=(token, ""),
+            timeout=30,
+        )
+        resp.raise_for_status()
+        payload: dict[str, Any] = resp.json()
+        lines: list[SourceLine] = []
+        for source_line in payload.get("sources", []):
+            lines.append(
+                {
+                    "line": int(source_line.get("line", 0)),
+                    "code": _strip_code_markup(str(source_line.get("code", ""))),
+                    "duplicated": bool(source_line.get("duplicated", False)),
+                    "is_new": bool(source_line.get("isNew", False)),
+                }
+            )
+        source_cache[component] = lines
+        print(f"  source {index}/{total}: {_component_path(component)}")
+    return source_cache
 
 
 def rating_label(value: str) -> str:
@@ -121,12 +388,17 @@ def rating_label(value: str) -> str:
     return mapping.get(value, value)
 
 
-def print_report(issues: list[dict[str, Any]], metrics: dict[str, str]) -> None:
+def print_report(
+    issues: list[dict[str, Any]],
+    metrics: dict[str, str],
+    quality_gate: QualityGateReport,
+) -> None:
     """Print a summary report to stdout.
 
     Args:
         issues: Issues returned by SonarCloud issues search API.
         metrics: Project metrics mapping.
+        quality_gate: Quality gate status and condition summary.
     """
     print("\n" + "=" * 70)
     print(f"  SONARCLOUD REPORT - {PROJECT_KEY}")
@@ -141,12 +413,33 @@ def print_report(issues: list[dict[str, Any]], metrics: dict[str, str]) -> None:
     print(f"  Security hotspots:   {metrics.get('security_hotspots', '?')}")
     print(f"  Coverage:            {metrics.get('coverage', '?')}%")
     print(f"  Duplication:         {metrics.get('duplicated_lines_density', '?')}%")
+    print(
+        f"  New coverage:        {_format_metric_value('new_coverage', metrics.get('new_coverage'))}"
+    )
+    print(
+        f"  New duplication:     {_format_metric_value('new_duplicated_lines_density', metrics.get('new_duplicated_lines_density'))}"
+    )
     tech_debt = metrics.get("sqale_index", "0")
     debt_minutes = int(tech_debt)
     print(f"  Tech debt:           {debt_minutes // 60}h {debt_minutes % 60}m")
     print(f"  Reliability rating:  {rating_label(metrics.get('reliability_rating', '?'))}")
     print(f"  Security rating:     {rating_label(metrics.get('security_rating', '?'))}")
     print(f"  Maintainability:     {rating_label(metrics.get('sqale_rating', '?'))}")
+    print(f"  Quality gate:        {quality_gate['status']}")
+
+    print("\n--- QUALITY GATE DETAILS ---")
+    print(f"  Period mode:         {quality_gate['period_mode'] or '?'}")
+    print(f"  Period date:         {quality_gate['period_date'] or '?'}")
+    if not quality_gate["failing_conditions"]:
+        print("  Failing conditions:  (none)")
+    else:
+        print("  Failing conditions:")
+        for condition in quality_gate["failing_conditions"]:
+            actual = _format_metric_value(condition["metric_key"], condition["actual_value"])
+            threshold = _format_metric_value(condition["metric_key"], condition["error_threshold"])
+            print(
+                f"    {_quality_metric_label(condition['metric_key']):<22} {actual} {condition['comparator'] or '?'} {threshold}"
+            )
 
     print(f"\n--- ISSUES SUMMARY ({len(issues)} total) ---")
 
@@ -190,22 +483,43 @@ def print_report(issues: list[dict[str, Any]], metrics: dict[str, str]) -> None:
     if not critical:
         print("    (none)")
     for issue in critical[:50]:
-        component = issue.get("component", "").replace(f"{PROJECT_KEY}:", "")
+        component = issue.get(
+            "component_path", issue.get("component", "").replace(f"{PROJECT_KEY}:", "")
+        )
         line = issue.get("line", "?")
         print(f"    [{issue.get('severity')}] {component}:{line}")
         print(f"      {issue.get('message', '')[:120]}")
         print(f"      Rule: {issue.get('rule', '')}")
+        text_range = issue.get("textRange") or {}
+        start_line = int(text_range.get("startLine") or issue.get("line") or 1)
+        end_line = int(text_range.get("endLine") or start_line)
+        primary_snippet = issue.get("primary_snippet", [])
+        if primary_snippet:
+            _print_issue_snippet(primary_snippet, start_line, end_line, "      ")
+        flow_details = issue.get("flow_details", [])
+        if flow_details:
+            print("      Secondary locations:")
+            for flow_detail in flow_details[:8]:
+                print(
+                    f"        {flow_detail['component_path']}:{flow_detail['start_line']} {flow_detail.get('message') or ''}".rstrip()
+                )
         print()
 
     print("=" * 70)
 
 
-def save_json(issues: list[dict[str, Any]], metrics: dict[str, str], output_dir: Path) -> Path:
+def save_json(
+    issues: list[dict[str, Any]],
+    metrics: dict[str, str],
+    quality_gate: QualityGateReport,
+    output_dir: Path,
+) -> Path:
     """Save raw data to JSON for further analysis.
 
     Args:
         issues: Issues returned by SonarCloud issues search API.
         metrics: Project metrics mapping.
+        quality_gate: Quality gate status and condition summary.
         output_dir: Directory where the report JSON should be written.
 
     Returns:
@@ -218,6 +532,7 @@ def save_json(issues: list[dict[str, Any]], metrics: dict[str, str], output_dir:
         "generated": datetime.now(UTC).isoformat(),
         "project": PROJECT_KEY,
         "metrics": metrics,
+        "quality_gate": quality_gate,
         "total_issues": len(issues),
         "issues": issues,
     }
@@ -236,15 +551,22 @@ def main() -> int:
     print("Fetching project metrics...")
     metrics = fetch_metrics(token)
 
+    print("Fetching quality gate status...")
+    quality_gate = fetch_quality_gate(token)
+
     print("Fetching all issues (this may take a moment)...")
     issues = fetch_all_issues(token)
 
-    print_report(issues, metrics)
+    print("Fetching source lines for issue details...")
+    source_cache = fetch_source_cache(token, issues)
+    detailed_issues = [_enrich_issue(issue, source_cache) for issue in issues]
+
+    print_report(detailed_issues, metrics, quality_gate)
 
     output_dir = Path(__file__).resolve().parent.parent / "reports"
-    json_path = save_json(issues, metrics, output_dir)
+    json_path = save_json(detailed_issues, metrics, quality_gate, output_dir)
     print(f"\nRaw JSON saved to: {json_path}")
-    print(f"({len(issues)} issues, {json_path.stat().st_size / 1024:.0f} KB)")
+    print(f"({len(detailed_issues)} issues, {json_path.stat().st_size / 1024:.0f} KB)")
     return 0
 
 

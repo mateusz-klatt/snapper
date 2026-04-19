@@ -71,6 +71,7 @@ from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.data.models import Base
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import _live_aiosqlite_connections
 from snapper.data.repository import _repository_cache
 from snapper.data.repository import dispose_repositories
 from snapper.data.seed.loader import run_seed
@@ -160,6 +161,20 @@ def _install_sqlite_connection_tracking() -> None:
     sqlite3.connect = tracked_connect
     sqlite3.dbapi2.connect = tracked_connect
     _tracking_install_state["sqlite"] = True
+
+
+def _close_tracked_sqlite_connections() -> None:
+    """Close any sqlite connections left open by the current test."""
+    for connection in tuple(_tracked_sqlite_connections):
+        with contextlib.suppress(Exception):
+            connection.close()
+
+
+async def _close_tracked_aiosqlite_connections() -> None:
+    """Close any tracked raw aiosqlite connections left open by the current test."""
+    for connection in tuple(_live_aiosqlite_connections.values()):
+        with contextlib.suppress(Exception):
+            await connection.close()
 
 
 @pytest.fixture(autouse=True)
@@ -521,9 +536,7 @@ def cleanup_session_resources() -> Generator[None]:
     yield
     with contextlib.suppress(Exception):
         _cleanup_zmq_contexts()
-    for connection in _tracked_sqlite_connections:
-        with contextlib.suppress(Exception):
-            connection.close()
+    _close_tracked_sqlite_connections()
     loop = asyncio.new_event_loop()
     try:
         loop.run_until_complete(dispose_repositories())
@@ -552,6 +565,21 @@ def pytest_configure(config: pytest.Config) -> None:
         """Intentionally suppressed: zmq may not be installed."""
 
 
+@pytest.hookimpl(hookwrapper=True, trylast=True)
+def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None) -> Generator[None]:
+    """Run final DB cleanup before pytest collects unraisable teardown warnings."""
+    yield
+    _close_tracked_sqlite_connections()
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(dispose_repositories())
+        loop.run_until_complete(_close_tracked_aiosqlite_connections())
+    finally:
+        loop.close()
+    _repository_cache.clear()
+    gc.collect()
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def cleanup_all() -> AsyncGenerator[None]:
     """Clean up singletons and repository caches after each test."""
@@ -574,8 +602,10 @@ async def cleanup_all() -> AsyncGenerator[None]:
     except Exception:
         pass
     finally:
+        _close_tracked_sqlite_connections()
         _cleanup_zmq_contexts()
         _repository_cache.clear()
+        gc.collect()
 
 
 @pytest.fixture(autouse=True, scope="function")

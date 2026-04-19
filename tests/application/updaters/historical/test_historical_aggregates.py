@@ -1,5 +1,6 @@
 """Unit tests for PolygonAggregatesBackfillService."""
 
+import math
 from collections.abc import Callable
 from datetime import UTC
 from datetime import date
@@ -1588,7 +1589,7 @@ async def test_chunk_optimization_skip_when_all_csv_exist() -> None:
 
     class _StubLoaderWithCSV(_StubLoader):
         def get_aggregate_csv_path_for_day(
-            self, archive_symbol: str, ticker: str, timespan: str, day: date
+            self, archive_symbol: str, timespan: str, day: date
         ) -> Path | None:
             mock_path = MagicMock(spec=Path)
             mock_path.exists.return_value = True
@@ -2474,11 +2475,11 @@ def test_build_candle_rows_converts_values_decimal() -> None:
     assert row["instrument_public_id"] == "inst-pub-7"
     assert row["open_at"] == candle.timestamp
     assert row["timeframe"] == "1m"
-    assert row["open"] == 1.0
-    assert row["high"] == 2.0
-    assert row["low"] == 3.0
-    assert row["close"] == 4.0
-    assert row["volume"] == 5.0
+    assert math.isclose(row["open"], 1.0)
+    assert math.isclose(row["high"], 2.0)
+    assert math.isclose(row["low"], 3.0)
+    assert math.isclose(row["close"], 4.0)
+    assert math.isclose(row["volume"], 5.0)
     assert row["vwap"] is None
     assert row["trades"] == 10
     assert isinstance(row["timestamp"], datetime)

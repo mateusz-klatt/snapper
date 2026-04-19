@@ -64,6 +64,7 @@ from loguru import logger
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
+from snapper.api.auth.services.ws_token_service import WsTokenService
 from snapper.api.auth.services.ws_token_service import get_ws_token_service
 from snapper.api.schemas.data_responses import CandleListResponse
 from snapper.api.schemas.data_responses import ContinuousCandleListResponse
@@ -109,13 +110,18 @@ from snapper.application.services.continuous_contract_builder import ContinuousC
 from snapper.application.services.settings import SettingsService
 from snapper.application.services.settings import get_settings_service
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
+from snapper.auth.dependencies import CSRFManager
 from snapper.auth.dependencies import get_csrf_manager
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.routes import router as auth_router
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.auth.tokens import TokenManager
+from snapper.auth.tokens import WebSocketTokenRotator
 from snapper.auth.tokens import get_token_manager
+from snapper.auth.user_service import UserService
+from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
@@ -132,6 +138,7 @@ from snapper.data.backtest_repository import BacktestRepository
 from snapper.data.repository import Repository
 from snapper.data.repository import dispose_repositories
 from snapper.infrastructure.rest.tracker import get_rest_call_tracker
+from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
 from snapper.interface.websocket.helpers import build_allowed_origins
 from snapper.mcp.server import build_mcp_app
@@ -235,6 +242,24 @@ def _configure_auth_services(settings_service: SettingsService) -> None:
     logger.info("WsTokenService initialized with database settings")
 
 
+def _clear_runtime_singletons() -> None:
+    """Clear process-local auth and settings singletons during app shutdown."""
+    for singleton_cls in (
+        SymbolMapperService,
+        WebSocketAuthManager,
+        WebSocketTokenRotator,
+        UserService,
+        WsTokenService,
+        CSRFManager,
+        TokenManager,
+        SettingsService,
+    ):
+        try:
+            singleton_cls.clear_instance()
+        except Exception:
+            continue
+
+
 async def _reconcile_stale_backtests(app: FastAPI) -> None:
     """Mark orphaned backtest runs as failed at boot time.
 
@@ -325,6 +350,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         manager = app.state.manager
         await manager.cleanup()
         await settings_service.shutdown()
+        _clear_runtime_singletons()
         await dispose_repositories()
         logger.info("Application shutdown complete")
 

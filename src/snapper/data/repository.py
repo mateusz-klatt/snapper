@@ -34,6 +34,7 @@ from abc import abstractmethod
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager
 from contextlib import asynccontextmanager
+from contextlib import suppress
 from dataclasses import asdict
 from dataclasses import dataclass
 from datetime import UTC
@@ -42,6 +43,7 @@ from datetime import datetime
 from datetime import timedelta
 from inspect import isawaitable
 from typing import Any
+from typing import Protocol
 from typing import cast
 from uuid import uuid7
 
@@ -435,6 +437,13 @@ class InstrumentSpecInput:
     rollover_rate_long: float | None = None
     rollover_rate_short: float | None = None
     max_funding_rate: float | None = None
+
+
+class _ClosableConnection(Protocol):
+    """Protocol for tracked raw driver connections."""
+
+    def close(self) -> object:
+        """Close the underlying connection."""
 
 
 class Repository(ABC):
@@ -2360,6 +2369,11 @@ def _register_sqlite_fk_pragma(engine: Any) -> None:
 
     @event.listens_for(engine, "connect")
     def _set_sqlite_fk(dbapi_connection: Any, _connection_record: Any) -> None:
+        driver_connection = getattr(dbapi_connection, "driver_connection", None)
+        if driver_connection is not None and hasattr(driver_connection, "close"):
+            _live_aiosqlite_connections[id(driver_connection)] = cast(
+                _ClosableConnection, driver_connection
+            )
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
@@ -2405,6 +2419,8 @@ class SQLAlchemyRepository(Repository):
             self.engine, expire_on_commit=False, class_=AsyncSession
         )
         _live_sqlalchemy_repositories.add(self)
+        with suppress(TypeError):
+            _live_sqlalchemy_engines.add(self.engine)
 
     async def create_all(self) -> None:
         """Create all database tables from model metadata."""
@@ -2419,13 +2435,27 @@ class SQLAlchemyRepository(Repository):
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
         """Provide async session with automatic rollback on error."""
-        async with self.session_factory() as s:
+        session_or_context = self.session_factory()
+        if isinstance(session_or_context, AsyncSession):
+            session = session_or_context
             try:
-                yield s
+                yield session
             except GeneratorExit:
                 pass
             except Exception:
-                await s.rollback()
+                await session.rollback()
+                raise
+            finally:
+                await session.close()
+            return
+        session_context = cast(AbstractAsyncContextManager[AsyncSession], session_or_context)
+        async with session_context as session:
+            try:
+                yield session
+            except GeneratorExit:
+                pass
+            except Exception:
+                await session.rollback()
                 raise
 
     async def get_latest_candle_ids(
@@ -6815,6 +6845,8 @@ class SQLAlchemyRepository(Repository):
 
 _repository_cache: dict[str, Repository] = {}
 _live_sqlalchemy_repositories: weakref.WeakSet[object] = weakref.WeakSet()
+_live_sqlalchemy_engines: weakref.WeakSet[AsyncEngine] = weakref.WeakSet()
+_live_aiosqlite_connections: dict[int, _ClosableConnection] = {}
 
 
 def get_repository(db_url: str) -> Repository:
@@ -6844,16 +6876,28 @@ async def dispose_repositories() -> None:
     }
     for live_repo in _live_sqlalchemy_repositories:
         repos_to_dispose[id(live_repo)] = live_repo
+    engines_to_dispose: dict[int, AsyncEngine] = {}
     for repo in repos_to_dispose.values():
         engine = getattr(repo, "engine", None)
-        if engine is None:
-            continue
+        if isinstance(engine, AsyncEngine):
+            engines_to_dispose[id(engine)] = engine
+    for live_engine in _live_sqlalchemy_engines:
+        engines_to_dispose[id(live_engine)] = live_engine
+    for engine in engines_to_dispose.values():
         try:
             dispose_result = engine.dispose()
             if isawaitable(dispose_result):
                 await dispose_result
         except Exception as e:
             logger.warning(f"Failed to dispose repository engine: {e}")
+    for connection in tuple(_live_aiosqlite_connections.values()):
+        try:
+            close_result = connection.close()
+            if isawaitable(close_result):
+                await close_result
+        except Exception as e:
+            logger.warning(f"Failed to close tracked aiosqlite connection: {e}")
+    _live_aiosqlite_connections.clear()
     _repository_cache.clear()
 
 

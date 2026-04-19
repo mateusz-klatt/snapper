@@ -12,6 +12,17 @@ import pytest
 import scripts.sonar_report as sonar_report
 
 
+def _quality_gate(status: str = "OK") -> sonar_report.QualityGateReport:
+    """Return a minimal quality gate payload for tests."""
+    return {
+        "status": status,
+        "period_mode": "previous_version",
+        "period_date": "2026-02-01T16:42:42+0000",
+        "conditions": [],
+        "failing_conditions": [],
+    }
+
+
 class FrozenDateTime(datetime):
     """Deterministic datetime for tests."""
 
@@ -150,9 +161,10 @@ class TestPrintReport:
             }
         ]
         metrics = {"ncloc": "1", "sqale_index": "0"}
+        quality_gate = _quality_gate()
 
         with patch.object(sonar_report, "datetime", FrozenDateTime):
-            sonar_report.print_report(issues, metrics)
+            sonar_report.print_report(issues, metrics, quality_gate)
 
         captured = capsys.readouterr()
         assert "BLOCKER + CRITICAL issues" in captured.out
@@ -193,15 +205,42 @@ class TestPrintReport:
             "security_rating": "2.0",
             "sqale_rating": "3.0",
         }
+        quality_gate = {
+            "status": "ERROR",
+            "period_mode": "previous_version",
+            "period_date": "2026-02-01T16:42:42+0000",
+            "conditions": [
+                {
+                    "status": "ERROR",
+                    "metric_key": "new_duplicated_lines_density",
+                    "comparator": "GT",
+                    "error_threshold": "3",
+                    "actual_value": "5.4",
+                    "period_index": 1,
+                }
+            ],
+            "failing_conditions": [
+                {
+                    "status": "ERROR",
+                    "metric_key": "new_duplicated_lines_density",
+                    "comparator": "GT",
+                    "error_threshold": "3",
+                    "actual_value": "5.4",
+                    "period_index": 1,
+                }
+            ],
+        }
 
         with patch.object(sonar_report, "datetime", FrozenDateTime):
-            sonar_report.print_report(issues, metrics)
+            sonar_report.print_report(issues, metrics, quality_gate)
 
         captured = capsys.readouterr()
         assert "CRITICAL" in captured.out
         assert "src/app.py:7" in captured.out
         assert "Tech debt:" in captured.out
         assert "Maintainability:" in captured.out
+        assert "QUALITY GATE DETAILS" in captured.out
+        assert "New duplication" in captured.out
         assert "Top 20 directories:" in captured.out
         assert "src" in captured.out
 
@@ -214,15 +253,17 @@ class TestSaveJson:
         output_dir = tmp_path / "out"
         issues: list[dict[str, Any]] = [{"key": "i1"}]
         metrics: dict[str, str] = {"bugs": "0"}
+        quality_gate = _quality_gate()
 
         with patch.object(sonar_report, "datetime", FrozenDateTime):
-            path = sonar_report.save_json(issues, metrics, output_dir)
+            path = sonar_report.save_json(issues, metrics, quality_gate, output_dir)
 
         assert path.exists()
         assert path.name == "sonar_report_20260201_1721.json"
         payload = path.read_text()
         assert '"project"' in payload
         assert '"issues"' in payload
+        assert '"quality_gate"' in payload
 
 
 class TestMain:
@@ -241,7 +282,12 @@ class TestMain:
                 "scripts.sonar_report.fetch_metrics",
                 return_value={"ncloc": "0", "sqale_index": "0"},
             ) as mock_metrics,
+            patch(
+                "scripts.sonar_report.fetch_quality_gate",
+                return_value=_quality_gate(),
+            ) as mock_quality_gate,
             patch("scripts.sonar_report.fetch_all_issues", return_value=[]) as mock_issues,
+            patch("scripts.sonar_report.fetch_source_cache", return_value={}) as mock_source_cache,
             patch("scripts.sonar_report.print_report") as mock_print,
             patch("scripts.sonar_report.save_json", return_value=json_path) as mock_save,
         ):
@@ -249,7 +295,9 @@ class TestMain:
 
         assert mock_token.call_count == 1
         assert mock_metrics.call_count == 1
+        assert mock_quality_gate.call_count == 1
         assert mock_issues.call_count == 1
+        assert mock_source_cache.call_count == 1
         assert mock_print.call_count == 1
         assert mock_save.call_count == 1
 

@@ -138,19 +138,28 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         channel = message.get("channel", "")
         msg_type = message.get("type", "")
         if channel == "ticker" and msg_type in ("snapshot", "update"):
-            for item in message.get("data", []):
-                try:
-                    tick = parse_kraken_equities_ticker(item)
-                    _enqueue_or_drop_oldest(self._tick_queue, tick, "Tick")
-                except (ValueError, KeyError) as exc:
-                    logger.debug(f"Skipping unparseable equities ticker: {exc}")
-        elif channel == "trade" and msg_type in ("snapshot", "update"):
-            for item in message.get("data", []):
-                try:
-                    trade = parse_kraken_equities_trade(item)
-                    _enqueue_or_drop_oldest(self._trade_queue, trade, "Trade")
-                except (ValueError, KeyError) as exc:
-                    logger.debug(f"Skipping unparseable equities trade: {exc}")
+            self._handle_ticker_message(message)
+            return
+        if channel == "trade" and msg_type in ("snapshot", "update"):
+            self._handle_trade_message(message)
+
+    def _handle_ticker_message(self, message: dict[str, Any]) -> None:
+        """Parse and enqueue equities ticker updates."""
+        for item in message.get("data", []):
+            try:
+                tick = parse_kraken_equities_ticker(item)
+                _enqueue_or_drop_oldest(self._tick_queue, tick, "Tick")
+            except (ValueError, KeyError) as exc:
+                logger.debug(f"Skipping unparseable equities ticker: {exc}")
+
+    def _handle_trade_message(self, message: dict[str, Any]) -> None:
+        """Parse and enqueue equities trade updates."""
+        for item in message.get("data", []):
+            try:
+                trade = parse_kraken_equities_trade(item)
+                _enqueue_or_drop_oldest(self._trade_queue, trade, "Trade")
+            except (ValueError, KeyError) as exc:
+                logger.debug(f"Skipping unparseable equities trade: {exc}")
 
     async def _ensure_ws_connected(self) -> None:
         """Connect the SpotWSClient if not already connected."""
