@@ -107,12 +107,9 @@ class KrakenFuturesFundingBackfillService(RegisterableProcess):
             logger.warning("No Kraken Futures symbols configured for funding backfill")
             return
         client = KrakenFuturesExchangeClient()
-        try:
-            for symbol in symbols:
-                await self._process_symbol(client, symbol)
-                await asyncio.sleep(_RATE_LIMIT_DELAY)
-        finally:
-            pass
+        for symbol in symbols:
+            await self._process_symbol(client, symbol)
+            await asyncio.sleep(_RATE_LIMIT_DELAY)
 
     def _resolve_symbols(self) -> list[str]:
         """Determine which symbols to backfill.

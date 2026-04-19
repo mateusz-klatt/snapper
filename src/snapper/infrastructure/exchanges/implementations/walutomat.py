@@ -699,21 +699,17 @@ class WalutomatExchangeClient(ExchangeClientBase):
                         prev is None and order.filled > 0
                     )
                     if should_yield:
+                        if math.isclose(order.filled, order.amount):
+                            order_status = ExchangeOrderStatusEnum.FILLED
+                        else:
+                            order_status = ExchangeOrderStatusEnum.PARTIALLY_FILLED
                         yield ExecutionUpdate(
                             order_id=order.id,
                             exec_type="trade",
                             symbol=order.symbol,
                             side=order.side,
                             order_type=order.type,
-                            order_status=(
-                                ExchangeOrderStatusEnum.FILLED
-                                if math.isclose(order.filled, order.amount)
-                                else (
-                                    ExchangeOrderStatusEnum.PARTIALLY_FILLED
-                                    if order.filled > 0
-                                    else ExchangeOrderStatusEnum.OPEN
-                                )
-                            ),
+                            order_status=order_status,
                             timestamp=datetime.now(UTC),
                             cum_qty=order.filled,
                             cl_ord_id=order.client_order_id or "",

@@ -353,7 +353,8 @@ class ZmqBrokerProcess(RegisterableProcess):
                         f"observed={list(self._observed_subscriptions)}"
                     )
                 try:
-                    await asyncio.wait_for(self._observation_changed.wait(), timeout=remaining)
+                    async with asyncio.timeout(remaining):
+                        await self._observation_changed.wait()
                 except TimeoutError:
                     continue
 

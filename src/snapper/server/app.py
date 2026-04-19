@@ -1664,11 +1664,12 @@ def _create_underlying_router() -> APIRouter:
                 )
             utc_start = start.astimezone(UTC) if start.tzinfo else start.replace(tzinfo=UTC)
             utc_end = end.astimezone(UTC) if end.tzinfo else end.replace(tzinfo=UTC)
-            now = (
-                as_of.astimezone(UTC)
-                if as_of and as_of.tzinfo
-                else (as_of.replace(tzinfo=UTC) if as_of else datetime.now(UTC))
-            )
+            if as_of is None:
+                now = datetime.now(UTC)
+            elif as_of.tzinfo:
+                now = as_of.astimezone(UTC)
+            else:
+                now = as_of.replace(tzinfo=UTC)
             underlying = await repo.get_underlying_by_ticker(ticker, now)
             if underlying is None:
                 raise HTTPException(status_code=404, detail=f"Underlying not found: {ticker}")

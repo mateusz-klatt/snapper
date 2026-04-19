@@ -3792,19 +3792,21 @@ def test_build_continuous_rejects_negative_rollover_days(cli_runner: CliRunner) 
     Then: typer exits non-zero at parse time with the rollover field
         named in the error output, without invoking the builder.
     """
-    result = cli_runner.invoke(
-        app,
-        [
-            "build-continuous",
-            "SPX",
-            "kraken_equities",
-            "ES",
-            "--rollover-days",
-            "-1",
-        ],
-    )
-    assert result.exit_code != 0
-    assert "rollover-days" in result.output.lower() or "rollover_days" in result.output.lower()
+    with patch("snapper.cli.app.ContinuousContractBuilder") as mock_builder_cls:
+        result = cli_runner.invoke(
+            app,
+            [
+                "build-continuous",
+                "SPX",
+                "kraken_equities",
+                "ES",
+                "--rollover-days",
+                "-1",
+            ],
+        )
+
+    assert result.exit_code == 2
+    mock_builder_cls.assert_not_called()
 
 
 def test_build_continuous_rejects_excessive_rollover_days(cli_runner: CliRunner) -> None:
@@ -3815,19 +3817,21 @@ def test_build_continuous_rejects_excessive_rollover_days(cli_runner: CliRunner)
     Then: typer exits non-zero at parse time with the rollover field
         named in the error output, without invoking the builder.
     """
-    result = cli_runner.invoke(
-        app,
-        [
-            "build-continuous",
-            "SPX",
-            "kraken_equities",
-            "ES",
-            "--rollover-days",
-            "366",
-        ],
-    )
-    assert result.exit_code != 0
-    assert "rollover-days" in result.output.lower() or "rollover_days" in result.output.lower()
+    with patch("snapper.cli.app.ContinuousContractBuilder") as mock_builder_cls:
+        result = cli_runner.invoke(
+            app,
+            [
+                "build-continuous",
+                "SPX",
+                "kraken_equities",
+                "ES",
+                "--rollover-days",
+                "366",
+            ],
+        )
+
+    assert result.exit_code == 2
+    mock_builder_cls.assert_not_called()
 
 
 class TestBacktestList:

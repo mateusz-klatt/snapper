@@ -126,14 +126,14 @@ class MermaidRenderer:
         self._width_px = width_px
         self._scale = scale
 
-    def _resolve_command(self, project_root: Path) -> Sequence[str]:
+    def _resolve_command(self, project_root: Path) -> tuple[str, ...]:
         """Resolve the Mermaid CLI command for the current environment.
 
         Args:
             project_root: Root path of the project for locating local CLI.
 
         Returns:
-            Sequence of command arguments for invoking Mermaid CLI.
+            Tuple of command arguments for invoking Mermaid CLI.
         """
         local_bin_dir = project_root / "frontend" / "node_modules" / ".bin"
         local_candidates = [local_bin_dir / "mmdc"]

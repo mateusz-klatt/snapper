@@ -247,6 +247,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         Args:
             message: Raw WebSocket message dictionary.
         """
+        await asyncio.sleep(0)
         if "event" in message:
             return
         feed = message.get("feed", "")
@@ -282,6 +283,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         Args:
             message: Raw WebSocket message dictionary.
         """
+        await asyncio.sleep(0)
         if "event" in message:
             return
         feed = message.get("feed", "")

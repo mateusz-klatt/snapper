@@ -609,8 +609,9 @@ class TestCoordinatorPartitioningProperties:
         settings = AppSettings(bootstrap, settings_service=None)
         assert settings.coordinator_instance_id == 2
 
-    def test_instance_id_defaults_to_zero(self) -> None:
+    def test_instance_id_defaults_to_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Default bootstrap value surfaces as ``0``."""
+        monkeypatch.delenv("SNAPPER_COORDINATOR_INSTANCE_ID", raising=False)
         bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
         settings = AppSettings(bootstrap, settings_service=None)
         assert settings.coordinator_instance_id == 0
@@ -624,8 +625,9 @@ class TestCoordinatorPartitioningProperties:
         settings = AppSettings(bootstrap, settings_service=None)
         assert settings.coordinator_instance_count == 5
 
-    def test_instance_count_defaults_to_one(self) -> None:
+    def test_instance_count_defaults_to_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Default bootstrap value surfaces as ``1``."""
+        monkeypatch.delenv("SNAPPER_COORDINATOR_INSTANCE_COUNT", raising=False)
         bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
         settings = AppSettings(bootstrap, settings_service=None)
         assert settings.coordinator_instance_count == 1
@@ -639,8 +641,9 @@ class TestCoordinatorPartitioningProperties:
         settings = AppSettings(bootstrap, settings_service=None)
         assert settings.coordinator_outbox_max_scan_rows == 50
 
-    def test_max_scan_rows_default_is_1000(self) -> None:
+    def test_max_scan_rows_default_is_1000(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The bootstrap default ``"1000"`` parses to the int ``1000``."""
+        monkeypatch.delenv("SNAPPER_COORDINATOR_OUTBOX_MAX_SCAN_ROWS", raising=False)
         bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
         settings = AppSettings(bootstrap, settings_service=None)
         assert settings.coordinator_outbox_max_scan_rows == 1000

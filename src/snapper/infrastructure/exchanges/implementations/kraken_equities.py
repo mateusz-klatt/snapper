@@ -132,6 +132,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         Args:
             message: Parsed WebSocket message.
         """
+        await asyncio.sleep(0)
         if isinstance(message, list) or not isinstance(message, dict):
             return
         channel = message.get("channel", "")

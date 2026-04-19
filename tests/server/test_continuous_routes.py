@@ -168,6 +168,68 @@ class TestGetContinuousSeries:
         assert "truncated" in data["message"]
         client.close()
 
+    def test_as_of_aware_is_normalized_to_utc_for_underlying_lookup(self) -> None:
+        """Given aware as_of, convert it to UTC before repository lookup.
+
+        When: Caller passes an aware datetime query parameter,
+        Then: Repository receives the UTC-normalized timestamp.
+        """
+        build_result = BuildResult(
+            candles=[],
+            contracts_used=[],
+            roll_points=[],
+            failed_roll=None,
+        )
+        repo = AsyncMock()
+        repo.get_underlying_by_ticker = AsyncMock(return_value=_make_underlying())
+
+        with patch("snapper.server.app.ContinuousContractBuilder") as mock_builder_cls:
+            mock_builder = AsyncMock()
+            mock_builder.build = AsyncMock(return_value=build_result)
+            mock_builder_cls.return_value = mock_builder
+            client = _create_client(repo)
+            response = client.get(
+                f"/api/underlyings/SPX/continuous{_BASE_PARAMS}&as_of=2026-01-05T12:30:00Z"
+            )
+
+        assert response.status_code == 200
+        assert repo.get_underlying_by_ticker.await_args.args == (
+            "SPX",
+            datetime(2026, 1, 5, 12, 30, tzinfo=UTC),
+        )
+        client.close()
+
+    def test_as_of_naive_is_assumed_utc_for_underlying_lookup(self) -> None:
+        """Given naive as_of, assume UTC before repository lookup.
+
+        When: Caller passes a naive datetime query parameter,
+        Then: Repository receives the same instant with UTC tzinfo attached.
+        """
+        build_result = BuildResult(
+            candles=[],
+            contracts_used=[],
+            roll_points=[],
+            failed_roll=None,
+        )
+        repo = AsyncMock()
+        repo.get_underlying_by_ticker = AsyncMock(return_value=_make_underlying())
+
+        with patch("snapper.server.app.ContinuousContractBuilder") as mock_builder_cls:
+            mock_builder = AsyncMock()
+            mock_builder.build = AsyncMock(return_value=build_result)
+            mock_builder_cls.return_value = mock_builder
+            client = _create_client(repo)
+            response = client.get(
+                f"/api/underlyings/SPX/continuous{_BASE_PARAMS}&as_of=2026-01-05T12:30:00"
+            )
+
+        assert response.status_code == 200
+        assert repo.get_underlying_by_ticker.await_args.args == (
+            "SPX",
+            datetime(2026, 1, 5, 12, 30, tzinfo=UTC),
+        )
+        client.close()
+
     def test_underlying_not_found_returns_404(self) -> None:
         """Given nonexistent ticker, return 404.
 

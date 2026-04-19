@@ -455,6 +455,47 @@ export const SettingItem = ({
     setIsEditing(false)
   }
 
+  let content: React.ReactNode
+
+  if (isBoolean) {
+    content = (
+      <BooleanToggle
+        setting={setting}
+        onUpdate={onUpdate}
+        onDelete={onDelete}
+        isSaving={isSaving}
+        readOnly={readOnly}
+      />
+    )
+  } else if (isEditing) {
+    content = (
+      <EditingView
+        isJson={isJson}
+        jsonValue={jsonValue}
+        setJsonValue={setJsonValue}
+        localValue={localValue}
+        setLocalValue={setLocalValue}
+        onJsonSave={handleJsonSave}
+        onSave={handleSave}
+        onCancel={handleCancel}
+        isSaving={isSaving}
+        readOnly={readOnly}
+      />
+    )
+  } else {
+    content = (
+      <DisplayView
+        setting={setting}
+        showDeleteConfirm={showDeleteConfirm}
+        setShowDeleteConfirm={setShowDeleteConfirm}
+        setIsEditing={setIsEditing}
+        onDelete={onDelete}
+        isSaving={isSaving}
+        readOnly={readOnly}
+      />
+    )
+  }
+
   return (
     <div className='bg-alpine-50 border border-dark-600 rounded-2xl p-3 hover:border-muted-400 transition-colors'>
       <div className='flex items-start justify-between mb-2'>
@@ -480,40 +521,7 @@ export const SettingItem = ({
           {setting.description && <p className='text-muted-600 text-xs'>{setting.description}</p>}
         </div>
       </div>
-      <div className='space-y-2'>
-        {isBoolean ? (
-          <BooleanToggle
-            setting={setting}
-            onUpdate={onUpdate}
-            onDelete={onDelete}
-            isSaving={isSaving}
-            readOnly={readOnly}
-          />
-        ) : isEditing ? (
-          <EditingView
-            isJson={isJson}
-            jsonValue={jsonValue}
-            setJsonValue={setJsonValue}
-            localValue={localValue}
-            setLocalValue={setLocalValue}
-            onJsonSave={handleJsonSave}
-            onSave={handleSave}
-            onCancel={handleCancel}
-            isSaving={isSaving}
-            readOnly={readOnly}
-          />
-        ) : (
-          <DisplayView
-            setting={setting}
-            showDeleteConfirm={showDeleteConfirm}
-            setShowDeleteConfirm={setShowDeleteConfirm}
-            setIsEditing={setIsEditing}
-            onDelete={onDelete}
-            isSaving={isSaving}
-            readOnly={readOnly}
-          />
-        )}
-      </div>
+      <div className='space-y-2'>{content}</div>
     </div>
   )
 }
