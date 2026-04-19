@@ -19,6 +19,7 @@ import math
 import statistics
 from dataclasses import dataclass
 from dataclasses import field
+from datetime import datetime
 from typing import Final
 
 from snapper.data.repository_types import BacktestEquityPointInsertRow
@@ -97,52 +98,8 @@ def compute_metrics(
     """
     metrics = BacktestMetrics()
 
-    exit_trades = [t for t in trades if t.get("pnl") is not None]
-    metrics.total_trades = len(exit_trades)
-
-    if exit_trades:
-        pnls = [float(t["pnl"]) for t in exit_trades if t["pnl"] is not None]
-        metrics.winning_trades = sum(1 for p in pnls if p > 0)
-        metrics.losing_trades = sum(1 for p in pnls if p < 0)
-        metrics.total_pnl = sum(pnls)
-        metrics.win_rate = (
-            metrics.winning_trades / metrics.total_trades if metrics.total_trades > 0 else 0.0
-        )
-        metrics.avg_trade_pnl = metrics.total_pnl / metrics.total_trades
-        metrics.expectancy = metrics.avg_trade_pnl
-
-        gross_profit = sum(p for p in pnls if p > 0)
-        gross_loss = abs(sum(p for p in pnls if p < 0))
-        if gross_loss > 0:
-            metrics.profit_factor = gross_profit / gross_loss
-        elif gross_profit > 0:
-            metrics.profit_factor = float("inf")
-        else:
-            metrics.profit_factor = 0.0
-
-    if equity_points:
-        equities = [ep["equity"] for ep in equity_points]
-        metrics.final_equity = equities[-1]
-        metrics.max_equity = max(equities)
-
-        metrics.max_drawdown = _compute_max_drawdown(equities)
-
-        if len(equities) >= 2:
-            returns = _compute_returns(equities)
-            metrics.sharpe_ratio = _compute_sharpe(returns, trading_days_per_year)
-            metrics.sortino_ratio = _compute_sortino(returns, trading_days_per_year)
-
-        if equity_points[0]["equity"] > 0 and len(equity_points) >= 2:
-            first_time = equity_points[0]["point_time"]
-            last_time = equity_points[-1]["point_time"]
-            duration_days = (last_time - first_time).total_seconds() / 86400
-            if duration_days > 0:
-                metrics.cagr = _compute_cagr(
-                    initial_balance, metrics.final_equity, duration_days, trading_days_per_year
-                )
-                metrics.calmar_ratio = (
-                    metrics.cagr / metrics.max_drawdown if metrics.max_drawdown > 0 else 0.0
-                )
+    _populate_trade_metrics(metrics, trades)
+    _populate_equity_metrics(metrics, equity_points, initial_balance, trading_days_per_year)
 
     metrics.max_drawdown_duration_seconds = _compute_max_drawdown_duration_seconds(
         equity_points, metrics.warnings
@@ -151,6 +108,84 @@ def compute_metrics(
     metrics.turnover_ratio = _compute_turnover_ratio(equity_points, trades, metrics.warnings)
 
     return metrics
+
+
+def _warn_metric(warnings: list[MetricWarning], metric: str, reason: str) -> None:
+    """Append a metric warning entry."""
+    warnings.append(MetricWarning(metric=metric, reason=reason))
+
+
+def _compute_profit_factor(pnls: list[float]) -> float:
+    """Compute the trade profit factor from realized PnL values."""
+    gross_profit = sum(pnl for pnl in pnls if pnl > 0)
+    gross_loss = abs(sum(pnl for pnl in pnls if pnl < 0))
+    if gross_loss > 0:
+        return gross_profit / gross_loss
+    if gross_profit > 0:
+        return float("inf")
+    return 0.0
+
+
+def _populate_trade_metrics(
+    metrics: BacktestMetrics,
+    trades: list[BacktestTradeInsertRow],
+) -> None:
+    """Fill trade-derived metrics on the aggregate result object."""
+    exit_trades = [trade for trade in trades if trade.get("pnl") is not None]
+    metrics.total_trades = len(exit_trades)
+    if not exit_trades:
+        return
+    pnls = [float(trade["pnl"]) for trade in exit_trades if trade["pnl"] is not None]
+    metrics.winning_trades = sum(1 for pnl in pnls if pnl > 0)
+    metrics.losing_trades = sum(1 for pnl in pnls if pnl < 0)
+    metrics.total_pnl = sum(pnls)
+    metrics.win_rate = metrics.winning_trades / metrics.total_trades
+    metrics.avg_trade_pnl = metrics.total_pnl / metrics.total_trades
+    metrics.expectancy = metrics.avg_trade_pnl
+    metrics.profit_factor = _compute_profit_factor(pnls)
+
+
+def _populate_growth_metrics(
+    metrics: BacktestMetrics,
+    equity_points: list[BacktestEquityPointInsertRow],
+    initial_balance: float,
+    trading_days_per_year: float,
+) -> None:
+    """Fill CAGR and Calmar ratio when the curve spans a positive duration."""
+    if len(equity_points) < 2 or equity_points[0]["equity"] <= 0:
+        return
+    first_time = equity_points[0]["point_time"]
+    last_time = equity_points[-1]["point_time"]
+    duration_days = (last_time - first_time).total_seconds() / 86400
+    if duration_days <= 0:
+        return
+    metrics.cagr = _compute_cagr(
+        initial_balance,
+        metrics.final_equity,
+        duration_days,
+        trading_days_per_year,
+    )
+    metrics.calmar_ratio = metrics.cagr / metrics.max_drawdown if metrics.max_drawdown > 0 else 0.0
+
+
+def _populate_equity_metrics(
+    metrics: BacktestMetrics,
+    equity_points: list[BacktestEquityPointInsertRow],
+    initial_balance: float,
+    trading_days_per_year: float,
+) -> None:
+    """Fill equity-curve-derived metrics on the aggregate result object."""
+    if not equity_points:
+        return
+    equities = [point["equity"] for point in equity_points]
+    metrics.final_equity = equities[-1]
+    metrics.max_equity = max(equities)
+    metrics.max_drawdown = _compute_max_drawdown(equities)
+    if len(equities) >= 2:
+        returns = _compute_returns(equities)
+        metrics.sharpe_ratio = _compute_sharpe(returns, trading_days_per_year)
+        metrics.sortino_ratio = _compute_sortino(returns, trading_days_per_year)
+    _populate_growth_metrics(metrics, equity_points, initial_balance, trading_days_per_year)
 
 
 def _compute_max_drawdown(equities: list[float]) -> float:
@@ -264,6 +299,36 @@ def _compute_cagr(
         return 0.0
 
 
+def _prepare_drawdown_duration_inputs(
+    equity_points: list[BacktestEquityPointInsertRow],
+    warnings: list[MetricWarning],
+) -> tuple[list[float], list[datetime]] | None:
+    """Return drawdown inputs or emit the matching degeneracy warning."""
+    if len(equity_points) < 2:
+        _warn_metric(
+            warnings,
+            "max_drawdown_duration_seconds",
+            "fewer_than_two_equity_points",
+        )
+        return None
+    equities = [point["equity"] for point in equity_points]
+    if len(set(equities)) == 1:
+        _warn_metric(warnings, "max_drawdown_duration_seconds", "flat_equity_curve")
+        return None
+    times = [point["point_time"] for point in equity_points]
+    return equities, times
+
+
+def _max_drawdown_duration_candidate(
+    current_max_duration: float,
+    drawdown_start: datetime,
+    drawdown_end: datetime,
+) -> float:
+    """Return the larger of the existing max duration and one closed window."""
+    duration = (drawdown_end - drawdown_start).total_seconds()
+    return duration if duration > current_max_duration else current_max_duration
+
+
 def _compute_max_drawdown_duration_seconds(
     equity_points: list[BacktestEquityPointInsertRow],
     warnings: list[MetricWarning],
@@ -282,53 +347,36 @@ def _compute_max_drawdown_duration_seconds(
     equity value equals the starting value (no drawdown ever occurred),
     or the curve is strictly monotonically non-decreasing.
     """
-    if len(equity_points) < 2:
-        warnings.append(
-            MetricWarning(
-                metric="max_drawdown_duration_seconds",
-                reason="fewer_than_two_equity_points",
-            )
-        )
+    prepared_inputs = _prepare_drawdown_duration_inputs(equity_points, warnings)
+    if prepared_inputs is None:
         return None
-    equities = [ep["equity"] for ep in equity_points]
-    times = [ep["point_time"] for ep in equity_points]
-    if len(set(equities)) == 1:
-        warnings.append(
-            MetricWarning(
-                metric="max_drawdown_duration_seconds",
-                reason="flat_equity_curve",
-            )
-        )
-        return None
+    equities, times = prepared_inputs
     peak_value = equities[0]
     peak_time = times[0]
-    in_drawdown = False
-    current_drawdown_start = peak_time
+    current_drawdown_start: datetime | None = None
     max_duration = 0.0
-    for eq, t in zip(equities, times, strict=True):
-        if eq < peak_value:
-            if not in_drawdown:
-                in_drawdown = True
+    for equity, point_time in zip(equities, times, strict=True):
+        if equity < peak_value:
+            if current_drawdown_start is None:
                 current_drawdown_start = peak_time
             continue
-        if in_drawdown:
-            duration = (t - current_drawdown_start).total_seconds()
-            if duration > max_duration:
-                max_duration = duration
-            in_drawdown = False
-        peak_value = eq
-        peak_time = t
-    if in_drawdown:
-        dangling = (times[-1] - current_drawdown_start).total_seconds()
-        if dangling > max_duration:
-            max_duration = dangling
-    if max_duration <= 0:
-        warnings.append(
-            MetricWarning(
-                metric="max_drawdown_duration_seconds",
-                reason="no_drawdown_observed",
+        if current_drawdown_start is not None:
+            max_duration = _max_drawdown_duration_candidate(
+                max_duration,
+                current_drawdown_start,
+                point_time,
             )
+            current_drawdown_start = None
+        peak_value = equity
+        peak_time = point_time
+    if current_drawdown_start is not None:
+        max_duration = _max_drawdown_duration_candidate(
+            max_duration,
+            current_drawdown_start,
+            times[-1],
         )
+    if max_duration <= 0:
+        _warn_metric(warnings, "max_drawdown_duration_seconds", "no_drawdown_observed")
         return None
     return max_duration
 
@@ -350,15 +398,13 @@ def _compute_exposure_ratio(
     a degenerate case, per R10 sonnet fix.
     """
     if len(equity_points) < 2:
-        warnings.append(
-            MetricWarning(metric="exposure_ratio", reason="fewer_than_two_equity_points")
-        )
+        _warn_metric(warnings, "exposure_ratio", "fewer_than_two_equity_points")
         return None
     total_duration = (
         equity_points[-1]["point_time"] - equity_points[0]["point_time"]
     ).total_seconds()
     if total_duration <= 0:
-        warnings.append(MetricWarning(metric="exposure_ratio", reason="zero_run_duration"))
+        _warn_metric(warnings, "exposure_ratio", "zero_run_duration")
         return None
     exposed = 0.0
     for i in range(1, len(equity_points)):
@@ -382,11 +428,11 @@ def _compute_turnover_ratio(
     return ``0.0`` (turnover is definitionally zero, not degenerate).
     """
     if not equity_points:
-        warnings.append(MetricWarning(metric="turnover_ratio", reason="empty_equity_curve"))
+        _warn_metric(warnings, "turnover_ratio", "empty_equity_curve")
         return None
     mean_equity = statistics.mean(ep["equity"] for ep in equity_points)
     if mean_equity <= 0:
-        warnings.append(MetricWarning(metric="turnover_ratio", reason="non_positive_mean_equity"))
+        _warn_metric(warnings, "turnover_ratio", "non_positive_mean_equity")
         return None
     notional = sum(abs(t["quantity"]) * t["price"] for t in trades)
     return notional / mean_equity

@@ -34,6 +34,7 @@ from snapper.interface.websocket.models import WsStatsSnapshot
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server import process_runner
 from snapper.server.app import _build_strategy_payload
+from snapper.server.app import _clear_runtime_singletons
 from snapper.server.app import _reconcile_stale_backtests
 from snapper.server.app import _safe_get_caps_enforcer
 from snapper.server.app import create_api_router
@@ -262,6 +263,36 @@ class TestCreateApp:
         with patch("snapper.server.app.get_caps_enforcer_dependency") as mock_dep:
             mock_dep.side_effect = RuntimeError("Not a SQLAlchemyRepository")
             assert _safe_get_caps_enforcer() is None
+
+    def test_clear_runtime_singletons_continues_after_clear_error(self) -> None:
+        """Test runtime singleton cleanup continues after one clear_instance failure.
+
+        Given: One singleton clear operation raises an exception,
+        When: runtime singletons are cleared,
+        Then: later singleton clear operations still run.
+        """
+        with (
+            patch("snapper.server.app.SymbolMapperService") as mock_symbol_mapper,
+            patch("snapper.server.app.WebSocketAuthManager") as mock_ws_auth,
+            patch("snapper.server.app.WebSocketTokenRotator") as mock_token_rotator,
+            patch("snapper.server.app.UserService") as mock_user_service,
+            patch("snapper.server.app.WsTokenService") as mock_ws_token_service,
+            patch("snapper.server.app.CSRFManager") as mock_csrf_manager,
+            patch("snapper.server.app.TokenManager") as mock_token_manager,
+            patch("snapper.server.app.SettingsService") as mock_settings_service,
+        ):
+            mock_ws_auth.clear_instance.side_effect = RuntimeError("boom")
+
+            _clear_runtime_singletons()
+
+        mock_symbol_mapper.clear_instance.assert_called_once()
+        mock_ws_auth.clear_instance.assert_called_once()
+        mock_token_rotator.clear_instance.assert_called_once()
+        mock_user_service.clear_instance.assert_called_once()
+        mock_ws_token_service.clear_instance.assert_called_once()
+        mock_csrf_manager.clear_instance.assert_called_once()
+        mock_token_manager.clear_instance.assert_called_once()
+        mock_settings_service.clear_instance.assert_called_once()
 
 
 class TestCreateApiRouter:

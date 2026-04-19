@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from types import TracebackType
 from typing import Any
+from typing import Unpack
 from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -53,7 +54,9 @@ from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
 from snapper.data.repository import where_active_now
 from snapper.data.repository_types import AccrualLedgerInsertRow
+from snapper.data.repository_types import ExecutionInsertRow
 from snapper.data.repository_types import FundingRateInsertRow
+from snapper.data.repository_types import OrderInsertRow
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
 
 
@@ -150,6 +153,26 @@ async def test_session_skips_generator_exit_without_rollback() -> None:
     async with repo.session():
         raise GeneratorExit
     assert session.rollback_called is False
+
+
+@pytest.mark.asyncio
+async def test_session_direct_async_session_skips_generator_exit_without_rollback() -> None:
+    """Test direct AsyncSession branch skips rollback on GeneratorExit.
+
+    Given: A repository whose session factory returns AsyncSession directly,
+    When: GeneratorExit is raised inside the session context,
+    Then: Rollback is skipped and the session is still closed.
+    """
+    session = MagicMock(spec=AsyncSession)
+    session.rollback = AsyncMock()
+    session.close = AsyncMock()
+    repo = _make_repo(lambda: cast(AsyncSession, session))
+
+    async with repo.session():
+        raise GeneratorExit
+
+    session.rollback.assert_not_awaited()
+    session.close.assert_awaited_once()
 
 
 class _DummyInsert:
@@ -1078,22 +1101,8 @@ class DummyRepository(Repository):
 
     async def insert_order(
         self,
-        instrument_public_id: str,
-        client_order_id: str | None,
-        exchange_order_id: str | None,
-        created_at: datetime,
-        side: str,
-        order_type: str,
-        price: float | None,
-        size: float,
-        status: str,
-        session_id: str,
-        sequence_id: int,
-        timestamp: datetime,
-        time_in_force: str | None = None,
-        mode: str = "live",
-        leverage: int | None = None,
-        reduce_only: bool = False,
+        row: OrderInsertRow | None = None,
+        **kwargs: Unpack[OrderInsertRow],
     ) -> tuple[int, str]:
         """Insert order - no-op returning (0, stub-public-id)."""
         return (0, "stub-public-id")
@@ -1116,18 +1125,8 @@ class DummyRepository(Repository):
 
     async def insert_execution(
         self,
-        order_public_id: str,
-        timestamp: datetime,
-        side: str,
-        status: str,
-        price: float,
-        size: float,
-        fee: float,
-        fee_asset: str,
-        session_id: str,
-        sequence_id: int,
-        exec_id: str | None = None,
-        trade_id: str | None = None,
+        row: ExecutionInsertRow | None = None,
+        **kwargs: Unpack[ExecutionInsertRow],
     ) -> int:
         """Insert execution - no-op returning 0."""
         return 0
@@ -1482,6 +1481,45 @@ async def test_dispose_repositories_engine_none(monkeypatch: pytest.MonkeyPatch)
     repo_module._repository_cache["test_engine_none"] = _StubRepo()
     await dispose_repositories()
     assert repo_module._repository_cache == {}
+
+
+@pytest.mark.asyncio
+async def test_dispose_repositories_handles_tracked_aiosqlite_close_paths() -> None:
+    """Test dispose_repositories handles sync and failing tracked SQLite closes.
+
+    Given: Tracked SQLite connections with sync close and failing close paths,
+    When: dispose_repositories is called,
+    Then: Sync closes are accepted, failures are logged, and tracking is cleared.
+    """
+    repo._repository_cache.clear()
+    repo_module._live_sqlalchemy_repositories.clear()
+    repo_module._live_sqlalchemy_engines.clear()
+    repo_module._live_aiosqlite_connections.clear()
+
+    class _SyncConnection:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+            return None
+
+    class _FailingConnection:
+        def close(self) -> None:
+            raise RuntimeError("close boom")
+
+    sync_connection = _SyncConnection()
+    repo_module._live_aiosqlite_connections[1] = sync_connection
+    repo_module._live_aiosqlite_connections[2] = _FailingConnection()
+
+    with patch.object(repo_module, "logger") as mock_logger:
+        await dispose_repositories()
+
+    assert sync_connection.closed is True
+    assert repo_module._live_aiosqlite_connections == {}
+    mock_logger.warning.assert_called_once_with(
+        "Failed to close tracked aiosqlite connection: close boom"
+    )
 
 
 @pytest.mark.asyncio
@@ -2192,22 +2230,8 @@ class _MinimalRepository(Repository):
 
     async def insert_order(
         self,
-        instrument_public_id: str,
-        client_order_id: str | None,
-        exchange_order_id: str | None,
-        created_at: datetime,
-        side: str,
-        order_type: str,
-        price: float | None,
-        size: float,
-        status: str,
-        session_id: str,
-        sequence_id: int,
-        timestamp: datetime,
-        time_in_force: str | None = None,
-        mode: str = "live",
-        leverage: int | None = None,
-        reduce_only: bool = False,
+        row: OrderInsertRow | None = None,
+        **kwargs: Unpack[OrderInsertRow],
     ) -> tuple[int, str]:
         return (0, "stub-public-id")
 
@@ -2229,18 +2253,8 @@ class _MinimalRepository(Repository):
 
     async def insert_execution(
         self,
-        order_public_id: str,
-        timestamp: datetime,
-        side: str,
-        status: str,
-        price: float,
-        size: float,
-        fee: float,
-        fee_asset: str,
-        session_id: str,
-        sequence_id: int,
-        exec_id: str | None = None,
-        trade_id: str | None = None,
+        row: ExecutionInsertRow | None = None,
+        **kwargs: Unpack[ExecutionInsertRow],
     ) -> int:
         return 0
 

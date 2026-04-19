@@ -10084,6 +10084,13 @@ export interface Operations {
                     "application/json": Components["schemas"]["BacktestRunListResponse"];
                 };
             };
+            /** @description no active wallet selected */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -10155,6 +10162,13 @@ export interface Operations {
                 content: {
                     "application/json": Components["schemas"]["BacktestComparisonListResponse"];
                 };
+            };
+            /** @description no active wallet selected */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

@@ -44,6 +44,7 @@ from datetime import timedelta
 from inspect import isawaitable
 from typing import Any
 from typing import Protocol
+from typing import Unpack
 from typing import cast
 from uuid import uuid7
 
@@ -120,6 +121,7 @@ from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import CheckpointUpsertRow
 from snapper.data.repository_types import CreateScopeGrantRequest
+from snapper.data.repository_types import ExecutionInsertRow
 from snapper.data.repository_types import ExecutionPlanCheckpointRow
 from snapper.data.repository_types import ExecutionPlanDecisionInsertRow
 from snapper.data.repository_types import ExecutionPlanDecisionRow
@@ -136,6 +138,7 @@ from snapper.data.repository_types import InstrumentUnderlyingRow
 from snapper.data.repository_types import MarketSnapshotRow
 from snapper.data.repository_types import MarketSnapshotUpsertRow
 from snapper.data.repository_types import OperatorRow
+from snapper.data.repository_types import OrderInsertRow
 from snapper.data.repository_types import OrderRow
 from snapper.data.repository_types import PositionCycleInsertRow
 from snapper.data.repository_types import PositionCycleRow
@@ -446,6 +449,21 @@ class _ClosableConnection(Protocol):
         """Close the underlying connection."""
 
 
+class _DisposableEngine(Protocol):
+    """Protocol for engine-like objects that expose dispose()."""
+
+    def dispose(self) -> object:
+        """Dispose the underlying engine resources."""
+
+
+def _resolve_disposable_engine(engine: object) -> _DisposableEngine | None:
+    """Return an engine-like object when it exposes a callable dispose()."""
+    dispose = getattr(engine, "dispose", None)
+    if not callable(dispose):
+        return None
+    return cast(_DisposableEngine, engine)
+
+
 class Repository(ABC):
     """Abstract base class defining the repository interface.
 
@@ -588,24 +606,8 @@ class Repository(ABC):
     @abstractmethod
     async def insert_order(
         self,
-        instrument_public_id: str,
-        client_order_id: str | None,
-        exchange_order_id: str | None,
-        created_at: datetime,
-        side: str,
-        order_type: str,
-        price: float | None,
-        size: float,
-        status: str,
-        session_id: str,
-        sequence_id: int,
-        timestamp: datetime,
-        wallet_public_id: str,
-        operator_public_id: str | None = None,
-        time_in_force: str | None = None,
-        mode: str = "live",
-        leverage: int | None = None,
-        reduce_only: bool = False,
+        row: OrderInsertRow | None = None,
+        **kwargs: Unpack[OrderInsertRow],
     ) -> tuple[int, str]:
         """Insert new order record, returning (id, public_id) tuple.
 
@@ -641,21 +643,8 @@ class Repository(ABC):
     @abstractmethod
     async def insert_execution(
         self,
-        order_public_id: str,
-        timestamp: datetime,
-        side: str,
-        status: str,
-        price: float,
-        size: float,
-        fee: float,
-        fee_asset: str,
-        session_id: str,
-        sequence_id: int,
-        wallet_public_id: str,
-        exec_id: str | None = None,
-        trade_id: str | None = None,
-        operator_public_id: str | None = None,
-        liquidity_role: str = "unknown",
+        row: ExecutionInsertRow | None = None,
+        **kwargs: Unpack[ExecutionInsertRow],
     ) -> int:
         """Insert execution record, returning execution ID.
 
@@ -2807,50 +2796,42 @@ class SQLAlchemyRepository(Repository):
 
     async def insert_order(
         self,
-        instrument_public_id: str,
-        client_order_id: str | None,
-        exchange_order_id: str | None,
-        created_at: datetime,
-        side: str,
-        order_type: str,
-        price: float | None,
-        size: float,
-        status: str,
-        session_id: str,
-        sequence_id: int,
-        timestamp: datetime,
-        wallet_public_id: str,
-        operator_public_id: str | None = None,
-        time_in_force: str | None = None,
-        mode: str = "live",
-        leverage: int | None = None,
-        reduce_only: bool = False,
+        row: OrderInsertRow | None = None,
+        **kwargs: Unpack[OrderInsertRow],
     ) -> tuple[int, str]:
         """Insert new order record and return (id, public_id) tuple."""
+        if row is not None and kwargs:
+            raise ValueError("insert_order accepts either row or keyword fields, not both")
+        order_row = row if row is not None else kwargs
+        mode = order_row.get("mode", "live")
+        operator_public_id = order_row.get("operator_public_id")
+        time_in_force = order_row.get("time_in_force")
+        leverage = order_row.get("leverage")
+        reduce_only = order_row.get("reduce_only", False)
         async with self.session() as s:
             order = Order(
-                instrument_public_id=instrument_public_id,
+                instrument_public_id=order_row["instrument_public_id"],
                 mode=mode,
-                wallet_public_id=wallet_public_id,
+                wallet_public_id=order_row["wallet_public_id"],
                 operator_public_id=operator_public_id,
-                client_order_id=client_order_id,
-                exchange_order_id=exchange_order_id,
-                created_at=created_at,
+                client_order_id=order_row["client_order_id"],
+                exchange_order_id=order_row["exchange_order_id"],
+                created_at=order_row["created_at"],
                 updated_at=None,
-                timestamp=timestamp,
-                side=side,
-                order_type=order_type,
-                price=price,
-                size=size,
+                timestamp=order_row["timestamp"],
+                side=order_row["side"],
+                order_type=order_row["order_type"],
+                price=order_row["price"],
+                size=order_row["size"],
                 filled_size=0.0,
                 average_price=None,
-                status=status,
+                status=order_row["status"],
                 time_in_force=time_in_force,
                 error=None,
                 leverage=leverage,
                 reduce_only=reduce_only,
-                session_id=session_id,
-                sequence_id=sequence_id,
+                session_id=order_row["session_id"],
+                sequence_id=order_row["sequence_id"],
             )
             s.add(order)
             await s.commit()
@@ -2913,39 +2894,33 @@ class SQLAlchemyRepository(Repository):
 
     async def insert_execution(
         self,
-        order_public_id: str,
-        timestamp: datetime,
-        side: str,
-        status: str,
-        price: float,
-        size: float,
-        fee: float,
-        fee_asset: str,
-        session_id: str,
-        sequence_id: int,
-        wallet_public_id: str,
-        exec_id: str | None = None,
-        trade_id: str | None = None,
-        operator_public_id: str | None = None,
-        liquidity_role: str = "unknown",
+        row: ExecutionInsertRow | None = None,
+        **kwargs: Unpack[ExecutionInsertRow],
     ) -> int:
         """Insert execution record and return generated ID."""
+        if row is not None and kwargs:
+            raise ValueError("insert_execution accepts either row or keyword fields, not both")
+        execution_row = row if row is not None else kwargs
+        operator_public_id = execution_row.get("operator_public_id")
+        exec_id = execution_row.get("exec_id")
+        trade_id = execution_row.get("trade_id")
+        liquidity_role = execution_row.get("liquidity_role", "unknown")
         async with self.session() as s:
             execution = Execution(
-                order_public_id=order_public_id,
-                wallet_public_id=wallet_public_id,
+                order_public_id=execution_row["order_public_id"],
+                wallet_public_id=execution_row["wallet_public_id"],
                 operator_public_id=operator_public_id,
                 exec_id=exec_id,
                 trade_id=trade_id,
-                timestamp=timestamp,
-                side=side,
-                status=status,
-                price=price,
-                size=size,
-                fee=fee,
-                fee_asset=fee_asset,
-                session_id=session_id,
-                sequence_id=sequence_id,
+                timestamp=execution_row["timestamp"],
+                side=execution_row["side"],
+                status=execution_row["status"],
+                price=execution_row["price"],
+                size=execution_row["size"],
+                fee=execution_row["fee"],
+                fee_asset=execution_row["fee_asset"],
+                session_id=execution_row["session_id"],
+                sequence_id=execution_row["sequence_id"],
                 liquidity_role=liquidity_role,
             )
             s.add(execution)
@@ -6876,16 +6851,20 @@ async def dispose_repositories() -> None:
     }
     for live_repo in _live_sqlalchemy_repositories:
         repos_to_dispose[id(live_repo)] = live_repo
-    engines_to_dispose: dict[int, AsyncEngine] = {}
+    engines_to_dispose: dict[int, object] = {}
     for repo in repos_to_dispose.values():
         engine = getattr(repo, "engine", None)
-        if isinstance(engine, AsyncEngine):
+        if engine is not None:
             engines_to_dispose[id(engine)] = engine
     for live_engine in _live_sqlalchemy_engines:
         engines_to_dispose[id(live_engine)] = live_engine
     for engine in engines_to_dispose.values():
+        disposable_engine = _resolve_disposable_engine(engine)
+        if disposable_engine is None:
+            logger.warning("Failed to dispose repository engine: engine has no callable dispose()")
+            continue
         try:
-            dispose_result = engine.dispose()
+            dispose_result = disposable_engine.dispose()
             if isawaitable(dispose_result):
                 await dispose_result
         except Exception as e:

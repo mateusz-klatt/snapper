@@ -89,6 +89,10 @@ _PROCESS_BAD_REQUEST_RESPONSE: dict[int | str, dict[str, Any]] = {
 _PROCESS_FORBIDDEN_RESPONSE: dict[int | str, dict[str, Any]] = {
     403: {"description": "Process scope denied"}
 }
+_PROCESS_START_RESPONSES: dict[int | str, dict[str, Any]] = {
+    400: {"description": "Invalid process request"},
+    403: {"description": "Process scope denied"},
+}
 
 
 def _mint_provenance(request: Request) -> tuple[str, int, str, datetime]:
@@ -650,10 +654,7 @@ async def get_process_schema(
 @router.post(
     "/{name}/start",
     openapi_extra=openapi_schema(ProcessStartRequest),
-    responses={
-        **_PROCESS_BAD_REQUEST_RESPONSE,
-        **_PROCESS_FORBIDDEN_RESPONSE,
-    },
+    responses=_PROCESS_START_RESPONSES,
 )
 async def start_process(
     http_request: Request,

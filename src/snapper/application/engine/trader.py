@@ -2189,7 +2189,7 @@ class TraderCoordinator(RegisterableProcess):
                 logger.opt(exception=True).debug("Accrual check failed for {}", engine_key)
 
     async def _accrue_engine(
-        self, engine_key: str, engine: TradingEngineService, now: datetime
+        self, _engine_key: str, engine: TradingEngineService, now: datetime
     ) -> None:
         """Apply pending accrual boundaries for a single engine."""
         instrument_public_id = await self.repository.get_instrument_public_id_by_symbol(

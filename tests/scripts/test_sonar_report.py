@@ -66,6 +66,215 @@ class TestRatingLabel:
         assert sonar_report.rating_label("?") == "?"
 
 
+class TestHelperFunctions:
+    """Tests for Sonar report helper functions."""
+
+    def test_value_and_label_helpers_cover_fallback_paths(self) -> None:
+        """Helpers normalize missing values, markup, labels, and metric formatting."""
+        assert (
+            sonar_report._component_path(f"{sonar_report.PROJECT_KEY}:src/app.py") == "src/app.py"
+        )
+        assert sonar_report._measure_value({"value": "7"}) == "7"
+        assert sonar_report._measure_value({"periods": [{"value": "8.5"}]}) == "8.5"
+        assert sonar_report._measure_value({"periods": [{"other": "x"}]}) == "?"
+        assert sonar_report._measure_value({}) == "?"
+        assert sonar_report._optional_str(None) is None
+        assert sonar_report._optional_str(12) == "12"
+        assert sonar_report._optional_int(None) is None
+        assert sonar_report._optional_int("14") == 14
+        assert sonar_report._strip_code_markup("<span>alpha &gt; beta</span>") == "alpha > beta"
+        assert (
+            sonar_report._quality_metric_label("new_duplicated_lines_density") == "New duplication"
+        )
+        assert sonar_report._quality_metric_label("custom_metric") == "custom_metric"
+        assert sonar_report._format_metric_value("new_security_rating", "1.0") == "A"
+        assert sonar_report._format_metric_value("new_coverage", "95.73") == "95.7%"
+        assert sonar_report._format_metric_value("custom_metric", "42") == "42"
+        assert sonar_report._format_metric_value("custom_metric", None) == "?"
+
+    def test_extract_enrich_and_print_issue_snippet(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Snippet helpers annotate issues and render marked source context."""
+        component = f"{sonar_report.PROJECT_KEY}:src/app.py"
+        flow_component = f"{sonar_report.PROJECT_KEY}:src/lib.py"
+        source_cache: dict[str, list[sonar_report.SourceLine]] = {
+            component: [
+                {"line": 8, "code": "before", "duplicated": False, "is_new": False},
+                {"line": 9, "code": "target", "duplicated": True, "is_new": True},
+                {"line": 10, "code": "after", "duplicated": False, "is_new": True},
+            ],
+            flow_component: [
+                {"line": 3, "code": "helper", "duplicated": False, "is_new": False},
+            ],
+        }
+        snippet = sonar_report._extract_snippet(source_cache, component, 9, 9)
+        assert [line["line"] for line in snippet] == [8, 9, 10]
+        assert sonar_report._extract_snippet(source_cache, "missing", 1, 1) == []
+
+        issue: dict[str, Any] = {
+            "component": component,
+            "line": 9,
+            "textRange": {"startLine": 9, "endLine": 9, "startOffset": 0, "endOffset": 6},
+            "flows": [
+                {
+                    "locations": [
+                        {
+                            "component": flow_component,
+                            "textRange": {
+                                "startLine": 3,
+                                "endLine": 3,
+                                "startOffset": 1,
+                                "endOffset": 5,
+                            },
+                            "msg": "+1",
+                        }
+                    ]
+                }
+            ],
+        }
+        enriched = sonar_report._enrich_issue(issue, source_cache)
+        assert enriched["component_path"] == "src/app.py"
+        assert len(enriched["primary_snippet"]) == 3
+        assert enriched["flow_details"][0]["component_path"] == "src/lib.py"
+        assert enriched["flow_details"][0]["snippet"][0]["code"] == "helper"
+
+        sonar_report._print_issue_snippet(snippet, 9, 9, "  ")
+        captured = capsys.readouterr()
+        assert ">     9 | target [dup new]" in captured.out
+
+
+class TestFetchQualityGate:
+    """Tests for fetch_quality_gate."""
+
+    def test_fetches_and_normalizes_quality_gate(self) -> None:
+        """Builds quality gate data including failing conditions."""
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json = MagicMock(
+            return_value={
+                "projectStatus": {
+                    "status": "ERROR",
+                    "periods": [{"mode": "previous_version", "date": "2026-02-01T16:42:42+0000"}],
+                    "conditions": [
+                        {
+                            "status": "OK",
+                            "metricKey": "new_coverage",
+                            "comparator": "LT",
+                            "errorThreshold": "80",
+                            "actualValue": "95.7",
+                            "periodIndex": 1,
+                        },
+                        {
+                            "status": "ERROR",
+                            "metricKey": "new_duplicated_lines_density",
+                            "comparator": "GT",
+                            "errorThreshold": "3",
+                            "actualValue": "5.4",
+                            "periodIndex": 1,
+                        },
+                    ],
+                }
+            }
+        )
+
+        with patch("scripts.sonar_report.httpx.get", return_value=response) as mock_get:
+            result = sonar_report.fetch_quality_gate("t")
+
+        assert result["status"] == "ERROR"
+        assert result["period_mode"] == "previous_version"
+        assert result["period_date"] == "2026-02-01T16:42:42+0000"
+        assert len(result["conditions"]) == 2
+        assert len(result["failing_conditions"]) == 1
+        assert result["failing_conditions"][0]["metric_key"] == "new_duplicated_lines_density"
+        assert "qualitygates/project_status" in mock_get.call_args.args[0]
+
+
+class TestFetchSourceCache:
+    """Tests for fetch_source_cache."""
+
+    def test_fetches_source_lines_for_issue_and_flow_components(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Loads and normalizes source lines for primary and secondary components."""
+        response_main = MagicMock()
+        response_main.raise_for_status = MagicMock()
+        response_main.json = MagicMock(
+            return_value={
+                "sources": [
+                    {
+                        "line": 7,
+                        "code": "<span>alpha</span>",
+                        "duplicated": True,
+                        "isNew": False,
+                    }
+                ]
+            }
+        )
+        response_flow = MagicMock()
+        response_flow.raise_for_status = MagicMock()
+        response_flow.json = MagicMock(
+            return_value={
+                "sources": [
+                    {
+                        "line": 3,
+                        "code": "<span>beta &amp; gamma</span>",
+                        "duplicated": False,
+                        "isNew": True,
+                    }
+                ]
+            }
+        )
+        issues: list[dict[str, Any]] = [
+            {
+                "component": f"{sonar_report.PROJECT_KEY}:src/app.py",
+                "flows": [{"locations": [{"component": f"{sonar_report.PROJECT_KEY}:src/lib.py"}]}],
+            }
+        ]
+
+        with patch(
+            "scripts.sonar_report.httpx.get", side_effect=[response_main, response_flow]
+        ) as mock_get:
+            cache = sonar_report.fetch_source_cache("t", issues)
+
+        assert sorted(cache) == [
+            f"{sonar_report.PROJECT_KEY}:src/app.py",
+            f"{sonar_report.PROJECT_KEY}:src/lib.py",
+        ]
+        assert cache[f"{sonar_report.PROJECT_KEY}:src/app.py"][0]["code"] == "alpha"
+        assert cache[f"{sonar_report.PROJECT_KEY}:src/lib.py"][0]["code"] == "beta & gamma"
+        assert mock_get.call_count == 2
+        captured = capsys.readouterr()
+        assert "source 1/2" in captured.out
+        assert "src/app.py" in captured.out
+
+    def test_ignores_missing_components_when_building_source_cache(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Skips empty primary and secondary component entries when collecting sources."""
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json = MagicMock(return_value={"sources": []})
+        issues: list[dict[str, Any]] = [
+            {
+                "component": "",
+                "flows": [{"locations": [{"component": ""}, {}]}],
+            },
+            {
+                "component": f"{sonar_report.PROJECT_KEY}:src/only.py",
+                "flows": [],
+            },
+        ]
+
+        with patch("scripts.sonar_report.httpx.get", return_value=response) as mock_get:
+            cache = sonar_report.fetch_source_cache("t", issues)
+
+        assert sorted(cache) == [f"{sonar_report.PROJECT_KEY}:src/only.py"]
+        assert mock_get.call_count == 1
+        captured = capsys.readouterr()
+        assert "source 1/1" in captured.out
+
+
 class TestFetchMetrics:
     """Tests for fetch_metrics."""
 
@@ -243,6 +452,40 @@ class TestPrintReport:
         assert "New duplication" in captured.out
         assert "Top 20 directories:" in captured.out
         assert "src" in captured.out
+
+    def test_prints_primary_snippet_and_secondary_locations(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Prints source snippets and secondary locations for detailed issues."""
+        issues: list[dict[str, Any]] = [
+            {
+                "severity": "CRITICAL",
+                "type": "CODE_SMELL",
+                "rule": "python:S3776",
+                "component": f"{sonar_report.PROJECT_KEY}:src/app.py",
+                "component_path": "src/app.py",
+                "line": 10,
+                "message": "Complex function",
+                "textRange": {"startLine": 10, "endLine": 10},
+                "primary_snippet": [
+                    {"line": 9, "code": "before", "duplicated": False, "is_new": False},
+                    {"line": 10, "code": "focus", "duplicated": False, "is_new": True},
+                ],
+                "flow_details": [
+                    {"component_path": "src/helper.py", "start_line": 22, "message": "+1"}
+                ],
+            }
+        ]
+        metrics = {"ncloc": "10", "sqale_index": "0"}
+        quality_gate = _quality_gate()
+
+        with patch.object(sonar_report, "datetime", FrozenDateTime):
+            sonar_report.print_report(issues, metrics, quality_gate)
+
+        captured = capsys.readouterr()
+        assert ">    10 | focus [new]" in captured.out
+        assert "Secondary locations:" in captured.out
+        assert "src/helper.py:22 +1" in captured.out
 
 
 class TestSaveJson:

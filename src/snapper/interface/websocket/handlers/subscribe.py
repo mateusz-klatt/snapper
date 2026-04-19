@@ -37,6 +37,42 @@ __all__ = [
 _BACKTEST_PREFIX = "backtest."
 
 
+def _extract_backtest_wallet_public_id(topic: str) -> str | None:
+    """Extract the wallet public id from a backtest topic.
+
+    Returns ``None`` for the bare ``backtest.`` root or malformed
+    walletless bodies.
+    """
+    body = topic[len(_BACKTEST_PREFIX) :].removesuffix(".")
+    if not body:
+        return None
+    wallet_public_id, _, _remainder = body.partition(".")
+    return wallet_public_id or None
+
+
+def _is_backtest_topic_allowed(topic: str, principal: AuthPrincipal) -> bool:
+    """Return whether the principal may subscribe to a backtest topic."""
+    if principal.role == UserRole.ADMIN:
+        return True
+    active_wallet = principal.active_wallet_public_id
+    if active_wallet is None:
+        return False
+    return _extract_backtest_wallet_public_id(topic) == active_wallet
+
+
+def _invalid_registry_root_error(topic: str) -> str | None:
+    """Return the registry-root validation error for prefix topics."""
+    if not topic.endswith("."):
+        return None
+    if topic in REGISTRY_ROOTS or topic.startswith(_BACKTEST_PREFIX):
+        return None
+    registry_roots = ", ".join(sorted(REGISTRY_ROOTS))
+    return (
+        f"Prefix '{topic}' is not a registry root. "
+        f"Allowed prefix subscriptions: {registry_roots}"
+    )
+
+
 def _validate_ws_topics(
     raw_topics: list[str],
 ) -> tuple[list[str], list[tuple[str, str]]]:
@@ -70,21 +106,11 @@ def _validate_ws_topics(
         if not is_valid:
             invalid.append((cleaned, error_msg_str))
             continue
-        if (
-            cleaned.endswith(".")
-            and cleaned not in REGISTRY_ROOTS
-            and not cleaned.startswith(_BACKTEST_PREFIX)
-        ):
-            registry_roots = ", ".join(sorted(REGISTRY_ROOTS))
-            invalid.append(
-                (
-                    cleaned,
-                    f"Prefix '{cleaned}' is not a registry root. "
-                    f"Allowed prefix subscriptions: {registry_roots}",
-                )
-            )
-        else:
-            valid.append(cleaned)
+        registry_root_error = _invalid_registry_root_error(cleaned)
+        if registry_root_error is not None:
+            invalid.append((cleaned, registry_root_error))
+            continue
+        valid.append(cleaned)
     return valid, invalid
 
 
@@ -120,26 +146,10 @@ def _enforce_backtest_wallet_scope(
     wallet_allowed: list[str] = []
     wallet_denied: list[str] = []
     for topic in topics:
-        if not topic.startswith(_BACKTEST_PREFIX):
+        if not topic.startswith(_BACKTEST_PREFIX) or _is_backtest_topic_allowed(topic, principal):
             wallet_allowed.append(topic)
             continue
-        if principal.role == UserRole.ADMIN:
-            wallet_allowed.append(topic)
-            continue
-        active_wallet = principal.active_wallet_public_id
-        if active_wallet is None:
-            wallet_denied.append(topic)
-            continue
-        body = topic[len(_BACKTEST_PREFIX) :]
-        body = body[:-1] if body.endswith(".") else body
-        segments = body.split(".") if body else []
-        if not segments:
-            wallet_denied.append(topic)
-            continue
-        if segments[0] == active_wallet:
-            wallet_allowed.append(topic)
-        else:
-            wallet_denied.append(topic)
+        wallet_denied.append(topic)
     return wallet_allowed, wallet_denied
 
 

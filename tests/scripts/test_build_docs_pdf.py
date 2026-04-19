@@ -370,7 +370,7 @@ class TestMermaidRenderer:
         assets_dir = tmp_path / "assets"
         assets_dir.mkdir(parents=True)
         renderer = MermaidRenderer(assets_dir=assets_dir, project_root=tmp_path)
-        assert renderer._command == ("/usr/bin/mmdc",)
+        assert renderer._command == ["/usr/bin/mmdc"]
 
     @patch("scripts.build_docs_pdf.shutil.which")
     def test_resolve_command_pnpm_exec(self, mock_which: MagicMock, tmp_path: Path) -> None:
@@ -384,7 +384,7 @@ class TestMermaidRenderer:
         assets_dir = tmp_path / "assets"
         assets_dir.mkdir(parents=True)
         renderer = MermaidRenderer(assets_dir=assets_dir, project_root=tmp_path)
-        assert renderer._command == ("/usr/bin/pnpm", "exec", "mmdc")
+        assert renderer._command == ["/usr/bin/pnpm", "exec", "mmdc"]
 
     @patch("scripts.build_docs_pdf.shutil.which", return_value=None)
     def test_resolve_command_raises_if_not_found(

@@ -168,6 +168,49 @@ class SignalRow(TypedDict):
     operator_public_id: str | None
 
 
+class OrderInsertRow(TypedDict):
+    """Row dict used by insert_order."""
+
+    instrument_public_id: str
+    client_order_id: str | None
+    exchange_order_id: str | None
+    created_at: datetime
+    side: str
+    order_type: str
+    price: float | None
+    size: float
+    status: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+    wallet_public_id: str
+    operator_public_id: NotRequired[str | None]
+    time_in_force: NotRequired[str | None]
+    mode: NotRequired[str]
+    leverage: NotRequired[int | None]
+    reduce_only: NotRequired[bool]
+
+
+class ExecutionInsertRow(TypedDict):
+    """Row dict used by insert_execution."""
+
+    order_public_id: str
+    timestamp: datetime
+    side: str
+    status: str
+    price: float
+    size: float
+    fee: float
+    fee_asset: str
+    session_id: str
+    sequence_id: int
+    wallet_public_id: str
+    exec_id: NotRequired[str | None]
+    trade_id: NotRequired[str | None]
+    operator_public_id: NotRequired[str | None]
+    liquidity_role: NotRequired[str]
+
+
 class OrderRow(TypedDict):
     """Row dict returned by get_orders."""
 

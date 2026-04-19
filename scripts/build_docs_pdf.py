@@ -126,14 +126,14 @@ class MermaidRenderer:
         self._width_px = width_px
         self._scale = scale
 
-    def _resolve_command(self, project_root: Path) -> tuple[str, ...]:
+    def _resolve_command(self, project_root: Path) -> list[str]:
         """Resolve the Mermaid CLI command for the current environment.
 
         Args:
             project_root: Root path of the project for locating local CLI.
 
         Returns:
-            Tuple of command arguments for invoking Mermaid CLI.
+            Command arguments for invoking Mermaid CLI.
         """
         local_bin_dir = project_root / "frontend" / "node_modules" / ".bin"
         local_candidates = [local_bin_dir / "mmdc"]
@@ -141,13 +141,13 @@ class MermaidRenderer:
             local_candidates.insert(0, local_bin_dir / "mmdc.cmd")
         for candidate in local_candidates:
             if candidate.exists() and os.access(candidate, os.X_OK):
-                return (str(candidate),)
+                return [str(candidate)]
         binary = shutil.which("mmdc")
         if binary:
-            return (binary,)
+            return [binary]
         pnpm = shutil.which("pnpm")
         if pnpm:
-            return (pnpm, "exec", "mmdc")
+            return [pnpm, "exec", "mmdc"]
         raise MermaidRenderingError(
             "Missing Mermaid CLI. Install '@mermaid-js/mermaid-cli' "
             "(for example `pnpm add -D @mermaid-js/mermaid-cli`) or ensure `mmdc` is on PATH."

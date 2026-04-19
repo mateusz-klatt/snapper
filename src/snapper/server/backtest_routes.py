@@ -179,6 +179,34 @@ _BACKTEST_SERVER_ERROR_RESPONSE: dict[int | str, dict[str, Any]] = {
 _COMPARISON_NOT_FOUND_RESPONSE: dict[int | str, dict[str, Any]] = {
     404: {"description": "Comparison or run not found"}
 }
+_BACKTEST_CREATE_RESPONSES: dict[int | str, dict[str, Any]] = {
+    400: {"description": _NO_ACTIVE_WALLET},
+    500: {"description": "Backtest request failed"},
+}
+_BACKTEST_LIST_RESPONSES: dict[int | str, dict[str, Any]] = {
+    400: {"description": _NO_ACTIVE_WALLET}
+}
+_BACKTEST_READ_RESPONSES: dict[int | str, dict[str, Any]] = {
+    400: {"description": _NO_ACTIVE_WALLET},
+    404: {"description": _NOT_FOUND},
+}
+_BACKTEST_CANCEL_RESPONSES: dict[int | str, dict[str, Any]] = {
+    400: {"description": _NO_ACTIVE_WALLET},
+    404: {"description": _NOT_FOUND},
+    409: {"description": "Backtest request conflict"},
+    500: {"description": "Backtest request failed"},
+}
+_BACKTEST_COMPARISON_READ_RESPONSES: dict[int | str, dict[str, Any]] = {
+    400: {"description": _NO_ACTIVE_WALLET},
+    404: {"description": "Comparison or run not found"},
+}
+_BACKTEST_COMPARISON_WRITE_RESPONSES: dict[int | str, dict[str, Any]] = {
+    400: {"description": _NO_ACTIVE_WALLET},
+    404: {"description": "Comparison or run not found"},
+    409: {"description": "Backtest request conflict"},
+    422: {"description": "Backtest request validation failed"},
+    500: {"description": "Backtest request failed"},
+}
 
 
 def _enforce_wallet_scope(principal: AuthPrincipal, run: BacktestRunRow | dict[str, Any]) -> None:
@@ -263,10 +291,7 @@ def _get_process_factory(request: Request) -> ProcessLauncherService:
     "",
     openapi_extra=openapi_schema(BacktestCreateCommand),
     dependencies=[Depends(validate_csrf_token)],
-    responses={
-        **_NO_ACTIVE_WALLET_RESPONSE,
-        **_BACKTEST_SERVER_ERROR_RESPONSE,
-    },
+    responses=_BACKTEST_CREATE_RESPONSES,
 )
 async def create_backtest(
     request: Request,
@@ -398,7 +423,7 @@ async def create_backtest(
     )
 
 
-@router.get("")
+@router.get("", responses=_BACKTEST_LIST_RESPONSES)
 async def list_backtests(
     request: Request,
     principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_BACKTESTS))],
@@ -585,13 +610,7 @@ def _to_comparison_data(row: BacktestComparisonRow) -> BacktestComparisonData:
     "/compare",
     openapi_extra=openapi_schema(BacktestCompareRequest),
     dependencies=[Depends(validate_csrf_token)],
-    responses={
-        **_NO_ACTIVE_WALLET_RESPONSE,
-        **_COMPARISON_NOT_FOUND_RESPONSE,
-        **_BACKTEST_CONFLICT_RESPONSE,
-        **_BACKTEST_VALIDATION_RESPONSE,
-        **_BACKTEST_SERVER_ERROR_RESPONSE,
-    },
+    responses=_BACKTEST_COMPARISON_WRITE_RESPONSES,
 )
 async def create_comparison(
     request: Request,
@@ -702,7 +721,7 @@ async def create_comparison(
     )
 
 
-@router.get("/compare")
+@router.get("/compare", responses=_BACKTEST_LIST_RESPONSES)
 async def list_comparisons(
     request: Request,
     principal: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_BACKTESTS))],
@@ -749,10 +768,7 @@ async def list_comparisons(
 
 @router.get(
     "/compare/{comparison_public_id}",
-    responses={
-        **_NO_ACTIVE_WALLET_RESPONSE,
-        **_COMPARISON_NOT_FOUND_RESPONSE,
-    },
+    responses=_BACKTEST_COMPARISON_READ_RESPONSES,
 )
 async def get_comparison(
     comparison_public_id: str,
@@ -825,10 +841,7 @@ async def get_comparison(
 
 @router.get(
     "/{run_id}",
-    responses={
-        **_NO_ACTIVE_WALLET_RESPONSE,
-        **_BACKTEST_NOT_FOUND_RESPONSE,
-    },
+    responses=_BACKTEST_READ_RESPONSES,
 )
 async def get_backtest(
     run_id: str,
@@ -880,12 +893,7 @@ async def get_backtest(
     "/{run_id}/cancel",
     openapi_extra=openapi_schema(BacktestCancelCommand),
     dependencies=[Depends(validate_csrf_token)],
-    responses={
-        **_NO_ACTIVE_WALLET_RESPONSE,
-        **_BACKTEST_NOT_FOUND_RESPONSE,
-        **_BACKTEST_CONFLICT_RESPONSE,
-        **_BACKTEST_SERVER_ERROR_RESPONSE,
-    },
+    responses=_BACKTEST_CANCEL_RESPONSES,
 )
 async def cancel_backtest(
     run_id: str,
@@ -947,10 +955,7 @@ async def cancel_backtest(
 @router.post(
     "/{run_id}/rerun",
     dependencies=[Depends(validate_csrf_token)],
-    responses={
-        **_NO_ACTIVE_WALLET_RESPONSE,
-        **_BACKTEST_NOT_FOUND_RESPONSE,
-    },
+    responses=_BACKTEST_READ_RESPONSES,
 )
 async def rerun_backtest(
     run_id: str,
@@ -1006,10 +1011,7 @@ async def rerun_backtest(
 
 @router.get(
     "/{run_id}/trades",
-    responses={
-        **_NO_ACTIVE_WALLET_RESPONSE,
-        **_BACKTEST_NOT_FOUND_RESPONSE,
-    },
+    responses=_BACKTEST_READ_RESPONSES,
 )
 async def get_backtest_trades(
     run_id: str,
@@ -1079,10 +1081,7 @@ async def get_backtest_trades(
 
 @router.get(
     "/{run_id}/signals",
-    responses={
-        **_NO_ACTIVE_WALLET_RESPONSE,
-        **_BACKTEST_NOT_FOUND_RESPONSE,
-    },
+    responses=_BACKTEST_READ_RESPONSES,
 )
 async def get_backtest_signals(
     run_id: str,
@@ -1148,10 +1147,7 @@ async def get_backtest_signals(
 
 @router.get(
     "/{run_id}/events",
-    responses={
-        **_NO_ACTIVE_WALLET_RESPONSE,
-        **_BACKTEST_NOT_FOUND_RESPONSE,
-    },
+    responses=_BACKTEST_READ_RESPONSES,
 )
 async def get_backtest_events(
     run_id: str,
@@ -1210,10 +1206,7 @@ async def get_backtest_events(
 
 @router.get(
     "/{run_id}/equity",
-    responses={
-        **_NO_ACTIVE_WALLET_RESPONSE,
-        **_BACKTEST_NOT_FOUND_RESPONSE,
-    },
+    responses=_BACKTEST_READ_RESPONSES,
 )
 async def get_backtest_equity(
     run_id: str,
