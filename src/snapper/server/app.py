@@ -125,6 +125,7 @@ from snapper.auth.tokens import get_token_manager
 from snapper.auth.user_service import UserService
 from snapper.auth.user_service import get_user_service
 from snapper.auth.websocket_auth import WebSocketAuthManager
+from snapper.auth.websocket_auth import get_ws_auth_manager
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
@@ -383,6 +384,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     app.state.user_service_publisher_context = user_publisher_context
     get_user_service().set_msg_publisher(user_publisher)
     logger.info("UserService publisher wired to ZMQ broker for admin.user_deactivated")
+    await get_ws_auth_manager().start_admin_listener(settings.zmq_broker_xpub)
     discover_processes()
     process_factory = ProcessLauncherService(settings)
     app.state.process_factory = process_factory
@@ -412,6 +414,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         manager = app.state.manager
         await manager.cleanup()
         await settings_service.shutdown()
+        await get_ws_auth_manager().stop_admin_listener()
         _shutdown_user_service_publisher(app)
         _clear_runtime_singletons()
         await dispose_repositories()

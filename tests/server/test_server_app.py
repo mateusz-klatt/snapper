@@ -112,6 +112,13 @@ class TestLifespan:
                 return_value=(MagicMock(), MagicMock()),
             ),
             patch("snapper.server.app._shutdown_user_service_publisher"),
+            patch(
+                "snapper.server.app.get_ws_auth_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                ),
+            ),
         ):
             mock_settings_service = MagicMock()
             mock_settings_service.shutdown = AsyncMock()
@@ -162,6 +169,13 @@ class TestLifespan:
                 return_value=(MagicMock(), MagicMock()),
             ),
             patch("snapper.server.app._shutdown_user_service_publisher"),
+            patch(
+                "snapper.server.app.get_ws_auth_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                ),
+            ),
         ):
             mock_settings_service = MagicMock()
             mock_settings_service.shutdown = AsyncMock()
@@ -199,6 +213,13 @@ class TestLifespan:
                 return_value=(MagicMock(), MagicMock()),
             ),
             patch("snapper.server.app._shutdown_user_service_publisher"),
+            patch(
+                "snapper.server.app.get_ws_auth_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                ),
+            ),
         ):
             mock_settings_service = MagicMock()
             mock_get_settings_service.return_value = mock_settings_service

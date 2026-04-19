@@ -5,11 +5,14 @@ connections including session tracking and role-based access control.
 """
 
 import asyncio
+import contextlib
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import UTC
 from datetime import datetime
 
+import zmq
+import zmq.asyncio
 from fastapi import WebSocket
 from loguru import logger
 
@@ -18,6 +21,16 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.tokens import get_token_manager
+from snapper.messaging.infrastructure.validated_socket import HWM_AUDIT
+from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
+from snapper.messaging.infrastructure.validated_socket import apply_hwm
+from snapper.messaging.schemas.data import UserDeactivatedData
+
+_KILL_SWITCH_CLOSE_CODE = 4003
+_KILL_SWITCH_REASON_FALLBACK = "account_deactivated"
+_ADMIN_USER_DEACTIVATED_TOPIC = "admin.user_deactivated"
+_ADMIN_LISTEN_RECV_BACKOFF_S = 0.1
+_KILL_SWITCH_REASON_MAX_LEN = 120
 
 
 @dataclass(slots=True)
@@ -97,6 +110,10 @@ class WebSocketAuthManager:
         self.token_manager = get_token_manager()
         self.authenticated_connections: dict[WebSocket, AuthPrincipal] = {}
         self._connection_states: dict[WebSocket, ConnectionState] = {}
+        self._admin_zmq_context: zmq.asyncio.Context | None = None
+        self._admin_subscriber: ValidatedSubscriber | None = None
+        self._admin_listen_task: asyncio.Task[None] | None = None
+        self._admin_running: bool = False
 
     @staticmethod
     def _extract_ws_bearer_token(websocket: WebSocket) -> str | None:
@@ -298,6 +315,184 @@ class WebSocketAuthManager:
             UserRole.ADMIN: 2,
         }
         return role_hierarchy[user.role] >= role_hierarchy[required_role]
+
+    async def start_admin_listener(self, zmq_broker_xpub: str) -> None:
+        """Open the admin-bus subscriber and start the dispatch task.
+
+        Subscribes to ``admin.user_deactivated`` (plan §3.6.1) so the
+        kill switch fanout from `UserService.deactivate_user` (Day 3b
+        sole publisher) reaches every authenticated WebSocket on this
+        instance and closes it with code 4003 on the next event-loop
+        tick. Idempotent: a second call while the listener is already
+        running is a no-op so the FastAPI lifespan can re-enter the
+        startup sequence safely.
+
+        `admin.scope_revoked` subscription wiring is deferred to Day 3f
+        (`validate_ai_delegate_subscription` per plan §3.8 — the
+        re-validation algorithm needs the wallet-scope check that
+        ships in that step).
+
+        Args:
+            zmq_broker_xpub: Address of the broker's XPUB endpoint.
+                Empty string skips the listener entirely (test mode).
+        """
+        await asyncio.sleep(0)
+        if self._admin_listen_task is not None:
+            return
+        if not zmq_broker_xpub:
+            logger.info("WebSocketAuthManager: empty broker XPUB, skipping admin listener")
+            return
+        self._admin_zmq_context = zmq.asyncio.Context()
+        raw_sub_socket = self._admin_zmq_context.socket(zmq.SUB)
+        apply_hwm(raw_sub_socket, rcvhwm=HWM_AUDIT)
+        raw_sub_socket.connect(zmq_broker_xpub)
+        self._admin_subscriber = ValidatedSubscriber(raw_sub_socket)
+        self._admin_subscriber.subscribe(_ADMIN_USER_DEACTIVATED_TOPIC)
+        self._admin_running = True
+        self._admin_listen_task = asyncio.create_task(self._admin_listen_loop())
+        logger.info(
+            "WebSocketAuthManager: admin-bus listener subscribed to {} on {}",
+            _ADMIN_USER_DEACTIVATED_TOPIC,
+            zmq_broker_xpub,
+        )
+
+    async def stop_admin_listener(self) -> None:
+        """Cancel the dispatch task, close the subscriber, terminate the context.
+
+        Order mirrors `_shutdown_user_service_publisher` (Day 3b):
+        flip the running flag first so the loop exits on the next
+        iteration, cancel the task, then dispose socket + context with
+        suppressed exceptions so a transient broker issue cannot mask
+        a clean shutdown. Idempotent.
+        """
+        self._admin_running = False
+        task = self._admin_listen_task
+        self._admin_listen_task = None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        if self._admin_subscriber is not None:
+            with contextlib.suppress(Exception):
+                self._admin_subscriber.close()
+            self._admin_subscriber = None
+        if self._admin_zmq_context is not None:
+            with contextlib.suppress(Exception):
+                self._admin_zmq_context.term()
+            self._admin_zmq_context = None
+
+    async def _admin_listen_loop(self) -> None:
+        """Receive admin-bus events and dispatch to per-topic handlers.
+
+        Per-message failures (parse errors, handler exceptions, recv
+        errors) are caught + logged so a single bad frame can never
+        silently stop the listener. Only `asyncio.CancelledError`
+        from `stop_admin_listener` unwinds the loop. The recv +
+        dispatch halves are factored into helpers so the loop body
+        stays under the project's cognitive-complexity ceiling.
+        """
+        subscriber = self._admin_subscriber
+        if subscriber is None:
+            return
+        try:
+            while self._admin_running:
+                frame = await self._admin_recv_one_frame(subscriber)
+                if frame is None:
+                    continue
+                await self._admin_dispatch_frame(*frame)
+        except asyncio.CancelledError:
+            logger.info("WebSocketAuthManager: admin listen loop cancelled")
+            raise
+
+    async def _admin_recv_one_frame(
+        self, subscriber: ValidatedSubscriber
+    ) -> tuple[str, str] | None:
+        """Receive and decode one admin-bus frame.
+
+        Returns ``None`` (after a small backoff) when recv raises a
+        non-cancellation error so the caller can simply ``continue``.
+        """
+        try:
+            topic_bytes, payload_bytes = await subscriber.recv_multipart()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("WebSocketAuthManager admin listener recv failed: {}", exc)
+            await asyncio.sleep(_ADMIN_LISTEN_RECV_BACKOFF_S)
+            return None
+        topic = topic_bytes.decode() if isinstance(topic_bytes, bytes) else str(topic_bytes)
+        payload = payload_bytes.decode() if isinstance(payload_bytes, bytes) else str(payload_bytes)
+        return topic, payload
+
+    async def _admin_dispatch_frame(self, topic: str, payload: str) -> None:
+        """Route one decoded admin-bus frame to its typed handler.
+
+        Handler exceptions other than ``CancelledError`` are logged
+        + swallowed so one bad frame cannot stop the listener.
+        """
+        try:
+            if topic == _ADMIN_USER_DEACTIVATED_TOPIC:
+                await self._handle_user_deactivated(UserDeactivatedData.from_json(payload))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "WebSocketAuthManager admin handler failed: topic={} err={}",
+                topic,
+                exc,
+            )
+
+    async def _handle_user_deactivated(self, data: UserDeactivatedData) -> None:
+        """Drop every authenticated WebSocket whose principal matches the deactivated user."""
+        await self.close_user_connections(
+            user_public_id=data.user_public_id,
+            reason=data.reason or _KILL_SWITCH_REASON_FALLBACK,
+        )
+
+    async def close_user_connections(self, user_public_id: str, reason: str) -> int:
+        """Close every authenticated WS matching `user_public_id` (code 4003).
+
+        Iterates a snapshot so the `disconnect` side-effect (which
+        mutates `authenticated_connections`) does not invalidate the
+        iterator. A `ws.close()` failure (already-closed socket,
+        broken pipe, etc.) is logged + swallowed so one stuck
+        connection cannot block the rest from being torn down. Match
+        is by `user_public_id` (stable UUID7); username is mutable so
+        is intentionally NOT used here.
+
+        Args:
+            user_public_id: UUID7 of the user whose sessions are
+                being terminated.
+            reason: Free-text reason carried in the WS close frame.
+                Truncated to 120 characters because RFC 6455 limits
+                the close-reason field to 123 bytes.
+
+        Returns:
+            Number of connections that were closed.
+        """
+        truncated_reason = reason[:_KILL_SWITCH_REASON_MAX_LEN]
+        closed = 0
+        for ws, principal in tuple(self.authenticated_connections.items()):
+            if principal.user_public_id != user_public_id:
+                continue
+            try:
+                await ws.close(code=_KILL_SWITCH_CLOSE_CODE, reason=truncated_reason)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to close kill-switched WS for user {}: {}",
+                    user_public_id,
+                    exc,
+                )
+            self.disconnect(ws)
+            closed += 1
+        if closed:
+            logger.info(
+                "Kill switch closed {} WebSocket(s) for user {} (reason='{}')",
+                closed,
+                user_public_id,
+                truncated_reason,
+            )
+        return closed
 
     def get_connection_stats(self) -> AuthConnectionStats:
         """Get statistics about authenticated connections.
