@@ -31,7 +31,9 @@ from snapper.application.services.settings import SettingsService
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.auth.dependencies import _extract_bearer_token
 from snapper.auth.schemas.tokens import TokenClaims
+from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import get_token_manager
+from snapper.auth.tokens import hash_token
 from snapper.data.repository import Repository
 from snapper.mcp.tools import register_mcp_tools
 
@@ -150,6 +152,55 @@ class FeatureFlagMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+def _build_rejection_response(token_manager: TokenManager, token: str) -> JSONResponse:
+    """Return a 401 JSONResponse with the most specific ``error_code`` we can.
+
+    Plan §2 item 6 (R3-B2 resolution) requires the MCP rejection path
+    to distinguish a deactivated-user rejection from a generic
+    verification failure so the client can surface a clear re-login
+    prompt instead of attempting a refresh that will fail again.
+
+    We consult the Day 3d-B verify-cache directly: when
+    :meth:`TokenManager.verify_token_with_db` returns ``None`` AND
+    the cached entry carries a non-empty ``user_public_id`` with
+    ``user_is_active=False``, the DB projection told us explicitly
+    that the owner is deactivated. Every other None path
+    (missing-inventory, invalid signature, expired, revoked-but-
+    user-still-active) collapses to ``invalid_bearer_token``.
+
+    This keeps the hot path a single ``verify_token_with_db`` call
+    — the disambiguation is a dict lookup on the already-populated
+    cache, not a second DB round-trip.
+
+    Args:
+        token_manager: Singleton used for the cache lookup.
+        token: The raw JWT presented by the client (unverified).
+
+    Returns:
+        401 :class:`JSONResponse` with the specific ``error_code``.
+    """
+    token_hash = hash_token(token)
+    entry = token_manager._verify_cache.get(token_hash)
+    if entry is not None and entry.user_public_id and not entry.user_is_active:
+        return JSONResponse(
+            status_code=401,
+            content={
+                "error_code": "user_deactivated",
+                "detail": (
+                    "Account has been deactivated. Contact an administrator "
+                    "or obtain new credentials via POST /api/auth/login."
+                ),
+            },
+        )
+    return JSONResponse(
+        status_code=401,
+        content={
+            "error_code": "invalid_bearer_token",
+            "detail": "Bearer token failed verification. Refresh via POST /api/auth/refresh.",
+        },
+    )
+
+
 class BearerAuthMiddleware(BaseHTTPMiddleware):
     """Require a valid ``Authorization: Bearer <jwt>`` on every MCP call.
 
@@ -254,13 +305,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         token_manager = get_token_manager()
         claims = await token_manager.verify_token_with_db(token, repository)
         if claims is None:
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "error_code": "invalid_bearer_token",
-                    "detail": "Bearer token failed verification. Refresh via POST /api/auth/refresh.",
-                },
-            )
+            return _build_rejection_response(token_manager, token)
         request.state.token_claims = claims
         ctx_token = TOKEN_CLAIMS_CTX.set(claims)
         try:

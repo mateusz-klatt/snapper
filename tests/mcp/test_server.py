@@ -165,6 +165,50 @@ class TestBearerAuthMiddleware:
         assert response.status_code == 503
         assert response.json()["error_code"] == "mcp_unavailable"
 
+    def test_deactivated_user_token_returns_401_user_deactivated(self) -> None:
+        """Deactivated user's token → 401 ``user_deactivated`` (plan §2 item 6).
+
+        Given: the flag is on, the bearer token passes JWT signature
+            + expiry, but the Day 3d-B DB-backed verify rejects it
+            because ``users.is_active=False``. The verify-cache
+            therefore carries an entry with ``user_public_id`` populated
+            and ``user_is_active=False``.
+        When: the middleware processes the request,
+        Then: HTTP 401 is returned with
+            ``error_code="user_deactivated"`` — distinct from
+            ``invalid_bearer_token`` so MCP clients surface a
+            re-login prompt instead of attempting a refresh that
+            would fail with the same verdict.
+        """
+        from snapper.auth.tokens import _VerifyCacheEntry
+        from snapper.auth.tokens import hash_token
+
+        svc = _make_settings_service(enabled=True)
+        app = build_mcp_app(settings_service_getter=lambda: svc, repository_getter=lambda: Mock())
+        client = TestClient(app)
+        deactivated_token = f"{_TEST_TOKEN_PLACEHOLDER}.deactivated"
+        token_hash = hash_token(deactivated_token)
+        now_ts = datetime.now(UTC).timestamp()
+        cache_entry = _VerifyCacheEntry(
+            is_valid=True,
+            user_is_active=False,
+            user_public_id="user-deactivated-123",
+            expires_at_ts=now_ts + 900,
+            cached_at_ts=now_ts,
+        )
+        with patch("snapper.mcp.server.get_token_manager") as mock_get:
+            token_manager = Mock()
+            token_manager.verify_token_with_db = AsyncMock(return_value=None)
+            token_manager._verify_cache = {token_hash: cache_entry}
+            mock_get.return_value = token_manager
+            response = client.post(
+                "/mcp",
+                headers={"Authorization": f"Bearer {deactivated_token}"},
+                json={},
+            )
+        assert response.status_code == 401
+        assert response.json()["error_code"] == "user_deactivated"
+
     def test_invalid_bearer_token_returns_401_invalid_bearer(self) -> None:
         """Unverifiable JWT → 401 ``invalid_bearer_token``.
 
@@ -182,6 +226,7 @@ class TestBearerAuthMiddleware:
         with patch("snapper.mcp.server.get_token_manager") as mock_get:
             token_manager = Mock()
             token_manager.verify_token_with_db = AsyncMock(return_value=None)
+            token_manager._verify_cache = {}
             mock_get.return_value = token_manager
             response = client.post(
                 "/mcp",
