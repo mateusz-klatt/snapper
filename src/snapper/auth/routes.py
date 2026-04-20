@@ -302,7 +302,7 @@ async def refresh_token(
     """Refresh session tokens with optional wallet-scope change.
 
     Order (plan §2.5 R14 gpt-5.4 fix #3 — verify → parse → validate →
-    blacklist → mint):
+    rotate → blacklist):
 
     1. Verify refresh-token signature + blacklist status.
     2. Parse optional body (422 on malformed UUID7 or mutually
@@ -310,14 +310,21 @@ async def refresh_token(
        field + model validators on ``RefreshTokenPayload``).
     3. Role-branched wallet-membership validation (404 when the
        hinted wallet is outside the caller's visibility).
-    4. Blacklist the old refresh token ONLY after every validation
-       passes — a rejected hint leaves the old token usable for a
-       retry with a valid hint.
-    5. Mint new tokens from the post-validation principal. Response
-       ``user.active_wallet_public_id`` is projected from
-       ``principal.active_wallet_public_id`` (NOT ``token_data``)
-       so a hinted refresh surfaces the NEW wallet, matching the
-       freshly-minted token claims.
+    4. Mint new tokens from the post-validation principal, then
+       call :meth:`TokenManager.rotate_tokens` which revokes the
+       old refresh row AND inserts the new pair inside a SINGLE DB
+       transaction (plan §3.6.2 R1 fix). If the old row is already
+       revoked (replay) or the insert fails, the transaction rolls
+       back and the route returns 401 — the caller retries with
+       the original refresh JWT.
+    5. Seed the in-memory JTI blacklist AFTER the rotation commits
+       so the grace-period window starts at the post-commit moment
+       (cross-instance consistency).
+
+    Response ``user.active_wallet_public_id`` is projected from
+    ``principal.active_wallet_public_id`` (NOT ``token_data``) so
+    a hinted refresh surfaces the NEW wallet, matching the
+    freshly-minted token claims.
 
     Empty body preserved byte-identically for the three zero-body
     callers (``stores/auth.refreshToken``, WS ticket refresh,
@@ -338,14 +345,16 @@ async def refresh_token(
         response: FastAPI response for setting cookies.
         body: Optional refresh-token command envelope (``None`` on
             empty body).
-        repo: Repository for wallet-membership lookups.
+        repo: Repository for wallet-membership lookups + atomic
+            refresh rotation.
 
     Returns:
         RefreshResponse with new tokens, WS token, CSRF token, and
         user profile carrying ``active_wallet_public_id``.
 
     Raises:
-        HTTPException: 401 if refresh token invalid / missing,
+        HTTPException: 401 if refresh token invalid / missing OR
+            the refresh JTI has already been redeemed (replay).
             404 when the wallet hint is outside caller visibility.
     """
     settings = request.app.state.settings
@@ -377,13 +386,22 @@ async def refresh_token(
     )
     payload = RefreshTokenPayload() if body is None else body.payload
     principal = await _apply_wallet_hint(payload, principal, repo)
-    await repo.revoke_user_active_token_by_jti(token_data.jti, datetime.now(UTC))
-    token_manager.blacklist_token(token_data.jti)
     new_token_pair = token_manager.create_tokens(
         principal,
         session_id=token_data.sid,
     )
-    await token_manager.persist_tokens(new_token_pair, principal.user_public_id, repo)
+    rotated = await token_manager.rotate_tokens(
+        new_token_pair,
+        principal.user_public_id,
+        token_data.jti,
+        repo,
+    )
+    if not rotated:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token already redeemed",
+        )
+    token_manager.blacklist_token(token_data.jti)
     csrf_manager = get_csrf_manager()
     csrf_token = csrf_manager.generate_token()
     cookie_secure = settings.session_secure

@@ -1696,6 +1696,59 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def rotate_user_active_token(
+        self,
+        old_jti: str,
+        new_rows: list[UserActiveTokenInsertRow],
+        revoked_at: datetime,
+    ) -> int:
+        """Atomic refresh-rotation: revoke ``old_jti`` AND insert new rows.
+
+        The refresh endpoint exchanges a redeemed refresh JWT for a
+        fresh access + refresh pair. Plan §3.6.2 requires this
+        exchange be atomic at the DB layer: the old row's
+        ``revoked_at`` must flip ONLY if the new pair lands, and
+        vice-versa. Splitting the two operations across two
+        independent transactions opens two failure modes the Day
+        3d-A R1 multi-model review flagged as MAJOR:
+
+            1. Replay: if the old row is already revoked (count=0)
+               and the caller still rotates, a compromised refresh
+               JWT could issue multiple successor pairs inside the
+               in-memory blacklist grace window. The atomic path
+               surfaces count=0 so the route can return 401 BEFORE
+               minting a new pair.
+            2. Stranded user: if revoke commits but the subsequent
+               insert fails (transient DB error, connection reset),
+               the user loses their refresh token without receiving
+               a replacement. One transaction → either both stick
+               or both roll back; the caller retries with the
+               original refresh JWT.
+
+        The method does NOT seed the in-memory blacklist — that's
+        the caller's responsibility AFTER this call returns a
+        positive rowcount, so the blacklist grace period starts at
+        the post-commit moment.
+
+        Args:
+            old_jti: JTI of the refresh token being redeemed. Must
+                identify the CURRENT active row; if the row is
+                already revoked or missing, the method returns 0
+                and NOTHING is inserted (rollback contract).
+            new_rows: Insert batch for the successor access +
+                refresh rows. Typically 2 rows produced by
+                :meth:`TokenManager.persist_tokens`-style decoding.
+            revoked_at: Timestamp stamped on the old row's
+                ``revoked_at`` when the rotation commits.
+
+        Returns:
+            1 when the rotation committed; 0 when the old row was
+            already revoked or absent — in which case the new rows
+            were NOT inserted.
+        """
+        ...
+
+    @abstractmethod
     async def revoke_user_active_token_by_jti(
         self,
         jti: str,
@@ -4044,6 +4097,33 @@ class SQLAlchemyRepository(Repository):
             )
             await s.commit()
             return int(result.rowcount or 0)
+
+    async def rotate_user_active_token(
+        self,
+        old_jti: str,
+        new_rows: list[UserActiveTokenInsertRow],
+        revoked_at: datetime,
+    ) -> int:
+        """Atomic revoke-old + insert-new across a single transaction.
+
+        See :meth:`Repository.rotate_user_active_token` for contract.
+        """
+        async with self.session() as s:
+            result: Any = await s.execute(
+                update(UserActiveToken)
+                .where(
+                    UserActiveToken.jti == old_jti,
+                    UserActiveToken.revoked_at.is_(None),
+                )
+                .values(revoked_at=revoked_at)
+            )
+            rowcount = int(result.rowcount or 0)
+            if rowcount != 1:
+                await s.rollback()
+                return rowcount
+            await s.execute(insert(UserActiveToken), list(new_rows))
+            await s.commit()
+            return rowcount
 
     async def get_active_token_by_hash(
         self,

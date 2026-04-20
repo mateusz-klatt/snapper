@@ -208,43 +208,24 @@ class TokenManager:
         )
         return TokenClaims.model_validate_json(json_mod.dumps(payload))
 
-    async def persist_tokens(
+    def _build_inventory_rows(
         self,
         pair: TokenPair,
         user_public_id: str,
-        repository: Repository,
-    ) -> None:
-        """Persist both JWTs of ``pair`` into ``user_active_tokens``.
+    ) -> list[UserActiveTokenInsertRow]:
+        """Decode ``pair`` into the two inventory rows (access + refresh).
 
-        Called by the login and refresh route handlers immediately
-        after ``create_tokens`` returns so every outstanding token
-        is reflected in the DB inventory. This is the precondition
-        for the Day 3d DB-backed ``verify_token`` path: any JWT
-        without a matching row fails verification per §3.6.3's
-        deployment note ("pre-existing JWTs issued before migration
-        have no row → verify_token() will 401 them").
-
-        Insertion is batched through
-        :meth:`Repository.insert_user_active_tokens` so both the
-        access and refresh rows land in one transaction. If the
-        batch fails the caller's transactional scope surfaces the
-        exception — the route handler then returns 500 and the
-        client must retry login.
-
-        Args:
-            pair: The freshly-minted :class:`TokenPair` from
-                :meth:`create_tokens`.
-            user_public_id: UUID of the authenticated user — the
-                inventory's foreign key to ``users``.
-            repository: Active :class:`Repository` bound to the
-                caller's transactional scope.
+        Shared by :meth:`persist_tokens` (fresh login) and
+        :meth:`rotate_tokens` (refresh rotation) so both callers
+        agree on the row shape + ``token_hash`` + ``expires_at``
+        projection.
         """
         access_claims = self._decode_fresh_token(pair.access_token)
         refresh_claims = self._decode_fresh_token(pair.refresh_token)
         issued_at = datetime.fromtimestamp(access_claims.iat, tz=UTC)
         access_exp = datetime.fromtimestamp(access_claims.exp, tz=UTC)
         refresh_exp = datetime.fromtimestamp(refresh_claims.exp, tz=UTC)
-        rows: list[UserActiveTokenInsertRow] = [
+        return [
             UserActiveTokenInsertRow(
                 public_id=str(uuid.uuid7()),
                 user_public_id=user_public_id,
@@ -264,13 +245,107 @@ class TokenManager:
                 expires_at=refresh_exp,
             ),
         ]
+
+    async def persist_tokens(
+        self,
+        pair: TokenPair,
+        user_public_id: str,
+        repository: Repository,
+    ) -> None:
+        """Persist both JWTs of ``pair`` into ``user_active_tokens``.
+
+        Called by the login route handler immediately after
+        ``create_tokens`` returns so every outstanding token is
+        reflected in the DB inventory. This is the precondition for
+        the Day 3d DB-backed ``verify_token`` path: any JWT without
+        a matching row fails verification per §3.6.3's deployment
+        note ("pre-existing JWTs issued before migration have no
+        row → verify_token() will 401 them").
+
+        Insertion is batched through
+        :meth:`Repository.insert_user_active_tokens` so both the
+        access and refresh rows land in one transaction. If the
+        batch fails the caller's transactional scope surfaces the
+        exception — the route handler then returns 500 and the
+        client must retry login.
+
+        The refresh-rotation path uses :meth:`rotate_tokens`
+        instead; this method is reserved for the login (no old JTI
+        to revoke) case.
+
+        Args:
+            pair: The freshly-minted :class:`TokenPair` from
+                :meth:`create_tokens`.
+            user_public_id: UUID of the authenticated user — the
+                inventory's foreign key to ``users``.
+            repository: Active :class:`Repository` bound to the
+                caller's transactional scope.
+        """
+        rows = self._build_inventory_rows(pair, user_public_id)
         await repository.insert_user_active_tokens(rows)
         logger.debug(
             "persist_tokens: user={} access_jti={} refresh_jti={}",
             user_public_id,
-            access_claims.jti,
-            refresh_claims.jti,
+            rows[0]["jti"],
+            rows[1]["jti"],
         )
+
+    async def rotate_tokens(
+        self,
+        pair: TokenPair,
+        user_public_id: str,
+        old_refresh_jti: str,
+        repository: Repository,
+    ) -> bool:
+        """Atomic refresh-rotation: revoke ``old_refresh_jti`` + persist ``pair``.
+
+        The refresh route must treat "revoke old JTI" and "persist
+        new pair" as a single transaction so that:
+
+            1. A replayed refresh token (old row already revoked or
+               absent) cannot mint another successor pair inside the
+               in-memory blacklist grace window. Returns ``False``
+               and NOTHING is inserted — caller returns 401.
+            2. A transient DB error during new-row insert rolls
+               back the old-row revoke so the user retries with the
+               original refresh JWT instead of getting stranded.
+
+        The in-memory blacklist is NOT seeded here — that is the
+        caller's responsibility AFTER this method returns
+        ``True``, so the blacklist grace period starts post-commit.
+
+        Args:
+            pair: The freshly-minted :class:`TokenPair` (successor
+                to the redeemed refresh JWT).
+            user_public_id: UUID of the user — consistent across
+                redeem and rotate per JWT claim.
+            old_refresh_jti: JTI of the refresh JWT being redeemed.
+            repository: Active :class:`Repository`.
+
+        Returns:
+            ``True`` when the rotation committed (rowcount == 1);
+            ``False`` when the old row was already revoked or
+            absent, in which case the caller MUST NOT return the
+            new pair to the client.
+        """
+        rows = self._build_inventory_rows(pair, user_public_id)
+        count = await repository.rotate_user_active_token(old_refresh_jti, rows, datetime.now(UTC))
+        if count != 1:
+            logger.warning(
+                "rotate_tokens: refresh JTI replay/missing — user={} old_jti={} rowcount={}",
+                user_public_id,
+                old_refresh_jti,
+                count,
+            )
+            return False
+        logger.debug(
+            "rotate_tokens: user={} old_jti={} new_access_jti={} new_refresh_jti={}",
+            user_public_id,
+            old_refresh_jti,
+            rows[0]["jti"],
+            rows[1]["jti"],
+        )
+        return True
 
     def _is_token_blacklisted(self, jti: str) -> bool:
         """Check if token is blacklisted (past grace period).

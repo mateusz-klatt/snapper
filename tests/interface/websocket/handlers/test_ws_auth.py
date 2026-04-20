@@ -3100,6 +3100,7 @@ class StubTokenManager:
         self.last_verified_token: str | None = None
         self.last_session_id: str | None = None
         self.persisted_pairs: list[tuple[TokenPair, str]] = []
+        self.rotated_old_jtis: list[str] = []
 
     def create_tokens(
         self,
@@ -3119,8 +3120,20 @@ class StubTokenManager:
         user_public_id: str,
         repository: object,
     ) -> None:
-        """Record the call so the login/refresh routes can complete."""
+        """Record the call so the login route can complete."""
         self.persisted_pairs.append((pair, user_public_id))
+
+    async def rotate_tokens(
+        self,
+        pair: TokenPair,
+        user_public_id: str,
+        old_refresh_jti: str,
+        repository: object,
+    ) -> bool:
+        """Record the rotation call; returns True so the refresh route completes."""
+        self.persisted_pairs.append((pair, user_public_id))
+        self.rotated_old_jtis.append(old_refresh_jti)
+        return True
 
     def verify_token(self, token: str) -> TokenClaims | None:
         """Verify token and return claims."""
@@ -3339,6 +3352,12 @@ def test_login_success_sets_cookies(
     assert response.cookies.get("access_token") == "new-access"
     assert response.cookies.get("refresh_token") == "new-refresh"
     assert response.cookies.get("csrf_token") == "csrf-new"
+    assert len(token_manager.persisted_pairs) == 1
+    persisted_pair, persisted_user_id = token_manager.persisted_pairs[0]
+    assert persisted_pair.access_token == "new-access"
+    assert persisted_pair.refresh_token == "new-refresh"
+    assert persisted_user_id == user.public_id
+    assert token_manager.rotated_old_jtis == []
 
 
 def test_login_failure_returns_401(
@@ -3425,6 +3444,12 @@ def test_refresh_token_success(
     assert payload["user"]["role"] == "operator"
     assert token_manager.last_created_user is not None
     assert token_manager.last_created_user.active_wallet_public_id == "wallet-from-old-token"
+    assert token_manager.rotated_old_jtis == ["refresh-jti"]
+    assert len(token_manager.persisted_pairs) == 1
+    rotated_pair, rotated_user_id = token_manager.persisted_pairs[0]
+    assert rotated_pair.access_token == "rotated-access"
+    assert rotated_pair.refresh_token == "rotated-refresh"
+    assert rotated_user_id == token_manager.last_created_user.user_public_id
 
 
 def test_get_current_user_profile_returns_user(
@@ -3545,6 +3570,72 @@ def test_refresh_token_user_missing_returns_401(
     response = client.post("/auth/refresh")
     assert response.status_code == 401
     assert response.json()["detail"] == "User not found"
+
+
+def test_refresh_token_replay_returns_401_no_mint(
+    auth_app: AuthAppFixture,
+    monkeypatch: Any,
+) -> None:
+    """Replayed refresh JWT (rotation rowcount 0) is rejected with 401.
+
+    Given: Valid JWT signature but the refresh JTI is already revoked
+        (rotate_user_active_token returns 0),
+    When: Calling refresh endpoint,
+    Then: 401 is returned, the old JTI is NOT re-blacklisted, and no
+        new cookies are set. Protects against replay within the
+        in-memory blacklist grace window (R1 REQUEST CHANGES fix
+        for Day 3d-A).
+    """
+
+    class _ReplayTokenManager(StubTokenManager):
+        """Stub where ``rotate_tokens`` always returns False (replay)."""
+
+        async def rotate_tokens(
+            self,
+            pair: TokenPair,
+            user_public_id: str,
+            old_refresh_jti: str,
+            repository: object,
+        ) -> bool:
+            self.rotated_old_jtis.append(old_refresh_jti)
+            return False
+
+    client, user_service, _token_manager, _csrf_manager = auth_app
+    replay_manager = _ReplayTokenManager()
+    replay_manager.verify_response = TokenClaims(
+        sub="123",
+        username="bob",
+        role=UserRole.OPERATOR,
+        permissions=["read"],
+        exp=999999999,
+        iat=123456,
+        jti="replayed-jti",
+        sid="session-123",
+    )
+    monkeypatch.setattr(routes, "get_token_manager", lambda: replay_manager)
+    user = UserProfile(
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="test-pid",
+        timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+        username="bob",
+        role=UserRole.OPERATOR,
+        created_at=datetime.now(UTC),
+    )
+    user_service.user_by_id = user
+    replay_manager.create_tokens_response = TokenPair(
+        access_token="should-not-leak",
+        refresh_token="should-not-leak",
+        expires_in=999,
+    )
+    client.cookies.set("refresh_token", "redeemed-refresh")
+    response = client.post("/auth/refresh")
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Refresh token already redeemed"
+    assert replay_manager.rotated_old_jtis == ["replayed-jti"]
+    assert replay_manager.blacklisted == []
+    assert response.cookies.get("access_token") is None
+    assert response.cookies.get("refresh_token") is None
 
 
 def test_logout_invalidates_tokens(
