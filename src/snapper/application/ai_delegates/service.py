@@ -14,10 +14,12 @@ mode the Day 3d-A R1 review flagged for refresh rotation — so
 this service holds ONE session scope for the whole flow.
 """
 
+import asyncio
 import secrets
 import uuid
 from datetime import UTC
 from datetime import datetime
+from typing import ClassVar
 from uuid import uuid7
 
 import bcrypt
@@ -110,6 +112,28 @@ class InvalidOwnerPrincipalError(Exception):
 class DelegateService:
     """Create + manage AI delegates owned by an operator."""
 
+    _owner_locks: ClassVar[dict[str, asyncio.Lock]] = {}
+    """In-process serialisation for the proliferation guard + insert.
+
+    Day 5d-C R2 review (claude-sonnet-4.6 BLOCKER): the count-then-
+    insert path is open to races under PostgreSQL's default READ
+    COMMITTED isolation because two concurrent
+    ``POST /api/ai-delegates`` can both read ``count=4`` and both
+    commit. A ``SELECT … FOR UPDATE`` on the owner row closes
+    cross-instance races on PG, but SQLite's transaction model
+    does not emulate FOR UPDATE, so the in-test concurrency still
+    bypasses the cap. This dict maps ``owner_public_id`` to a
+    per-owner :class:`asyncio.Lock` so every create inside a
+    single Python process serialises before the DB round-trips —
+    closing both the SQLite-test race AND the in-process PG
+    race. Cross-process PG races are still covered by the
+    transactional row lock in :meth:`_guard_proliferation`.
+
+    The dict is a class-level attribute so the lock survives
+    across :class:`DelegateService` instances in the same process
+    (FastAPI spawns a fresh service per request).
+    """
+
     def __init__(
         self,
         repository: Repository,
@@ -132,6 +156,24 @@ class DelegateService:
         self.repository = repository
         self.token_manager = token_manager
         self._tracker = tracker or SequenceTracker()
+
+    @classmethod
+    def _get_owner_lock(cls, owner_public_id: str) -> asyncio.Lock:
+        """Return (and lazily create) the per-owner proliferation lock.
+
+        Args:
+            owner_public_id: UUID of the creating operator.
+
+        Returns:
+            The shared :class:`asyncio.Lock` for this owner. Every
+            in-process create call for this owner will acquire the
+            same lock, serialising the guard + insert sequence.
+        """
+        lock = cls._owner_locks.get(owner_public_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            cls._owner_locks[owner_public_id] = lock
+        return lock
 
     async def create_delegate(
         self,
@@ -210,6 +252,28 @@ class DelegateService:
         """
         self._guard_owner(owner.user_public_id)
         bound_operator_public_id = self._resolve_operator_binding(owner, body)
+        async with self._get_owner_lock(owner.user_public_id):
+            return await self._create_delegate_locked(
+                owner=owner,
+                body=body,
+                bound_operator_public_id=bound_operator_public_id,
+            )
+
+    async def _create_delegate_locked(
+        self,
+        *,
+        owner: AuthPrincipal,
+        body: DelegateCreateBody,
+        bound_operator_public_id: str,
+    ) -> DelegateCreatedPayload:
+        """Execute the atomic create once the per-owner lock is held.
+
+        Split out from :meth:`create_delegate` so the lock scope is
+        obvious at the call site. The lock wraps the
+        :meth:`_guard_proliferation` + insert + commit sequence so
+        two concurrent same-owner calls in the same process cannot
+        both pass the cap check.
+        """
         async with self.repository.session() as session:
             await self._guard_proliferation(session, owner.user_public_id)
             username = await self._reserve_unique_username(session, body.label)
@@ -528,6 +592,24 @@ class DelegateService:
         :class:`DelegateProliferationError` so the route can map
         to 409 before the atomic create transaction opens.
 
+        Day 5d-C R2 review (claude-sonnet-4.6 BLOCKER): the count
+        + insert pair runs under PostgreSQL's default READ
+        COMMITTED isolation, which does NOT serialise two
+        concurrent ``POST /api/ai-delegates`` calls from the same
+        owner — both could read count=4, both pass the guard, and
+        both commit (minting 6 delegates through a 5-delegate cap).
+        Since the cap is the blast-radius control for a leaked
+        operator session, serialisation is a security invariant,
+        not just a data-integrity nit.
+
+        Closure: lock the owning User row with
+        ``SELECT ... FOR UPDATE`` BEFORE counting. On PostgreSQL
+        this blocks any concurrent transaction that would also lock
+        the same owner row until this commit completes; on SQLite
+        the write lock already serialises transactions so the
+        clause is a no-op. Either way, the count → guard → insert
+        sequence becomes atomic per-owner.
+
         Args:
             session: Active :class:`AsyncSession` from the calling
                 transaction.
@@ -535,6 +617,16 @@ class DelegateService:
         """
         now = _now_for_join()
         user_ts, user_known_to = where_active(User, now)
+        lock_stmt = (
+            select(User.public_id)
+            .where(
+                User.public_id == owner_public_id,
+                user_ts,
+                user_known_to,
+            )
+            .with_for_update()
+        )
+        await session.execute(lock_stmt)
         count_stmt = (
             select(func.count())
             .select_from(User)

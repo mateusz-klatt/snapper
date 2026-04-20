@@ -791,6 +791,56 @@ class TestDelegateProliferationCap:
         assert "limit reached" in exc.value.detail
 
 
+class TestDelegateProliferationConcurrency:
+    """Day 5d-C R2 closure — proliferation cap survives concurrent creates.
+
+    Before the row-lock fix, two parallel ``POST /api/ai-delegates``
+    calls from the same owner could both read the same pre-insert
+    count and both commit, minting ``MAX + N`` delegates. The fix
+    serialises on a ``SELECT ... FOR UPDATE`` of the owner's User
+    row, which PostgreSQL honours as a real lock and SQLite
+    promotes to its write lock. Either way, the count → guard →
+    insert sequence is atomic per-owner.
+    """
+
+    @pytest.mark.asyncio
+    async def test_parallel_creates_respect_cap(self, repo: SQLAlchemyRepository) -> None:
+        """MAX_AI_DELEGATES_PER_OWNER + 2 concurrent creates = 5 rows, not 7.
+
+        Given: an operator at the cap boundary with
+            ``MAX_AI_DELEGATES_PER_OWNER`` slots available,
+        When: ``MAX + 2`` create calls fire concurrently via
+            :func:`asyncio.gather`,
+        Then: exactly ``MAX`` delegates are persisted and the
+            extra attempts raise :class:`DelegateProliferationError`.
+            Confirms the row-lock serialises the count-then-insert
+            under concurrent load.
+        """
+        await _seed_owner(repo, public_id="owner-race", username="owner-race")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        owner = _make_owner_principal("owner-race", operator_public_id="op-race")
+
+        async def _attempt(slot: int) -> bool:
+            body = DelegateCreateBody(
+                label=f"concurrent-{slot:02d}",
+                caps=DelegateCapsBody(),
+            )
+            try:
+                await service.create_delegate(owner=owner, body=body)
+                return True
+            except DelegateProliferationError:
+                return False
+
+        attempts = MAX_AI_DELEGATES_PER_OWNER + 2
+        outcomes = await asyncio.gather(*[_attempt(i) for i in range(attempts)])
+        admitted = sum(1 for ok in outcomes if ok)
+        rejected = sum(1 for ok in outcomes if not ok)
+        assert admitted == MAX_AI_DELEGATES_PER_OWNER
+        assert rejected == 2
+        persisted = await service.list_delegates(owner_public_id="owner-race")
+        assert len(persisted) == MAX_AI_DELEGATES_PER_OWNER
+
+
 class TestCreateDelegateInsertFailureRollsBackAtomically:
     """Codex R1 NICE-TO-HAVE — pin the transactional rollback invariant."""
 
