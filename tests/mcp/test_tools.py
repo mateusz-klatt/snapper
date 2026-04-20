@@ -51,7 +51,20 @@ def _make_claims(
         jti="jti",
         sid="sid",
         user_public_id=user_public_id,
+        operator_public_ids=["op-1"],
         primary_operator_public_id="op-1",
+    )
+
+
+def _allow_wallet(repo: Any, wallet_public_id: str = "wallet-1") -> None:
+    """Configure a mock repo so ``validate_user_wallet_scope`` admits the wallet.
+
+    The helper sets ``list_accessible_wallets_for_operators`` on the
+    AsyncMock to return the single row every ``submit_manual_order``
+    test in this module uses. Call before dispatching the tool.
+    """
+    repo.list_accessible_wallets_for_operators = AsyncMock(
+        return_value=[{"public_id": wallet_public_id}]
     )
 
 
@@ -201,6 +214,7 @@ class TestSubmitManualOrderTool:
         repo = AsyncMock()
         repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-pid"))
         repo.insert_trade_command = AsyncMock(return_value=(2, "cmd-pid"))
+        _allow_wallet(repo)
         server = _build_server(
             repository=repo,
             caps_enforcer=self._make_enforcer_admit(),
@@ -237,6 +251,7 @@ class TestSubmitManualOrderTool:
         repo = AsyncMock()
         repo.insert_execution_plan = AsyncMock()
         repo.insert_trade_command = AsyncMock()
+        _allow_wallet(repo)
         server = _build_server(
             repository=repo,
             caps_enforcer=self._make_enforcer_reject(),
@@ -342,6 +357,7 @@ class TestSubmitManualOrderTool:
             side_effect=IntegrityError("INSERT failed", params=None, orig=_PgOrigError())
         )
         repo.insert_trade_command = AsyncMock()
+        _allow_wallet(repo)
         server = _build_server(
             repository=repo,
             caps_enforcer=self._make_enforcer_admit(),
@@ -385,6 +401,7 @@ class TestSubmitManualOrderTool:
             side_effect=IntegrityError("INSERT failed", params=None, orig=_SqliteOrigError())
         )
         repo.insert_trade_command = AsyncMock()
+        _allow_wallet(repo)
         server = _build_server(
             repository=repo,
             caps_enforcer=self._make_enforcer_admit(),
@@ -428,6 +445,7 @@ class TestSubmitManualOrderTool:
         repo.insert_execution_plan = AsyncMock(
             side_effect=IntegrityError("INSERT failed", params=None, orig=_CheckOrigError())
         )
+        _allow_wallet(repo)
         server = _build_server(
             repository=repo,
             caps_enforcer=self._make_enforcer_admit(),
@@ -464,6 +482,7 @@ class TestSubmitManualOrderTool:
         repo.insert_execution_plan = AsyncMock(
             side_effect=IntegrityError("synthetic", params=None, orig=None)
         )
+        _allow_wallet(repo)
         server = _build_server(
             repository=repo,
             caps_enforcer=self._make_enforcer_admit(),
@@ -499,6 +518,7 @@ class TestSubmitManualOrderTool:
         repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-pid"))
         repo.insert_trade_command = AsyncMock(side_effect=RuntimeError("broker down"))
         repo.update_execution_plan_status = AsyncMock(return_value=2)
+        _allow_wallet(repo)
         server = _build_server(
             repository=repo,
             caps_enforcer=self._make_enforcer_admit(),
@@ -540,6 +560,7 @@ class TestSubmitManualOrderTool:
         repo.update_execution_plan_status = AsyncMock(
             side_effect=RuntimeError("compensation blew up")
         )
+        _allow_wallet(repo)
         server = _build_server(
             repository=repo,
             caps_enforcer=self._make_enforcer_admit(),

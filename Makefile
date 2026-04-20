@@ -1,4 +1,4 @@
-.PHONY: help system-deps setup setup-full py-refresh refresh pre-refresh fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate-dev migrate-prod dev-backend dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-cov ios-setup ios-gen-types ios-build ios-test ios-archive ios-export ios-ipa ios-clean docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-polygon-aggregates docker-polygon-aggregates-all docker-polygon-grouped docker-stop server-check docs-pdf clean
+.PHONY: help system-deps setup setup-full py-refresh refresh pre-refresh fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml check fix check-all fix-all check-exclusions check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral move-imports run-collector run-trader run-paper run-backtest run-server run-static run-polygon-aggregates run-polygon-aggregates-all run-polygon-grouped migrate-dev migrate-prod dev-backend dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-cov ios-setup ios-gen-types ios-build ios-test ios-archive ios-export ios-ipa ios-clean docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-polygon-aggregates docker-polygon-aggregates-all docker-polygon-grouped docker-stop server-check docs-pdf clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -239,7 +239,7 @@ cov-serial:
 cov-xml:
 	$(PYRUN) coverage xml -o coverage.xml
 
-check: fmt lint typecheck check-docstrings check-no-comments check-main-guard check-init-files check-temporal-mutations
+check: fmt lint typecheck check-docstrings check-no-comments check-main-guard check-init-files check-temporal-mutations check-vendor-neutral
 
 fix: fmt-fix lint-fix move-imports
 
@@ -266,6 +266,9 @@ check-init-files:
 
 check-temporal-mutations:
 	$(VENV_PY) scripts/check_temporal_mutations.py --strict
+
+check-vendor-neutral:
+	$(VENV_PY) scripts/check_vendor_neutral.py --strict
 
 move-imports:
 	$(VENV_PY) scripts/move_imports_to_top.py $(PY_DIRS)

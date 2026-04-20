@@ -3,9 +3,9 @@
 This module defines request/response schemas for the
 ``/api/ai-delegates`` CRUD surface. Delegates are
 :class:`~snapper.auth.domain.roles.UserRole.AI_DELEGATE` users an
-operator creates so an MCP client (Claude Desktop, Cursor, etc.)
-can authenticate to Snapper with a scoped bearer token pair
-instead of the operator's primary credentials.
+operator creates so an MCP-compatible client can authenticate to
+Snapper with a scoped bearer token pair instead of the operator's
+primary credentials.
 
 Envelopes follow the standard Snapper pattern
 (:class:`~snapper.api.schemas.base.PayloadRequest` /

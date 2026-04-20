@@ -307,6 +307,7 @@ not on status text.
 | 401    | `user_deactivated`         | Owner account deactivated (plan §2 item 6)       | Prompt re-login; don't auto-refresh                   |
 | 401    | Refresh token redeemed     | Replay of a spent refresh JWT                    | Re-login                                              |
 | 401    | Account deactivated        | Session cookie flow                              | Re-login                                              |
+| 403    | `wallet_out_of_scope`      | Tool targets a wallet outside the caller's scope | Pick a wallet the caller still has a live grant on    |
 
 Delegate CRUD:
 

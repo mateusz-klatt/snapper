@@ -49,6 +49,7 @@ from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.repository import Repository
 from snapper.data.repository_types import ExecutionPlanInsertRow
 from snapper.data.repository_types import TradeCommandInsertRow
+from snapper.mcp.auth import validate_user_wallet_scope
 from snapper.mcp.output_sanitizer import sanitize_output
 
 _MCP_SOURCE_SURFACE = "mcp"
@@ -246,6 +247,7 @@ def register_mcp_tools(
                 "before lifespan startup."
             )
         now = datetime.now(UTC)
+        await validate_user_wallet_scope(claims, wallet_public_id, repo, as_of=now)
         ts = dt.datetime.now(dt.UTC)
         shard_key = f"{exchange}.{instrument}.live"
         plan_public_id: str | None = None
