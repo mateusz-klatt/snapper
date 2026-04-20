@@ -22,6 +22,7 @@ import pytest
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
+from snapper.auth.tokens import BLACKLIST_MAX_ENTRIES
 from snapper.auth.tokens import REJECTION_REASON_INVALID
 from snapper.auth.tokens import REJECTION_REASON_USER_DEACTIVATED
 from snapper.auth.tokens import VERIFY_CACHE_MAX_ENTRIES
@@ -563,8 +564,6 @@ class TestBlacklistHardCap:
         Then: the set size stays at the cap and the oldest entry is
             the one that was evicted.
         """
-        from snapper.auth.tokens import BLACKLIST_MAX_ENTRIES
-
         manager = _fresh_manager()
         base_ts = datetime.now(UTC).timestamp() - 1000.0
         for i in range(BLACKLIST_MAX_ENTRIES):
@@ -595,8 +594,6 @@ class TestBlacklistHardCap:
         When: one more JTI is invalidated,
         Then: the cap is enforced identically.
         """
-        from snapper.auth.tokens import BLACKLIST_MAX_ENTRIES
-
         manager = _fresh_manager()
         base_ts = datetime.now(UTC).timestamp() - 1000.0
         for i in range(BLACKLIST_MAX_ENTRIES):

@@ -53,8 +53,8 @@ MCP_RATE_LIMIT: Final[str] = "60/minute"
 """Default per-principal MCP quota.
 
 60 requests per minute per authenticated delegate is enough for
-interactive usage (a human plus Claude Desktop typing / clicking
-tools) but bounds a runaway retry loop to roughly one request per
+interactive usage from a desktop MCP client with a human in the
+loop, but bounds a runaway retry loop to roughly one request per
 second. Raising the cap is a deployment-time choice; hard-coding a
 higher default risks letting abusive traffic through on fresh
 installs.

@@ -580,8 +580,12 @@ export type Paths = {
          *         201-shaped :class:`DelegateCreatedResponse`.
          *
          *     Raises:
-         *         HTTPException: 409 when a unique username can't be
-         *             derived from the label (pathological input).
+         *         HTTPException: 422 when the caller-supplied
+         *             ``operator_public_id`` is outside the caller's claim
+         *             set OR no selection was given and the caller has no
+         *             primary operator. 409 when a unique username can't be
+         *             derived from the label (pathological input) OR the
+         *             owner already holds the per-owner delegate cap.
          */
         post: Operations["create_delegate_api_ai_delegates_post"];
         delete?: never;
@@ -8211,7 +8215,13 @@ export type Components = {
          *     The operator chooses a human-readable ``label`` that becomes
          *     the delegate's username (prefixed with ``ai-``). Caps are
          *     optional — every cap defaulting to the Snapper-wide fallback
-         *     per plan §3.5.3.
+         *     per plan §3.5.3. The operator also picks WHICH of their
+         *     authenticated operators the delegate inherits membership
+         *     on — the minted delegate's wallet-scope set equals the
+         *     chosen operator's scope grants (plan §2 item 3). The
+         *     selection MUST sit inside the caller's authenticated operator
+         *     set; omit to default to the caller's
+         *     ``primary_operator_public_id``.
          *
          *     Attributes:
          *         label: Non-empty human-readable tag. Normalised to
@@ -8219,6 +8229,10 @@ export type Components = {
          *             listable in the standard user table without an
          *             auxiliary display-name column.
          *         caps: Optional per-delegate trading safety caps.
+         *         operator_public_id: Operator the delegate is bound to —
+         *             must be in the caller's claim set. ``None`` defers
+         *             to the caller's primary operator so simple callers
+         *             don't need to know their membership set.
          */
         DelegateCreateBody: {
             /**
@@ -8227,6 +8241,11 @@ export type Components = {
              */
             label: string;
             caps?: Components["schemas"]["DelegateCapsBody"];
+            /**
+             * Operator Public Id
+             * @description Operator the delegate is bound to — must be in the caller's claim set. Null defers to the caller's primary operator.
+             */
+            operator_public_id?: string | null;
         };
         /**
          * DelegateCapsUpdateRequest

@@ -3567,6 +3567,14 @@ struct DelegateCreateBody: Codable, Sendable {
     /// Delegate label
     let label: String
     let caps: DelegateCapsBody?
+    /// Operator the delegate is bound to — must be in the caller's claim set. Null defers to the caller's primary operator.
+    let operatorPublicId: String?
+
+    enum CodingKeys: String, CodingKey {
+        case label
+        case caps
+        case operatorPublicId = "operator_public_id"
+    }
 }
 
 struct DelegateCapsUpdateRequest: Codable, Sendable {

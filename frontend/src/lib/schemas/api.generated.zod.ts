@@ -2099,6 +2099,7 @@ export const DelegateCreateBodySchema = z
   .object({
     label: z.string().min(1).max(48),
     caps: DelegateCapsBodySchema.optional(),
+    operator_public_id: z.string().nullable().optional(),
   })
   .strict()
 

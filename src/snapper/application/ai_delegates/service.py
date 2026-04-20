@@ -115,7 +115,7 @@ class DelegateService:
     _owner_locks: ClassVar[dict[str, asyncio.Lock]] = {}
     """In-process serialisation for the proliferation guard + insert.
 
-    Day 5d-C R2 review (claude-sonnet-4.6 BLOCKER): the count-then-
+    Day 5d-C R2 review (security BLOCKER): the count-then-
     insert path is open to races under PostgreSQL's default READ
     COMMITTED isolation because two concurrent
     ``POST /api/ai-delegates`` can both read ``count=4`` and both
@@ -592,7 +592,7 @@ class DelegateService:
         :class:`DelegateProliferationError` so the route can map
         to 409 before the atomic create transaction opens.
 
-        Day 5d-C R2 review (claude-sonnet-4.6 BLOCKER): the count
+        Day 5d-C R2 review (security BLOCKER): the count
         + insert pair runs under PostgreSQL's default READ
         COMMITTED isolation, which does NOT serialise two
         concurrent ``POST /api/ai-delegates`` calls from the same

@@ -6,6 +6,7 @@ routes against a real in-memory SQLite DB so the SCD2 + caps
 """
 
 import asyncio
+import json as _json_mod
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta as _td
@@ -1075,8 +1076,6 @@ class TestAiDelegatesFeatureFlagGate:
             ``{"detail": ...}`` wrapper FastAPI would have produced
             for a raw ``HTTPException``.
         """
-        import json as _json_mod
-
         exc = ai_delegate_routes.AiIntegrationDisabledError("AI integration is disabled.")
         response = ai_delegate_routes.ai_integration_disabled_handler(_Magic(), exc)
         assert response.status_code == 503
