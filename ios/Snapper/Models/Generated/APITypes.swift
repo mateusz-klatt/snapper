@@ -1104,6 +1104,115 @@ struct CredentialSummary: Codable, Sendable {
     }
 }
 
+struct DelegateCapsBody: Codable, Sendable {
+    /// JSON dict {instrument_public_id: qty} or null for unbounded
+    let maxOrderQuantityPerInstrument: JsonObject?
+    /// In-flight command cap (null = unbounded)
+    let maxOpenOrders: Int?
+    /// Rolling 24h USD notional cap (null = unbounded)
+    let maxDailyNotionalUsd: Double?
+    /// Sliding 60s cancel cap (null = unbounded)
+    let maxCancelsPerMinute: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case maxOrderQuantityPerInstrument = "max_order_quantity_per_instrument"
+        case maxOpenOrders = "max_open_orders"
+        case maxDailyNotionalUsd = "max_daily_notional_usd"
+        case maxCancelsPerMinute = "max_cancels_per_minute"
+    }
+}
+
+struct DelegateCreatedPayload: Codable, Sendable {
+    let delegate: DelegateRead
+    let accessToken: String
+    let refreshToken: String
+    let expiresIn: Int
+
+    enum CodingKeys: String, CodingKey {
+        case delegate
+        case accessToken = "access_token"
+        case refreshToken = "refresh_token"
+        case expiresIn = "expires_in"
+    }
+}
+
+struct DelegateCreatedResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: DelegateCreatedPayload
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct DelegateListResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: [DelegateRead]
+    /// Number of items in payload
+    let count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+        case count
+    }
+}
+
+struct DelegateRead: Codable, Sendable {
+    let publicId: String
+    let username: String
+    let label: String
+    let createdByUserPublicId: String
+    let createdAt: Date
+    let isActive: Bool
+    let caps: DelegateCapsBody
+
+    enum CodingKeys: String, CodingKey {
+        case publicId = "public_id"
+        case username
+        case label
+        case createdByUserPublicId = "created_by_user_public_id"
+        case createdAt = "created_at"
+        case isActive = "is_active"
+        case caps
+    }
+}
+
+struct DelegateResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: DelegateRead
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
 struct EquityOverlayPoint: Codable, Sendable {
     let pointTime: Date
     let equityA: Double?
@@ -1267,6 +1376,33 @@ struct ExecutionPlanResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: ExecutionPlanData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct FeatureFlagsPayload: Codable, Sendable {
+    /// Whether the MCP sub-app is activated (plan §3.12).
+    let aiIntegrationEnabled: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case aiIntegrationEnabled = "ai_integration_enabled"
+    }
+}
+
+struct FeatureFlagsResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: FeatureFlagsPayload
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -3407,6 +3543,75 @@ struct RemoveSettingRequest: Codable, Sendable {
 }
 
 struct RemoveSettingBody: Codable, Sendable {
+}
+
+struct DelegateCreateRequest: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: DelegateCreateBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct DelegateCreateBody: Codable, Sendable {
+    /// Delegate label
+    let label: String
+    let caps: DelegateCapsBody?
+}
+
+struct DelegateCapsUpdateRequest: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: DelegateCapsUpdateBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct DelegateCapsUpdateBody: Codable, Sendable {
+    let caps: DelegateCapsBody
+}
+
+struct DelegateDeactivateRequest: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: DelegateDeactivateBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct DelegateDeactivateBody: Codable, Sendable {
+    /// Optional audit reason
+    let reason: String?
 }
 
 struct BacktestCreateCommand: Codable, Sendable {

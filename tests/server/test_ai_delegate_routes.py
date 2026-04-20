@@ -8,19 +8,32 @@ routes against a real in-memory SQLite DB so the SCD2 + caps
 import asyncio
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta as _td
 from typing import Any
+from unittest.mock import MagicMock as _Magic
+from unittest.mock import patch as _patch
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select as _sel
+from sqlalchemy import update as _up
+from sqlalchemy.exc import IntegrityError
 
 from snapper.api.schemas.ai_delegates import DelegateCapsBody
 from snapper.api.schemas.ai_delegates import DelegateCapsUpdateBody
+from snapper.api.schemas.ai_delegates import DelegateCapsUpdateRequest
 from snapper.api.schemas.ai_delegates import DelegateCreateBody
 from snapper.api.schemas.ai_delegates import DelegateCreatedPayload
+from snapper.api.schemas.ai_delegates import DelegateCreateRequest
 from snapper.api.schemas.ai_delegates import DelegateDeactivateBody
+from snapper.api.schemas.ai_delegates import DelegateDeactivateRequest
 from snapper.api.schemas.ai_delegates import DelegateRead
+from snapper.application.ai_delegates.service import MAX_AI_DELEGATES_PER_OWNER
+from snapper.application.ai_delegates.service import DelegateLabelConflictError
 from snapper.application.ai_delegates.service import DelegateNotFoundError
+from snapper.application.ai_delegates.service import DelegateProliferationError
 from snapper.application.ai_delegates.service import DelegateService
+from snapper.application.ai_delegates.service import InvalidOwnerPrincipalError
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.tokens import TokenManager
@@ -31,6 +44,8 @@ from snapper.data.models import UserActiveToken
 from snapper.data.models import UserTradingCaps
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.server import ai_delegate_routes
+from snapper.server.ai_delegate_routes import _build_service
 
 _BCRYPT_FAKE_DIGEST: str = "$2b$12$" + "x" * 53
 
@@ -326,8 +341,6 @@ class TestBlankOwnerGuard:
         self, repo: SQLAlchemyRepository
     ) -> None:
         """Empty ``owner.user_public_id`` blocks create at the service boundary."""
-        from snapper.application.ai_delegates.service import InvalidOwnerPrincipalError
-
         service = DelegateService(repository=repo, token_manager=_fresh_manager())
         with pytest.raises(InvalidOwnerPrincipalError):
             await service.create_delegate(
@@ -340,8 +353,6 @@ class TestBlankOwnerGuard:
         self, repo: SQLAlchemyRepository
     ) -> None:
         """List refuses blank owner IDs — no cross-tenant leak."""
-        from snapper.application.ai_delegates.service import InvalidOwnerPrincipalError
-
         service = DelegateService(repository=repo, token_manager=_fresh_manager())
         with pytest.raises(InvalidOwnerPrincipalError):
             await service.list_delegates(owner_public_id="")
@@ -351,8 +362,6 @@ class TestBlankOwnerGuard:
         self, repo: SQLAlchemyRepository
     ) -> None:
         """Detail refuses blank owner IDs even when the delegate public_id is set."""
-        from snapper.application.ai_delegates.service import InvalidOwnerPrincipalError
-
         service = DelegateService(repository=repo, token_manager=_fresh_manager())
         with pytest.raises(InvalidOwnerPrincipalError):
             await service.get_delegate(public_id="whatever", owner_public_id="")
@@ -362,8 +371,6 @@ class TestBlankOwnerGuard:
         self, repo: SQLAlchemyRepository
     ) -> None:
         """PATCH refuses blank owner IDs."""
-        from snapper.application.ai_delegates.service import InvalidOwnerPrincipalError
-
         service = DelegateService(repository=repo, token_manager=_fresh_manager())
         with pytest.raises(InvalidOwnerPrincipalError):
             await service.update_caps(
@@ -377,11 +384,6 @@ class TestBlankOwnerGuard:
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Route layer maps ``InvalidOwnerPrincipalError`` → 401 with detail."""
-        from fastapi import HTTPException
-
-        from snapper.api.schemas.ai_delegates import DelegateCreateRequest
-        from snapper.application.ai_delegates.service import InvalidOwnerPrincipalError
-        from snapper.server import ai_delegate_routes
 
         class _BlankService:
             async def create_delegate(
@@ -413,10 +415,6 @@ class TestBlankOwnerGuard:
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """List route maps ``InvalidOwnerPrincipalError`` → 401."""
-        from fastapi import HTTPException
-
-        from snapper.application.ai_delegates.service import InvalidOwnerPrincipalError
-        from snapper.server import ai_delegate_routes
 
         class _BlankService:
             async def list_delegates(self, owner_public_id: str) -> list[DelegateRead]:
@@ -437,10 +435,6 @@ class TestBlankOwnerGuard:
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """GET route maps ``InvalidOwnerPrincipalError`` → 401."""
-        from fastapi import HTTPException
-
-        from snapper.application.ai_delegates.service import InvalidOwnerPrincipalError
-        from snapper.server import ai_delegate_routes
 
         class _BlankService:
             async def get_delegate(self, public_id: str, owner_public_id: str) -> DelegateRead:
@@ -462,11 +456,6 @@ class TestBlankOwnerGuard:
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """PATCH route maps ``InvalidOwnerPrincipalError`` → 401."""
-        from fastapi import HTTPException
-
-        from snapper.api.schemas.ai_delegates import DelegateCapsUpdateRequest
-        from snapper.application.ai_delegates.service import InvalidOwnerPrincipalError
-        from snapper.server import ai_delegate_routes
 
         class _BlankService:
             async def update_caps(
@@ -504,10 +493,6 @@ class TestBlankOwnerGuard:
         the route must map that to 401 before ever touching
         ``UserService.deactivate_user``.
         """
-        from fastapi import HTTPException
-
-        from snapper.application.ai_delegates.service import InvalidOwnerPrincipalError
-        from snapper.server import ai_delegate_routes
 
         class _BlankService:
             async def get_delegate(self, public_id: str, owner_public_id: str) -> DelegateRead:
@@ -535,9 +520,6 @@ class TestDelegateProliferationCap:
         self, repo: SQLAlchemyRepository
     ) -> None:
         """Creating the 6th active delegate fails with DelegateProliferationError."""
-        from snapper.application.ai_delegates.service import MAX_AI_DELEGATES_PER_OWNER
-        from snapper.application.ai_delegates.service import DelegateProliferationError
-
         await _seed_owner(repo, public_id="owner-cap", username="cap")
         service = DelegateService(repository=repo, token_manager=_fresh_manager())
         for i in range(MAX_AI_DELEGATES_PER_OWNER):
@@ -556,8 +538,6 @@ class TestDelegateProliferationCap:
         self, repo: SQLAlchemyRepository
     ) -> None:
         """Rotations stay unbounded: deactivating frees a slot for a fresh mint."""
-        from snapper.application.ai_delegates.service import MAX_AI_DELEGATES_PER_OWNER
-
         await _seed_owner(repo, public_id="owner-rot", username="rot")
         service = DelegateService(repository=repo, token_manager=_fresh_manager())
         first = await service.create_delegate(
@@ -570,7 +550,6 @@ class TestDelegateProliferationCap:
                 body=DelegateCreateBody(label=f"f-{i}", caps=DelegateCapsBody()),
             )
         async with repo.session() as s:
-            from sqlalchemy import update as _up
 
             await s.execute(
                 _up(User).where(User.public_id == first.delegate.public_id).values(is_active=False)
@@ -585,8 +564,6 @@ class TestDelegateProliferationCap:
     @pytest.mark.asyncio
     async def test_cap_applies_per_owner_not_global(self, repo: SQLAlchemyRepository) -> None:
         """The cap is scoped per ``created_by_user_public_id``."""
-        from snapper.application.ai_delegates.service import MAX_AI_DELEGATES_PER_OWNER
-
         await _seed_owner(repo, public_id="owner-a", username="a")
         await _seed_owner(repo, public_id="owner-b", username="b")
         service = DelegateService(repository=repo, token_manager=_fresh_manager())
@@ -606,11 +583,6 @@ class TestDelegateProliferationCap:
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """HTTP surface: 409 with the cap message when proliferation fires."""
-        from fastapi import HTTPException
-
-        from snapper.api.schemas.ai_delegates import DelegateCreateRequest
-        from snapper.application.ai_delegates.service import DelegateProliferationError
-        from snapper.server import ai_delegate_routes
 
         class _ProliferationService:
             async def create_delegate(
@@ -658,11 +630,6 @@ class TestCreateDelegateInsertFailureRollsBackAtomically:
         flushed. The outer ``async with session()`` scope must roll
         back so NO user / caps / token rows persist.
         """
-        from datetime import timedelta as _td
-        from unittest.mock import patch as _patch
-
-        from sqlalchemy.exc import IntegrityError
-
         await _seed_owner(repo, public_id="owner-rb", username="rb")
         now = datetime.now(UTC)
         collision_hash = "deadbeef" * 8
@@ -734,8 +701,6 @@ class TestBuildServiceFactory:
         self, repo: SQLAlchemyRepository
     ) -> None:
         """Factory wires repository + TokenManager into a live service."""
-        from snapper.server.ai_delegate_routes import _build_service
-
         _fresh_manager()
         service = _build_service(repo)
         assert isinstance(service, DelegateService)
@@ -756,10 +721,6 @@ class TestServiceEdgeCases:
         ``_random_suffix`` to a constant so every retry collides
         on the first SQL lookup against a single seeded row.
         """
-        from unittest.mock import patch as _patch
-
-        from snapper.application.ai_delegates.service import DelegateLabelConflictError
-
         await _seed_owner(repo, public_id="owner-c", username="owner-c")
         async with repo.session() as s:
             s.add(
@@ -806,16 +767,12 @@ class TestServiceEdgeCases:
 
     def test_coerce_caps_none_column_returns_none(self) -> None:
         """Caps row exists but the JSON column is NULL → None."""
-        from unittest.mock import MagicMock as _Magic
-
         caps_row = _Magic()
         caps_row.max_order_quantity_per_instrument = None
         assert DelegateService._coerce_caps_json(caps_row) is None
 
     def test_coerce_caps_populated_column_passes_through(self) -> None:
         """Populated JSON dict is returned verbatim."""
-        from unittest.mock import MagicMock as _Magic
-
         caps_row = _Magic()
         caps_row.max_order_quantity_per_instrument = {"BTC-USD": 0.5}
         assert DelegateService._coerce_caps_json(caps_row) == {"BTC-USD": 0.5}
@@ -829,11 +786,6 @@ class TestRouteHandlers:
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """``DelegateLabelConflictError`` from the service → 409 HTTPException."""
-        from fastapi import HTTPException
-
-        from snapper.api.schemas.ai_delegates import DelegateCreateRequest
-        from snapper.application.ai_delegates.service import DelegateLabelConflictError
-        from snapper.server import ai_delegate_routes
 
         class _ConflictService:
             async def create_delegate(
@@ -866,9 +818,6 @@ class TestRouteHandlers:
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """``DelegateNotFoundError`` → 404 HTTPException."""
-        from fastapi import HTTPException
-
-        from snapper.server import ai_delegate_routes
 
         class _MissingService:
             async def get_delegate(self, public_id: str, owner_public_id: str) -> DelegateRead:
@@ -891,10 +840,6 @@ class TestRouteHandlers:
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """PATCH 404 path for cross-tenant / missing delegate."""
-        from fastapi import HTTPException
-
-        from snapper.api.schemas.ai_delegates import DelegateCapsUpdateRequest
-        from snapper.server import ai_delegate_routes
 
         class _MissingService:
             async def update_caps(
@@ -928,7 +873,6 @@ class TestRouteHandlers:
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Happy-path list returns a typed envelope with count=0."""
-        from snapper.server import ai_delegate_routes
 
         class _EmptyService:
             async def list_delegates(self, owner_public_id: str) -> list[DelegateRead]:
@@ -950,8 +894,6 @@ class TestRouteHandlers:
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Happy-path GET wraps the service's delegate in a typed envelope."""
-        from snapper.server import ai_delegate_routes
-
         delegate = DelegateRead(
             public_id="d1",
             username="ai-happy-abc123",
@@ -982,9 +924,6 @@ class TestRouteHandlers:
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Happy-path PATCH returns the updated delegate with new caps."""
-        from snapper.api.schemas.ai_delegates import DelegateCapsUpdateRequest
-        from snapper.server import ai_delegate_routes
-
         updated = DelegateRead(
             public_id="d2",
             username="ai-u-abc123",
@@ -1026,9 +965,6 @@ class TestRouteHandlers:
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Happy-path CREATE returns the one-shot token payload."""
-        from snapper.api.schemas.ai_delegates import DelegateCreateRequest
-        from snapper.server import ai_delegate_routes
-
         delegate = DelegateRead(
             public_id="d3",
             username="ai-fresh-abc123",
@@ -1075,9 +1011,6 @@ class TestRouteHandlers:
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Deactivate 404 path when the pre-load returns DelegateNotFoundError."""
-        from fastapi import HTTPException
-
-        from snapper.server import ai_delegate_routes
 
         class _MissingService:
             async def get_delegate(self, public_id: str, owner_public_id: str) -> DelegateRead:
@@ -1102,9 +1035,6 @@ class TestRouteHandlers:
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Happy-path deactivate delegates to ``UserService.deactivate_user``."""
-        from snapper.api.schemas.ai_delegates import DelegateDeactivateRequest
-        from snapper.server import ai_delegate_routes
-
         delegate = DelegateRead(
             public_id="d4",
             username="ai-bye-abc123",
@@ -1150,10 +1080,6 @@ class TestRouteHandlers:
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Race: delegate existed at load but was deactivated by a concurrent caller."""
-        from fastapi import HTTPException
-
-        from snapper.server import ai_delegate_routes
-
         delegate = DelegateRead(
             public_id="d5",
             username="ai-race-abc123",
@@ -1191,8 +1117,6 @@ class TestRouteHandlers:
 
 def _make_rest_request() -> Any:
     """Mock FastAPI Request with a real SequenceTracker."""
-    from unittest.mock import MagicMock as _Magic
-
     request = _Magic()
     request.app.state.rest_tracker = SequenceTracker()
     return request

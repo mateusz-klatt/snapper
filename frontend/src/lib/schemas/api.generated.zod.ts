@@ -218,6 +218,12 @@ export const ExecutionPlanDataSchema = z
   })
   .strict()
 
+export const FeatureFlagsPayloadSchema = z
+  .object({
+    ai_integration_enabled: z.boolean(),
+  })
+  .strict()
+
 export const FrontMonthDataSchema = z
   .object({
     type: z.literal('front_month'),
@@ -734,6 +740,12 @@ export const SettingUpdateBodySchema = z
 
 export const RemoveSettingBodySchema = z.object({}).strict()
 
+export const DelegateDeactivateBodySchema = z
+  .object({
+    reason: z.string().max(120).nullable().optional(),
+  })
+  .strict()
+
 export const BacktestCompareBodySchema = z
   .object({
     mode: z.enum(['manual', 'auto']),
@@ -988,6 +1000,17 @@ export const ExecutionPlanResponseSchema = z
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     payload: ExecutionPlanDataSchema,
+  })
+  .strict()
+
+export const FeatureFlagsResponseSchema = z
+  .object({
+    type: z.literal('feature_flags_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: FeatureFlagsPayloadSchema,
   })
   .strict()
 
@@ -1429,6 +1452,17 @@ export const RemoveSettingRequestSchema = z
   })
   .strict()
 
+export const DelegateDeactivateRequestSchema = z
+  .object({
+    type: z.literal('delegate_deactivate_request').optional(),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: DelegateDeactivateBodySchema,
+  })
+  .strict()
+
 export const BacktestCompareRequestSchema = z
   .object({
     type: z.literal('backtest_compare_request').optional(),
@@ -1837,6 +1871,15 @@ export const ConfiguredProcessSchema = z
   })
   .strict()
 
+export const DelegateCapsBodySchema = z
+  .object({
+    max_order_quantity_per_instrument: z.record(z.string(), z.any()).nullable().optional(),
+    max_open_orders: z.number().int().nullable().optional(),
+    max_daily_notional_usd: z.number().nullable().optional(),
+    max_cancels_per_minute: z.number().int().nullable().optional(),
+  })
+  .strict()
+
 export const ProcessRunSchema = z
   .object({
     type: z.literal('process_run'),
@@ -2040,6 +2083,31 @@ export const ConfiguredProcessesResponseSchema = z
   })
   .strict()
 
+export const DelegateReadSchema = z
+  .object({
+    public_id: z.string(),
+    username: z.string(),
+    label: z.string(),
+    created_by_user_public_id: z.string(),
+    created_at: z.iso.datetime(),
+    is_active: z.boolean(),
+    caps: DelegateCapsBodySchema,
+  })
+  .strict()
+
+export const DelegateCreateBodySchema = z
+  .object({
+    label: z.string().min(1).max(48),
+    caps: DelegateCapsBodySchema.optional(),
+  })
+  .strict()
+
+export const DelegateCapsUpdateBodySchema = z
+  .object({
+    caps: DelegateCapsBodySchema,
+  })
+  .strict()
+
 export const ProcessRunsResponseSchema = z
   .object({
     type: z.literal('process_runs'),
@@ -2131,6 +2199,60 @@ export const BacktestComparisonDetailResponseSchema = z
   })
   .strict()
 
+export const DelegateCreatedPayloadSchema = z
+  .object({
+    delegate: DelegateReadSchema,
+    access_token: z.string(),
+    refresh_token: z.string(),
+    expires_in: z.number().int(),
+  })
+  .strict()
+
+export const DelegateListResponseSchema = z
+  .object({
+    type: z.literal('delegate_list'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: z.array(DelegateReadSchema),
+    count: z.number().int(),
+  })
+  .strict()
+
+export const DelegateResponseSchema = z
+  .object({
+    type: z.literal('delegate_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: DelegateReadSchema,
+  })
+  .strict()
+
+export const DelegateCreateRequestSchema = z
+  .object({
+    type: z.literal('delegate_create_request').optional(),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: DelegateCreateBodySchema,
+  })
+  .strict()
+
+export const DelegateCapsUpdateRequestSchema = z
+  .object({
+    type: z.literal('delegate_caps_update_request').optional(),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: DelegateCapsUpdateBodySchema,
+  })
+  .strict()
+
 export const SystemStatusResponseSchema = z
   .object({
     type: z.literal('system_status_response'),
@@ -2139,6 +2261,17 @@ export const SystemStatusResponseSchema = z
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     payload: SystemStatusDataSchema,
+  })
+  .strict()
+
+export const DelegateCreatedResponseSchema = z
+  .object({
+    type: z.literal('delegate_created_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: DelegateCreatedPayloadSchema,
   })
   .strict()
 
@@ -2156,6 +2289,7 @@ export type EquityOverlayPoint = z.infer<typeof EquityOverlayPointSchema>
 export type ExchangeListResponse = z.infer<typeof ExchangeListResponseSchema>
 export type ExecutionData = z.infer<typeof ExecutionDataSchema>
 export type ExecutionPlanData = z.infer<typeof ExecutionPlanDataSchema>
+export type FeatureFlagsPayload = z.infer<typeof FeatureFlagsPayloadSchema>
 export type FrontMonthData = z.infer<typeof FrontMonthDataSchema>
 export type GapStats = z.infer<typeof GapStatsSchema>
 export type HealthTopics = z.infer<typeof HealthTopicsSchema>
@@ -2203,6 +2337,7 @@ export type ChangePasswordBody = z.infer<typeof ChangePasswordBodySchema>
 export type AdminResetPasswordBody = z.infer<typeof AdminResetPasswordBodySchema>
 export type SettingUpdateBody = z.infer<typeof SettingUpdateBodySchema>
 export type RemoveSettingBody = z.infer<typeof RemoveSettingBodySchema>
+export type DelegateDeactivateBody = z.infer<typeof DelegateDeactivateBodySchema>
 export type BacktestCompareBody = z.infer<typeof BacktestCompareBodySchema>
 export type BacktestCancelBody = z.infer<typeof BacktestCancelBodySchema>
 export type CreateCredentialBody = z.infer<typeof CreateCredentialBodySchema>
@@ -2228,6 +2363,7 @@ export type CredentialListResponse = z.infer<typeof CredentialListResponseSchema
 export type CredentialResponse = z.infer<typeof CredentialResponseSchema>
 export type ExecutionListResponse = z.infer<typeof ExecutionListResponseSchema>
 export type ExecutionPlanResponse = z.infer<typeof ExecutionPlanResponseSchema>
+export type FeatureFlagsResponse = z.infer<typeof FeatureFlagsResponseSchema>
 export type FrontMonthResponse = z.infer<typeof FrontMonthResponseSchema>
 export type GapDetectionStats = z.infer<typeof GapDetectionStatsSchema>
 export type JsonValue = z.infer<typeof JsonValueSchema>
@@ -2269,6 +2405,7 @@ export type ChangePasswordRequest = z.infer<typeof ChangePasswordRequestSchema>
 export type AdminResetPasswordRequest = z.infer<typeof AdminResetPasswordRequestSchema>
 export type SettingUpdate = z.infer<typeof SettingUpdateSchema>
 export type RemoveSettingRequest = z.infer<typeof RemoveSettingRequestSchema>
+export type DelegateDeactivateRequest = z.infer<typeof DelegateDeactivateRequestSchema>
 export type BacktestCompareRequest = z.infer<typeof BacktestCompareRequestSchema>
 export type BacktestCancelCommand = z.infer<typeof BacktestCancelCommandSchema>
 export type CreateCredentialCommand = z.infer<typeof CreateCredentialCommandSchema>
@@ -2301,6 +2438,7 @@ export type AvailableProcess = z.infer<typeof AvailableProcessSchema>
 export type BacktestResultInline = z.infer<typeof BacktestResultInlineSchema>
 export type BacktestRunData = z.infer<typeof BacktestRunDataSchema>
 export type ConfiguredProcess = z.infer<typeof ConfiguredProcessSchema>
+export type DelegateCapsBody = z.infer<typeof DelegateCapsBodySchema>
 export type ProcessRun = z.infer<typeof ProcessRunSchema>
 export type ProcessSchemaData = z.infer<typeof ProcessSchemaDataSchema>
 export type StrategyStatusPayload = z.infer<typeof StrategyStatusPayloadSchema>
@@ -2317,6 +2455,9 @@ export type BacktestComparisonDetailResponseData = z.infer<
 export type BacktestRunListResponse = z.infer<typeof BacktestRunListResponseSchema>
 export type BacktestRunResponse = z.infer<typeof BacktestRunResponseSchema>
 export type ConfiguredProcessesResponse = z.infer<typeof ConfiguredProcessesResponseSchema>
+export type DelegateRead = z.infer<typeof DelegateReadSchema>
+export type DelegateCreateBody = z.infer<typeof DelegateCreateBodySchema>
+export type DelegateCapsUpdateBody = z.infer<typeof DelegateCapsUpdateBodySchema>
 export type ProcessRunsResponse = z.infer<typeof ProcessRunsResponseSchema>
 export type ProcessSchemaResponse = z.infer<typeof ProcessSchemaResponseSchema>
 export type SystemStatusData = z.infer<typeof SystemStatusDataSchema>
@@ -2327,4 +2468,10 @@ export type BacktestRunDetailResponse = z.infer<typeof BacktestRunDetailResponse
 export type BacktestComparisonDetailResponse = z.infer<
   typeof BacktestComparisonDetailResponseSchema
 >
+export type DelegateCreatedPayload = z.infer<typeof DelegateCreatedPayloadSchema>
+export type DelegateListResponse = z.infer<typeof DelegateListResponseSchema>
+export type DelegateResponse = z.infer<typeof DelegateResponseSchema>
+export type DelegateCreateRequest = z.infer<typeof DelegateCreateRequestSchema>
+export type DelegateCapsUpdateRequest = z.infer<typeof DelegateCapsUpdateRequestSchema>
 export type SystemStatusResponse = z.infer<typeof SystemStatusResponseSchema>
+export type DelegateCreatedResponse = z.infer<typeof DelegateCreatedResponseSchema>

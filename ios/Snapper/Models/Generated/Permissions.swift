@@ -46,4 +46,5 @@ let resourceAccess: [String: [UserRole]] = [
     "admin": [.admin],
     "settings": [.admin],
     "backtests": [.ai_delegate, .viewer, .operatorRole, .admin],
+    "ai-integration": [.operatorRole, .admin],
 ]

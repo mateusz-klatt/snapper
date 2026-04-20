@@ -22,6 +22,7 @@ from uuid import uuid7
 
 import bcrypt
 from loguru import logger
+from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -421,8 +422,6 @@ class DelegateService:
                 transaction.
             owner_public_id: UUID of the creating operator.
         """
-        from sqlalchemy import func
-
         now = _now_for_join()
         user_ts, user_known_to = where_active(User, now)
         count_stmt = (

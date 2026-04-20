@@ -668,6 +668,42 @@ export interface RemoveSetting {
 }
 
 /**
+ * DelegateCreate request entity.
+ * Use with delegateCreateToAPI() transform.
+ */
+export interface DelegateCreate {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  payload: Record<string, unknown>
+}
+
+/**
+ * DelegateCapsUpdate request entity.
+ * Use with delegateCapsUpdateToAPI() transform.
+ */
+export interface DelegateCapsUpdate {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  payload: Record<string, unknown>
+}
+
+/**
+ * DelegateDeactivate request entity.
+ * Use with delegateDeactivateToAPI() transform.
+ */
+export interface DelegateDeactivate {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  payload: Record<string, unknown>
+}
+
+/**
  * BacktestCompare request entity.
  * Use with backtestCompareToAPI() transform.
  */
