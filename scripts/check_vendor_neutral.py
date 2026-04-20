@@ -10,8 +10,10 @@ listed in `VENDOR_PATTERN`.  A line with a trailing `# vendor-neutral-ok`
 comment is treated as an intentional, reviewed exemption.
 """
 
+import io
 import re
 import sys
+import tokenize
 from pathlib import Path
 from typing import Final
 
@@ -37,14 +39,15 @@ VENDOR_PATTERN: Final[re.Pattern[str]] = re.compile(
 )
 
 ALLOWLIST_COMMENT: Final[str] = "vendor-neutral-ok"
+"""Allowlist marker that must appear inside a real Python ``#`` comment.
 
-ALLOWLIST_MARKER: Final[re.Pattern[str]] = re.compile(r"#[^\n]*vendor-neutral-ok\b")
-"""Trailing-comment allowlist pattern.
-
-The marker MUST appear inside a ``#`` comment (anywhere after the first
-``#`` on the line). Matching only within the comment prevents a string
-literal like ``"not vendor-neutral-ok"`` from silently disabling the
-scanner on a line that carries a real vendor reference.
+A line is exempted only when :func:`_is_allowlisted` finds this string
+inside a token the Python tokenizer classifies as
+:data:`tokenize.COMMENT`. Substring-based checks were retired in the
+R2 review fix-up because they exempted any line containing the text,
+including string literals that happen to embed a ``#`` — e.g.
+``NAME = "Claude Desktop # vendor-neutral-ok"`` — which let authors
+silently bypass the scanner.
 """
 
 
@@ -71,19 +74,32 @@ def iter_python_files(root: Path) -> list[Path]:
 def _is_allowlisted(line: str) -> bool:
     """Return True when the line carries the vendor-neutral-ok marker in a comment.
 
-    The marker must sit inside a Python ``#`` comment — a string
-    literal with the same text does NOT silence the scanner. This
-    closes the R1 review finding that substring-matching the marker
-    would let authors bypass the gate via a plain string.
+    The check tokenizes the line with :mod:`tokenize` and inspects
+    only :data:`tokenize.COMMENT` tokens. A string literal whose body
+    happens to contain ``# vendor-neutral-ok`` does NOT exempt the
+    line — a regression from the earlier substring / regex
+    implementations that closed the R2 review finding.
+
+    Lines the tokenizer cannot parse in isolation (syntactically
+    incomplete fragments — e.g. the middle of a multi-line string or
+    a continuation line) fall through to ``False`` so the scanner
+    errs on the side of reporting rather than silently exempting.
 
     Args:
         line: Raw source line including any trailing comment.
 
     Returns:
-        True only when the allowlist marker appears inside a trailing
-        ``#`` comment on the line.
+        True only when the allowlist marker appears inside a
+        :data:`tokenize.COMMENT` token on the line.
     """
-    return ALLOWLIST_MARKER.search(line) is not None
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(line + "\n").readline)
+        for tok in tokens:
+            if tok.type == tokenize.COMMENT and ALLOWLIST_COMMENT in tok.string:
+                return True
+    except (tokenize.TokenError, SyntaxError):
+        return False
+    return False
 
 
 def check_file(filepath: Path) -> list[Violation]:

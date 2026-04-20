@@ -186,6 +186,57 @@ class TestCheckFileShouldPass:
 
         assert len(findings) == 1
 
+    def test_allowlist_marker_in_string_with_hash_does_not_exempt(self, tmp_path: Path) -> None:
+        """A ``#`` *inside* a string literal MUST NOT qualify as a comment.
+
+        Given: a vendor-named line where the ``#`` sits inside a
+            string literal (``"Claude Desktop # vendor-neutral-ok"``),
+        When: ``check_file`` runs,
+        Then: one violation is returned — closes the R2 finding that
+            a regex-based ``#`` anchor could not distinguish a real
+            Python comment from a ``#`` embedded in a string. The
+            tokenizer-based allowlist correctly classifies the ``#``
+            as part of the STRING token rather than a COMMENT token.
+        """
+        f = tmp_path / "x.py"
+        f.write_text('NAME = "Claude Desktop # vendor-neutral-ok"\n')
+
+        findings = checker.check_file(f)
+
+        assert len(findings) == 1
+
+    def test_allowlist_marker_in_fstring_does_not_exempt(self, tmp_path: Path) -> None:
+        """An f-string carrying the marker MUST NOT exempt the line.
+
+        Given: a vendor-named line where the marker sits inside an
+            ``f"..."`` literal,
+        When: ``check_file`` runs,
+        Then: one violation is returned — f-strings tokenize as a
+            ``FSTRING_*`` / ``STRING`` span, never as ``COMMENT``.
+        """
+        f = tmp_path / "x.py"
+        f.write_text('MSG = f"Claude Desktop # vendor-neutral-ok"\n')
+
+        findings = checker.check_file(f)
+
+        assert len(findings) == 1
+
+    def test_tokenizer_error_does_not_false_exempt(self, tmp_path: Path) -> None:
+        """An unparseable line MUST NOT silently exempt a vendor reference.
+
+        Given: a syntactically-broken line (dangling string + vendor
+            name) that the tokenizer cannot fully decode,
+        When: ``check_file`` runs,
+        Then: the regex still fires and one violation is returned —
+            the allowlist fails closed, not open, on tokenizer errors.
+        """
+        f = tmp_path / "x.py"
+        f.write_text('NAME = "unterminated  anthropic\n')
+
+        findings = checker.check_file(f)
+
+        assert len(findings) == 1
+
     def test_generic_mcp_phrasing_is_safe(self, tmp_path: Path) -> None:
         """Verify vendor-neutral phrasing is NOT flagged.
 
