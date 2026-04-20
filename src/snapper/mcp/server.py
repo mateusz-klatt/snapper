@@ -34,6 +34,7 @@ from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.tokens import REJECTION_REASON_USER_DEACTIVATED
 from snapper.auth.tokens import get_token_manager
 from snapper.data.repository import Repository
+from snapper.mcp.rate_limiting import PrincipalRateLimitMiddleware
 from snapper.mcp.tools import register_mcp_tools
 
 _MCP_SERVER_NAME = "snapper"
@@ -320,7 +321,10 @@ def build_mcp_app(
            deployments don't even verify JWTs.
         2. :class:`BearerAuthMiddleware` — auth gate; populates
            ``request.state.token_claims`` before tool dispatch.
-        3. Downstream FastMCP Streamable HTTP app with tools
+        3. :class:`PrincipalRateLimitMiddleware` — per-principal
+           throttle keyed off the claims set by (2). Plan §3.10 +
+           Day 5d-B2 closure of the Day 5c review MAJOR finding.
+        4. Downstream FastMCP Streamable HTTP app with tools
            registered via :func:`register_mcp_tools`.
 
     Args:
@@ -360,6 +364,7 @@ def build_mcp_app(
         claims_getter=get_current_claims,
     )
     downstream = mcp_server.streamable_http_app()
+    downstream.add_middleware(PrincipalRateLimitMiddleware)
     downstream.add_middleware(
         BearerAuthMiddleware,
         repository_getter=repository_getter or (lambda: None),
