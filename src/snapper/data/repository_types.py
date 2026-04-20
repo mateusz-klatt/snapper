@@ -1024,7 +1024,18 @@ class CreateScopeGrantRequest(TypedDict):
 
 
 class ExecutionPlanDecisionInsertRow(TypedDict):
-    """Insert params for insert_execution_plan_decision."""
+    """Insert params for insert_execution_plan_decision.
+
+    ``source_surface`` threads the plan §3.9 audit enum
+    (``mcp | rest | strategy | ws``) from the caller all the way to
+    the persisted row. The repository used to rely on the column's
+    ``server_default="strategy"`` to backfill every insert; the Day
+    5c 3-model review flagged that typing hole as a MINOR because
+    any future MCP-originated decision path would silently write
+    ``"strategy"`` and collapse audit provenance. Marking the field
+    required here (and ``total=True``) forces every caller to make
+    a deliberate choice.
+    """
 
     plan_public_id: str
     decision_type: str
@@ -1035,6 +1046,7 @@ class ExecutionPlanDecisionInsertRow(TypedDict):
     new_status: str | None
     reason: str
     decision_importance: str
+    source_surface: str
 
 
 class ExecutionPlanDecisionRow(TypedDict):
@@ -1053,6 +1065,7 @@ class ExecutionPlanDecisionRow(TypedDict):
     new_status: str | None
     reason: str
     decision_importance: str
+    source_surface: str
 
 
 class PositionCycleRow(TypedDict):

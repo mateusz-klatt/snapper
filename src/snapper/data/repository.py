@@ -6127,6 +6127,7 @@ class SQLAlchemyRepository(Repository):
                 new_status=row.get("new_status"),
                 reason=row["reason"],
                 decision_importance=row["decision_importance"],
+                source_surface=row["source_surface"],
                 session_id=session_id,
                 sequence_id=sequence_id,
                 timestamp=bus_time,
@@ -6175,6 +6176,7 @@ class SQLAlchemyRepository(Repository):
                     new_status=d.new_status,
                     reason=d.reason,
                     decision_importance=d.decision_importance,
+                    source_surface=d.source_surface,
                 )
                 for d in result.scalars().all()
             ]

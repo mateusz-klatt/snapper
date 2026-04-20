@@ -6560,6 +6560,7 @@ async def test_insert_and_list_execution_plan_decisions(tmp_path: Path) -> None:
             "new_status": None,
             "reason": "SL triggered",
             "decision_importance": "action",
+            "source_surface": "strategy",
         },
         bus_time=now,
         session_id="s1",
@@ -6594,6 +6595,7 @@ async def test_list_decisions_importance_filter(tmp_path: Path) -> None:
                 "new_status": None,
                 "reason": f"test {imp}",
                 "decision_importance": imp,
+                "source_surface": "strategy",
             },
             bus_time=now,
             session_id="s1",
@@ -6624,6 +6626,7 @@ async def test_list_decisions_pagination(tmp_path: Path) -> None:
                 "new_status": None,
                 "reason": f"reason-{i}",
                 "decision_importance": "action",
+                "source_surface": "strategy",
             },
             bus_time=t,
             session_id="s1",
@@ -6641,6 +6644,45 @@ async def test_list_decisions_pagination(tmp_path: Path) -> None:
         "plan-1", as_of=now + timedelta(seconds=10), limit=2, offset=4
     )
     assert len(page3) == 1
+
+
+@pytest.mark.asyncio
+async def test_insert_decision_persists_source_surface(tmp_path: Path) -> None:
+    """Day 5c MINOR closure — source_surface is threaded from DTO to the row.
+
+    Given: an :class:`ExecutionPlanDecisionInsertRow` with
+        ``source_surface='mcp'`` (the provenance value only an MCP
+        caller would pick),
+    When: the repository inserts the decision,
+    Then: the persisted row carries ``source_surface='mcp'``
+        verbatim. Closes the Day 5c review MINOR that the DTO used
+        to lack the field and every caller fell to the column's
+        ``server_default='strategy'``.
+    """
+    db_path = tmp_path / "decision_source_surface.db"
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    now = datetime.now(UTC)
+    await r.insert_execution_plan_decision(
+        row={
+            "plan_public_id": "plan-mcp",
+            "decision_type": "command_emitted",
+            "decided_at": now,
+            "trigger_type": "mcp",
+            "evidence": {},
+            "emitted_command_public_id": None,
+            "new_status": None,
+            "reason": "MCP-originated decision",
+            "decision_importance": "action",
+            "source_surface": "mcp",
+        },
+        bus_time=now,
+        session_id="mcp-session",
+        sequence_id=1,
+    )
+    rows = await r.list_execution_plan_decisions("plan-mcp", as_of=now)
+    assert len(rows) == 1
+    assert rows[0].get("source_surface") == "mcp"
 
 
 @pytest.mark.asyncio

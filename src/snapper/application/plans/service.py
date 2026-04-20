@@ -692,6 +692,7 @@ class PlanExecutorService(RegisterableProcess):
             new_status=new_status,
             reason=reason,
             decision_importance=importance,
+            source_surface="strategy",
         )
         try:
             await self.repository.insert_execution_plan_decision(
