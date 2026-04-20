@@ -5,6 +5,7 @@ management including blacklisting and WebSocket token rotation.
 """
 
 import hashlib
+import heapq
 import json as json_mod
 import secrets
 import uuid
@@ -574,10 +575,14 @@ class TokenManager:
                usually enough under steady-state traffic.
             2. Hard-cap pass — if the cache is STILL over the
                threshold (burst of fresh unique tokens all within
-               TTL), evict the oldest entries by ``cached_at_ts``
-               down to the limit. Guarantees bounded memory even
-               under pathological spray-of-fresh-tokens load (Codex
-               R1 MAJOR resolution).
+               TTL), evict the ``overflow`` oldest entries by
+               ``cached_at_ts`` via :func:`heapq.nsmallest`
+               (O(n log overflow), typically O(n) for
+               overflow=1). Guarantees bounded memory even under
+               pathological spray-of-fresh-tokens load without
+               paying the O(n log n) cost of a full sort on every
+               insert at capacity (Codex R1 MAJOR + Copilot R2
+               MINOR resolutions).
         """
         stale_keys: list[str] = [
             key
@@ -590,9 +595,11 @@ class TokenManager:
         hard_evicted = 0
         if len(self._verify_cache) > VERIFY_CACHE_MAX_ENTRIES:
             overflow = len(self._verify_cache) - VERIFY_CACHE_MAX_ENTRIES
-            victims = sorted(self._verify_cache.items(), key=lambda item: item[1].cached_at_ts)[
-                :overflow
-            ]
+            victims = heapq.nsmallest(
+                overflow,
+                self._verify_cache.items(),
+                key=lambda item: item[1].cached_at_ts,
+            )
             for key, _entry in victims:
                 del self._verify_cache[key]
             hard_evicted = len(victims)
