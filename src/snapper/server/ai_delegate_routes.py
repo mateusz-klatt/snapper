@@ -65,6 +65,49 @@ _INVALID_PRINCIPAL = (
     "AI delegate management requires an authenticated principal with a "
     "populated user_public_id. Re-login to obtain a current token."
 )
+_AI_INTEGRATION_FLAG_KEY = "ai_integration_enabled"
+
+
+def require_ai_integration_enabled(request: Request) -> None:
+    """Reject the request when the AI integration feature flag is off.
+
+    Day 5c review MAJOR closure: plan §3.12 requires
+    ``/api/ai-delegates/*`` to share the same feature gate as
+    ``/api/mcp``. Without this dependency, operators could mint
+    delegates + tokens while the feature is disabled, leaking a
+    management surface that the rest of Phase A refuses to serve.
+
+    The response shape mirrors the MCP sub-app's
+    :class:`FeatureFlagMiddleware` so a frontend or CLI branching
+    on ``error_code`` sees the same payload regardless of which
+    surface returned the 503.
+
+    Args:
+        request: Active FastAPI request; settings service is pulled
+            from ``app.state`` so toggling the DB setting takes
+            effect without a restart.
+
+    Raises:
+        HTTPException: 503 ``{"error_code": "feature_disabled"}``
+            when the flag is off or the settings service has not
+            been initialised yet (fail-closed during startup).
+    """
+    settings_service = getattr(request.app.state, "settings_service", None)
+    enabled = bool(
+        settings_service.get_setting(_AI_INTEGRATION_FLAG_KEY, default=False)
+        if settings_service is not None
+        else False
+    )
+    if enabled:
+        return
+    detail = (
+        "feature_disabled: AI integration is disabled. Enable the "
+        f"'{_AI_INTEGRATION_FLAG_KEY}' setting to activate the delegate surface."
+    )
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail=detail,
+    )
 
 
 def _build_service(repository: Repository) -> DelegateService:
@@ -79,6 +122,7 @@ async def create_delegate(
     owner: Annotated[AuthPrincipal, Depends(require_role(UserRole.OPERATOR))],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
+    _flag: Annotated[None, Depends(require_ai_integration_enabled)] = None,
 ) -> DelegateCreatedResponse:
     """Atomically create a new AI delegate + mint its token pair.
 
@@ -147,6 +191,7 @@ async def list_delegates(
     request: Request,
     owner: Annotated[AuthPrincipal, Depends(require_role(UserRole.OPERATOR))],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
+    _flag: Annotated[None, Depends(require_ai_integration_enabled)] = None,
 ) -> DelegateListResponse:
     """Return every SCD2-active delegate the caller owns.
 
@@ -177,6 +222,7 @@ async def get_delegate(
     delegate_public_id: str,
     owner: Annotated[AuthPrincipal, Depends(require_role(UserRole.OPERATOR))],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
+    _flag: Annotated[None, Depends(require_ai_integration_enabled)] = None,
 ) -> DelegateResponse:
     """Fetch a single delegate owned by the caller.
 
@@ -219,6 +265,7 @@ async def update_delegate_caps(
     owner: Annotated[AuthPrincipal, Depends(require_role(UserRole.OPERATOR))],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
+    _flag: Annotated[None, Depends(require_ai_integration_enabled)] = None,
 ) -> DelegateResponse:
     """SCD2 close+insert new caps for a delegate the caller owns."""
     service = _build_service(repo)
@@ -261,6 +308,7 @@ async def deactivate_delegate(
     owner: Annotated[AuthPrincipal, Depends(require_role(UserRole.OPERATOR))],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     _csrf: Annotated[None, Depends(validate_csrf_token)],
+    _flag: Annotated[None, Depends(require_ai_integration_enabled)] = None,
 ) -> DelegateResponse:
     """Deactivate a delegate via the shared kill-switch flow.
 

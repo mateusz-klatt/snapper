@@ -956,6 +956,68 @@ class TestServiceEdgeCases:
         assert DelegateService._coerce_caps_json(caps_row) == {"BTC-USD": 0.5}
 
 
+class TestAiDelegatesFeatureFlagGate:
+    """Day 5d-B1 closure — `/api/ai-delegates/*` shares the MCP feature flag.
+
+    The Day 5c 3-model review flagged a MAJOR (2/2 consensus): plan
+    §3.12 requires the delegate management surface to refuse every
+    request when ``ai_integration_enabled`` is off, parity with the
+    ``/api/mcp`` sub-app's :class:`FeatureFlagMiddleware`. Without
+    the gate, operators could mint delegates + tokens on an instance
+    where the rest of the AI surface is disabled.
+    """
+
+    def test_flag_off_raises_503_feature_disabled(self) -> None:
+        """Flag off → 503 with ``feature_disabled`` payload.
+
+        Given: a settings service whose ``get_setting`` returns
+            ``False`` for ``ai_integration_enabled``,
+        When: the dependency runs,
+        Then: :class:`HTTPException` 503 is raised with a ``detail``
+            string carrying the stable ``feature_disabled`` code so
+            clients can branch on it.
+        """
+        settings_service = _Magic()
+        settings_service.get_setting.return_value = False
+        request = _Magic()
+        request.app.state.settings_service = settings_service
+        with pytest.raises(HTTPException) as exc:
+            ai_delegate_routes.require_ai_integration_enabled(request)
+        assert exc.value.status_code == 503
+        assert "feature_disabled" in str(exc.value.detail)
+
+    def test_flag_on_returns_none(self) -> None:
+        """Flag on → the dependency passes through silently.
+
+        Given: the setting resolves to ``True``,
+        When: the dependency runs,
+        Then: it returns ``None`` so the downstream route body runs.
+        """
+        settings_service = _Magic()
+        settings_service.get_setting.return_value = True
+        request = _Magic()
+        request.app.state.settings_service = settings_service
+        ai_delegate_routes.require_ai_integration_enabled(request)
+
+    def test_settings_service_missing_treated_as_flag_off(self) -> None:
+        """Pre-lifespan startup (no settings service) → 503 fail-closed.
+
+        Given: ``app.state.settings_service`` is absent (lifespan
+            has not populated the singleton yet),
+        When: the dependency runs,
+        Then: it raises 503 ``feature_disabled`` just like a
+            deliberate off state — matches the MCP middleware's
+            fail-closed startup behaviour so behaviour is
+            predictable across the admin / management / MCP
+            surfaces.
+        """
+        request = _Magic()
+        request.app.state = _Magic(spec=["rest_tracker"])
+        with pytest.raises(HTTPException) as exc:
+            ai_delegate_routes.require_ai_integration_enabled(request)
+        assert exc.value.status_code == 503
+
+
 class TestRouteHandlers:
     """Direct invocation of route functions for 409 / 404 / happy path coverage."""
 
