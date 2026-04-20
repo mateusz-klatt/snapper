@@ -52,9 +52,22 @@ def _now_for_join() -> datetime:
 
 _DELEGATES_TOPIC = "ai_delegates"
 
+MAX_AI_DELEGATES_PER_OWNER: int = 5
+"""Plan §5 item 5 — cap on live delegates per operator.
+
+Bounds delegate proliferation so an operator can't spray
+credentials that later need individual revocation on compromise.
+Deactivated delegates drop out of the count (``is_active=True``
+only) so rotations stay unbounded.
+"""
+
 
 class DelegateNotFoundError(Exception):
     """Raised when the requested delegate doesn't exist OR isn't owned by the caller."""
+
+
+class DelegateProliferationError(Exception):
+    """Raised when the owner already has :data:`MAX_AI_DELEGATES_PER_OWNER` active delegates."""
 
 
 class DelegateLabelConflictError(Exception):
@@ -151,9 +164,13 @@ class DelegateService:
             InvalidOwnerPrincipalError: If the caller's principal
                 does not carry a usable ``user_public_id`` (R1
                 blank-owner guard).
+            DelegateProliferationError: If the owner already owns
+                :data:`MAX_AI_DELEGATES_PER_OWNER` active delegates
+                (plan §5 item 5 cap).
         """
         self._guard_owner(owner.user_public_id)
         async with self.repository.session() as session:
+            await self._guard_proliferation(session, owner.user_public_id)
             username = await self._reserve_unique_username(session, body.label)
             now = datetime.now(UTC)
             placeholder_password_hash = self._mint_unusable_password_hash()
@@ -387,6 +404,45 @@ class DelegateService:
             caps_row=refreshed,
             label=self._label_from_username(user_row.username),
         )
+
+    @staticmethod
+    async def _guard_proliferation(session: AsyncSession, owner_public_id: str) -> None:
+        """Cap live delegates per operator at :data:`MAX_AI_DELEGATES_PER_OWNER`.
+
+        Plan §5 item 5 — bounds the blast radius of a leaked
+        operator session. Counts ONLY active (``is_active=True``)
+        SCD2-current delegate Users; deactivated rows don't count
+        so rotations remain unbounded. Fails-closed with
+        :class:`DelegateProliferationError` so the route can map
+        to 409 before the atomic create transaction opens.
+
+        Args:
+            session: Active :class:`AsyncSession` from the calling
+                transaction.
+            owner_public_id: UUID of the creating operator.
+        """
+        from sqlalchemy import func
+
+        now = _now_for_join()
+        user_ts, user_known_to = where_active(User, now)
+        count_stmt = (
+            select(func.count())
+            .select_from(User)
+            .where(
+                User.created_by_user_public_id == owner_public_id,
+                User.role == UserRole.AI_DELEGATE.value,
+                User.is_active,
+                user_ts,
+                user_known_to,
+            )
+        )
+        current_count = (await session.execute(count_stmt)).scalar_one()
+        if current_count >= MAX_AI_DELEGATES_PER_OWNER:
+            raise DelegateProliferationError(
+                f"Operator {owner_public_id} already owns {current_count} active "
+                f"AI delegates (limit {MAX_AI_DELEGATES_PER_OWNER}). Deactivate an "
+                "existing delegate before creating a new one."
+            )
 
     @staticmethod
     def _guard_owner(owner_public_id: str) -> None:

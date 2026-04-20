@@ -39,15 +39,16 @@ export const ROLE_PERMISSIONS: Record<UserRole, readonly Permission[]> = {
 } as const
 
 export const RESOURCE_ACCESS: Record<string, readonly UserRole[]> = {
-  overview: ['ai_delegate', 'viewer', 'operator', 'admin'],
-  market: ['ai_delegate', 'viewer', 'operator', 'admin'],
-  processes: ['operator', 'admin'],
-  strategies: ['ai_delegate', 'viewer', 'operator', 'admin'],
-  orders: ['ai_delegate', 'viewer', 'operator', 'admin'],
-  positions: ['ai_delegate', 'viewer', 'operator', 'admin'],
-  signals: ['ai_delegate', 'viewer', 'operator', 'admin'],
-  health: ['ai_delegate', 'viewer', 'operator', 'admin'],
-  admin: ['admin'],
-  settings: ['admin'],
-  backtests: ['ai_delegate', 'viewer', 'operator', 'admin'],
+  'overview': ['ai_delegate', 'viewer', 'operator', 'admin'],
+  'market': ['ai_delegate', 'viewer', 'operator', 'admin'],
+  'processes': ['operator', 'admin'],
+  'strategies': ['ai_delegate', 'viewer', 'operator', 'admin'],
+  'orders': ['ai_delegate', 'viewer', 'operator', 'admin'],
+  'positions': ['ai_delegate', 'viewer', 'operator', 'admin'],
+  'signals': ['ai_delegate', 'viewer', 'operator', 'admin'],
+  'health': ['ai_delegate', 'viewer', 'operator', 'admin'],
+  'admin': ['admin'],
+  'settings': ['admin'],
+  'backtests': ['ai_delegate', 'viewer', 'operator', 'admin'],
+  'ai-integration': ['operator', 'admin'],
 } as const

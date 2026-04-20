@@ -527,6 +527,120 @@ class TestBlankOwnerGuard:
         assert exc.value.status_code == 401
 
 
+class TestDelegateProliferationCap:
+    """Plan §5 item 5 — bound delegates per operator."""
+
+    @pytest.mark.asyncio
+    async def test_sixth_create_raises_proliferation_error(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Creating the 6th active delegate fails with DelegateProliferationError."""
+        from snapper.application.ai_delegates.service import MAX_AI_DELEGATES_PER_OWNER
+        from snapper.application.ai_delegates.service import DelegateProliferationError
+
+        await _seed_owner(repo, public_id="owner-cap", username="cap")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        for i in range(MAX_AI_DELEGATES_PER_OWNER):
+            await service.create_delegate(
+                owner=_make_owner_principal("owner-cap"),
+                body=DelegateCreateBody(label=f"d-{i}", caps=DelegateCapsBody()),
+            )
+        with pytest.raises(DelegateProliferationError):
+            await service.create_delegate(
+                owner=_make_owner_principal("owner-cap"),
+                body=DelegateCreateBody(label="one-too-many", caps=DelegateCapsBody()),
+            )
+
+    @pytest.mark.asyncio
+    async def test_deactivated_delegates_do_not_count_against_cap(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Rotations stay unbounded: deactivating frees a slot for a fresh mint."""
+        from snapper.application.ai_delegates.service import MAX_AI_DELEGATES_PER_OWNER
+
+        await _seed_owner(repo, public_id="owner-rot", username="rot")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        first = await service.create_delegate(
+            owner=_make_owner_principal("owner-rot"),
+            body=DelegateCreateBody(label="first", caps=DelegateCapsBody()),
+        )
+        for i in range(MAX_AI_DELEGATES_PER_OWNER - 1):
+            await service.create_delegate(
+                owner=_make_owner_principal("owner-rot"),
+                body=DelegateCreateBody(label=f"f-{i}", caps=DelegateCapsBody()),
+            )
+        async with repo.session() as s:
+            from sqlalchemy import update as _up
+
+            await s.execute(
+                _up(User).where(User.public_id == first.delegate.public_id).values(is_active=False)
+            )
+            await s.commit()
+        replacement = await service.create_delegate(
+            owner=_make_owner_principal("owner-rot"),
+            body=DelegateCreateBody(label="replacement", caps=DelegateCapsBody()),
+        )
+        assert replacement.delegate.is_active is True
+
+    @pytest.mark.asyncio
+    async def test_cap_applies_per_owner_not_global(self, repo: SQLAlchemyRepository) -> None:
+        """The cap is scoped per ``created_by_user_public_id``."""
+        from snapper.application.ai_delegates.service import MAX_AI_DELEGATES_PER_OWNER
+
+        await _seed_owner(repo, public_id="owner-a", username="a")
+        await _seed_owner(repo, public_id="owner-b", username="b")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        for i in range(MAX_AI_DELEGATES_PER_OWNER):
+            await service.create_delegate(
+                owner=_make_owner_principal("owner-a"),
+                body=DelegateCreateBody(label=f"a{i}", caps=DelegateCapsBody()),
+            )
+        payload = await service.create_delegate(
+            owner=_make_owner_principal("owner-b"),
+            body=DelegateCreateBody(label="b-slot-1", caps=DelegateCapsBody()),
+        )
+        assert payload.delegate.is_active is True
+
+    @pytest.mark.asyncio
+    async def test_create_route_maps_proliferation_error_to_409(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """HTTP surface: 409 with the cap message when proliferation fires."""
+        from fastapi import HTTPException
+
+        from snapper.api.schemas.ai_delegates import DelegateCreateRequest
+        from snapper.application.ai_delegates.service import DelegateProliferationError
+        from snapper.server import ai_delegate_routes
+
+        class _ProliferationService:
+            async def create_delegate(
+                self, owner: AuthPrincipal, body: DelegateCreateBody
+            ) -> DelegateCreatedPayload:
+                raise DelegateProliferationError("limit reached")
+
+        monkeypatch.setattr(
+            ai_delegate_routes, "_build_service", lambda _repo: _ProliferationService()
+        )
+        request = _make_rest_request()
+        body = DelegateCreateRequest(
+            session_id="s",
+            sequence_id=1,
+            public_id="p",
+            timestamp=datetime.now(UTC),
+            payload=DelegateCreateBody(label="hit-cap", caps=DelegateCapsBody()),
+        )
+        with pytest.raises(HTTPException) as exc:
+            await ai_delegate_routes.create_delegate(
+                request=request,
+                body=body,
+                owner=_make_owner_principal(),
+                repo=repo,
+                _csrf=None,
+            )
+        assert exc.value.status_code == 409
+        assert "limit reached" in exc.value.detail
+
+
 class TestCreateDelegateInsertFailureRollsBackAtomically:
     """Codex R1 NICE-TO-HAVE — pin the transactional rollback invariant."""
 

@@ -40,6 +40,7 @@ from snapper.api.schemas.ai_delegates import DelegateListResponse
 from snapper.api.schemas.ai_delegates import DelegateResponse
 from snapper.application.ai_delegates.service import DelegateLabelConflictError
 from snapper.application.ai_delegates.service import DelegateNotFoundError
+from snapper.application.ai_delegates.service import DelegateProliferationError
 from snapper.application.ai_delegates.service import DelegateService
 from snapper.application.ai_delegates.service import InvalidOwnerPrincipalError
 from snapper.auth.dependencies import require_role
@@ -110,6 +111,11 @@ async def create_delegate(
     except InvalidOwnerPrincipalError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail=_INVALID_PRINCIPAL
+        ) from exc
+    except DelegateProliferationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
         ) from exc
     except DelegateLabelConflictError as exc:
         raise HTTPException(

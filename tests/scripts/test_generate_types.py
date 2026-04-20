@@ -1017,7 +1017,7 @@ class TestGenerateIosPermissions:
         assert "Generated" in captured.out
         assert "21 permissions" in captured.out
         assert "4 roles" in captured.out
-        assert "11 resources" in captured.out
+        assert "12 resources" in captured.out
 
     def test_includes_all_roles(self, tmp_path: Path) -> None:
         """Generated file includes viewer, operatorRole, and admin roles.
@@ -2136,7 +2136,7 @@ class TestGeneratePermissions:
         assert "Generated" in captured.out
         assert "21 permissions" in captured.out
         assert "4 roles" in captured.out
-        assert "11 resources" in captured.out
+        assert "12 resources" in captured.out
 
     def test_includes_all_roles(self, tmp_path: Path) -> None:
         """Generated file includes viewer, operator, and admin roles."""
@@ -2160,10 +2160,11 @@ class TestGeneratePermissions:
 
         output = tmp_path / "frontend" / "src" / "types" / "permissions.generated.ts"
         content = output.read_text()
-        assert "overview: ['ai_delegate', 'viewer', 'operator', 'admin']" in content
-        assert "admin: ['admin']" in content
-        assert "settings: ['admin']" in content
-        assert "processes: ['operator', 'admin']" in content
+        assert "'overview': ['ai_delegate', 'viewer', 'operator', 'admin']" in content
+        assert "'admin': ['admin']" in content
+        assert "'settings': ['admin']" in content
+        assert "'processes': ['operator', 'admin']" in content
+        assert "'ai-integration': ['operator', 'admin']" in content
 
     def test_user_role_type_not_exported(self, tmp_path: Path) -> None:
         """UserRole type is file-local, not exported."""

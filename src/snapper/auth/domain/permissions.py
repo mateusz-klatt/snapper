@@ -59,6 +59,7 @@ RESOURCE_PERMISSIONS: dict[str, Permission | None] = {
     "admin": Permission.MANAGE_USERS,
     "settings": Permission.CONFIGURE_SYSTEM,
     "backtests": Permission.READ_BACKTESTS,
+    "ai-integration": Permission.MANAGE_PROCESSES,
 }
 
 

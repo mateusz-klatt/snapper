@@ -1711,7 +1711,7 @@ def generate_permissions(project_root: Path) -> None:
         for role in UserRole:
             if required_perm is None or required_perm in BACKEND_ROLE_PERMISSIONS[role]:
                 allowed_roles.append(f"'{role.value}'")
-        resource_entries.append(f"  {resource}: [{', '.join(allowed_roles)}],")
+        resource_entries.append(f"  '{resource}': [{', '.join(allowed_roles)}],")
 
     lines = [
         "/**",

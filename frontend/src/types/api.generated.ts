@@ -29,6 +29,10 @@ export type Paths = {
          *         request: FastAPI request.
          *         response: FastAPI response for setting cookies.
          *         login_data: Login credentials.
+         *         repo: Repository used to persist the freshly-minted token
+         *             pair in ``user_active_tokens`` (plan §3.6.2) so the
+         *             Day 3d-B DB-backed ``verify_token`` and the kill switch
+         *             can see the rows on the next request.
          *
          *     Returns:
          *         LoginResponse with user profile.
@@ -57,7 +61,7 @@ export type Paths = {
          * @description Refresh session tokens with optional wallet-scope change.
          *
          *     Order (plan §2.5 R14 gpt-5.4 fix #3 — verify → parse → validate →
-         *     blacklist → mint):
+         *     rotate → blacklist):
          *
          *     1. Verify refresh-token signature + blacklist status.
          *     2. Parse optional body (422 on malformed UUID7 or mutually
@@ -65,14 +69,29 @@ export type Paths = {
          *        field + model validators on ``RefreshTokenPayload``).
          *     3. Role-branched wallet-membership validation (404 when the
          *        hinted wallet is outside the caller's visibility).
-         *     4. Blacklist the old refresh token ONLY after every validation
-         *        passes — a rejected hint leaves the old token usable for a
-         *        retry with a valid hint.
-         *     5. Mint new tokens from the post-validation principal. Response
-         *        ``user.active_wallet_public_id`` is projected from
-         *        ``principal.active_wallet_public_id`` (NOT ``token_data``)
-         *        so a hinted refresh surfaces the NEW wallet, matching the
-         *        freshly-minted token claims.
+         *     4. Mint new tokens from the post-validation principal, then
+         *        call :meth:`TokenManager.rotate_tokens` which revokes the
+         *        old refresh row AND inserts the new pair inside a SINGLE DB
+         *        transaction (plan §3.6.2 R1 fix). Outcome matrix:
+         *
+         *            - Rowcount == 1 (atomic success): route continues.
+         *            - Rowcount == 0 (replay / unknown JTI): transaction
+         *              rolls back and returns False → route raises 401.
+         *            - DB exception (connection reset, integrity error on
+         *              the new-pair insert): the ``async with session()``
+         *              scope rolls back; the exception propagates out of
+         *              ``rotate_tokens`` and surfaces as a 5xx so the
+         *              client can retry with the original refresh JWT —
+         *              no cookies / no successor tokens leaked.
+         *
+         *     5. Seed the in-memory JTI blacklist AFTER the rotation commits
+         *        so the grace-period window starts at the post-commit moment
+         *        (cross-instance consistency).
+         *
+         *     Response ``user.active_wallet_public_id`` is projected from
+         *     ``principal.active_wallet_public_id`` (NOT ``token_data``) so
+         *     a hinted refresh surfaces the NEW wallet, matching the
+         *     freshly-minted token claims.
          *
          *     Empty body preserved byte-identically for the three zero-body
          *     callers (``stores/auth.refreshToken``, WS ticket refresh,
@@ -93,15 +112,23 @@ export type Paths = {
          *         response: FastAPI response for setting cookies.
          *         body: Optional refresh-token command envelope (``None`` on
          *             empty body).
-         *         repo: Repository for wallet-membership lookups.
+         *         repo: Repository for wallet-membership lookups + atomic
+         *             refresh rotation.
          *
          *     Returns:
          *         RefreshResponse with new tokens, WS token, CSRF token, and
          *         user profile carrying ``active_wallet_public_id``.
          *
          *     Raises:
-         *         HTTPException: 401 if refresh token invalid / missing,
+         *         HTTPException: 401 if refresh token invalid / missing OR
+         *             the refresh JTI has already been redeemed (replay).
          *             404 when the wallet hint is outside caller visibility.
+         *         Exception: DB errors during ``rotate_tokens`` (integrity
+         *             violation on the new pair, connection reset, etc.)
+         *             propagate out — the atomic transaction has already
+         *             rolled back so the old refresh JWT remains usable for
+         *             retry. Surfaces to the client as a 5xx via FastAPI's
+         *             default exception handler.
          */
         post: Operations["refresh_token_api_auth_refresh_post"];
         delete?: never;
@@ -352,6 +379,45 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
+    "/api/settings/features": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Public Feature Flags
+         * @description Return the public feature-flag projection (plan §4 Day 4 item 1).
+         *
+         *     The frontend reads this endpoint on mount to decide whether to
+         *     render the ``/ai-integration`` navigation entry. No auth is
+         *     required because the response only surfaces on/off state of
+         *     feature gates that are already visible in the mount structure
+         *     (``/api/mcp`` returns 503 when the same flag is off, regardless
+         *     of credentials). Revealing the flag state to an unauthenticated
+         *     caller is equivalent information to trying the disabled endpoint.
+         *
+         *     Args:
+         *         request: FastAPI request — used for the REST tracker that
+         *             stamps provenance on the response envelope.
+         *
+         *     Returns:
+         *         :class:`FeatureFlagsResponse` with the current state of every
+         *         public feature flag. Currently only
+         *         ``ai_integration_enabled`` is exposed; future flags can be
+         *         added to :class:`FeatureFlagsPayload` without changing the
+         *         envelope shape.
+         */
+        get: Operations["get_public_feature_flags_api_settings_features_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/settings": {
         parameters: {
             query?: never;
@@ -467,6 +533,113 @@ export type Paths = {
          *         HTTPException: If setting not found.
          */
         post: Operations["remove_setting_api_settings__key__remove_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/ai-delegates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Delegates
+         * @description Return every SCD2-active delegate the caller owns.
+         *
+         *     Deactivated delegates drop out of the list; the frontend
+         *     list view tracks the active set.
+         */
+        get: Operations["list_delegates_api_ai_delegates_get"];
+        put?: never;
+        /**
+         * Create Delegate
+         * @description Atomically create a new AI delegate + mint its token pair.
+         *
+         *     The response carries the access + refresh JWT pair ONCE. The
+         *     operator must copy the tokens into their MCP client config
+         *     within the HTTP session; Snapper will not re-serve them on
+         *     the list or detail endpoints.
+         *
+         *     Args:
+         *         request: FastAPI request (for the REST tracker).
+         *         body: :class:`DelegateCreateRequest` with label + optional
+         *             caps.
+         *         owner: Authenticated operator (OPERATOR or ADMIN via
+         *             ``require_role``).
+         *         repo: Repository dep — the service opens a single
+         *             transactional scope underneath.
+         *         _csrf: CSRF validation dep. Required because create is a
+         *             cookie-flow-admitting endpoint; pure-Bearer clients
+         *             bypass via the middleware rule in plan §3.7.
+         *
+         *     Returns:
+         *         201-shaped :class:`DelegateCreatedResponse`.
+         *
+         *     Raises:
+         *         HTTPException: 409 when a unique username can't be
+         *             derived from the label (pathological input).
+         */
+        post: Operations["create_delegate_api_ai_delegates_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/ai-delegates/{delegate_public_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Delegate
+         * @description Fetch a single delegate owned by the caller.
+         *
+         *     Returns 404 both for "no such delegate" AND "not owned by
+         *     you" so cross-tenant existence isn't leaked via error codes.
+         */
+        get: Operations["get_delegate_api_ai_delegates__delegate_public_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update Delegate Caps
+         * @description SCD2 close+insert new caps for a delegate the caller owns.
+         */
+        patch: Operations["update_delegate_caps_api_ai_delegates__delegate_public_id__patch"];
+        trace?: never;
+    };
+    "/api/ai-delegates/{delegate_public_id}/deactivate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Deactivate Delegate
+         * @description Deactivate a delegate via the shared kill-switch flow.
+         *
+         *     The heavy lifting (SCD2-close ``is_active=True`` → insert
+         *     ``is_active=False``, revoke ``user_active_tokens``, publish
+         *     ``admin.user_deactivated``) lives in
+         *     :meth:`UserService.deactivate_user` — so the same bus-event
+         *     fanout + verify-cache eviction that the admin deactivation
+         *     path uses applies here verbatim. This route only enforces
+         *     "caller owns this delegate" and converts the service's
+         *     bool return into the HTTP shape.
+         */
+        post: Operations["deactivate_delegate_api_ai_delegates__delegate_public_id__deactivate_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3869,6 +4042,188 @@ export type Components = {
             label?: string | null;
         };
         /**
+         * DelegateCapsBody
+         * @description Per-delegate trading safety caps.
+         *
+         *     Every field is optional; a ``None`` cap means "inherit the
+         *     Snapper-wide default" per the plan §3.5.3 fallback policy.
+         *     The underlying :class:`~snapper.data.models.UserTradingCaps`
+         *     row is always written at create time (even for all-``None``
+         *     caps) so the Day 1c ``TradingCapsEnforcer.guard`` surface has
+         *     a row to read + cap history is SCD2-preserved.
+         *
+         *     Attributes:
+         *         max_order_quantity_per_instrument: JSON ``{instrument: qty}``
+         *             OR a scalar — passed through unchanged to the
+         *             enforcer.
+         *         max_open_orders: in-flight command cap.
+         *         max_daily_notional_usd: rolling 24h USD-notional cap.
+         *         max_cancels_per_minute: sliding-window cancel cap.
+         */
+        DelegateCapsBody: {
+            /** @description JSON dict {instrument_public_id: qty} or null for unbounded */
+            max_order_quantity_per_instrument?: Record<string, unknown> | null;
+            /**
+             * Max Open Orders
+             * @description In-flight command cap (null = unbounded)
+             */
+            max_open_orders?: number | null;
+            /**
+             * Max Daily Notional Usd
+             * @description Rolling 24h USD notional cap (null = unbounded)
+             */
+            max_daily_notional_usd?: number | null;
+            /**
+             * Max Cancels Per Minute
+             * @description Sliding 60s cancel cap (null = unbounded)
+             */
+            max_cancels_per_minute?: number | null;
+        };
+        /**
+         * DelegateCreatedPayload
+         * @description Create-delegate response body — the ONLY place tokens surface.
+         *
+         *     Returned from ``POST /api/ai-delegates``. The operator must
+         *     copy the tokens out of the response within their session; the
+         *     list + detail endpoints deliberately do not re-serve them.
+         *
+         *     Attributes:
+         *         delegate: The newly-minted :class:`DelegateRead`
+         *             projection.
+         *         access_token: Freshly-minted JWT — operator copies into
+         *             the MCP client config.
+         *         refresh_token: Freshly-minted refresh JWT.
+         *         expires_in: Access-token lifetime in seconds (mirrors the
+         *             standard :class:`~snapper.auth.schemas.tokens.TokenPair`
+         *             shape so CLI clients that also handle login responses
+         *             can share deserialisation code).
+         */
+        DelegateCreatedPayload: {
+            delegate: Components["schemas"]["DelegateRead"];
+            /** Access Token */
+            access_token: string;
+            /** Refresh Token */
+            refresh_token: string;
+            /** Expires In */
+            expires_in: number;
+        };
+        /**
+         * DelegateCreatedResponse
+         * @description POST-create response envelope — one-shot token surface.
+         */
+        DelegateCreatedResponse: {
+            /**
+             * Type
+             * @default delegate_created_response
+             * @constant
+             */
+            type: "delegate_created_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["DelegateCreatedPayload"];
+        };
+        /**
+         * DelegateListResponse
+         * @description List-delegates response envelope.
+         */
+        DelegateListResponse: {
+            /**
+             * Type
+             * @default delegate_list
+             * @constant
+             */
+            type: "delegate_list";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Payload */
+            payload: Components["schemas"]["DelegateRead"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
+            count: number;
+        };
+        /**
+         * DelegateRead
+         * @description Public projection of a delegate used by list/detail reads.
+         *
+         *     The ``access_token`` + ``refresh_token`` fields are NEVER set
+         *     on list/detail responses — only the POST-create response
+         *     includes them (once, in :class:`DelegateCreatedPayload`).
+         *     Once issued, the tokens live only in the client (env var /
+         *     keychain); Snapper never re-serves them.
+         *
+         *     Attributes:
+         *         public_id: Delegate user's UUID7 public identifier.
+         *         username: Delegate's username (``ai-<label>`` shape).
+         *         label: Human-readable label the operator supplied.
+         *         created_by_user_public_id: Owner operator's public_id.
+         *         created_at: Bus-time when the delegate was minted.
+         *         is_active: Flipped to ``False`` on
+         *             ``POST /api/ai-delegates/{id}/deactivate``.
+         *         caps: Current trading caps (always populated).
+         */
+        DelegateRead: {
+            /** Public Id */
+            public_id: string;
+            /** Username */
+            username: string;
+            /** Label */
+            label: string;
+            /** Created By User Public Id */
+            created_by_user_public_id: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Is Active */
+            is_active: boolean;
+            caps: Components["schemas"]["DelegateCapsBody"];
+        };
+        /**
+         * DelegateResponse
+         * @description Single delegate read response envelope.
+         */
+        DelegateResponse: {
+            /**
+             * Type
+             * @default delegate_response
+             * @constant
+             */
+            type: "delegate_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["DelegateRead"];
+        };
+        /**
          * EquityOverlayPoint
          * @description Aligned equity sample across both runs (one-sided legs nullable).
          */
@@ -4157,6 +4512,58 @@ export type Components = {
             /** Session Id */
             session_id: string;
             payload: Components["schemas"]["ExecutionPlanData"];
+        };
+        /**
+         * FeatureFlagsPayload
+         * @description Public feature-flag projection (plan §4 Day 4 item 1, resolves R2-M5).
+         *
+         *     Exposes ONLY the boolean feature flags that the frontend needs
+         *     on mount to decide whether to render the ``/ai-integration``
+         *     surface. No secrets, no per-user state, no setting values —
+         *     just the on/off state of feature gates that are safe to reveal
+         *     to an unauthenticated caller.
+         *
+         *     Attributes:
+         *         ai_integration_enabled: Whether the MCP sub-app is
+         *             activated. When ``False``, the frontend hides the
+         *             AI Integration navigation entry and the ``/api/mcp``
+         *             endpoint returns ``503 feature_disabled`` per plan
+         *             §3.12 always-mounted-but-gated semantics.
+         */
+        FeatureFlagsPayload: {
+            /**
+             * Ai Integration Enabled
+             * @description Whether the MCP sub-app is activated (plan §3.12).
+             */
+            ai_integration_enabled: boolean;
+        };
+        /**
+         * FeatureFlagsResponse
+         * @description Public feature-flag response envelope.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         *         payload: Feature-flag booleans.
+         */
+        FeatureFlagsResponse: {
+            /**
+             * Type
+             * @default feature_flags_response
+             * @constant
+             */
+            type: "feature_flags_response";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["FeatureFlagsPayload"];
         };
         /**
          * FrontMonthData
@@ -7775,6 +8182,131 @@ export type Components = {
          */
         RemoveSettingBody: Record<string, never>;
         /**
+         * DelegateCreateRequest
+         * @description Create-delegate request envelope.
+         */
+        DelegateCreateRequest: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "delegate_create_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["DelegateCreateBody"];
+        };
+        /**
+         * DelegateCreateBody
+         * @description Operator-supplied fields for creating a new AI delegate.
+         *
+         *     The operator chooses a human-readable ``label`` that becomes
+         *     the delegate's username (prefixed with ``ai-``). Caps are
+         *     optional — every cap defaulting to the Snapper-wide fallback
+         *     per plan §3.5.3.
+         *
+         *     Attributes:
+         *         label: Non-empty human-readable tag. Normalised to
+         *             ``ai-<label>`` as the username so the delegate is
+         *             listable in the standard user table without an
+         *             auxiliary display-name column.
+         *         caps: Optional per-delegate trading safety caps.
+         */
+        DelegateCreateBody: {
+            /**
+             * Label
+             * @description Delegate label
+             */
+            label: string;
+            caps?: Components["schemas"]["DelegateCapsBody"];
+        };
+        /**
+         * DelegateCapsUpdateRequest
+         * @description Update-delegate-caps request envelope.
+         */
+        DelegateCapsUpdateRequest: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "delegate_caps_update_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["DelegateCapsUpdateBody"];
+        };
+        /**
+         * DelegateCapsUpdateBody
+         * @description Body for ``PATCH /api/ai-delegates/{id}``.
+         *
+         *     Only the caps fields are mutable post-create. ``label`` and
+         *     ``username`` are immutable after mint (changing them would
+         *     invalidate live tokens without an atomic rotation).
+         *
+         *     Attributes:
+         *         caps: Replacement caps — every field replaces the
+         *             corresponding existing cap. Missing fields are treated
+         *             as ``None`` (unbounded).
+         */
+        DelegateCapsUpdateBody: {
+            caps: Components["schemas"]["DelegateCapsBody"];
+        };
+        /**
+         * DelegateDeactivateRequest
+         * @description Deactivate-delegate request envelope.
+         */
+        DelegateDeactivateRequest: {
+            /**
+             * Type
+             * @constant
+             */
+            type?: "delegate_deactivate_request";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            payload: Components["schemas"]["DelegateDeactivateBody"];
+        };
+        /**
+         * DelegateDeactivateBody
+         * @description Body for ``POST /api/ai-delegates/{id}/deactivate``.
+         *
+         *     Attributes:
+         *         reason: Optional free-text reason recorded in audit logs
+         *             + propagated through ``admin.user_deactivated`` so
+         *             the WS listener's close-reason carries context.
+         */
+        DelegateDeactivateBody: {
+            /**
+             * Reason
+             * @description Optional audit reason
+             */
+            reason?: string | null;
+        };
+        /**
          * BacktestCreateCommand
          * @description Request envelope for POST /api/backtests.
          */
@@ -8864,6 +9396,26 @@ export interface Operations {
             };
         };
     };
+    get_public_feature_flags_api_settings_features_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["FeatureFlagsResponse"];
+                };
+            };
+        };
+    };
     get_all_settings_api_settings_get: {
         parameters: {
             query?: {
@@ -8994,6 +9546,172 @@ export interface Operations {
                 };
             };
             /** @description Setting not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_delegates_api_ai_delegates_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["DelegateListResponse"];
+                };
+            };
+        };
+    };
+    create_delegate_api_ai_delegates_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["DelegateCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["DelegateCreatedResponse"];
+                };
+            };
+        };
+    };
+    get_delegate_api_ai_delegates__delegate_public_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                delegate_public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["DelegateResponse"];
+                };
+            };
+            /** @description Delegate not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_delegate_caps_api_ai_delegates__delegate_public_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                delegate_public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["DelegateCapsUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["DelegateResponse"];
+                };
+            };
+            /** @description Delegate not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    deactivate_delegate_api_ai_delegates__delegate_public_id__deactivate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                delegate_public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": Components["schemas"]["DelegateDeactivateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["DelegateResponse"];
+                };
+            };
+            /** @description Delegate not found */
             404: {
                 headers: {
                     [name: string]: unknown;
