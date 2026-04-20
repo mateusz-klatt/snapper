@@ -221,6 +221,44 @@ class TestCheckFileShouldPass:
 
         assert len(findings) == 1
 
+    def test_allowlist_marker_in_triple_quoted_docstring_does_not_exempt(
+        self, tmp_path: Path
+    ) -> None:
+        """A vendor line inside a triple-quoted docstring MUST NOT bypass.
+
+        Given: a module-level docstring whose body contains a vendor
+            name and a ``# vendor-neutral-ok`` fragment (which looks
+            like a comment only when tokenized per-line — at the file
+            level it is part of the STRING token spanning the
+            docstring),
+        When: ``check_file`` runs,
+        Then: one violation is returned — closes the R3 finding that
+            per-line tokenization misclassified docstring bodies as
+            comment-bearing lines. File-level tokenization keeps the
+            enclosing STRING context intact.
+        """
+        f = tmp_path / "x.py"
+        f.write_text('"""\nClaude Desktop # vendor-neutral-ok\n"""\n')
+
+        findings = checker.check_file(f)
+
+        assert len(findings) == 1
+
+    def test_real_trailing_comment_still_exempts(self, tmp_path: Path) -> None:
+        """A real trailing ``#`` comment still exempts the line end-to-end.
+
+        Given: a vendor-named line whose ``# vendor-neutral-ok`` is
+            the file-level trailing comment on an assignment,
+        When: ``check_file`` runs,
+        Then: no violation is reported — confirms the file-level
+            tokenizer still picks up genuine comments after the R3
+            rewrite.
+        """
+        f = tmp_path / "x.py"
+        f.write_text('NAME = "Claude Desktop client"  # vendor-neutral-ok\n')
+
+        assert checker.check_file(f) == []
+
     def test_tokenizer_error_does_not_false_exempt(self, tmp_path: Path) -> None:
         """An unparseable line MUST NOT silently exempt a vendor reference.
 

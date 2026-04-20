@@ -71,39 +71,48 @@ def iter_python_files(root: Path) -> list[Path]:
     return sorted(python_files)
 
 
-def _is_allowlisted(line: str) -> bool:
-    """Return True when the line carries the vendor-neutral-ok marker in a comment.
+def _collect_allowlisted_lines(source: str) -> set[int]:
+    """Return the line numbers whose marker sits inside a real ``#`` comment.
 
-    The check tokenizes the line with :mod:`tokenize` and inspects
-    only :data:`tokenize.COMMENT` tokens. A string literal whose body
-    happens to contain ``# vendor-neutral-ok`` does NOT exempt the
-    line — a regression from the earlier substring / regex
-    implementations that closed the R2 review finding.
+    The scanner tokenizes the *entire* file once so multi-line
+    structures (triple-quoted docstrings, implicit line
+    continuations, f-string spans) are classified correctly.
+    Per-line tokenization was previously tried and retired: a line
+    like ``Claude Desktop # vendor-neutral-ok`` sitting *inside* a
+    docstring tokenizes in isolation as a COMMENT even though at the
+    file level it is STRING, which let authors bypass the scanner
+    by hiding the vendor reference inside a triple-quoted block.
 
-    Lines the tokenizer cannot parse in isolation (syntactically
-    incomplete fragments — e.g. the middle of a multi-line string or
-    a continuation line) fall through to ``False`` so the scanner
-    errs on the side of reporting rather than silently exempting.
+    Tokenizer errors on the whole file (``tokenize.TokenError`` or
+    ``SyntaxError``) fall through to an empty set so nothing gets
+    exempted — the allowlist fails closed.
 
     Args:
-        line: Raw source line including any trailing comment.
+        source: Full file text.
 
     Returns:
-        True only when the allowlist marker appears inside a
-        :data:`tokenize.COMMENT` token on the line.
+        1-based line numbers where a :data:`tokenize.COMMENT` token
+        contains :data:`ALLOWLIST_COMMENT`.
     """
     try:
-        tokens = tokenize.generate_tokens(io.StringIO(line + "\n").readline)
+        tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+        allowlisted: set[int] = set()
         for tok in tokens:
             if tok.type == tokenize.COMMENT and ALLOWLIST_COMMENT in tok.string:
-                return True
+                allowlisted.add(tok.start[0])
+        return allowlisted
     except (tokenize.TokenError, SyntaxError):
-        return False
-    return False
+        return set()
 
 
 def check_file(filepath: Path) -> list[Violation]:
     """Scan a single file and return vendor-string violations.
+
+    The function reads the file once, derives the set of lines whose
+    trailing ``#`` comment carries the allowlist marker via
+    :func:`_collect_allowlisted_lines` (file-level tokenization so a
+    docstring body cannot bypass), then regex-scans every line for
+    vendor names. Lines in the allowlist set are skipped.
 
     Args:
         filepath: Path to the Python source file.
@@ -112,15 +121,16 @@ def check_file(filepath: Path) -> list[Violation]:
         List of (line_number, matched_token, stripped_line) tuples.
     """
     try:
-        lines = filepath.read_text(encoding="utf-8").splitlines()
+        source = filepath.read_text(encoding="utf-8")
     except OSError:
         return []
+    allowlisted_lines = _collect_allowlisted_lines(source)
     violations: list[Violation] = []
-    for line_num, line in enumerate(lines, start=1):
+    for line_num, line in enumerate(source.splitlines(), start=1):
         match = VENDOR_PATTERN.search(line)
         if match is None:
             continue
-        if _is_allowlisted(line):
+        if line_num in allowlisted_lines:
             continue
         violations.append((line_num, match.group(0), line.strip()))
     return violations
