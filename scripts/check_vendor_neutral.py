@@ -38,6 +38,15 @@ VENDOR_PATTERN: Final[re.Pattern[str]] = re.compile(
 
 ALLOWLIST_COMMENT: Final[str] = "vendor-neutral-ok"
 
+ALLOWLIST_MARKER: Final[re.Pattern[str]] = re.compile(r"#[^\n]*vendor-neutral-ok\b")
+"""Trailing-comment allowlist pattern.
+
+The marker MUST appear inside a ``#`` comment (anywhere after the first
+``#`` on the line). Matching only within the comment prevents a string
+literal like ``"not vendor-neutral-ok"`` from silently disabling the
+scanner on a line that carries a real vendor reference.
+"""
+
 
 def iter_python_files(root: Path) -> list[Path]:
     """Collect Python files under the scan root.
@@ -60,15 +69,21 @@ def iter_python_files(root: Path) -> list[Path]:
 
 
 def _is_allowlisted(line: str) -> bool:
-    """Return True when the line carries the vendor-neutral-ok marker.
+    """Return True when the line carries the vendor-neutral-ok marker in a comment.
+
+    The marker must sit inside a Python ``#`` comment — a string
+    literal with the same text does NOT silence the scanner. This
+    closes the R1 review finding that substring-matching the marker
+    would let authors bypass the gate via a plain string.
 
     Args:
         line: Raw source line including any trailing comment.
 
     Returns:
-        True when the allowlist marker is present anywhere in the line.
+        True only when the allowlist marker appears inside a trailing
+        ``#`` comment on the line.
     """
-    return ALLOWLIST_COMMENT in line
+    return ALLOWLIST_MARKER.search(line) is not None
 
 
 def check_file(filepath: Path) -> list[Violation]:

@@ -14,7 +14,9 @@ import pytest
 
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.tokens import TokenClaims
+from snapper.mcp.auth import OPERATOR_SCOPE_ERROR_CODE
 from snapper.mcp.auth import WALLET_SCOPE_ERROR_CODE
+from snapper.mcp.auth import ensure_operator_in_claims
 from snapper.mcp.auth import validate_user_wallet_scope
 
 
@@ -158,3 +160,56 @@ class TestValidateUserWalletScope:
         )
         args, _kwargs = repo.list_accessible_wallets_for_operators.call_args
         assert args[1] == pinned
+
+
+class TestEnsureOperatorInClaims:
+    """Coverage for the operator-binding re-validation helper (R1 BLOCKER)."""
+
+    def test_none_selection_is_admitted(self) -> None:
+        """``operator_public_id=None`` → caller defers to primary; admit.
+
+        Given: a non-ADMIN caller who passes no operator selection,
+        When: the gate runs,
+        Then: it returns without raising so the tool can fall back to
+            ``primary_operator_public_id`` from the claims.
+        """
+        ensure_operator_in_claims(_claims(), None)
+
+    def test_admin_bypass(self) -> None:
+        """ADMIN role → admitted even for operators not on their claims.
+
+        Given: an ADMIN caller whose claim set happens to be empty,
+        When: the gate runs against an arbitrary operator,
+        Then: it returns without raising — ADMIN implicitly covers
+            every operator, matching the wallet-gate ADMIN bypass.
+        """
+        ensure_operator_in_claims(
+            _claims(role=UserRole.ADMIN, operator_public_ids=[]),
+            "op-arbitrary",
+        )
+
+    def test_operator_in_claims_admitted(self) -> None:
+        """Operator present in claims → admit.
+
+        Given: a delegate whose claims list ``op-1``,
+        When: they select ``op-1``,
+        Then: the gate returns.
+        """
+        ensure_operator_in_claims(_claims(operator_public_ids=["op-1"]), "op-1")
+
+    def test_operator_not_in_claims_rejected(self) -> None:
+        """Operator outside the claim set → PermissionError with stable code.
+
+        Given: a delegate whose claims list only ``op-1``,
+        When: they select ``op-2``,
+        Then: the gate raises PermissionError citing
+            :data:`OPERATOR_SCOPE_ERROR_CODE` — the stable classifier
+            FastMCP tool errors surface to clients.
+        """
+        with pytest.raises(PermissionError) as exc:
+            ensure_operator_in_claims(
+                _claims(operator_public_ids=["op-1"]),
+                "op-2",
+            )
+        assert OPERATOR_SCOPE_ERROR_CODE in str(exc.value)
+        assert "op-2" in str(exc.value)

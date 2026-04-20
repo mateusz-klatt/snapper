@@ -169,6 +169,23 @@ class TestCheckFileShouldPass:
 
         assert checker.check_file(f) == []
 
+    def test_allowlist_marker_in_string_literal_does_not_exempt(self, tmp_path: Path) -> None:
+        """Marker inside a string literal MUST NOT bypass the scanner.
+
+        Given: a vendor-named line whose only ``vendor-neutral-ok``
+            occurrence is inside a string literal (no ``#`` comment),
+        When: ``check_file`` runs,
+        Then: one violation is returned — closes the R1 finding where
+            substring matching the marker would let authors bypass the
+            gate with a plain string.
+        """
+        f = tmp_path / "x.py"
+        f.write_text('NAME = "Claude Desktop is not vendor-neutral-ok here"\n')
+
+        findings = checker.check_file(f)
+
+        assert len(findings) == 1
+
     def test_generic_mcp_phrasing_is_safe(self, tmp_path: Path) -> None:
         """Verify vendor-neutral phrasing is NOT flagged.
 

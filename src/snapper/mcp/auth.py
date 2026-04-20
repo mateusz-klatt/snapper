@@ -46,6 +46,61 @@ distinguish scope rejections from caps rejections, token issues, or
 feature-flag toggles. Enumerated in ``docs/ai-integration.md``.
 """
 
+OPERATOR_SCOPE_ERROR_CODE: str = "operator_out_of_scope"
+"""Error code returned when the caller-supplied operator is not in their claims.
+
+MCP write tools accept an optional ``operator_public_id`` so a
+caller who belongs to multiple operators can pick which one to act
+AS. The selection MUST be inside the authenticated operator set;
+otherwise the write would be attributed to an operator the caller
+cannot act for. Enumerated in ``docs/ai-integration.md``.
+"""
+
+
+def ensure_operator_in_claims(
+    claims: TokenClaims,
+    operator_public_id: str | None,
+) -> None:
+    """Reject when the caller picks an operator outside their authenticated set.
+
+    ADMIN bypass mirrors the wallet gate: a role that implicitly
+    covers every operator does not need this check. All other roles
+    must select one of the operators listed on their JWT claims. A
+    ``None`` selection is admitted because the caller defers to
+    :attr:`TokenClaims.primary_operator_public_id`, which the tool
+    plugs in downstream; the claim set is the source of truth for
+    that fallback so no extra validation is required.
+
+    Wiring pairs with :func:`validate_user_wallet_scope` so the two
+    checks together cover the `(operator, wallet)` tuple any MCP
+    write tool stamps onto the persisted row: the wallet gate
+    proves the wallet sits inside *some* operator the caller holds,
+    and this helper proves the caller actually chose *that* same
+    operator instead of spoofing a peer.
+
+    Args:
+        claims: Verified :class:`TokenClaims` for the current call.
+        operator_public_id: Caller-supplied operator selection.
+            ``None`` means "fall back to the primary operator" and
+            is always admitted.
+
+    Raises:
+        PermissionError: when a non-ADMIN caller picks an operator
+            outside :attr:`TokenClaims.operator_public_ids`. The
+            message starts with :data:`OPERATOR_SCOPE_ERROR_CODE`
+            so FastMCP tool errors carry a stable classifier.
+    """
+    if operator_public_id is None:
+        return
+    if claims.role == UserRole.ADMIN:
+        return
+    if operator_public_id in claims.operator_public_ids:
+        return
+    raise PermissionError(
+        f"{OPERATOR_SCOPE_ERROR_CODE}: operator '{operator_public_id}' is not "
+        f"in the caller's authenticated operator set."
+    )
+
 
 async def validate_user_wallet_scope(
     claims: TokenClaims,

@@ -236,6 +236,8 @@ class TestSubmitManualOrderTool:
         assert result["plan_public_id"] == "plan-pid"
         assert result["command_public_id"] == "cmd-pid"
         assert result["source_surface"] == "mcp"
+        scope_args = repo.list_accessible_wallets_for_operators.call_args.args
+        assert scope_args[0] == ["op-1"]
         cmd_row = repo.insert_trade_command.await_args.args[0]
         assert cmd_row["source_surface"] == "mcp"
 
@@ -580,3 +582,84 @@ class TestSubmitManualOrderTool:
                 },
             )
         assert "broker down" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_wallet_out_of_scope_rejects_before_any_write(self) -> None:
+        """Wallet not in scope → tool rejects before plan + command inserts.
+
+        Given: the repository's ``list_accessible_wallets_for_operators``
+            returns a set that does NOT include the target wallet,
+        When: ``submit_manual_order`` is dispatched,
+        Then: a ``wallet_out_of_scope`` tool error surfaces AND neither
+            ``insert_execution_plan`` nor ``insert_trade_command`` is
+            invoked — the scope gate fails closed before any write.
+            Guards against regressions where a wiring refactor might
+            accidentally bypass :func:`validate_user_wallet_scope`.
+        """
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock()
+        repo.insert_trade_command = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(
+            return_value=[{"public_id": "wallet-other"}]
+        )
+        server = _build_server(
+            repository=repo,
+            caps_enforcer=self._make_enforcer_admit(),
+        )
+        with pytest.raises(ToolError) as exc:
+            await server._tool_manager.call_tool(
+                "submit_manual_order",
+                {
+                    "exchange": "kraken",
+                    "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
+                    "side": "buy",
+                    "order_type": "market",
+                    "quantity": 1.0,
+                    "wallet_public_id": "wallet-1",
+                    "idempotency_key": "idem-scope-fail",
+                },
+            )
+        assert "wallet_out_of_scope" in str(exc.value)
+        repo.insert_execution_plan.assert_not_called()
+        repo.insert_trade_command.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_operator_out_of_scope_rejects_before_any_write(self) -> None:
+        """Caller-supplied operator outside claims → reject before any write.
+
+        Given: the caller picks an ``operator_public_id`` that is not
+            in their authenticated ``operator_public_ids``,
+        When: ``submit_manual_order`` is dispatched,
+        Then: a ``operator_out_of_scope`` tool error surfaces AND no
+            DB calls fire (not even the scope-gate wallet lookup) —
+            the operator gate short-circuits first. Closes the R1
+            cross-operator attribution bypass finding.
+        """
+        repo = AsyncMock()
+        repo.insert_execution_plan = AsyncMock()
+        repo.insert_trade_command = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock()
+        server = _build_server(
+            repository=repo,
+            caps_enforcer=self._make_enforcer_admit(),
+        )
+        with pytest.raises(ToolError) as exc:
+            await server._tool_manager.call_tool(
+                "submit_manual_order",
+                {
+                    "exchange": "kraken",
+                    "instrument": "BTC-USD",
+                    "instrument_public_id": "inst-1",
+                    "side": "buy",
+                    "order_type": "market",
+                    "quantity": 1.0,
+                    "wallet_public_id": "wallet-1",
+                    "idempotency_key": "idem-op-fail",
+                    "operator_public_id": "op-NOT-MINE",
+                },
+            )
+        assert "operator_out_of_scope" in str(exc.value)
+        repo.list_accessible_wallets_for_operators.assert_not_called()
+        repo.insert_execution_plan.assert_not_called()
+        repo.insert_trade_command.assert_not_called()

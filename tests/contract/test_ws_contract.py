@@ -254,27 +254,46 @@ class TestWsBearerExtractionContract:
 
 
 class TestWsFrameContractConstants:
-    """Documented close codes are part of the wire contract."""
+    """Documented close codes are part of the wire contract.
 
-    def test_auth_close_code_is_4401(self) -> None:
-        """Auth failure close code MUST be ``4401`` (documented).
+    Clients — including ``websockets`` CLI tooling used during
+    incident triage — branch on the close code to distinguish
+    "retry with fresh token" (``4401``) from "user deactivated"
+    (``4003``). The assertions below pin BOTH codes so a rename on
+    either side is caught by the contract test.
+    """
 
-        Clients — including ``websockets`` CLI tooling used during
-        incident triage — branch on the close code to distinguish
-        "retry with fresh token" (4401) from "user deactivated"
-        (4003). Pinning the constant here guards the contract.
+    def test_auth_close_code_4401_present_in_handler(self) -> None:
+        """The auth-handler source MUST reference close code ``4401``.
+
+        Given: the WebSocket auth handler module,
+        When: its source is inspected,
+        Then: the literal ``4401`` appears — a regression to any
+            other status code breaks client retry logic.
         """
-        from snapper.interface.websocket.handlers.auth import AUTH_TIMEOUT_SECONDS
+        import snapper.interface.websocket.handlers.auth as auth_handler_mod
 
-        assert isinstance(AUTH_TIMEOUT_SECONDS, int)
-
-        import snapper.auth.websocket_auth as ws_auth_mod
-
-        source: str = ws_auth_mod.__file__
-        with open(source, encoding="utf-8") as fh:
+        with open(auth_handler_mod.__file__, encoding="utf-8") as fh:
             body = fh.read()
 
-        assert "4003" in body or "code=4003" in body or "code 4003" in body
+        assert "4401" in body
+
+    def test_deactivation_close_code_4003_present_in_ws_auth(self) -> None:
+        """The WS auth manager source MUST reference close code ``4003``.
+
+        Given: the ``WebSocketAuthManager`` admin-bus subscriber
+            that closes matching sessions on ``admin.user_deactivated``,
+        When: its source is inspected,
+        Then: the literal ``4003`` appears — the documented code
+            client UX uses to prompt a full re-login rather than a
+            silent refresh.
+        """
+        import snapper.auth.websocket_auth as ws_auth_mod
+
+        with open(ws_auth_mod.__file__, encoding="utf-8") as fh:
+            body = fh.read()
+
+        assert "4003" in body
 
 
 class TestWsSingletonStateIsolation:
