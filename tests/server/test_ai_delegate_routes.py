@@ -585,7 +585,32 @@ class TestCreateDelegateInsertFailureRollsBackAtomically:
                 .scalars()
                 .all()
             )
+            created_user_ids = [u.public_id for u in users]
+            leaked_caps = (
+                (
+                    await s.execute(
+                        _sel(UserTradingCaps).where(
+                            UserTradingCaps.user_public_id.in_(created_user_ids + ["__never__"])
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            leaked_tokens = (
+                (
+                    await s.execute(
+                        _sel(UserActiveToken).where(
+                            UserActiveToken.user_public_id.in_(created_user_ids + ["__never__"])
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
         assert users == []
+        assert leaked_caps == []
+        assert leaked_tokens == []
 
 
 class TestBuildServiceFactory:
