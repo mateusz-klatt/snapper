@@ -38,6 +38,7 @@ from snapper.auth.tokens import hash_token
 from snapper.core.json_types import JsonObject
 from snapper.data.models import User
 from snapper.data.models import UserActiveToken
+from snapper.data.models import UserOperatorMembership
 from snapper.data.models import UserTradingCaps
 from snapper.data.repository import Repository
 from snapper.data.repository import close_and_insert
@@ -73,6 +74,24 @@ class DelegateProliferationError(Exception):
 
 class DelegateLabelConflictError(Exception):
     """Raised when the normalised username derived from the label already exists."""
+
+
+class DelegateOperatorBindingError(Exception):
+    """Raised when the delegate cannot be bound to a valid operator.
+
+    Day 5c BLOCKER fix: the delegate MUST carry a
+    ``UserOperatorMembership`` row so its minted tokens decode with
+    ``operator_public_ids`` populated; otherwise the Day 5b MCP
+    wallet-scope gate rejects every write. Triggered when:
+
+        - the caller chose an ``operator_public_id`` outside their
+          own authenticated set (cross-operator spoof attempt), or
+        - the caller has NO primary operator AND did not specify
+          one explicitly (ambiguous delegate scope).
+
+    Route handler maps this to HTTP 422 with a ``detail`` that
+    names the offending operator so clients can self-correct.
+    """
 
 
 class InvalidOwnerPrincipalError(Exception):
@@ -123,29 +142,45 @@ class DelegateService:
 
         Steps (all in one transaction):
 
-            1. Derive a unique username ``ai-<slug>-<suffix>`` from
+            1. Resolve + validate the target operator binding via
+               :meth:`_resolve_operator_binding` so the delegate
+               inherits a concrete ``operator_public_id`` the
+               caller is authorised to act AS (Day 5c BLOCKER
+               fix — fresh delegates were otherwise rejected by
+               the MCP wallet gate).
+            2. Derive a unique username ``ai-<slug>-<suffix>`` from
                ``body.label`` — retries with a fresh suffix on
                collision up to a small bound.
-            2. Insert the :class:`User` row with
+            3. Insert the :class:`User` row with
                ``role=AI_DELEGATE``,
                ``is_active=True``, and
                ``created_by_user_public_id`` pointing at
                ``owner.user_public_id`` so the per-owner listing
                query can filter cheaply via the migration-0012
                ``ix_users_created_by_user_public_id`` index.
-            3. Insert the :class:`UserTradingCaps` row with the
+            4. Insert the :class:`UserTradingCaps` row with the
                operator-supplied caps (or all-``None`` for
                "inherit defaults").
-            4. Mint an access+refresh pair via
-               :meth:`TokenManager.create_tokens`.
-            5. Insert both ``user_active_tokens`` rows so Day 3d-B
+            5. Insert the :class:`UserOperatorMembership` row with
+               ``is_primary=True`` so the delegate has a single
+               canonical operator scope — the refresh round-trip
+               can later re-resolve identical
+               ``operator_public_ids`` from DB.
+            6. Mint an access+refresh pair via
+               :meth:`TokenManager.create_tokens`. The principal
+               passed in carries ``operator_public_ids=[bound]``
+               so the minted JWT decodes with populated operator
+               scope and Day 5b
+               :func:`~snapper.mcp.auth.validate_user_wallet_scope`
+               admits the delegate's first write call.
+            7. Insert both ``user_active_tokens`` rows so Day 3d-B
                ``verify_token_with_db`` admits them on the next
                request.
 
         If any step raises, the outer ``async with session`` rolls
-        back — no partial User row, no orphan caps, no phantom
-        tokens (R2 atomicity guarantee matching Day 3d-A
-        ``rotate_user_active_token``).
+        back — no partial User row, no orphan caps, no membership
+        without a User, no phantom tokens (R2 atomicity guarantee
+        matching Day 3d-A ``rotate_user_active_token``).
 
         Args:
             owner: The creating operator's principal. Must be
@@ -165,11 +200,16 @@ class DelegateService:
             InvalidOwnerPrincipalError: If the caller's principal
                 does not carry a usable ``user_public_id`` (R1
                 blank-owner guard).
+            DelegateOperatorBindingError: If
+                ``body.operator_public_id`` is outside the caller's
+                claim set OR no explicit binding is given and the
+                caller has no primary operator.
             DelegateProliferationError: If the owner already owns
                 :data:`MAX_AI_DELEGATES_PER_OWNER` active delegates
                 (plan §5 item 5 cap).
         """
         self._guard_owner(owner.user_public_id)
+        bound_operator_public_id = self._resolve_operator_binding(owner, body)
         async with self.repository.session() as session:
             await self._guard_proliferation(session, owner.user_public_id)
             username = await self._reserve_unique_username(session, body.label)
@@ -200,11 +240,22 @@ class DelegateService:
                 sequence_id=self._tracker.next_sequence(_DELEGATES_TOPIC),
             )
             session.add(caps_row)
+            membership_row = UserOperatorMembership(
+                user_public_id=delegate_user.public_id,
+                operator_public_id=bound_operator_public_id,
+                is_primary=True,
+                timestamp=now,
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence(_DELEGATES_TOPIC),
+            )
+            session.add(membership_row)
             delegate_principal = AuthPrincipal(
                 username=delegate_user.username,
                 role=UserRole.AI_DELEGATE,
                 is_active=True,
                 user_public_id=delegate_user.public_id,
+                operator_public_ids=[bound_operator_public_id],
+                primary_operator_public_id=bound_operator_public_id,
             )
             pair = self.token_manager.create_tokens(delegate_principal)
             access_claims = self.token_manager.decode_fresh_token(pair.access_token)
@@ -252,6 +303,66 @@ class DelegateService:
             refresh_token=pair.refresh_token,
             expires_in=pair.expires_in,
         )
+
+    def _resolve_operator_binding(
+        self,
+        owner: AuthPrincipal,
+        body: DelegateCreateBody,
+    ) -> str:
+        """Pick + validate the operator the new delegate inherits.
+
+        Closes the Day 5c 3-model review BLOCKER: a delegate created
+        without a :class:`UserOperatorMembership` row has empty
+        ``operator_public_ids`` on its minted JWT and is rejected
+        by every Day 5b MCP wallet-scope + operator-scope gate. The
+        binding MUST land in the same transaction as the User +
+        caps + token rows so a partial insert cannot leak a delegate
+        that can authenticate but cannot act.
+
+        Resolution order:
+
+            1. ADMIN caller + explicit ``operator_public_id`` → use
+               it unchanged. ADMIN implicitly spans every operator.
+            2. Non-ADMIN caller + explicit ``operator_public_id``
+               → MUST sit inside ``owner.operator_public_ids``;
+               otherwise raise :class:`DelegateOperatorBindingError`
+               (cross-operator spoof attempt).
+            3. No explicit pick → fall back to
+               ``owner.primary_operator_public_id``. Empty primary
+               + no explicit pick raises — the delegate would be
+               ambiguously scoped.
+
+        Args:
+            owner: The creating principal. Its
+                ``operator_public_ids`` set is the source of
+                truth for what the caller may act AS.
+            body: Parsed create body — ``body.operator_public_id``
+                is the optional explicit selection.
+
+        Returns:
+            The validated operator UUID that will be written to
+            the ``UserOperatorMembership`` row AND encoded into the
+            delegate's minted JWT claims.
+
+        Raises:
+            DelegateOperatorBindingError: when the selection is
+                outside the caller's claim set OR when no selection
+                is provided and the caller has no primary operator.
+        """
+        explicit = body.operator_public_id
+        if explicit is not None:
+            if owner.role == UserRole.ADMIN:
+                return explicit
+            if explicit not in owner.operator_public_ids:
+                raise DelegateOperatorBindingError(
+                    f"Operator '{explicit}' is not in the caller's authenticated set."
+                )
+            return explicit
+        if not owner.primary_operator_public_id:
+            raise DelegateOperatorBindingError(
+                "Caller has no primary operator — supply `operator_public_id` explicitly."
+            )
+        return owner.primary_operator_public_id
 
     async def list_delegates(self, owner_public_id: str) -> list[DelegateRead]:
         """Return every SCD2-active delegate the caller owns.

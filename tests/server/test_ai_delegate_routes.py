@@ -31,6 +31,7 @@ from snapper.api.schemas.ai_delegates import DelegateRead
 from snapper.application.ai_delegates.service import MAX_AI_DELEGATES_PER_OWNER
 from snapper.application.ai_delegates.service import DelegateLabelConflictError
 from snapper.application.ai_delegates.service import DelegateNotFoundError
+from snapper.application.ai_delegates.service import DelegateOperatorBindingError
 from snapper.application.ai_delegates.service import DelegateProliferationError
 from snapper.application.ai_delegates.service import DelegateService
 from snapper.application.ai_delegates.service import InvalidOwnerPrincipalError
@@ -41,8 +42,10 @@ from snapper.auth.tokens import hash_token
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import User
 from snapper.data.models import UserActiveToken
+from snapper.data.models import UserOperatorMembership
 from snapper.data.models import UserTradingCaps
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import where_active_now
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server import ai_delegate_routes
 from snapper.server.ai_delegate_routes import _build_service
@@ -87,11 +90,16 @@ async def _seed_owner(repo: SQLAlchemyRepository, public_id: str, username: str)
         await s.commit()
 
 
-def _make_owner_principal(user_public_id: str = "owner-1") -> AuthPrincipal:
+def _make_owner_principal(
+    user_public_id: str = "owner-1",
+    operator_public_id: str = "operator-1",
+) -> AuthPrincipal:
     return AuthPrincipal(
         username="owner",
         role=UserRole.OPERATOR,
         user_public_id=user_public_id,
+        operator_public_ids=[operator_public_id],
+        primary_operator_public_id=operator_public_id,
     )
 
 
@@ -199,6 +207,176 @@ class TestCreateDelegate:
         outcome = await manager.verify_token_with_reason(payload.access_token, repo)
         assert outcome.claims is not None
         assert outcome.rejection_reason is None
+
+
+class TestDelegateOperatorBinding:
+    """Day 5c BLOCKER closure — delegates inherit a validated operator scope.
+
+    Regression coverage for the 3-model review's BLOCKER: before
+    this fix, `create_delegate` minted JWTs with empty
+    `operator_public_ids`, which made the Day 5b MCP wallet-scope
+    gate reject every freshly-created delegate on its first
+    `submit_manual_order`.
+    """
+
+    @pytest.mark.asyncio
+    async def test_minted_tokens_carry_primary_operator_by_default(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Default path → delegate inherits caller's primary operator.
+
+        Given: a caller with a single operator membership and no
+            explicit ``operator_public_id`` in the create body,
+        When: the delegate is minted,
+        Then: the decoded access-token claims carry the primary
+            operator both in ``operator_public_ids`` and
+            ``primary_operator_public_id``.
+        """
+        await _seed_owner(repo, public_id="owner-bind-a", username="owner-bind-a")
+        manager = _fresh_manager()
+        service = DelegateService(repository=repo, token_manager=manager)
+        body = DelegateCreateBody(label="bind-default", caps=DelegateCapsBody())
+        principal = _make_owner_principal("owner-bind-a", operator_public_id="op-primary")
+        payload = await service.create_delegate(owner=principal, body=body)
+        claims = manager.decode_fresh_token(payload.access_token)
+        assert claims.operator_public_ids == ["op-primary"]
+        assert claims.primary_operator_public_id == "op-primary"
+
+    @pytest.mark.asyncio
+    async def test_explicit_operator_in_claims_is_honoured(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Explicit in-set choice → delegate bound to that operator.
+
+        Given: a caller who is a member of two operators and picks
+            the non-primary one explicitly,
+        When: the delegate is minted,
+        Then: the minted claims reflect the explicit selection.
+        """
+        await _seed_owner(repo, public_id="owner-bind-b", username="owner-bind-b")
+        manager = _fresh_manager()
+        service = DelegateService(repository=repo, token_manager=manager)
+        body = DelegateCreateBody(
+            label="bind-explicit",
+            caps=DelegateCapsBody(),
+            operator_public_id="op-secondary",
+        )
+        principal = AuthPrincipal(
+            username="owner",
+            role=UserRole.OPERATOR,
+            user_public_id="owner-bind-b",
+            operator_public_ids=["op-primary", "op-secondary"],
+            primary_operator_public_id="op-primary",
+        )
+        payload = await service.create_delegate(owner=principal, body=body)
+        claims = manager.decode_fresh_token(payload.access_token)
+        assert claims.operator_public_ids == ["op-secondary"]
+        assert claims.primary_operator_public_id == "op-secondary"
+
+    @pytest.mark.asyncio
+    async def test_operator_outside_claim_set_raises(self, repo: SQLAlchemyRepository) -> None:
+        """Cross-operator pick → :class:`DelegateOperatorBindingError`.
+
+        Given: a non-ADMIN caller who explicitly names an operator
+            that is NOT in their authenticated set,
+        When: the delegate create runs,
+        Then: ``DelegateOperatorBindingError`` is raised and no
+            User / caps / membership / token row is persisted.
+        """
+        await _seed_owner(repo, public_id="owner-bind-c", username="owner-bind-c")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        body = DelegateCreateBody(
+            label="spoof",
+            caps=DelegateCapsBody(),
+            operator_public_id="op-NOT-MINE",
+        )
+        principal = _make_owner_principal("owner-bind-c", operator_public_id="op-primary")
+        with pytest.raises(DelegateOperatorBindingError) as exc:
+            await service.create_delegate(owner=principal, body=body)
+        assert "op-NOT-MINE" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_admin_bypasses_claim_set_check(self, repo: SQLAlchemyRepository) -> None:
+        """ADMIN caller may bind delegate to any operator.
+
+        Given: an ADMIN caller with an empty operator claim set,
+        When: they bind a delegate to a specific operator,
+        Then: the binding is accepted because ADMIN implicitly
+            spans every operator — matches the MCP wallet gate's
+            ADMIN bypass.
+        """
+        await _seed_owner(repo, public_id="owner-bind-d", username="owner-bind-d")
+        manager = _fresh_manager()
+        service = DelegateService(repository=repo, token_manager=manager)
+        body = DelegateCreateBody(
+            label="admin-pick",
+            caps=DelegateCapsBody(),
+            operator_public_id="op-any",
+        )
+        principal = AuthPrincipal(
+            username="admin",
+            role=UserRole.ADMIN,
+            user_public_id="owner-bind-d",
+        )
+        payload = await service.create_delegate(owner=principal, body=body)
+        claims = manager.decode_fresh_token(payload.access_token)
+        assert claims.operator_public_ids == ["op-any"]
+
+    @pytest.mark.asyncio
+    async def test_no_explicit_and_no_primary_raises(self, repo: SQLAlchemyRepository) -> None:
+        """Ambiguous binding → raise rather than pick silently.
+
+        Given: a non-ADMIN caller with no primary operator and no
+            explicit selection,
+        When: the delegate create runs,
+        Then: ``DelegateOperatorBindingError`` surfaces so the
+            route can return 422 — delegates are not minted with
+            ambiguous scope.
+        """
+        await _seed_owner(repo, public_id="owner-bind-e", username="owner-bind-e")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        body = DelegateCreateBody(label="no-op", caps=DelegateCapsBody())
+        principal = AuthPrincipal(
+            username="owner",
+            role=UserRole.OPERATOR,
+            user_public_id="owner-bind-e",
+        )
+        with pytest.raises(DelegateOperatorBindingError):
+            await service.create_delegate(owner=principal, body=body)
+
+    @pytest.mark.asyncio
+    async def test_membership_row_is_persisted_atomically(self, repo: SQLAlchemyRepository) -> None:
+        """Happy path persists the ``UserOperatorMembership`` row.
+
+        Given: a successful create_delegate call,
+        When: the DB is queried for active memberships of the new
+            delegate,
+        Then: exactly one active ``is_primary=True`` row exists
+            pointing at the bound operator — proving the row
+            landed in the same transaction as the User / caps /
+            token rows.
+        """
+        await _seed_owner(repo, public_id="owner-bind-f", username="owner-bind-f")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        body = DelegateCreateBody(label="atomic-bind", caps=DelegateCapsBody())
+        principal = _make_owner_principal("owner-bind-f", operator_public_id="op-bind")
+        payload = await service.create_delegate(owner=principal, body=body)
+        async with repo.session() as s:
+            rows = (
+                (
+                    await s.execute(
+                        _sel(UserOperatorMembership).where(
+                            UserOperatorMembership.user_public_id == payload.delegate.public_id,
+                            *where_active_now(UserOperatorMembership),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert len(rows) == 1
+        assert rows[0].operator_public_id == "op-bind"
+        assert rows[0].is_primary is True
 
 
 class TestListDelegates:
@@ -780,6 +958,51 @@ class TestServiceEdgeCases:
 
 class TestRouteHandlers:
     """Direct invocation of route functions for 409 / 404 / happy path coverage."""
+
+    @pytest.mark.asyncio
+    async def test_create_route_converts_operator_binding_error_to_422(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``DelegateOperatorBindingError`` → 422 HTTPException (Day 5c fix).
+
+        Given: the service raises ``DelegateOperatorBindingError``
+            because the caller picked an operator outside their
+            claim set,
+        When: the route runs,
+        Then: HTTP 422 surfaces with the exception detail so clients
+            can self-correct with a valid operator selection.
+        """
+
+        class _BindService:
+            async def create_delegate(
+                self, owner: AuthPrincipal, body: DelegateCreateBody
+            ) -> DelegateCreatedPayload:
+                await asyncio.sleep(0)
+                raise DelegateOperatorBindingError("Operator 'op-NOT-MINE' is not in claim set.")
+
+        monkeypatch.setattr(ai_delegate_routes, "_build_service", lambda _repo: _BindService())
+        request = _make_rest_request()
+        body = DelegateCreateRequest(
+            session_id="s",
+            sequence_id=1,
+            public_id="p",
+            timestamp=datetime.now(UTC),
+            payload=DelegateCreateBody(
+                label="spoofed",
+                caps=DelegateCapsBody(),
+                operator_public_id="op-NOT-MINE",
+            ),
+        )
+        with pytest.raises(HTTPException) as exc:
+            await ai_delegate_routes.create_delegate(
+                request=request,
+                body=body,
+                owner=_make_owner_principal(),
+                repo=repo,
+                _csrf=None,
+            )
+        assert exc.value.status_code == 422
+        assert "op-NOT-MINE" in str(exc.value.detail)
 
     @pytest.mark.asyncio
     async def test_create_route_converts_label_conflict_to_409(

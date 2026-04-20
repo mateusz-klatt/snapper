@@ -40,6 +40,7 @@ from snapper.api.schemas.ai_delegates import DelegateListResponse
 from snapper.api.schemas.ai_delegates import DelegateResponse
 from snapper.application.ai_delegates.service import DelegateLabelConflictError
 from snapper.application.ai_delegates.service import DelegateNotFoundError
+from snapper.application.ai_delegates.service import DelegateOperatorBindingError
 from snapper.application.ai_delegates.service import DelegateProliferationError
 from snapper.application.ai_delegates.service import DelegateService
 from snapper.application.ai_delegates.service import InvalidOwnerPrincipalError
@@ -102,8 +103,12 @@ async def create_delegate(
         201-shaped :class:`DelegateCreatedResponse`.
 
     Raises:
-        HTTPException: 409 when a unique username can't be
-            derived from the label (pathological input).
+        HTTPException: 422 when the caller-supplied
+            ``operator_public_id`` is outside the caller's claim
+            set OR no selection was given and the caller has no
+            primary operator. 409 when a unique username can't be
+            derived from the label (pathological input) OR the
+            owner already holds the per-owner delegate cap.
     """
     service = _build_service(repo)
     try:
@@ -111,6 +116,11 @@ async def create_delegate(
     except InvalidOwnerPrincipalError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail=_INVALID_PRINCIPAL
+        ) from exc
+    except DelegateOperatorBindingError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
         ) from exc
     except DelegateProliferationError as exc:
         raise HTTPException(

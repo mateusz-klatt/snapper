@@ -318,6 +318,8 @@ Delegate CRUD:
 | 403    | `require_role(OPERATOR)`               | AI_DELEGATE or VIEWER trying to manage delegates            |
 | 404    | `Delegate not found`                   | Unknown ID OR cross-tenant (no existence leak)              |
 | 409    | `Could not derive a unique username …` | Label slug collides 8+ times (pathological)                 |
+| 422    | `Operator '<id>' is not in …`          | Caller picked `operator_public_id` outside their claim set  |
+| 422    | `Caller has no primary operator …`     | No explicit operator and no primary → binding is ambiguous  |
 
 ---
 

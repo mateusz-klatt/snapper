@@ -65,7 +65,13 @@ class DelegateCreateBody(StrictBody):
     The operator chooses a human-readable ``label`` that becomes
     the delegate's username (prefixed with ``ai-``). Caps are
     optional — every cap defaulting to the Snapper-wide fallback
-    per plan §3.5.3.
+    per plan §3.5.3. The operator also picks WHICH of their
+    authenticated operators the delegate inherits membership
+    on — the minted delegate's wallet-scope set equals the
+    chosen operator's scope grants (plan §2 item 3). The
+    selection MUST sit inside the caller's authenticated operator
+    set; omit to default to the caller's
+    ``primary_operator_public_id``.
 
     Attributes:
         label: Non-empty human-readable tag. Normalised to
@@ -73,11 +79,22 @@ class DelegateCreateBody(StrictBody):
             listable in the standard user table without an
             auxiliary display-name column.
         caps: Optional per-delegate trading safety caps.
+        operator_public_id: Operator the delegate is bound to —
+            must be in the caller's claim set. ``None`` defers
+            to the caller's primary operator so simple callers
+            don't need to know their membership set.
     """
 
     label: str = Field(..., min_length=1, max_length=48, description="Delegate label")
     caps: DelegateCapsBody = Field(
         default_factory=DelegateCapsBody, description="Per-delegate trading caps"
+    )
+    operator_public_id: str | None = Field(
+        None,
+        description=(
+            "Operator the delegate is bound to — must be in the caller's claim set. "
+            "Null defers to the caller's primary operator."
+        ),
     )
 
 
