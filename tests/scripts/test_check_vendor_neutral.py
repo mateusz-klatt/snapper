@@ -259,6 +259,64 @@ class TestCheckFileShouldPass:
 
         assert checker.check_file(f) == []
 
+    def test_allowlist_marker_in_fstring_replacement_field_does_not_exempt(
+        self, tmp_path: Path
+    ) -> None:
+        """A ``#`` comment inside an f-string ``{...}`` MUST NOT bypass.
+
+        Given: a PEP 701 multi-line f-string where the vendor name
+            sits in the ``FSTRING_MIDDLE`` text and the marker appears
+            inside a ``{expr # vendor-neutral-ok}`` replacement field
+            on the same physical line,
+        When: ``check_file`` runs,
+        Then: one violation is reported — closes the R4 finding that
+            the file-level tokenizer emits a ``COMMENT`` for the ``#``
+            inside the replacement field, which the previous
+            file-level allowlist wrongly treated as a trailing comment
+            on the vendor-bearing line.
+        """
+        f = tmp_path / "x.py"
+        f.write_text('MSG = f"""\nClaude Desktop {1  # vendor-neutral-ok\n}\n"""\n')
+
+        findings = checker.check_file(f)
+
+        assert len(findings) == 1
+
+    def test_fstring_with_non_brace_ops_in_expression_still_scans(self, tmp_path: Path) -> None:
+        """Non-brace OPs inside an f-string replacement field don't derail scanning.
+
+        Given: an f-string whose replacement field contains OP tokens
+            other than ``{`` / ``}`` (here ``,`` and ``[`` / ``]``)
+            — the branch where the OP-in-fstring tracker returns the
+            depth counters unchanged,
+        When: ``check_file`` runs,
+        Then: the vendor name inside the f-string template still
+            fires a violation. Exercises the final ``return`` in
+            :func:`_update_fstring_depth`.
+        """
+        f = tmp_path / "x.py"
+        f.write_text('MSG = f"Claude Desktop {[1, 2][0]}"\n')
+
+        findings = checker.check_file(f)
+
+        assert len(findings) == 1
+
+    def test_single_line_fstring_with_trailing_comment_still_exempts(self, tmp_path: Path) -> None:
+        """A single-line f-string followed by a real trailing comment exempts.
+
+        Given: a single-line f-string expression with a genuine
+            ``# vendor-neutral-ok`` comment AFTER the f-string ends,
+        When: ``check_file`` runs,
+        Then: no violation is reported — the expression-depth tracker
+            must not false-reject genuine trailing comments just
+            because the enclosing line happens to contain an
+            ``FSTRING_START`` token.
+        """
+        f = tmp_path / "x.py"
+        f.write_text('MSG = f"Claude Desktop"  # vendor-neutral-ok\n')
+
+        assert checker.check_file(f) == []
+
     def test_tokenizer_error_does_not_false_exempt(self, tmp_path: Path) -> None:
         """An unparseable line MUST NOT silently exempt a vendor reference.
 

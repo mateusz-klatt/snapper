@@ -71,6 +71,43 @@ def iter_python_files(root: Path) -> list[Path]:
     return sorted(python_files)
 
 
+def _update_fstring_depth(
+    tok: tokenize.TokenInfo,
+    fstring_depth: int,
+    fstring_expr_depth: int,
+) -> tuple[int, int]:
+    """Return the updated f-string depth counters after consuming ``tok``.
+
+    Keeps :func:`_collect_allowlisted_lines` short by concentrating
+    the nested-field bookkeeping here. ``{`` and ``}`` are classified
+    by the Python tokenizer as :data:`tokenize.OP` tokens; inside an
+    active f-string, the first ``{`` opens an expression replacement
+    field and the matching ``}`` closes it. The ``{{`` / ``}}``
+    literal-escape forms appear inside ``FSTRING_MIDDLE`` tokens,
+    not as standalone ``OP``s, so they are ignored by this helper.
+
+    Args:
+        tok: Token currently being processed.
+        fstring_depth: Number of FSTRING_START tokens still open.
+        fstring_expr_depth: Number of ``{`` replacement fields open
+            inside the innermost f-string.
+
+    Returns:
+        Updated ``(fstring_depth, fstring_expr_depth)`` after
+        consuming ``tok``.
+    """
+    if tok.type == tokenize.FSTRING_START:
+        return fstring_depth + 1, fstring_expr_depth
+    if tok.type == tokenize.FSTRING_END and fstring_depth > 0:
+        return fstring_depth - 1, fstring_expr_depth
+    if tok.type == tokenize.OP and fstring_depth > 0:
+        if tok.string == "{":
+            return fstring_depth, fstring_expr_depth + 1
+        if tok.string == "}" and fstring_expr_depth > 0:
+            return fstring_depth, fstring_expr_depth - 1
+    return fstring_depth, fstring_expr_depth
+
+
 def _collect_allowlisted_lines(source: str) -> set[int]:
     """Return the line numbers whose marker sits inside a real ``#`` comment.
 
@@ -79,9 +116,27 @@ def _collect_allowlisted_lines(source: str) -> set[int]:
     continuations, f-string spans) are classified correctly.
     Per-line tokenization was previously tried and retired: a line
     like ``Claude Desktop # vendor-neutral-ok`` sitting *inside* a
-    docstring tokenizes in isolation as a COMMENT even though at the
-    file level it is STRING, which let authors bypass the scanner
-    by hiding the vendor reference inside a triple-quoted block.
+    docstring tokenizes in isolation as a COMMENT even though at
+    the file level it is STRING, which let authors bypass the
+    scanner by hiding the vendor reference inside a triple-quoted
+    block.
+
+    The R4 review added a further defence for Python 3.12+ PEP 701
+    f-strings: a ``{expr # comment}`` replacement field tokenizes to
+    a real :data:`tokenize.COMMENT` whose source line may ALSO carry
+    a vendor name inside the enclosing ``FSTRING_MIDDLE``. To keep
+    those fragments from falsely exempting the line, the collector
+    tracks two counters:
+
+        - ``fstring_depth`` — how many FSTRING_START tokens are
+          currently open (supports nested f-strings).
+        - ``fstring_expr_depth`` — how many ``{`` replacement fields
+          are open inside the innermost f-string.
+
+    A COMMENT is only accepted as an allowlist marker when
+    ``fstring_expr_depth == 0``; inside a replacement field it is
+    part of the expression and not a statement-level trailing
+    comment.
 
     Tokenizer errors on the whole file (``tokenize.TokenError`` or
     ``SyntaxError``) fall through to an empty set so nothing gets
@@ -92,17 +147,27 @@ def _collect_allowlisted_lines(source: str) -> set[int]:
 
     Returns:
         1-based line numbers where a :data:`tokenize.COMMENT` token
-        contains :data:`ALLOWLIST_COMMENT`.
+        contains :data:`ALLOWLIST_COMMENT` AND is not nested inside
+        an f-string replacement field.
     """
     try:
-        tokens = tokenize.generate_tokens(io.StringIO(source).readline)
-        allowlisted: set[int] = set()
-        for tok in tokens:
-            if tok.type == tokenize.COMMENT and ALLOWLIST_COMMENT in tok.string:
-                allowlisted.add(tok.start[0])
-        return allowlisted
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
     except (tokenize.TokenError, SyntaxError):
         return set()
+    allowlisted: set[int] = set()
+    fstring_depth = 0
+    fstring_expr_depth = 0
+    for tok in tokens:
+        fstring_depth, fstring_expr_depth = _update_fstring_depth(
+            tok, fstring_depth, fstring_expr_depth
+        )
+        if (
+            tok.type == tokenize.COMMENT
+            and ALLOWLIST_COMMENT in tok.string
+            and fstring_expr_depth == 0
+        ):
+            allowlisted.add(tok.start[0])
+    return allowlisted
 
 
 def check_file(filepath: Path) -> list[Violation]:
