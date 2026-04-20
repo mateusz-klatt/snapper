@@ -313,10 +313,18 @@ async def refresh_token(
     4. Mint new tokens from the post-validation principal, then
        call :meth:`TokenManager.rotate_tokens` which revokes the
        old refresh row AND inserts the new pair inside a SINGLE DB
-       transaction (plan §3.6.2 R1 fix). If the old row is already
-       revoked (replay) or the insert fails, the transaction rolls
-       back and the route returns 401 — the caller retries with
-       the original refresh JWT.
+       transaction (plan §3.6.2 R1 fix). Outcome matrix:
+
+           - Rowcount == 1 (atomic success): route continues.
+           - Rowcount == 0 (replay / unknown JTI): transaction
+             rolls back and returns False → route raises 401.
+           - DB exception (connection reset, integrity error on
+             the new-pair insert): the ``async with session()``
+             scope rolls back; the exception propagates out of
+             ``rotate_tokens`` and surfaces as a 5xx so the
+             client can retry with the original refresh JWT —
+             no cookies / no successor tokens leaked.
+
     5. Seed the in-memory JTI blacklist AFTER the rotation commits
        so the grace-period window starts at the post-commit moment
        (cross-instance consistency).
@@ -356,6 +364,12 @@ async def refresh_token(
         HTTPException: 401 if refresh token invalid / missing OR
             the refresh JTI has already been redeemed (replay).
             404 when the wallet hint is outside caller visibility.
+        Exception: DB errors during ``rotate_tokens`` (integrity
+            violation on the new pair, connection reset, etc.)
+            propagate out — the atomic transaction has already
+            rolled back so the old refresh JWT remains usable for
+            retry. Surfaces to the client as a 5xx via FastAPI's
+            default exception handler.
     """
     settings = request.app.state.settings
     refresh_token_value = _extract_refresh_bearer_token(request) or request.cookies.get(

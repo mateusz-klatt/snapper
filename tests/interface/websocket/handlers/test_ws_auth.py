@@ -3634,6 +3634,7 @@ def test_refresh_token_replay_returns_401_no_mint(
     assert response.json()["detail"] == "Refresh token already redeemed"
     assert replay_manager.rotated_old_jtis == ["replayed-jti"]
     assert replay_manager.blacklisted == []
+    assert replay_manager.persisted_pairs == []
     assert response.cookies.get("access_token") is None
     assert response.cookies.get("refresh_token") is None
 

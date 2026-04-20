@@ -208,6 +208,62 @@ class TestRotateUserActiveToken:
         assert await repo.list_active_user_token_jtis("user-replay") == []
 
     @pytest.mark.asyncio
+    async def test_insert_failure_after_successful_revoke_rolls_back_update(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Unique-constraint violation on new rows rolls back the old-row revoke.
+
+        Given: an active refresh row AND a successor batch whose
+            ``token_hash`` collides with an existing row,
+        When: ``rotate_user_active_token`` runs,
+        Then: the INSERT raises ``IntegrityError`` inside the same
+            ``async with self.session()`` scope so the UPDATE-revoke
+            is ALSO rolled back — the old refresh JWT remains
+            usable for retry (R2 NICE-TO-HAVE strict-atomicity
+            coverage requested by Codex + Copilot).
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        now = datetime.now(UTC)
+        await repo.insert_user_active_tokens(
+            [
+                UserActiveTokenInsertRow(
+                    public_id="pub-old-atomic",
+                    user_public_id="user-atomic",
+                    jti="old-atomic",
+                    token_hash="hash-collision-sentinel",
+                    token_type="refresh",
+                    issued_at=now,
+                    expires_at=now + timedelta(days=7),
+                ),
+                UserActiveTokenInsertRow(
+                    public_id="pub-collision-src",
+                    user_public_id="user-atomic",
+                    jti="collision-src",
+                    token_hash="hash-new-access",
+                    token_type="access",
+                    issued_at=now,
+                    expires_at=now + timedelta(minutes=15),
+                ),
+            ]
+        )
+        attempted_new: list[UserActiveTokenInsertRow] = [
+            UserActiveTokenInsertRow(
+                public_id="pub-dupe",
+                user_public_id="user-atomic",
+                jti="would-duplicate-hash",
+                token_hash="hash-new-access",
+                token_type="access",
+                issued_at=now,
+                expires_at=now + timedelta(minutes=15),
+            )
+        ]
+        with pytest.raises(IntegrityError):
+            await repo.rotate_user_active_token("old-atomic", attempted_new, now)
+        active = sorted(await repo.list_active_user_token_jtis("user-atomic"))
+        assert active == ["collision-src", "old-atomic"]
+
+    @pytest.mark.asyncio
     async def test_unknown_jti_returns_zero_and_does_not_insert(
         self, repo: SQLAlchemyRepository
     ) -> None:
