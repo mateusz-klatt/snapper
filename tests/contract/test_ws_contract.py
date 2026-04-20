@@ -24,6 +24,8 @@ from unittest.mock import patch
 
 import pytest
 
+import snapper.auth.websocket_auth as ws_auth_mod
+import snapper.interface.websocket.handlers.auth as auth_handler_mod
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
@@ -271,8 +273,6 @@ class TestWsFrameContractConstants:
         Then: the literal ``4401`` appears — a regression to any
             other status code breaks client retry logic.
         """
-        import snapper.interface.websocket.handlers.auth as auth_handler_mod
-
         with open(auth_handler_mod.__file__, encoding="utf-8") as fh:
             body = fh.read()
 
@@ -288,8 +288,6 @@ class TestWsFrameContractConstants:
             client UX uses to prompt a full re-login rather than a
             silent refresh.
         """
-        import snapper.auth.websocket_auth as ws_auth_mod
-
         with open(ws_auth_mod.__file__, encoding="utf-8") as fh:
             body = fh.read()
 
