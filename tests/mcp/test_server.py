@@ -20,6 +20,7 @@ without relying on FastAPI lifespan wiring.
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from unittest.mock import AsyncMock
 from unittest.mock import Mock
 from unittest.mock import patch
 
@@ -75,7 +76,7 @@ class TestFeatureFlagMiddleware:
             always-mounted-but-gated semantics.
         """
         svc = _make_settings_service(enabled=False)
-        app = build_mcp_app(settings_service_getter=lambda: svc)
+        app = build_mcp_app(settings_service_getter=lambda: svc, repository_getter=lambda: Mock())
         client = TestClient(app)
         response = client.post("/mcp", json={})
         assert response.status_code == 503
@@ -92,7 +93,7 @@ class TestFeatureFlagMiddleware:
             ``error_code="feature_disabled"`` rather than raising an
             AttributeError.
         """
-        app = build_mcp_app(settings_service_getter=lambda: None)
+        app = build_mcp_app(settings_service_getter=lambda: None, repository_getter=lambda: Mock())
         client = TestClient(app)
         response = client.post("/mcp", json={})
         assert response.status_code == 503
@@ -112,7 +113,7 @@ class TestBearerAuthMiddleware:
             FastMCP downstream is never invoked.
         """
         svc = _make_settings_service(enabled=True)
-        app = build_mcp_app(settings_service_getter=lambda: svc)
+        app = build_mcp_app(settings_service_getter=lambda: svc, repository_getter=lambda: Mock())
         client = TestClient(app)
         response = client.post("/mcp", json={})
         assert response.status_code == 401
@@ -130,7 +131,7 @@ class TestBearerAuthMiddleware:
             ``None`` for any other scheme.
         """
         svc = _make_settings_service(enabled=True)
-        app = build_mcp_app(settings_service_getter=lambda: svc)
+        app = build_mcp_app(settings_service_getter=lambda: svc, repository_getter=lambda: Mock())
         client = TestClient(app)
         response = client.post(
             "/mcp",
@@ -139,6 +140,30 @@ class TestBearerAuthMiddleware:
         )
         assert response.status_code == 401
         assert response.json()["error_code"] == "missing_bearer_token"
+
+    def test_repository_getter_returns_none_yields_503(self) -> None:
+        """Lifespan-not-ready repo → 503 ``mcp_unavailable`` (plan §3.6.3).
+
+        Given: the feature flag is on and a Bearer token is present
+            but the repository_getter returns ``None`` (e.g., FastAPI
+            lifespan hasn't finished wiring the DB singleton),
+        When: the bearer middleware processes the request,
+        Then: HTTP 503 with ``error_code="mcp_unavailable"`` is
+            returned BEFORE any TokenManager call. The alternative —
+            silently skipping the DB-backed check — would let
+            revoked JWTs through during startup, defeating the Day
+            3d-B contract.
+        """
+        svc = _make_settings_service(enabled=True)
+        app = build_mcp_app(settings_service_getter=lambda: svc, repository_getter=lambda: None)
+        client = TestClient(app)
+        response = client.post(
+            "/mcp",
+            headers={"Authorization": f"Bearer {_TEST_TOKEN_PLACEHOLDER}"},
+            json={},
+        )
+        assert response.status_code == 503
+        assert response.json()["error_code"] == "mcp_unavailable"
 
     def test_invalid_bearer_token_returns_401_invalid_bearer(self) -> None:
         """Unverifiable JWT → 401 ``invalid_bearer_token``.
@@ -152,11 +177,11 @@ class TestBearerAuthMiddleware:
             than obtain a new token from scratch.
         """
         svc = _make_settings_service(enabled=True)
-        app = build_mcp_app(settings_service_getter=lambda: svc)
+        app = build_mcp_app(settings_service_getter=lambda: svc, repository_getter=lambda: Mock())
         client = TestClient(app)
         with patch("snapper.mcp.server.get_token_manager") as mock_get:
             token_manager = Mock()
-            token_manager.verify_token.return_value = None
+            token_manager.verify_token_with_db = AsyncMock(return_value=None)
             mock_get.return_value = token_manager
             response = client.post(
                 "/mcp",
@@ -188,7 +213,7 @@ class TestBearerAuthMiddleware:
 
         downstream = Starlette(routes=[Route("/mcp", _echo_claims, methods=["POST"])])
         svc = _make_settings_service(enabled=True)
-        downstream.add_middleware(BearerAuthMiddleware)
+        downstream.add_middleware(BearerAuthMiddleware, repository_getter=lambda: Mock())
         downstream.add_middleware(
             FeatureFlagMiddleware,
             settings_service_getter=lambda: svc,
@@ -197,7 +222,7 @@ class TestBearerAuthMiddleware:
         client = TestClient(downstream)
         with patch("snapper.mcp.server.get_token_manager") as mock_get:
             token_manager = Mock()
-            token_manager.verify_token.return_value = claims
+            token_manager.verify_token_with_db = AsyncMock(return_value=claims)
             mock_get.return_value = token_manager
             response = client.post(
                 "/mcp",
@@ -221,7 +246,7 @@ class TestMCPAppComposition:
             ``routes`` attribute presence).
         """
         svc = _make_settings_service(enabled=True)
-        app = build_mcp_app(settings_service_getter=lambda: svc)
+        app = build_mcp_app(settings_service_getter=lambda: svc, repository_getter=lambda: Mock())
         assert hasattr(app, "routes")
         assert hasattr(app, "user_middleware")
 
@@ -241,7 +266,7 @@ class TestMCPAppComposition:
             call_count["n"] += 1
             return svc
 
-        app = build_mcp_app(settings_service_getter=_getter)
+        app = build_mcp_app(settings_service_getter=_getter, repository_getter=lambda: Mock())
         client = TestClient(app)
         client.post("/mcp", json={})
         client.post("/mcp", json={})

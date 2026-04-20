@@ -161,7 +161,37 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
     The MCP transport (Streamable HTTP per plan §3.2) has no cookie
     semantics — clients exclusively present the bearer token they
     obtained via ``POST /api/auth/login?return_tokens=true`` (Day 2a).
+
+    Per plan §3.6.3 (Day 3d-B): verification routes through
+    :meth:`TokenManager.verify_token_with_db` so each MCP call
+    checks the ``user_active_tokens`` inventory + SCD2-active
+    ``users.is_active`` via the 30-second LRU cache. A deactivated
+    user's token is rejected on the NEXT MCP call without waiting
+    for the access-token TTL.
     """
+
+    def __init__(
+        self,
+        app: Any,
+        repository_getter: Callable[[], Repository | None],
+    ) -> None:
+        """Initialize the middleware with a Repository getter.
+
+        The getter is lazy because :func:`build_mcp_app` runs during
+        ``create_app`` — BEFORE the FastAPI lifespan has set up the
+        repository singleton. Resolving per-request instead of at
+        construction time keeps the sub-app mountable in any order.
+
+        Args:
+            app: Downstream ASGI app.
+            repository_getter: Zero-arg callable returning the
+                shared :class:`Repository` singleton at request
+                time. ``None`` at call time surfaces as a 503 so
+                MCP requests fail fast during a broken lifespan
+                rather than silently skipping the DB-backed check.
+        """
+        super().__init__(app)
+        self._repository_getter = repository_getter
 
     async def dispatch(self, request: Request, call_next: Any) -> Any:
         """Verify the Bearer token before dispatching to the MCP app.
@@ -197,8 +227,20 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
                     ),
                 },
             )
+        repository = self._repository_getter()
+        if repository is None:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error_code": "mcp_unavailable",
+                    "detail": (
+                        "MCP repository not initialized — retry after server "
+                        "lifespan startup completes."
+                    ),
+                },
+            )
         token_manager = get_token_manager()
-        claims = token_manager.verify_token(token)
+        claims = await token_manager.verify_token_with_db(token, repository)
         if claims is None:
             return JSONResponse(
                 status_code=401,
@@ -269,7 +311,10 @@ def build_mcp_app(
         claims_getter=get_current_claims,
     )
     downstream = mcp_server.streamable_http_app()
-    downstream.add_middleware(BearerAuthMiddleware)
+    downstream.add_middleware(
+        BearerAuthMiddleware,
+        repository_getter=repository_getter or (lambda: None),
+    )
     downstream.add_middleware(
         FeatureFlagMiddleware,
         settings_service_getter=settings_service_getter,

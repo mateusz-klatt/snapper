@@ -38,6 +38,8 @@ from snapper.api.auth.services.ws_token_service import get_ws_token_service
 from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.auth.websocket_auth import get_ws_auth_manager
 from snapper.config.settings import get_settings
+from snapper.data.repository import Repository
+from snapper.data.repository import get_repository
 from snapper.interface.websocket.bridge import ZmqWebSocketBridgeService
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
 from snapper.interface.websocket.dispatcher import dispatch_messages
@@ -91,6 +93,7 @@ async def _authenticate_and_dispatch(
     manager: WebSocketConnectionManager,
     ws_auth_manager: WebSocketAuthManager,
     ws_token_service: WsTokenService,
+    repository: Repository,
     state: list[bool],
     db_url: str | None = None,
 ) -> None:
@@ -104,11 +107,13 @@ async def _authenticate_and_dispatch(
         manager: WebSocket connection manager.
         ws_auth_manager: WebSocket authentication manager.
         ws_token_service: WebSocket token service.
+        repository: Active :class:`Repository` threaded through to the
+            DB-backed verify path (plan §3.6.3 Day 3d-B).
         state: Single-element list; set to [True] once connected.
         db_url: Optional database URL for control recording.
     """
     auth_result = await authenticate_websocket(
-        websocket, ws_auth_manager, ws_token_service, manager.tracker
+        websocket, ws_auth_manager, ws_token_service, manager.tracker, repository
     )
     if not auth_result.success or auth_result.user is None:
         return
@@ -154,12 +159,14 @@ def create_authenticated_websocket_router(manager: WebSocketConnectionManager) -
             return
         _ensure_zmq_bridge(manager)
         authenticated: list[bool] = [False]
+        repository = get_repository(settings.db_url)
         try:
             await _authenticate_and_dispatch(
                 websocket,
                 manager,
                 ws_auth_manager,
                 ws_token_service,
+                repository,
                 authenticated,
                 db_url=settings.db_url,
             )

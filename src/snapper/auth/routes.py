@@ -381,7 +381,7 @@ async def refresh_token(
             detail="Refresh token not found",
         )
     token_manager = get_token_manager()
-    token_data = token_manager.verify_token(refresh_token_value)
+    token_data = await token_manager.verify_token_with_db(refresh_token_value, repo)
     if not token_data:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

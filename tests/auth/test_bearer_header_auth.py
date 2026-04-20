@@ -18,6 +18,7 @@ have no cookie jar:
 
 from datetime import UTC
 from datetime import datetime
+from unittest.mock import AsyncMock
 from unittest.mock import Mock
 from unittest.mock import patch
 
@@ -105,23 +106,26 @@ class TestGetCurrentUserBearer:
             sid="sid-1",
         )
 
-    def test_bearer_header_path_authenticates(self) -> None:
+    @pytest.mark.asyncio
+    async def test_bearer_header_path_authenticates(self) -> None:
         """Given a Bearer header, Then the principal is derived from the JWT.
 
         Cookie is absent; the header carries the token alone.
         """
         request = _make_request(headers={"authorization": "Bearer h.e.ader-jwt"})
         claims = self._token_claims()
+        repo = Mock()
         with patch("snapper.auth.dependencies.get_token_manager") as mock_get:
             mgr = Mock()
-            mgr.verify_token.return_value = claims
+            mgr.verify_token_with_db = AsyncMock(return_value=claims)
             mock_get.return_value = mgr
-            principal = get_current_user(request)
+            principal = await get_current_user(request, repo)
         assert principal is not None
         assert principal.username == "alice"
-        mgr.verify_token.assert_called_once_with("h.e.ader-jwt")
+        mgr.verify_token_with_db.assert_awaited_once_with("h.e.ader-jwt", repo)
 
-    def test_bearer_header_takes_precedence_over_cookie(self) -> None:
+    @pytest.mark.asyncio
+    async def test_bearer_header_takes_precedence_over_cookie(self) -> None:
         """Given both Bearer header and cookie, Then the header wins.
 
         The header is the authoritative path for MCP clients; the
@@ -132,12 +136,13 @@ class TestGetCurrentUserBearer:
             cookies={"access_token": "cookie.jwt"},
         )
         claims = self._token_claims()
+        repo = Mock()
         with patch("snapper.auth.dependencies.get_token_manager") as mock_get:
             mgr = Mock()
-            mgr.verify_token.return_value = claims
+            mgr.verify_token_with_db = AsyncMock(return_value=claims)
             mock_get.return_value = mgr
-            get_current_user(request)
-        mgr.verify_token.assert_called_once_with("header.jwt")
+            await get_current_user(request, repo)
+        mgr.verify_token_with_db.assert_awaited_once_with("header.jwt", repo)
 
 
 class TestValidateCsrfTokenBearerSkip:
@@ -220,7 +225,8 @@ class TestWebSocketBearerAuth:
         ws.cookies = cookies or {}
         return ws
 
-    def test_bearer_header_path_authenticates(self) -> None:
+    @pytest.mark.asyncio
+    async def test_bearer_header_path_authenticates(self) -> None:
         """Given a Bearer header on the WS upgrade, Then principal is built.
 
         Cookie is absent; the WebSocket manager resolves the token
@@ -243,16 +249,18 @@ class TestWebSocketBearerAuth:
         WebSocketAuthManager._initialized = False
         manager.__init__()
 
+        repo = Mock()
         with patch.object(manager, "token_manager") as token_manager_mock:
-            token_manager_mock.verify_token.return_value = claims
-            result = manager.verify_session_cookie(ws)
+            token_manager_mock.verify_token_with_db = AsyncMock(return_value=claims)
+            result = await manager.verify_session_cookie(ws, repo)
 
         assert result is not None
         principal, _claims = result
         assert principal.username == "ai-delegate-1"
-        token_manager_mock.verify_token.assert_called_once_with("ws.jwt")
+        token_manager_mock.verify_token_with_db.assert_awaited_once_with("ws.jwt", repo)
 
-    def test_bearer_header_takes_precedence_over_cookie(self) -> None:
+    @pytest.mark.asyncio
+    async def test_bearer_header_takes_precedence_over_cookie(self) -> None:
         """Given both WS header and cookie, Then the header wins."""
         now = int(datetime.now(UTC).timestamp())
         claims = TokenClaims(
@@ -274,21 +282,25 @@ class TestWebSocketBearerAuth:
         WebSocketAuthManager._initialized = False
         manager.__init__()
 
+        repo = Mock()
         with patch.object(manager, "token_manager") as token_manager_mock:
-            token_manager_mock.verify_token.return_value = claims
-            manager.verify_session_cookie(ws)
+            token_manager_mock.verify_token_with_db = AsyncMock(return_value=claims)
+            await manager.verify_session_cookie(ws, repo)
 
-        token_manager_mock.verify_token.assert_called_once_with("ws.header")
+        token_manager_mock.verify_token_with_db.assert_awaited_once_with("ws.header", repo)
 
-    def test_both_missing_returns_none(self) -> None:
+    @pytest.mark.asyncio
+    async def test_both_missing_returns_none(self) -> None:
         """Given neither header nor cookie, Then ``None`` — 401 flow upstream."""
         ws = self._make_ws()
         manager = WebSocketAuthManager()
         WebSocketAuthManager._initialized = False
         manager.__init__()
-        assert manager.verify_session_cookie(ws) is None
+        repo = Mock()
+        assert await manager.verify_session_cookie(ws, repo) is None
 
-    def test_ws_bearer_non_bearer_scheme_falls_back_to_cookie(self) -> None:
+    @pytest.mark.asyncio
+    async def test_ws_bearer_non_bearer_scheme_falls_back_to_cookie(self) -> None:
         """Given a non-Bearer scheme on WS header and a valid cookie, Then cookie wins."""
         now = int(datetime.now(UTC).timestamp())
         claims = TokenClaims(
@@ -308,10 +320,11 @@ class TestWebSocketBearerAuth:
         manager = WebSocketAuthManager()
         WebSocketAuthManager._initialized = False
         manager.__init__()
+        repo = Mock()
         with patch.object(manager, "token_manager") as token_manager_mock:
-            token_manager_mock.verify_token.return_value = claims
-            manager.verify_session_cookie(ws)
-        token_manager_mock.verify_token.assert_called_once_with("cookie.jwt")
+            token_manager_mock.verify_token_with_db = AsyncMock(return_value=claims)
+            await manager.verify_session_cookie(ws, repo)
+        token_manager_mock.verify_token_with_db.assert_awaited_once_with("cookie.jwt", repo)
 
 
 class TestCsrfStillRequiredWithoutBearer:

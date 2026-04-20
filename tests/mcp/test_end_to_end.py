@@ -82,7 +82,7 @@ def _build_end_to_end_app(settings_service: Mock) -> Starlette:
         return JSONResponse({"seen": claims.username}, status_code=200)
 
     app = Starlette(routes=[Route("/mcp", _echo_username, methods=["POST"])])
-    app.add_middleware(BearerAuthMiddleware)
+    app.add_middleware(BearerAuthMiddleware, repository_getter=lambda: Mock())
     app.add_middleware(FeatureFlagMiddleware, settings_service_getter=lambda: settings_service)
     return app
 
@@ -107,7 +107,7 @@ class TestEndToEndBearerToContextVar:
         claims = _make_claims("ai-delegate-e2e")
         with patch("snapper.mcp.server.get_token_manager") as mock_get:
             token_manager = Mock()
-            token_manager.verify_token.return_value = claims
+            token_manager.verify_token_with_db = AsyncMock(return_value=claims)
             mock_get.return_value = token_manager
             client = TestClient(app)
             response = client.post(
@@ -136,7 +136,7 @@ class TestEndToEndBearerToContextVar:
         claims_first = _make_claims("first-caller")
         with patch("snapper.mcp.server.get_token_manager") as mock_get:
             token_manager = Mock()
-            token_manager.verify_token.return_value = claims_first
+            token_manager.verify_token_with_db = AsyncMock(return_value=claims_first)
             mock_get.return_value = token_manager
             client = TestClient(app)
             response_1 = client.post(
@@ -165,7 +165,7 @@ class TestEndToEndBearerToContextVar:
         app = _build_end_to_end_app(svc)
         with patch("snapper.mcp.server.get_token_manager") as mock_get:
             token_manager = Mock()
-            token_manager.verify_token.return_value = _make_claims("x")
+            token_manager.verify_token_with_db = AsyncMock(return_value=_make_claims("x"))
             mock_get.return_value = token_manager
             client = TestClient(app)
             client.post(
@@ -194,7 +194,7 @@ class TestEndToEndBearerToContextVar:
             return JSONResponse({"seen": None}, status_code=200)
 
         app = Starlette(routes=[Route("/mcp", _counting_echo, methods=["POST"])])
-        app.add_middleware(BearerAuthMiddleware)
+        app.add_middleware(BearerAuthMiddleware, repository_getter=lambda: Mock())
         app.add_middleware(FeatureFlagMiddleware, settings_service_getter=lambda: svc)
 
         client = TestClient(app)
@@ -272,12 +272,14 @@ class TestEndToEndBearerToContextVar:
             return JSONResponse({"result": result}, status_code=200)
 
         app = Starlette(routes=[Route("/mcp", _dispatch_tool, methods=["POST"])])
-        app.add_middleware(BearerAuthMiddleware)
+        app.add_middleware(BearerAuthMiddleware, repository_getter=lambda: Mock())
         app.add_middleware(FeatureFlagMiddleware, settings_service_getter=lambda: svc)
 
         with patch("snapper.mcp.server.get_token_manager") as mock_get:
             token_manager = Mock()
-            token_manager.verify_token.return_value = _make_claims("real-tool-caller")
+            token_manager.verify_token_with_db = AsyncMock(
+                return_value=_make_claims("real-tool-caller")
+            )
             mock_get.return_value = token_manager
             client = TestClient(app)
             response = client.post(
@@ -328,12 +330,12 @@ class TestEndToEndBearerToContextVar:
                 await self.app(scope, receive, send)
 
         app.add_middleware(_ClearingMiddleware)
-        app.add_middleware(BearerAuthMiddleware)
+        app.add_middleware(BearerAuthMiddleware, repository_getter=lambda: Mock())
         app.add_middleware(FeatureFlagMiddleware, settings_service_getter=lambda: svc)
 
         with patch("snapper.mcp.server.get_token_manager") as mock_get:
             token_manager = Mock()
-            token_manager.verify_token.return_value = _make_claims()
+            token_manager.verify_token_with_db = AsyncMock(return_value=_make_claims())
             mock_get.return_value = token_manager
             client = TestClient(app)
             response = client.post(

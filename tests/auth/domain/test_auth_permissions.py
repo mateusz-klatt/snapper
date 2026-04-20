@@ -1394,7 +1394,8 @@ class TestGetCurrentUser:
         request = Mock(spec=Request)
         request.cookies = {}
         request.headers = {}
-        result = get_current_user(request)
+        repo = Mock()
+        result = await get_current_user(request, repo)
         assert result is None
 
     async def test_get_current_user_valid_token(self) -> None:
@@ -1421,14 +1422,16 @@ class TestGetCurrentUser:
         )
         with patch("snapper.auth.dependencies.get_token_manager") as mock_get_token_manager:
             mock_token_manager = Mock()
-            mock_token_manager.verify_token.return_value = token_data
+            mock_token_manager.verify_token_with_db = AsyncMock(return_value=token_data)
             mock_get_token_manager.return_value = mock_token_manager
-            result = get_current_user(request)
+            repo = Mock()
+            result = await get_current_user(request, repo)
             assert result is not None
             assert result.username == "testuser"
             assert result.role == UserRole.OPERATOR
             assert request.state.user == result
             assert request.state.token_data == token_data
+            mock_token_manager.verify_token_with_db.assert_awaited_once_with("valid_token", repo)
 
     async def test_get_current_user_invalid_token(self) -> None:
         """Verify get_current_user returns None for invalid token.
@@ -1442,9 +1445,10 @@ class TestGetCurrentUser:
         request.headers = {}
         with patch("snapper.auth.dependencies.get_token_manager") as mock_get_token_manager:
             mock_token_manager = Mock()
-            mock_token_manager.verify_token.return_value = None
+            mock_token_manager.verify_token_with_db = AsyncMock(return_value=None)
             mock_get_token_manager.return_value = mock_token_manager
-            result = get_current_user(request)
+            repo = Mock()
+            result = await get_current_user(request, repo)
             assert result is None
 
 

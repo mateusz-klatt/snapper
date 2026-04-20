@@ -59,6 +59,8 @@ from snapper.auth.websocket_auth import AuthConnectionStats
 from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.auth.websocket_auth import get_ws_auth_manager
 from snapper.config.bootstrap import BootstrapSettingsLoader
+from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.repository import where_active_now
 from snapper.interface.websocket.bridge import ZmqWebSocketBridgeService
 from snapper.interface.websocket.handlers.auth import AUTH_TIMEOUT_SECONDS
 from snapper.interface.websocket.handlers.auth import REAUTH_GRACE_PERIOD
@@ -81,6 +83,7 @@ from snapper.server.app import create_app
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
 from snapper.server.authenticated_websocket import get_allowed_topics_for_role
 from snapper.server.authenticated_websocket import has_trading_permission
+from snapper.server.dependencies import get_repository_dependency
 
 
 def _make_rest_request() -> MagicMock:
@@ -182,8 +185,12 @@ def _connect_with_cookie(test_client: Any, token: str) -> Any:
 def _issue_test_auth_tokens(test_client: Any, *, username: str, password: str) -> tuple[str, str]:
     user_data = _TEST_WS_USER_DATA.get(username)
     assert user_data is not None, f"Unknown websocket test user: {username}"
-    expected_password, role, user_public_id = user_data
+    expected_password, role, _fallback_public_id = user_data
     assert password == expected_password
+    repo = get_repository_dependency()
+    resolved_public_id = asyncio.run(
+        _resolve_or_seed_user(username, role, _fallback_public_id, repo)
+    )
     session_id = f"ws-test-session-{username}"
     token_manager = get_token_manager()
     ws_token_service = get_ws_token_service()
@@ -193,16 +200,62 @@ def _issue_test_auth_tokens(test_client: Any, *, username: str, password: str) -
             role=role,
             email=f"{username}@example.test",
             is_active=True,
-            user_public_id=user_public_id,
+            user_public_id=resolved_public_id,
         ),
         session_id=session_id,
     )
+    asyncio.run(token_manager.persist_tokens(token_pair, resolved_public_id, repo))
     ws_token = ws_token_service.generate(user_id=username, session_id=session_id).token
     test_client.cookies.clear()
     test_client.cookies.set("access_token", token_pair.access_token)
     test_client.cookies.set("refresh_token", token_pair.refresh_token)
     test_client.cookies.set("csrf_token", f"csrf-{username}")
     return ws_token, token_pair.access_token
+
+
+async def _resolve_or_seed_user(
+    username: str,
+    role: UserRole,
+    fallback_public_id: str,
+    repo: Any,
+) -> str:
+    """Return the existing SCD2-active user's public_id, seeding if absent.
+
+    Dev seed already creates admin/operator/viewer with auto-generated
+    UUIDs. Returning the existing public_id avoids inserting a duplicate
+    row (``authenticate_user`` raises MultipleResultsFound otherwise)
+    while still supporting cold-start runs where the seed skipped.
+    """
+    from sqlalchemy import select as _select
+
+    from snapper.data.models import User as _User
+
+    async with repo.session() as s:
+        existing = (
+            await s.execute(
+                _select(_User.public_id).where(_User.username == username, *where_active_now(_User))
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            return str(existing)
+        seed_time = datetime(2026, 1, 1, tzinfo=UTC)
+        s.add(
+            _User(
+                public_id=fallback_public_id,
+                session_id="ws-test-seed",
+                sequence_id=1,
+                timestamp=seed_time,
+                known_to=KNOWN_TO_MAX,
+                username=username,
+                email=f"{username}@example.test",
+                password_hash="$2b$12$" + "x" * 53,
+                role=role.value,
+                is_active=True,
+                created_at=seed_time,
+            )
+        )
+        await s.commit()
+    return fallback_public_id
 
 
 def _prepare_ws_token(test_client: Any, *, username: str, password: str) -> str:
@@ -913,7 +966,7 @@ async def test_handshake_missing_cookie() -> None:
     )
     with patch("snapper.server.authenticated_websocket.get_ws_auth_manager") as mock_auth:
         mock_auth_manager = MagicMock()
-        mock_auth_manager.verify_session_cookie.return_value = None
+        mock_auth_manager.verify_session_cookie = AsyncMock(return_value=None)
         mock_auth.return_value = mock_auth_manager
         endpoint = router.routes[0].endpoint
         await endpoint(websocket)
@@ -949,7 +1002,7 @@ async def test_handshake_timeout() -> None:
     )
     with patch("snapper.auth.websocket_auth.get_token_manager") as mock_get_token:
         mock_token_manager = MagicMock()
-        mock_token_manager.verify_token.return_value = token_data
+        mock_token_manager.verify_token_with_db = AsyncMock(return_value=token_data)
         mock_get_token.return_value = mock_token_manager
         manager = ConnectionManagerStub()
         router = create_authenticated_websocket_router(manager)
@@ -991,7 +1044,7 @@ async def test_handshake_invalid_json_payload() -> None:
     )
     with patch("snapper.auth.websocket_auth.get_token_manager") as mock_get_token:
         mock_token_manager = MagicMock()
-        mock_token_manager.verify_token.return_value = token_data
+        mock_token_manager.verify_token_with_db = AsyncMock(return_value=token_data)
         mock_get_token.return_value = mock_token_manager
         manager = ConnectionManagerStub()
         router = create_authenticated_websocket_router(manager)
@@ -1180,7 +1233,7 @@ async def test_handshake_invalid_json_message() -> None:
     )
     with patch("snapper.auth.websocket_auth.get_token_manager") as mock_get_token:
         mock_token_manager = MagicMock()
-        mock_token_manager.verify_token.return_value = token_data
+        mock_token_manager.verify_token_with_db = AsyncMock(return_value=token_data)
         mock_get_token.return_value = mock_token_manager
         manager = ConnectionManagerStub()
         router = create_authenticated_websocket_router(manager)
@@ -1223,7 +1276,7 @@ async def test_handshake_missing_ws_token() -> None:
     )
     with patch("snapper.auth.websocket_auth.get_token_manager") as mock_get_token:
         mock_token_manager = MagicMock()
-        mock_token_manager.verify_token.return_value = token_data
+        mock_token_manager.verify_token_with_db = AsyncMock(return_value=token_data)
         mock_get_token.return_value = mock_token_manager
         manager = ConnectionManagerStub()
         router = create_authenticated_websocket_router(manager)
@@ -1271,7 +1324,7 @@ async def test_handshake_invalid_ws_token() -> None:
     )
     with patch("snapper.auth.websocket_auth.get_token_manager") as mock_get_token:
         mock_token_manager = MagicMock()
-        mock_token_manager.verify_token.return_value = token_data
+        mock_token_manager.verify_token_with_db = AsyncMock(return_value=token_data)
         mock_get_token.return_value = mock_token_manager
         manager = ConnectionManagerStub()
         router = create_authenticated_websocket_router(manager)
@@ -1353,7 +1406,7 @@ async def test_bridge_creation_when_manager_zmq_bridge_is_none() -> None:
     with patch("snapper.server.authenticated_websocket.get_ws_auth_manager") as mock_auth:
         mock_auth_manager = MagicMock()
         user = AuthPrincipal(username="alice", role=UserRole.OPERATOR)
-        mock_auth_manager.verify_session_cookie.return_value = (user, token_data)
+        mock_auth_manager.verify_session_cookie = AsyncMock(return_value=(user, token_data))
         mock_auth_manager.get_connection_expiration.return_value = datetime.now(UTC)
         mock_auth.return_value = mock_auth_manager
         with patch("snapper.server.authenticated_websocket.get_ws_token_service") as mock_token_svc:
@@ -1401,7 +1454,7 @@ async def test_websocket_endpoint_handles_unexpected_exception() -> None:
     with patch("snapper.server.authenticated_websocket.get_ws_auth_manager") as mock_auth:
         mock_auth_manager = MagicMock()
         user = AuthPrincipal(username="alice", role=UserRole.OPERATOR)
-        mock_auth_manager.verify_session_cookie.return_value = (user, token_data)
+        mock_auth_manager.verify_session_cookie = AsyncMock(return_value=(user, token_data))
         mock_auth_manager.get_connection_expiration.return_value = datetime.now(UTC)
         mock_auth.return_value = mock_auth_manager
         with patch("snapper.server.authenticated_websocket.get_ws_token_service") as mock_token_svc:
@@ -1589,7 +1642,9 @@ class AuthManagerStub:
         self.disconnect_calls: list[Any] = []
         self.expiration = datetime_from_timestamp(None)
 
-    def verify_session_cookie(self, websocket: Any) -> tuple[Any, Any] | None:
+    async def verify_session_cookie(
+        self, websocket: Any, repository: Any
+    ) -> tuple[Any, Any] | None:
         """Verify session cookie and return result."""
         return self.session_result
 
@@ -2568,9 +2623,9 @@ class TestAuthenticateWebsocket:
         When: Authenticating WebSocket,
         Then: Returns failure with missing_cookie reason.
         """
-        mock_ws_auth_manager.verify_session_cookie.return_value = None
+        mock_ws_auth_manager.verify_session_cookie = AsyncMock(return_value=None)
         result = await authenticate_websocket(
-            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker
+            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker, MagicMock()
         )
         assert result.success is False
         mock_websocket.send_text.assert_called()
@@ -2595,13 +2650,15 @@ class TestAuthenticateWebsocket:
         When: Waiting for client response,
         Then: Returns failure with timeout reason.
         """
-        mock_ws_auth_manager.verify_session_cookie.return_value = (
-            mock_user,
-            mock_token_data,
+        mock_ws_auth_manager.verify_session_cookie = AsyncMock(
+            return_value=(
+                mock_user,
+                mock_token_data,
+            )
         )
         mock_websocket.receive_text.side_effect = TimeoutError()
         result = await authenticate_websocket(
-            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker
+            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker, MagicMock()
         )
         assert result.success is False
         calls = mock_websocket.send_text.call_args_list
@@ -2625,13 +2682,15 @@ class TestAuthenticateWebsocket:
         When: Client sends malformed JSON,
         Then: Returns failure with invalid_json reason.
         """
-        mock_ws_auth_manager.verify_session_cookie.return_value = (
-            mock_user,
-            mock_token_data,
+        mock_ws_auth_manager.verify_session_cookie = AsyncMock(
+            return_value=(
+                mock_user,
+                mock_token_data,
+            )
         )
         mock_websocket.receive_text.return_value = "not valid json{"
         result = await authenticate_websocket(
-            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker
+            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker, MagicMock()
         )
         assert result.success is False
         calls = mock_websocket.send_text.call_args_list
@@ -2655,9 +2714,11 @@ class TestAuthenticateWebsocket:
         When: Client sends wrong message type,
         Then: Returns failure with Invalid auth payload reason.
         """
-        mock_ws_auth_manager.verify_session_cookie.return_value = (
-            mock_user,
-            mock_token_data,
+        mock_ws_auth_manager.verify_session_cookie = AsyncMock(
+            return_value=(
+                mock_user,
+                mock_token_data,
+            )
         )
         mock_websocket.receive_text.return_value = json.dumps(
             {
@@ -2669,7 +2730,7 @@ class TestAuthenticateWebsocket:
             }
         )
         result = await authenticate_websocket(
-            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker
+            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker, MagicMock()
         )
         assert result.success is False
         mock_websocket.close.assert_called_with(code=4401, reason="Invalid auth payload")
@@ -2690,9 +2751,11 @@ class TestAuthenticateWebsocket:
         When: Client sends authenticate without ws_token,
         Then: Returns failure with Invalid auth payload reason.
         """
-        mock_ws_auth_manager.verify_session_cookie.return_value = (
-            mock_user,
-            mock_token_data,
+        mock_ws_auth_manager.verify_session_cookie = AsyncMock(
+            return_value=(
+                mock_user,
+                mock_token_data,
+            )
         )
         mock_websocket.receive_text.return_value = json.dumps(
             {
@@ -2704,7 +2767,7 @@ class TestAuthenticateWebsocket:
             }
         )
         result = await authenticate_websocket(
-            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker
+            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker, MagicMock()
         )
         assert result.success is False
         mock_websocket.close.assert_called_with(code=4401, reason="Invalid auth payload")
@@ -2725,9 +2788,11 @@ class TestAuthenticateWebsocket:
         When: Verifying ws_token,
         Then: Returns failure with ws_token replay reason.
         """
-        mock_ws_auth_manager.verify_session_cookie.return_value = (
-            mock_user,
-            mock_token_data,
+        mock_ws_auth_manager.verify_session_cookie = AsyncMock(
+            return_value=(
+                mock_user,
+                mock_token_data,
+            )
         )
         mock_websocket.receive_text.return_value = json.dumps(
             {
@@ -2741,7 +2806,7 @@ class TestAuthenticateWebsocket:
         )
         mock_ws_token_service.verify.side_effect = WsTokenAlreadyUsedError("Token replay")
         result = await authenticate_websocket(
-            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker
+            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker, MagicMock()
         )
         assert result.success is False
         mock_websocket.close.assert_called_with(code=4401, reason="ws_token replay")
@@ -2762,9 +2827,11 @@ class TestAuthenticateWebsocket:
         When: Verifying ws_token,
         Then: Returns failure with Invalid ws_token reason.
         """
-        mock_ws_auth_manager.verify_session_cookie.return_value = (
-            mock_user,
-            mock_token_data,
+        mock_ws_auth_manager.verify_session_cookie = AsyncMock(
+            return_value=(
+                mock_user,
+                mock_token_data,
+            )
         )
         mock_websocket.receive_text.return_value = json.dumps(
             {
@@ -2778,7 +2845,7 @@ class TestAuthenticateWebsocket:
         )
         mock_ws_token_service.verify.side_effect = WsTokenError("Invalid token")
         result = await authenticate_websocket(
-            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker
+            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker, MagicMock()
         )
         assert result.success is False
         mock_websocket.close.assert_called_with(code=4401, reason="Invalid ws_token")
@@ -2800,9 +2867,11 @@ class TestAuthenticateWebsocket:
         When: Completing authentication,
         Then: Returns success with user, payload and tasks.
         """
-        mock_ws_auth_manager.verify_session_cookie.return_value = (
-            mock_user,
-            mock_token_data,
+        mock_ws_auth_manager.verify_session_cookie = AsyncMock(
+            return_value=(
+                mock_user,
+                mock_token_data,
+            )
         )
         mock_websocket.receive_text.return_value = json.dumps(
             {
@@ -2816,7 +2885,7 @@ class TestAuthenticateWebsocket:
         )
         mock_ws_token_service.verify.return_value = mock_ws_payload
         result = await authenticate_websocket(
-            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker
+            mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker, MagicMock()
         )
         assert result.success is True
         assert result.user == mock_user
@@ -3136,7 +3205,16 @@ class StubTokenManager:
         return True
 
     def verify_token(self, token: str) -> TokenClaims | None:
-        """Verify token and return claims."""
+        """Verify token and return claims (sync JWT+blacklist layer)."""
+        self.last_verified_token = token
+        return self.verify_response
+
+    async def verify_token_with_db(
+        self,
+        token: str,
+        repository: object,
+    ) -> TokenClaims | None:
+        """DB-backed verify stub: delegates to the sync ``verify_token`` verdict."""
         self.last_verified_token = token
         return self.verify_response
 
@@ -4776,7 +4854,8 @@ class TestWebSocketAuthManager:
         manager2 = get_ws_auth_manager()
         assert manager1 is manager2
 
-    def test_verify_session_cookie_no_token(self) -> None:
+    @pytest.mark.asyncio
+    async def test_verify_session_cookie_no_token(self) -> None:
         """Verify session cookie returns None without token.
 
         Given: WebSocket with no cookies,
@@ -4786,9 +4865,11 @@ class TestWebSocketAuthManager:
         ws_auth_manager = get_ws_auth_manager()
         websocket = MagicMock(spec=WebSocket)
         websocket.cookies = {}
-        assert ws_auth_manager.verify_session_cookie(websocket) is None
+        repo = MagicMock()
+        assert await ws_auth_manager.verify_session_cookie(websocket, repo) is None
 
-    def test_verify_session_cookie_invalid_token(self) -> None:
+    @pytest.mark.asyncio
+    async def test_verify_session_cookie_invalid_token(self) -> None:
         """Verify session cookie returns None with invalid token.
 
         Given: WebSocket with invalid access_token cookie,
@@ -4798,9 +4879,11 @@ class TestWebSocketAuthManager:
         ws_auth_manager = get_ws_auth_manager()
         websocket = MagicMock(spec=WebSocket)
         websocket.cookies = {"access_token": "invalid"}
-        assert ws_auth_manager.verify_session_cookie(websocket) is None
+        repo = MagicMock()
+        assert await ws_auth_manager.verify_session_cookie(websocket, repo) is None
 
-    def test_verify_session_cookie_valid_token(self) -> None:
+    @pytest.mark.asyncio
+    async def test_verify_session_cookie_valid_token(self) -> None:
         """Verify session cookie returns user and token data.
 
         Given: WebSocket with valid access_token cookie,
@@ -4817,7 +4900,17 @@ class TestWebSocketAuthManager:
         tokens = token_manager.create_tokens(user)
         websocket = MagicMock(spec=WebSocket)
         websocket.cookies = {"access_token": tokens.access_token}
-        result = ws_auth_manager.verify_session_cookie(websocket)
+        from snapper.data.repository_types import UserActiveTokenVerificationRow
+
+        row = UserActiveTokenVerificationRow(
+            user_public_id=user.user_public_id,
+            revoked_at=None,
+            expires_at=datetime.now(UTC) + timedelta(minutes=15),
+            user_is_active=True,
+        )
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(return_value=row)
+        result = await ws_auth_manager.verify_session_cookie(websocket, repo)
         assert result is not None
         authenticated_user, token_data = result
         assert authenticated_user.username == user.username

@@ -21,6 +21,7 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.tokens import get_token_manager
+from snapper.data.repository import Repository
 from snapper.messaging.infrastructure.validated_socket import HWM_AUDIT
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
@@ -141,8 +142,10 @@ class WebSocketAuthManager:
         token = parts[1].strip()
         return token or None
 
-    def verify_session_cookie(
-        self, websocket: WebSocket
+    async def verify_session_cookie(
+        self,
+        websocket: WebSocket,
+        repository: Repository,
     ) -> tuple[AuthPrincipal, TokenClaims] | None:
         """Verify session from WebSocket auth header or cookie.
 
@@ -152,12 +155,22 @@ class WebSocketAuthManager:
         without cookie jars present the header; browser clients
         continue to use the cookie.
 
+        Per plan §3.6.3 (Day 3d-B): the method is now async and
+        runs through :meth:`TokenManager.verify_token_with_db` so
+        the WebSocket upgrade check consults the
+        ``user_active_tokens`` inventory + SCD2-active
+        ``users.is_active`` join. The kill switch therefore rejects
+        a deactivated user's reconnect attempt on the NEXT upgrade
+        instead of waiting for the 15-minute access-token expiry.
+
         The method name is preserved for call-site stability — the
         semantics are now "verify session token transport, header or
         cookie", not strictly "cookie".
 
         Args:
             websocket: WebSocket connection.
+            repository: Active :class:`Repository` for the
+                DB-backed verify path.
 
         Returns:
             Tuple of (AuthPrincipal, TokenClaims) if valid, None otherwise.
@@ -165,7 +178,7 @@ class WebSocketAuthManager:
         token = self._extract_ws_bearer_token(websocket) or websocket.cookies.get("access_token")
         if not token:
             return None
-        token_data = self.token_manager.verify_token(token)
+        token_data = await self.token_manager.verify_token_with_db(token, repository)
         if not token_data:
             return None
         user = AuthPrincipal(

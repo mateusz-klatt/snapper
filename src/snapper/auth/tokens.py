@@ -8,6 +8,7 @@ import hashlib
 import json as json_mod
 import secrets
 import uuid
+from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -33,6 +34,30 @@ BLACKLIST_GRACE_PERIOD_SECONDS: Final[float] = 10.0
 
 BLACKLIST_CLEANUP_MULTIPLIER: Final[int] = 2
 """Factor applied to grace period when deciding when to purge old entries."""
+
+VERIFY_CACHE_TTL_SECONDS: Final[float] = 30.0
+"""Seconds a verify_token_with_db verdict is reused from the LRU (plan §3.6.3)."""
+
+VERIFY_CACHE_MAX_ENTRIES: Final[int] = 10000
+"""Upper bound on the verify-cache size before an opportunistic prune runs."""
+
+
+@dataclass(slots=True, frozen=True)
+class _VerifyCacheEntry:
+    """Frozen verdict returned by the DB-backed verify path.
+
+    Shape extended per R5-M4 so the admin-bus subscriber can evict
+    every cached token for a deactivated user without scanning the
+    raw JWTs (which we never retain). ``expires_at_ts`` holds the
+    JWT ``exp`` claim as a unix timestamp so expired entries are
+    short-circuited on lookup even if they linger past the TTL.
+    """
+
+    is_valid: bool
+    user_is_active: bool
+    user_public_id: str
+    expires_at_ts: float
+    cached_at_ts: float
 
 
 def hash_token(raw_token: str) -> str:
@@ -88,6 +113,7 @@ class TokenManager:
         self._settings: AppSettings | None = None
         self._blacklisted_tokens: dict[str, float] = {}
         self._blacklist_grace_period = BLACKLIST_GRACE_PERIOD_SECONDS
+        self._verify_cache: dict[str, _VerifyCacheEntry] = {}
 
     def set_settings_service(self, settings_service: SettingsService) -> None:
         """Set settings service for configuration.
@@ -413,6 +439,185 @@ class TokenManager:
         except ValidationError as exc:
             logger.warning(f"Token payload validation failed: {exc}")
             return None
+
+    async def verify_token_with_db(
+        self,
+        token: str,
+        repository: Repository,
+    ) -> TokenClaims | None:
+        """DB-backed verify (plan §3.6.3) with 30s LRU cache.
+
+        Fully validates a JWT against the ``user_active_tokens``
+        inventory so that the Day 3a/3b kill switch propagates to
+        every request on the NEXT call instead of waiting for the
+        access-token expiry. The request-path sequence is:
+
+            1. Run :meth:`verify_token` for the cheap checks
+               (signature, expiry, JTI blacklist). A failure short-
+               circuits so we never touch the DB or the cache for
+               malformed / forged / blacklisted tokens.
+            2. Hash the token and consult the 30-second LRU cache.
+               A hit within TTL returns immediately; a cached
+               negative verdict also short-circuits with ``None``
+               so repeated replays don't amplify DB load.
+            3. On cache miss, call
+               :meth:`Repository.get_active_token_by_hash` which
+               joins ``user_active_tokens`` with the SCD2-active
+               ``users`` row. The projection carries
+               ``user_is_active`` so the deactivated-user state
+               surfaces in one round-trip.
+            4. Cache the verdict for ``VERIFY_CACHE_TTL_SECONDS``
+               (positive AND negative — bounded cost for replayed
+               invalid tokens) and return the claims when every
+               gate passes.
+
+        Cross-instance invariant: the 30-second TTL is a staleness
+        ceiling; the admin-bus subscriber wired in Day 3c calls
+        :meth:`invalidate_user_cache` on ``admin.user_deactivated``
+        so kill-switch latency collapses to one bus-message-round-
+        trip instead of 30 s.
+
+        Args:
+            token: JWT string presented by the client.
+            repository: Active :class:`Repository` bound to the
+                caller's transactional scope. A sync caller lives
+                under the route handler's DB dep; the MCP
+                middleware and WS auth pass the same singleton so
+                connection-pool semantics match REST.
+
+        Returns:
+            The :class:`TokenClaims` on success, ``None`` when the
+            JWT fails any gate (signature, expiry, blacklist, not-
+            in-inventory, revoked, user deactivated).
+        """
+        token_data = self.verify_token(token)
+        if token_data is None:
+            return None
+        th = hash_token(token)
+        now_ts = datetime.now(UTC).timestamp()
+        cached = self._verify_cache.get(th)
+        if cached is not None and cached.cached_at_ts + VERIFY_CACHE_TTL_SECONDS > now_ts:
+            if not cached.is_valid or not cached.user_is_active:
+                return None
+            return token_data
+        row = await repository.get_active_token_by_hash(th)
+        if row is None:
+            self._cache_verdict(
+                th,
+                is_valid=False,
+                user_is_active=False,
+                user_public_id="",
+                token_data=token_data,
+                now_ts=now_ts,
+            )
+            logger.warning(
+                "verify_token_with_db: token not in inventory — user={} jti={}",
+                token_data.user_public_id,
+                token_data.jti,
+            )
+            return None
+        is_valid = row["revoked_at"] is None
+        user_is_active = row["user_is_active"]
+        self._cache_verdict(
+            th,
+            is_valid=is_valid,
+            user_is_active=user_is_active,
+            user_public_id=row["user_public_id"],
+            token_data=token_data,
+            now_ts=now_ts,
+        )
+        if not is_valid:
+            logger.info(
+                "verify_token_with_db: token revoked — user={} jti={}",
+                token_data.user_public_id,
+                token_data.jti,
+            )
+            return None
+        if not user_is_active:
+            logger.info(
+                "verify_token_with_db: user deactivated — user={} jti={}",
+                token_data.user_public_id,
+                token_data.jti,
+            )
+            return None
+        return token_data
+
+    def _cache_verdict(
+        self,
+        token_hash: str,
+        *,
+        is_valid: bool,
+        user_is_active: bool,
+        user_public_id: str,
+        token_data: TokenClaims,
+        now_ts: float,
+    ) -> None:
+        """Insert a verdict row and prune when the cache grows large."""
+        self._verify_cache[token_hash] = _VerifyCacheEntry(
+            is_valid=is_valid,
+            user_is_active=user_is_active,
+            user_public_id=user_public_id,
+            expires_at_ts=float(token_data.exp),
+            cached_at_ts=now_ts,
+        )
+        if len(self._verify_cache) > VERIFY_CACHE_MAX_ENTRIES:
+            self._prune_verify_cache(now_ts)
+
+    def _prune_verify_cache(self, now_ts: float) -> None:
+        """Drop every cache entry whose TTL has lapsed or JWT expired.
+
+        Called opportunistically when the cache exceeds
+        :data:`VERIFY_CACHE_MAX_ENTRIES` so pathological hit rates on
+        invalid tokens cannot grow unbounded. Cheaper than an LRU
+        eviction sweep and sufficient for the plan §3.6.3 bounded-
+        growth guarantee.
+        """
+        stale_keys: list[str] = [
+            key
+            for key, entry in self._verify_cache.items()
+            if entry.cached_at_ts + VERIFY_CACHE_TTL_SECONDS <= now_ts
+            or entry.expires_at_ts <= now_ts
+        ]
+        for key in stale_keys:
+            del self._verify_cache[key]
+        logger.debug(
+            "verify_cache prune: size_after={} evicted={}",
+            len(self._verify_cache),
+            len(stale_keys),
+        )
+
+    def invalidate_user_cache(self, user_public_id: str) -> int:
+        """Evict every cache entry whose ``user_public_id`` matches.
+
+        Called by the Day 3c/3d-C admin-bus subscriber on receipt of
+        ``admin.user_deactivated`` so a cross-instance deactivation
+        propagates to this TokenManager's LRU without waiting for
+        the 30-second TTL. Plan §3.6.3 resolution of R4-M5 + R5-M3.
+
+        Args:
+            user_public_id: UUID of the user whose cache entries
+                should be evicted. Unknown users are a no-op (count
+                of 0 returned, not an error).
+
+        Returns:
+            Number of entries evicted. Observable via the return
+            value for Day 3c tests — no additional metrics surface
+            is required.
+        """
+        matching_keys = [
+            key
+            for key, entry in self._verify_cache.items()
+            if entry.user_public_id == user_public_id
+        ]
+        for key in matching_keys:
+            del self._verify_cache[key]
+        if matching_keys:
+            logger.info(
+                "invalidate_user_cache: user={} evicted={}",
+                user_public_id,
+                len(matching_keys),
+            )
+        return len(matching_keys)
 
     def refresh_tokens(self, refresh_token: str) -> TokenPair | None:
         """Refresh token pair using refresh token.

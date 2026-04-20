@@ -4132,6 +4132,17 @@ class SQLAlchemyRepository(Repository):
         """Return the verify-path row for ``token_hash`` joined with ``users.is_active``.
 
         See :meth:`Repository.get_active_token_by_hash` for contract.
+
+        Temporal filter note: the JOIN uses ``where_active_now(User)``
+        (``timestamp <= now`` AND ``known_to > now``) instead of
+        ``known_to == KNOWN_TO_MAX``. The equality form relies on
+        exact datetime-string round-tripping between SQLAlchemy's
+        ``DateTime`` binding and SQLite's stored value; pre-seeded
+        rows persist the tz suffix (``+00:00``) while binds may
+        elide it, producing silent empty JOIN results. The
+        ``>``/``<=`` form matches the rest of the codebase idiom
+        (see :func:`where_active_now`) and works across both seed
+        shapes + dialects.
         """
         async with self.session() as s:
             result = await s.execute(
@@ -4145,7 +4156,7 @@ class SQLAlchemyRepository(Repository):
                     User,
                     and_(
                         User.public_id == UserActiveToken.user_public_id,
-                        User.known_to == KNOWN_TO_MAX,
+                        *where_active_now(User),
                     ),
                 )
                 .where(UserActiveToken.token_hash == token_hash)

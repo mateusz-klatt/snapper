@@ -21,6 +21,7 @@ from snapper.api.auth.services.ws_token_service import WsTokenService
 from snapper.api.auth.services.ws_token_service import compute_sid_hash
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.websocket_auth import WebSocketAuthManager
+from snapper.data.repository import Repository
 from snapper.interface.websocket.models import SERVER_CONTROL_SEQ
 from snapper.interface.websocket.schemas import WSAuthenticateRequest
 from snapper.interface.websocket.schemas import WSAuthExpiredResponse
@@ -151,25 +152,31 @@ async def authenticate_websocket(
     ws_auth_manager: WebSocketAuthManager,
     ws_token_service: WsTokenService,
     tracker: SequenceTracker,
+    repository: Repository,
 ) -> AuthResult:
     """Authenticate a new WebSocket connection.
 
     Implements the full authentication flow:
-    1. Verify session cookie
-    2. Request ws_token from client
-    3. Verify ws_token against session
-    4. Create deadline tasks and register connection
+    1. Verify session cookie via DB-backed
+       :meth:`WebSocketAuthManager.verify_session_cookie`
+       (plan §3.6.3 Day 3d-B — checks ``user_active_tokens`` +
+       SCD2-active ``users.is_active``).
+    2. Request ws_token from client.
+    3. Verify ws_token against session.
+    4. Create deadline tasks and register connection.
 
     Args:
         websocket: The WebSocket connection to authenticate.
         ws_auth_manager: Manager for WebSocket authentication state.
         ws_token_service: Service for verifying ws_tokens.
         tracker: Sequence tracker for stamping outbound messages.
+        repository: Active :class:`Repository` threaded through to
+            the DB-backed verify path.
 
     Returns:
         AuthResult with success status and authentication details.
     """
-    session_result = ws_auth_manager.verify_session_cookie(websocket)
+    session_result = await ws_auth_manager.verify_session_cookie(websocket, repository)
     if session_result is None:
         auth_failed = WSAuthFailedResponse(
             reason="missing_cookie",

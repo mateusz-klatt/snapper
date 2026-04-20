@@ -27,7 +27,9 @@ from snapper.auth.tokens import get_token_manager
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
+from snapper.data.repository import Repository
 from snapper.interface.websocket.helpers import build_allowed_origins
+from snapper.server.dependencies import get_repository_dependency
 
 
 def _extract_bearer_token(request: Request) -> str | None:
@@ -56,10 +58,11 @@ def _extract_bearer_token(request: Request) -> str | None:
     return token or None
 
 
-def get_current_user(
+async def get_current_user(
     request: Request,
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
 ) -> AuthPrincipal | None:
-    """Extract current auth principal from Bearer header or cookie.
+    """Extract current auth principal via DB-backed verification.
 
     Per plan §3.7: the ``Authorization: Bearer <jwt>`` header is
     consulted FIRST; the ``access_token`` cookie is the fallback. This
@@ -67,8 +70,16 @@ def get_current_user(
     the same `/api/*` surface as the browser UI while preserving the
     existing cookie flow for the frontend.
 
+    Per plan §3.6.3 (Day 3d-B): verification now calls
+    :meth:`TokenManager.verify_token_with_db` so each request checks
+    the ``user_active_tokens`` inventory + ``users.is_active`` via
+    the 30-second LRU cache. The kill switch therefore propagates to
+    every request on the NEXT call instead of waiting for the 15-
+    minute access-token expiry.
+
     Args:
         request: FastAPI request object.
+        repo: Repository dep for the DB-backed verify path.
 
     Returns:
         AuthPrincipal if authenticated, None otherwise.
@@ -77,7 +88,7 @@ def get_current_user(
     if not access_token:
         return None
     token_manager = get_token_manager()
-    token_data: TokenClaims | None = token_manager.verify_token(access_token)
+    token_data: TokenClaims | None = await token_manager.verify_token_with_db(access_token, repo)
     if not token_data:
         return None
     principal = AuthPrincipal(

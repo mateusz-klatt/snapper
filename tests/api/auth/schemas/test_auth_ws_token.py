@@ -6,6 +6,8 @@ from datetime import datetime
 from typing import Any
 from typing import cast
 
+import pytest
+
 from snapper.api.auth.schemas.ws_token import WsTokenPayload
 from snapper.api.auth.services.ws_token_service import compute_sid_hash
 from snapper.auth.domain.roles import UserRole
@@ -40,7 +42,12 @@ class DummyTokenManager:
         self.verify_response: TokenClaims | None = None
 
     def verify_token(self, token: str) -> TokenClaims | None:
-        """Return preconfigured token claims."""
+        """Return preconfigured token claims (sync JWT+blacklist layer)."""
+        return self.verify_response
+
+    async def verify_token_with_db(self, token: str, repository: object) -> TokenClaims | None:
+        """DB-backed verify stub: yields once then returns the sync verdict."""
+        await asyncio.sleep(0)
         return self.verify_response
 
 
@@ -76,7 +83,8 @@ def _ws_payload(session_id: str) -> WsTokenPayload:
     )
 
 
-def test_verify_session_cookie_success() -> None:
+@pytest.mark.asyncio
+async def test_verify_session_cookie_success() -> None:
     """Verify session cookie verification returns user and token data.
 
     Given: A websocket with valid access_token cookie,
@@ -87,14 +95,15 @@ def test_verify_session_cookie_success() -> None:
     token_manager.verify_response = _token_data()
     websocket = DummyWebSocket()
     websocket.cookies["access_token"] = "valid"
-    result = manager.verify_session_cookie(cast(Any, websocket))
+    result = await manager.verify_session_cookie(cast(Any, websocket), cast(Any, object()))
     assert result is not None
     user, token_data = result
     assert user.username == "alice"
     assert token_data.sid == "session-123"
 
 
-def test_verify_session_cookie_missing_cookie() -> None:
+@pytest.mark.asyncio
+async def test_verify_session_cookie_missing_cookie() -> None:
     """Verify missing cookie returns None.
 
     Given: A websocket without access_token cookie,
@@ -103,7 +112,7 @@ def test_verify_session_cookie_missing_cookie() -> None:
     """
     manager, _token_manager = _create_manager()
     websocket = DummyWebSocket()
-    result = manager.verify_session_cookie(cast(Any, websocket))
+    result = await manager.verify_session_cookie(cast(Any, websocket), cast(Any, object()))
     assert result is None
 
 
@@ -276,7 +285,8 @@ def test_singleton_does_not_create_second_instance() -> None:
     WebSocketAuthManager.clear_instance()
 
 
-def test_verify_session_cookie_with_invalid_token() -> None:
+@pytest.mark.asyncio
+async def test_verify_session_cookie_with_invalid_token() -> None:
     """Verify invalid token cookie returns None.
 
     Given: A websocket with invalid access_token cookie,
@@ -290,7 +300,7 @@ def test_verify_session_cookie_with_invalid_token() -> None:
     manager.token_manager = cast(Any, token_manager)
     websocket = DummyWebSocket()
     websocket.cookies["access_token"] = "invalid"
-    result = manager.verify_session_cookie(cast(Any, websocket))
+    result = await manager.verify_session_cookie(cast(Any, websocket), cast(Any, object()))
     assert result is None
     WebSocketAuthManager.clear_instance()
 
