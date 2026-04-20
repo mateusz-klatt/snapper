@@ -407,6 +407,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         get_user_service().set_msg_publisher(user_publisher)
         logger.info("UserService publisher wired to ZMQ broker for admin.user_deactivated")
         await get_ws_auth_manager().start_admin_listener(settings.zmq_broker_xpub)
+        await get_token_manager().start_admin_listener(settings.zmq_broker_xpub)
         discover_processes()
         process_factory = ProcessLauncherService(settings)
         app.state.process_factory = process_factory
@@ -438,6 +439,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         if settings_service is not None:
             await settings_service.shutdown()
         await get_ws_auth_manager().stop_admin_listener()
+        await get_token_manager().stop_admin_listener()
         _shutdown_user_service_publisher(app)
         _clear_runtime_singletons()
         await dispose_repositories()

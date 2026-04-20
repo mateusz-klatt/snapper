@@ -48,6 +48,30 @@ from snapper.server.dependencies import reset_caps_enforcer_singleton
 from snapper.utils.logging import setup_logging
 from tests.server import dummy_processes
 
+
+def _make_token_listener_recorder(recorded: list[str]) -> MagicMock:
+    """Build a TokenManager mock whose listener calls append to ``recorded``.
+
+    Mirrors the ``mock_ws_auth`` helper in the lifespan-ordering test
+    so Day 3d-C's `TokenManager.start_admin_listener` /
+    `stop_admin_listener` calls land in the same event sequence as
+    Day 3c's `WebSocketAuthManager` calls. Each call appends a
+    distinct prefix (`tm_*` vs `ws_*`) so the ordering assertion can
+    pin the relative sequence of both listeners' lifecycle hooks.
+    """
+    mock = MagicMock()
+
+    async def _start(_xpub: str) -> None:
+        recorded.append("tm_start_admin_listener")
+
+    async def _stop() -> None:
+        recorded.append("tm_stop_admin_listener")
+
+    mock.start_admin_listener = _start
+    mock.stop_admin_listener = _stop
+    return mock
+
+
 TEST_DB_URL = "sqlite:///:memory:"
 
 _tracked_test_clients: list[TestClient] = []
@@ -119,6 +143,13 @@ class TestLifespan:
                     stop_admin_listener=AsyncMock(),
                 ),
             ),
+            patch(
+                "snapper.server.app.get_token_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                ),
+            ),
         ):
             mock_settings_service = MagicMock()
             mock_settings_service.shutdown = AsyncMock()
@@ -182,6 +213,13 @@ class TestLifespan:
                     stop_admin_listener=AsyncMock(),
                 ),
             ),
+            patch(
+                "snapper.server.app.get_token_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                ),
+            ),
         ):
             mock_settings_service = MagicMock()
             mock_settings_service.shutdown = AsyncMock()
@@ -227,10 +265,10 @@ class TestLifespan:
         mock_ws_auth = MagicMock()
 
         async def _start_listener(_xpub: str) -> None:
-            recorded.append("start_admin_listener")
+            recorded.append("ws_start_admin_listener")
 
         async def _stop_listener() -> None:
-            recorded.append("stop_admin_listener")
+            recorded.append("ws_stop_admin_listener")
 
         mock_ws_auth.start_admin_listener = _start_listener
         mock_ws_auth.stop_admin_listener = _stop_listener
@@ -258,6 +296,10 @@ class TestLifespan:
                 "snapper.server.app.get_ws_auth_manager",
                 return_value=mock_ws_auth,
             ),
+            patch(
+                "snapper.server.app.get_token_manager",
+                return_value=_make_token_listener_recorder(recorded),
+            ),
         ):
             mock_settings_service = MagicMock()
             mock_settings_service.shutdown = AsyncMock()
@@ -270,10 +312,19 @@ class TestLifespan:
             mock_factory_cls.return_value = mock_factory
             async with lifespan(mock_app):
                 pass
-        startup_order = recorded[: recorded.index("stop_admin_listener")]
-        shutdown_order = recorded[recorded.index("stop_admin_listener") :]
-        assert startup_order == ["set_msg_publisher", "start_admin_listener"]
-        assert shutdown_order == ["stop_admin_listener", "shutdown_publisher"]
+        shutdown_anchor = recorded.index("ws_stop_admin_listener")
+        startup_order = recorded[:shutdown_anchor]
+        shutdown_order = recorded[shutdown_anchor:]
+        assert startup_order == [
+            "set_msg_publisher",
+            "ws_start_admin_listener",
+            "tm_start_admin_listener",
+        ]
+        assert shutdown_order == [
+            "ws_stop_admin_listener",
+            "tm_stop_admin_listener",
+            "shutdown_publisher",
+        ]
 
     @pytest.mark.asyncio
     async def test_lifespan_finally_runs_when_startup_raises_after_partial_init(
@@ -311,10 +362,10 @@ class TestLifespan:
         mock_ws_auth = MagicMock()
 
         async def _start_listener(_xpub: str) -> None:
-            recorded.append("start_admin_listener")
+            recorded.append("ws_start_admin_listener")
 
         async def _stop_listener() -> None:
-            recorded.append("stop_admin_listener")
+            recorded.append("ws_stop_admin_listener")
 
         mock_ws_auth.start_admin_listener = _start_listener
         mock_ws_auth.stop_admin_listener = _stop_listener
@@ -349,6 +400,10 @@ class TestLifespan:
                 "snapper.server.app.get_ws_auth_manager",
                 return_value=mock_ws_auth,
             ),
+            patch(
+                "snapper.server.app.get_token_manager",
+                return_value=_make_token_listener_recorder(recorded),
+            ),
         ):
             mock_settings_service = MagicMock()
             mock_settings_service.shutdown = AsyncMock()
@@ -357,7 +412,8 @@ class TestLifespan:
                 async with lifespan(mock_app):
                     pass
         assert "discover_processes_raised" in recorded
-        assert "stop_admin_listener" in recorded
+        assert "ws_stop_admin_listener" in recorded
+        assert "tm_stop_admin_listener" in recorded
         assert "shutdown_publisher" in recorded
         assert mock_settings_service.shutdown.await_count == 1
 
@@ -391,6 +447,13 @@ class TestLifespan:
             patch("snapper.server.app._shutdown_user_service_publisher") as mock_shutdown_pub,
             patch(
                 "snapper.server.app.get_ws_auth_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                ),
+            ),
+            patch(
+                "snapper.server.app.get_token_manager",
                 return_value=MagicMock(
                     start_admin_listener=AsyncMock(),
                     stop_admin_listener=AsyncMock(),
@@ -440,6 +503,13 @@ class TestLifespan:
                     stop_admin_listener=AsyncMock(),
                 ),
             ),
+            patch(
+                "snapper.server.app.get_token_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                ),
+            ),
         ):
             mock_settings_service = MagicMock()
             mock_settings_service.shutdown = AsyncMock()
@@ -479,6 +549,13 @@ class TestLifespan:
             patch("snapper.server.app._shutdown_user_service_publisher"),
             patch(
                 "snapper.server.app.get_ws_auth_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                ),
+            ),
+            patch(
+                "snapper.server.app.get_token_manager",
                 return_value=MagicMock(
                     start_admin_listener=AsyncMock(),
                     stop_admin_listener=AsyncMock(),

@@ -4,6 +4,8 @@ This module provides JWT token creation, verification, and lifecycle
 management including blacklisting and WebSocket token rotation.
 """
 
+import asyncio
+import contextlib
 import hashlib
 import heapq
 import json as json_mod
@@ -16,6 +18,8 @@ from datetime import timedelta
 from typing import Final
 
 import jwt
+import zmq
+import zmq.asyncio
 from loguru import logger
 from pydantic import ValidationError
 
@@ -29,6 +33,10 @@ from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
 from snapper.data.repository import Repository
 from snapper.data.repository_types import UserActiveTokenInsertRow
+from snapper.messaging.infrastructure.validated_socket import HWM_AUDIT
+from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
+from snapper.messaging.infrastructure.validated_socket import apply_hwm
+from snapper.messaging.schemas.data import UserDeactivatedData
 
 BLACKLIST_GRACE_PERIOD_SECONDS: Final[float] = 10.0
 """Seconds a blacklisted token remains usable to handle concurrent requests."""
@@ -41,6 +49,12 @@ VERIFY_CACHE_TTL_SECONDS: Final[float] = 30.0
 
 VERIFY_CACHE_MAX_ENTRIES: Final[int] = 10000
 """Upper bound on the verify-cache size before an opportunistic prune runs."""
+
+_ADMIN_USER_DEACTIVATED_TOPIC: Final[str] = "admin.user_deactivated"
+"""Bus topic that Day 3b `UserService.deactivate_user` publishes under."""
+
+_ADMIN_LISTEN_RECV_BACKOFF_S: Final[float] = 0.1
+"""Backoff after a non-cancellation recv error so the loop cannot tight-spin."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -115,6 +129,11 @@ class TokenManager:
         self._blacklisted_tokens: dict[str, float] = {}
         self._blacklist_grace_period = BLACKLIST_GRACE_PERIOD_SECONDS
         self._verify_cache: dict[str, _VerifyCacheEntry] = {}
+        self._admin_listener_lock = asyncio.Lock()
+        self._admin_listen_task: asyncio.Task[None] | None = None
+        self._admin_subscriber: ValidatedSubscriber | None = None
+        self._admin_zmq_context: zmq.asyncio.Context | None = None
+        self._admin_running = False
 
     def set_settings_service(self, settings_service: SettingsService) -> None:
         """Set settings service for configuration.
@@ -787,6 +806,174 @@ class TokenManager:
             True if tokens match.
         """
         return secrets.compare_digest(token, expected)
+
+    async def start_admin_listener(self, zmq_broker_xpub: str) -> None:
+        """Open the admin-bus subscriber and start the dispatch task.
+
+        Subscribes to ``admin.user_deactivated`` (plan §3.6.1 Day 3
+        deliverable 1a) so a cross-instance kill-switch event
+        published by ``UserService.deactivate_user`` collapses the
+        30-second LRU TTL ceiling to one bus-message round-trip.
+        On receipt, :meth:`invalidate_user_cache` walks
+        ``_verify_cache`` and drops every entry whose cached
+        ``user_public_id`` matches the deactivated user's UUID.
+
+        Idempotent + restart-safe via ``_admin_listener_lock``
+        (mirrors the Day 3c WebSocketAuthManager listener pattern):
+        a second call while a healthy listener is running is a
+        no-op; a second call after the previous task finished
+        early reaps the dead task and re-allocates so the
+        cross-instance eviction stays live across single-listener
+        failures.
+
+        Args:
+            zmq_broker_xpub: Address of the broker's XPUB endpoint.
+                Empty string skips the listener entirely (test
+                mode / single-instance deployments where the TTL
+                alone is sufficient).
+        """
+        async with self._admin_listener_lock:
+            if self._admin_listen_task is not None and not self._admin_listen_task.done():
+                return
+            if self._admin_listen_task is not None:
+                await self._reap_admin_listener_unlocked()
+            if not zmq_broker_xpub:
+                logger.info("TokenManager: empty broker XPUB, skipping admin listener")
+                return
+            self._admin_zmq_context = zmq.asyncio.Context()
+            raw_sub_socket = self._admin_zmq_context.socket(zmq.SUB)
+            apply_hwm(raw_sub_socket, rcvhwm=HWM_AUDIT)
+            raw_sub_socket.connect(zmq_broker_xpub)
+            self._admin_subscriber = ValidatedSubscriber(raw_sub_socket)
+            self._admin_subscriber.subscribe(_ADMIN_USER_DEACTIVATED_TOPIC)
+            self._admin_running = True
+            self._admin_listen_task = asyncio.create_task(self._admin_listen_loop())
+            logger.info(
+                "TokenManager: admin-bus listener subscribed to {} on {}",
+                _ADMIN_USER_DEACTIVATED_TOPIC,
+                zmq_broker_xpub,
+            )
+
+    async def stop_admin_listener(self) -> None:
+        """Cancel the dispatch task, close the subscriber, terminate the context.
+
+        Serialised against :meth:`start_admin_listener` via
+        ``_admin_listener_lock`` so an overlapping start cannot
+        allocate a new socket while we are tearing the old one
+        down. Idempotent.
+        """
+        async with self._admin_listener_lock:
+            await self._reap_admin_listener_unlocked()
+
+    async def _reap_admin_listener_unlocked(self) -> None:
+        """Tear down listener resources. Caller MUST hold ``_admin_listener_lock``.
+
+        Captures every resource reference into locals BEFORE
+        clearing the attributes so a follow-up
+        :meth:`start_admin_listener` (which runs after we release
+        the lock) sees a fully-clean slate and cannot interfere
+        with the close + term calls below (Day 3c R1 MAJOR
+        pattern).
+        """
+        self._admin_running = False
+        task = self._admin_listen_task
+        subscriber = self._admin_subscriber
+        context = self._admin_zmq_context
+        self._admin_listen_task = None
+        self._admin_subscriber = None
+        self._admin_zmq_context = None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        if subscriber is not None:
+            with contextlib.suppress(Exception):
+                subscriber.close()
+        if context is not None:
+            with contextlib.suppress(Exception):
+                context.term()
+
+    async def _admin_listen_loop(self) -> None:
+        """Receive admin-bus events and dispatch to per-topic handlers.
+
+        Per-message failures (parse errors, handler exceptions,
+        recv errors) are caught + logged so a single bad frame
+        can never silently stop the listener. Only
+        ``asyncio.CancelledError`` from
+        :meth:`stop_admin_listener` unwinds the loop.
+        """
+        subscriber = self._admin_subscriber
+        if subscriber is None:
+            return
+        try:
+            while self._admin_running:
+                frame = await self._admin_recv_one_frame(subscriber)
+                if frame is None:
+                    continue
+                await self._admin_dispatch_frame(*frame)
+        except asyncio.CancelledError:
+            logger.info("TokenManager: admin listen loop cancelled")
+            raise
+
+    async def _admin_recv_one_frame(
+        self, subscriber: ValidatedSubscriber
+    ) -> tuple[str, str] | None:
+        """Receive and decode one admin-bus frame.
+
+        Returns ``None`` (after a small backoff) when recv raises
+        a non-cancellation error OR when the decoded bytes are
+        not valid UTF-8 — both cases let the caller simply
+        ``continue`` instead of letting a malformed frame unwind
+        the listener loop. Decode is INSIDE the ``try`` so a
+        :exc:`UnicodeDecodeError` cannot escape the helper.
+        """
+        try:
+            topic_bytes, payload_bytes = await subscriber.recv_multipart()
+            topic = topic_bytes.decode() if isinstance(topic_bytes, bytes) else str(topic_bytes)
+            payload = (
+                payload_bytes.decode() if isinstance(payload_bytes, bytes) else str(payload_bytes)
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("TokenManager admin listener recv failed: {}", exc)
+            await asyncio.sleep(_ADMIN_LISTEN_RECV_BACKOFF_S)
+            return None
+        return topic, payload
+
+    async def _admin_dispatch_frame(self, topic: str, payload: str) -> None:
+        """Route one decoded admin-bus frame to its typed handler.
+
+        Handler exceptions other than ``CancelledError`` are
+        logged + swallowed so one bad frame cannot stop the
+        listener. The ``await asyncio.sleep(0)`` yield point is
+        deliberate: under a burst of admin events it prevents the
+        dispatch loop from starving other tasks on the event loop
+        between frames.
+        """
+        await asyncio.sleep(0)
+        try:
+            if topic == _ADMIN_USER_DEACTIVATED_TOPIC:
+                self._handle_user_deactivated(UserDeactivatedData.from_json(payload))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "TokenManager admin handler failed: topic={} err={}",
+                topic,
+                exc,
+            )
+
+    def _handle_user_deactivated(self, data: UserDeactivatedData) -> None:
+        """Evict every cache entry for ``data.user_public_id``.
+
+        Thin shim over :meth:`invalidate_user_cache`; exists as a
+        seam so tests + the listener share one dispatch surface.
+        Synchronous because :meth:`invalidate_user_cache` does no
+        I/O — walking the dict + deleting matching entries is
+        pure in-process work.
+        """
+        self.invalidate_user_cache(data.user_public_id)
 
     @classmethod
     def get_instance(cls) -> TokenManager:
