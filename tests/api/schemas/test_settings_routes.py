@@ -17,6 +17,7 @@ from snapper.api.schemas.settings import SettingUpdateBody
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.config.settings_routes import get_all_settings
+from snapper.config.settings_routes import get_public_feature_flags
 from snapper.config.settings_routes import get_setting_categories
 from snapper.config.settings_routes import remove_setting
 from snapper.config.settings_routes import set_setting
@@ -469,3 +470,69 @@ class TestSettingsRoutes:
                 request=mock_request, key="nonexistent_key", _body=body, user=mock_user, _csrf=None
             )
         assert exc_info.value.status_code == 404
+
+
+class TestPublicFeatureFlags:
+    """Tests for the public ``GET /settings/features`` endpoint (Day 4a)."""
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_flag_absent(self) -> None:
+        """Settings service default path → ``ai_integration_enabled=False``.
+
+        Plan §4 Day 4 item 1: when the ``ai_integration_enabled``
+        setting hasn't been flipped on, the endpoint surfaces
+        ``False`` so the frontend hides the AI Integration
+        navigation entry.
+        """
+        mock_request = MagicMock()
+        mock_request.app.state.rest_tracker = SequenceTracker()
+        mock_settings_service = MagicMock()
+        mock_settings_service.get_setting.return_value = False
+        mock_request.app.state.settings_service = mock_settings_service
+        response = await get_public_feature_flags(request=mock_request)
+        assert response.payload.ai_integration_enabled is False
+        mock_settings_service.get_setting.assert_called_once_with(
+            "ai_integration_enabled", default=False
+        )
+
+    @pytest.mark.asyncio
+    async def test_returns_true_when_flag_enabled(self) -> None:
+        """Settings service returns True → response reflects it."""
+        mock_request = MagicMock()
+        mock_request.app.state.rest_tracker = SequenceTracker()
+        mock_settings_service = MagicMock()
+        mock_settings_service.get_setting.return_value = True
+        mock_request.app.state.settings_service = mock_settings_service
+        response = await get_public_feature_flags(request=mock_request)
+        assert response.payload.ai_integration_enabled is True
+
+    @pytest.mark.asyncio
+    async def test_response_envelope_has_provenance(self) -> None:
+        """Response envelope carries session/sequence/public_id/timestamp."""
+        mock_request = MagicMock()
+        tracker = SequenceTracker()
+        mock_request.app.state.rest_tracker = tracker
+        mock_settings_service = MagicMock()
+        mock_settings_service.get_setting.return_value = True
+        mock_request.app.state.settings_service = mock_settings_service
+        response = await get_public_feature_flags(request=mock_request)
+        assert response.session_id == tracker.session_id
+        assert response.sequence_id >= 1
+        assert response.public_id
+        assert response.timestamp is not None
+        assert response.type == "feature_flags_response"
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_settings_service_missing(self) -> None:
+        """Lifespan-not-ready (state.settings_service absent) → False.
+
+        The endpoint must not raise when the FastAPI lifespan hasn't
+        finished wiring ``app.state.settings_service``; callers that
+        hit the route during startup see the safe default rather
+        than an unhandled 500.
+        """
+        mock_request = MagicMock()
+        mock_request.app.state = MagicMock(spec=["rest_tracker"])
+        mock_request.app.state.rest_tracker = SequenceTracker()
+        response = await get_public_feature_flags(request=mock_request)
+        assert response.payload.ai_integration_enabled is False

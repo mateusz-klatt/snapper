@@ -39,6 +39,8 @@ from sqlalchemy import update
 
 from snapper.api.schemas.base import MessageResponse
 from snapper.api.schemas.health import SettingCategoriesResponse
+from snapper.api.schemas.settings import FeatureFlagsPayload
+from snapper.api.schemas.settings import FeatureFlagsResponse
 from snapper.api.schemas.settings import RemoveSettingRequest
 from snapper.api.schemas.settings import SettingListResponse
 from snapper.api.schemas.settings import SettingRead
@@ -60,6 +62,54 @@ from snapper.server.json_body import openapi_schema
 router = APIRouter(prefix="/settings", tags=["settings"])
 
 _REST_STREAM = "rest.control"
+
+_AI_INTEGRATION_FLAG_KEY = "ai_integration_enabled"
+"""Key consulted by the MCP sub-app AND the public feature-flag endpoint."""
+
+
+@router.get("/features")
+async def get_public_feature_flags(
+    request: Request,
+) -> FeatureFlagsResponse:
+    """Return the public feature-flag projection (plan §4 Day 4 item 1).
+
+    The frontend reads this endpoint on mount to decide whether to
+    render the ``/ai-integration`` navigation entry. No auth is
+    required because the response only surfaces on/off state of
+    feature gates that are already visible in the mount structure
+    (``/api/mcp`` returns 503 when the same flag is off, regardless
+    of credentials). Revealing the flag state to an unauthenticated
+    caller is equivalent information to trying the disabled endpoint.
+
+    Args:
+        request: FastAPI request — used for the REST tracker that
+            stamps provenance on the response envelope.
+
+    Returns:
+        :class:`FeatureFlagsResponse` with the current state of every
+        public feature flag. Currently only
+        ``ai_integration_enabled`` is exposed; future flags can be
+        added to :class:`FeatureFlagsPayload` without changing the
+        envelope shape.
+    """
+    settings_service = getattr(request.app.state, "settings_service", None)
+    ai_integration_enabled = bool(
+        settings_service.get_setting(_AI_INTEGRATION_FLAG_KEY, default=False)
+        if settings_service is not None
+        else False
+    )
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    sid = tracker.session_id
+    seq = tracker.next_sequence(_REST_STREAM)
+    ts = datetime.now(UTC)
+    pid = str(uuid7())
+    return FeatureFlagsResponse(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=pid,
+        timestamp=ts,
+        payload=FeatureFlagsPayload(ai_integration_enabled=ai_integration_enabled),
+    )
 
 
 @router.get("")

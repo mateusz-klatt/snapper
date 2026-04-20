@@ -120,6 +120,39 @@ class SettingListResponse(PayloadListResponse[Literal["setting_list"], SettingRe
     type: Literal["setting_list"] = "setting_list"
 
 
+class FeatureFlagsPayload(StrictBody):
+    """Public feature-flag projection (plan §4 Day 4 item 1, resolves R2-M5).
+
+    Exposes ONLY the boolean feature flags that the frontend needs
+    on mount to decide whether to render the ``/ai-integration``
+    surface. No secrets, no per-user state, no setting values —
+    just the on/off state of feature gates that are safe to reveal
+    to an unauthenticated caller.
+
+    Attributes:
+        ai_integration_enabled: Whether the MCP sub-app is
+            activated. When ``False``, the frontend hides the
+            AI Integration navigation entry and the ``/api/mcp``
+            endpoint returns ``503 feature_disabled`` per plan
+            §3.12 always-mounted-but-gated semantics.
+    """
+
+    ai_integration_enabled: bool = Field(
+        ..., description="Whether the MCP sub-app is activated (plan §3.12)."
+    )
+
+
+class FeatureFlagsResponse(PayloadResponse[Literal["feature_flags_response"], FeatureFlagsPayload]):
+    """Public feature-flag response envelope.
+
+    Attributes:
+        type: Payload item type discriminator.
+        payload: Feature-flag booleans.
+    """
+
+    type: Literal["feature_flags_response"] = "feature_flags_response"
+
+
 class RemoveSettingBody(StrictBody):
     """Remove setting command body (empty).
 
@@ -142,6 +175,8 @@ class RemoveSettingRequest(PayloadRequest[Literal["remove_setting_request"], Rem
 
 
 __all__ = [
+    "FeatureFlagsPayload",
+    "FeatureFlagsResponse",
     "RemoveSettingBody",
     "RemoveSettingRequest",
     "SettingRead",
