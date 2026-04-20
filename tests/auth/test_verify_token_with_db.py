@@ -21,6 +21,7 @@ import pytest
 
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.tokens import REJECTION_REASON_INVALID
 from snapper.auth.tokens import REJECTION_REASON_USER_DEACTIVATED
 from snapper.auth.tokens import VERIFY_CACHE_MAX_ENTRIES
@@ -444,6 +445,81 @@ class TestVerifyCacheGenerationRace:
             gen_before=gen_before,
         )
         assert th in manager._verify_cache
+
+    @pytest.mark.asyncio
+    async def test_legacy_blank_claim_key_falls_back_to_row_user_id(self) -> None:
+        """Legacy blank-claim tokens use the row's user_public_id for the race guard.
+
+        Given: a token whose claim ``user_public_id=""`` (legacy
+            pre-Day-1c issuance),
+        When: :meth:`_cache_verdict` runs with the DB row's real
+            ``user_public_id`` as the fall-through guard key and
+            ``invalidate_user_cache(row_id)`` has already fired,
+        Then: the generation mismatch detected against the row's
+            id — not the blank claim — correctly skips the cache
+            write. Closes the gpt-5.3-codex re-review finding that
+            the guard previously sampled the claim key, which legacy
+            blank-claim tokens bypass because
+            :meth:`invalidate_user_cache` only bumps real user ids.
+        """
+        manager = _fresh_manager()
+        now = int(datetime.now(UTC).timestamp())
+        legacy_claims = TokenClaims(
+            sub="legacy-subject",
+            username="legacy-user",
+            role=UserRole.VIEWER,
+            permissions=[],
+            exp=now + 3600,
+            iat=now,
+            jti="legacy-jti",
+            sid="legacy-sid",
+            user_public_id="",
+        )
+        manager.invalidate_user_cache("legacy-row-id")
+        manager._cache_verdict(
+            "legacy-hash",
+            is_valid=True,
+            user_is_active=True,
+            user_public_id="legacy-row-id",
+            token_data=legacy_claims,
+            now_ts=datetime.now(UTC).timestamp(),
+            gen_before=0,
+        )
+        assert "legacy-hash" not in manager._verify_cache
+
+    @pytest.mark.asyncio
+    async def test_blank_claim_and_blank_row_skips_cache(self) -> None:
+        """When neither claim nor row carries a user id, caching is skipped.
+
+        Given: a token whose claim is blank AND the DB lookup
+            returned a row without a ``user_public_id``,
+        When: :meth:`_cache_verdict` runs,
+        Then: nothing is cached — the race guard has no
+            authoritative key to compare against, so fail-closed.
+        """
+        manager = _fresh_manager()
+        now = int(datetime.now(UTC).timestamp())
+        blank_claims = TokenClaims(
+            sub="s",
+            username="u",
+            role=UserRole.VIEWER,
+            permissions=[],
+            exp=now + 3600,
+            iat=now,
+            jti="j",
+            sid="sid",
+            user_public_id="",
+        )
+        manager._cache_verdict(
+            "orphan-hash",
+            is_valid=False,
+            user_is_active=False,
+            user_public_id="",
+            token_data=blank_claims,
+            now_ts=datetime.now(UTC).timestamp(),
+            gen_before=0,
+        )
+        assert "orphan-hash" not in manager._verify_cache
 
     @pytest.mark.asyncio
     async def test_end_to_end_concurrent_invalidate_blocks_positive(self) -> None:

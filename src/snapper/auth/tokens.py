@@ -619,7 +619,10 @@ class TokenManager:
                 else REJECTION_REASON_INVALID
             )
             return VerifyOutcome(claims=None, rejection_reason=reason)
-        gen_before = self._user_cache_generations.get(token_data.user_public_id, 0)
+        claim_sample_key = token_data.user_public_id
+        gen_before_claim = (
+            self._user_cache_generations.get(claim_sample_key, 0) if claim_sample_key else 0
+        )
         row = await repository.get_active_token_by_hash(th)
         if row is None:
             self._cache_verdict(
@@ -629,7 +632,7 @@ class TokenManager:
                 user_public_id="",
                 token_data=token_data,
                 now_ts=now_ts,
-                gen_before=gen_before,
+                gen_before=gen_before_claim,
             )
             logger.warning(
                 "verify_token_with_db: token not in inventory — user={} jti={}",
@@ -639,11 +642,16 @@ class TokenManager:
             return VerifyOutcome(claims=None, rejection_reason=REJECTION_REASON_INVALID)
         is_valid = row["revoked_at"] is None
         user_is_active = row["user_is_active"]
+        row_user_id = row["user_public_id"]
+        if claim_sample_key:
+            gen_before = gen_before_claim
+        else:
+            gen_before = self._user_cache_generations.get(row_user_id, 0)
         self._cache_verdict(
             th,
             is_valid=is_valid,
             user_is_active=user_is_active,
-            user_public_id=row["user_public_id"],
+            user_public_id=row_user_id,
             token_data=token_data,
             now_ts=now_ts,
             gen_before=gen_before,
@@ -691,6 +699,18 @@ class TokenManager:
         case we do NOT cache — the next verify hit re-reads the DB
         rather than serving a stale positive from the LRU.
 
+        Day 5d re-review hardening (gpt-5.3-codex): the sample key
+        is chosen as ``token_data.user_public_id`` when the claim
+        carries one, else the row's ``user_public_id``. Legacy
+        tokens pre-dating Day 1c have a blank claim
+        ``user_public_id=""``; since
+        :meth:`invalidate_user_cache` bumps the real user id
+        (not ``""``), the race guard can only be meaningful when
+        the cache key and the admin-event key agree. When neither
+        the claim nor the row provides a non-empty id we skip
+        caching entirely — fail-closed so a legacy blank-claim
+        token with no row identity cannot dodge the guard.
+
         Args:
             token_hash: SHA-256 hex digest of the token (cache key).
             is_valid: ``revoked_at IS NULL`` on the inventory row.
@@ -702,12 +722,15 @@ class TokenManager:
             now_ts: Monotonic-ish "now" the caller also used to read
                 the cache — keeps the TTL anchored to one clock
                 sample per request.
-            gen_before: Generation counter value for
-                ``token_data.user_public_id`` sampled BEFORE the DB
-                read. If the stored value differs now, the write
-                is skipped.
+            gen_before: Generation counter value sampled BEFORE the
+                DB read using the same effective user id this
+                method samples now. If the stored value differs
+                now, the write is skipped.
         """
-        sample_key = token_data.user_public_id
+        sample_key = token_data.user_public_id or user_public_id
+        if not sample_key:
+            logger.debug("verify_cache skip: no authoritative user id for generation guard")
+            return
         gen_now = self._user_cache_generations.get(sample_key, 0)
         if gen_now != gen_before:
             logger.debug(
