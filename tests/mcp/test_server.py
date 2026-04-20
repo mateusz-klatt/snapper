@@ -34,6 +34,7 @@ from snapper.application.services.settings import SettingsService
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.tokens import REJECTION_REASON_INVALID
+from snapper.auth.tokens import REJECTION_REASON_USER_DEACTIVATED
 from snapper.auth.tokens import VerifyOutcome
 from snapper.mcp.server import BearerAuthMiddleware
 from snapper.mcp.server import FeatureFlagMiddleware
@@ -209,9 +210,6 @@ class TestBearerAuthMiddleware:
             re-login prompt instead of attempting a refresh that
             would fail with the same verdict.
         """
-        from snapper.auth.tokens import REJECTION_REASON_USER_DEACTIVATED
-        from snapper.auth.tokens import VerifyOutcome
-
         svc = _make_settings_service(enabled=True)
         app = build_mcp_app(settings_service_getter=lambda: svc, repository_getter=lambda: Mock())
         client = TestClient(app)

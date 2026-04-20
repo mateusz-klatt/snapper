@@ -17,6 +17,8 @@ from datetime import datetime
 from datetime import timedelta
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
@@ -222,8 +224,6 @@ class TestRotateUserActiveToken:
             usable for retry (R2 NICE-TO-HAVE strict-atomicity
             coverage requested by Codex + Copilot).
         """
-        from sqlalchemy.exc import IntegrityError
-
         now = datetime.now(UTC)
         await repo.insert_user_active_tokens(
             [
@@ -555,7 +555,6 @@ class TestPersistTokens:
         pair = manager.create_tokens(principal)
         await manager.persist_tokens(pair, principal.user_public_id, repo)
         async with repo.session() as s:
-            from sqlalchemy import select
 
             rows = (
                 (

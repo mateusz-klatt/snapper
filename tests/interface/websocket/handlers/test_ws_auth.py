@@ -21,6 +21,7 @@ from fastapi import HTTPException
 from fastapi import WebSocket
 from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
+from sqlalchemy import select as _select
 
 import snapper.interface.websocket.handlers.auth as auth_handlers
 import snapper.server.authenticated_websocket as auth_ws
@@ -60,7 +61,9 @@ from snapper.auth.websocket_auth import WebSocketAuthManager
 from snapper.auth.websocket_auth import get_ws_auth_manager
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import User as _User
 from snapper.data.repository import where_active_now
+from snapper.data.repository_types import UserActiveTokenVerificationRow
 from snapper.interface.websocket.bridge import ZmqWebSocketBridgeService
 from snapper.interface.websocket.handlers.auth import AUTH_TIMEOUT_SECONDS
 from snapper.interface.websocket.handlers.auth import REAUTH_GRACE_PERIOD
@@ -226,10 +229,6 @@ async def _resolve_or_seed_user(
     row (``authenticate_user`` raises MultipleResultsFound otherwise)
     while still supporting cold-start runs where the seed skipped.
     """
-    from sqlalchemy import select as _select
-
-    from snapper.data.models import User as _User
-
     async with repo.session() as s:
         existing = (
             await s.execute(
@@ -4900,7 +4899,6 @@ class TestWebSocketAuthManager:
         tokens = token_manager.create_tokens(user)
         websocket = MagicMock(spec=WebSocket)
         websocket.cookies = {"access_token": tokens.access_token}
-        from snapper.data.repository_types import UserActiveTokenVerificationRow
 
         row = UserActiveTokenVerificationRow(
             user_public_id=user.user_public_id,

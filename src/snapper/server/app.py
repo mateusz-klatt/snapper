@@ -166,6 +166,7 @@ from snapper.messaging.schemas.data import SignalData
 from snapper.messaging.schemas.data import UnderlyingAssetData
 from snapper.messaging.schemas.data import UnderlyingInstrumentData
 from snapper.messaging.schemas.data import VenueFeeScheduleData
+from snapper.server.ai_delegate_routes import router as ai_delegate_router
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
 from snapper.server.backtest_routes import router as backtest_router
 from snapper.server.credential_routes import router as credential_router
@@ -521,6 +522,7 @@ def create_app() -> FastAPI:
     manager = WebSocketConnectionManager()
     app.include_router(auth_router, prefix=API_PREFIX)
     app.include_router(settings_router, prefix=API_PREFIX)
+    app.include_router(ai_delegate_router, prefix=API_PREFIX)
     app.include_router(process_router, prefix=API_PREFIX)
     app.include_router(strategy_router, prefix=API_PREFIX)
     app.include_router(wallet_router, prefix=API_PREFIX)
