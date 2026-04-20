@@ -257,6 +257,22 @@ class TokenManager:
             expires_in=int(access_token_expires.total_seconds()),
         )
 
+    def decode_fresh_token(self, token: str) -> TokenClaims:
+        """Public alias for :meth:`_decode_fresh_token` (Day 4b R1 resolution).
+
+        Use this from external services (e.g. DelegateService) that
+        need to project freshly-minted JWT claims into inventory
+        rows. Keeps the underscore-prefixed method name as a
+        backward-compatible internal alias.
+
+        Args:
+            token: JWT string emitted by ``create_tokens``.
+
+        Returns:
+            Typed :class:`TokenClaims` for the decoded payload.
+        """
+        return self._decode_fresh_token(token)
+
     def _decode_fresh_token(self, token: str) -> TokenClaims:
         """Decode a token we just minted, returning typed claims.
 

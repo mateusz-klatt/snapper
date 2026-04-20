@@ -61,6 +61,19 @@ class DelegateLabelConflictError(Exception):
     """Raised when the normalised username derived from the label already exists."""
 
 
+class InvalidOwnerPrincipalError(Exception):
+    """Raised when the caller's principal is missing a usable ``user_public_id``.
+
+    Day 4b R1 (Copilot MAJOR): a legacy / misconfigured token whose
+    ``user_public_id`` decodes to an empty string must not be
+    allowed to create a delegate with ``created_by_user_public_id=""``
+    — that would make every other blank-ID principal see the
+    delegate. We fail-closed at the service boundary so the route
+    can surface a clean 401 instead of silently minting ownerless
+    rows.
+    """
+
+
 class DelegateService:
     """Create + manage AI delegates owned by an operator."""
 
@@ -135,7 +148,11 @@ class DelegateService:
         Raises:
             DelegateLabelConflictError: If a unique username can't
                 be derived from the label within the retry bound.
+            InvalidOwnerPrincipalError: If the caller's principal
+                does not carry a usable ``user_public_id`` (R1
+                blank-owner guard).
         """
+        self._guard_owner(owner.user_public_id)
         async with self.repository.session() as session:
             username = await self._reserve_unique_username(session, body.label)
             now = datetime.now(UTC)
@@ -172,8 +189,8 @@ class DelegateService:
                 user_public_id=delegate_user.public_id,
             )
             pair = self.token_manager.create_tokens(delegate_principal)
-            access_claims = self.token_manager._decode_fresh_token(pair.access_token)
-            refresh_claims = self.token_manager._decode_fresh_token(pair.refresh_token)
+            access_claims = self.token_manager.decode_fresh_token(pair.access_token)
+            refresh_claims = self.token_manager.decode_fresh_token(pair.refresh_token)
             issued_at = datetime.fromtimestamp(access_claims.iat, tz=UTC)
             access_exp = datetime.fromtimestamp(access_claims.exp, tz=UTC)
             refresh_exp = datetime.fromtimestamp(refresh_claims.exp, tz=UTC)
@@ -201,7 +218,9 @@ class DelegateService:
             )
             await session.commit()
             delegate_read = self._delegate_read_from_rows(
-                user_row=delegate_user, caps_row=caps_row, label=body.label
+                user_row=delegate_user,
+                caps_row=caps_row,
+                label=self._label_from_username(delegate_user.username),
             )
         logger.info(
             "create_delegate: owner={} delegate={} username={}",
@@ -219,6 +238,11 @@ class DelegateService:
     async def list_delegates(self, owner_public_id: str) -> list[DelegateRead]:
         """Return every SCD2-active delegate the caller owns.
 
+        Fails closed with :class:`InvalidOwnerPrincipalError` when
+        the ``owner_public_id`` is empty — prevents legacy blank-ID
+        tokens from enumerating other blank-ID operators' delegates
+        (R1 Copilot MAJOR fix).
+
         Excludes deactivated delegates (``is_active=False``) so
         the frontend list view matches the
         ``POST /deactivate`` semantic — a deactivated delegate
@@ -233,6 +257,7 @@ class DelegateService:
             List of :class:`DelegateRead` projections. Empty when
             the operator has never created a delegate.
         """
+        self._guard_owner(owner_public_id)
         async with self.repository.session() as session:
             now = _now_for_join()
             caps_ts, caps_known_to = where_active(UserTradingCaps, now)
@@ -286,7 +311,12 @@ class DelegateService:
         Returns:
             :class:`DelegateRead` projection of the active
             delegate + its caps.
+
+        Raises:
+            InvalidOwnerPrincipalError: if ``owner_public_id`` is
+                empty (R1 blank-owner guard).
         """
+        self._guard_owner(owner_public_id)
         async with self.repository.session() as session:
             user_row, caps_row = await self._load_delegate_with_caps(
                 session, public_id, owner_public_id
@@ -324,7 +354,12 @@ class DelegateService:
         Returns:
             :class:`DelegateRead` projection after the new caps
             row has committed.
+
+        Raises:
+            InvalidOwnerPrincipalError: if ``owner_public_id`` is
+                empty (R1 blank-owner guard).
         """
+        self._guard_owner(owner_public_id)
         async with self.repository.session() as session:
             user_row, _caps = await self._load_delegate_with_caps(
                 session, public_id, owner_public_id
@@ -352,6 +387,24 @@ class DelegateService:
             caps_row=refreshed,
             label=self._label_from_username(user_row.username),
         )
+
+    @staticmethod
+    def _guard_owner(owner_public_id: str) -> None:
+        """Reject empty ``owner_public_id`` so ownerless rows can't appear.
+
+        Day 4b R1 Copilot MAJOR fix: a legacy/misconfigured token
+        could decode with ``user_public_id=""``. Allowing that
+        through would persist ``created_by_user_public_id=""`` on
+        new delegates, visible to every other blank-ID operator
+        principal. Fail closed with
+        :class:`InvalidOwnerPrincipalError` so the route layer
+        raises 401 instead of silently creating orphan rows.
+        """
+        if not owner_public_id:
+            raise InvalidOwnerPrincipalError(
+                "AI delegate management requires a populated user_public_id "
+                "on the caller's principal."
+            )
 
     async def _reserve_unique_username(self, session: AsyncSession, label: str) -> str:
         """Derive a unique ``ai-<slug>-<suffix>`` username from the label.

@@ -41,6 +41,7 @@ from snapper.api.schemas.ai_delegates import DelegateResponse
 from snapper.application.ai_delegates.service import DelegateLabelConflictError
 from snapper.application.ai_delegates.service import DelegateNotFoundError
 from snapper.application.ai_delegates.service import DelegateService
+from snapper.application.ai_delegates.service import InvalidOwnerPrincipalError
 from snapper.auth.dependencies import require_role
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
@@ -58,6 +59,10 @@ router = APIRouter(prefix="/ai-delegates", tags=["ai-delegates"])
 
 _REST_STREAM = "rest.control"
 _DELEGATE_NOT_FOUND = "Delegate not found"
+_INVALID_PRINCIPAL = (
+    "AI delegate management requires an authenticated principal with a "
+    "populated user_public_id. Re-login to obtain a current token."
+)
 
 
 def _build_service(repository: Repository) -> DelegateService:
@@ -102,6 +107,10 @@ async def create_delegate(
     service = _build_service(repo)
     try:
         payload = await service.create_delegate(owner=owner, body=body.payload)
+    except InvalidOwnerPrincipalError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=_INVALID_PRINCIPAL
+        ) from exc
     except DelegateLabelConflictError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -129,7 +138,12 @@ async def list_delegates(
     list view tracks the active set.
     """
     service = _build_service(repo)
-    delegates = await service.list_delegates(owner_public_id=owner.user_public_id)
+    try:
+        delegates = await service.list_delegates(owner_public_id=owner.user_public_id)
+    except InvalidOwnerPrincipalError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=_INVALID_PRINCIPAL
+        ) from exc
     tracker: SequenceTracker = request.app.state.rest_tracker
     return DelegateListResponse(
         session_id=tracker.session_id,
@@ -159,6 +173,10 @@ async def get_delegate(
             public_id=delegate_public_id,
             owner_public_id=owner.user_public_id,
         )
+    except InvalidOwnerPrincipalError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=_INVALID_PRINCIPAL
+        ) from exc
     except DelegateNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=_DELEGATE_NOT_FOUND
@@ -194,6 +212,10 @@ async def update_delegate_caps(
             owner_public_id=owner.user_public_id,
             body=body.payload,
         )
+    except InvalidOwnerPrincipalError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=_INVALID_PRINCIPAL
+        ) from exc
     except DelegateNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=_DELEGATE_NOT_FOUND
@@ -241,6 +263,10 @@ async def deactivate_delegate(
             public_id=delegate_public_id,
             owner_public_id=owner.user_public_id,
         )
+    except InvalidOwnerPrincipalError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=_INVALID_PRINCIPAL
+        ) from exc
     except DelegateNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=_DELEGATE_NOT_FOUND
