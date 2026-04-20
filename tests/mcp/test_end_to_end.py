@@ -34,7 +34,6 @@ from starlette.testclient import TestClient
 from snapper.application.services.settings import SettingsService
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.tokens import TokenClaims
-from snapper.auth.tokens import REJECTION_REASON_INVALID
 from snapper.auth.tokens import VerifyOutcome
 from snapper.mcp.server import TOKEN_CLAIMS_CTX
 from snapper.mcp.server import BearerAuthMiddleware
@@ -113,7 +112,7 @@ class TestEndToEndBearerToContextVar:
             token_manager.verify_token_with_reason = AsyncMock(
                 return_value=VerifyOutcome(
                     claims=claims,
-                    rejection_reason=(None if (claims) is not None else REJECTION_REASON_INVALID),
+                    rejection_reason=None,
                 )
             )
             mock_get.return_value = token_manager
@@ -148,9 +147,7 @@ class TestEndToEndBearerToContextVar:
             token_manager.verify_token_with_reason = AsyncMock(
                 return_value=VerifyOutcome(
                     claims=claims_first,
-                    rejection_reason=(
-                        None if (claims_first) is not None else REJECTION_REASON_INVALID
-                    ),
+                    rejection_reason=None,
                 )
             )
             mock_get.return_value = token_manager
@@ -185,9 +182,7 @@ class TestEndToEndBearerToContextVar:
             token_manager.verify_token_with_reason = AsyncMock(
                 return_value=VerifyOutcome(
                     claims=_make_claims("x"),
-                    rejection_reason=(
-                        None if (_make_claims("x")) is not None else REJECTION_REASON_INVALID
-                    ),
+                    rejection_reason=None,
                 )
             )
             mock_get.return_value = token_manager
@@ -365,9 +360,7 @@ class TestEndToEndBearerToContextVar:
             token_manager.verify_token_with_reason = AsyncMock(
                 return_value=VerifyOutcome(
                     claims=_make_claims(),
-                    rejection_reason=(
-                        None if (_make_claims()) is not None else REJECTION_REASON_INVALID
-                    ),
+                    rejection_reason=None,
                 )
             )
             mock_get.return_value = token_manager

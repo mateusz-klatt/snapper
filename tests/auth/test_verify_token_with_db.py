@@ -20,6 +20,8 @@ import pytest
 
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.auth.tokens import REJECTION_REASON_INVALID
+from snapper.auth.tokens import REJECTION_REASON_USER_DEACTIVATED
 from snapper.auth.tokens import VERIFY_CACHE_MAX_ENTRIES
 from snapper.auth.tokens import VERIFY_CACHE_TTL_SECONDS
 from snapper.auth.tokens import TokenManager
@@ -135,6 +137,141 @@ class TestVerifyTokenWithDB:
         repo = MagicMock()
         repo.get_active_token_by_hash = AsyncMock(return_value=None)
         assert await manager.verify_token_with_db("not.a.jwt", repo) is None
+        repo.get_active_token_by_hash.assert_not_awaited()
+
+
+class TestVerifyTokenWithReasonBranches:
+    """Direct coverage of :meth:`TokenManager.verify_token_with_reason` reason paths.
+
+    Day 3d-D R1 + R2 follow-up (Copilot MINOR NEW FINDING):
+    ``verify_token_with_db`` now delegates to
+    ``verify_token_with_reason``; the wrapper tests above only
+    exercise the ``TokenClaims | None`` projection. These tests
+    assert the ``rejection_reason`` field directly so a future
+    refactor that collapses the USER_DEACTIVATED / INVALID mapping
+    fails loudly.
+    """
+
+    @pytest.mark.asyncio
+    async def test_jwt_fail_returns_invalid(self) -> None:
+        """Signature / expiry / blacklist failure → ``invalid``."""
+        manager = _fresh_manager()
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(return_value=None)
+        outcome = await manager.verify_token_with_reason("not.a.jwt", repo)
+        assert outcome.claims is None
+        assert outcome.rejection_reason == REJECTION_REASON_INVALID
+        repo.get_active_token_by_hash.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_success_has_none_reason(self) -> None:
+        """Valid JWT + row + active user → claims + ``rejection_reason=None``."""
+        manager = _fresh_manager()
+        token = _mint_access_token(manager)
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(return_value=_make_verification_row())
+        outcome = await manager.verify_token_with_reason(token, repo)
+        assert outcome.claims is not None
+        assert outcome.rejection_reason is None
+
+    @pytest.mark.asyncio
+    async def test_missing_inventory_row_returns_invalid(self) -> None:
+        """No row in inventory → ``invalid`` (pre-migration / forged)."""
+        manager = _fresh_manager()
+        token = _mint_access_token(manager)
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(return_value=None)
+        outcome = await manager.verify_token_with_reason(token, repo)
+        assert outcome.claims is None
+        assert outcome.rejection_reason == REJECTION_REASON_INVALID
+
+    @pytest.mark.asyncio
+    async def test_revoked_row_user_active_returns_invalid(self) -> None:
+        """Revoked token but user still active → ``invalid`` (not deactivated)."""
+        manager = _fresh_manager()
+        token = _mint_access_token(manager)
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(
+            return_value=_make_verification_row(revoked=True, user_is_active=True)
+        )
+        outcome = await manager.verify_token_with_reason(token, repo)
+        assert outcome.claims is None
+        assert outcome.rejection_reason == REJECTION_REASON_INVALID
+
+    @pytest.mark.asyncio
+    async def test_revoked_row_user_deactivated_returns_user_deactivated(self) -> None:
+        """Revoked AND deactivated → ``user_deactivated`` wins.
+
+        When a token is both revoked (e.g. by the kill switch) AND
+        the user is deactivated, the deactivation signal is more
+        informative to the client than the revocation.
+        """
+        manager = _fresh_manager()
+        token = _mint_access_token(manager)
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(
+            return_value=_make_verification_row(revoked=True, user_is_active=False)
+        )
+        outcome = await manager.verify_token_with_reason(token, repo)
+        assert outcome.claims is None
+        assert outcome.rejection_reason == REJECTION_REASON_USER_DEACTIVATED
+
+    @pytest.mark.asyncio
+    async def test_active_row_user_deactivated_returns_user_deactivated(self) -> None:
+        """Token not revoked but user deactivated → ``user_deactivated``."""
+        manager = _fresh_manager()
+        token = _mint_access_token(manager)
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(
+            return_value=_make_verification_row(user_is_active=False)
+        )
+        outcome = await manager.verify_token_with_reason(token, repo)
+        assert outcome.claims is None
+        assert outcome.rejection_reason == REJECTION_REASON_USER_DEACTIVATED
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_deactivated_returns_user_deactivated(self) -> None:
+        """Cached verdict with populated ``user_public_id`` + ``user_is_active=False``."""
+        manager = _fresh_manager()
+        token = _mint_access_token(manager)
+        th = hash_token(token)
+        now_ts = datetime.now(UTC).timestamp()
+        manager._verify_cache[th] = _VerifyCacheEntry(
+            is_valid=False,
+            user_is_active=False,
+            user_public_id="user-cached-deactivated",
+            expires_at_ts=now_ts + 900,
+            cached_at_ts=now_ts,
+        )
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(return_value=None)
+        outcome = await manager.verify_token_with_reason(token, repo)
+        assert outcome.rejection_reason == REJECTION_REASON_USER_DEACTIVATED
+        repo.get_active_token_by_hash.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_missing_inventory_returns_invalid(self) -> None:
+        """Cached negative entry with empty ``user_public_id`` → ``invalid``.
+
+        The ``user_public_id=""`` sentinel means the row was missing
+        at the time of the prior lookup — neither kill-switch nor
+        deactivation applies.
+        """
+        manager = _fresh_manager()
+        token = _mint_access_token(manager)
+        th = hash_token(token)
+        now_ts = datetime.now(UTC).timestamp()
+        manager._verify_cache[th] = _VerifyCacheEntry(
+            is_valid=False,
+            user_is_active=False,
+            user_public_id="",
+            expires_at_ts=now_ts + 900,
+            cached_at_ts=now_ts,
+        )
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(return_value=None)
+        outcome = await manager.verify_token_with_reason(token, repo)
+        assert outcome.rejection_reason == REJECTION_REASON_INVALID
         repo.get_active_token_by_hash.assert_not_awaited()
 
 

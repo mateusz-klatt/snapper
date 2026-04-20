@@ -167,6 +167,33 @@ class TestBearerAuthMiddleware:
         assert response.status_code == 503
         assert response.json()["error_code"] == "mcp_unavailable"
 
+    def test_rejection_with_unexpected_none_reason_falls_back_to_invalid(self) -> None:
+        """Defensive: ``None`` rejection_reason maps to ``invalid_bearer_token``.
+
+        Day 3d-D R2 (Copilot MINOR NEW FINDING): pin the defensive
+        default in ``_build_rejection_response`` so a future
+        ``VerifyOutcome`` with a ``None`` reason (which should never
+        happen in production but could emerge from a refactor bug)
+        falls through to ``invalid_bearer_token`` instead of
+        accidentally leaking ``user_deactivated``.
+        """
+        svc = _make_settings_service(enabled=True)
+        app = build_mcp_app(settings_service_getter=lambda: svc, repository_getter=lambda: Mock())
+        client = TestClient(app)
+        with patch("snapper.mcp.server.get_token_manager") as mock_get:
+            token_manager = Mock()
+            token_manager.verify_token_with_reason = AsyncMock(
+                return_value=VerifyOutcome(claims=None, rejection_reason=None)
+            )
+            mock_get.return_value = token_manager
+            response = client.post(
+                "/mcp",
+                headers={"Authorization": f"Bearer {_TEST_TOKEN_PLACEHOLDER}"},
+                json={},
+            )
+        assert response.status_code == 401
+        assert response.json()["error_code"] == "invalid_bearer_token"
+
     def test_deactivated_user_token_returns_401_user_deactivated(self) -> None:
         """Deactivated user's token → 401 ``user_deactivated`` (plan §2 item 6).
 
@@ -224,7 +251,7 @@ class TestBearerAuthMiddleware:
             token_manager.verify_token_with_reason = AsyncMock(
                 return_value=VerifyOutcome(
                     claims=None,
-                    rejection_reason=(None if (None) is not None else REJECTION_REASON_INVALID),
+                    rejection_reason=REJECTION_REASON_INVALID,
                 )
             )
             token_manager._verify_cache = {}
@@ -272,7 +299,7 @@ class TestBearerAuthMiddleware:
             token_manager.verify_token_with_reason = AsyncMock(
                 return_value=VerifyOutcome(
                     claims=claims,
-                    rejection_reason=(None if (claims) is not None else REJECTION_REASON_INVALID),
+                    rejection_reason=None,
                 )
             )
             mock_get.return_value = token_manager
