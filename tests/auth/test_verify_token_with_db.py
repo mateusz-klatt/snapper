@@ -447,20 +447,20 @@ class TestVerifyCacheGenerationRace:
         assert th in manager._verify_cache
 
     @pytest.mark.asyncio
-    async def test_legacy_blank_claim_key_falls_back_to_row_user_id(self) -> None:
-        """Legacy blank-claim tokens use the row's user_public_id for the race guard.
+    async def test_blank_claim_always_fails_closed(self) -> None:
+        """Legacy blank-claim tokens are NEVER cached — fail-closed.
 
         Given: a token whose claim ``user_public_id=""`` (legacy
-            pre-Day-1c issuance),
-        When: :meth:`_cache_verdict` runs with the DB row's real
-            ``user_public_id`` as the fall-through guard key and
-            ``invalidate_user_cache(row_id)`` has already fired,
-        Then: the generation mismatch detected against the row's
-            id — not the blank claim — correctly skips the cache
-            write. Closes the gpt-5.3-codex re-review finding that
-            the guard previously sampled the claim key, which legacy
-            blank-claim tokens bypass because
-            :meth:`invalidate_user_cache` only bumps real user ids.
+            pre-Day-1c issuance) and a successful DB-row lookup,
+        When: :meth:`_cache_verdict` runs,
+        Then: the cache is NOT written — the race guard needs a
+            pre-DB-read sample keyed off the same identifier the
+            admin-bus listener bumps, but a blank claim has no such
+            identifier before the await. Closes the Day 5d-C R2
+            codex finding that sampling the row id post-await
+            cannot detect an invalidate-during-DB-read race. Phase A
+            never issues blank-claim tokens; legacy tokens pay a
+            perf penalty (always DB-backed) until they expire.
         """
         manager = _fresh_manager()
         now = int(datetime.now(UTC).timestamp())
@@ -475,7 +475,6 @@ class TestVerifyCacheGenerationRace:
             sid="legacy-sid",
             user_public_id="",
         )
-        manager.invalidate_user_cache("legacy-row-id")
         manager._cache_verdict(
             "legacy-hash",
             is_valid=True,

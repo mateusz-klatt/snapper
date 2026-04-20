@@ -620,7 +620,7 @@ class TokenManager:
             )
             return VerifyOutcome(claims=None, rejection_reason=reason)
         claim_sample_key = token_data.user_public_id
-        gen_before_claim = (
+        gen_before = (
             self._user_cache_generations.get(claim_sample_key, 0) if claim_sample_key else 0
         )
         row = await repository.get_active_token_by_hash(th)
@@ -632,7 +632,7 @@ class TokenManager:
                 user_public_id="",
                 token_data=token_data,
                 now_ts=now_ts,
-                gen_before=gen_before_claim,
+                gen_before=gen_before,
             )
             logger.warning(
                 "verify_token_with_db: token not in inventory — user={} jti={}",
@@ -643,10 +643,6 @@ class TokenManager:
         is_valid = row["revoked_at"] is None
         user_is_active = row["user_is_active"]
         row_user_id = row["user_public_id"]
-        if claim_sample_key:
-            gen_before = gen_before_claim
-        else:
-            gen_before = self._user_cache_generations.get(row_user_id, 0)
         self._cache_verdict(
             th,
             is_valid=is_valid,
@@ -699,17 +695,20 @@ class TokenManager:
         case we do NOT cache — the next verify hit re-reads the DB
         rather than serving a stale positive from the LRU.
 
-        Day 5d re-review hardening (gpt-5.3-codex): the sample key
-        is chosen as ``token_data.user_public_id`` when the claim
-        carries one, else the row's ``user_public_id``. Legacy
-        tokens pre-dating Day 1c have a blank claim
-        ``user_public_id=""``; since
-        :meth:`invalidate_user_cache` bumps the real user id
-        (not ``""``), the race guard can only be meaningful when
-        the cache key and the admin-event key agree. When neither
-        the claim nor the row provides a non-empty id we skip
-        caching entirely — fail-closed so a legacy blank-claim
-        token with no row identity cannot dodge the guard.
+        Day 5d re-review hardening (gpt-5.3-codex, R2 on
+        ``e035e9c``): legacy tokens pre-dating Day 1c have a blank
+        claim ``user_public_id=""``. The sample for the race guard
+        MUST come from a key sampled BEFORE the DB await so a
+        concurrent ``invalidate_user_cache`` that bumps the real
+        user id during the await is observable as a mismatch. When
+        the claim is blank we cannot know the row's id without
+        reading the DB first, which defeats the guard entirely.
+        The safe resolution is to skip caching blank-claim tokens
+        completely — fail-closed. These legacy tokens pay a perf
+        penalty (always DB-backed) but cannot slip a stale positive
+        into cache during a race. Phase A issuance never emits
+        blank-claim tokens, so the penalty is bounded by legacy
+        session lifetimes (≤ 15 min access-token TTL).
 
         Args:
             token_hash: SHA-256 hex digest of the token (cache key).
@@ -727,10 +726,13 @@ class TokenManager:
                 method samples now. If the stored value differs
                 now, the write is skipped.
         """
-        sample_key = token_data.user_public_id or user_public_id
-        if not sample_key:
-            logger.debug("verify_cache skip: no authoritative user id for generation guard")
+        if not token_data.user_public_id:
+            logger.debug(
+                "verify_cache skip: blank-claim legacy token cannot be guarded "
+                "against invalidate-during-DB-read races"
+            )
             return
+        sample_key = token_data.user_public_id
         gen_now = self._user_cache_generations.get(sample_key, 0)
         if gen_now != gen_before:
             logger.debug(
