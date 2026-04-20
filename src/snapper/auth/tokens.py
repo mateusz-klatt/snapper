@@ -564,13 +564,20 @@ class TokenManager:
             self._prune_verify_cache(now_ts)
 
     def _prune_verify_cache(self, now_ts: float) -> None:
-        """Drop every cache entry whose TTL has lapsed or JWT expired.
+        """Drop stale entries AND hard-evict the oldest to stay bounded.
 
         Called opportunistically when the cache exceeds
-        :data:`VERIFY_CACHE_MAX_ENTRIES` so pathological hit rates on
-        invalid tokens cannot grow unbounded. Cheaper than an LRU
-        eviction sweep and sufficient for the plan §3.6.3 bounded-
-        growth guarantee.
+        :data:`VERIFY_CACHE_MAX_ENTRIES`. Two passes:
+
+            1. Stale pass — drop every entry whose 30-second TTL has
+               lapsed or whose JWT ``exp`` has passed. Cheap and
+               usually enough under steady-state traffic.
+            2. Hard-cap pass — if the cache is STILL over the
+               threshold (burst of fresh unique tokens all within
+               TTL), evict the oldest entries by ``cached_at_ts``
+               down to the limit. Guarantees bounded memory even
+               under pathological spray-of-fresh-tokens load (Codex
+               R1 MAJOR resolution).
         """
         stale_keys: list[str] = [
             key
@@ -580,10 +587,20 @@ class TokenManager:
         ]
         for key in stale_keys:
             del self._verify_cache[key]
+        hard_evicted = 0
+        if len(self._verify_cache) > VERIFY_CACHE_MAX_ENTRIES:
+            overflow = len(self._verify_cache) - VERIFY_CACHE_MAX_ENTRIES
+            victims = sorted(self._verify_cache.items(), key=lambda item: item[1].cached_at_ts)[
+                :overflow
+            ]
+            for key, _entry in victims:
+                del self._verify_cache[key]
+            hard_evicted = len(victims)
         logger.debug(
-            "verify_cache prune: size_after={} evicted={}",
+            "verify_cache prune: size_after={} stale_evicted={} hard_evicted={}",
             len(self._verify_cache),
             len(stale_keys),
+            hard_evicted,
         )
 
     def invalidate_user_cache(self, user_public_id: str) -> int:

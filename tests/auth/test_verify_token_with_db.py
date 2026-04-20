@@ -179,6 +179,37 @@ class TestVerifyCachePrune:
     """Opportunistic pruning keeps the cache bounded (§3.6.3)."""
 
     @pytest.mark.asyncio
+    async def test_hard_cap_applies_when_all_entries_fresh(self) -> None:
+        """Fresh-only burst → oldest entries hard-evicted to stay at cap.
+
+        Codex R1 MAJOR regression guard: a burst of unique tokens
+        within TTL must not let the cache grow unbounded past
+        ``VERIFY_CACHE_MAX_ENTRIES``. The stale pass would find
+        nothing to evict; the hard-cap pass drops the oldest by
+        ``cached_at_ts`` down to the limit.
+        """
+        manager = _fresh_manager()
+        base_ts = datetime.now(UTC).timestamp()
+        for i in range(VERIFY_CACHE_MAX_ENTRIES):
+            manager._verify_cache[f"fresh-{i}"] = _VerifyCacheEntry(
+                is_valid=True,
+                user_is_active=True,
+                user_public_id=f"user-{i}",
+                expires_at_ts=base_ts + 900,
+                cached_at_ts=base_ts + i * 0.001,
+            )
+        assert len(manager._verify_cache) == VERIFY_CACHE_MAX_ENTRIES
+        token = _mint_access_token(manager, user_public_id="burst-user")
+        repo = MagicMock()
+        repo.get_active_token_by_hash = AsyncMock(
+            return_value=_make_verification_row(user_public_id="burst-user")
+        )
+        await manager.verify_token_with_db(token, repo)
+        assert len(manager._verify_cache) <= VERIFY_CACHE_MAX_ENTRIES
+        assert "fresh-0" not in manager._verify_cache
+        assert hash_token(token) in manager._verify_cache
+
+    @pytest.mark.asyncio
     async def test_prune_runs_when_cache_exceeds_threshold(self) -> None:
         """Adding past the bound evicts every expired / past-TTL entry.
 

@@ -159,9 +159,13 @@ class WebSocketAuthManager:
         runs through :meth:`TokenManager.verify_token_with_db` so
         the WebSocket upgrade check consults the
         ``user_active_tokens`` inventory + SCD2-active
-        ``users.is_active`` join. The kill switch therefore rejects
-        a deactivated user's reconnect attempt on the NEXT upgrade
-        instead of waiting for the 15-minute access-token expiry.
+        ``users.is_active`` join. Kill-switch propagation: the
+        same-instance kill switch evicts the LRU immediately;
+        cross-instance reconnect attempts are rejected within the
+        30-second cache TTL until the Day 3d-C admin-bus
+        subscriber collapses that to one bus round-trip. The
+        effective ceiling drops from the 15-minute access-token
+        TTL to 30 s.
 
         The method name is preserved for call-site stability — the
         semantics are now "verify session token transport, header or

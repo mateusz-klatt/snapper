@@ -165,9 +165,12 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
     Per plan §3.6.3 (Day 3d-B): verification routes through
     :meth:`TokenManager.verify_token_with_db` so each MCP call
     checks the ``user_active_tokens`` inventory + SCD2-active
-    ``users.is_active`` via the 30-second LRU cache. A deactivated
-    user's token is rejected on the NEXT MCP call without waiting
-    for the access-token TTL.
+    ``users.is_active`` via the 30-second LRU cache. Kill-switch
+    propagation: same-instance MCP calls see the revocation on the
+    next cache miss (≤30 s); cross-instance calls are bounded by
+    the 30-second TTL until the Day 3d-C admin-bus subscriber
+    collapses that to one bus round-trip. The effective ceiling
+    drops from the 15-minute access-token TTL to 30 s.
     """
 
     def __init__(

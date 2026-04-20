@@ -73,9 +73,14 @@ async def get_current_user(
     Per plan §3.6.3 (Day 3d-B): verification now calls
     :meth:`TokenManager.verify_token_with_db` so each request checks
     the ``user_active_tokens`` inventory + ``users.is_active`` via
-    the 30-second LRU cache. The kill switch therefore propagates to
-    every request on the NEXT call instead of waiting for the 15-
-    minute access-token expiry.
+    the 30-second LRU cache. Kill-switch propagation: same-instance
+    callers see the revocation on the next cache miss (≤30 s under
+    steady state; immediately on local
+    :meth:`TokenManager.invalidate_user_cache`). Cross-instance
+    callers see it within the 30-second TTL ceiling until the Day
+    3d-C admin-bus subscriber collapses that to one bus-message
+    round-trip. Either way, the effective ceiling drops from the
+    15-minute access-token TTL to 30 s.
 
     Args:
         request: FastAPI request object.
