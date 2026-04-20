@@ -156,6 +156,7 @@ async def login(
     request: Request,
     response: Response,
     login_data: Annotated[LoginRequest, Depends(json_body(LoginRequest))],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
 ) -> LoginResponse:
     """Authenticate user and create session.
 
@@ -171,6 +172,10 @@ async def login(
         request: FastAPI request.
         response: FastAPI response for setting cookies.
         login_data: Login credentials.
+        repo: Repository used to persist the freshly-minted token
+            pair in ``user_active_tokens`` (plan §3.6.2) so the
+            Day 3d-B DB-backed ``verify_token`` and the kill switch
+            can see the rows on the next request.
 
     Returns:
         LoginResponse with user profile.
@@ -194,6 +199,7 @@ async def login(
     token_manager = get_token_manager()
     principal = await user_service.build_auth_principal(user)
     token_pair = token_manager.create_tokens(principal)
+    await token_manager.persist_tokens(token_pair, principal.user_public_id, repo)
     csrf_manager = get_csrf_manager()
     csrf_token = csrf_manager.generate_token()
     cookie_secure = settings.session_secure
@@ -371,11 +377,13 @@ async def refresh_token(
     )
     payload = RefreshTokenPayload() if body is None else body.payload
     principal = await _apply_wallet_hint(payload, principal, repo)
+    await repo.revoke_user_active_token_by_jti(token_data.jti, datetime.now(UTC))
     token_manager.blacklist_token(token_data.jti)
     new_token_pair = token_manager.create_tokens(
         principal,
         session_id=token_data.sid,
     )
+    await token_manager.persist_tokens(new_token_pair, principal.user_public_id, repo)
     csrf_manager = get_csrf_manager()
     csrf_token = csrf_manager.generate_token()
     cookie_secure = settings.session_secure

@@ -107,6 +107,7 @@ from snapper.data.models import Trade
 from snapper.data.models import TradeCommand
 from snapper.data.models import TradeProjectionCheckpoint
 from snapper.data.models import UnderlyingAsset
+from snapper.data.models import User
 from snapper.data.models import UserActiveToken
 from snapper.data.models import UserOperatorMembership
 from snapper.data.models import UserTradingCaps
@@ -154,6 +155,8 @@ from snapper.data.repository_types import TradeProjectionCheckpointRow
 from snapper.data.repository_types import TradeRow
 from snapper.data.repository_types import TradeUpsertRow
 from snapper.data.repository_types import UnderlyingAssetRow
+from snapper.data.repository_types import UserActiveTokenInsertRow
+from snapper.data.repository_types import UserActiveTokenVerificationRow
 from snapper.data.repository_types import UserOperatorMembershipRow
 from snapper.data.repository_types import UserRecentSubmitRow
 from snapper.data.repository_types import UserTradingCapsRow
@@ -1665,6 +1668,95 @@ class Repository(ABC):
 
         Returns:
             Count of cancel commands in the window.
+        """
+        ...
+
+    @abstractmethod
+    async def insert_user_active_tokens(
+        self,
+        rows: list[UserActiveTokenInsertRow],
+    ) -> None:
+        """Persist every freshly-minted access + refresh token row.
+
+        Driven by :meth:`TokenManager.persist_tokens` after each
+        successful ``create_tokens()`` — the inventory is what the
+        Day 3d DB-backed ``verify_token`` SELECTs against and what
+        :meth:`TokenManager.revoke_user_sessions` flips on the kill
+        switch. Insertion is batched because both tokens in a pair
+        share the same ``issued_at`` and a single round-trip
+        preserves the invariant that either both rows land or
+        neither does (plan §3.6.2).
+
+        Args:
+            rows: Insert-row batch. Empty list is a no-op. Each row
+                must supply every NOT NULL column on
+                :class:`~snapper.data.models.UserActiveToken`; the
+                ``revoked_at`` column defaults to ``NULL`` (active).
+        """
+        ...
+
+    @abstractmethod
+    async def revoke_user_active_token_by_jti(
+        self,
+        jti: str,
+        revoked_at: datetime,
+    ) -> int:
+        """Flip ``revoked_at`` on a single row identified by ``jti``.
+
+        Single-row counterpart to
+        :meth:`revoke_user_active_tokens` used on the refresh-token
+        rotation path (plan §3.6.3): when a caller redeems a refresh
+        JWT, the old row is marked revoked immediately so a replay
+        of the same refresh JWT post-rotation fails even before the
+        blacklist grace period elapses. The call is idempotent — a
+        second invocation on an already-revoked row leaves
+        ``revoked_at`` unchanged and returns 0 (rowcount excludes
+        rows that already matched the WHERE clause).
+
+        Args:
+            jti: JWT ID of the row to revoke. Unknown JTIs are a
+                no-op (not an error).
+            revoked_at: Timestamp to stamp on ``revoked_at``.
+                Typically ``datetime.now(UTC)`` at the rotation
+                entry.
+
+        Returns:
+            1 when the row was flipped, 0 when no matching unrevoked
+            row existed.
+        """
+        ...
+
+    @abstractmethod
+    async def get_active_token_by_hash(
+        self,
+        token_hash: str,
+    ) -> UserActiveTokenVerificationRow | None:
+        """Return verify-path row by ``token_hash``, joined with ``users.is_active``.
+
+        Used by the Day 3d async ``verify_token`` to check in a
+        single round-trip that (a) the presented JWT has a matching
+        ``user_active_tokens`` row (rejects pre-migration tokens per
+        §3.6.3 deployment note), (b) it has not been revoked
+        (``revoked_at IS NULL``), (c) the owner is still active
+        (``users.is_active = True``), and (d) the cached
+        ``expires_at`` matches what the JWT payload carries. The
+        join on ``users`` uses the SCD2 active row (``known_to
+        = KNOWN_TO_MAX``) so a deactivation (which writes a fresh
+        SCD2 row with ``is_active=False``) is visible immediately
+        without a second SELECT.
+
+        Args:
+            token_hash: SHA-256 HEX of the presented JWT. Callers
+                must compute the hash; this method does NOT accept
+                raw tokens so the plaintext never reaches the
+                repository layer.
+
+        Returns:
+            A :class:`UserActiveTokenVerificationRow` when a row
+            exists, or ``None`` when no matching row was found
+            (pre-migration token, token was issued on a different
+            instance before table deploy, or a malicious / tampered
+            token whose hash doesn't collide with any known row).
         """
         ...
 
@@ -3917,6 +4009,77 @@ class SQLAlchemyRepository(Repository):
             )
             await s.commit()
             return int(result.rowcount or 0)
+
+    async def insert_user_active_tokens(
+        self,
+        rows: list[UserActiveTokenInsertRow],
+    ) -> None:
+        """Persist a batch of fresh access + refresh token rows.
+
+        See :meth:`Repository.insert_user_active_tokens` for contract.
+        """
+        if not rows:
+            return
+        async with self.session() as s:
+            await s.execute(insert(UserActiveToken), list(rows))
+            await s.commit()
+
+    async def revoke_user_active_token_by_jti(
+        self,
+        jti: str,
+        revoked_at: datetime,
+    ) -> int:
+        """Flip ``revoked_at`` on the single row identified by ``jti``.
+
+        See :meth:`Repository.revoke_user_active_token_by_jti` for contract.
+        """
+        async with self.session() as s:
+            result: Any = await s.execute(
+                update(UserActiveToken)
+                .where(
+                    UserActiveToken.jti == jti,
+                    UserActiveToken.revoked_at.is_(None),
+                )
+                .values(revoked_at=revoked_at)
+            )
+            await s.commit()
+            return int(result.rowcount or 0)
+
+    async def get_active_token_by_hash(
+        self,
+        token_hash: str,
+    ) -> UserActiveTokenVerificationRow | None:
+        """Return the verify-path row for ``token_hash`` joined with ``users.is_active``.
+
+        See :meth:`Repository.get_active_token_by_hash` for contract.
+        """
+        async with self.session() as s:
+            result = await s.execute(
+                select(
+                    UserActiveToken.user_public_id,
+                    UserActiveToken.revoked_at,
+                    UserActiveToken.expires_at,
+                    User.is_active,
+                )
+                .join(
+                    User,
+                    and_(
+                        User.public_id == UserActiveToken.user_public_id,
+                        User.known_to == KNOWN_TO_MAX,
+                    ),
+                )
+                .where(UserActiveToken.token_hash == token_hash)
+            )
+            row = result.first()
+            if row is None:
+                return None
+            user_public_id, revoked_at, expires_at, user_is_active = row
+            return UserActiveTokenVerificationRow(
+                user_public_id=user_public_id,
+                revoked_at=revoked_at,
+                expires_at=expires_at,
+                user_is_active=bool(user_is_active),
+            )
 
     async def get_plan_public_id_for_client_order_id(
         self,

@@ -3099,6 +3099,7 @@ class StubTokenManager:
         self.last_created_user: AuthPrincipal | None = None
         self.last_verified_token: str | None = None
         self.last_session_id: str | None = None
+        self.persisted_pairs: list[tuple[TokenPair, str]] = []
 
     def create_tokens(
         self,
@@ -3111,6 +3112,15 @@ class StubTokenManager:
         self.last_created_user = user
         self.last_session_id = session_id
         return self.create_tokens_response
+
+    async def persist_tokens(
+        self,
+        pair: TokenPair,
+        user_public_id: str,
+        repository: object,
+    ) -> None:
+        """Record the call so the login/refresh routes can complete."""
+        self.persisted_pairs.append((pair, user_public_id))
 
     def verify_token(self, token: str) -> TokenClaims | None:
         """Verify token and return claims."""

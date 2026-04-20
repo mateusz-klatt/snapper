@@ -350,6 +350,53 @@ class UserTradingCapsRow(TypedDict):
     max_cancels_per_minute: int | None
 
 
+class UserActiveTokenInsertRow(TypedDict):
+    """Insert row for ``user_active_tokens`` (plan §3.6.2).
+
+    Populated by :meth:`TokenManager.persist_tokens` on every
+    successful ``create_tokens()`` so the inventory mirrors every
+    outstanding access + refresh JWT. ``token_type`` is the literal
+    string ``"access"`` or ``"refresh"``; ``token_hash`` is the
+    SHA-256 hex of the full JWT (reversing to raw JWT is not
+    supported — only byte-for-byte equality on the hash column is
+    used by :meth:`Repository.get_active_token_by_hash`).
+
+    Every field maps 1:1 to a NOT NULL column on
+    :class:`~snapper.data.models.UserActiveToken` except
+    ``revoked_at`` which starts NULL and is flipped by the kill
+    switch / refresh-rotation paths.
+    """
+
+    public_id: str
+    user_public_id: str
+    jti: str
+    token_hash: str
+    token_type: str
+    issued_at: datetime
+    expires_at: datetime
+
+
+class UserActiveTokenVerificationRow(TypedDict):
+    """Read projection for DB-backed ``verify_token`` (plan §3.6.3).
+
+    Returned by :meth:`Repository.get_active_token_by_hash` for the
+    per-request validation path. The row combines the non-temporal
+    ``user_active_tokens`` lifecycle columns with the
+    ``users.is_active`` flag so the verifier can reject tokens owned
+    by a deactivated user in a single round-trip instead of issuing
+    a second SELECT.
+
+    ``revoked_at IS NOT NULL`` or ``user_is_active is False`` →
+    verify fails. Both states are cached in the 30-second LRU to
+    keep the hot path O(1).
+    """
+
+    user_public_id: str
+    revoked_at: datetime | None
+    expires_at: datetime
+    user_is_active: bool
+
+
 class UserRecentSubmitRow(TypedDict):
     """Row returned by ``get_user_recent_submits`` for notional-cap math.
 

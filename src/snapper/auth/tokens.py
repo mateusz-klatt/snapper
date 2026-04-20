@@ -4,6 +4,7 @@ This module provides JWT token creation, verification, and lifecycle
 management including blacklisting and WebSocket token rotation.
 """
 
+import hashlib
 import json as json_mod
 import secrets
 import uuid
@@ -25,12 +26,31 @@ from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
 from snapper.data.repository import Repository
+from snapper.data.repository_types import UserActiveTokenInsertRow
 
 BLACKLIST_GRACE_PERIOD_SECONDS: Final[float] = 10.0
 """Seconds a blacklisted token remains usable to handle concurrent requests."""
 
 BLACKLIST_CLEANUP_MULTIPLIER: Final[int] = 2
 """Factor applied to grace period when deciding when to purge old entries."""
+
+
+def hash_token(raw_token: str) -> str:
+    """Return the SHA-256 hex digest of a raw JWT.
+
+    Centralised so the inventory insert, the DB-backed verify lookup,
+    and the kill-switch revocation paths all agree on the hash shape
+    used as the lookup key in ``user_active_tokens`` (plan §3.6.2).
+
+    Args:
+        raw_token: The JWT string exactly as emitted by
+            ``TokenManager.create_tokens``.
+
+    Returns:
+        64-char lowercase hex digest suitable for the ``token_hash``
+        column.
+    """
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
 
 class TokenManager:
@@ -159,6 +179,97 @@ class TokenManager:
             access_token=access_token,
             refresh_token=refresh_token,
             expires_in=int(access_token_expires.total_seconds()),
+        )
+
+    def _decode_fresh_token(self, token: str) -> TokenClaims:
+        """Decode a token we just minted, returning typed claims.
+
+        Trust context: the token was produced inside the same
+        process by ``create_tokens`` using our secret and algorithm,
+        so signature failure here would be a programming error, not
+        an auth failure. We still pass through :mod:`jwt.decode` so
+        the exp/iat validation behaviour matches the verify path and
+        any future signing-key rotation surfaces a clear exception
+        instead of silent misbehaviour. No blacklist or DB check is
+        performed — this helper is exclusively for
+        :meth:`persist_tokens` extracting ``jti``/``iat``/``exp``
+        from a freshly-minted pair (plan §3.6.2).
+
+        Args:
+            token: JWT string emitted by ``create_tokens``.
+
+        Returns:
+            Typed :class:`TokenClaims` for the decoded payload.
+        """
+        payload = jwt.decode(
+            token,
+            self.settings.auth_secret_key,
+            algorithms=[self.settings.auth_algorithm],
+        )
+        return TokenClaims.model_validate_json(json_mod.dumps(payload))
+
+    async def persist_tokens(
+        self,
+        pair: TokenPair,
+        user_public_id: str,
+        repository: Repository,
+    ) -> None:
+        """Persist both JWTs of ``pair`` into ``user_active_tokens``.
+
+        Called by the login and refresh route handlers immediately
+        after ``create_tokens`` returns so every outstanding token
+        is reflected in the DB inventory. This is the precondition
+        for the Day 3d DB-backed ``verify_token`` path: any JWT
+        without a matching row fails verification per §3.6.3's
+        deployment note ("pre-existing JWTs issued before migration
+        have no row → verify_token() will 401 them").
+
+        Insertion is batched through
+        :meth:`Repository.insert_user_active_tokens` so both the
+        access and refresh rows land in one transaction. If the
+        batch fails the caller's transactional scope surfaces the
+        exception — the route handler then returns 500 and the
+        client must retry login.
+
+        Args:
+            pair: The freshly-minted :class:`TokenPair` from
+                :meth:`create_tokens`.
+            user_public_id: UUID of the authenticated user — the
+                inventory's foreign key to ``users``.
+            repository: Active :class:`Repository` bound to the
+                caller's transactional scope.
+        """
+        access_claims = self._decode_fresh_token(pair.access_token)
+        refresh_claims = self._decode_fresh_token(pair.refresh_token)
+        issued_at = datetime.fromtimestamp(access_claims.iat, tz=UTC)
+        access_exp = datetime.fromtimestamp(access_claims.exp, tz=UTC)
+        refresh_exp = datetime.fromtimestamp(refresh_claims.exp, tz=UTC)
+        rows: list[UserActiveTokenInsertRow] = [
+            UserActiveTokenInsertRow(
+                public_id=str(uuid.uuid7()),
+                user_public_id=user_public_id,
+                jti=access_claims.jti,
+                token_hash=hash_token(pair.access_token),
+                token_type="access",
+                issued_at=issued_at,
+                expires_at=access_exp,
+            ),
+            UserActiveTokenInsertRow(
+                public_id=str(uuid.uuid7()),
+                user_public_id=user_public_id,
+                jti=refresh_claims.jti,
+                token_hash=hash_token(pair.refresh_token),
+                token_type="refresh",
+                issued_at=issued_at,
+                expires_at=refresh_exp,
+            ),
+        ]
+        await repository.insert_user_active_tokens(rows)
+        logger.debug(
+            "persist_tokens: user={} access_jti={} refresh_jti={}",
+            user_public_id,
+            access_claims.jti,
+            refresh_claims.jti,
         )
 
     def _is_token_blacklisted(self, jti: str) -> bool:
