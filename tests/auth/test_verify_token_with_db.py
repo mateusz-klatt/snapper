@@ -10,6 +10,7 @@ Covers :meth:`TokenManager.verify_token_with_db`:
 - Stale entries (past TTL / JWT ``exp``) are pruned under bounded growth.
 """
 
+import asyncio
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -36,6 +37,7 @@ def _fresh_manager() -> TokenManager:
     manager = TokenManager()
     manager._blacklisted_tokens.clear()
     manager._verify_cache.clear()
+    manager._user_cache_generations.clear()
     return manager
 
 
@@ -372,3 +374,158 @@ class TestVerifyCachePrune:
         await manager.verify_token_with_db(token, repo)
         stale_keys_remaining = [k for k in manager._verify_cache if k.startswith("stale-")]
         assert stale_keys_remaining == []
+
+
+class TestVerifyCacheGenerationRace:
+    """Day 5c review MAJOR closure — cache can't be repopulated with stale data.
+
+    Simulates the race codex-gpt-5.3 flagged: a concurrent
+    ``invalidate_user_cache`` bump during a DB read must prevent
+    the racing verify call from repopulating the cache with a
+    verdict that the admin event already superseded.
+    """
+
+    @pytest.mark.asyncio
+    async def test_generation_bump_blocks_cache_repopulation(self) -> None:
+        """Concurrent admin-bus eviction during DB read → cache NOT written.
+
+        Given: a verify call that has passed the sync ``verify_token``
+            gate and is about to read the DB,
+        When: :meth:`invalidate_user_cache` runs for the same user
+            BEFORE the verify call reaches :meth:`_cache_verdict`
+            (simulated by bumping the generation manually after
+            sampling),
+        Then: :meth:`_cache_verdict` sees the mismatched generation
+            and skips the write — the cache stays empty rather than
+            storing a positive verdict the admin event has already
+            invalidated.
+        """
+        manager = _fresh_manager()
+        token = _mint_access_token(manager, user_public_id="race-user")
+        th = hash_token(token)
+        token_data = manager.verify_token(token)
+        assert token_data is not None
+        gen_before = manager._user_cache_generations.get("race-user", 0)
+        manager.invalidate_user_cache("race-user")
+        manager._cache_verdict(
+            th,
+            is_valid=True,
+            user_is_active=True,
+            user_public_id="race-user",
+            token_data=token_data,
+            now_ts=datetime.now(UTC).timestamp(),
+            gen_before=gen_before,
+        )
+        assert th not in manager._verify_cache
+
+    @pytest.mark.asyncio
+    async def test_generation_unchanged_still_caches(self) -> None:
+        """Quiescent path — no racing bump → verdict lands in cache.
+
+        Given: a verify call with no competing admin event,
+        When: :meth:`_cache_verdict` is called with the generation
+            sampled at entry,
+        Then: the cache entry IS written (the guard must not
+            regress the normal path).
+        """
+        manager = _fresh_manager()
+        token = _mint_access_token(manager, user_public_id="quiet-user")
+        th = hash_token(token)
+        token_data = manager.verify_token(token)
+        assert token_data is not None
+        gen_before = manager._user_cache_generations.get("quiet-user", 0)
+        manager._cache_verdict(
+            th,
+            is_valid=True,
+            user_is_active=True,
+            user_public_id="quiet-user",
+            token_data=token_data,
+            now_ts=datetime.now(UTC).timestamp(),
+            gen_before=gen_before,
+        )
+        assert th in manager._verify_cache
+
+    @pytest.mark.asyncio
+    async def test_end_to_end_concurrent_invalidate_blocks_positive(self) -> None:
+        """End-to-end: invalidate during the awaited DB read → no cache fill.
+
+        Given: a repository whose
+            ``get_active_token_by_hash`` awaits long enough for
+            :meth:`invalidate_user_cache` to run concurrently,
+        When: ``verify_token_with_reason`` completes,
+        Then: the verdict is NOT cached; the next verify re-reads
+            the DB rather than serving a stale positive.
+        """
+        manager = _fresh_manager()
+        token = _mint_access_token(manager, user_public_id="concurrent-user")
+
+        async def _slow_lookup(_hash: str) -> UserActiveTokenVerificationRow:
+            await asyncio.sleep(0)
+            manager.invalidate_user_cache("concurrent-user")
+            return _make_verification_row(user_public_id="concurrent-user")
+
+        repo = MagicMock()
+        repo.get_active_token_by_hash = _slow_lookup
+        await manager.verify_token_with_reason(token, repo)
+        assert hash_token(token) not in manager._verify_cache
+
+
+class TestBlacklistHardCap:
+    """Day 5c review MAJOR closure — JTI blacklist cannot leak unbounded.
+
+    Covers :meth:`_enforce_blacklist_cap`: when a mass deactivation
+    pushes the set past :data:`BLACKLIST_MAX_ENTRIES`, the oldest
+    overflow is evicted so a low-traffic instance does not keep
+    every JTI in memory until grace expires.
+    """
+
+    def test_cap_evicts_oldest_on_overflow(self) -> None:
+        """Adding past the cap drops the oldest entries first.
+
+        Given: the blacklist seeded to exactly the cap with
+            monotonically-increasing timestamps,
+        When: one more JTI is added,
+        Then: the set size stays at the cap and the oldest entry is
+            the one that was evicted.
+        """
+        from snapper.auth.tokens import BLACKLIST_MAX_ENTRIES
+
+        manager = _fresh_manager()
+        base_ts = datetime.now(UTC).timestamp() - 1000.0
+        for i in range(BLACKLIST_MAX_ENTRIES):
+            manager._blacklisted_tokens[f"jti-{i:06d}"] = base_ts + i
+        assert len(manager._blacklisted_tokens) == BLACKLIST_MAX_ENTRIES
+        manager.blacklist_token("jti-fresh")
+        assert len(manager._blacklisted_tokens) == BLACKLIST_MAX_ENTRIES
+        assert "jti-000000" not in manager._blacklisted_tokens
+        assert "jti-fresh" in manager._blacklisted_tokens
+
+    def test_cap_no_op_when_under_threshold(self) -> None:
+        """No evictions when set stays within the cap.
+
+        Given: a blacklist well below the cap,
+        When: more entries are added,
+        Then: nothing is evicted.
+        """
+        manager = _fresh_manager()
+        for i in range(100):
+            manager.blacklist_token(f"jti-{i}")
+        assert len(manager._blacklisted_tokens) == 100
+
+    def test_immediate_blacklist_also_enforces_cap(self) -> None:
+        """:meth:`blacklist_token_immediately` shares the same cap path.
+
+        Given: blacklist at the cap with the immediate-invalidate
+            API used instead of the grace-period one,
+        When: one more JTI is invalidated,
+        Then: the cap is enforced identically.
+        """
+        from snapper.auth.tokens import BLACKLIST_MAX_ENTRIES
+
+        manager = _fresh_manager()
+        base_ts = datetime.now(UTC).timestamp() - 1000.0
+        for i in range(BLACKLIST_MAX_ENTRIES):
+            manager._blacklisted_tokens[f"imm-{i:06d}"] = base_ts + i
+        manager.blacklist_token_immediately("imm-fresh")
+        assert len(manager._blacklisted_tokens) == BLACKLIST_MAX_ENTRIES
+        assert "imm-000000" not in manager._blacklisted_tokens

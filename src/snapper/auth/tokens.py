@@ -50,6 +50,19 @@ VERIFY_CACHE_TTL_SECONDS: Final[float] = 30.0
 VERIFY_CACHE_MAX_ENTRIES: Final[int] = 10000
 """Upper bound on the verify-cache size before an opportunistic prune runs."""
 
+BLACKLIST_MAX_ENTRIES: Final[int] = 50000
+"""Hard cap on in-memory JTI blacklist entries.
+
+Closes the Day 5c 3-model review MAJOR: mass deactivation via
+``TokenManager.revoke_user_sessions`` bulk-adds every active JTI
+to the blacklist, and the opportunistic cleanup only runs on the
+verify path. A low-traffic instance that survives a large
+deactivation batch would leak memory until the grace period
+expired for every entry. The hard cap pairs with the heapq
+eviction in :meth:`_enforce_blacklist_cap` to bound the set even
+when verify traffic is sparse.
+"""
+
 _ADMIN_USER_DEACTIVATED_TOPIC: Final[str] = "admin.user_deactivated"
 """Bus topic that Day 3b `UserService.deactivate_user` publishes under."""
 
@@ -159,6 +172,7 @@ class TokenManager:
         self._blacklisted_tokens: dict[str, float] = {}
         self._blacklist_grace_period = BLACKLIST_GRACE_PERIOD_SECONDS
         self._verify_cache: dict[str, _VerifyCacheEntry] = {}
+        self._user_cache_generations: dict[str, int] = {}
         self._admin_listener_lock = asyncio.Lock()
         self._admin_listen_task: asyncio.Task[None] | None = None
         self._admin_subscriber: ValidatedSubscriber | None = None
@@ -605,6 +619,7 @@ class TokenManager:
                 else REJECTION_REASON_INVALID
             )
             return VerifyOutcome(claims=None, rejection_reason=reason)
+        gen_before = self._user_cache_generations.get(token_data.user_public_id, 0)
         row = await repository.get_active_token_by_hash(th)
         if row is None:
             self._cache_verdict(
@@ -614,6 +629,7 @@ class TokenManager:
                 user_public_id="",
                 token_data=token_data,
                 now_ts=now_ts,
+                gen_before=gen_before,
             )
             logger.warning(
                 "verify_token_with_db: token not in inventory — user={} jti={}",
@@ -630,6 +646,7 @@ class TokenManager:
             user_public_id=row["user_public_id"],
             token_data=token_data,
             now_ts=now_ts,
+            gen_before=gen_before,
         )
         if not is_valid:
             logger.info(
@@ -661,8 +678,43 @@ class TokenManager:
         user_public_id: str,
         token_data: TokenClaims,
         now_ts: float,
+        gen_before: int,
     ) -> None:
-        """Insert a verdict row and prune when the cache grows large."""
+        """Insert a verdict row, prune on overflow, and skip on stale generation.
+
+        The ``gen_before`` parameter closes the Day 5c review MAJOR
+        race finding: if the caller sampled the per-user generation
+        before the DB read and a concurrent
+        :meth:`invalidate_user_cache` incremented it during that
+        read, the verdict we are about to cache may reflect a user
+        state that an admin event has already superseded. In that
+        case we do NOT cache — the next verify hit re-reads the DB
+        rather than serving a stale positive from the LRU.
+
+        Args:
+            token_hash: SHA-256 hex digest of the token (cache key).
+            is_valid: ``revoked_at IS NULL`` on the inventory row.
+            user_is_active: SCD2-active ``users.is_active`` value.
+            user_public_id: Owner user's UUID7 (empty when the row
+                is absent entirely).
+            token_data: Verified :class:`TokenClaims` used for the
+                cache entry's expiry stamp.
+            now_ts: Monotonic-ish "now" the caller also used to read
+                the cache — keeps the TTL anchored to one clock
+                sample per request.
+            gen_before: Generation counter value for
+                ``token_data.user_public_id`` sampled BEFORE the DB
+                read. If the stored value differs now, the write
+                is skipped.
+        """
+        sample_key = token_data.user_public_id
+        gen_now = self._user_cache_generations.get(sample_key, 0)
+        if gen_now != gen_before:
+            logger.debug(
+                "verify_cache skip: generation advanced during DB read — user={}",
+                sample_key,
+            )
+            return
         self._verify_cache[token_hash] = _VerifyCacheEntry(
             is_valid=is_valid,
             user_is_active=user_is_active,
@@ -727,6 +779,15 @@ class TokenManager:
         propagates to this TokenManager's LRU without waiting for
         the 30-second TTL. Plan §3.6.3 resolution of R4-M5 + R5-M3.
 
+        Day 5d-C closes the 3-model review MAJOR race: the user's
+        generation counter is bumped FIRST so any ``verify_token_with_reason``
+        that is mid-flight on this user (already past the DB read)
+        sees a generation mismatch in :meth:`_cache_verdict` and
+        skips the cache write. Without the bump, a concurrent
+        verify could repopulate a freshly-evicted entry with a
+        stale positive verdict and admit a deactivated user for up
+        to the 30-second TTL.
+
         Args:
             user_public_id: UUID of the user whose cache entries
                 should be evicted. Unknown users are a no-op (count
@@ -737,6 +798,9 @@ class TokenManager:
             value for Day 3c tests — no additional metrics surface
             is required.
         """
+        self._user_cache_generations[user_public_id] = (
+            self._user_cache_generations.get(user_public_id, 0) + 1
+        )
         matching_keys = [
             key
             for key, entry in self._verify_cache.items()
@@ -793,6 +857,7 @@ class TokenManager:
         """
         current_time = datetime.now(UTC).timestamp()
         self._blacklisted_tokens[jti] = current_time
+        self._enforce_blacklist_cap()
         logger.info(f"Blacklisted token with grace period: {jti}")
 
     def blacklist_token_immediately(self, jti: str) -> None:
@@ -805,7 +870,44 @@ class TokenManager:
         """
         past_time = datetime.now(UTC).timestamp() - self._blacklist_grace_period - 1
         self._blacklisted_tokens[jti] = past_time
+        self._enforce_blacklist_cap()
         logger.info(f"Immediately blacklisted token: {jti}")
+
+    def _enforce_blacklist_cap(self) -> None:
+        """Hard-cap the in-memory JTI blacklist (Day 5c MAJOR closure).
+
+        Opportunistic cleanup via :meth:`_cleanup_old_blacklist_entries`
+        only runs on the verify path, so a low-traffic instance that
+        absorbs a mass deactivation can leak memory until every grace
+        period expires — the 3-model review flagged this as a
+        MAJOR. The cap below uses the same ``heapq.nsmallest`` pattern
+        as the verify-cache prune: when the set exceeds
+        :data:`BLACKLIST_MAX_ENTRIES`, evict the oldest overflow so
+        the set stays bounded by a predictable multiplier of the
+        plan's expected live-token population.
+
+        A bounded eviction window can drop an entry that is still
+        inside its grace period; that is acceptable because the
+        underlying ``user_active_tokens`` inventory + SCD2-active
+        ``users.is_active`` check in :meth:`verify_token_with_db`
+        remain authoritative. The in-memory blacklist is a fast
+        path, not the source of truth.
+        """
+        overflow = len(self._blacklisted_tokens) - BLACKLIST_MAX_ENTRIES
+        if overflow <= 0:
+            return
+        victims = heapq.nsmallest(
+            overflow,
+            self._blacklisted_tokens.items(),
+            key=lambda kv: kv[1],
+        )
+        for key, _ts in victims:
+            del self._blacklisted_tokens[key]
+        logger.warning(
+            "blacklist cap: evicted {} oldest entries (size_after={})",
+            overflow,
+            len(self._blacklisted_tokens),
+        )
 
     async def revoke_user_sessions(self, user_public_id: str, repository: Repository) -> int:
         """Revoke every active session for a user (kill switch — plan §3.6.1).
