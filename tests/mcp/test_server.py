@@ -33,6 +33,8 @@ from starlette.testclient import TestClient
 from snapper.application.services.settings import SettingsService
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.tokens import TokenClaims
+from snapper.auth.tokens import REJECTION_REASON_INVALID
+from snapper.auth.tokens import VerifyOutcome
 from snapper.mcp.server import BearerAuthMiddleware
 from snapper.mcp.server import FeatureFlagMiddleware
 from snapper.mcp.server import build_mcp_app
@@ -170,9 +172,9 @@ class TestBearerAuthMiddleware:
 
         Given: the flag is on, the bearer token passes JWT signature
             + expiry, but the Day 3d-B DB-backed verify rejects it
-            because ``users.is_active=False``. The verify-cache
-            therefore carries an entry with ``user_public_id`` populated
-            and ``user_is_active=False``.
+            because ``users.is_active=False`` — ``verify_token_with_reason``
+            returns a ``VerifyOutcome`` with
+            ``rejection_reason=REJECTION_REASON_USER_DEACTIVATED``.
         When: the middleware processes the request,
         Then: HTTP 401 is returned with
             ``error_code="user_deactivated"`` — distinct from
@@ -180,30 +182,23 @@ class TestBearerAuthMiddleware:
             re-login prompt instead of attempting a refresh that
             would fail with the same verdict.
         """
-        from snapper.auth.tokens import _VerifyCacheEntry
-        from snapper.auth.tokens import hash_token
+        from snapper.auth.tokens import REJECTION_REASON_USER_DEACTIVATED
+        from snapper.auth.tokens import VerifyOutcome
 
         svc = _make_settings_service(enabled=True)
         app = build_mcp_app(settings_service_getter=lambda: svc, repository_getter=lambda: Mock())
         client = TestClient(app)
-        deactivated_token = f"{_TEST_TOKEN_PLACEHOLDER}.deactivated"
-        token_hash = hash_token(deactivated_token)
-        now_ts = datetime.now(UTC).timestamp()
-        cache_entry = _VerifyCacheEntry(
-            is_valid=True,
-            user_is_active=False,
-            user_public_id="user-deactivated-123",
-            expires_at_ts=now_ts + 900,
-            cached_at_ts=now_ts,
-        )
         with patch("snapper.mcp.server.get_token_manager") as mock_get:
             token_manager = Mock()
-            token_manager.verify_token_with_db = AsyncMock(return_value=None)
-            token_manager._verify_cache = {token_hash: cache_entry}
+            token_manager.verify_token_with_reason = AsyncMock(
+                return_value=VerifyOutcome(
+                    claims=None, rejection_reason=REJECTION_REASON_USER_DEACTIVATED
+                )
+            )
             mock_get.return_value = token_manager
             response = client.post(
                 "/mcp",
-                headers={"Authorization": f"Bearer {deactivated_token}"},
+                headers={"Authorization": f"Bearer {_TEST_TOKEN_PLACEHOLDER}"},
                 json={},
             )
         assert response.status_code == 401
@@ -226,6 +221,12 @@ class TestBearerAuthMiddleware:
         with patch("snapper.mcp.server.get_token_manager") as mock_get:
             token_manager = Mock()
             token_manager.verify_token_with_db = AsyncMock(return_value=None)
+            token_manager.verify_token_with_reason = AsyncMock(
+                return_value=VerifyOutcome(
+                    claims=None,
+                    rejection_reason=(None if (None) is not None else REJECTION_REASON_INVALID),
+                )
+            )
             token_manager._verify_cache = {}
             mock_get.return_value = token_manager
             response = client.post(
@@ -268,6 +269,12 @@ class TestBearerAuthMiddleware:
         with patch("snapper.mcp.server.get_token_manager") as mock_get:
             token_manager = Mock()
             token_manager.verify_token_with_db = AsyncMock(return_value=claims)
+            token_manager.verify_token_with_reason = AsyncMock(
+                return_value=VerifyOutcome(
+                    claims=claims,
+                    rejection_reason=(None if (claims) is not None else REJECTION_REASON_INVALID),
+                )
+            )
             mock_get.return_value = token_manager
             response = client.post(
                 "/mcp",

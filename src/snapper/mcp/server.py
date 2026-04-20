@@ -31,9 +31,8 @@ from snapper.application.services.settings import SettingsService
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.auth.dependencies import _extract_bearer_token
 from snapper.auth.schemas.tokens import TokenClaims
-from snapper.auth.tokens import TokenManager
+from snapper.auth.tokens import REJECTION_REASON_USER_DEACTIVATED
 from snapper.auth.tokens import get_token_manager
-from snapper.auth.tokens import hash_token
 from snapper.data.repository import Repository
 from snapper.mcp.tools import register_mcp_tools
 
@@ -152,36 +151,28 @@ class FeatureFlagMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-def _build_rejection_response(token_manager: TokenManager, token: str) -> JSONResponse:
-    """Return a 401 JSONResponse with the most specific ``error_code`` we can.
+def _build_rejection_response(rejection_reason: str | None) -> JSONResponse:
+    """Return a 401 JSONResponse whose ``error_code`` matches ``rejection_reason``.
 
-    Plan §2 item 6 (R3-B2 resolution) requires the MCP rejection path
-    to distinguish a deactivated-user rejection from a generic
-    verification failure so the client can surface a clear re-login
-    prompt instead of attempting a refresh that will fail again.
-
-    We consult the Day 3d-B verify-cache directly: when
-    :meth:`TokenManager.verify_token_with_db` returns ``None`` AND
-    the cached entry carries a non-empty ``user_public_id`` with
-    ``user_is_active=False``, the DB projection told us explicitly
-    that the owner is deactivated. Every other None path
-    (missing-inventory, invalid signature, expired, revoked-but-
-    user-still-active) collapses to ``invalid_bearer_token``.
-
-    This keeps the hot path a single ``verify_token_with_db`` call
-    — the disambiguation is a dict lookup on the already-populated
-    cache, not a second DB round-trip.
+    Plan §2 item 6 (R3-B2 resolution) + Day 3d-D R1 review
+    (Copilot MAJOR + Codex MINOR): the reason comes straight from
+    :meth:`TokenManager.verify_token_with_reason` so the classifier
+    cannot be fooled by a stale cache entry left over from an
+    earlier request (the race the R1 review flagged). Success is
+    never routed here; only rejection reasons land in this
+    function.
 
     Args:
-        token_manager: Singleton used for the cache lookup.
-        token: The raw JWT presented by the client (unverified).
+        rejection_reason: One of :data:`REJECTION_REASON_USER_DEACTIVATED`
+            (from ``TokenManager``) / :data:`REJECTION_REASON_INVALID` /
+            ``None``. ``None`` is treated as ``REJECTION_REASON_INVALID``
+            defensively so an unforeseen outcome shape cannot
+            accidentally leak a ``user_deactivated`` verdict.
 
     Returns:
         401 :class:`JSONResponse` with the specific ``error_code``.
     """
-    token_hash = hash_token(token)
-    entry = token_manager._verify_cache.get(token_hash)
-    if entry is not None and entry.user_public_id and not entry.user_is_active:
+    if rejection_reason == REJECTION_REASON_USER_DEACTIVATED:
         return JSONResponse(
             status_code=401,
             content={
@@ -303,9 +294,10 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
                 },
             )
         token_manager = get_token_manager()
-        claims = await token_manager.verify_token_with_db(token, repository)
-        if claims is None:
-            return _build_rejection_response(token_manager, token)
+        outcome = await token_manager.verify_token_with_reason(token, repository)
+        if outcome.claims is None:
+            return _build_rejection_response(outcome.rejection_reason)
+        claims = outcome.claims
         request.state.token_claims = claims
         ctx_token = TOKEN_CLAIMS_CTX.set(claims)
         try:

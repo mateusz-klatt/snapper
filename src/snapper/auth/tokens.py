@@ -75,6 +75,36 @@ class _VerifyCacheEntry:
     cached_at_ts: float
 
 
+REJECTION_REASON_USER_DEACTIVATED: Final[str] = "user_deactivated"
+"""Rejection reason emitted when ``users.is_active=False`` for the token's owner."""
+
+REJECTION_REASON_INVALID: Final[str] = "invalid"
+"""Rejection reason for every other failure mode (signature, expiry, blacklist, missing row, revoked)."""
+
+
+@dataclass(slots=True, frozen=True)
+class VerifyOutcome:
+    """Verdict + rejection reason returned by the DB-backed verify path (plan §3.6.3).
+
+    Day 3d-D R1 review (Copilot gpt-5.4 MAJOR + Codex gpt-5.3-codex
+    MINOR) flagged that the MCP middleware's cache re-lookup could
+    misclassify a later JWT-layer failure (expiry, signature,
+    blacklist) as ``user_deactivated`` if a stale deactivation
+    entry was still in the 30-second LRU. Returning the reason
+    alongside the claims removes the indirection: callers that
+    only care about the happy path read ``claims``; the MCP
+    middleware branches on ``rejection_reason`` directly without
+    re-reading cache.
+
+    ``rejection_reason`` is ``None`` on success, one of
+    :data:`REJECTION_REASON_USER_DEACTIVATED` /
+    :data:`REJECTION_REASON_INVALID` on failure.
+    """
+
+    claims: TokenClaims | None
+    rejection_reason: str | None
+
+
 def hash_token(raw_token: str) -> str:
     """Return the SHA-256 hex digest of a raw JWT.
 
@@ -465,6 +495,35 @@ class TokenManager:
         token: str,
         repository: Repository,
     ) -> TokenClaims | None:
+        """Return only ``claims`` from :meth:`verify_token_with_reason`.
+
+        Backward-compatible thin wrapper preserved for the 3
+        cookie/JWT-only callers that don't need the rejection reason
+        (``get_current_user``, refresh route, ``verify_session_cookie``).
+        The MCP middleware uses :meth:`verify_token_with_reason`
+        directly so it can branch on the exact failure mode without
+        re-reading the cache (Day 3d-D R1 fix).
+
+        See :meth:`verify_token_with_reason` for the full contract.
+
+        Args:
+            token: JWT string presented by the client.
+            repository: Active :class:`Repository` for the DB-backed
+                verify path.
+
+        Returns:
+            The :class:`TokenClaims` on success, ``None`` on any
+            rejection (signature, expiry, blacklist, not-in-inventory,
+            revoked, user deactivated).
+        """
+        outcome = await self.verify_token_with_reason(token, repository)
+        return outcome.claims
+
+    async def verify_token_with_reason(
+        self,
+        token: str,
+        repository: Repository,
+    ) -> VerifyOutcome:
         """DB-backed verify (plan §3.6.3) with 30s LRU cache.
 
         Fully validates a JWT against the ``user_active_tokens``
@@ -506,20 +565,30 @@ class TokenManager:
                 connection-pool semantics match REST.
 
         Returns:
-            The :class:`TokenClaims` on success, ``None`` when the
-            JWT fails any gate (signature, expiry, blacklist, not-
-            in-inventory, revoked, user deactivated).
+            A :class:`VerifyOutcome` with ``claims`` populated on
+            success (``rejection_reason=None``) OR ``claims=None``
+            plus a populated ``rejection_reason`` of
+            :data:`REJECTION_REASON_USER_DEACTIVATED` or
+            :data:`REJECTION_REASON_INVALID`. Callers that only
+            need the success-path claims can use
+            :meth:`verify_token_with_db` for the backward-
+            compatible ``TokenClaims | None`` shape.
         """
         token_data = self.verify_token(token)
         if token_data is None:
-            return None
+            return VerifyOutcome(claims=None, rejection_reason=REJECTION_REASON_INVALID)
         th = hash_token(token)
         now_ts = datetime.now(UTC).timestamp()
         cached = self._verify_cache.get(th)
         if cached is not None and cached.cached_at_ts + VERIFY_CACHE_TTL_SECONDS > now_ts:
-            if not cached.is_valid or not cached.user_is_active:
-                return None
-            return token_data
+            if cached.is_valid and cached.user_is_active:
+                return VerifyOutcome(claims=token_data, rejection_reason=None)
+            reason = (
+                REJECTION_REASON_USER_DEACTIVATED
+                if cached.user_public_id and not cached.user_is_active
+                else REJECTION_REASON_INVALID
+            )
+            return VerifyOutcome(claims=None, rejection_reason=reason)
         row = await repository.get_active_token_by_hash(th)
         if row is None:
             self._cache_verdict(
@@ -535,7 +604,7 @@ class TokenManager:
                 token_data.user_public_id,
                 token_data.jti,
             )
-            return None
+            return VerifyOutcome(claims=None, rejection_reason=REJECTION_REASON_INVALID)
         is_valid = row["revoked_at"] is None
         user_is_active = row["user_is_active"]
         self._cache_verdict(
@@ -552,15 +621,20 @@ class TokenManager:
                 token_data.user_public_id,
                 token_data.jti,
             )
-            return None
+            reason = (
+                REJECTION_REASON_USER_DEACTIVATED
+                if not user_is_active
+                else REJECTION_REASON_INVALID
+            )
+            return VerifyOutcome(claims=None, rejection_reason=reason)
         if not user_is_active:
             logger.info(
                 "verify_token_with_db: user deactivated — user={} jti={}",
                 token_data.user_public_id,
                 token_data.jti,
             )
-            return None
-        return token_data
+            return VerifyOutcome(claims=None, rejection_reason=REJECTION_REASON_USER_DEACTIVATED)
+        return VerifyOutcome(claims=token_data, rejection_reason=None)
 
     def _cache_verdict(
         self,

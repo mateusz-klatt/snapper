@@ -34,6 +34,8 @@ from starlette.testclient import TestClient
 from snapper.application.services.settings import SettingsService
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.tokens import TokenClaims
+from snapper.auth.tokens import REJECTION_REASON_INVALID
+from snapper.auth.tokens import VerifyOutcome
 from snapper.mcp.server import TOKEN_CLAIMS_CTX
 from snapper.mcp.server import BearerAuthMiddleware
 from snapper.mcp.server import FeatureFlagMiddleware
@@ -108,6 +110,12 @@ class TestEndToEndBearerToContextVar:
         with patch("snapper.mcp.server.get_token_manager") as mock_get:
             token_manager = Mock()
             token_manager.verify_token_with_db = AsyncMock(return_value=claims)
+            token_manager.verify_token_with_reason = AsyncMock(
+                return_value=VerifyOutcome(
+                    claims=claims,
+                    rejection_reason=(None if (claims) is not None else REJECTION_REASON_INVALID),
+                )
+            )
             mock_get.return_value = token_manager
             client = TestClient(app)
             response = client.post(
@@ -137,6 +145,14 @@ class TestEndToEndBearerToContextVar:
         with patch("snapper.mcp.server.get_token_manager") as mock_get:
             token_manager = Mock()
             token_manager.verify_token_with_db = AsyncMock(return_value=claims_first)
+            token_manager.verify_token_with_reason = AsyncMock(
+                return_value=VerifyOutcome(
+                    claims=claims_first,
+                    rejection_reason=(
+                        None if (claims_first) is not None else REJECTION_REASON_INVALID
+                    ),
+                )
+            )
             mock_get.return_value = token_manager
             client = TestClient(app)
             response_1 = client.post(
@@ -166,6 +182,14 @@ class TestEndToEndBearerToContextVar:
         with patch("snapper.mcp.server.get_token_manager") as mock_get:
             token_manager = Mock()
             token_manager.verify_token_with_db = AsyncMock(return_value=_make_claims("x"))
+            token_manager.verify_token_with_reason = AsyncMock(
+                return_value=VerifyOutcome(
+                    claims=_make_claims("x"),
+                    rejection_reason=(
+                        None if (_make_claims("x")) is not None else REJECTION_REASON_INVALID
+                    ),
+                )
+            )
             mock_get.return_value = token_manager
             client = TestClient(app)
             client.post(
@@ -277,8 +301,10 @@ class TestEndToEndBearerToContextVar:
 
         with patch("snapper.mcp.server.get_token_manager") as mock_get:
             token_manager = Mock()
-            token_manager.verify_token_with_db = AsyncMock(
-                return_value=_make_claims("real-tool-caller")
+            real_tool_claims = _make_claims("real-tool-caller")
+            token_manager.verify_token_with_db = AsyncMock(return_value=real_tool_claims)
+            token_manager.verify_token_with_reason = AsyncMock(
+                return_value=VerifyOutcome(claims=real_tool_claims, rejection_reason=None)
             )
             mock_get.return_value = token_manager
             client = TestClient(app)
@@ -336,6 +362,14 @@ class TestEndToEndBearerToContextVar:
         with patch("snapper.mcp.server.get_token_manager") as mock_get:
             token_manager = Mock()
             token_manager.verify_token_with_db = AsyncMock(return_value=_make_claims())
+            token_manager.verify_token_with_reason = AsyncMock(
+                return_value=VerifyOutcome(
+                    claims=_make_claims(),
+                    rejection_reason=(
+                        None if (_make_claims()) is not None else REJECTION_REASON_INVALID
+                    ),
+                )
+            )
             mock_get.return_value = token_manager
             client = TestClient(app)
             response = client.post(
