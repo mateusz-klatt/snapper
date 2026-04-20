@@ -166,6 +166,8 @@ from snapper.messaging.schemas.data import SignalData
 from snapper.messaging.schemas.data import UnderlyingAssetData
 from snapper.messaging.schemas.data import UnderlyingInstrumentData
 from snapper.messaging.schemas.data import VenueFeeScheduleData
+from snapper.server.ai_delegate_routes import AiIntegrationDisabledError
+from snapper.server.ai_delegate_routes import ai_integration_disabled_handler
 from snapper.server.ai_delegate_routes import router as ai_delegate_router
 from snapper.server.authenticated_websocket import create_authenticated_websocket_router
 from snapper.server.backtest_routes import router as backtest_router
@@ -502,6 +504,7 @@ def create_app() -> FastAPI:
     app.state.limiter = limiter
     app.state.provenance_gap_detectors = provenance_gap_detectors
     app.add_exception_handler(RateLimitExceeded, handle_rate_limit_exceeded)
+    app.add_exception_handler(AiIntegrationDisabledError, ai_integration_disabled_handler)
     app.add_middleware(SlowAPIMiddleware)
     rest_tracker = SequenceTracker()
     app.state.rest_tracker = rest_tracker

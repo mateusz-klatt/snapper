@@ -31,6 +31,7 @@ from fastapi import Depends
 from fastapi import HTTPException
 from fastapi import Request
 from fastapi import status
+from fastapi.responses import JSONResponse
 
 from snapper.api.schemas.ai_delegates import DelegateCapsUpdateRequest
 from snapper.api.schemas.ai_delegates import DelegateCreatedResponse
@@ -68,6 +69,20 @@ _INVALID_PRINCIPAL = (
 _AI_INTEGRATION_FLAG_KEY = "ai_integration_enabled"
 
 
+class AiIntegrationDisabledError(Exception):
+    """Raised by :func:`require_ai_integration_enabled` when the flag is off.
+
+    Caught by :func:`ai_integration_disabled_handler` (registered on
+    the FastAPI app in :mod:`snapper.server.app`) and translated
+    into a 503 :class:`JSONResponse` whose body matches the MCP
+    sub-app's :class:`FeatureFlagMiddleware` envelope EXACTLY
+    (``{"error_code": "feature_disabled", "detail": "..."}``). Day
+    5d-B1 Rfollowup: gpt-5.4 review caught that the previous
+    ``HTTPException`` path emitted FastAPI's default
+    ``{"detail": ...}`` wrapper, breaking plan §3.12 parity.
+    """
+
+
 def require_ai_integration_enabled(request: Request) -> None:
     """Reject the request when the AI integration feature flag is off.
 
@@ -77,20 +92,18 @@ def require_ai_integration_enabled(request: Request) -> None:
     delegates + tokens while the feature is disabled, leaking a
     management surface that the rest of Phase A refuses to serve.
 
-    The response shape mirrors the MCP sub-app's
-    :class:`FeatureFlagMiddleware` so a frontend or CLI branching
-    on ``error_code`` sees the same payload regardless of which
-    surface returned the 503.
-
     Args:
         request: Active FastAPI request; settings service is pulled
             from ``app.state`` so toggling the DB setting takes
             effect without a restart.
 
     Raises:
-        HTTPException: 503 ``{"error_code": "feature_disabled"}``
-            when the flag is off or the settings service has not
-            been initialised yet (fail-closed during startup).
+        AiIntegrationDisabledError: when the flag is off or the
+            settings service has not been initialised yet
+            (fail-closed during startup). Translated to a 503
+            JSONResponse with the MCP-compatible
+            ``{"error_code": "feature_disabled"}`` envelope by the
+            app-level exception handler.
     """
     settings_service = getattr(request.app.state, "settings_service", None)
     enabled = bool(
@@ -100,13 +113,43 @@ def require_ai_integration_enabled(request: Request) -> None:
     )
     if enabled:
         return
-    detail = (
-        "feature_disabled: AI integration is disabled. Enable the "
+    raise AiIntegrationDisabledError(
+        "AI integration is disabled. Enable the "
         f"'{_AI_INTEGRATION_FLAG_KEY}' setting to activate the delegate surface."
     )
-    raise HTTPException(
+
+
+def ai_integration_disabled_handler(
+    _request: Request,
+    exc: Exception,
+) -> JSONResponse:
+    """Translate :class:`AiIntegrationDisabledError` to MCP-parity 503.
+
+    The body shape is identical to
+    :class:`~snapper.mcp.server.FeatureFlagMiddleware`'s 503 so a
+    frontend / CLI branching on ``error_code`` sees one payload
+    regardless of which surface returned the 503 (plan §3.12).
+
+    Args:
+        _request: The inbound FastAPI request (unused — the
+            envelope is constant across call sites).
+        exc: The caught exception. Annotated as :class:`Exception`
+            to match Starlette's exception-handler signature
+            (Starlette calls through a shared dispatcher that
+            types every handler as ``Callable[[Request, Exception],
+            Response]``). In practice the app-level registration
+            only routes :class:`AiIntegrationDisabledError` here.
+
+    Returns:
+        A 503 :class:`JSONResponse` with the vendor-neutral
+        ``error_code`` envelope.
+    """
+    return JSONResponse(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail=detail,
+        content={
+            "error_code": "feature_disabled",
+            "detail": str(exc),
+        },
     )
 
 

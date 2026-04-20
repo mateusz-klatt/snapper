@@ -967,24 +967,23 @@ class TestAiDelegatesFeatureFlagGate:
     where the rest of the AI surface is disabled.
     """
 
-    def test_flag_off_raises_503_feature_disabled(self) -> None:
-        """Flag off → 503 with ``feature_disabled`` payload.
+    def test_flag_off_raises_custom_error(self) -> None:
+        """Flag off → :class:`AiIntegrationDisabledError` raised.
 
         Given: a settings service whose ``get_setting`` returns
             ``False`` for ``ai_integration_enabled``,
         When: the dependency runs,
-        Then: :class:`HTTPException` 503 is raised with a ``detail``
-            string carrying the stable ``feature_disabled`` code so
-            clients can branch on it.
+        Then: it raises :class:`AiIntegrationDisabledError` so the
+            app-level handler can translate it to the structured
+            503 envelope that mirrors the MCP sub-app.
         """
         settings_service = _Magic()
         settings_service.get_setting.return_value = False
         request = _Magic()
         request.app.state.settings_service = settings_service
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(ai_delegate_routes.AiIntegrationDisabledError) as exc:
             ai_delegate_routes.require_ai_integration_enabled(request)
-        assert exc.value.status_code == 503
-        assert "feature_disabled" in str(exc.value.detail)
+        assert "AI integration is disabled" in str(exc.value)
 
     def test_flag_on_returns_none(self) -> None:
         """Flag on → the dependency passes through silently.
@@ -1000,22 +999,42 @@ class TestAiDelegatesFeatureFlagGate:
         ai_delegate_routes.require_ai_integration_enabled(request)
 
     def test_settings_service_missing_treated_as_flag_off(self) -> None:
-        """Pre-lifespan startup (no settings service) → 503 fail-closed.
+        """Pre-lifespan startup (no settings service) → fail-closed.
 
         Given: ``app.state.settings_service`` is absent (lifespan
             has not populated the singleton yet),
         When: the dependency runs,
-        Then: it raises 503 ``feature_disabled`` just like a
-            deliberate off state — matches the MCP middleware's
-            fail-closed startup behaviour so behaviour is
-            predictable across the admin / management / MCP
-            surfaces.
+        Then: it raises :class:`AiIntegrationDisabledError` just
+            like a deliberate off state — matches the MCP
+            middleware's fail-closed startup behaviour.
         """
         request = _Magic()
         request.app.state = _Magic(spec=["rest_tracker"])
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(ai_delegate_routes.AiIntegrationDisabledError):
             ai_delegate_routes.require_ai_integration_enabled(request)
-        assert exc.value.status_code == 503
+
+    def test_handler_returns_mcp_parity_envelope(self) -> None:
+        """Day 5c Rfollowup (gpt-5.4): envelope must match MCP 503 parity.
+
+        Given: an :class:`AiIntegrationDisabledError`,
+        When: :func:`ai_integration_disabled_handler` translates it,
+        Then: the 503 :class:`JSONResponse` body is
+            ``{"error_code": "feature_disabled", "detail": "..."}``
+            — EXACTLY the envelope MCP's
+            :class:`FeatureFlagMiddleware` emits. No nested
+            ``{"detail": ...}`` wrapper FastAPI would have produced
+            for a raw ``HTTPException``.
+        """
+        import json as _json_mod
+
+        exc = ai_delegate_routes.AiIntegrationDisabledError("AI integration is disabled.")
+        response = ai_delegate_routes.ai_integration_disabled_handler(_Magic(), exc)
+        assert response.status_code == 503
+        body = _json_mod.loads(bytes(response.body).decode("utf-8"))
+        assert body == {
+            "error_code": "feature_disabled",
+            "detail": "AI integration is disabled.",
+        }
 
 
 class TestRouteHandlers:
