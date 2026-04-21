@@ -141,3 +141,5 @@ class AuthService: ObservableObject {
 struct ErrorResponse: Codable {
     let detail: String
 }
+
+extension AuthService: AuthRefreshing {}

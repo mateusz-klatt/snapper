@@ -11,6 +11,7 @@
 		13E8D50DB0D86D78A2BF31DB /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F7849605786039354D6A6590 /* Assets.xcassets */; };
 		1C42056D6B73DB2475D007F4 /* APITypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = C90AC0DDC55DFC58EF4590D7 /* APITypes.swift */; };
 		3847E72F3248A41EA8DCD9F2 /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A50EF856475775A1EEA07E0 /* MainTabView.swift */; };
+		398C326321946F6554E4F5C3 /* Protocols.swift in Sources */ = {isa = PBXBuildFile; fileRef = D203FD7280A91512EE623EE1 /* Protocols.swift */; };
 		3B5F692F8C98407F76E6F09E /* TypeBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = C69A0BFD6B16B0BD652D904F /* TypeBridge.swift */; };
 		3B9060A9B55885A03C1316D0 /* SnapperApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB34EE347C68EC93D009F7F4 /* SnapperApp.swift */; };
 		4903E053BC2B9E8FC22EC62A /* WebSocketManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1499AF1C8B116093A1A9426D /* WebSocketManager.swift */; };
@@ -26,6 +27,7 @@
 		D4D538F756906829CC4ECC61 /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9948BCE1220922C26E1E5D5 /* LoginView.swift */; };
 		D5A6C18290A3F9154ED7E741 /* LoginViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6798D055E36E2A96D2575882 /* LoginViewModel.swift */; };
 		E00A59F35D84C52F5B093C9A /* WSMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FC42AFF6C9070E52403CC6A /* WSMessages.swift */; };
+		E26F0CF3DFE246A9C9E7F1CA /* WSState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A0B22DD35B1534E9A1AFFA3 /* WSState.swift */; };
 		FC31D3C744C65776E28C570D /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A453B3AED6CC7374A032D39 /* Theme.swift */; };
 /* End PBXBuildFile section */
 
@@ -54,11 +56,13 @@
 		5A50EF856475775A1EEA07E0 /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
 		6798D055E36E2A96D2575882 /* LoginViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginViewModel.swift; sourceTree = "<group>"; };
 		6B649B56E9F5DB1981C9D47E /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		9A0B22DD35B1534E9A1AFFA3 /* WSState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WSState.swift; sourceTree = "<group>"; };
 		A9948BCE1220922C26E1E5D5 /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
 		C69A0BFD6B16B0BD652D904F /* TypeBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypeBridge.swift; sourceTree = "<group>"; };
 		C866C094E8868C0EF03F6809 /* AuthService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthService.swift; sourceTree = "<group>"; };
 		C90AC0DDC55DFC58EF4590D7 /* APITypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APITypes.swift; sourceTree = "<group>"; };
 		CB3EEEA02ED3924700201EC3 /* SnapperTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SnapperTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		D203FD7280A91512EE623EE1 /* Protocols.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Protocols.swift; sourceTree = "<group>"; };
 		E6605FA90A650CA70270A857 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		F4EDEB8970703709AC631633 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
 		F7849605786039354D6A6590 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -106,7 +110,9 @@
 			children = (
 				442D4323A9B7C8B7A02A5B08 /* APIClient.swift */,
 				C866C094E8868C0EF03F6809 /* AuthService.swift */,
+				D203FD7280A91512EE623EE1 /* Protocols.swift */,
 				1499AF1C8B116093A1A9426D /* WebSocketManager.swift */,
+				9A0B22DD35B1534E9A1AFFA3 /* WSState.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -292,12 +298,14 @@
 				D5A6C18290A3F9154ED7E741 /* LoginViewModel.swift in Sources */,
 				3847E72F3248A41EA8DCD9F2 /* MainTabView.swift in Sources */,
 				A35D23705FCF8BC6B9E3E64C /* Permissions.swift in Sources */,
+				398C326321946F6554E4F5C3 /* Protocols.swift in Sources */,
 				D339ECEBC32C9FE4E3040546 /* SettingsView.swift in Sources */,
 				3B9060A9B55885A03C1316D0 /* SnapperApp.swift in Sources */,
 				FC31D3C744C65776E28C570D /* Theme.swift in Sources */,
 				81189414878D69E0A0DC0601 /* TradingView.swift in Sources */,
 				3B5F692F8C98407F76E6F09E /* TypeBridge.swift in Sources */,
 				E00A59F35D84C52F5B093C9A /* WSMessages.swift in Sources */,
+				E26F0CF3DFE246A9C9E7F1CA /* WSState.swift in Sources */,
 				4903E053BC2B9E8FC22EC62A /* WebSocketManager.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

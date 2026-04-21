@@ -50,24 +50,36 @@ struct DashboardView: View {
     }
 
     private var connectionStatusView: some View {
-        HStack {
-            Circle()
-                .fill(connectionColor)
-                .frame(width: 8, height: 8)
+        // TimelineView re-evaluates every 1s so heartbeat freshness color
+        // transitions green → amber → red as time passes between frames
+        // even when no new @Published update fires from `webSocketManager`.
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            HStack {
+                Circle()
+                    .fill(connectionColor(at: context.date))
+                    .frame(width: 8, height: 8)
 
-            Text(connectionText)
-                .font(.caption)
-                .foregroundColor(.textSecondary)
+                Text(connectionText(at: context.date))
+                    .font(.caption)
+                    .foregroundColor(.textSecondary)
 
-            Spacer()
+                Spacer()
+            }
+            .padding(.horizontal)
         }
-        .padding(.horizontal)
     }
 
-    private var connectionColor: Color {
+    /// Heartbeat-freshness thresholds wired per plan SC#1.
+    /// Green: heartbeat within 5s. Amber: 5–30s. Red: >30s or never arrived
+    /// while the socket is already `.connected` (i.e. healthy connection,
+    /// stale heartbeats — distinct from socket-level disconnect).
+    private static let heartbeatFreshThreshold: TimeInterval = 5
+    private static let heartbeatStaleThreshold: TimeInterval = 30
+
+    private func connectionColor(at now: Date) -> Color {
         switch webSocketManager.connectionState {
         case .connected:
-            return .brandGreen
+            return heartbeatColor(at: now)
         case .connecting, .authenticating:
             return .orange
         case .disconnected, .error:
@@ -75,10 +87,31 @@ struct DashboardView: View {
         }
     }
 
-    private var connectionText: String {
+    /// When the socket is `.connected`, the UI reflects heartbeat freshness
+    /// rather than socket state alone — a connected-but-silent publisher
+    /// surfaces as amber/red so operators notice stale data.
+    private func heartbeatColor(at now: Date) -> Color {
+        guard let last = webSocketManager.state.lastHeartbeatAt else {
+            return .orange
+        }
+        let age = now.timeIntervalSince(last)
+        if age <= Self.heartbeatFreshThreshold {
+            return .brandGreen
+        } else if age <= Self.heartbeatStaleThreshold {
+            return .orange
+        } else {
+            return .brandRed
+        }
+    }
+
+    private func connectionText(at now: Date) -> String {
         switch webSocketManager.connectionState {
         case .connected:
-            return "Connected"
+            if let last = webSocketManager.state.lastHeartbeatAt {
+                let age = Int(now.timeIntervalSince(last))
+                return "Connected · last heartbeat \(age)s ago"
+            }
+            return "Connected · waiting for heartbeat"
         case .connecting:
             return "Connecting..."
         case .authenticating:

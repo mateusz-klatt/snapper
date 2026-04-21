@@ -14,7 +14,7 @@ final class APIClientNetworkTests: XCTestCase {
         configuration.protocolClasses = [MockURLProtocol.self]
         mockSession = URLSession(configuration: configuration)
 
-        apiClient = APIClient(session: mockSession)
+        apiClient = APIClient(session: mockSession, authService: FakeAuthService())
     }
 
     override func tearDown() {

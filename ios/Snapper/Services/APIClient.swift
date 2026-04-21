@@ -1,12 +1,14 @@
 import Foundation
 
 final class APIClient: Sendable {
-    @MainActor static let shared = APIClient(session: .shared)
+    @MainActor static let shared = APIClient(session: .shared, authService: AuthService.shared)
 
     private let session: URLSession
+    private let authService: AuthRefreshing
 
-    init(session: URLSession) {
+    init(session: URLSession, authService: AuthRefreshing) {
         self.session = session
+        self.authService = authService
     }
 
     private func request<T: Decodable>(

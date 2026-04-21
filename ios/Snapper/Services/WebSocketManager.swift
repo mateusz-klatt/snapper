@@ -4,21 +4,37 @@ import os
 
 @MainActor
 class WebSocketManager: ObservableObject {
-    static let shared = WebSocketManager()
+    static let shared = WebSocketManager(
+        authService: AuthService.shared,
+        taskFactory: URLSessionWebSocketTaskFactory(session: .shared),
+        sleeper: TaskSleeper()
+    )
 
     @Published var connectionState: ConnectionState = .disconnected
-    @Published var lastMessage: ServerMessage?
     @Published var availableTopics: [String] = []
+    @Published private(set) var state = WSState()
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Snapper", category: "WebSocket")
 
-    private var webSocketTask: URLSessionWebSocketTask?
+    private let authService: AuthRefreshing
+    private let taskFactory: WebSocketTaskFactory
+    // Exposed so Commit 2 (proactive refresh) and tests can inject a fake.
+    let sleeper: Sleeper
+
+    private var webSocketTask: WebSocketTaskProtocol?
     private var pingTimer: Timer?
     private var shouldReconnect = false
     private var intentionalDisconnect = false
     private var reconnectAttempts = 0
     private let maxReconnectAttempts = 10
     private let baseReconnectInterval: TimeInterval = 3
+
+    /// Confirmed subscriptions — survive reconnects so the dispatcher can
+    /// replay them on the next `auth_complete`.
+    private var subscribedTopics: Set<String> = []
+    /// Queued subscriptions made while not `.connected`; cleared after the
+    /// first replay (then their topics live in `subscribedTopics`).
+    private var pendingSubscriptions: Set<String> = []
 
     enum ConnectionState: Equatable {
         case disconnected
@@ -28,8 +44,10 @@ class WebSocketManager: ObservableObject {
         case error(String)
     }
 
-    private init() {
-        // Singleton: prevent external instantiation
+    init(authService: AuthRefreshing, taskFactory: WebSocketTaskFactory, sleeper: Sleeper) {
+        self.authService = authService
+        self.taskFactory = taskFactory
+        self.sleeper = sleeper
     }
 
     func connect() {
@@ -47,7 +65,7 @@ class WebSocketManager: ObservableObject {
         intentionalDisconnect = false
 
         let request = URLRequest(url: url)
-        webSocketTask = URLSession.shared.webSocketTask(with: request)
+        webSocketTask = taskFactory.makeTask(request: request)
         webSocketTask?.resume()
 
         listenForMessages()
@@ -66,46 +84,72 @@ class WebSocketManager: ObservableObject {
 
     func sendJSON(_ dict: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: dict),
-              let text = String(data: data, encoding: .utf8) else {
+              let text = String(data: data, encoding: .utf8),
+              let task = webSocketTask else {
             return
         }
-        let message = URLSessionWebSocketTask.Message.string(text)
-        webSocketTask?.send(message) { error in
-            if let error = error {
-                self.logger.error("WebSocket send error: \(error)")
+        Task { [weak self] in
+            do {
+                try await task.send(.string(text))
+            } catch {
+                self?.logger.error("WebSocket send error: \(error)")
             }
         }
     }
 
     func subscribe(topics: [String]) {
-        guard case .connected = connectionState else { return }
-        sendJSON(["type": "subscribe", "topics": topics])
+        if case .connected = connectionState {
+            sendJSON(["type": "subscribe", "topics": topics])
+            topics.forEach { subscribedTopics.insert($0) }
+        } else {
+            topics.forEach { pendingSubscriptions.insert($0) }
+        }
     }
 
     func unsubscribe(topics: [String]) {
-        guard case .connected = connectionState else { return }
-        sendJSON(["type": "unsubscribe", "topics": topics])
+        topics.forEach {
+            pendingSubscriptions.remove($0)
+            subscribedTopics.remove($0)
+        }
+        if case .connected = connectionState {
+            sendJSON(["type": "unsubscribe", "topics": topics])
+        }
+    }
+
+    private func replayPendingSubscriptions() {
+        let toSend = subscribedTopics.union(pendingSubscriptions)
+        guard !toSend.isEmpty else { return }
+        sendJSON(["type": "subscribe", "topics": Array(toSend)])
+        subscribedTopics.formUnion(pendingSubscriptions)
+        pendingSubscriptions.removeAll()
     }
 
     private func listenForMessages() {
-        webSocketTask?.receive { [weak self] result in
-            Task { @MainActor in
+        guard let task = webSocketTask else { return }
+        Task { @MainActor [weak self] in
+            do {
+                let message = try await task.receive()
                 guard let self = self else { return }
-                switch result {
-                case .success(let message):
-                    self.handleRawMessage(message)
+                self.handleRawMessage(message)
+                // Continue the read loop only while the in-flight task still
+                // matches the one we kicked off — guards against double-loops
+                // if the socket was swapped while `receive()` was suspended.
+                if let current = self.webSocketTask, current === task {
                     self.listenForMessages()
-                case .failure(let error):
-                    if !self.intentionalDisconnect {
-                        self.logger.error("WebSocket receive error: \(error)")
-                    }
-                    self.handleDisconnection()
                 }
+            } catch {
+                guard let self = self else { return }
+                if !self.intentionalDisconnect {
+                    self.logger.error("WebSocket receive error: \(error)")
+                }
+                self.handleDisconnection()
             }
         }
     }
 
-    private func handleRawMessage(_ message: URLSessionWebSocketTask.Message) {
+    /// Dispatch a raw inbound frame. Internal for `@testable` access so the
+    /// dispatcher tests can pump decoded frames without a live socket.
+    func handleRawMessage(_ message: URLSessionWebSocketTask.Message) {
         let data: Data
         switch message {
         case .string(let text):
@@ -131,12 +175,7 @@ class WebSocketManager: ObservableObject {
             break
 
         case "auth_complete":
-            reconnectAttempts = 0
-            connectionState = .connected
-            if let topics = json["available_topics"] as? [String] {
-                availableTopics = topics
-            }
-            startPingTimer()
+            handleAuthComplete(data: data, rawJSON: json)
 
         case "auth_failed":
             let reason = json["reason"] as? String ?? "unknown"
@@ -159,13 +198,75 @@ class WebSocketManager: ObservableObject {
             break
 
         default:
-            let serverMsg = ServerMessage(type: type, data: data)
-            lastMessage = serverMsg
+            dispatchTypedFrame(type: type, data: data)
+        }
+    }
+
+    /// Two-pass decode: parse the full `WSAuthCompleteResponse` shape to
+    /// surface `availableTopics`, `userRole`, and `wsTokenExp` (the last
+    /// of which Commit 2's proactive refresh consumes).
+    private func handleAuthComplete(data: Data, rawJSON: [String: Any]) {
+        reconnectAttempts = 0
+        connectionState = .connected
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        if let parsed = try? decoder.decode(WSAuthCompleteResponse.self, from: data) {
+            availableTopics = parsed.availableTopics
+            state.wsTokenExp = parsed.wsTokenExp
+        } else if let topics = rawJSON["available_topics"] as? [String] {
+            // Fallback: keep the pre-envelope behaviour so partial frames
+            // from older backends still expose topic lists to the UI.
+            availableTopics = topics
+        }
+
+        replayPendingSubscriptions()
+        startPingTimer()
+    }
+
+    /// Decode typed payloads into `WSState` `@Published` properties.
+    private func dispatchTypedFrame(type: String, data: Data) {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        switch type {
+        case "trade":
+            if let decoded = try? decoder.decode(TradeData.self, from: data) {
+                state.lastTrade = decoded
+            } else {
+                logger.debug("WS trade frame failed to decode")
+            }
+        case "order_event":
+            if let decoded = try? decoder.decode(OrderEventData.self, from: data) {
+                state.lastOrderEvent = decoded
+            } else {
+                logger.debug("WS order_event frame failed to decode")
+            }
+        case "order_cancel":
+            if let decoded = try? decoder.decode(OrderCancelData.self, from: data) {
+                state.lastOrderCancel = decoded
+            } else {
+                logger.debug("WS order_cancel frame failed to decode")
+            }
+        case "heartbeat":
+            if let decoded = try? decoder.decode(HeartbeatData.self, from: data) {
+                state.lastHeartbeat = decoded
+                state.lastHeartbeatAt = Date()
+            } else {
+                logger.debug("WS heartbeat frame failed to decode")
+            }
+        case "user_deactivated":
+            if let decoded = try? decoder.decode(UserDeactivatedData.self, from: data) {
+                state.lastUserDeactivated = decoded
+            } else {
+                logger.debug("WS user_deactivated frame failed to decode")
+            }
+        default:
+            logger.debug("WS frame type=\(type, privacy: .public) not bound in Plan 1")
         }
     }
 
     private func performAuthentication() async {
-        guard let token = await AuthService.shared.fetchFreshWsToken() else {
+        guard let token = await authService.fetchFreshWsToken() else {
             logger.error("Failed to get ws_token for WebSocket auth")
             connectionState = .error("No ws_token")
             webSocketTask?.cancel(with: .normalClosure, reason: nil)
@@ -176,7 +277,7 @@ class WebSocketManager: ObservableObject {
     }
 
     private func performReauthentication() async {
-        guard let token = await AuthService.shared.fetchFreshWsToken() else {
+        guard let token = await authService.fetchFreshWsToken() else {
             logger.error("Failed to get ws_token for reauth")
             return
         }
@@ -215,9 +316,4 @@ class WebSocketManager: ObservableObject {
             }
         }
     }
-}
-
-struct ServerMessage {
-    let type: String
-    let data: Data
 }
