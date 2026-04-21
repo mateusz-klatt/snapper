@@ -118,6 +118,30 @@ class KrakenFuturesBackfillParameters(StrictBody):
     resume: bool = True
 
 
+class KrakenEquitiesBackfillParameters(StrictBody):
+    """Parameters for KrakenEquitiesAggregatesBackfillService.
+
+    Kraken Equities (TradFi FCM futures) market-data-only ingest uses
+    the internal ``iapi.kraken.com`` ticker/history endpoint. Only
+    intervals accepted by that endpoint are allowed downstream; see
+    ``_timeframe_to_interval`` in the exchange client for the live-probed
+    support set (``1m/5m/15m/30m/1h/1d``).
+
+    Attributes:
+        symbols: Native symbols to backfill (empty uses all mapped).
+        all_symbols: If True, backfill all Kraken Equities symbols.
+        timeframe: Candle interval (``1m``, ``5m``, ``15m``, ``30m``, ``1h``, ``1d``).
+        days_back: Number of days to backfill from today.
+        resume: Whether to resume from last stored candle.
+    """
+
+    symbols: list[str] = []
+    all_symbols: bool = False
+    timeframe: str = "1h"
+    days_back: int = 30
+    resume: bool = True
+
+
 class GroupedDailyBackfillParameters(StrictBody):
     """Parameters for PolygonGroupedDailyBackfillService.
 

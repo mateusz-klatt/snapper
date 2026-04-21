@@ -328,6 +328,9 @@ run-polygon-grouped:
 	$(PYRUN) snapper polygon-backfill-grouped -m stocks -l us -d 729
 	$(PYRUN) snapper polygon-backfill-grouped -m fx -d 729
 
+backfill-kraken-equities-candles:
+	$(PYRUN) snapper kraken-equities-backfill-candles -t 1h -d 30
+
 run-broker:
 	$(PYRUN) snapper broker
 

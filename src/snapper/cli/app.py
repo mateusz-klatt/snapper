@@ -27,6 +27,7 @@ Data Updates:
     - ``update-polygon-symbols``: Sync Polygon symbol mappings
     - ``polygon-backfill-aggregates``: Backfill historical data
     - ``kraken-futures-backfill-candles``: Backfill Kraken Futures OHLCV
+    - ``kraken-equities-backfill-candles``: Backfill Kraken Equities (FCM) OHLCV
     - ``update-kraken-futures-funding-rates``: Backfill funding rates
 
 Example:
@@ -73,6 +74,9 @@ from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.services.continuous_contract_builder import ContinuousContractBuilder
 from snapper.application.updaters.historical.aggregates import PolygonAggregatesBackfillService
 from snapper.application.updaters.historical.grouped import PolygonGroupedDailyBackfillService
+from snapper.application.updaters.historical.kraken_equities_aggregates import (
+    KrakenEquitiesAggregatesBackfillService,
+)
 from snapper.application.updaters.historical.kraken_futures_aggregates import (
     KrakenFuturesAggregatesBackfillService,
 )
@@ -1153,6 +1157,61 @@ def kraken_futures_backfill_candles(
             typer.echo("Kraken Futures candle backfill complete!")
         except Exception as e:
             typer.echo(f"Error during Kraken Futures candle backfill: {e}")
+            raise typer.Exit(code=1) from e
+
+    asyncio.run(run_backfill())
+
+
+@app.command(name="kraken-equities-backfill-candles")
+def kraken_equities_backfill_candles(
+    symbols: Annotated[
+        list[str] | None,
+        typer.Option("--symbol", "-s", help="Native symbols to backfill (e.g., MNQM6-CME)"),
+    ] = None,
+    all_symbols: bool = typer.Option(False, "--all", help="Backfill all Kraken Equities symbols"),
+    timeframe: str = typer.Option(
+        "1h", "--timeframe", "-t", help="Candle interval: 1m, 5m, 15m, 30m, 1h, 1d"
+    ),
+    days_back: int = typer.Option(30, "--days", "-d", help="Days back to fetch"),
+    resume: bool = typer.Option(True, "--resume/--no-resume", help="Resume from latest candle"),
+) -> None:
+    """Backfill historical OHLCV candles from Kraken Equities (TradFi FCM).
+
+    Hits the internal ``iapi.kraken.com/api/internal/markets/{ws_symbol}/
+    ticker/history`` endpoint (market-data-only; no order placement).
+    Response is ~10-minute delayed per FCM policy. The endpoint is
+    undocumented and may change without notice; per-chunk upstream
+    failures surface as ``RuntimeError`` so outages are distinguishable
+    from legitimately-empty candle windows.
+
+    Args:
+        symbols: List of native symbols to backfill.
+        all_symbols: Backfill all mapped Kraken Equities symbols.
+        timeframe: Candle interval accepted by the iapi endpoint.
+        days_back: Number of days to backfill.
+        resume: Resume from last stored candle timestamp.
+    """
+
+    async def run_backfill() -> None:
+        service = KrakenEquitiesAggregatesBackfillService(
+            symbols=symbols,
+            all_symbols=all_symbols,
+            timeframe=timeframe,
+            days_back=days_back,
+            resume=resume,
+        )
+        try:
+            symbol_source = (
+                _CLI_SYMBOL_SOURCE_ALL_MAPPED if all_symbols else _CLI_SYMBOL_SOURCE_SETTINGS
+            )
+            typer.echo(
+                f"Starting Kraken Equities candle backfill "
+                f"({timeframe}, {days_back} days, {symbol_source})..."
+            )
+            await service.start()
+            typer.echo("Kraken Equities candle backfill complete!")
+        except Exception as e:
+            typer.echo(f"Error during Kraken Equities candle backfill: {e}")
             raise typer.Exit(code=1) from e
 
     asyncio.run(run_backfill())
