@@ -46,6 +46,10 @@ import {
   useCreateBacktestComparison,
   useFeatureFlags,
   useAiDelegates,
+  useAiDelegate,
+  useCreateAiDelegate,
+  useUpdateAiDelegateCaps,
+  useDeactivateAiDelegate,
 } from './queries'
 import { useAuth } from '../stores/auth'
 import { apiClient, APIError } from '../lib/apiClient'
@@ -330,6 +334,16 @@ vi.mock('../lib/apiClient', () => ({
     listAiDelegates: vi.fn(() =>
       Promise.resolve(envelope('delegate_list', { payload: [], count: 0 }))
     ),
+    getAiDelegate: vi.fn(() => Promise.resolve(envelope('delegate_response', { payload: {} }))),
+    createAiDelegate: vi.fn(() =>
+      Promise.resolve(envelope('delegate_created_response', { payload: {} }))
+    ),
+    updateAiDelegateCaps: vi.fn(() =>
+      Promise.resolve(envelope('delegate_response', { payload: {} }))
+    ),
+    deactivateAiDelegate: vi.fn(() =>
+      Promise.resolve(envelope('delegate_response', { payload: {} }))
+    ),
   },
   APIError: class APIError extends Error {
     constructor(
@@ -394,6 +408,10 @@ const mockedApiClient = apiClient as unknown as {
   getBacktestComparisons: Mock
   getFeatureFlags: Mock
   listAiDelegates: Mock
+  getAiDelegate: Mock
+  createAiDelegate: Mock
+  updateAiDelegateCaps: Mock
+  deactivateAiDelegate: Mock
 }
 const createQueryClient = () =>
   new QueryClient({
@@ -1723,6 +1741,103 @@ describe('queries', () => {
       await waitFor(() => expect(result.current.isSuccess).toBe(true))
       expect(result.current.data?.count).toBe(1)
       expect(result.current.data?.payload[0].label).toBe('Alpha')
+    })
+    it('useAiDelegate stays disabled when publicId is null', () => {
+      const { result } = renderHook(() => useAiDelegate(null), { wrapper: createWrapper() })
+
+      expect(result.current.isPending).toBe(true)
+      expect(mockedApiClient.getAiDelegate).not.toHaveBeenCalled()
+    })
+    it('useAiDelegate fetches detail when publicId provided', async () => {
+      mockedApiClient.getAiDelegate.mockResolvedValueOnce(
+        envelope('delegate_response', {
+          payload: {
+            public_id: 'd-1',
+            username: 'ai-alpha',
+            label: 'Alpha',
+            created_by_user_public_id: 'u-1',
+            created_at: '2026-04-21T00:00:00Z',
+            is_active: true,
+            caps: {
+              max_open_orders: null,
+              max_daily_notional_usd: null,
+              max_cancels_per_minute: null,
+              max_order_quantity_per_instrument: null,
+            },
+          },
+        })
+      )
+      const { result } = renderHook(() => useAiDelegate('d-1'), { wrapper: createWrapper() })
+
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      expect(result.current.data?.payload.public_id).toBe('d-1')
+      expect(mockedApiClient.getAiDelegate).toHaveBeenCalledWith('d-1')
+    })
+    it('useCreateAiDelegate invalidates ai-delegates list on success', async () => {
+      const { queryClient, wrapper } = createWrapperWithClient()
+      const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries')
+
+      mockedApiClient.createAiDelegate.mockResolvedValueOnce(
+        envelope('delegate_created_response', { payload: {} })
+      )
+      const { result } = renderHook(() => useCreateAiDelegate(), { wrapper })
+
+      await act(async () => {
+        result.current.mutate({
+          label: 'Alpha',
+          caps: {
+            max_open_orders: null,
+            max_daily_notional_usd: null,
+            max_cancels_per_minute: null,
+            max_order_quantity_per_instrument: null,
+          },
+          operator_public_id: null,
+        })
+      })
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['ai-delegates'] })
+    })
+    it('useUpdateAiDelegateCaps invalidates list + detail on success', async () => {
+      const { queryClient, wrapper } = createWrapperWithClient()
+      const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries')
+
+      mockedApiClient.updateAiDelegateCaps.mockResolvedValueOnce(
+        envelope('delegate_response', { payload: {} })
+      )
+      const { result } = renderHook(() => useUpdateAiDelegateCaps(), { wrapper })
+
+      await act(async () => {
+        result.current.mutate({
+          publicId: 'd-1',
+          body: {
+            caps: {
+              max_open_orders: 10,
+              max_daily_notional_usd: null,
+              max_cancels_per_minute: null,
+              max_order_quantity_per_instrument: null,
+            },
+          },
+        })
+      })
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['ai-delegates'] })
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['ai-delegates', 'd-1'] })
+    })
+    it('useDeactivateAiDelegate invalidates list + detail on success', async () => {
+      const { queryClient, wrapper } = createWrapperWithClient()
+      const invalidateSpy = vi.spyOn(queryClient, 'invalidateQueries')
+
+      mockedApiClient.deactivateAiDelegate.mockResolvedValueOnce(
+        envelope('delegate_response', { payload: {} })
+      )
+      const { result } = renderHook(() => useDeactivateAiDelegate(), { wrapper })
+
+      await act(async () => {
+        result.current.mutate('d-1')
+      })
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['ai-delegates'] })
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['ai-delegates', 'd-1'] })
     })
   })
 })

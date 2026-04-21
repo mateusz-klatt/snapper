@@ -38,6 +38,8 @@ import {
   ExecutionPlanResponseSchema,
   FeatureFlagsResponseSchema,
   DelegateListResponseSchema,
+  DelegateResponseSchema,
+  DelegateCreatedResponseSchema,
 } from './schemas/api.generated.zod'
 import type {
   ScopeGrantListResponse,
@@ -98,6 +100,10 @@ import type {
   BacktestComparisonListResponse,
   FeatureFlagsResponse,
   DelegateListResponse,
+  DelegateResponse,
+  DelegateCreatedResponse,
+  DelegateCreateBody,
+  DelegateCapsUpdateBody,
 } from '../types/api'
 
 interface RequestOptions {
@@ -375,6 +381,19 @@ class APIClient {
   }
   public async postJSON<T>(url: string, body?: unknown, options: RequestOptions = {}): Promise<T> {
     const response = await this.post(url, body, options)
+
+    if (!response.ok) {
+      await this.raiseHttpError(response)
+    }
+
+    return response.json()
+  }
+  public async patchJSON<T>(url: string, body?: unknown, options: RequestOptions = {}): Promise<T> {
+    const response = await this.request(url, {
+      ...options,
+      method: 'PATCH',
+      body: body ? JSON.stringify(stampProvenance(body)) : undefined,
+    })
 
     if (!response.ok) {
       await this.raiseHttpError(response)
@@ -858,6 +877,29 @@ class APIClient {
     const data = await this.getJSON('/api/ai-delegates')
 
     return validateResponse(data, DelegateListResponseSchema, '/ai-delegates')
+  }
+  async getAiDelegate(publicId: string): Promise<DelegateResponse> {
+    const data = await this.getJSON(`/api/ai-delegates/${encodeURIComponent(publicId)}`)
+
+    return validateResponse(data, DelegateResponseSchema, '/ai-delegates/{id}')
+  }
+  async createAiDelegate(body: DelegateCreateBody): Promise<DelegateCreatedResponse> {
+    const data = await this.postJSON('/api/ai-delegates', body)
+
+    return validateResponse(data, DelegateCreatedResponseSchema, '/ai-delegates')
+  }
+  async updateAiDelegateCaps(
+    publicId: string,
+    body: DelegateCapsUpdateBody
+  ): Promise<DelegateResponse> {
+    const data = await this.patchJSON(`/api/ai-delegates/${encodeURIComponent(publicId)}`, body)
+
+    return validateResponse(data, DelegateResponseSchema, '/ai-delegates/{id}')
+  }
+  async deactivateAiDelegate(publicId: string): Promise<DelegateResponse> {
+    const data = await this.postJSON(`/api/ai-delegates/${encodeURIComponent(publicId)}/deactivate`)
+
+    return validateResponse(data, DelegateResponseSchema, '/ai-delegates/{id}/deactivate')
   }
 }
 

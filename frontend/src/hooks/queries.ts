@@ -38,6 +38,10 @@ import type {
   BracketCreateBody,
   TrailingStopCreateBody,
   BacktestCompareBody,
+  DelegateCreateBody,
+  DelegateCreatedResponse,
+  DelegateResponse,
+  DelegateCapsUpdateBody,
 } from '../types/api'
 
 const queryKeys = {
@@ -92,6 +96,7 @@ const queryKeys = {
     ['users', includeInactive, asOf] as const,
   featureFlags: () => ['feature-flags'] as const,
   aiDelegates: () => ['ai-delegates'] as const,
+  aiDelegate: (publicId: string) => ['ai-delegates', publicId] as const,
 }
 
 export const useSystemStatus = () => {
@@ -869,5 +874,52 @@ export const useAiDelegates = () => {
     queryFn: () => apiClient.listAiDelegates(),
     enabled: isAuthenticated,
     throwOnError: false,
+  })
+}
+
+export const useAiDelegate = (publicId: string | null) => {
+  const { isAuthenticated } = useAuth()
+
+  return useQuery({
+    queryKey: queryKeys.aiDelegate(publicId ?? ''),
+    queryFn: () => apiClient.getAiDelegate(publicId as string),
+    enabled: isAuthenticated && !!publicId,
+    throwOnError: false,
+  })
+}
+
+export const useCreateAiDelegate = () => {
+  const queryClient = useQueryClient()
+
+  return useMutation<DelegateCreatedResponse, Error, DelegateCreateBody>({
+    mutationFn: body => apiClient.createAiDelegate(body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.aiDelegates() })
+    },
+    gcTime: 0,
+  })
+}
+
+export const useUpdateAiDelegateCaps = () => {
+  const queryClient = useQueryClient()
+
+  return useMutation<DelegateResponse, Error, { publicId: string; body: DelegateCapsUpdateBody }>({
+    mutationFn: ({ publicId, body }) => apiClient.updateAiDelegateCaps(publicId, body),
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.aiDelegates() })
+      queryClient.invalidateQueries({ queryKey: queryKeys.aiDelegate(variables.publicId) })
+    },
+  })
+}
+
+export const useDeactivateAiDelegate = () => {
+  const queryClient = useQueryClient()
+
+  return useMutation<DelegateResponse, Error, string>({
+    mutationFn: publicId => apiClient.deactivateAiDelegate(publicId),
+    onSuccess: (_data, publicId) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.aiDelegates() })
+      queryClient.invalidateQueries({ queryKey: queryKeys.aiDelegate(publicId) })
+    },
   })
 }

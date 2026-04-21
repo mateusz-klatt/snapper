@@ -1,8 +1,9 @@
 import React, { useState } from 'react'
-import { Info, Loader2, ShieldAlert } from 'lucide-react'
+import { ChevronRight, Info, Loader2, ShieldAlert } from 'lucide-react'
 import { LiveOnlyNotice } from '../../components/LiveOnlyNotice'
-import { Modal } from '../../components/ui/Modal'
 import { Button, EmptyState } from '../../components/ui'
+import { CreateDelegateWizard } from './CreateDelegateWizard'
+import { DelegateDetailView } from './DelegateDetailView'
 import { useAiDelegates, useFeatureFlags } from '../../hooks/queries'
 import { useIsReadOnly } from '../../hooks/useIsReadOnly'
 import type { DelegateRead } from '../../types/api'
@@ -46,6 +47,11 @@ function EnabledShell(): React.ReactElement {
   const delegatesQuery = useAiDelegates()
   const readOnly = useIsReadOnly()
   const [wizardOpen, setWizardOpen] = useState(false)
+  const [detailPublicId, setDetailPublicId] = useState<string | null>(null)
+
+  if (detailPublicId !== null) {
+    return <DelegateDetailView publicId={detailPublicId} onBack={() => setDetailPublicId(null)} />
+  }
 
   return (
     <div className='p-6 space-y-4'>
@@ -65,9 +71,10 @@ function EnabledShell(): React.ReactElement {
       <DelegateList
         delegates={delegatesQuery.data?.payload ?? []}
         isLoading={delegatesQuery.isLoading}
+        onSelect={setDetailPublicId}
       />
 
-      <PlaceholderWizardModal open={wizardOpen} onClose={() => setWizardOpen(false)} />
+      <CreateDelegateWizard open={wizardOpen} onClose={() => setWizardOpen(false)} />
     </div>
   )
 }
@@ -75,9 +82,11 @@ function EnabledShell(): React.ReactElement {
 function DelegateList({
   delegates,
   isLoading,
+  onSelect,
 }: Readonly<{
   delegates: readonly DelegateRead[]
   isLoading: boolean
+  onSelect: (publicId: string) => void
 }>): React.ReactElement {
   if (isLoading) {
     return (
@@ -109,6 +118,7 @@ function DelegateList({
             <th className='px-4 py-2 font-semibold'>Max open orders</th>
             <th className='px-4 py-2 font-semibold'>Max daily USD</th>
             <th className='px-4 py-2 font-semibold'>Status</th>
+            <th className='px-4 py-2 font-semibold text-right'>Actions</th>
           </tr>
         </thead>
         <tbody className='divide-y divide-dark-600'>
@@ -132,28 +142,21 @@ function DelegateList({
                   {d.is_active ? 'Active' : 'Revoked'}
                 </span>
               </td>
+              <td className='px-4 py-2 text-right'>
+                <button
+                  type='button'
+                  onClick={() => onSelect(d.public_id)}
+                  className='text-brand-600 hover:text-brand-700 text-sm font-medium inline-flex items-center'
+                  aria-label={`View delegate ${d.label}`}
+                >
+                  Details
+                  <ChevronRight className='w-4 h-4' />
+                </button>
+              </td>
             </tr>
           ))}
         </tbody>
       </table>
     </div>
-  )
-}
-
-function PlaceholderWizardModal({
-  open,
-  onClose,
-}: Readonly<{ open: boolean; onClose: () => void }>): React.ReactElement {
-  return (
-    <Modal open={open} onClose={onClose} title='Create AI delegate' size='md'>
-      <div className='space-y-4 p-2'>
-        <p className='text-sm text-muted-700'>AI delegate wizard — coming in the next commit.</p>
-        <div className='flex justify-end'>
-          <Button variant='secondary' onClick={onClose}>
-            Close
-          </Button>
-        </div>
-      </div>
-    </Modal>
   )
 }

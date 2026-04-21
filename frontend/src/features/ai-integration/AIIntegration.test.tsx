@@ -7,11 +7,24 @@ import type { DelegateListResponse, DelegateRead } from '../../types/api'
 
 const mockUseFeatureFlags = vi.fn()
 const mockUseAiDelegates = vi.fn()
+
+type AiDelegateQueryShape = {
+  data: { payload: DelegateRead } | undefined
+  isLoading: boolean
+}
+const mockUseAiDelegate = vi.fn<() => AiDelegateQueryShape>(() => ({
+  data: undefined,
+  isLoading: false,
+}))
 const mockUseIsReadOnly = vi.fn()
 
 vi.mock('../../hooks/queries', () => ({
   useFeatureFlags: () => mockUseFeatureFlags(),
   useAiDelegates: () => mockUseAiDelegates(),
+  useAiDelegate: (_id: string | null) => mockUseAiDelegate(),
+  useUpdateAiDelegateCaps: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
+  useDeactivateAiDelegate: vi.fn(() => ({ mutateAsync: vi.fn() })),
+  useCreateAiDelegate: vi.fn(() => ({ mutateAsync: vi.fn(), reset: vi.fn(), isPending: false })),
 }))
 
 vi.mock('../../hooks/useIsReadOnly', () => ({
@@ -20,6 +33,10 @@ vi.mock('../../hooks/useIsReadOnly', () => ({
 
 vi.mock('../../components/LiveOnlyNotice', () => ({
   LiveOnlyNotice: () => <div data-testid='live-only-notice' />,
+}))
+
+vi.mock('react-hot-toast', () => ({
+  toast: { success: vi.fn(), error: vi.fn() },
 }))
 
 const renderWithProviders = (ui: ReactNode): ReturnType<typeof render> => {
@@ -155,27 +172,59 @@ describe('AIIntegration', () => {
     expect(screen.getByRole('button', { name: /Create delegate/ })).toBeDisabled()
   })
 
-  it('renders_placeholder_modal_when_create_clicked', () => {
+  it('opens_wizard_modal_when_create_clicked', () => {
     mockUseFeatureFlags.mockReturnValue({ isEnabled: true, isLoading: false })
     mockUseAiDelegates.mockReturnValue({ data: mkListResponse([]), isLoading: false })
     renderWithProviders(<AIIntegration />)
     fireEvent.click(screen.getByRole('button', { name: /Create delegate/ }))
-    expect(screen.getByText(/AI delegate wizard — coming in the next commit/)).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Create AI delegate' })).toBeInTheDocument()
   })
 
-  it('closes_placeholder_modal_via_Close_button', () => {
+  it('closes_wizard_modal_via_x_button', () => {
     mockUseFeatureFlags.mockReturnValue({ isEnabled: true, isLoading: false })
     mockUseAiDelegates.mockReturnValue({ data: mkListResponse([]), isLoading: false })
     renderWithProviders(<AIIntegration />)
     fireEvent.click(screen.getByRole('button', { name: /Create delegate/ }))
-    const closeBtn = screen
-      .getAllByRole('button', { name: 'Close' })
-      .find(el => !el.getAttribute('aria-label'))
+    expect(screen.getByRole('heading', { name: 'Create AI delegate' })).toBeInTheDocument()
+    // Click the close-modal backdrop which wires up to onClose → setWizardOpen(false)
+    const closeBackdrop = screen.getByRole('button', { name: 'Close modal' })
 
-    expect(closeBtn).toBeDefined()
-    fireEvent.click(closeBtn as HTMLElement)
-    expect(
-      screen.queryByText(/AI delegate wizard — coming in the next commit/)
-    ).not.toBeInTheDocument()
+    fireEvent.click(closeBackdrop)
+    expect(screen.queryByRole('heading', { name: 'Create AI delegate' })).not.toBeInTheDocument()
+  })
+
+  it('navigates_to_detail_view_when_row_details_clicked', () => {
+    const delegate = mkDelegate()
+
+    mockUseFeatureFlags.mockReturnValue({ isEnabled: true, isLoading: false })
+    mockUseAiDelegates.mockReturnValue({
+      data: mkListResponse([delegate]),
+      isLoading: false,
+    })
+    mockUseAiDelegate.mockReturnValue({
+      data: { payload: delegate },
+      isLoading: false,
+    })
+    renderWithProviders(<AIIntegration />)
+    fireEvent.click(screen.getByRole('button', { name: /View delegate Alpha/ }))
+    expect(screen.getByRole('button', { name: /Back to list/ })).toBeInTheDocument()
+  })
+
+  it('returns_to_list_when_detail_back_clicked', () => {
+    const delegate = mkDelegate()
+
+    mockUseFeatureFlags.mockReturnValue({ isEnabled: true, isLoading: false })
+    mockUseAiDelegates.mockReturnValue({
+      data: mkListResponse([delegate]),
+      isLoading: false,
+    })
+    mockUseAiDelegate.mockReturnValue({
+      data: { payload: delegate },
+      isLoading: false,
+    })
+    renderWithProviders(<AIIntegration />)
+    fireEvent.click(screen.getByRole('button', { name: /View delegate Alpha/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Back to list/ }))
+    expect(screen.getByRole('heading', { name: 'AI Integration' })).toBeInTheDocument()
   })
 })
