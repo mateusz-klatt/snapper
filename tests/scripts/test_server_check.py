@@ -202,7 +202,7 @@ class TestConstants:
 
     def test_default_max_retries(self) -> None:
         """Verify DEFAULT_MAX_RETRIES constant has correct value."""
-        assert DEFAULT_MAX_RETRIES == 45
+        assert DEFAULT_MAX_RETRIES == 15
 
     def test_default_delay(self) -> None:
         """Verify DEFAULT_DELAY constant has correct value.
