@@ -136,14 +136,13 @@ export function CreateDelegateWizard({
     resetRef.current = mutation.reset
   })
 
-  useEffect(() => {
-    mountedRef.current = true
-
-    return () => {
+  useEffect(
+    () => () => {
       mountedRef.current = false
       resetRef.current()
-    }
-  }, [])
+    },
+    []
+  )
 
   useEffect(() => {
     if (!open) dispatch({ type: 'reset' })

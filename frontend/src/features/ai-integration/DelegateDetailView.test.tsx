@@ -104,15 +104,15 @@ describe('DelegateDetailView', () => {
     mockUseAiDelegate.mockReturnValue({ data: { payload: delegate }, isLoading: false })
     render(<DelegateDetailView publicId={delegate.public_id} onBack={vi.fn()} />)
     expect(screen.getByRole('button', { name: /Update caps/ })).toBeDisabled()
-    expect(screen.getByRole('button', { name: /Deactivate/ })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /Revoke/ })).toBeDisabled()
   })
 
-  it('hides Deactivate + Update buttons when delegate is already inactive', () => {
+  it('hides Revoke + Update buttons when delegate is already inactive', () => {
     const delegate = buildDelegate({ is_active: false })
 
     mockUseAiDelegate.mockReturnValue({ data: { payload: delegate }, isLoading: false })
     render(<DelegateDetailView publicId={delegate.public_id} onBack={vi.fn()} />)
-    expect(screen.queryByRole('button', { name: /Deactivate/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Revoke/ })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Update caps/ })).toBeDisabled()
   })
 
@@ -222,14 +222,14 @@ describe('DelegateDetailView', () => {
     expect(mockUpdateMutation.mutateAsync).not.toHaveBeenCalled()
   })
 
-  it('opens RevokeConfirmDialog on Deactivate click', async () => {
+  it('opens RevokeConfirmDialog on Revoke click', async () => {
     const user = userEvent.setup()
     const delegate = buildDelegate()
 
     mockUseAiDelegate.mockReturnValue({ data: { payload: delegate }, isLoading: false })
     render(<DelegateDetailView publicId={delegate.public_id} onBack={vi.fn()} />)
-    await user.click(screen.getByRole('button', { name: /Deactivate/ }))
-    expect(screen.getByText(/Deactivate delegate "Alpha"\?/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /Revoke/ }))
+    expect(screen.getByText(/Revoke delegate "Alpha"\?/)).toBeInTheDocument()
   })
 
   it('Back to list triggers onBack', async () => {
@@ -282,10 +282,10 @@ describe('DelegateDetailView', () => {
 
     mockUseAiDelegate.mockReturnValue({ data: { payload: delegate }, isLoading: false })
     render(<DelegateDetailView publicId={delegate.public_id} onBack={vi.fn()} />)
-    await user.click(screen.getByRole('button', { name: /Deactivate/ }))
-    expect(screen.getByText(/Deactivate delegate "Alpha"\?/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /Revoke/ }))
+    expect(screen.getByText(/Revoke delegate "Alpha"\?/)).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
-    expect(screen.queryByText(/Deactivate delegate "Alpha"\?/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Revoke delegate "Alpha"\?/)).not.toBeInTheDocument()
   })
 
   it('pre-fills editor with empty strings when caps are null', async () => {

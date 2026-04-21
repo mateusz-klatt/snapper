@@ -858,10 +858,11 @@ export function useFeatureFlags(): { isEnabled: boolean; isLoading: boolean } {
     queryFn: () => apiClient.getFeatureFlags(),
     enabled: isAuthenticated,
     throwOnError: false,
+    select: data => data.payload.ai_integration_enabled === true,
   })
 
   return {
-    isEnabled: query.data?.payload.ai_integration_enabled === true,
+    isEnabled: query.data === true,
     isLoading: query.isLoading,
   }
 }

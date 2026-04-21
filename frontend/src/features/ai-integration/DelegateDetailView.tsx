@@ -105,7 +105,7 @@ export function DelegateDetailView({
           {delegate.is_active && (
             <Button variant='danger' onClick={() => setRevokeOpen(true)} disabled={readOnly}>
               <PowerOff className='w-4 h-4 mr-1 inline' />
-              Deactivate
+              Revoke
             </Button>
           )}
         </div>

@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useId } from 'react'
 import { createPortal } from 'react-dom'
 import clsx from 'clsx'
 
@@ -17,6 +17,8 @@ export const Modal: React.FC<Readonly<ModalProps>> = ({
   children,
   size = 'md',
 }) => {
+  const titleId = useId()
+
   useEffect(() => {
     const handleEsc = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -42,7 +44,12 @@ export const Modal: React.FC<Readonly<ModalProps>> = ({
     xl: 'max-w-4xl',
   }
   const modalContent = (
-    <div className='fixed inset-0 z-50 overflow-y-auto'>
+    <div
+      className='fixed inset-0 z-50 overflow-y-auto'
+      role='dialog'
+      aria-modal='true'
+      aria-labelledby={title ? titleId : undefined}
+    >
       {}
       <button
         type='button'
@@ -61,7 +68,9 @@ export const Modal: React.FC<Readonly<ModalProps>> = ({
           {}
           {title && (
             <div className='flex items-center justify-between border-b border-dark-600 p-6'>
-              <h3 className='text-lg font-semibold text-alpine-900'>{title}</h3>
+              <h3 id={titleId} className='text-lg font-semibold text-alpine-900'>
+                {title}
+              </h3>
               <button
                 onClick={onClose}
                 className='text-muted-500 transition-colors hover:text-alpine-900'
