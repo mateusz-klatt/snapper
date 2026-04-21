@@ -4,9 +4,6 @@
  * and run json-schema-to-typescript to regenerate this file.
  */
 
-/**
- * WebSocket message schemas for Snapper trading platform
- */
 export type WebSocketMessages =
   | StrictDataSchema
   | BacktestProgressData
@@ -187,154 +184,38 @@ export type Reason2 = string | null;
 export type Type27 = "venue_fee_schedule";
 export type InstrumentPublicId = string | null;
 export type MinVolume30D = number | null;
-/**
- * Message type discriminator
- */
 export type Type28 = "auth_complete";
-/**
- * Topics available for subscription
- */
 export type AvailableTopics = string[];
-/**
- * Authenticated user role
- */
 export type UserRole = "ai_delegate" | "viewer" | "operator" | "admin";
-/**
- * Session expiration (ISO 8601)
- */
 export type SessionExpiresAt = string | null;
-/**
- * Message type discriminator
- */
 export type Type29 = "auth_expired";
-/**
- * Message type discriminator
- */
 export type Type30 = "auth_failed";
-/**
- * Failure reason
- */
 export type Reason3 = string | null;
-/**
- * Message type discriminator
- */
 export type Type31 = "auth_ok";
-/**
- * Message type discriminator
- */
 export type Type32 = "auth_required";
-/**
- * Message type discriminator
- */
 export type Type33 = "authenticate";
-/**
- * Message type discriminator
- */
 export type Type34 = "error";
-/**
- * Message type discriminator
- */
 export type Type35 = "get_subscriptions";
-/**
- * Message type discriminator
- */
 export type Type36 = "ping";
-/**
- * Message type discriminator
- */
 export type Type37 = "pong";
-/**
- * Message type discriminator
- */
 export type Type38 = "reauth_ok";
-/**
- * Message type discriminator
- */
 export type Type39 = "reauth";
-/**
- * Message type discriminator
- */
 export type Type40 = "reauth_required";
-/**
- * Message type discriminator
- */
 export type Type41 = "subscribe";
-/**
- * Topics to subscribe to
- */
 export type Topics = string[];
-/**
- * Message type discriminator
- */
 export type Type42 = "subscription_success";
-/**
- * The subscription action performed
- */
 export type Action1 = "subscribe" | "unsubscribe";
-/**
- * Result status of the subscription operation
- */
 export type Status2 = "subscribed" | "unsubscribed" | "partial" | "denied" | "no_topics";
-/**
- * Topics that were successfully processed
- */
 export type Topics1 = string[];
-/**
- * Topics that were denied due to permissions
- */
 export type DeniedTopics = string[];
-/**
- * Current list of active subscriptions
- */
 export type ActiveSubscriptions = string[];
-/**
- * Optional message with additional details
- */
 export type Message = string | null;
-/**
- * Message type discriminator
- */
 export type Type43 = "subscriptions_list";
-/**
- * Current active subscriptions
- */
 export type Subscriptions = string[];
-/**
- * Topics available for subscription
- */
 export type AvailableTopics1 = string[];
-/**
- * Message type discriminator
- */
 export type Type44 = "unsubscribe";
-/**
- * Topics to unsubscribe from
- */
 export type Topics2 = string[];
 
-/**
- * Base schema for all event payload items across ZMQ, WebSocket, and REST.
- *
- * Every event payload item inherits from this base, gaining a unique UUID7
- * identifier, a type discriminator for routing/parsing, provenance fields
- * for gap detection, and a bus timestamp recording when the item was created.
- *
- * Subclasses MUST override type with a Literal default
- * (e.g. type: Literal["candle"] = "candle").
- *
- * Also provides to_json/from_json for ZMQ serialization.
- *
- * Provenance fields (session_id, sequence_id) are required at construction.
- * Producers must obtain these from a SequenceTracker before creating the
- * event. This ensures every event is complete and identifiable from birth.
- *
- * Attributes:
- *     type: Payload item type discriminator for routing and deserialization.
- *     sequence_id: Per-table monotonic counter for gap detection.
- *     public_id: Unique identifier (UUID7), generated at creation time.
- *     timestamp: Bus arrival timestamp (UTC), generated once at creation.
- *     session_id: Producer session identifier for provenance tracking.
- */
 export interface StrictDataSchema {
   type: string;
   sequence_id: number;
@@ -342,34 +223,6 @@ export interface StrictDataSchema {
   timestamp: string;
   session_id: string;
 }
-/**
- * Live backtest progress payload published to ZMQ + forwarded to WS.
- *
- * Published on topic ``backtest.{wallet_public_id}.{run_public_id}.{event}``
- * where ``event`` matches ``BacktestProgressEvent``. The bridge
- * forwards the envelope verbatim to every WS client subscribed to the
- * wallet + run prefix the topic falls under.
- *
- * Cross-field invariant (plan R18 sonnet F3): ``milestone`` is
- * non-null if-and-only-if ``event == "milestone"``. Without this
- * guard, a malformed payload ``(event="progress", milestone="25pct")``
- * would parse cleanly and the frontend milestone chip would fire on
- * every throttled progress tick. The validator closes both
- * directions.
- *
- * Attributes:
- *     type: Payload discriminator (``backtest_progress``).
- *     run_public_id: UUID7 of the backtest run.
- *     wallet_public_id: UUID7 of the owning wallet (for topic scope).
- *     event: Progress event enum.
- *     milestone: 25pct/50pct/75pct bucket (only on milestone events).
- *     candles_done: Candles processed so far.
- *     total_candles: Expected total (None when count query failed).
- *     signals_count: Cumulative signals generated.
- *     trades_count: Cumulative trades simulated.
- *     equity: Current portfolio equity.
- *     progress_pct: candles_done / total_candles (0.0 if total is None).
- */
 export interface BacktestProgressData {
   type: Type;
   sequence_id: number;
@@ -387,25 +240,6 @@ export interface BacktestProgressData {
   equity: number;
   progress_pct: number;
 }
-/**
- * OHLCV candlestick data for technical analysis.
- *
- * Represents aggregated price action over a specific timeframe.
- * Used by strategies for pattern recognition and indicator calculation.
- *
- * Attributes:
- *     instrument: Trading pair symbol (e.g., 'BTC-USD').
- *     exchange: Source exchange producing this candle data.
- *     timeframe: Candle duration (e.g., '1m', '1h', '1d').
- *     open_at: Exchange-provided candle interval start time.
- *     open: Opening price of the candle.
- *     high: Highest price during the candle.
- *     low: Lowest price during the candle.
- *     close: Closing price of the candle.
- *     volume: Total traded volume during the candle.
- *     vwap: Volume-weighted average price (optional).
- *     trades: Number of trades in the candle (optional).
- */
 export interface CandleData {
   type: Type1;
   sequence_id: number;
@@ -424,25 +258,6 @@ export interface CandleData {
   vwap?: Vwap;
   trades?: Trades;
 }
-/**
- * Candle from a stitched continuous contract series.
- *
- * Provenance is minted by the API handler (on-demand computation,
- * not a single DB row). open_at is domain time (interval start).
- *
- * Attributes:
- *     open_at: Candle interval start time.
- *     timeframe: Candle timeframe (e.g., "1h", "1d").
- *     open: Adjusted open price.
- *     high: Adjusted high price.
- *     low: Adjusted low price.
- *     close: Adjusted close price.
- *     volume: Raw volume (not adjusted).
- *     vwap: Adjusted VWAP (nullable).
- *     trades: Raw trade count (not adjusted, nullable).
- *     source_contract: Native symbol of the contract this bar came from.
- *     adjustment_factor: Cumulative adjustment applied (None for anchor).
- */
 export interface ContinuousCandleData {
   type: Type2;
   sequence_id: number;
@@ -461,21 +276,6 @@ export interface ContinuousCandleData {
   source_contract: string;
   adjustment_factor: AdjustmentFactor;
 }
-/**
- * Futures contract in a contract ladder listing.
- *
- * Provenance is minted per item (same pattern as FrontMonthData).
- *
- * Attributes:
- *     instrument_public_id: Public ID of the instrument.
- *     native_symbol: Symbol as known on the exchange.
- *     exchange: Exchange identifier.
- *     expiry_at: Contract expiry timestamp (nullable for perpetuals).
- *     instrument_kind: Product type (future, perpetual, etc.).
- *     relationship_type: How instrument relates to underlying.
- *     contract_family: Futures product root (nullable).
- *     is_front_month: True if this is the nearest non-expired contract.
- */
 export interface ContractData {
   type: Type3;
   sequence_id: number;
@@ -491,30 +291,6 @@ export interface ContractData {
   contract_family: ContractFamily;
   is_front_month: boolean;
 }
-/**
- * Order fill/execution details from an exchange.
- *
- * Represents a completed or partial fill of an order.
- * Contains all information needed for trade tracking and P&L calculation.
- *
- * Attributes:
- *     trade_id: Unique fill/trade ID from exchange (e.g., Kraken exec_id).
- *         May be None for exchanges that don't provide it.
- *     exchange_order_id: Exchange-assigned order ID (e.g., Kraken txid).
- *         May be None if exchange hasn't assigned an ID yet.
- *     client_order_id: Our generated order ID (e.g., 'signal-a1b2c3d4').
- *     instrument: Trading pair symbol.
- *     exchange: Exchange where the fill occurred.
- *     side: Trade direction ('buy' or 'sell').
- *     size: Cumulative filled quantity across all fills for the order.
- *     price: Cumulative average execution price across all fills.
- *     last_size: Incremental quantity filled by this execution event (delta).
- *     last_price: Price of the incremental fill (delta).
- *     fee: Transaction fee charged.
- *     fee_asset: Currency of the fee (e.g., 'USD', 'BTC').
- *     status: Fill status ('filled', 'partial', etc.).
- *     executed_at: Timestamp of the fill.
- */
 export interface ExecutionData {
   type: Type4;
   sequence_id: number;
@@ -540,26 +316,6 @@ export interface ExecutionData {
   user_public_id?: UserPublicId;
   liquidity_role?: string;
 }
-/**
- * Execution plan state for REST API responses.
- *
- * Attributes:
- *     plan_type: Plan type discriminator.
- *     status: Current plan lifecycle status.
- *     instrument_public_id: Target instrument UUID.
- *     exchange: Target exchange.
- *     mode: Execution mode (live/paper).
- *     side: Order side (buy/sell).
- *     total_quantity: Total intended quantity.
- *     filled_quantity: Quantity filled so far.
- *     created_at: Plan creation timestamp.
- *     created_via: Creation channel (ui/api/cli/strategy).
- *     wallet_public_id: Owning wallet UUID.
- *     operator_public_id: Operator identity (nullable).
- *     params: Plan-type-specific parameters.
- *     last_error: Most recent error message (nullable).
- *     idempotency_key: Client-provided dedup key (nullable).
- */
 export interface ExecutionPlanData {
   type: Type5;
   sequence_id: number;
@@ -587,20 +343,6 @@ export interface ExecutionPlanData {
 export interface Params {
   [k: string]: unknown;
 }
-/**
- * Front-month futures contract for an underlying.
- *
- * Provenance is minted by the API handler (projection across
- * multiple temporal tables, not a single DB row).
- *
- * Attributes:
- *     instrument_public_id: Public ID of the front-month instrument.
- *     native_symbol: Symbol as known on the exchange.
- *     exchange: Exchange identifier.
- *     expiry_at: Contract expiry timestamp (UTC).
- *     relationship_type: How instrument relates to underlying.
- *     contract_family: Futures product root (nullable).
- */
 export interface FrontMonthData {
   type: Type6;
   sequence_id: number;
@@ -614,25 +356,6 @@ export interface FrontMonthData {
   relationship_type: string;
   contract_family: ContractFamily1;
 }
-/**
- * Funding/rollover accrual event published to ZMQ for UI observability.
- *
- * Emitted by the trader's funding accrual loop after a charge is
- * persisted to the AccrualLedger and applied to the in-memory
- * TradeService and PortfolioTracker state.
- *
- * Attributes:
- *     instrument: Native symbol of the charged instrument.
- *     exchange: Exchange where the position is held.
- *     mode: Execution mode (live, paper).
- *     accrual_type: Kind of periodic charge applied.
- *     accrued_at: Boundary timestamp the charge covers.
- *     amount: Signed charge in the notional asset.
- *     amount_asset: Currency of the charge (e.g., USD).
- *     rate: Per-boundary rate used for the charge.
- *     notional: Absolute notional value of the position at charge time.
- *     position_quantity: Signed position size at charge time.
- */
 export interface FundingAccrualData {
   type: Type7;
   sequence_id: number;
@@ -650,19 +373,6 @@ export interface FundingAccrualData {
   notional: number;
   position_quantity: number;
 }
-/**
- * Component health heartbeat message.
- *
- * Published periodically by components to indicate they are alive.
- * Used for health monitoring and dead component detection.
- *
- * Attributes:
- *     component: Name of the sending component.
- *     sequence: Domain-level heartbeat generation count (not transport sequence_id).
- *     status: Current health status.
- *     lag_ms: Processing lag in milliseconds.
- *     meta: Optional metadata dictionary for extensions.
- */
 export interface HeartbeatData {
   type: Type8;
   sequence_id: number;
@@ -678,31 +388,6 @@ export interface HeartbeatData {
 export interface JsonObject {
   [k: string]: JsonValue;
 }
-/**
- * Instrument order capability matrix row for REST API responses.
- *
- * Describes which order types, features, and limits are available
- * for a given instrument on a given exchange.
- *
- * Attributes:
- *     instrument_public_id: UUID of the instrument.
- *     exchange: Exchange identifier.
- *     supported_order_types: List of supported order type strings.
- *     supports_post_only: Whether post-only orders are supported.
- *     supports_reduce_only: Whether reduce-only orders are supported.
- *     supports_amend_in_place: Whether in-place order amendment is supported.
- *     supports_native_stop_loss: Whether the exchange supports native SL.
- *     supports_native_take_profit: Whether the exchange supports native TP.
- *     supports_trailing_stop_client_side: Whether client-side trailing stop is viable.
- *     supports_market_making: Whether MM strategy is viable.
- *     supports_short_selling: Whether short selling is supported.
- *     supports_leverage: Whether leverage is supported.
- *     max_leverage_long: Maximum leverage for long positions.
- *     max_leverage_short: Maximum leverage for short positions.
- *     min_notional: Minimum notional order value.
- *     max_order_size: Maximum order size.
- *     top_of_book_quality: Book data quality hint for pegs/MM.
- */
 export interface InstrumentCapabilityData {
   type: Type9;
   sequence_id: number;
@@ -727,45 +412,6 @@ export interface InstrumentCapabilityData {
   max_order_size: MaxOrderSize;
   top_of_book_quality: string;
 }
-/**
- * Capability-aware instrument projection for REST responses.
- *
- * Joins Symbol + SymbolExchangeCapability + Instrument + InstrumentSpec
- * so the frontend can render the market-data-only badge + disable
- * submit buttons without a separate round-trip for capability lookup.
- *
- * Attributes:
- *     instrument_public_id: Public ID of the Instrument row when an
- *         active Instrument exists at the query snapshot. When the
- *         Symbol + capability rows are present but no Instrument row
- *         has been synced yet (transient state during symbol-updater
- *         runs), this field falls back to ``symbol_public_id`` so the
- *         frontend still has a stable identifier for dropdown keys.
- *         ``instrument_resolved=True`` marks the former case; callers
- *         that need to persist an order-entry reference MUST gate on
- *         that flag and re-resolve via
- *         ``Repository.get_instrument_public_id_by_symbol`` at submit
- *         time (the REST order-entry path already does this).
- *     symbol_public_id: Public ID of the Symbol row
- *         (same symbol can map to many instruments across exchanges).
- *     symbol: Native symbol string (e.g. ``MNQM6-CME``).
- *     exchange: Exchange identifier.
- *     can_trade: Value of ``SymbolExchangeCapability.can_trade`` — False
- *         means market-data only (frontend renders a "Market-data only"
- *         badge and disables order submit).
- *     can_market_data: Value of ``SymbolExchangeCapability.can_market_data``.
- *     instrument_resolved: ``True`` when ``instrument_public_id`` is a
- *         real ``Instrument.public_id``; ``False`` when it is the
- *         fallback ``Symbol.public_id``. Consumers that persist the
- *         instrument reference (order submission, cap tracking,
- *         pricing) MUST reject rows where ``instrument_resolved=False``
- *         and re-resolve via the authoritative symbol → instrument
- *         resolver, since these identifiers cross different namespaces.
- *     instrument_kind: InstrumentSpec kind label (``future``, ``spot``,
- *         etc.); ``None`` when no spec row exists.
- *     expiry_at: InstrumentSpec expiry timestamp; ``None`` for perpetuals
- *         + assets without a scheduled expiry.
- */
 export interface InstrumentDetailData {
   type: Type10;
   sequence_id: number;
@@ -782,18 +428,6 @@ export interface InstrumentDetailData {
   instrument_kind: InstrumentKind1;
   expiry_at: ExpiryAt1;
 }
-/**
- * Order cancel request from strategy to executor.
- *
- * Sent to request cancellation of an existing order.
- * Published on: orders.commands.{exchange}.{instrument}.cancel
- *
- * Attributes:
- *     exchange: Target exchange for the cancel.
- *     instrument: Trading pair symbol.
- *     exchange_order_id: Exchange-assigned order ID.
- *     client_order_id: Our generated order ID.
- */
 export interface OrderCancelData {
   type: Type11;
   sequence_id: number;
@@ -808,35 +442,6 @@ export interface OrderCancelData {
   operator_public_id?: OperatorPublicId2;
   user_public_id?: UserPublicId1;
 }
-/**
- * Current state of an order.
- *
- * Used for both ZMQ event publishing and REST API responses.
- * Published on orders.events.{exchange}.{instrument}.{status} topics.
- *
- * INVARIANT: The 'status' field MUST match the topic suffix.
- *
- * Attributes:
- *     exchange_order_id: Exchange-assigned order ID (e.g., Kraken txid).
- *         May be None before exchange ACK (e.g., for 'submitted' event).
- *     client_order_id: Our generated order ID (e.g., 'signal-a1b2c3d4').
- *     instrument: Trading pair symbol.
- *     exchange: Exchange where the order is placed.
- *     side: Order direction ('buy' or 'sell').
- *     status: Event type matching topic suffix (OrderEventType, excludes 'execution').
- *     order_type: Type of order ('market', 'limit', etc.).
- *     size: Total order size.
- *     filled_size: Amount filled so far.
- *     price: Limit price (for limit orders).
- *     average_price: Average fill price (for partial fills).
- *     reason: Optional rejection/failure reason (for 'rejected' status).
- *     time_in_force: Order time-in-force setting.
- *     error: Error message if order failed.
- *     created_at: Order creation timestamp.
- *     updated_at: Last status update timestamp.
- *     leverage: Margin leverage (None for spot, integer for margin).
- *     reduce_only: True when the order may only reduce an existing position.
- */
 export interface OrderData {
   type: Type12;
   sequence_id: number;
@@ -866,25 +471,6 @@ export interface OrderData {
   operator_public_id?: OperatorPublicId3;
   user_public_id?: UserPublicId2;
 }
-/**
- * Lightweight order event for cancel/replace confirmations.
- *
- * Used for publishing order lifecycle events that don't require full order
- * details. Preferred for cancel/replace results because those commands
- * don't carry side/order_type information.
- *
- * Published on: orders.events.{exchange}.{instrument}.{event}
- *
- * INVARIANT: The 'event' field MUST match the topic suffix.
- *
- * Attributes:
- *     exchange_order_id: Exchange-assigned order ID.
- *     client_order_id: Our generated order ID.
- *     exchange: Exchange where the order exists.
- *     instrument: Trading pair symbol.
- *     event: Event type matching topic suffix (OrderEventType).
- *     reason: Optional rejection/cancellation reason.
- */
 export interface OrderEventData {
   type: Type13;
   sequence_id: number;
@@ -901,20 +487,6 @@ export interface OrderEventData {
   operator_public_id?: OperatorPublicId4;
   user_public_id?: UserPublicId3;
 }
-/**
- * Order replace/modify request from strategy to executor.
- *
- * Sent to request modification of an existing order (price/quantity).
- * Published on: orders.commands.{exchange}.{instrument}.replace
- *
- * Attributes:
- *     exchange: Target exchange for the replace.
- *     instrument: Trading pair symbol.
- *     exchange_order_id: Exchange-assigned order ID.
- *     client_order_id: Our generated order ID.
- *     new_quantity: New order quantity (optional).
- *     new_price: New limit price (optional).
- */
 export interface OrderReplaceData {
   type: Type14;
   sequence_id: number;
@@ -931,27 +503,6 @@ export interface OrderReplaceData {
   operator_public_id?: OperatorPublicId5;
   user_public_id?: UserPublicId4;
 }
-/**
- * Order request from strategy to executor.
- *
- * Sent by strategies to request order placement on an exchange.
- * Contains all information needed for order creation.
- * Published on: orders.commands.{exchange}.{instrument}.submit
- *
- * Attributes:
- *     strategy_id: Identifier of the requesting strategy.
- *     exchange: Target exchange for the order.
- *     instrument: Trading pair symbol.
- *     mode: Execution mode ('live' or 'paper').
- *     side: Order direction ('buy' or 'sell').
- *     order_type: Type of order ('market', 'limit', etc.).
- *     quantity: Order size (must be positive).
- *     price: Limit price (required for limit orders).
- *     client_order_id: Client-side order identifier.
- *     signaled_at: Original signal timestamp (optional).
- *     leverage: Margin leverage (None for spot, integer for margin).
- *     reduce_only: True when closing an existing position.
- */
 export interface OrderRequestData {
   type: Type15;
   sequence_id: number;
@@ -975,22 +526,6 @@ export interface OrderRequestData {
   operator_public_id?: OperatorPublicId6;
   user_public_id?: UserPublicId5;
 }
-/**
- * Portfolio position snapshot.
- *
- * Represents a single position in the portfolio.
- * Used for both ZMQ event publishing and REST API responses.
- * The inherited ``timestamp`` field carries the last-update time.
- *
- * Attributes:
- *     instrument: Trading pair symbol.
- *     exchange: Exchange where the position is held.
- *     quantity: Position size (positive for long, negative for short).
- *     average_price: Average entry price.
- *     unrealized_pnl: Unrealized profit/loss.
- *     realized_pnl: Realized profit/loss.
- *     position_cycle_public_id: Public ID of the open position cycle, if any.
- */
 export interface PositionData {
   type: Type16;
   sequence_id: number;
@@ -1006,12 +541,6 @@ export interface PositionData {
   realized_pnl: number;
   position_cycle_public_id?: PositionCyclePublicId1;
 }
-/**
- * Historical data replay end marker.
- *
- * Sent at the end of a historical data replay session.
- * Strategies use this to finalize analysis and generate reports.
- */
 export interface ReplayEndData {
   type: Type17;
   sequence_id: number;
@@ -1019,15 +548,6 @@ export interface ReplayEndData {
   timestamp: string;
   session_id: string;
 }
-/**
- * Historical data replay start marker.
- *
- * Sent at the beginning of a historical data replay session.
- * Strategies use this to reset state before receiving replayed data.
- *
- * Attributes:
- *     started_at: Replay start timestamp (optional).
- */
 export interface ReplayStartData {
   type: Type18;
   sequence_id: number;
@@ -1036,18 +556,6 @@ export interface ReplayStartData {
   session_id: string;
   started_at?: StartedAt;
 }
-/**
- * Configuration setting change notification.
- *
- * Published when a setting is modified in the database.
- * Subscribers use this to invalidate caches or reload config.
- *
- * Attributes:
- *     key: Setting key that changed.
- *     value: New setting value.
- *     category: Setting category for grouping.
- *     updated_by: User who made the change (optional).
- */
 export interface SettingChangedData {
   type: Type19;
   sequence_id: number;
@@ -1059,22 +567,6 @@ export interface SettingChangedData {
   category: string;
   updated_by?: UpdatedBy;
 }
-/**
- * Trading signal generated by a strategy.
- *
- * Represents a recommendation to enter or exit a position.
- * Signals are published to the messaging bus for execution.
- *
- * Attributes:
- *     instrument: Target trading pair symbol.
- *     exchange: Target exchange for execution.
- *     side: Recommended direction ('buy' or 'sell').
- *     strength: Signal confidence from 0.0 (weak) to 1.0 (strong).
- *     reason: Human-readable explanation for the signal.
- *     price: Suggested entry/exit price (optional).
- *     strategy_name: Name of the generating strategy (optional).
- *     fired_at: Domain timestamp when the signal was generated.
- */
 export interface SignalData {
   type: Type20;
   sequence_id: number;
@@ -1093,16 +585,6 @@ export interface SignalData {
   operator_public_id?: OperatorPublicId7;
   user_public_id?: UserPublicId6;
 }
-/**
- * Symbol alias cache invalidation message.
- *
- * Published when symbol aliases are updated in the database.
- * Subscribers should clear their symbol mapper caches.
- *
- * Attributes:
- *     event: Event type (always 'symbol_aliases_updated').
- *     action: Required action (always 'clear_cache').
- */
 export interface SymbolAliasUpdateData {
   type: Type21;
   sequence_id: number;
@@ -1112,26 +594,6 @@ export interface SymbolAliasUpdateData {
   event: Event2;
   action: Action;
 }
-/**
- * Real-time price tick snapshot from an exchange.
- *
- * Represents a point-in-time snapshot of bid/ask prices and last trade.
- * Used for real-time price monitoring and spread calculations.
- *
- * Attributes:
- *     instrument: Trading pair symbol (e.g., 'BTC-USD').
- *     exchange: Source exchange producing this tick data.
- *     volume: Trading volume for the current period.
- *     bid: Best bid price (highest buy order).
- *     ask: Best ask price (lowest sell order).
- *     last: Last traded price.
- *     is_delayed: Whether the feed delivers ticks with an exchange-mandated
- *         delay (Kraken FCM / TradFi index futures = ~10 min). Strategies
- *         must gate on this flag before treating the price as current.
- *     is_extended_hours: Whether the tick occurred during extended trading
- *         hours (TradFi overnight session). ``None`` means the feed does
- *         not distinguish extended-hours ticks.
- */
 export interface TickData {
   type: Type22;
   sequence_id: number;
@@ -1147,21 +609,6 @@ export interface TickData {
   is_delayed?: boolean;
   is_extended_hours?: IsExtendedHours;
 }
-/**
- * Individual trade execution from the market.
- *
- * Represents a single trade that occurred on the exchange.
- * Used for trade tape analysis and market activity monitoring.
- *
- * Attributes:
- *     instrument: Trading pair symbol (e.g., 'BTC-USD').
- *     exchange: Source exchange where the trade occurred.
- *     executed_at: Exchange-provided trade execution timestamp.
- *     price: Execution price of the trade.
- *     volume: Size of the trade.
- *     side: Trade direction ('buy'/'sell') if available.
- *     trade_id: Exchange-provided trade identifier for deduplication.
- */
 export interface TradeData {
   type: Type23;
   sequence_id: number;
@@ -1176,19 +623,6 @@ export interface TradeData {
   side?: Side4;
   trade_id?: TradeId1;
 }
-/**
- * Underlying asset with instrument count.
- *
- * Provenance fields (public_id, session_id, sequence_id, timestamp)
- * come from the DB row via UnderlyingAssetRow.
- *
- * Attributes:
- *     ticker: Short code (e.g. 'SPX', 'GOLD').
- *     name: Canonical name (e.g. 'S&P 500').
- *     asset_class: Asset type category.
- *     sector: Optional sector classification.
- *     instrument_count: Number of instruments mapped to this underlying.
- */
 export interface UnderlyingAssetData {
   type: Type24;
   sequence_id: number;
@@ -1201,19 +635,6 @@ export interface UnderlyingAssetData {
   sector: Sector;
   instrument_count: number;
 }
-/**
- * Instrument mapped to an underlying asset.
- *
- * Provenance comes from the InstrumentUnderlyingMapping DB row.
- *
- * Attributes:
- *     instrument_public_id: Public ID of the instrument.
- *     native_symbol: Symbol as known on the exchange.
- *     exchange: Exchange identifier.
- *     asset_type: Asset type of the symbol.
- *     relationship_type: How instrument relates to underlying.
- *     contract_family: Futures product root (nullable).
- */
 export interface UnderlyingInstrumentData {
   type: Type25;
   sequence_id: number;
@@ -1227,32 +648,6 @@ export interface UnderlyingInstrumentData {
   relationship_type: string;
   contract_family: ContractFamily2;
 }
-/**
- * Admin kill-switch event for a deactivated user (plan §3.6.5).
- *
- * Published by `UserService.deactivate_user` as the SOLE publisher of
- * the `admin.user_deactivated` bus topic (plan §3.6.1 single-publisher
- * rule resolves R2-M1). Subscribers:
- *
- * - `AuthenticatedWebSocketManager` — closes active WS connections
- *   whose principal matches `user_public_id` with code 4003.
- * - `TokenManager` (cross-instance) — evicts every LRU cache entry
- *   where the cached `user_public_id` matches, eliminating the 30s
- *   multi-instance cache-staleness gap (plan §3.6.3, R4-M5+R5-M3).
- * - Audit consumers — preserves `reason` for the kill-switch trail.
- *
- * `TokenManager.revoke_user_sessions` is invoked synchronously by
- * the publisher BEFORE this event so the local instance is already
- * guaranteed-rejecting; the bus event handles cross-instance fanout
- * only.
- *
- * Attributes:
- *     user_public_id: UUID7 of the deactivated user row.
- *     deactivated_at: UTC timestamp of the kill-switch effective
- *         moment (matches the bus_time of the SCD2 close+insert).
- *     reason: Optional admin-supplied rationale, forwarded verbatim
- *         from `DeactivateUserBody.reason`.
- */
 export interface UserDeactivatedData {
   type: Type26;
   sequence_id: number;
@@ -1263,21 +658,6 @@ export interface UserDeactivatedData {
   deactivated_at: string;
   reason?: Reason2;
 }
-/**
- * Venue fee schedule row for REST API responses.
- *
- * Used by market-making evaluators to estimate profitability and
- * by the UI to display fee tiers.
- *
- * Attributes:
- *     exchange: Exchange identifier.
- *     instrument_public_id: Instrument UUID (null = exchange-wide default).
- *     fee_tier: Fee tier name.
- *     maker_bps: Maker fee in basis points (negative = rebate).
- *     taker_bps: Taker fee in basis points.
- *     min_volume_30d: Minimum 30-day volume for this tier.
- *     currency: Fee denomination currency.
- */
 export interface VenueFeeScheduleData {
   type: Type27;
   sequence_id: number;
@@ -1292,18 +672,6 @@ export interface VenueFeeScheduleData {
   min_volume_30d: MinVolume30D;
   currency: string;
 }
-/**
- * Authentication complete message with session info.
- *
- * Sent after successful authentication with available topics.
- *
- * Attributes:
- *     type: Message type discriminator ('auth_complete').
- *     available_topics: Topics available for subscription.
- *     user_role: Authenticated user's role.
- *     session_expires_at: Session expiration (ISO 8601).
- *     ws_token_exp: WebSocket token expiration (ISO 8601).
- */
 export interface WSAuthCompleteResponse {
   type: Type28;
   sequence_id: number;
@@ -1313,19 +681,8 @@ export interface WSAuthCompleteResponse {
   available_topics: AvailableTopics;
   user_role: UserRole;
   session_expires_at?: SessionExpiresAt;
-  /**
-   * WS token expiration (ISO 8601)
-   */
   ws_token_exp: string;
 }
-/**
- * Authentication expiration notification.
- *
- * Sent when token expires and grace period ends.
- *
- * Attributes:
- *     type: Message type discriminator ('auth_expired').
- */
 export interface WSAuthExpiredResponse {
   type: Type29;
   sequence_id: number;
@@ -1333,15 +690,6 @@ export interface WSAuthExpiredResponse {
   timestamp: string;
   session_id: string;
 }
-/**
- * Authentication failure message.
- *
- * Sent when authentication fails for any reason.
- *
- * Attributes:
- *     type: Message type discriminator ('auth_failed').
- *     reason: Optional failure reason code.
- */
 export interface WSAuthFailedResponse {
   type: Type30;
   sequence_id: number;
@@ -1350,92 +698,38 @@ export interface WSAuthFailedResponse {
   session_id: string;
   reason?: Reason3;
 }
-/**
- * Authentication success acknowledgment.
- *
- * Sent after successful ws_token verification.
- *
- * Attributes:
- *     type: Message type discriminator ('auth_ok').
- *     exp: Token expiration timestamp (ISO 8601).
- */
 export interface WSAuthOkResponse {
   type: Type31;
   sequence_id: number;
   public_id: string;
   timestamp: string;
   session_id: string;
-  /**
-   * Token expiration (ISO 8601)
-   */
   exp: string;
 }
-/**
- * Authentication request message.
- *
- * Sent immediately after WebSocket connection to request authentication.
- *
- * Attributes:
- *     type: Message type discriminator ('auth_required').
- *     timeout: Seconds until authentication timeout.
- */
 export interface WSAuthRequiredResponse {
   type: Type32;
   sequence_id: number;
   public_id: string;
   timestamp: string;
   session_id: string;
-  /**
-   * Authentication timeout in seconds
-   */
   timeout?: number;
 }
-/**
- * Initial authentication request from client.
- *
- * Sent in response to auth_required message.
- *
- * Attributes:
- *     type: Message type discriminator ('authenticate').
- *     ws_token: WebSocket authentication token.
- */
 export interface WSAuthenticateRequest {
   type: Type33;
   sequence_id: number;
   public_id: string;
   timestamp: string;
   session_id: string;
-  /**
-   * WebSocket authentication token
-   */
   ws_token: string;
 }
-/**
- * WebSocket error response message.
- *
- * Sent when an error occurs during message processing.
- *
- * Attributes:
- *     type: Message type discriminator ('error').
- *     message: Human-readable error description.
- */
 export interface WSErrorResponse {
   type: Type34;
   sequence_id: number;
   public_id: string;
   timestamp: string;
   session_id: string;
-  /**
-   * Error description
-   */
   message: string;
 }
-/**
- * Request current subscriptions list.
- *
- * Attributes:
- *     type: Message type discriminator ('get_subscriptions').
- */
 export interface WSGetSubscriptionsRequest {
   type: Type35;
   sequence_id: number;
@@ -1443,14 +737,6 @@ export interface WSGetSubscriptionsRequest {
   timestamp: string;
   session_id: string;
 }
-/**
- * Ping request from client.
- *
- * Used for connection health checks.
- *
- * Attributes:
- *     type: Message type discriminator ('ping').
- */
 export interface WSPingRequest {
   type: Type36;
   sequence_id: number;
@@ -1458,97 +744,38 @@ export interface WSPingRequest {
   timestamp: string;
   session_id: string;
 }
-/**
- * Pong response to ping request.
- *
- * Includes server timestamp and connection count.
- *
- * Attributes:
- *     type: Message type discriminator ('pong').
- *     timestamp: Server timestamp (ISO 8601).
- *     active_connections: Number of active WebSocket connections.
- */
 export interface WSPongResponse {
   type: Type37;
   sequence_id: number;
   public_id: string;
-  /**
-   * Server timestamp (ISO 8601)
-   */
   timestamp: string;
   session_id: string;
-  /**
-   * Number of active WebSocket connections
-   */
   active_connections: number;
 }
-/**
- * Reauthentication success acknowledgment.
- *
- * Sent after successful token refresh.
- *
- * Attributes:
- *     type: Message type discriminator ('reauth_ok').
- *     exp: New token expiration timestamp (ISO 8601).
- */
 export interface WSReauthOkResponse {
   type: Type38;
   sequence_id: number;
   public_id: string;
   timestamp: string;
   session_id: string;
-  /**
-   * New token expiration (ISO 8601)
-   */
   exp: string;
 }
-/**
- * Reauthentication request from client.
- *
- * Sent to refresh token before expiration.
- *
- * Attributes:
- *     type: Message type discriminator ('reauth').
- *     ws_token: New WebSocket authentication token.
- */
 export interface WSReauthRequest {
   type: Type39;
   sequence_id: number;
   public_id: string;
   timestamp: string;
   session_id: string;
-  /**
-   * New WebSocket authentication token
-   */
   ws_token: string;
 }
-/**
- * Reauthentication warning message.
- *
- * Sent before token expiration to prompt client to refresh.
- *
- * Attributes:
- *     type: Message type discriminator ('reauth_required').
- *     deadline: Deadline for reauthentication (ISO 8601).
- */
 export interface WSReauthRequiredResponse {
   type: Type40;
   sequence_id: number;
   public_id: string;
   timestamp: string;
   session_id: string;
-  /**
-   * Deadline for reauthentication (ISO 8601)
-   */
   deadline: string;
 }
-/**
- * Topic subscription request from client.
- *
- * Attributes:
- *     type: Message type discriminator ('subscribe').
- *     topics: List of topics to subscribe to.
- */
 export interface WSSubscribeRequest {
   type: Type41;
   sequence_id: number;
@@ -1557,20 +784,6 @@ export interface WSSubscribeRequest {
   session_id: string;
   topics: Topics;
 }
-/**
- * Subscription operation result message.
- *
- * Sent after subscribe/unsubscribe operations with detailed status.
- *
- * Attributes:
- *     type: Message type discriminator ('subscription_success').
- *     action: The action performed (subscribe/unsubscribe).
- *     status: Result status (subscribed, unsubscribed, partial, denied, no_topics).
- *     topics: Topics that were successfully processed.
- *     denied_topics: Topics denied due to permissions.
- *     active_subscriptions: Current list of active subscriptions.
- *     message: Optional additional details.
- */
 export interface WSSubscriptionSuccessResponse {
   type: Type42;
   sequence_id: number;
@@ -1584,17 +797,6 @@ export interface WSSubscriptionSuccessResponse {
   active_subscriptions: ActiveSubscriptions;
   message?: Message;
 }
-/**
- * Active subscriptions list response.
- *
- * Sent in response to get_subscriptions request.
- *
- * Attributes:
- *     type: Message type discriminator ('subscriptions_list').
- *     subscriptions: Current active subscriptions.
- *     available_topics: Topics available for subscription.
- *     total_available: Total number of available topics.
- */
 export interface WSSubscriptionsListResponse {
   type: Type43;
   sequence_id: number;
@@ -1603,18 +805,8 @@ export interface WSSubscriptionsListResponse {
   session_id: string;
   subscriptions: Subscriptions;
   available_topics: AvailableTopics1;
-  /**
-   * Total number of available topics
-   */
   total_available: number;
 }
-/**
- * Topic unsubscription request from client.
- *
- * Attributes:
- *     type: Message type discriminator ('unsubscribe').
- *     topics: List of topics to unsubscribe from.
- */
 export interface WSUnsubscribeRequest {
   type: Type44;
   sequence_id: number;

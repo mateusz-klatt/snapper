@@ -13,33 +13,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Login
-         * @description Authenticate user and create session.
-         *
-         *     Sets access_token, refresh_token, and csrf_token cookies.
-         *
-         *     Per plan §3.7: when the caller passes ``?return_tokens=true``,
-         *     the access / refresh JWTs are ALSO embedded in the response body
-         *     so MCP / CLI clients with no cookie jar can store them for
-         *     subsequent ``Authorization: Bearer`` calls. Cookies are still
-         *     set unconditionally for the browser flow.
-         *
-         *     Args:
-         *         request: FastAPI request.
-         *         response: FastAPI response for setting cookies.
-         *         login_data: Login credentials.
-         *         repo: Repository used to persist the freshly-minted token
-         *             pair in ``user_active_tokens`` (plan §3.6.2) so the
-         *             Day 3d-B DB-backed ``verify_token`` and the kill switch
-         *             can see the rows on the next request.
-         *
-         *     Returns:
-         *         LoginResponse with user profile.
-         *
-         *     Raises:
-         *         HTTPException: 401 if credentials invalid.
-         */
         post: Operations["login_api_auth_login_post"];
         delete?: never;
         options?: never;
@@ -56,80 +29,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Refresh Token
-         * @description Refresh session tokens with optional wallet-scope change.
-         *
-         *     Order (plan §2.5 R14 gpt-5.4 fix #3 — verify → parse → validate →
-         *     rotate → blacklist):
-         *
-         *     1. Verify refresh-token signature + blacklist status.
-         *     2. Parse optional body (422 on malformed UUID7 or mutually
-         *        exclusive fields — fires before any DB work via Pydantic
-         *        field + model validators on ``RefreshTokenPayload``).
-         *     3. Role-branched wallet-membership validation (404 when the
-         *        hinted wallet is outside the caller's visibility).
-         *     4. Mint new tokens from the post-validation principal, then
-         *        call :meth:`TokenManager.rotate_tokens` which revokes the
-         *        old refresh row AND inserts the new pair inside a SINGLE DB
-         *        transaction (plan §3.6.2 R1 fix). Outcome matrix:
-         *
-         *            - Rowcount == 1 (atomic success): route continues.
-         *            - Rowcount == 0 (replay / unknown JTI): transaction
-         *              rolls back and returns False → route raises 401.
-         *            - DB exception (connection reset, integrity error on
-         *              the new-pair insert): the ``async with session()``
-         *              scope rolls back; the exception propagates out of
-         *              ``rotate_tokens`` and surfaces as a 5xx so the
-         *              client can retry with the original refresh JWT —
-         *              no cookies / no successor tokens leaked.
-         *
-         *     5. Seed the in-memory JTI blacklist AFTER the rotation commits
-         *        so the grace-period window starts at the post-commit moment
-         *        (cross-instance consistency).
-         *
-         *     Response ``user.active_wallet_public_id`` is projected from
-         *     ``principal.active_wallet_public_id`` (NOT ``token_data``) so
-         *     a hinted refresh surfaces the NEW wallet, matching the
-         *     freshly-minted token claims.
-         *
-         *     Empty body preserved byte-identically for the three zero-body
-         *     callers (``stores/auth.refreshToken``, WS ticket refresh,
-         *     ``apiClient.refreshAndRetry``): ``body is None`` → empty
-         *     ``RefreshTokenPayload()`` → validation is a no-op.
-         *
-         *     Per plan §3.7: the refresh JWT is read from the
-         *     ``Authorization: Bearer`` header FIRST and the ``refresh_token``
-         *     cookie second. MCP / CLI clients without cookie jars use the
-         *     header path exclusively. Passing ``?return_tokens=true``
-         *     embeds the newly-minted access + refresh JWTs in the response
-         *     body (in addition to the existing cookie set) so the same
-         *     clients can rotate tokens without maintaining a cookie store.
-         *
-         *     Args:
-         *         request: FastAPI request with refresh_token cookie OR
-         *             ``Authorization: Bearer`` header.
-         *         response: FastAPI response for setting cookies.
-         *         body: Optional refresh-token command envelope (``None`` on
-         *             empty body).
-         *         repo: Repository for wallet-membership lookups + atomic
-         *             refresh rotation.
-         *
-         *     Returns:
-         *         RefreshResponse with new tokens, WS token, CSRF token, and
-         *         user profile carrying ``active_wallet_public_id``.
-         *
-         *     Raises:
-         *         HTTPException: 401 if refresh token invalid / missing OR
-         *             the refresh JTI has already been redeemed (replay).
-         *             404 when the wallet hint is outside caller visibility.
-         *         Exception: DB errors during ``rotate_tokens`` (integrity
-         *             violation on the new pair, connection reset, etc.)
-         *             propagate out — the atomic transaction has already
-         *             rolled back so the old refresh JWT remains usable for
-         *             retry. Surfaces to the client as a 5xx via FastAPI's
-         *             default exception handler.
-         */
         post: Operations["refresh_token_api_auth_refresh_post"];
         delete?: never;
         options?: never;
@@ -144,20 +43,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Current User Profile
-         * @description Get current user's profile.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         current_user: Authenticated principal from dependency.
-         *
-         *     Returns:
-         *         UserResponse wrapping the current user's profile.
-         *
-         *     Raises:
-         *         HTTPException: 404 if user not found in database.
-         */
         get: Operations["get_current_user_profile_api_auth_me_get"];
         put?: never;
         post?: never;
@@ -176,19 +61,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Logout
-         * @description Logout and invalidate session.
-         *
-         *     Clears all authentication cookies and invalidates tokens.
-         *
-         *     Args:
-         *         request: FastAPI request.
-         *         response: FastAPI response for clearing cookies.
-         *
-         *     Returns:
-         *         MessageResponse confirming logout.
-         */
         post: Operations["logout_api_auth_logout_post"];
         delete?: never;
         options?: never;
@@ -203,36 +75,8 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Users
-         * @description List all users in the system.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         current_user: Authenticated user with MANAGE_USERS permission.
-         *         include_inactive: Whether to include deactivated users.
-         *         as_of: Optional point-in-time query timestamp (UTC).
-         *
-         *     Returns:
-         *         List of user profiles with total count.
-         */
         get: Operations["get_users_api_auth_users_get"];
         put?: never;
-        /**
-         * Create User
-         * @description Create a new user account.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         user_data: User creation payload with username, password, etc.
-         *         current_user: Authenticated user with MANAGE_USERS permission.
-         *
-         *     Returns:
-         *         UserResponse wrapping the created user profile.
-         *
-         *     Raises:
-         *         HTTPException: If user creation fails.
-         */
         post: Operations["create_user_api_auth_users_post"];
         delete?: never;
         options?: never;
@@ -249,22 +93,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Update User
-         * @description Update an existing user's profile.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         user_id: Target user ID.
-         *         user_data: Update payload with optional email, role, is_active.
-         *         current_user: Authenticated user with MANAGE_USERS permission.
-         *
-         *     Returns:
-         *         UserResponse wrapping the updated user profile.
-         *
-         *     Raises:
-         *         HTTPException: If user not found.
-         */
         post: Operations["update_user_api_auth_users__user_id__update_post"];
         delete?: never;
         options?: never;
@@ -281,30 +109,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Deactivate User
-         * @description Deactivate a user account through the canonical kill-switch flow.
-         *
-         *     Resolves the username path segment to a `user_public_id` and
-         *     delegates to `UserService.deactivate_user`, which is the SOLE
-         *     publisher of `admin.user_deactivated` (plan §3.6.1). The service
-         *     layer also drives `TokenManager.revoke_user_sessions` synchronously
-         *     so the local instance rejects subsequent requests immediately.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         user_id: Target user identified by username in the URL path.
-         *         body: Request envelope; `body.payload.reason` is forwarded to
-         *             the bus event for audit.
-         *         current_user: Authenticated user with MANAGE_USERS permission.
-         *
-         *     Returns:
-         *         Success message.
-         *
-         *     Raises:
-         *         HTTPException: 400 when the caller targets their own account;
-         *             404 when no active user matches `user_id`.
-         */
         post: Operations["deactivate_user_api_auth_users__user_id__deactivate_post"];
         delete?: never;
         options?: never;
@@ -321,24 +125,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Change User Password
-         * @description Change a user's password.
-         *
-         *     Users can change their own password. Admins can change any password.
-         *
-         *     Args:
-         *         request: FastAPI request (used by rate limiter).
-         *         user_id: Target user ID.
-         *         password_data: Current and new password.
-         *         current_user: Authenticated user.
-         *
-         *     Returns:
-         *         Success message.
-         *
-         *     Raises:
-         *         HTTPException: If forbidden or invalid current password.
-         */
         post: Operations["change_user_password_api_auth_users__user_id__change_password_post"];
         delete?: never;
         options?: never;
@@ -355,23 +141,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Admin Reset User Password
-         * @description Admin endpoint to reset a user's password without current password.
-         *
-         *     Args:
-         *         request: FastAPI request (used by rate limiter).
-         *         user_id: Target user ID.
-         *         password_data: New password.
-         *         current_user: Admin user with MANAGE_USERS permission.
-         *         _csrf: CSRF token validation.
-         *
-         *     Returns:
-         *         Success message.
-         *
-         *     Raises:
-         *         HTTPException: If forbidden or user not found.
-         */
         post: Operations["admin_reset_user_password_api_auth_users__user_id__admin_reset_password_post"];
         delete?: never;
         options?: never;
@@ -386,29 +155,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Public Feature Flags
-         * @description Return the public feature-flag projection (plan §4 Day 4 item 1).
-         *
-         *     The frontend reads this endpoint on mount to decide whether to
-         *     render the ``/ai-integration`` navigation entry. No auth is
-         *     required because the response only surfaces on/off state of
-         *     feature gates that are already visible in the mount structure
-         *     (``/api/mcp`` returns 503 when the same flag is off, regardless
-         *     of credentials). Revealing the flag state to an unauthenticated
-         *     caller is equivalent information to trying the disabled endpoint.
-         *
-         *     Args:
-         *         request: FastAPI request — used for the REST tracker that
-         *             stamps provenance on the response envelope.
-         *
-         *     Returns:
-         *         :class:`FeatureFlagsResponse` with the current state of every
-         *         public feature flag. Currently only
-         *         ``ai_integration_enabled`` is exposed; future flags can be
-         *         added to :class:`FeatureFlagsPayload` without changing the
-         *         envelope shape.
-         */
         get: Operations["get_public_feature_flags_api_settings_features_get"];
         put?: never;
         post?: never;
@@ -425,19 +171,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get All Settings
-         * @description Retrieve all application settings, optionally filtered by category.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         user: Authenticated user with CONFIGURE_SYSTEM permission.
-         *         category: Optional category name to filter settings.
-         *         as_of: Optional point-in-time query timestamp.
-         *
-         *     Returns:
-         *         SettingListResponse wrapping all settings matching the filter criteria.
-         */
         get: Operations["get_all_settings_api_settings_get"];
         put?: never;
         post?: never;
@@ -454,18 +187,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Setting Categories
-         * @description Retrieve all distinct setting category names.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         user: Authenticated user with CONFIGURE_SYSTEM permission.
-         *         as_of: Optional point-in-time query timestamp.
-         *
-         *     Returns:
-         *         Response containing sorted list of category names.
-         */
         get: Operations["get_setting_categories_api_settings_categories_get"];
         put?: never;
         post?: never;
@@ -484,22 +205,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Set Setting
-         * @description Set a setting value by key (update or create).
-         *
-         *     Args:
-         *         http_request: FastAPI request (provides REST tracker for provenance).
-         *         key: The setting key to update or create.
-         *         body: Setting update payload with value and metadata.
-         *         user: Authenticated user with CONFIGURE_SYSTEM permission.
-         *
-         *     Returns:
-         *         SettingResponse wrapping the updated setting.
-         *
-         *     Raises:
-         *         HTTPException: If setting not found after update.
-         */
         post: Operations["set_setting_api_settings__key__set_post"];
         delete?: never;
         options?: never;
@@ -516,22 +221,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Remove Setting
-         * @description Remove a setting by key (soft-delete via bitemporal close).
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         key: The setting key to remove.
-         *         _body: Request envelope with provenance (payload is empty).
-         *         user: Authenticated user with CONFIGURE_SYSTEM permission.
-         *
-         *     Returns:
-         *         Success message confirming removal.
-         *
-         *     Raises:
-         *         HTTPException: If setting not found.
-         */
         post: Operations["remove_setting_api_settings__key__remove_post"];
         delete?: never;
         options?: never;
@@ -546,47 +235,8 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * List Delegates
-         * @description Return every SCD2-active delegate the caller owns.
-         *
-         *     Deactivated delegates drop out of the list; the frontend
-         *     list view tracks the active set.
-         */
         get: Operations["list_delegates_api_ai_delegates_get"];
         put?: never;
-        /**
-         * Create Delegate
-         * @description Atomically create a new AI delegate + mint its token pair.
-         *
-         *     The response carries the access + refresh JWT pair ONCE. The
-         *     operator must copy the tokens into their MCP client config
-         *     within the HTTP session; Snapper will not re-serve them on
-         *     the list or detail endpoints.
-         *
-         *     Args:
-         *         request: FastAPI request (for the REST tracker).
-         *         body: :class:`DelegateCreateRequest` with label + optional
-         *             caps.
-         *         owner: Authenticated operator (OPERATOR or ADMIN via
-         *             ``require_role``).
-         *         repo: Repository dep — the service opens a single
-         *             transactional scope underneath.
-         *         _csrf: CSRF validation dep. Required because create is a
-         *             cookie-flow-admitting endpoint; pure-Bearer clients
-         *             bypass via the middleware rule in plan §3.7.
-         *
-         *     Returns:
-         *         201-shaped :class:`DelegateCreatedResponse`.
-         *
-         *     Raises:
-         *         HTTPException: 422 when the caller-supplied
-         *             ``operator_public_id`` is outside the caller's claim
-         *             set OR no selection was given and the caller has no
-         *             primary operator. 409 when a unique username can't be
-         *             derived from the label (pathological input) OR the
-         *             owner already holds the per-owner delegate cap.
-         */
         post: Operations["create_delegate_api_ai_delegates_post"];
         delete?: never;
         options?: never;
@@ -601,23 +251,12 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Delegate
-         * @description Fetch a single delegate owned by the caller.
-         *
-         *     Returns 404 both for "no such delegate" AND "not owned by
-         *     you" so cross-tenant existence isn't leaked via error codes.
-         */
         get: Operations["get_delegate_api_ai_delegates__delegate_public_id__get"];
         put?: never;
         post?: never;
         delete?: never;
         options?: never;
         head?: never;
-        /**
-         * Update Delegate Caps
-         * @description SCD2 close+insert new caps for a delegate the caller owns.
-         */
         patch: Operations["update_delegate_caps_api_ai_delegates__delegate_public_id__patch"];
         trace?: never;
     };
@@ -630,19 +269,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Deactivate Delegate
-         * @description Deactivate a delegate via the shared kill-switch flow.
-         *
-         *     The heavy lifting (SCD2-close ``is_active=True`` → insert
-         *     ``is_active=False``, revoke ``user_active_tokens``, publish
-         *     ``admin.user_deactivated``) lives in
-         *     :meth:`UserService.deactivate_user` — so the same bus-event
-         *     fanout + verify-cache eviction that the admin deactivation
-         *     path uses applies here verbatim. This route only enforces
-         *     "caller owns this delegate" and converts the service's
-         *     bool return into the HTTP shape.
-         */
         post: Operations["deactivate_delegate_api_ai_delegates__delegate_public_id__deactivate_post"];
         delete?: never;
         options?: never;
@@ -657,7 +283,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /** List Available Processes */
         get: Operations["list_available_processes_api_processes_available_get"];
         put?: never;
         post?: never;
@@ -674,7 +299,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /** List Configured Processes */
         get: Operations["list_configured_processes_api_processes_configured_get"];
         put?: never;
         post?: never;
@@ -691,22 +315,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Process Summary
-         * @description Lightweight process summary returning category counts.
-         *
-         *     Returns running/total counts per category (feeds, strategies,
-         *     executors, brokers) for the overview dashboard. Requires only
-         *     READ_SYSTEM_STATUS permission so viewers can see process health.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         factory: Process launcher service.
-         *         _user: Authenticated user with READ_SYSTEM_STATUS permission.
-         *
-         *     Returns:
-         *         Process summary with counts per category.
-         */
         get: Operations["get_process_summary_api_processes_summary_get"];
         put?: never;
         post?: never;
@@ -725,27 +333,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Create Process Configuration
-         * @description Create a new process configuration from a template.
-         *
-         *     Args:
-         *         http_request: FastAPI request (provides REST tracker for provenance).
-         *         body: Process creation request with template name and config.
-         *         factory: Process launcher service.
-         *         settings: Application settings.
-         *         user: Authenticated user with MANAGE_PROCESSES permission, used
-         *             for the strategy scope check on operator/wallet.
-         *         repo: Repository used to verify active scope grants for the
-         *             requested operator/wallet pair.
-         *         _csrf: CSRF token validation.
-         *
-         *     Returns:
-         *         Process creation response with status.
-         *
-         *     Raises:
-         *         HTTPException: If template not found or name already exists.
-         */
         post: Operations["create_process_configuration_api_processes_post"];
         delete?: never;
         options?: never;
@@ -760,22 +347,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Process Schema
-         * @description Get the configuration schema for a registered process.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         name: Process name from registry.
-         *         settings: Application settings.
-         *         _user: Authenticated user with MANAGE_PROCESSES permission.
-         *
-         *     Returns:
-         *         Schema response with defaults and configuration options.
-         *
-         *     Raises:
-         *         HTTPException: If process not found in registry.
-         */
         get: Operations["get_process_schema_api_processes_schema__name__get"];
         put?: never;
         post?: never;
@@ -794,23 +365,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Start Process
-         * @description Start a previously created process configuration.
-         *
-         *     ``payload.parameters`` cannot
-         *     override ``operator_public_id`` or ``wallet_public_id`` at start
-         *     time — those fields are pinned to whatever ``_enforce_strategy_scope``
-         *     validated at create time. If the caller wants to switch wallets or
-         *     operators they must update the persisted process configuration
-         *     through the create / configure path so the scope check runs again.
-         *
-         *     For strategy templates, this handler ALSO re-runs
-         *     ``_enforce_strategy_scope`` against the persisted parameters before
-         *     starting the process, so a strategy whose grant has been revoked
-         *     between create-time and start-time fails closed instead of running
-         *     on a wallet the caller no longer controls.
-         */
         post: Operations["start_process_api_processes__name__start_post"];
         delete?: never;
         options?: never;
@@ -827,7 +381,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /** Stop Process */
         post: Operations["stop_process_api_processes__name__stop_post"];
         delete?: never;
         options?: never;
@@ -842,7 +395,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /** List Process Runs */
         get: Operations["list_process_runs_api_processes_runs_get"];
         put?: never;
         post?: never;
@@ -859,20 +411,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * List Strategies
-         * @description List configured strategy processes with lightweight status.
-         *
-         *     Returns only strategy-role processes with minimal fields
-         *     (name, running, enabled, mode) for read-only views.
-         *
-         *     Args:
-         *         request: FastAPI request containing app state.
-         *         _user: Authenticated user with READ_STRATEGIES permission.
-         *
-         *     Returns:
-         *         Strategy list with running status.
-         */
         get: Operations["list_strategies_api_strategies_get"];
         put?: never;
         post?: never;
@@ -889,57 +427,8 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * List Wallets
-         * @description List wallets accessible to the current principal.
-         *
-         *     ADMIN sees every active wallet. VIEWER and OPERATOR see only the
-         *     wallets covered by at least one active scope grant from the
-         *     principal's operator set — matching the Phase 0d wallet picker
-         *     contract that the picker is filtered server-side.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         principal: Authenticated caller — the wallet visibility scope
-         *             is derived from its role and ``operator_public_ids``.
-         *         repo: Repository dependency.
-         *
-         *     Returns:
-         *         ``WalletListResponse`` with one ``WalletInfo`` entry per
-         *         accessible active wallet, ordered deterministically by
-         *         ``(is_paper, label)``.
-         */
         get: Operations["list_wallets_api_wallets_get"];
         put?: never;
-        /**
-         * Create Wallet
-         * @description Create a new active wallet.
-         *
-         *     Guarded by the ``MANAGE_WALLET_CREDENTIALS`` permission, which
-         *     is ADMIN-only at Phase 0d launch. A wallet is the container for
-         *     credentials, so the same permission that manages credential
-         *     rotation also creates the wallets that hold them.
-         *
-         *     The active-unique index on ``(label, is_paper)`` is enforced at
-         *     the DB layer and bubbles up as HTTP 409 via
-         *     ``WalletConflictError``. Paper and live wallets may share the
-         *     same label (e.g. ``default`` + ``default`` with different
-         *     ``is_paper`` values) because they are disambiguated by the
-         *     paper flag.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         _principal: Authenticated caller holding MANAGE_WALLET_CREDENTIALS.
-         *         command: Create command envelope.
-         *         repo: Repository dependency.
-         *
-         *     Returns:
-         *         ``WalletResponse`` wrapping the newly-inserted wallet row.
-         *
-         *     Raises:
-         *         HTTPException: 409 if a wallet with the same
-         *             ``(label, is_paper)`` already exists.
-         */
         post: Operations["create_wallet_api_wallets_post"];
         delete?: never;
         options?: never;
@@ -954,24 +443,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * List Operators
-         * @description List operators accessible to the current principal.
-         *
-         *     ADMIN sees every active operator. VIEWER and OPERATOR see only
-         *     the operators in ``principal.operator_public_ids``, resolved to
-         *     ``OperatorInfo`` projections via ``list_active_operators`` so
-         *     the label / description fields are populated for the picker UI.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         principal: Authenticated caller.
-         *         repo: Repository dependency.
-         *
-         *     Returns:
-         *         ``OperatorListResponse`` ordered by ``label`` ascending.
-         *         Empty payload when the principal has no operator memberships.
-         */
         get: Operations["list_operators_api_operators_get"];
         put?: never;
         post?: never;
@@ -988,58 +459,8 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * List Scope Grants
-         * @description List active scope grants on a given wallet.
-         *
-         *     Non-ADMIN callers must have visibility into the target wallet
-         *     through their operator set; otherwise the request is rejected
-         *     with 403 so the existence of the wallet is not leaked through
-         *     an empty payload vs. a 404.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         principal: Authenticated caller.
-         *         repo: Repository dependency.
-         *         wallet_public_id: Public ID of the wallet to query.
-         *
-         *     Returns:
-         *         ``ScopeGrantListResponse`` ordered by ``timestamp`` ascending.
-         *
-         *     Raises:
-         *         HTTPException: 403 if the caller cannot see the target wallet.
-         */
         get: Operations["list_scope_grants_api_scope_grants_get"];
         put?: never;
-        /**
-         * Create Scope Grant
-         * @description Create a new active scope grant.
-         *
-         *     The XOR invariant between ``scope_kind`` and
-         *     ``underlying_public_id`` / ``instrument_public_id`` is validated
-         *     before the repository call so the client gets a 400 with a clear
-         *     message rather than opaque DB constraint errors. Overlap
-         *     conflicts (same-scope or cross-scope) bubble up as 409; the
-         *     underlying repository method holds an advisory lock on
-         *     PostgreSQL to prevent races.
-         *
-         *     ``granted_by_user_public_id`` is taken from the principal so
-         *     the client cannot spoof an audit identity.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         _principal: Authenticated caller holding MANAGE_SCOPE_GRANTS.
-         *         command: Create command envelope.
-         *         repo: Repository dependency.
-         *
-         *     Returns:
-         *         ``ScopeGrantResponse`` wrapping the newly-inserted grant row.
-         *
-         *     Raises:
-         *         HTTPException: 400 on XOR violation; 409 on overlap; 404 if
-         *             the target operator / wallet does not exist (bubbles up
-         *             via ``ScopeGrantNotFoundError`` from the repository).
-         */
         post: Operations["create_scope_grant_api_scope_grants_post"];
         delete?: never;
         options?: never;
@@ -1056,33 +477,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Handover Scope Grant
-         * @description Atomically transfer an active scope grant to a different operator.
-         *
-         *     Single transaction: SCD2-close the source grant and insert a new
-         *     grant under the destination operator carrying the same
-         *     ``scope_kind`` + public IDs. ``granted_by_user_public_id`` is
-         *     taken from the principal. Cross-scope overlap against the
-         *     destination operator's existing grants raises 409 and the
-         *     transaction is rolled back.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         _principal: Authenticated caller holding MANAGE_SCOPE_GRANTS.
-         *         command: Handover command envelope.
-         *         repo: Repository dependency.
-         *
-         *     Returns:
-         *         ``HandoverScopeGrantResponse`` wrapping both the closed
-         *         source grant and the new active grant so the client can
-         *         update caches without a second round trip.
-         *
-         *     Raises:
-         *         HTTPException: 400 on self-handover or other validation;
-         *             404 when the source grant or destination operator is
-         *             missing; 409 on cross-scope overlap.
-         */
         post: Operations["handover_scope_grant_api_scope_grants_handover_post"];
         delete?: never;
         options?: never;
@@ -1097,46 +491,8 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * List Credentials
-         * @description List active credentials on a wallet (summaries, no encrypted payload).
-         *
-         *     Args:
-         *         request: FastAPI request.
-         *         _principal: Authenticated caller holding READ_WALLET_CREDENTIALS.
-         *         wallet_public_id: Target wallet.
-         *         repo: Repository dependency.
-         *
-         *     Returns:
-         *         ``CredentialListResponse`` ordered by ``exchange``.
-         */
         get: Operations["list_credentials_api_wallets__wallet_public_id__credentials_get"];
         put?: never;
-        /**
-         * Create Credential
-         * @description Create a new wallet credential (encrypt + insert).
-         *
-         *     The plaintext ``credential_payload`` is validated against the
-         *     required-fields set for the declared ``credential_type`` and then
-         *     Fernet-encrypted before the DB insert. The ciphertext is stored;
-         *     the plaintext is discarded immediately. The response returns
-         *     ``CredentialSummary`` (no payload) so the secret never appears on
-         *     the wire response.
-         *
-         *     Args:
-         *         request: FastAPI request.
-         *         _principal: Authenticated caller holding MANAGE_WALLET_CREDENTIALS.
-         *         wallet_public_id: Target wallet (path param).
-         *         command: Create command envelope.
-         *         repo: Repository dependency.
-         *
-         *     Returns:
-         *         ``CredentialResponse`` wrapping a ``CredentialSummary``.
-         *
-         *     Raises:
-         *         HTTPException: 400 on missing payload fields; 409 if an active
-         *             credential for the same ``(wallet, exchange)`` exists.
-         */
         post: Operations["create_credential_api_wallets__wallet_public_id__credentials_post"];
         delete?: never;
         options?: never;
@@ -1153,31 +509,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Rotate Credential
-         * @description Rotate an existing credential (SCD2 close + insert).
-         *
-         *     The old credential row is closed and a new active row is inserted
-         *     with the provided encrypted payload. ``wallet_public_id`` in the
-         *     path is informational (for URL readability); the repository looks
-         *     up by ``credential_public_id`` only.
-         *
-         *     Args:
-         *         request: FastAPI request.
-         *         _principal: Authenticated caller holding MANAGE_WALLET_CREDENTIALS.
-         *         wallet_public_id: Informational path param (not used in query).
-         *         credential_public_id: Public ID of the credential to rotate.
-         *         command: Rotate command envelope.
-         *         repo: Repository dependency.
-         *
-         *     Returns:
-         *         ``CredentialResponse`` wrapping the newly-inserted credential.
-         *
-         *     Raises:
-         *         HTTPException: 400 if the rotation payload is missing required
-         *             fields for the existing credential's type; 404 if the
-         *             credential is not found or already closed.
-         */
         post: Operations["rotate_credential_api_wallets__wallet_public_id__credentials__credential_public_id__rotate_post"];
         delete?: never;
         options?: never;
@@ -1192,57 +523,8 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Orders
-         * @description Fetch orders with optional filters.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         _auth: Authenticated user with READ_ORDERS permission.
-         *         _csrf: CSRF token validation.
-         *         repo: Database repository.
-         *         symbol: Optional symbol filter.
-         *         exchange: Optional exchange filter.
-         *         limit: Maximum number of orders to return.
-         *         offset: Number of orders to skip.
-         *         as_of: Optional point-in-time query timestamp.
-         *         operator_public_id: Optional operator scope (403 if foreign).
-         *         wallet_public_id: Optional wallet scope (403 if inaccessible).
-         *
-         *     Returns:
-         *         OrderListResponse wrapping the order data.
-         */
         get: Operations["get_orders_api_orders_get"];
         put?: never;
-        /**
-         * Create Order
-         * @description Create a manual order via a manual_once execution plan.
-         *
-         *     Creates the plan with status=pending, inserts the TradeCommand,
-         *     then transitions to active. On command insert failure the plan
-         *     is marked failed. This two-phase approach prevents orphaned
-         *     active plans without commands.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         principal: Authenticated caller holding CREATE_ORDERS.
-         *         _csrf: CSRF token validation.
-         *         command: Create order command envelope.
-         *         repo: Repository dependency.
-         *         caps_enforcer: Per-user :class:`TradingCapsEnforcer`
-         *             injected by :func:`get_caps_enforcer_dependency` —
-         *             wraps the TradeCommand insert with
-         *             :meth:`guard` so the caller's §3.5 caps
-         *             (quantity, open orders, daily USD notional) are
-         *             evaluated before persistence.
-         *
-         *     Returns:
-         *         ExecutionPlanResponse wrapping the newly-created plan.
-         *
-         *     Raises:
-         *         HTTPException: 422 if params invalid, 403 if wallet not accessible,
-         *             409 if idempotency key already used.
-         */
         post: Operations["create_order_api_orders_post"];
         delete?: never;
         options?: never;
@@ -1259,30 +541,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Cancel Order
-         * @description Cancel an active execution plan.
-         *
-         *     Verifies the caller has access to the plan's wallet before
-         *     transitioning the plan to cancel_requested status and emitting a
-         *     venue-facing cancel ``TradeCommand`` for the active child order.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         plan_public_id: Plan to cancel (path parameter).
-         *         principal: Authenticated caller holding CANCEL_ORDERS.
-         *         _csrf: CSRF token validation.
-         *         command: Cancel command envelope.
-         *         repo: Repository dependency.
-         *         caps_enforcer: Per-user cap enforcer (see §3.5).
-         *
-         *     Returns:
-         *         ExecutionPlanResponse wrapping the updated plan.
-         *
-         *     Raises:
-         *         HTTPException: 404 if plan not found, 403 if wallet not accessible,
-         *             409 if already terminal.
-         */
         post: Operations["cancel_order_api_orders__plan_public_id__cancel_post"];
         delete?: never;
         options?: never;
@@ -1299,31 +557,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Cancel Order By Client Order Id
-         * @description Cancel an order by its ``client_order_id``.
-         *
-         *     Convenience endpoint for the Orders UI that only knows the child
-         *     order's ``client_order_id``. Resolves to the owning execution plan
-         *     via ``trade_commands.plan_public_id`` and then delegates to the
-         *     shared cancel flow.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         client_order_id: Child order client id to cancel.
-         *         principal: Authenticated caller holding CANCEL_ORDERS.
-         *         _csrf: CSRF token validation.
-         *         command: Cancel command envelope.
-         *         repo: Repository dependency.
-         *         caps_enforcer: Per-user cap enforcer (see §3.5).
-         *
-         *     Returns:
-         *         ExecutionPlanResponse wrapping the updated plan.
-         *
-         *     Raises:
-         *         HTTPException: 404 if no plan linked to this client_order_id,
-         *             403 if wallet not accessible, 409 if already terminal.
-         */
         post: Operations["cancel_order_by_client_order_id_api_orders_by_client_order_id__client_order_id__cancel_post"];
         delete?: never;
         options?: never;
@@ -1340,30 +573,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Create Bracket
-         * @description Create a bracket (SL/TP) execution plan on an open position cycle.
-         *
-         *     Validates the cycle is open, the caller has wallet access, the venue
-         *     supports reduce_only (Decision C1), price thresholds are on the
-         *     correct side, and at least one leg is present. The bracket is created
-         *     with status=armed and immediately starts watching ticks.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker + app state).
-         *         principal: Authenticated caller holding CREATE_ORDERS.
-         *         _csrf: CSRF token validation.
-         *         command: Bracket create command envelope.
-         *         repo: Repository dependency.
-         *
-         *     Returns:
-         *         ExecutionPlanResponse wrapping the new armed bracket plan.
-         *
-         *     Raises:
-         *         HTTPException: 422 if params invalid or capability missing,
-         *             409 if cycle not open or duplicate bracket, 403 if wallet
-         *             not accessible, 503 if executor unavailable.
-         */
         post: Operations["create_bracket_api_execution_plans_post"];
         delete?: never;
         options?: never;
@@ -1380,33 +589,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Cancel Bracket
-         * @description Cancel a bracket execution plan.
-         *
-         *     Armed brackets (no child orders yet) transition directly to cancelled.
-         *     Active brackets (child orders in-flight) transition to cancel_requested
-         *     and emit cancel TradeCommands, keeping the plan registered until venue
-         *     terminal events land.
-         *
-         *     Args:
-         *         request: FastAPI request.
-         *         plan_public_id: Bracket plan to cancel.
-         *         principal: Authenticated caller holding CANCEL_ORDERS.
-         *         _csrf: CSRF token validation.
-         *         command: Cancel command envelope.
-         *         repo: Repository dependency.
-         *         caps_enforcer: Per-user :class:`TradingCapsEnforcer` used to
-         *             gate the cancel TradeCommand insert against §3.5
-         *             caps (cancel rate limit).
-         *
-         *     Returns:
-         *         ExecutionPlanResponse wrapping the updated plan.
-         *
-         *     Raises:
-         *         HTTPException: 404 if not found, 409 if already terminal,
-         *             403 if wallet not accessible, 503 if executor unavailable.
-         */
         post: Operations["cancel_bracket_api_execution_plans__plan_public_id__cancel_post"];
         delete?: never;
         options?: never;
@@ -1421,22 +603,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Bracket
-         * @description Retrieve a single execution plan by public_id.
-         *
-         *     Args:
-         *         request: FastAPI request.
-         *         plan_public_id: Plan to retrieve.
-         *         principal: Authenticated caller holding READ_ORDERS.
-         *         repo: Repository dependency.
-         *
-         *     Returns:
-         *         ExecutionPlanResponse wrapping the plan.
-         *
-         *     Raises:
-         *         HTTPException: 404 if not found, 403 if wallet not accessible.
-         */
         get: Operations["get_bracket_api_execution_plans__plan_public_id__get"];
         put?: never;
         post?: never;
@@ -1453,25 +619,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * List Bracket Decisions
-         * @description List decision audit rows for an execution plan.
-         *
-         *     Args:
-         *         request: FastAPI request.
-         *         plan_public_id: Plan to query decisions for.
-         *         principal: Authenticated caller holding READ_ORDERS.
-         *         repo: Repository dependency.
-         *         importance: Optional importance filter (action/transition/routine).
-         *         limit: Maximum rows to return.
-         *         offset: Number of rows to skip.
-         *
-         *     Returns:
-         *         Dict with decisions list and count.
-         *
-         *     Raises:
-         *         HTTPException: 404 if plan not found, 403 if wallet not accessible.
-         */
         get: Operations["list_bracket_decisions_api_execution_plans__plan_public_id__decisions_get"];
         put?: never;
         post?: never;
@@ -1488,18 +635,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * List Open Cycles
-         * @description List all open position cycles, optionally filtered by minimum age.
-         *
-         *     Args:
-         *         principal: Authenticated admin user.
-         *         repo: Database repository.
-         *         min_age_hours: Only show cycles open longer than this (hours).
-         *
-         *     Returns:
-         *         List of open cycles with age information.
-         */
         get: Operations["list_open_cycles_api_position_cycles_open_get"];
         put?: never;
         post?: never;
@@ -1518,22 +653,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Close Orphan Cycle
-         * @description Close a specific orphaned position cycle.
-         *
-         *     Closes a single open cycle identified by its public_id. The operator
-         *     should verify via GET /open that the cycle is genuinely orphaned
-         *     (no active engine) before calling this endpoint.
-         *
-         *     Args:
-         *         principal: Authenticated admin user.
-         *         repo: Database repository.
-         *         cycle_public_id: Public ID of the cycle to close.
-         *
-         *     Returns:
-         *         Sweep result with the closed cycle ID.
-         */
         post: Operations["close_orphan_cycle_api_position_cycles_close_orphan_post"];
         delete?: never;
         options?: never;
@@ -1550,25 +669,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Sweep Orphan Cycles
-         * @description Bulk-close orphaned position cycles older than min_age_hours.
-         *
-         *     Closes all open cycles that have been open longer than the specified
-         *     threshold. Default threshold is 72 hours (3 days). The operator
-         *     should review via GET /open?min_age_hours=72 before running this.
-         *
-         *     Args:
-         *         principal: Authenticated admin user.
-         *         repo: Database repository.
-         *         min_age_hours: Minimum age in hours for a cycle to be considered orphaned.
-         *
-         *     Returns:
-         *         Sweep result with count and list of closed cycle IDs.
-         *
-         *     Raises:
-         *         HTTPException: 400 if min_age_hours < 1.
-         */
         post: Operations["sweep_orphan_cycles_api_position_cycles_sweep_orphans_post"];
         delete?: never;
         options?: never;
@@ -1585,29 +685,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Create Trailing Stop
-         * @description Create a trailing stop execution plan on an open position cycle.
-         *
-         *     Validates the cycle is open, the caller has wallet access, the venue
-         *     supports reduce_only, and trailing_pct is within bounds. The trailing
-         *     stop is created with status=armed and immediately starts watching ticks.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker + app state).
-         *         principal: Authenticated caller holding CREATE_ORDERS.
-         *         _csrf: CSRF token validation.
-         *         command: Trailing stop create command envelope.
-         *         repo: Repository dependency.
-         *
-         *     Returns:
-         *         ExecutionPlanResponse wrapping the new armed trailing stop plan.
-         *
-         *     Raises:
-         *         HTTPException: 422 if params invalid or capability missing,
-         *             409 if cycle not open or duplicate, 403 if wallet not
-         *             accessible, 503 if executor unavailable.
-         */
         post: Operations["create_trailing_stop_api_trailing_stops_post"];
         delete?: never;
         options?: never;
@@ -1624,32 +701,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Cancel Trailing Stop
-         * @description Cancel a trailing stop execution plan.
-         *
-         *     Armed trailing stops (no child orders yet) transition directly to cancelled.
-         *     Active trailing stops (child orders in-flight) transition to cancel_requested
-         *     and emit cancel TradeCommands.
-         *
-         *     Args:
-         *         request: FastAPI request.
-         *         plan_public_id: Trailing stop plan to cancel.
-         *         principal: Authenticated caller holding CANCEL_ORDERS.
-         *         _csrf: CSRF token validation.
-         *         command: Cancel command envelope.
-         *         repo: Repository dependency.
-         *         caps_enforcer: Per-user :class:`TradingCapsEnforcer` used to
-         *             gate the cancel TradeCommand insert against §3.5
-         *             caps (cancel rate limit).
-         *
-         *     Returns:
-         *         ExecutionPlanResponse wrapping the updated plan.
-         *
-         *     Raises:
-         *         HTTPException: 404 if not found, 409 if already terminal,
-         *             403 if wallet not accessible, 503 if executor unavailable.
-         */
         post: Operations["cancel_trailing_stop_api_trailing_stops__plan_public_id__cancel_post"];
         delete?: never;
         options?: never;
@@ -1664,22 +715,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Trailing Stop
-         * @description Retrieve a single trailing stop plan by public_id.
-         *
-         *     Args:
-         *         request: FastAPI request.
-         *         plan_public_id: Plan to retrieve.
-         *         principal: Authenticated caller holding READ_ORDERS.
-         *         repo: Repository dependency.
-         *
-         *     Returns:
-         *         ExecutionPlanResponse wrapping the plan.
-         *
-         *     Raises:
-         *         HTTPException: 404 if not found, 403 if wallet not accessible.
-         */
         get: Operations["get_trailing_stop_api_trailing_stops__plan_public_id__get"];
         put?: never;
         post?: never;
@@ -1696,25 +731,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * List Trailing Stop Decisions
-         * @description List decision audit rows for a trailing stop plan.
-         *
-         *     Args:
-         *         request: FastAPI request.
-         *         plan_public_id: Plan to query decisions for.
-         *         principal: Authenticated caller holding READ_ORDERS.
-         *         repo: Repository dependency.
-         *         importance: Optional importance filter (action/transition/routine).
-         *         limit: Maximum rows to return.
-         *         offset: Number of rows to skip.
-         *
-         *     Returns:
-         *         Dict with decisions list and count.
-         *
-         *     Raises:
-         *         HTTPException: 404 if plan not found, 403 if wallet not accessible.
-         */
         get: Operations["list_trailing_stop_decisions_api_trailing_stops__plan_public_id__decisions_get"];
         put?: never;
         post?: never;
@@ -1731,23 +747,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Trailing Stop By Cycle
-         * @description Get live trailing stop state for a position cycle.
-         *
-         *     Returns the active trailing stop's live evaluator state (peak_price,
-         *     current_stop) if one exists. Returns a message payload if no active
-         *     trailing stop is found.
-         *
-         *     Args:
-         *         request: FastAPI request.
-         *         cycle_public_id: Position cycle to look up.
-         *         principal: Authenticated caller holding READ_ORDERS.
-         *         repo: Repository dependency.
-         *
-         *     Returns:
-         *         TrailingStopStateResponse with live state, or message payload.
-         */
         get: Operations["get_trailing_stop_by_cycle_api_trailing_stops_by_cycle__cycle_public_id__get"];
         put?: never;
         post?: never;
@@ -1764,40 +763,8 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * List Backtests
-         * @description List backtest runs with optional filters.
-         *
-         *     Args:
-         *         request: FastAPI request.
-         *         principal: Authenticated caller with READ_BACKTESTS.
-         *         repo: Database repository.
-         *         as_of: Temporal query parameter.
-         *         strategy: Optional strategy filter.
-         *         run_status: Optional status filter.
-         *         config_hash: Phase 2c pairing-stable SHA-256 filter used by
-         *             the Step 4 auto-pair UI to fetch sibling runs.
-         *         limit: Page size.
-         *         offset: Page offset.
-         *
-         *     Returns:
-         *         List of backtest runs.
-         */
         get: Operations["list_backtests_api_backtests_get"];
         put?: never;
-        /**
-         * Create Backtest
-         * @description Create and launch a new backtest run.
-         *
-         *     Args:
-         *         request: FastAPI request.
-         *         command: Validated create command envelope.
-         *         principal: Authenticated caller with MANAGE_BACKTESTS.
-         *         repo: Database repository.
-         *
-         *     Returns:
-         *         Created backtest run response.
-         */
         post: Operations["create_backtest_api_backtests_post"];
         delete?: never;
         options?: never;
@@ -1812,48 +779,8 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * List Comparisons
-         * @description List recent comparisons for the caller's wallet.
-         *
-         *     Args:
-         *         request: FastAPI request.
-         *         principal: Authenticated caller with READ_BACKTESTS.
-         *         repo: Database repository dependency.
-         *         as_of: Temporal query parameter.
-         *         limit: Page size.
-         *         offset: Page offset.
-         *
-         *     Returns:
-         *         Wallet-scoped comparison list newest-first.
-         */
         get: Operations["list_comparisons_api_backtests_compare_get"];
         put?: never;
-        /**
-         * Create Comparison
-         * @description Create (or return idempotent existing) backtest comparison.
-         *
-         *     Plan §4.3 duplicate-submit contract: SELECT on normalised pair
-         *     first; 200 with existing if found. If the INSERT races past that
-         *     SELECT, the DB-enforced partial unique index
-         *     ``uq_bc_active_pair_per_wallet`` (migration 0010) raises
-         *     ``IntegrityError`` during the ``create_comparison`` commit;
-         *     ``SQLAlchemyRepository.session()`` rolls the failed session back
-         *     at the contextmanager boundary, then this handler opens a fresh
-         *     session via ``get_comparison_by_pair`` and returns the committed
-         *     winner with 200. Route registered BEFORE ``/{run_id}`` so
-         *     ``/compare`` is not captured as ``id="compare"`` (R14 sonnet
-         *     route-order fix).
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker).
-         *         command: Validated compare-request envelope.
-         *         principal: Authenticated caller with READ_BACKTESTS.
-         *         repo: Database repository dependency.
-         *
-         *     Returns:
-         *         Envelope wrapping the created (or existing) comparison row.
-         */
         post: Operations["create_comparison_api_backtests_compare_post"];
         delete?: never;
         options?: never;
@@ -1868,21 +795,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Comparison
-         * @description Fetch a comparison + recomputed diff from current artifact rows.
-         *
-         *     Args:
-         *         comparison_public_id: UUID7 of the comparison row.
-         *         request: FastAPI request.
-         *         principal: Authenticated caller with READ_BACKTESTS.
-         *         repo: Database repository dependency.
-         *         as_of: Temporal query parameter.
-         *
-         *     Returns:
-         *         Envelope with comparison metadata, both run projections, and
-         *         metrics/equity/trades/signals diffs recomputed on GET.
-         */
         get: Operations["get_comparison_api_backtests_compare__comparison_public_id__get"];
         put?: never;
         post?: never;
@@ -1899,20 +811,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Backtest
-         * @description Get backtest run detail with optional inline result for completed runs.
-         *
-         *     Args:
-         *         run_id: Run public ID.
-         *         request: FastAPI request.
-         *         principal: Authenticated caller.
-         *         repo: Database repository.
-         *         as_of: Temporal query parameter.
-         *
-         *     Returns:
-         *         Backtest run detail with result if completed.
-         */
         get: Operations["get_backtest_api_backtests__run_id__get"];
         put?: never;
         post?: never;
@@ -1931,20 +829,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Cancel Backtest
-         * @description Cancel a running or pending backtest run.
-         *
-         *     Args:
-         *         run_id: Run public ID.
-         *         request: FastAPI request.
-         *         command: Cancel command envelope.
-         *         principal: Authenticated caller with MANAGE_BACKTESTS.
-         *         repo: Database repository.
-         *
-         *     Returns:
-         *         Updated backtest run.
-         */
         post: Operations["cancel_backtest_api_backtests__run_id__cancel_post"];
         delete?: never;
         options?: never;
@@ -1961,19 +845,6 @@ export type Paths = {
         };
         get?: never;
         put?: never;
-        /**
-         * Rerun Backtest
-         * @description Re-run a backtest with the same configuration.
-         *
-         *     Args:
-         *         run_id: Original run public ID.
-         *         request: FastAPI request.
-         *         principal: Authenticated caller with MANAGE_BACKTESTS.
-         *         repo: Database repository.
-         *
-         *     Returns:
-         *         Newly created backtest run.
-         */
         post: Operations["rerun_backtest_api_backtests__run_id__rerun_post"];
         delete?: never;
         options?: never;
@@ -1988,22 +859,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Backtest Trades
-         * @description Get trades for a backtest run.
-         *
-         *     Args:
-         *         run_id: Run public ID.
-         *         request: FastAPI request.
-         *         principal: Authenticated caller.
-         *         repo: Database repository.
-         *         as_of: Temporal query.
-         *         limit: Page size.
-         *         offset: Page offset.
-         *
-         *     Returns:
-         *         List of backtest trades.
-         */
         get: Operations["get_backtest_trades_api_backtests__run_id__trades_get"];
         put?: never;
         post?: never;
@@ -2020,22 +875,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Backtest Signals
-         * @description Get signals for a backtest run.
-         *
-         *     Args:
-         *         run_id: Run public ID.
-         *         request: FastAPI request.
-         *         principal: Authenticated caller.
-         *         repo: Database repository.
-         *         as_of: Temporal query.
-         *         limit: Page size.
-         *         offset: Page offset.
-         *
-         *     Returns:
-         *         List of backtest signals.
-         */
         get: Operations["get_backtest_signals_api_backtests__run_id__signals_get"];
         put?: never;
         post?: never;
@@ -2052,20 +891,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Backtest Events
-         * @description Get events for a backtest run.
-         *
-         *     Args:
-         *         run_id: Run public ID.
-         *         request: FastAPI request.
-         *         principal: Authenticated caller.
-         *         repo: Database repository.
-         *         as_of: Temporal query.
-         *
-         *     Returns:
-         *         List of backtest events.
-         */
         get: Operations["get_backtest_events_api_backtests__run_id__events_get"];
         put?: never;
         post?: never;
@@ -2082,23 +907,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Backtest Equity
-         * @description Get equity-curve points for a backtest run, ordered ascending by point_time.
-         *
-         *     Args:
-         *         run_id: Run public ID.
-         *         request: FastAPI request.
-         *         principal: Authenticated caller.
-         *         repo: Database repository.
-         *         as_of: Temporal query parameter.
-         *         limit: Page size (max 20000).
-         *         after: Forward cursor — set to the last seen point_time of the
-         *             previous page to fetch the next slice (exclusive).
-         *
-         *     Returns:
-         *         List of equity points.
-         */
         get: Operations["get_backtest_equity_api_backtests__run_id__equity_get"];
         put?: never;
         post?: never;
@@ -2115,24 +923,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Candles
-         * @description Fetch historical candle data for an instrument.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         _auth: Authenticated user with READ_MARKET_DATA permission.
-         *         _csrf: CSRF token validation.
-         *         repo: Database repository.
-         *         instrument: Instrument symbol to query.
-         *         exchange: Exchange name to query.
-         *         timeframe: Candle timeframe (e.g. '1m', '1h').
-         *         limit: Maximum number of candles to return.
-         *         as_of: Optional point-in-time query timestamp.
-         *
-         *     Returns:
-         *         CandleListResponse wrapping the candle data (empty payload if no instrument found).
-         */
         get: Operations["get_candles_api_candles_get"];
         put?: never;
         post?: never;
@@ -2149,27 +939,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Signals
-         * @description Fetch trading signals with optional filters.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         _auth: Authenticated user with READ_MARKET_DATA permission.
-         *         _csrf: CSRF token validation.
-         *         repo: Database repository.
-         *         instrument: Optional instrument symbol filter.
-         *         strategy: Optional strategy name filter.
-         *         exchange: Optional exchange filter.
-         *         hours: Hours of history to return.
-         *         limit: Maximum number of signals to return.
-         *         as_of: Optional point-in-time query timestamp.
-         *         operator_public_id: Optional operator scope (403 if foreign).
-         *         wallet_public_id: Optional wallet scope (403 if inaccessible).
-         *
-         *     Returns:
-         *         SignalListResponse wrapping the signal data.
-         */
         get: Operations["get_signals_api_signals_get"];
         put?: never;
         post?: never;
@@ -2186,20 +955,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Exchanges
-         * @description Return distinct exchange names from symbol_aliases.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         _auth: Authenticated user with READ_MARKET_DATA permission.
-         *         _csrf: CSRF token validation.
-         *         repo: Database repository.
-         *         as_of: Optional point-in-time query timestamp.
-         *
-         *     Returns:
-         *         ExchangeListResponse wrapping the exchange name list.
-         */
         get: Operations["get_exchanges_api_exchanges_get"];
         put?: never;
         post?: never;
@@ -2216,21 +971,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Exchange Instruments
-         * @description Return distinct native symbols available on a given exchange.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         exchange: Exchange name to query instruments for.
-         *         _auth: Authenticated user with READ_MARKET_DATA permission.
-         *         _csrf: CSRF token validation.
-         *         repo: Database repository.
-         *         as_of: Optional point-in-time query timestamp.
-         *
-         *     Returns:
-         *         InstrumentListResponse wrapping the instrument symbol list.
-         */
         get: Operations["get_exchange_instruments_api_exchanges__exchange__instruments_get"];
         put?: never;
         post?: never;
@@ -2247,26 +987,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Exchange Instruments Detail
-         * @description Return capability-aware instrument rows for a given exchange.
-         *
-         *     Each row carries ``can_trade``, ``can_market_data``,
-         *     ``instrument_kind``, and ``expiry_at`` so the frontend can render
-         *     a "Market-data only" badge and disable order-entry for
-         *     TradFi-style instruments without a second round-trip.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         exchange: Exchange name to query instruments for.
-         *         _auth: Authenticated user with READ_MARKET_DATA permission.
-         *         _csrf: CSRF token validation.
-         *         repo: Database repository.
-         *         as_of: Optional point-in-time query timestamp.
-         *
-         *     Returns:
-         *         InstrumentDetailListResponse wrapping the instrument detail list.
-         */
         get: Operations["get_exchange_instruments_detail_api_exchanges__exchange__instruments_detail_get"];
         put?: never;
         post?: never;
@@ -2283,20 +1003,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Underlyings
-         * @description Return all underlying assets with instrument counts.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         _auth: Authenticated user with READ_MARKET_DATA permission.
-         *         _csrf: CSRF token validation.
-         *         repo: Database repository.
-         *         as_of: Optional point-in-time query timestamp.
-         *
-         *     Returns:
-         *         UnderlyingAssetListResponse wrapping underlying asset list.
-         */
         get: Operations["get_underlyings_api_underlyings_get"];
         put?: never;
         post?: never;
@@ -2313,25 +1019,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Underlying Instruments
-         * @description Return instruments mapped to an underlying asset.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         ticker: Underlying asset ticker (e.g. 'SPX', 'GOLD').
-         *         _auth: Authenticated user with READ_MARKET_DATA permission.
-         *         _csrf: CSRF token validation.
-         *         repo: Database repository.
-         *         as_of: Optional point-in-time query timestamp.
-         *         relationship_type: Optional filter (exact/derivative/proxy).
-         *
-         *     Returns:
-         *         UnderlyingInstrumentListResponse wrapping instrument list.
-         *
-         *     Raises:
-         *         HTTPException: 404 if ticker not found.
-         */
         get: Operations["get_underlying_instruments_api_underlyings__ticker__instruments_get"];
         put?: never;
         post?: never;
@@ -2348,26 +1035,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Front Month
-         * @description Return the front-month (nearest non-expired) futures contract.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         ticker: Underlying asset ticker (e.g. 'SPX', 'GOLD').
-         *         _auth: Authenticated user with READ_MARKET_DATA permission.
-         *         _csrf: CSRF token validation.
-         *         repo: Database repository.
-         *         as_of: Optional point-in-time query timestamp.
-         *         exchange: Optional exchange filter.
-         *         contract_family: Optional futures product root filter.
-         *
-         *     Returns:
-         *         FrontMonthResponse wrapping the front-month instrument.
-         *
-         *     Raises:
-         *         HTTPException: 404 if ticker not found or no active futures.
-         */
         get: Operations["get_front_month_api_underlyings__ticker__front_month_get"];
         put?: never;
         post?: never;
@@ -2384,27 +1051,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Contracts
-         * @description Return all futures contracts for an underlying asset.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         ticker: Underlying asset ticker (e.g. 'SPX', 'GOLD').
-         *         _auth: Authenticated user with READ_MARKET_DATA permission.
-         *         _csrf: CSRF token validation.
-         *         repo: Database repository.
-         *         as_of: Optional point-in-time query timestamp.
-         *         exchange: Optional exchange filter.
-         *         contract_family: Optional futures product root filter.
-         *         include_expired: Whether to include expired contracts.
-         *
-         *     Returns:
-         *         ContractListResponse wrapping the contracts list.
-         *
-         *     Raises:
-         *         HTTPException: 404 if ticker not found.
-         */
         get: Operations["get_contracts_api_underlyings__ticker__contracts_get"];
         put?: never;
         post?: never;
@@ -2421,36 +1067,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Continuous Series
-         * @description Build and return a continuous contract candle series.
-         *
-         *     Stitches historical candle data from multiple expired futures contracts
-         *     into a single continuous price series using the specified adjustment method.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         ticker: Underlying asset ticker (e.g. 'SPX', 'GOLD').
-         *         _auth: Authenticated user with READ_MARKET_DATA permission.
-         *         _csrf: CSRF token validation.
-         *         repo: Database repository.
-         *         exchange: Exchange to source contracts from.
-         *         contract_family: Product root (e.g. 'ES', 'GC', 'CL').
-         *         timeframe: Candle timeframe (e.g. '1h', '1d').
-         *         start: Series start time (inclusive).
-         *         end: Series end time (inclusive).
-         *         method: Adjustment method: 'unadjusted', 'ratio', 'panama'.
-         *         rollover_days_before: Days before expiry to roll (0 = on expiry).
-         *         as_of: Optional point-in-time query timestamp.
-         *
-         *     Returns:
-         *         Full series response, or partial response if a roll gap was too large.
-         *
-         *     Raises:
-         *         HTTPException: 400 for invalid params, 404 if underlying not found.
-         *             Returns 200 with empty payload when the underlying exists but
-         *             has no contracts / no candles in the requested range.
-         */
         get: Operations["get_continuous_series_api_underlyings__ticker__continuous_get"];
         put?: never;
         post?: never;
@@ -2467,23 +1083,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Executions
-         * @description Fetch execution (fill) records.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         _auth: Authenticated user with READ_ORDERS permission.
-         *         _csrf: CSRF token validation.
-         *         repo: Database repository.
-         *         limit: Maximum number of executions to return.
-         *         as_of: Optional point-in-time query timestamp.
-         *         operator_public_id: Optional operator scope (403 if foreign).
-         *         wallet_public_id: Optional wallet scope (403 if inaccessible).
-         *
-         *     Returns:
-         *         ExecutionListResponse wrapping the execution data.
-         */
         get: Operations["get_executions_api_executions_get"];
         put?: never;
         post?: never;
@@ -2500,22 +1099,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Positions
-         * @description Fetch current portfolio positions.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         _auth: Authenticated user with READ_POSITIONS permission.
-         *         _csrf: CSRF token validation.
-         *         repo: Database repository.
-         *         as_of: Optional point-in-time query timestamp.
-         *         operator_public_id: Optional operator scope (403 if foreign).
-         *         wallet_public_id: Optional wallet scope (403 if inaccessible).
-         *
-         *     Returns:
-         *         PositionListResponse wrapping the position data.
-         */
         get: Operations["get_positions_api_positions_get"];
         put?: never;
         post?: never;
@@ -2532,22 +1115,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Instrument Capabilities
-         * @description Fetch instrument order capability matrix.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         _auth: Authenticated user with READ_MARKET_DATA permission.
-         *         _csrf: CSRF token validation.
-         *         repo: Database repository.
-         *         exchange: Optional exchange name filter.
-         *         instrument_public_id: Optional instrument UUID filter.
-         *         as_of: Optional point-in-time query timestamp.
-         *
-         *     Returns:
-         *         InstrumentCapabilityListResponse wrapping capability rows.
-         */
         get: Operations["get_instrument_capabilities_api_instrument_capabilities_get"];
         put?: never;
         post?: never;
@@ -2564,21 +1131,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Get Venue Fee Schedules
-         * @description Fetch venue fee schedules.
-         *
-         *     Args:
-         *         request: FastAPI request (provides REST tracker for provenance).
-         *         _auth: Authenticated user with READ_MARKET_DATA permission.
-         *         _csrf: CSRF token validation.
-         *         repo: Database repository.
-         *         exchange: Optional exchange name filter.
-         *         as_of: Optional point-in-time query timestamp.
-         *
-         *     Returns:
-         *         VenueFeeScheduleListResponse wrapping fee schedule rows.
-         */
         get: Operations["get_venue_fee_schedules_api_venue_fee_schedules_get"];
         put?: never;
         post?: never;
@@ -2595,7 +1147,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /** Health Check */
         get: Operations["health_check_api_health_get"];
         put?: never;
         post?: never;
@@ -2612,7 +1163,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /** Websocket Stats */
         get: Operations["websocket_stats_api_ws_stats_get"];
         put?: never;
         post?: never;
@@ -2629,7 +1179,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /** Zmq Health Check */
         get: Operations["zmq_health_check_api_zmq_health_get"];
         put?: never;
         post?: never;
@@ -2646,16 +1195,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Rest Rate Metrics
-         * @description Return rolling REST call rates + utilization per exchange.
-         *
-         *     Reads the process-scoped ``RestCallTracker`` snapshot and
-         *     projects it into the typed envelope used by the other
-         *     monitoring endpoints. Gated behind ``READ_SYSTEM_STATUS`` so a
-         *     viewer role can see rate-limit health without having any
-         *     trading permission.
-         */
         get: Operations["rest_rate_metrics_api_metrics_rest_rate_get"];
         put?: never;
         post?: never;
@@ -2672,7 +1211,6 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        /** Get System Status */
         get: Operations["get_system_status_api_status_get"];
         put?: never;
         post?: never;
@@ -2686,2357 +1224,636 @@ export type Paths = {
 export type webhooks = Record<string, never>;
 export type Components = {
     schemas: {
-        /**
-         * AvailableProcess
-         * @description Available process template response schema.
-         *
-         *     Describes a registered process that can be instantiated.
-         *     First-class payload in AvailableProcessesResponse.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         name: Process identifier.
-         *         class_path: Full Python class path.
-         *         method: Entry point method name.
-         *         description: Human-readable description.
-         *         lifecycle: Process lifecycle type (long_running/one_shot).
-         *         role: Process role category.
-         *         tags: Categorization tags.
-         *         parameters_schema: JSON Schema for parameters.
-         */
         AvailableProcess: {
-            /**
-             * Type
-             * @default available_process
-             * @constant
-             */
             type: "available_process";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /**
-             * Name
-             * @description Process identifier
-             */
             name: string;
-            /**
-             * Class Path
-             * @description Full Python class path
-             */
             class_path: string;
-            /**
-             * Method
-             * @description Entry point method name
-             */
             method: string;
-            /**
-             * Description
-             * @description Human-readable description
-             */
             description: string;
-            /**
-             * Lifecycle
-             * @description Process lifecycle type
-             * @enum {string}
-             */
             lifecycle: "long_running" | "one_shot";
-            /**
-             * Role
-             * @description Process role category
-             * @enum {string}
-             */
             role: "core" | "task" | "strategy" | "backtest";
-            /**
-             * Tags
-             * @description Categorization tags
-             * @default []
-             */
             tags: string[];
-            /** @description JSON Schema for parameters */
             parameters_schema?: Record<string, unknown> | null;
         };
-        /**
-         * AvailableProcessesResponse
-         * @description Available processes list response schema.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         payload: List of available process templates.
-         *         count: Total number of available processes.
-         */
         AvailableProcessesResponse: {
-            /**
-             * Type
-             * @default available_processes
-             * @constant
-             */
             type: "available_processes";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["AvailableProcess"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * BacktestComparisonData
-         * @description Comparison metadata — the immutable side of a compare request.
-         */
         BacktestComparisonData: {
-            /**
-             * Type
-             * @default backtest_comparison
-             * @constant
-             */
             type: "backtest_comparison";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Wallet Public Id */
             wallet_public_id: string;
-            /** Run A Public Id */
             run_a_public_id: string;
-            /** Run B Public Id */
             run_b_public_id: string;
-            /** Config Hash */
             config_hash?: string | null;
-            /** Pairing Mode */
             pairing_mode: string;
-            /** Anchor Run Public Id */
             anchor_run_public_id?: string | null;
         };
-        /**
-         * BacktestComparisonDetailResponse
-         * @description Envelope for GET /api/backtests/compare/{comparison_public_id}.
-         */
         BacktestComparisonDetailResponse: {
-            /**
-             * Type
-             * @default backtest_comparison_detail_response
-             * @constant
-             */
             type: "backtest_comparison_detail_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["BacktestComparisonDetailResponseData"];
         };
-        /**
-         * BacktestComparisonDetailResponseData
-         * @description Response payload for GET /api/backtests/compare/{id}.
-         */
         BacktestComparisonDetailResponseData: {
-            /**
-             * Type
-             * @default backtest_comparison_detail
-             * @constant
-             */
             type: "backtest_comparison_detail";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             comparison: Components["schemas"]["BacktestComparisonData"];
             run_a: Components["schemas"]["BacktestRunData"];
             run_b: Components["schemas"]["BacktestRunData"];
-            /** Metrics Diff */
             metrics_diff: Components["schemas"]["MetricDiffRow"][];
-            /** Equity Overlay */
             equity_overlay: Components["schemas"]["EquityOverlayPoint"][];
-            /** Trades Diff */
             trades_diff: Components["schemas"]["TradeDiffEntry"][];
-            /** Signals Diff */
             signals_diff: Components["schemas"]["SignalDiffEntry"][];
         };
-        /**
-         * BacktestComparisonListResponse
-         * @description Envelope for GET /api/backtests/compare (wallet-scoped list).
-         */
         BacktestComparisonListResponse: {
-            /**
-             * Type
-             * @default backtest_comparison_list
-             * @constant
-             */
             type: "backtest_comparison_list";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["BacktestComparisonData"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * BacktestComparisonResponse
-         * @description Envelope for POST /api/backtests/compare.
-         */
         BacktestComparisonResponse: {
-            /**
-             * Type
-             * @default backtest_comparison_response
-             * @constant
-             */
             type: "backtest_comparison_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["BacktestComparisonData"];
         };
-        /**
-         * BacktestEquityPointInline
-         * @description Inline equity-curve point used by GET /api/backtests/{id}/equity.
-         *
-         *     Attributes:
-         *         point_time: Timestamp of the equity sample.
-         *         equity: Total portfolio equity.
-         *         cash: Cash component.
-         *         position_value: Open-position value.
-         *         drawdown: Drawdown fraction at this point.
-         */
         BacktestEquityPointInline: {
-            /**
-             * Point Time
-             * Format: date-time
-             */
             point_time: string;
-            /** Equity */
             equity: number;
-            /** Cash */
             cash: number;
-            /**
-             * Position Value
-             * @default 0
-             */
             position_value: number;
-            /**
-             * Drawdown
-             * @default 0
-             */
             drawdown: number;
         };
-        /**
-         * BacktestEquityPointListResponse
-         * @description Paginated response for GET /api/backtests/{id}/equity.
-         */
         BacktestEquityPointListResponse: {
-            /**
-             * Type
-             * @default backtest_equity_point_list
-             * @constant
-             */
             type: "backtest_equity_point_list";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["BacktestEquityPointInline"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * BacktestEventData
-         * @description Backtest event payload.
-         *
-         *     Attributes:
-         *         type: Payload discriminator.
-         *         run_public_id: Parent run.
-         *         event_type: Event classification.
-         *         detail: Event-specific data.
-         */
         BacktestEventData: {
-            /**
-             * Type
-             * @default backtest_event
-             * @constant
-             */
             type: "backtest_event";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Run Public Id */
             run_public_id: string;
-            /** Event Type */
             event_type: string;
-            /** Detail */
             detail?: {
                 [key: string]: unknown;
             };
         };
-        /**
-         * BacktestEventListResponse
-         * @description List of backtest events response.
-         */
         BacktestEventListResponse: {
-            /**
-             * Type
-             * @default backtest_event_list
-             * @constant
-             */
             type: "backtest_event_list";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["BacktestEventData"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * BacktestResultInline
-         * @description Inline backtest aggregate metrics embedded in BacktestRunDetailData.
-         *
-         *     Phase 2c Step 1 promotes 5 metrics from ``extra_metrics`` to typed
-         *     nullable-float columns and adds 3 new metrics. Mixed-vintage reads
-         *     are handled at the route layer via an explicit null-coalescing
-         *     fallback (typed column else ``extra_metrics.get(name)``) — see
-         *     ``backtest_routes.py`` inline projection.
-         *
-         *     Attributes:
-         *         total_trades: Total exit trades.
-         *         winning_trades: Profitable trades.
-         *         losing_trades: Losing trades.
-         *         total_pnl: Net PnL.
-         *         max_drawdown: Maximum drawdown fraction.
-         *         sharpe_ratio: Annualized Sharpe.
-         *         win_rate: Win rate fraction.
-         *         profit_factor: Gross profit divided by gross loss.
-         *         final_equity: Final equity value.
-         *         max_equity: Peak equity value.
-         *         sortino_ratio: Annualized Sortino ratio.
-         *         cagr: Compound annual growth rate.
-         *         calmar_ratio: CAGR divided by max drawdown.
-         *         expectancy: Mean per-trade PnL.
-         *         avg_trade_pnl: Average PnL per exit trade.
-         *         max_drawdown_duration_seconds: Longest peak-to-recovery duration.
-         *         exposure_ratio: Fraction of run time holding a non-zero position.
-         *         turnover_ratio: Total notional traded divided by mean equity.
-         *         extra_metrics: Any non-promoted additional computed metrics.
-         */
         BacktestResultInline: {
-            /** Total Trades */
             total_trades: number;
-            /** Winning Trades */
             winning_trades: number;
-            /** Losing Trades */
             losing_trades: number;
-            /** Total Pnl */
             total_pnl: number;
-            /** Max Drawdown */
             max_drawdown: number;
-            /** Sharpe Ratio */
             sharpe_ratio?: number | null;
-            /** Win Rate */
             win_rate?: number | null;
-            /** Profit Factor */
             profit_factor?: number | null;
-            /** Final Equity */
             final_equity: number;
-            /** Max Equity */
             max_equity: number;
-            /** Sortino Ratio */
             sortino_ratio?: number | null;
-            /** Cagr */
             cagr?: number | null;
-            /** Calmar Ratio */
             calmar_ratio?: number | null;
-            /** Expectancy */
             expectancy?: number | null;
-            /** Avg Trade Pnl */
             avg_trade_pnl?: number | null;
-            /** Max Drawdown Duration Seconds */
             max_drawdown_duration_seconds?: number | null;
-            /** Exposure Ratio */
             exposure_ratio?: number | null;
-            /** Turnover Ratio */
             turnover_ratio?: number | null;
             extra_metrics?: Record<string, unknown>;
         };
-        /**
-         * BacktestRunData
-         * @description Backtest run detail payload.
-         *
-         *     Attributes:
-         *         type: Payload discriminator.
-         *         wallet_public_id: Owning wallet.
-         *         strategy_name: Strategy class name.
-         *         strategy_params: Strategy parameters.
-         *         instrument_public_id: Target instrument.
-         *         exchange: Exchange name.
-         *         timeframe: Candle timeframe.
-         *         start_date: Period start.
-         *         end_date: Period end.
-         *         initial_cash: Starting balance.
-         *         status: Run lifecycle status.
-         *         started_at: When execution started.
-         *         completed_at: When execution finished.
-         *         error: Error message if failed.
-         */
         BacktestRunData: {
-            /**
-             * Type
-             * @default backtest_run
-             * @constant
-             */
             type: "backtest_run";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Wallet Public Id */
             wallet_public_id: string;
-            /** Strategy Name */
             strategy_name: string;
-            /** @default {} */
             strategy_params: Record<string, unknown>;
-            /** Instrument Public Id */
             instrument_public_id: string;
-            /** Exchange */
             exchange: string;
-            /** Timeframe */
             timeframe: string;
-            /**
-             * Start Date
-             * Format: date-time
-             */
             start_date: string;
-            /**
-             * End Date
-             * Format: date-time
-             */
             end_date: string;
-            /** Initial Cash */
             initial_cash: number;
-            /** Status */
             status: string;
-            /**
-             * Execution Mode
-             * @default direct_db
-             */
             execution_mode: string;
-            /**
-             * Fill Model
-             * @default market
-             */
             fill_model: string;
-            /**
-             * Slippage Bps
-             * @default 0
-             */
             slippage_bps: number;
-            /**
-             * Commission Bps
-             * @default 0
-             */
             commission_bps: number;
-            /** Config Hash */
             config_hash?: string | null;
-            /** Started At */
             started_at?: string | null;
-            /** Completed At */
             completed_at?: string | null;
-            /** Error */
             error?: string | null;
         };
-        /**
-         * BacktestRunDetailData
-         * @description Detail-only payload — adds inline result for completed runs.
-         *
-         *     Used exclusively by GET /api/backtests/{id}. Other endpoints
-         *     (create/list/cancel/rerun) keep emitting the lighter BacktestRunData
-         *     so they do not leak a permanent ``result: null`` field.
-         *
-         *     Attributes:
-         *         result: Inline aggregate metrics if status == 'completed', else None.
-         */
         BacktestRunDetailData: {
-            /**
-             * Type
-             * @default backtest_run
-             * @constant
-             */
             type: "backtest_run";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Wallet Public Id */
             wallet_public_id: string;
-            /** Strategy Name */
             strategy_name: string;
-            /** @default {} */
             strategy_params: Record<string, unknown>;
-            /** Instrument Public Id */
             instrument_public_id: string;
-            /** Exchange */
             exchange: string;
-            /** Timeframe */
             timeframe: string;
-            /**
-             * Start Date
-             * Format: date-time
-             */
             start_date: string;
-            /**
-             * End Date
-             * Format: date-time
-             */
             end_date: string;
-            /** Initial Cash */
             initial_cash: number;
-            /** Status */
             status: string;
-            /**
-             * Execution Mode
-             * @default direct_db
-             */
             execution_mode: string;
-            /**
-             * Fill Model
-             * @default market
-             */
             fill_model: string;
-            /**
-             * Slippage Bps
-             * @default 0
-             */
             slippage_bps: number;
-            /**
-             * Commission Bps
-             * @default 0
-             */
             commission_bps: number;
-            /** Config Hash */
             config_hash?: string | null;
-            /** Started At */
             started_at?: string | null;
-            /** Completed At */
             completed_at?: string | null;
-            /** Error */
             error?: string | null;
             result?: Components["schemas"]["BacktestResultInline"] | null;
         };
-        /**
-         * BacktestRunDetailResponse
-         * @description Detail backtest run response — used by GET /api/backtests/{id}.
-         */
         BacktestRunDetailResponse: {
-            /**
-             * Type
-             * @default backtest_run_detail_response
-             * @constant
-             */
             type: "backtest_run_detail_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["BacktestRunDetailData"];
         };
-        /**
-         * BacktestRunListResponse
-         * @description List of backtest runs response.
-         */
         BacktestRunListResponse: {
-            /**
-             * Type
-             * @default backtest_run_list
-             * @constant
-             */
             type: "backtest_run_list";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["BacktestRunData"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * BacktestRunResponse
-         * @description Single backtest run response (lightweight; no inline result).
-         */
         BacktestRunResponse: {
-            /**
-             * Type
-             * @default backtest_run_response
-             * @constant
-             */
             type: "backtest_run_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["BacktestRunData"];
         };
-        /**
-         * BacktestSignalData
-         * @description Backtest signal payload.
-         *
-         *     Attributes:
-         *         type: Payload discriminator.
-         *         run_public_id: Parent run.
-         *         signal_time: When signal was generated.
-         *         signal_type: Signal direction.
-         *         instrument: Target instrument.
-         *         price: Price at signal time.
-         *         indicators: Strategy indicator values.
-         */
         BacktestSignalData: {
-            /**
-             * Type
-             * @default backtest_signal
-             * @constant
-             */
             type: "backtest_signal";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Run Public Id */
             run_public_id: string;
-            /**
-             * Signal Time
-             * Format: date-time
-             */
             signal_time: string;
-            /** Signal Type */
             signal_type: string;
-            /** Instrument */
             instrument: string;
-            /** Price */
             price: number;
-            /** Indicators */
             indicators?: {
                 [key: string]: unknown;
             };
         };
-        /**
-         * BacktestSignalListResponse
-         * @description List of backtest signals response.
-         */
         BacktestSignalListResponse: {
-            /**
-             * Type
-             * @default backtest_signal_list
-             * @constant
-             */
             type: "backtest_signal_list";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["BacktestSignalData"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * BacktestTradeData
-         * @description Backtest trade payload.
-         *
-         *     Attributes:
-         *         type: Payload discriminator.
-         *         run_public_id: Parent run.
-         *         executed_at: Trade execution time.
-         *         instrument: Instrument name.
-         *         side: Trade direction.
-         *         quantity: Trade size.
-         *         price: Fill price.
-         *         fee: Commission fee.
-         *         pnl: Per-fill PnL (None for entries).
-         *         position_after: Portfolio position after fill.
-         *         signal_public_id: ``public_id`` of the originating ``backtest_signal``;
-         *             None for synthetic fills with no triggering signal. Surfaces the
-         *             FK-style linkage required by Phase 2b parity tests.
-         */
         BacktestTradeData: {
-            /**
-             * Type
-             * @default backtest_trade
-             * @constant
-             */
             type: "backtest_trade";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Run Public Id */
             run_public_id: string;
-            /**
-             * Executed At
-             * Format: date-time
-             */
             executed_at: string;
-            /** Instrument */
             instrument: string;
-            /** Side */
             side: string;
-            /** Quantity */
             quantity: number;
-            /** Price */
             price: number;
-            /** Fee */
             fee: number;
-            /** Pnl */
             pnl?: number | null;
-            /**
-             * Position After
-             * @default 0
-             */
             position_after: number;
-            /** Signal Public Id */
             signal_public_id?: string | null;
         };
-        /**
-         * BacktestTradeListResponse
-         * @description List of backtest trades response.
-         */
         BacktestTradeListResponse: {
-            /**
-             * Type
-             * @default backtest_trade_list
-             * @constant
-             */
             type: "backtest_trade_list";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["BacktestTradeData"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * ConfiguredProcess
-         * @description Configured process response schema.
-         *
-         *     Describes a process configuration with its current runtime state.
-         *     First-class payload in ConfiguredProcessesResponse.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         name: Unique process name.
-         *         enabled: Whether process autostarts on boot.
-         *         running: Whether process is currently running.
-         *         mode: Execution mode (thread/process).
-         *         class_path: Full Python class path.
-         *         method: Entry point method name.
-         *         parameters: Constructor parameters dict.
-         *         note: Optional note.
-         *         lifecycle: Process lifecycle type.
-         *         role: Process role category.
-         *         tags: Categorization tags.
-         *         parameters_schema: JSON Schema for parameters.
-         *         is_one_shot: Whether process is one-shot task.
-         *         active_public_id: Active public ID if running.
-         */
         ConfiguredProcess: {
-            /**
-             * Type
-             * @default configured_process
-             * @constant
-             */
             type: "configured_process";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /**
-             * Name
-             * @description Unique process name
-             */
             name: string;
-            /**
-             * Enabled
-             * @description Whether process autostarts on boot
-             */
             enabled: boolean;
-            /**
-             * Running
-             * @description Whether process is currently running
-             */
             running: boolean;
-            /**
-             * Mode
-             * @description Execution mode (thread/process)
-             * @enum {string}
-             */
             mode: "thread" | "process";
-            /**
-             * Class Path
-             * @description Full Python class path
-             */
             class_path: string;
-            /**
-             * Method
-             * @description Entry point method name
-             */
             method: string;
-            /**
-             * @description Constructor parameters
-             * @default {}
-             */
             parameters: Record<string, unknown>;
-            /**
-             * Note
-             * @description Optional note
-             */
             note?: string | null;
-            /**
-             * Lifecycle
-             * @description Process lifecycle type
-             * @enum {string}
-             */
             lifecycle: "long_running" | "one_shot";
-            /**
-             * Role
-             * @description Process role category
-             * @enum {string}
-             */
             role: "core" | "task" | "strategy" | "backtest";
-            /**
-             * Tags
-             * @description Categorization tags
-             * @default []
-             */
             tags: string[];
-            /** @description JSON Schema for parameters */
             parameters_schema?: Record<string, unknown> | null;
-            /**
-             * Is One Shot
-             * @description Whether process is one-shot task
-             */
             is_one_shot: boolean;
-            /**
-             * Active Public Id
-             * @description Active public ID if running
-             */
             active_public_id?: string | null;
         };
-        /**
-         * ConfiguredProcessesResponse
-         * @description Configured processes list response schema.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         payload: List of configured processes.
-         *         count: Total number of configured processes.
-         */
         ConfiguredProcessesResponse: {
-            /**
-             * Type
-             * @default configured_processes
-             * @constant
-             */
             type: "configured_processes";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["ConfiguredProcess"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * ConnectionStats
-         * @description Connection-level statistics from the ZMQ-WebSocket bridge.
-         *
-         *     Attributes:
-         *         active_connections: Number of active WebSocket connections.
-         *         zmq_subscribers: Number of active ZMQ subscriber sockets.
-         *         subscriber_tasks: Number of running subscriber asyncio tasks.
-         *         active_topics: Number of topics with at least one subscriber.
-         *         active_clients: Number of unique connected clients.
-         */
         ConnectionStats: {
-            /**
-             * Active Connections
-             * @description Active WebSocket connections
-             * @default 0
-             */
             active_connections: number;
-            /**
-             * Zmq Subscribers
-             * @description Active ZMQ subscriber sockets
-             * @default 0
-             */
             zmq_subscribers: number;
-            /**
-             * Subscriber Tasks
-             * @description Running subscriber tasks
-             * @default 0
-             */
             subscriber_tasks: number;
-            /**
-             * Active Topics
-             * @description Topics with subscribers
-             * @default 0
-             */
             active_topics: number;
-            /**
-             * Active Clients
-             * @description Unique connected clients
-             * @default 0
-             */
             active_clients: number;
         };
-        /**
-         * ContinuousCandleData
-         * @description Candle from a stitched continuous contract series.
-         *
-         *     Provenance is minted by the API handler (on-demand computation,
-         *     not a single DB row). open_at is domain time (interval start).
-         *
-         *     Attributes:
-         *         open_at: Candle interval start time.
-         *         timeframe: Candle timeframe (e.g., "1h", "1d").
-         *         open: Adjusted open price.
-         *         high: Adjusted high price.
-         *         low: Adjusted low price.
-         *         close: Adjusted close price.
-         *         volume: Raw volume (not adjusted).
-         *         vwap: Adjusted VWAP (nullable).
-         *         trades: Raw trade count (not adjusted, nullable).
-         *         source_contract: Native symbol of the contract this bar came from.
-         *         adjustment_factor: Cumulative adjustment applied (None for anchor).
-         */
         ContinuousCandleData: {
-            /**
-             * Type
-             * @default continuous_candle
-             * @constant
-             */
             type: "continuous_candle";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /**
-             * Open At
-             * Format: date-time
-             */
             open_at: string;
-            /** Timeframe */
             timeframe: string;
-            /** Open */
             open: number;
-            /** High */
             high: number;
-            /** Low */
             low: number;
-            /** Close */
             close: number;
-            /** Volume */
             volume: number;
-            /** Vwap */
             vwap: number | null;
-            /** Trades */
             trades: number | null;
-            /** Source Contract */
             source_contract: string;
-            /** Adjustment Factor */
             adjustment_factor: number | null;
         };
-        /**
-         * ContinuousCandleListResponse
-         * @description Continuous contract candle list response wrapper.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         payload: List of stitched continuous candle items.
-         *         count: Total number of candles in the response.
-         */
         ContinuousCandleListResponse: {
-            /**
-             * Type
-             * @default continuous_candle_list
-             * @constant
-             */
             type: "continuous_candle_list";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["ContinuousCandleData"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * ContinuousSeriesPartialResponse
-         * @description Partial continuous series response when a roll gap is too large.
-         *
-         *     Returned with HTTP 200 so consumers receive usable data up to the
-         *     failure point. The failed_roll field signals truncation.
-         */
         ContinuousSeriesPartialResponse: {
-            /**
-             * Type
-             * @default continuous_partial
-             * @constant
-             */
             type: "continuous_partial";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["ContinuousCandleData"][];
-            /** Count */
             count: number;
             failed_roll: Components["schemas"]["RollPointDetail"];
-            /** Message */
             message: string;
         };
-        /**
-         * ContractData
-         * @description Futures contract in a contract ladder listing.
-         *
-         *     Provenance is minted per item (same pattern as FrontMonthData).
-         *
-         *     Attributes:
-         *         instrument_public_id: Public ID of the instrument.
-         *         native_symbol: Symbol as known on the exchange.
-         *         exchange: Exchange identifier.
-         *         expiry_at: Contract expiry timestamp (nullable for perpetuals).
-         *         instrument_kind: Product type (future, perpetual, etc.).
-         *         relationship_type: How instrument relates to underlying.
-         *         contract_family: Futures product root (nullable).
-         *         is_front_month: True if this is the nearest non-expired contract.
-         */
         ContractData: {
-            /**
-             * Type
-             * @default contract
-             * @constant
-             */
             type: "contract";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Instrument Public Id */
             instrument_public_id: string;
-            /** Native Symbol */
             native_symbol: string;
-            /** Exchange */
             exchange: string;
-            /** Expiry At */
             expiry_at: string | null;
-            /** Instrument Kind */
             instrument_kind: string | null;
-            /** Relationship Type */
             relationship_type: string;
-            /** Contract Family */
             contract_family: string | null;
-            /** Is Front Month */
             is_front_month: boolean;
         };
-        /**
-         * ContractListResponse
-         * @description Contract ladder list response wrapper.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         payload: List of contract data items.
-         *         count: Total number of contracts in the response.
-         */
         ContractListResponse: {
-            /**
-             * Type
-             * @default contract_list
-             * @constant
-             */
             type: "contract_list";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["ContractData"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * CredentialListResponse
-         * @description List wrapper for ``GET /api/wallets/{id}/credentials``.
-         */
         CredentialListResponse: {
-            /**
-             * Type
-             * @default credential_list_response
-             * @constant
-             */
             type: "credential_list_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["CredentialSummary"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * CredentialResponse
-         * @description Singleton wrapper for create / rotate responses.
-         */
         CredentialResponse: {
-            /**
-             * Type
-             * @default credential_response
-             * @constant
-             */
             type: "credential_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["CredentialSummary"];
         };
-        /**
-         * CredentialSummary
-         * @description Read projection of a wallet credential WITHOUT the encrypted payload.
-         *
-         *     The ``encrypted_payload`` column is intentionally excluded so the
-         *     API never surfaces ciphertext. The frontend credential tab shows
-         *     label / exchange / credential_type and offers a "Rotate" action;
-         *     the actual secret never leaves the server.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         wallet_public_id: Owning wallet.
-         *         exchange: Exchange identifier (lowercase).
-         *         credential_type: One of ``api_key_secret`` / ``rsa_pem`` /
-         *             ``oauth`` / ``paper``.
-         *         label: Human-readable description (null when unset).
-         */
         CredentialSummary: {
-            /**
-             * Type
-             * @default credential_summary
-             * @constant
-             */
             type: "credential_summary";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Wallet Public Id */
             wallet_public_id: string;
-            /** Exchange */
             exchange: string;
-            /** Credential Type */
             credential_type: string;
-            /** Label */
             label?: string | null;
         };
-        /**
-         * DelegateCapsBody
-         * @description Per-delegate trading safety caps.
-         *
-         *     Every field is optional; a ``None`` cap means "inherit the
-         *     Snapper-wide default" per the plan §3.5.3 fallback policy.
-         *     The underlying :class:`~snapper.data.models.UserTradingCaps`
-         *     row is always written at create time (even for all-``None``
-         *     caps) so the Day 1c ``TradingCapsEnforcer.guard`` surface has
-         *     a row to read + cap history is SCD2-preserved.
-         *
-         *     Attributes:
-         *         max_order_quantity_per_instrument: JSON ``{instrument: qty}``
-         *             OR a scalar — passed through unchanged to the
-         *             enforcer.
-         *         max_open_orders: in-flight command cap.
-         *         max_daily_notional_usd: rolling 24h USD-notional cap.
-         *         max_cancels_per_minute: sliding-window cancel cap.
-         */
         DelegateCapsBody: {
-            /** @description JSON dict {instrument_public_id: qty} or null for unbounded */
             max_order_quantity_per_instrument?: Record<string, unknown> | null;
-            /**
-             * Max Open Orders
-             * @description In-flight command cap (null = unbounded)
-             */
             max_open_orders?: number | null;
-            /**
-             * Max Daily Notional Usd
-             * @description Rolling 24h USD notional cap (null = unbounded)
-             */
             max_daily_notional_usd?: number | null;
-            /**
-             * Max Cancels Per Minute
-             * @description Sliding 60s cancel cap (null = unbounded)
-             */
             max_cancels_per_minute?: number | null;
         };
-        /**
-         * DelegateCreatedPayload
-         * @description Create-delegate response body — the ONLY place tokens surface.
-         *
-         *     Returned from ``POST /api/ai-delegates``. The operator must
-         *     copy the tokens out of the response within their session; the
-         *     list + detail endpoints deliberately do not re-serve them.
-         *
-         *     Attributes:
-         *         delegate: The newly-minted :class:`DelegateRead`
-         *             projection.
-         *         access_token: Freshly-minted JWT — operator copies into
-         *             the MCP client config.
-         *         refresh_token: Freshly-minted refresh JWT.
-         *         expires_in: Access-token lifetime in seconds (mirrors the
-         *             standard :class:`~snapper.auth.schemas.tokens.TokenPair`
-         *             shape so CLI clients that also handle login responses
-         *             can share deserialisation code).
-         */
         DelegateCreatedPayload: {
             delegate: Components["schemas"]["DelegateRead"];
-            /** Access Token */
             access_token: string;
-            /** Refresh Token */
             refresh_token: string;
-            /** Expires In */
             expires_in: number;
         };
-        /**
-         * DelegateCreatedResponse
-         * @description POST-create response envelope — one-shot token surface.
-         */
         DelegateCreatedResponse: {
-            /**
-             * Type
-             * @default delegate_created_response
-             * @constant
-             */
             type: "delegate_created_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["DelegateCreatedPayload"];
         };
-        /**
-         * DelegateListResponse
-         * @description List-delegates response envelope.
-         */
         DelegateListResponse: {
-            /**
-             * Type
-             * @default delegate_list
-             * @constant
-             */
             type: "delegate_list";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["DelegateRead"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * DelegateRead
-         * @description Public projection of a delegate used by list/detail reads.
-         *
-         *     The ``access_token`` + ``refresh_token`` fields are NEVER set
-         *     on list/detail responses — only the POST-create response
-         *     includes them (once, in :class:`DelegateCreatedPayload`).
-         *     Once issued, the tokens live only in the client (env var /
-         *     keychain); Snapper never re-serves them.
-         *
-         *     Attributes:
-         *         public_id: Delegate user's UUID7 public identifier.
-         *         username: Delegate's username (``ai-<label>`` shape).
-         *         label: Human-readable label the operator supplied.
-         *         created_by_user_public_id: Owner operator's public_id.
-         *         created_at: Bus-time when the delegate was minted.
-         *         is_active: Flipped to ``False`` on
-         *             ``POST /api/ai-delegates/{id}/deactivate``.
-         *         caps: Current trading caps (always populated).
-         */
         DelegateRead: {
-            /** Public Id */
             public_id: string;
-            /** Username */
             username: string;
-            /** Label */
             label: string;
-            /** Created By User Public Id */
             created_by_user_public_id: string;
-            /**
-             * Created At
-             * Format: date-time
-             */
             created_at: string;
-            /** Is Active */
             is_active: boolean;
             caps: Components["schemas"]["DelegateCapsBody"];
         };
-        /**
-         * DelegateResponse
-         * @description Single delegate read response envelope.
-         */
         DelegateResponse: {
-            /**
-             * Type
-             * @default delegate_response
-             * @constant
-             */
             type: "delegate_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["DelegateRead"];
         };
-        /**
-         * EquityOverlayPoint
-         * @description Aligned equity sample across both runs (one-sided legs nullable).
-         */
         EquityOverlayPoint: {
-            /**
-             * Point Time
-             * Format: date-time
-             */
             point_time: string;
-            /** Equity A */
             equity_a?: number | null;
-            /** Equity B */
             equity_b?: number | null;
         };
-        /**
-         * ExchangeListResponse
-         * @description Exchange list response wrapper.
-         *
-         *     Wraps a list of exchange name strings with a count.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         payload: List of exchange name strings.
-         *         count: Total number of exchanges in the response.
-         */
         ExchangeListResponse: {
-            /**
-             * Type
-             * @default exchange_list
-             * @constant
-             */
             type: "exchange_list";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: string[];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * ExecutionData
-         * @description Order fill/execution details from an exchange.
-         *
-         *     Represents a completed or partial fill of an order.
-         *     Contains all information needed for trade tracking and P&L calculation.
-         *
-         *     Attributes:
-         *         trade_id: Unique fill/trade ID from exchange (e.g., Kraken exec_id).
-         *             May be None for exchanges that don't provide it.
-         *         exchange_order_id: Exchange-assigned order ID (e.g., Kraken txid).
-         *             May be None if exchange hasn't assigned an ID yet.
-         *         client_order_id: Our generated order ID (e.g., 'signal-a1b2c3d4').
-         *         instrument: Trading pair symbol.
-         *         exchange: Exchange where the fill occurred.
-         *         side: Trade direction ('buy' or 'sell').
-         *         size: Cumulative filled quantity across all fills for the order.
-         *         price: Cumulative average execution price across all fills.
-         *         last_size: Incremental quantity filled by this execution event (delta).
-         *         last_price: Price of the incremental fill (delta).
-         *         fee: Transaction fee charged.
-         *         fee_asset: Currency of the fee (e.g., 'USD', 'BTC').
-         *         status: Fill status ('filled', 'partial', etc.).
-         *         executed_at: Timestamp of the fill.
-         */
         ExecutionData: {
-            /**
-             * Type
-             * @default execution
-             * @constant
-             */
             type: "execution";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Trade Id */
             trade_id?: string | null;
-            /** Exchange Order Id */
             exchange_order_id?: string | null;
-            /** Client Order Id */
             client_order_id: string;
-            /** Instrument */
             instrument: string;
-            /**
-             * Exchange
-             * @enum {string}
-             */
             exchange: "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
-            /**
-             * Side
-             * @enum {string}
-             */
             side: "buy" | "sell";
-            /** Size */
             size: number;
-            /** Price */
             price: number;
-            /** Last Size */
             last_size: number;
-            /** Last Price */
             last_price: number;
-            /** Fee */
             fee: number;
-            /** Fee Asset */
             fee_asset: string;
-            /**
-             * Status
-             * @enum {string}
-             */
             status: "filled" | "partial";
-            /**
-             * Executed At
-             * Format: date-time
-             */
             executed_at: string;
-            /**
-             * Wallet Public Id
-             * @default
-             */
             wallet_public_id: string;
-            /** Operator Public Id */
             operator_public_id?: string | null;
-            /** User Public Id */
             user_public_id?: string | null;
-            /**
-             * Liquidity Role
-             * @default unknown
-             */
             liquidity_role: string;
         };
-        /**
-         * ExecutionListResponse
-         * @description Execution list response wrapper.
-         *
-         *     Wraps a list of ExecutionData items with a count.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         payload: List of execution data items.
-         *         count: Total number of executions in the response.
-         */
         ExecutionListResponse: {
-            /**
-             * Type
-             * @default execution_list
-             * @constant
-             */
             type: "execution_list";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["ExecutionData"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * ExecutionPlanData
-         * @description Execution plan state for REST API responses.
-         *
-         *     Attributes:
-         *         plan_type: Plan type discriminator.
-         *         status: Current plan lifecycle status.
-         *         instrument_public_id: Target instrument UUID.
-         *         exchange: Target exchange.
-         *         mode: Execution mode (live/paper).
-         *         side: Order side (buy/sell).
-         *         total_quantity: Total intended quantity.
-         *         filled_quantity: Quantity filled so far.
-         *         created_at: Plan creation timestamp.
-         *         created_via: Creation channel (ui/api/cli/strategy).
-         *         wallet_public_id: Owning wallet UUID.
-         *         operator_public_id: Operator identity (nullable).
-         *         params: Plan-type-specific parameters.
-         *         last_error: Most recent error message (nullable).
-         *         idempotency_key: Client-provided dedup key (nullable).
-         */
         ExecutionPlanData: {
-            /**
-             * Type
-             * @default execution_plan
-             * @constant
-             */
             type: "execution_plan";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Plan Type */
             plan_type: string;
-            /** Status */
             status: string;
-            /** Instrument Public Id */
             instrument_public_id: string;
-            /** Exchange */
             exchange: string;
-            /** Mode */
             mode: string;
-            /** Side */
             side: string;
-            /** Total Quantity */
             total_quantity: number;
-            /** Filled Quantity */
             filled_quantity: number;
-            /**
-             * Created At
-             * Format: date-time
-             */
             created_at: string;
-            /** Created Via */
             created_via: string;
-            /** Wallet Public Id */
             wallet_public_id: string;
-            /** Operator Public Id */
             operator_public_id: string | null;
-            /** Params */
             params: {
                 [key: string]: unknown;
             };
-            /** Position Cycle Public Id */
             position_cycle_public_id: string | null;
-            /** Parent Plan Public Id */
             parent_plan_public_id: string | null;
-            /** Last Error */
             last_error: string | null;
-            /** Idempotency Key */
             idempotency_key: string | null;
         };
-        /**
-         * ExecutionPlanResponse
-         * @description Singleton wrapper returned by order creation and plan endpoints.
-         */
         ExecutionPlanResponse: {
-            /**
-             * Type
-             * @default execution_plan_response
-             * @constant
-             */
             type: "execution_plan_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["ExecutionPlanData"];
         };
-        /**
-         * FeatureFlagsPayload
-         * @description Public feature-flag projection (plan §4 Day 4 item 1, resolves R2-M5).
-         *
-         *     Exposes ONLY the boolean feature flags that the frontend needs
-         *     on mount to decide whether to render the ``/ai-integration``
-         *     surface. No secrets, no per-user state, no setting values —
-         *     just the on/off state of feature gates that are safe to reveal
-         *     to an unauthenticated caller.
-         *
-         *     Attributes:
-         *         ai_integration_enabled: Whether the MCP sub-app is
-         *             activated. When ``False``, the frontend hides the
-         *             AI Integration navigation entry and the ``/api/mcp``
-         *             endpoint returns ``503 feature_disabled`` per plan
-         *             §3.12 always-mounted-but-gated semantics.
-         */
         FeatureFlagsPayload: {
-            /**
-             * Ai Integration Enabled
-             * @description Whether the MCP sub-app is activated (plan §3.12).
-             */
             ai_integration_enabled: boolean;
         };
-        /**
-         * FeatureFlagsResponse
-         * @description Public feature-flag response envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         payload: Feature-flag booleans.
-         */
         FeatureFlagsResponse: {
-            /**
-             * Type
-             * @default feature_flags_response
-             * @constant
-             */
             type: "feature_flags_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["FeatureFlagsPayload"];
         };
-        /**
-         * FrontMonthData
-         * @description Front-month futures contract for an underlying.
-         *
-         *     Provenance is minted by the API handler (projection across
-         *     multiple temporal tables, not a single DB row).
-         *
-         *     Attributes:
-         *         instrument_public_id: Public ID of the front-month instrument.
-         *         native_symbol: Symbol as known on the exchange.
-         *         exchange: Exchange identifier.
-         *         expiry_at: Contract expiry timestamp (UTC).
-         *         relationship_type: How instrument relates to underlying.
-         *         contract_family: Futures product root (nullable).
-         */
         FrontMonthData: {
-            /**
-             * Type
-             * @default front_month
-             * @constant
-             */
             type: "front_month";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Instrument Public Id */
             instrument_public_id: string;
-            /** Native Symbol */
             native_symbol: string;
-            /** Exchange */
             exchange: string;
-            /**
-             * Expiry At
-             * Format: date-time
-             */
             expiry_at: string;
-            /** Relationship Type */
             relationship_type: string;
-            /** Contract Family */
             contract_family: string | null;
         };
-        /**
-         * FrontMonthResponse
-         * @description Front-month instrument response wrapper.
-         *
-         *     Attributes:
-         *         type: Payload type discriminator.
-         *         payload: Front-month instrument data.
-         */
         FrontMonthResponse: {
-            /**
-             * Type
-             * @default front_month
-             * @constant
-             */
             type: "front_month";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["FrontMonthData"];
         };
-        /**
-         * GapDetectionStats
-         * @description Aggregated gap detection statistics from all detectors.
-         *
-         *     Attributes:
-         *         bridge: Gap stats from the ZMQ-to-WebSocket bridge detector.
-         *         rest_clients: Per-session gap stats from REST client detectors.
-         */
         GapDetectionStats: {
-            /** @description ZMQ bridge gap detection stats */
             bridge: Components["schemas"]["GapStats"];
-            /**
-             * Rest Clients
-             * @description Per-session REST client gap stats
-             * @default {}
-             */
             rest_clients: {
                 [key: string]: Components["schemas"]["GapStats"];
             };
         };
-        /**
-         * GapStats
-         * @description Gap detection telemetry counters for a single detector.
-         *
-         *     Attributes:
-         *         gaps_detected: Total missing messages detected.
-         *         session_resets: Producer session resets observed.
-         *         duplicates: Duplicate or reordered messages observed.
-         *         mid_stream_joins: Subscriptions that started mid-stream.
-         *         rejected_unstamped: Messages rejected due to missing provenance.
-         */
         GapStats: {
-            /**
-             * Gaps Detected
-             * @description Total missing messages detected
-             * @default 0
-             */
             gaps_detected: number;
-            /**
-             * Session Resets
-             * @description Producer session resets observed
-             * @default 0
-             */
             session_resets: number;
-            /**
-             * Duplicates
-             * @description Duplicate or reordered messages
-             * @default 0
-             */
             duplicates: number;
-            /**
-             * Mid Stream Joins
-             * @description Subscriptions started mid-stream
-             * @default 0
-             */
             mid_stream_joins: number;
-            /**
-             * Rejected Unstamped
-             * @description Messages without provenance
-             * @default 0
-             */
             rejected_unstamped: number;
         };
-        /** HTTPValidationError */
         HTTPValidationError: {
-            /** Detail */
             detail?: Components["schemas"]["ValidationError"][];
         };
-        /**
-         * HandoverScopeGrantResponse
-         * @description Envelope wrapper for the handover result.
-         */
         HandoverScopeGrantResponse: {
-            /**
-             * Type
-             * @default handover_scope_grant_response
-             * @constant
-             */
             type: "handover_scope_grant_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["HandoverScopeGrantResult"];
         };
-        /**
-         * HandoverScopeGrantResult
-         * @description Payload returned by ``POST /api/scope-grants/handover``.
-         *
-         *     The handover is an atomic SCD2 close + insert: the source grant
-         *     is closed (``known_to`` set to the handover timestamp) and a new
-         *     active grant is inserted under the destination operator. Both
-         *     rows are returned so the client can update caches without a
-         *     second fetch.
-         *
-         *     Attributes:
-         *         closed_grant: The source grant with ``known_to`` stamped at
-         *             the handover timestamp.
-         *         new_grant: The newly-inserted active grant under the
-         *             destination operator.
-         */
         HandoverScopeGrantResult: {
             closed_grant: Components["schemas"]["ScopeGrantInfo"];
             new_grant: Components["schemas"]["ScopeGrantInfo"];
         };
-        /**
-         * HealthCheckData
-         * @description Domain data for the main health check endpoint.
-         *
-         *     Provides overall service health status including version,
-         *     connection statistics, topic availability, and gap detection stats.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         status: Overall service health status (healthy/warning/error).
-         *         version: Application version string.
-         *         connections: Connection statistics.
-         *         topics: Topic availability information.
-         *         gap_detection: Gap detection statistics from all detectors.
-         */
         HealthCheckData: {
-            /**
-             * Type
-             * @default health_check
-             * @constant
-             */
             type: "health_check";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /**
-             * Status
-             * @description Overall service health status
-             * @enum {string}
-             */
             status: "healthy" | "warning" | "error";
-            /**
-             * Version
-             * @description Application version
-             */
             version: string;
-            /** @description Connection statistics */
             connections: Components["schemas"]["ConnectionStats"];
-            /** @description Topics availability */
             topics: Components["schemas"]["HealthTopics"];
-            /** @description Gap detection statistics */
             gap_detection: Components["schemas"]["GapDetectionStats"];
         };
-        /**
-         * HealthCheckResponse
-         * @description Main health check endpoint response.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
         HealthCheckResponse: {
-            /**
-             * Type
-             * @default health_check_response
-             * @constant
-             */
             type: "health_check_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["HealthCheckData"];
         };
-        /**
-         * HealthTopics
-         * @description Topic subscription statistics.
-         *
-         *     Attributes:
-         *         active: Number of currently active topics with subscribers.
-         */
         HealthTopics: {
-            /**
-             * Active
-             * @description Number of currently active topics
-             */
             active: number;
         };
-        /**
-         * InstrumentDetailData
-         * @description Capability-aware instrument projection for REST responses.
-         *
-         *     Joins Symbol + SymbolExchangeCapability + Instrument + InstrumentSpec
-         *     so the frontend can render the market-data-only badge + disable
-         *     submit buttons without a separate round-trip for capability lookup.
-         *
-         *     Attributes:
-         *         instrument_public_id: Public ID of the Instrument row when an
-         *             active Instrument exists at the query snapshot. When the
-         *             Symbol + capability rows are present but no Instrument row
-         *             has been synced yet (transient state during symbol-updater
-         *             runs), this field falls back to ``symbol_public_id`` so the
-         *             frontend still has a stable identifier for dropdown keys.
-         *             ``instrument_resolved=True`` marks the former case; callers
-         *             that need to persist an order-entry reference MUST gate on
-         *             that flag and re-resolve via
-         *             ``Repository.get_instrument_public_id_by_symbol`` at submit
-         *             time (the REST order-entry path already does this).
-         *         symbol_public_id: Public ID of the Symbol row
-         *             (same symbol can map to many instruments across exchanges).
-         *         symbol: Native symbol string (e.g. ``MNQM6-CME``).
-         *         exchange: Exchange identifier.
-         *         can_trade: Value of ``SymbolExchangeCapability.can_trade`` — False
-         *             means market-data only (frontend renders a "Market-data only"
-         *             badge and disables order submit).
-         *         can_market_data: Value of ``SymbolExchangeCapability.can_market_data``.
-         *         instrument_resolved: ``True`` when ``instrument_public_id`` is a
-         *             real ``Instrument.public_id``; ``False`` when it is the
-         *             fallback ``Symbol.public_id``. Consumers that persist the
-         *             instrument reference (order submission, cap tracking,
-         *             pricing) MUST reject rows where ``instrument_resolved=False``
-         *             and re-resolve via the authoritative symbol → instrument
-         *             resolver, since these identifiers cross different namespaces.
-         *         instrument_kind: InstrumentSpec kind label (``future``, ``spot``,
-         *             etc.); ``None`` when no spec row exists.
-         *         expiry_at: InstrumentSpec expiry timestamp; ``None`` for perpetuals
-         *             + assets without a scheduled expiry.
-         */
         InstrumentDetailData: {
-            /**
-             * Type
-             * @default instrument_detail
-             * @constant
-             */
             type: "instrument_detail";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Instrument Public Id */
             instrument_public_id: string;
-            /** Symbol Public Id */
             symbol_public_id: string;
-            /** Symbol */
             symbol: string;
-            /** Exchange */
             exchange: string;
-            /** Can Trade */
             can_trade: boolean;
-            /** Can Market Data */
             can_market_data: boolean;
-            /** Instrument Resolved */
             instrument_resolved: boolean;
-            /** Instrument Kind */
             instrument_kind: string | null;
-            /** Expiry At */
             expiry_at: string | null;
         };
-        /**
-         * InstrumentDetailListResponse
-         * @description Capability-aware instrument list response wrapper.
-         *
-         *     Wraps ``InstrumentDetailData`` items so the frontend can render
-         *     market-data-only badges + disable order-entry for non-tradable
-         *     instruments without a second round-trip.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         payload: List of ``InstrumentDetailData`` items.
-         *         count: Total number of instruments in the response.
-         */
         InstrumentDetailListResponse: {
-            /**
-             * Type
-             * @default instrument_detail_list
-             * @constant
-             */
             type: "instrument_detail_list";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["InstrumentDetailData"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * InstrumentListResponse
-         * @description Instrument list response wrapper.
-         *
-         *     Wraps a list of instrument symbol strings with a count.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         payload: List of instrument symbol strings.
-         *         count: Total number of instruments in the response.
-         */
         InstrumentListResponse: {
-            /**
-             * Type
-             * @default instrument_list
-             * @constant
-             */
             type: "instrument_list";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: string[];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
         JsonObject: {
@@ -5046,4232 +1863,1124 @@ export type Components = {
         JsonValue: string | number | boolean | null | Record<string, unknown>[] | {
             [key: string]: Record<string, unknown>;
         };
-        /**
-         * LoginData
-         * @description Login payload data.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         message: Success message.
-         *         expires_in: Access token TTL in seconds.
-         *         user: Authenticated user profile.
-         *         access_token: JWT returned only when ``?return_tokens=true``
-         *             is set. ``None`` for the cookie-only browser flow.
-         *         refresh_token: JWT returned only when ``?return_tokens=true``
-         *             is set. ``None`` for the cookie-only browser flow.
-         */
         LoginData: {
-            /**
-             * Type
-             * @default login
-             * @constant
-             */
             type: "login";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Message */
             message: string;
-            /** Expires In */
             expires_in: number;
             user: Components["schemas"]["UserProfile"];
-            /** Access Token */
             access_token?: string | null;
-            /** Refresh Token */
             refresh_token?: string | null;
         };
-        /**
-         * LoginResponse
-         * @description Login REST response envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
         LoginResponse: {
-            /**
-             * Type
-             * @default login_response
-             * @constant
-             */
             type: "login_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["LoginData"];
         };
-        /**
-         * MessageResponse
-         * @description Generic API response containing a single message.
-         *
-         *     Used for simple acknowledgment responses (logout, delete, password change).
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         payload: Human-readable response message.
-         */
         MessageResponse: {
-            /**
-             * Type
-             * @default message
-             * @constant
-             */
             type: "message";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: string;
         };
-        /**
-         * MetricDiffRow
-         * @description One row in the side-by-side metrics diff.
-         */
         MetricDiffRow: {
-            /** Name */
             name: string;
-            /** Run A */
             run_a?: number | null;
-            /** Run B */
             run_b?: number | null;
-            /** Delta */
             delta?: number | null;
-            /** Pct */
             pct?: number | null;
         };
-        /**
-         * OperatorInfo
-         * @description Read projection of a single ``operators`` SCD2 row.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         label: Human-readable operator name.
-         *         description: Optional free-form description.
-         */
         OperatorInfo: {
-            /**
-             * Type
-             * @default operator_info
-             * @constant
-             */
             type: "operator_info";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Label */
             label: string;
-            /** Description */
             description?: string | null;
         };
-        /**
-         * OperatorListResponse
-         * @description List wrapper for ``GET /api/operators``.
-         */
         OperatorListResponse: {
-            /**
-             * Type
-             * @default operator_list_response
-             * @constant
-             */
             type: "operator_list_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["OperatorInfo"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * OrderData
-         * @description Current state of an order.
-         *
-         *     Used for both ZMQ event publishing and REST API responses.
-         *     Published on orders.events.{exchange}.{instrument}.{status} topics.
-         *
-         *     INVARIANT: The 'status' field MUST match the topic suffix.
-         *
-         *     Attributes:
-         *         exchange_order_id: Exchange-assigned order ID (e.g., Kraken txid).
-         *             May be None before exchange ACK (e.g., for 'submitted' event).
-         *         client_order_id: Our generated order ID (e.g., 'signal-a1b2c3d4').
-         *         instrument: Trading pair symbol.
-         *         exchange: Exchange where the order is placed.
-         *         side: Order direction ('buy' or 'sell').
-         *         status: Event type matching topic suffix (OrderEventType, excludes 'execution').
-         *         order_type: Type of order ('market', 'limit', etc.).
-         *         size: Total order size.
-         *         filled_size: Amount filled so far.
-         *         price: Limit price (for limit orders).
-         *         average_price: Average fill price (for partial fills).
-         *         reason: Optional rejection/failure reason (for 'rejected' status).
-         *         time_in_force: Order time-in-force setting.
-         *         error: Error message if order failed.
-         *         created_at: Order creation timestamp.
-         *         updated_at: Last status update timestamp.
-         *         leverage: Margin leverage (None for spot, integer for margin).
-         *         reduce_only: True when the order may only reduce an existing position.
-         */
         OrderData: {
-            /**
-             * Type
-             * @default order
-             * @constant
-             */
             type: "order";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Exchange Order Id */
             exchange_order_id?: string | null;
-            /** Client Order Id */
             client_order_id: string;
-            /** Instrument */
             instrument: string;
-            /**
-             * Exchange
-             * @enum {string}
-             */
             exchange: "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
-            /**
-             * Mode
-             * @default live
-             * @enum {string}
-             */
             mode: "live" | "paper";
-            /**
-             * Side
-             * @enum {string}
-             */
             side: "buy" | "sell";
-            /** Status */
             status: string;
-            /**
-             * Order Type
-             * @enum {string}
-             */
             order_type: "market" | "limit" | "stop" | "stop_limit";
-            /** Size */
             size: number;
-            /** Filled Size */
             filled_size: number;
-            /** Price */
             price?: number | null;
-            /** Average Price */
             average_price?: number | null;
-            /** Reason */
             reason?: string | null;
-            /** Time In Force */
             time_in_force?: string | null;
-            /** Error */
             error?: string | null;
-            /**
-             * Created At
-             * Format: date-time
-             */
             created_at: string;
-            /** Updated At */
             updated_at?: string | null;
-            /** Leverage */
             leverage?: number | null;
-            /**
-             * Reduce Only
-             * @default false
-             */
             reduce_only: boolean;
-            /**
-             * Wallet Public Id
-             * @default
-             */
             wallet_public_id: string;
-            /** Operator Public Id */
             operator_public_id?: string | null;
-            /** User Public Id */
             user_public_id?: string | null;
         };
-        /**
-         * OrderListResponse
-         * @description Order list response wrapper.
-         *
-         *     Wraps a list of OrderData items with a count.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         payload: List of order data items.
-         *         count: Total number of orders in the response.
-         */
         OrderListResponse: {
-            /**
-             * Type
-             * @default order_list
-             * @constant
-             */
             type: "order_list";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["OrderData"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * OrphanSweepResponse
-         * @description Response from orphan sweep endpoint.
-         */
         OrphanSweepResponse: {
-            /**
-             * Type
-             * @default orphan_sweep_result
-             * @constant
-             */
             type: "orphan_sweep_result";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["OrphanSweepResultData"];
         };
-        /**
-         * OrphanSweepResultData
-         * @description Result of an orphan cycle sweep operation.
-         */
         OrphanSweepResultData: {
-            /**
-             * Type
-             * @default orphan_sweep_result
-             * @constant
-             */
             type: "orphan_sweep_result";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Closed Count */
             closed_count: number;
-            /** Closed Cycle Ids */
             closed_cycle_ids: string[];
         };
-        /**
-         * PositionCycleData
-         * @description Position cycle summary for admin display.
-         */
         PositionCycleData: {
-            /**
-             * Type
-             * @default position_cycle
-             * @constant
-             */
             type: "position_cycle";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Cycle Public Id */
             cycle_public_id: string;
-            /** Shard Key */
             shard_key: string;
-            /** Instrument Public Id */
             instrument_public_id: string;
-            /** Exchange */
             exchange: string;
-            /** Mode */
             mode: string;
-            /** Wallet Public Id */
             wallet_public_id: string;
-            /** Operator Public Id */
             operator_public_id: string | null;
-            /** Direction */
             direction: string;
-            /** Max Qty */
             max_qty: number;
-            /** Opened At */
             opened_at: string;
-            /** Age Hours */
             age_hours: number;
         };
-        /**
-         * PositionCycleListResponse
-         * @description List of open position cycles.
-         */
         PositionCycleListResponse: {
-            /**
-             * Type
-             * @default position_cycles
-             * @constant
-             */
             type: "position_cycles";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["PositionCycleData"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * PositionData
-         * @description Portfolio position snapshot.
-         *
-         *     Represents a single position in the portfolio.
-         *     Used for both ZMQ event publishing and REST API responses.
-         *     The inherited ``timestamp`` field carries the last-update time.
-         *
-         *     Attributes:
-         *         instrument: Trading pair symbol.
-         *         exchange: Exchange where the position is held.
-         *         quantity: Position size (positive for long, negative for short).
-         *         average_price: Average entry price.
-         *         unrealized_pnl: Unrealized profit/loss.
-         *         realized_pnl: Realized profit/loss.
-         *         position_cycle_public_id: Public ID of the open position cycle, if any.
-         */
         PositionData: {
-            /**
-             * Type
-             * @default position
-             * @constant
-             */
             type: "position";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Instrument */
             instrument: string;
-            /**
-             * Exchange
-             * @enum {string}
-             */
             exchange: "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
-            /**
-             * Mode
-             * @default live
-             * @enum {string}
-             */
             mode: "live" | "paper";
-            /** Quantity */
             quantity: number;
-            /** Average Price */
             average_price: number;
-            /** Unrealized Pnl */
             unrealized_pnl: number;
-            /** Realized Pnl */
             realized_pnl: number;
-            /** Position Cycle Public Id */
             position_cycle_public_id?: string | null;
         };
-        /**
-         * PositionListResponse
-         * @description Position list response wrapper.
-         *
-         *     Wraps a list of PositionData items with a count.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         payload: List of position data items.
-         *         count: Total number of positions in the response.
-         */
         PositionListResponse: {
-            /**
-             * Type
-             * @default position_list
-             * @constant
-             */
             type: "position_list";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["PositionData"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * ProcessCategoryCount
-         * @description Running/total count for a process category.
-         *
-         *     Nested structural schema used inside ProcessSummaryData.
-         *
-         *     Attributes:
-         *         running: Number of currently running processes.
-         *         total: Total number of configured processes.
-         */
         ProcessCategoryCount: {
-            /**
-             * Running
-             * @description Number of currently running processes
-             */
             running: number;
-            /**
-             * Total
-             * @description Total number of configured processes
-             */
             total: number;
         };
-        /**
-         * ProcessCreateData
-         * @description Process creation data schema.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         status: Operation status ('created').
-         *         process: Created process info.
-         */
         ProcessCreateData: {
-            /**
-             * Type
-             * @default process_create
-             * @constant
-             */
             type: "process_create";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /**
-             * Status
-             * @description Operation status
-             * @constant
-             */
             status: "created";
-            /** @description Created process info */
             process: Components["schemas"]["ProcessCreatedInfo"];
         };
-        /**
-         * ProcessCreateResponse
-         * @description Process creation REST response envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
         ProcessCreateResponse: {
-            /**
-             * Type
-             * @default process_create_response
-             * @constant
-             */
             type: "process_create_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["ProcessCreateData"];
         };
-        /**
-         * ProcessCreatedInfo
-         * @description Process creation info nested structural schema.
-         *
-         *     Used inside ProcessCreateData to describe the created process.
-         *
-         *     Attributes:
-         *         name: Unique process name.
-         *         template: Template used for creation.
-         */
         ProcessCreatedInfo: {
-            /**
-             * Name
-             * @description Unique process name
-             */
             name: string;
-            /**
-             * Template
-             * @description Template used for creation
-             */
             template: string;
         };
-        /**
-         * ProcessRun
-         * @description Process run record response schema.
-         *
-         *     Represents a single execution run of a process.
-         *     First-class payload in ProcessRunsResponse.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         public_id: Unique run identifier.
-         *         process_name: Process name.
-         *         status: Run status.
-         *         role: Process role.
-         *         lifecycle: Process lifecycle.
-         *         parameters: Run parameters.
-         *         result: Run result if completed.
-         *         error: Error message if failed.
-         *         tags: Process tags.
-         *         started_at: Start time in ISO format.
-         *         completed_at: Completion time if finished.
-         */
         ProcessRun: {
-            /**
-             * Type
-             * @default process_run
-             * @constant
-             */
             type: "process_run";
-            /** Sequence Id */
             sequence_id: number;
-            /**
-             * Public Id
-             * @description Unique run identifier
-             */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /**
-             * Process Name
-             * @description Process name
-             */
             process_name: string;
-            /**
-             * Status
-             * @description Run status
-             * @enum {string}
-             */
             status: "running" | "succeeded" | "failed" | "cancelled";
-            /**
-             * Role
-             * @description Process role
-             * @enum {string}
-             */
             role: "core" | "task" | "strategy" | "backtest";
-            /**
-             * Lifecycle
-             * @description Process lifecycle
-             * @enum {string}
-             */
             lifecycle: "long_running" | "one_shot";
-            /** @description Run parameters */
             parameters?: Record<string, unknown> | null;
-            /** @description Run result if completed */
             result?: Record<string, unknown> | null;
-            /**
-             * Error
-             * @description Error message if failed
-             */
             error?: string | null;
-            /**
-             * Tags
-             * @description Process tags
-             * @default []
-             */
             tags: string[];
-            /**
-             * Started At
-             * @description Start time in ISO format
-             */
             started_at: string;
-            /**
-             * Completed At
-             * @description Completion time if finished
-             */
             completed_at?: string | null;
         };
-        /**
-         * ProcessRunsResponse
-         * @description Process runs list response schema.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         payload: List of process runs.
-         *         count: Total number of runs.
-         */
         ProcessRunsResponse: {
-            /**
-             * Type
-             * @default process_runs
-             * @constant
-             */
             type: "process_runs";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["ProcessRun"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * ProcessSchemaData
-         * @description Process schema data.
-         *
-         *     Describes a process template schema with default values.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         name: Process identifier.
-         *         description: Human-readable description.
-         *         class_path: Full Python class path.
-         *         method: Entry point method name.
-         *         default_enabled: Default autostart setting.
-         *         default_mode: Default execution mode.
-         *         default_parameters: Default constructor parameters.
-         *         lifecycle: Process lifecycle type.
-         */
         ProcessSchemaData: {
-            /**
-             * Type
-             * @default process_schema
-             * @constant
-             */
             type: "process_schema";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /**
-             * Name
-             * @description Process identifier
-             */
             name: string;
-            /**
-             * Description
-             * @description Human-readable description
-             */
             description: string;
-            /**
-             * Class Path
-             * @description Full Python class path
-             */
             class_path: string;
-            /**
-             * Method
-             * @description Entry point method name
-             */
             method: string;
-            /**
-             * Default Enabled
-             * @description Default autostart setting
-             */
             default_enabled: boolean;
-            /**
-             * Default Mode
-             * @description Default execution mode
-             * @enum {string}
-             */
             default_mode: "thread" | "process";
-            /**
-             * @description Default parameters
-             * @default {}
-             */
             default_parameters: Record<string, unknown>;
-            /**
-             * Lifecycle
-             * @description Process lifecycle type
-             * @enum {string}
-             */
             lifecycle: "long_running" | "one_shot";
         };
-        /**
-         * ProcessSchemaResponse
-         * @description Process schema REST response envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
         ProcessSchemaResponse: {
-            /**
-             * Type
-             * @default process_schema_response
-             * @constant
-             */
             type: "process_schema_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["ProcessSchemaData"];
         };
-        /**
-         * ProcessStartData
-         * @description Process start data schema.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         status: Operation status (success, already_running, error).
-         *         name: Process name.
-         *         process_public_id: Public ID of the started process run (if started).
-         *         message: Additional message.
-         */
         ProcessStartData: {
-            /**
-             * Type
-             * @default process_start
-             * @constant
-             */
             type: "process_start";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /**
-             * Status
-             * @description Operation status (success, already_running, error)
-             * @enum {string}
-             */
             status: "success" | "already_running" | "error";
-            /**
-             * Name
-             * @description Process name
-             */
             name: string;
-            /**
-             * Process Public Id
-             * @description Public ID if started
-             */
             process_public_id?: string | null;
-            /**
-             * Message
-             * @description Additional message
-             */
             message?: string | null;
         };
-        /**
-         * ProcessStartResponse
-         * @description Process start REST response envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
         ProcessStartResponse: {
-            /**
-             * Type
-             * @default process_start_response
-             * @constant
-             */
             type: "process_start_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["ProcessStartData"];
         };
-        /**
-         * ProcessStatus
-         * @description Process status nested structural schema.
-         *
-         *     Represents the current status of a single process. Used as a nested
-         *     field inside other schemas (e.g. SystemStatusData).
-         *
-         *     Attributes:
-         *         status: Process status (not_running, running, stopped, completed, error).
-         *         pid: Process ID if running.
-         *         started_at: Start time in ISO format.
-         *         command: Command that was executed.
-         *         exit_code: Exit code if stopped.
-         *         error: Error message if failed.
-         */
         ProcessStatus: {
-            /**
-             * Status
-             * @description Process status: not_running, running, stopped, completed, error
-             * @enum {string}
-             */
             status: "not_running" | "running" | "stopped" | "completed" | "error";
-            /**
-             * Pid
-             * @description Process ID if running
-             */
             pid?: number | null;
-            /**
-             * Started At
-             * @description Start time in ISO format
-             */
             started_at?: string | null;
-            /**
-             * Command
-             * @description Command that was executed
-             */
             command?: string | null;
-            /**
-             * Exit Code
-             * @description Exit code if stopped
-             */
             exit_code?: number | null;
-            /**
-             * Error
-             * @description Error message if failed
-             */
             error?: string | null;
         };
-        /**
-         * ProcessStopData
-         * @description Process stop data schema.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         status: Operation status (success, not_running, error).
-         *         name: Process name.
-         *         message: Additional message.
-         */
         ProcessStopData: {
-            /**
-             * Type
-             * @default process_stop
-             * @constant
-             */
             type: "process_stop";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /**
-             * Status
-             * @description Operation status (success, not_running, error)
-             * @enum {string}
-             */
             status: "success" | "not_running" | "error";
-            /**
-             * Name
-             * @description Process name
-             */
             name: string;
-            /**
-             * Message
-             * @description Additional message
-             */
             message?: string | null;
         };
-        /**
-         * ProcessStopResponse
-         * @description Process stop REST response envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
         ProcessStopResponse: {
-            /**
-             * Type
-             * @default process_stop_response
-             * @constant
-             */
             type: "process_stop_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["ProcessStopData"];
         };
-        /**
-         * ProcessSummaryData
-         * @description Lightweight process summary data for the overview dashboard.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         feeds: Count of feed publisher processes.
-         *         strategies: Count of strategy processes.
-         *         executors: Count of executor processes.
-         *         brokers: Count of broker processes.
-         */
         ProcessSummaryData: {
-            /**
-             * Type
-             * @default process_summary
-             * @constant
-             */
             type: "process_summary";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** @description Feed publisher process counts */
             feeds: Components["schemas"]["ProcessCategoryCount"];
-            /** @description Strategy process counts */
             strategies: Components["schemas"]["ProcessCategoryCount"];
-            /** @description Executor process counts */
             executors: Components["schemas"]["ProcessCategoryCount"];
-            /** @description Broker process counts */
             brokers: Components["schemas"]["ProcessCategoryCount"];
         };
-        /**
-         * ProcessSummaryResponse
-         * @description Process summary REST response envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
         ProcessSummaryResponse: {
-            /**
-             * Type
-             * @default process_summary_response
-             * @constant
-             */
             type: "process_summary_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["ProcessSummaryData"];
         };
-        /**
-         * RefreshData
-         * @description Token refresh payload data.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         message: Success message.
-         *         ws_token: New WebSocket authentication token.
-         *         ws_token_exp: WebSocket token expiration time.
-         *         csrf_token: New CSRF token.
-         *         user: User profile.
-         *         access_token: JWT returned only when ``?return_tokens=true``
-         *             is set. ``None`` for the cookie-only browser flow.
-         *         refresh_token: JWT returned only when ``?return_tokens=true``
-         *             is set. ``None`` for the cookie-only browser flow.
-         */
         RefreshData: {
-            /**
-             * Type
-             * @default refresh
-             * @constant
-             */
             type: "refresh";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Message */
             message: string;
-            /** Ws Token */
             ws_token: string;
-            /**
-             * Ws Token Exp
-             * Format: date-time
-             */
             ws_token_exp: string;
-            /** Csrf Token */
             csrf_token: string;
             user: Components["schemas"]["UserProfile"];
-            /** Access Token */
             access_token?: string | null;
-            /** Refresh Token */
             refresh_token?: string | null;
         };
-        /**
-         * RefreshResponse
-         * @description Token refresh REST response envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
         RefreshResponse: {
-            /**
-             * Type
-             * @default refresh_response
-             * @constant
-             */
             type: "refresh_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["RefreshData"];
         };
-        /**
-         * RelationshipTypeEnum
-         * @description Relationship between an instrument and its underlying asset.
-         * @enum {string}
-         */
         RelationshipTypeEnum: "exact" | "derivative" | "proxy";
-        /**
-         * RestRateData
-         * @description Payload for the ``GET /api/metrics/rest-rate`` endpoint.
-         *
-         *     Attributes:
-         *         exchanges: Per-exchange sliding-window stats. Exchanges appear
-         *             in the map only after at least one REST call has been
-         *             recorded against them since process startup.
-         */
         RestRateData: {
-            /**
-             * Type
-             * @default rest_rate
-             * @constant
-             */
             type: "rest_rate";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /**
-             * Exchanges
-             * @description Per-exchange rolling REST call stats + utilization
-             */
             exchanges: {
                 [key: string]: Components["schemas"]["RestRateExchangeStats"];
             };
         };
-        /**
-         * RestRateExchangeStats
-         * @description Per-exchange REST call statistics for the rate-rate endpoint.
-         *
-         *     Attributes:
-         *         rps_1s: Average requests per second over the last 1 second.
-         *         rps_10s: Average requests per second over the last 10 seconds.
-         *         rps_60s: Average requests per second over the last 60 seconds.
-         *         limit_rps: Published upstream limit in req/s. ``None`` when no
-         *             public limit is documented for this exchange.
-         *         utilization: ``rps_1s / limit_rps`` as a fraction in
-         *             ``[0.0, +inf)``. ``None`` when no published limit exists.
-         */
         RestRateExchangeStats: {
-            /**
-             * Rps 1S
-             * @description Rolling 1s req/s rate
-             */
             rps_1s: number;
-            /**
-             * Rps 10S
-             * @description Rolling 10s req/s rate
-             */
             rps_10s: number;
-            /**
-             * Rps 60S
-             * @description Rolling 60s req/s rate
-             */
             rps_60s: number;
-            /**
-             * Limit Rps
-             * @description Published upstream limit in req/s
-             */
             limit_rps?: number | null;
-            /**
-             * Utilization
-             * @description rps_1s / limit_rps fraction, None when limit unknown
-             */
             utilization?: number | null;
         };
-        /**
-         * RestRateResponse
-         * @description REST call rate observability endpoint response.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
         RestRateResponse: {
-            /**
-             * Type
-             * @default rest_rate_response
-             * @constant
-             */
             type: "rest_rate_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["RestRateData"];
         };
-        /**
-         * RollPointDetail
-         * @description Roll point detail for partial failure response.
-         */
         RollPointDetail: {
-            /** From Contract */
             from_contract: string;
-            /** To Contract */
             to_contract: string;
-            /** Roll At */
             roll_at: string;
         };
-        /**
-         * ScopeGrantInfo
-         * @description Read projection of a single ``wallet_operator_scope_grants`` SCD2 row.
-         *
-         *     Exactly one of ``underlying_public_id`` / ``instrument_public_id``
-         *     is non-null, matching ``scope_kind``, enforced by the CHECK
-         *     constraint on the source table.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         operator_public_id: Operator holding the grant.
-         *         wallet_public_id: Wallet covered by the grant.
-         *         granted_by_user_public_id: Audit identity that created the grant.
-         *         scope_kind: Either ``"underlying"`` or ``"instrument"``.
-         *         underlying_public_id: Set iff ``scope_kind == "underlying"``.
-         *         instrument_public_id: Set iff ``scope_kind == "instrument"``.
-         *         note: Free-form audit note (null when unset).
-         *         known_to: SCD2 end-of-validity timestamp — the sentinel
-         *             ``9999-12-31 23:59:59`` indicates an active grant.
-         */
         ScopeGrantInfo: {
-            /**
-             * Type
-             * @default scope_grant_info
-             * @constant
-             */
             type: "scope_grant_info";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Operator Public Id */
             operator_public_id: string;
-            /** Wallet Public Id */
             wallet_public_id: string;
-            /** Granted By User Public Id */
             granted_by_user_public_id: string;
-            /** Scope Kind */
             scope_kind: string;
-            /** Underlying Public Id */
             underlying_public_id?: string | null;
-            /** Instrument Public Id */
             instrument_public_id?: string | null;
-            /** Note */
             note?: string | null;
-            /**
-             * Known To
-             * Format: date-time
-             */
             known_to: string;
         };
-        /**
-         * ScopeGrantListResponse
-         * @description List wrapper for ``GET /api/scope-grants``.
-         */
         ScopeGrantListResponse: {
-            /**
-             * Type
-             * @default scope_grant_list_response
-             * @constant
-             */
             type: "scope_grant_list_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["ScopeGrantInfo"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * ScopeGrantResponse
-         * @description Singleton wrapper returned by ``POST /api/scope-grants``.
-         */
         ScopeGrantResponse: {
-            /**
-             * Type
-             * @default scope_grant_response
-             * @constant
-             */
             type: "scope_grant_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["ScopeGrantInfo"];
         };
-        /**
-         * SettingCategoriesResponse
-         * @description Setting categories list response.
-         *
-         *     Attributes:
-         *         payload: List of unique setting categories.
-         *         count: Number of categories.
-         */
         SettingCategoriesResponse: {
-            /**
-             * Type
-             * @default setting_categories
-             * @constant
-             */
             type: "setting_categories";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: string[];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * SettingListResponse
-         * @description Setting list response wrapper.
-         *
-         *     Wraps a list of SettingRead items with a count for REST API consistency.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         payload: List of setting data items.
-         *         count: Total number of settings in the response.
-         */
         SettingListResponse: {
-            /**
-             * Type
-             * @default setting_list
-             * @constant
-             */
             type: "setting_list";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["SettingRead"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * SettingRead
-         * @description Setting read response schema.
-         *
-         *     Returned when fetching a setting from the database.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         key: Unique setting key identifier.
-         *         value: Setting value as string.
-         *         category: Setting category for grouping.
-         *         description: Optional human-readable description.
-         *         updated_at: Last modification timestamp.
-         *         updated_by: User who last modified the setting.
-         */
         SettingRead: {
-            /**
-             * Type
-             * @default setting_read
-             * @constant
-             */
             type: "setting_read";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Key */
             key: string;
-            /** Value */
             value: string;
-            /** Category */
             category: string;
-            /** Description */
             description?: string | null;
-            /**
-             * Updated At
-             * Format: date-time
-             */
             updated_at: string;
-            /** Updated By */
             updated_by?: string | null;
         };
-        /**
-         * SettingResponse
-         * @description Single setting response wrapper.
-         *
-         *     Wraps a SettingRead in a typed envelope for REST API consistency.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         payload: The setting data.
-         */
         SettingResponse: {
-            /**
-             * Type
-             * @default setting_response
-             * @constant
-             */
             type: "setting_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["SettingRead"];
         };
-        /**
-         * SignalData
-         * @description Trading signal generated by a strategy.
-         *
-         *     Represents a recommendation to enter or exit a position.
-         *     Signals are published to the messaging bus for execution.
-         *
-         *     Attributes:
-         *         instrument: Target trading pair symbol.
-         *         exchange: Target exchange for execution.
-         *         side: Recommended direction ('buy' or 'sell').
-         *         strength: Signal confidence from 0.0 (weak) to 1.0 (strong).
-         *         reason: Human-readable explanation for the signal.
-         *         price: Suggested entry/exit price (optional).
-         *         strategy_name: Name of the generating strategy (optional).
-         *         fired_at: Domain timestamp when the signal was generated.
-         */
         SignalData: {
-            /**
-             * Type
-             * @default signal
-             * @constant
-             */
             type: "signal";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Instrument */
             instrument: string;
-            /**
-             * Exchange
-             * @enum {string}
-             */
             exchange: "paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat";
-            /**
-             * Side
-             * @enum {string}
-             */
             side: "buy" | "sell";
-            /** Strength */
             strength: number;
-            /** Reason */
             reason: string;
-            /** Price */
             price?: number | null;
-            /** Strategy Name */
             strategy_name?: string | null;
-            /**
-             * Fired At
-             * Format: date-time
-             */
             fired_at: string;
-            /**
-             * Wallet Public Id
-             * @default
-             */
             wallet_public_id: string;
-            /** Operator Public Id */
             operator_public_id?: string | null;
-            /** User Public Id */
             user_public_id?: string | null;
         };
-        /**
-         * SignalDiffEntry
-         * @description Matched signal from either leg.
-         */
         SignalDiffEntry: {
-            /** Instrument */
             instrument: string;
-            /**
-             * Signal Time
-             * Format: date-time
-             */
             signal_time: string;
-            /** Signal Type */
             signal_type: string;
-            /**
-             * Leg
-             * @enum {string}
-             */
             leg: "a" | "b" | "common";
         };
-        /**
-         * SignalListResponse
-         * @description Signal list response wrapper.
-         *
-         *     Wraps a list of SignalData items with a count.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         payload: List of signal data items.
-         *         count: Total number of signals in the response.
-         */
         SignalListResponse: {
-            /**
-             * Type
-             * @default signal_list
-             * @constant
-             */
             type: "signal_list";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["SignalData"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * StrategyListResponse
-         * @description Strategy processes list response.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         payload: List of strategy processes.
-         *         count: Total number of strategies.
-         */
         StrategyListResponse: {
-            /**
-             * Type
-             * @default strategy_list
-             * @constant
-             */
             type: "strategy_list";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["StrategyProcess"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * StrategyProcess
-         * @description Lightweight strategy process info for read-only views.
-         *
-         *     First-class payload in StrategyListResponse.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         name: Unique process name.
-         *         running: Whether process is currently running.
-         *         enabled: Whether process autostarts on boot.
-         *         mode: Execution mode (thread/process).
-         */
         StrategyProcess: {
-            /**
-             * Type
-             * @default strategy_process
-             * @constant
-             */
             type: "strategy_process";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /**
-             * Name
-             * @description Unique process name
-             */
             name: string;
-            /**
-             * Running
-             * @description Whether process is currently running
-             */
             running: boolean;
-            /**
-             * Enabled
-             * @description Whether process autostarts on boot
-             */
             enabled: boolean;
-            /**
-             * Mode
-             * @description Execution mode (thread/process)
-             * @enum {string}
-             */
             mode: "thread" | "process";
         };
-        /**
-         * StrategyStatusPayload
-         * @description Strategy process status payload for the system status endpoint.
-         *
-         *     Nested structural schema used inside SystemStatusData.
-         *
-         *     Attributes:
-         *         strategy_name: Name of the strategy.
-         *         status: Current strategy status string.
-         *         details: Full raw status dictionary from the process.
-         *         signals_generated: Number of signals generated.
-         *         trades_executed: Number of trades executed.
-         *         last_signal: Last signal description.
-         *         last_signal_time: Timestamp of last signal.
-         *         pnl: Current profit and loss.
-         *         pid: Process ID.
-         *         uptime: Process uptime string.
-         */
         StrategyStatusPayload: {
-            /**
-             * Strategy Name
-             * @description Strategy name
-             */
             strategy_name: string;
-            /**
-             * Status
-             * @description Current strategy status
-             */
             status: string;
-            /**
-             * @description Full raw status
-             * @default {}
-             */
             details: Record<string, unknown>;
-            /**
-             * Signals Generated
-             * @description Signals generated count
-             */
             signals_generated?: number | null;
-            /**
-             * Trades Executed
-             * @description Trades executed count
-             */
             trades_executed?: number | null;
-            /**
-             * Last Signal
-             * @description Last signal description
-             */
             last_signal?: string | null;
-            /**
-             * Last Signal Time
-             * @description Last signal timestamp
-             */
             last_signal_time?: string | null;
-            /**
-             * Pnl
-             * @description Current PnL
-             */
             pnl?: number | null;
-            /**
-             * Pid
-             * @description Process ID
-             */
             pid?: number | null;
-            /**
-             * Uptime
-             * @description Process uptime
-             */
             uptime?: string | null;
         };
-        /**
-         * SubscriptionsStats
-         * @description Subscription statistics.
-         *
-         *     Attributes:
-         *         per_topic: Subscriber count per topic.
-         *         per_client: Topics subscribed per client.
-         */
         SubscriptionsStats: {
-            /**
-             * Per Topic
-             * @description Subscriber count per topic
-             */
             per_topic: {
                 [key: string]: number;
             };
-            /**
-             * Per Client
-             * @description Topics subscribed per client
-             */
             per_client: {
                 [key: string]: string[];
             };
         };
-        /**
-         * SystemStatusData
-         * @description System-wide status data schema.
-         *
-         *     Provides status of the trader process, backtests, and active strategies.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         trader: Trader process status.
-         *         backtests: Status of backtest processes by ID.
-         *         strategies: List of active strategies from strategy_runner.
-         */
         SystemStatusData: {
-            /**
-             * Type
-             * @default system_status
-             * @constant
-             */
             type: "system_status";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             trader: Components["schemas"]["ProcessStatus"];
-            /** Backtests */
             backtests: {
                 [key: string]: Components["schemas"]["ProcessStatus"];
             };
-            /**
-             * Strategies
-             * @description List of active strategies from strategy_runner
-             * @default []
-             */
             strategies: Components["schemas"]["StrategyStatusPayload"][];
         };
-        /**
-         * SystemStatusResponse
-         * @description System-wide status REST response envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
         SystemStatusResponse: {
-            /**
-             * Type
-             * @default system_status_response
-             * @constant
-             */
             type: "system_status_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["SystemStatusData"];
         };
-        /**
-         * TopicMetricSnapshot
-         * @description Point-in-time snapshot of metrics for a single topic.
-         *
-         *     Attributes:
-         *         active_subscribers: Current subscriber count for this topic.
-         *         received: Total messages received from ZMQ.
-         *         forwarded: Messages successfully forwarded to clients.
-         *         throttled: Messages dropped due to throttling.
-         *         dropped: Messages dropped due to backpressure.
-         *         timeout: Messages that timed out during send.
-         *         errors: Number of errors encountered.
-         *         invalid_messages: Messages that could not be parsed as a typed envelope.
-         *         last_message_ts: Timestamp of last received message.
-         *         throttle_ms: Configured throttle interval (None if unconfigured).
-         *         pattern: ZMQ subscription pattern (None if unconfigured).
-         */
         TopicMetricSnapshot: {
-            /**
-             * Active Subscribers
-             * @description Current subscriber count
-             * @default 0
-             */
             active_subscribers: number;
-            /**
-             * Received
-             * @description Total messages received
-             * @default 0
-             */
             received: number;
-            /**
-             * Forwarded
-             * @description Messages forwarded to clients
-             * @default 0
-             */
             forwarded: number;
-            /**
-             * Throttled
-             * @description Messages dropped by throttling
-             * @default 0
-             */
             throttled: number;
-            /**
-             * Dropped
-             * @description Messages dropped by backpressure
-             * @default 0
-             */
             dropped: number;
-            /**
-             * Timeout
-             * @description Messages timed out during send
-             * @default 0
-             */
             timeout: number;
-            /**
-             * Errors
-             * @description Errors encountered
-             * @default 0
-             */
             errors: number;
-            /**
-             * Invalid Messages
-             * @description Messages with unparseable envelope
-             * @default 0
-             */
             invalid_messages: number;
-            /**
-             * Last Message Ts
-             * @description Last message timestamp
-             * @default 0
-             */
             last_message_ts: number;
-            /**
-             * Throttle Ms
-             * @description Throttle interval ms
-             */
             throttle_ms?: number | null;
-            /**
-             * Pattern
-             * @description ZMQ subscription pattern
-             */
             pattern?: string | null;
         };
-        /**
-         * TradeDiffEntry
-         * @description Matched trade from either leg (for common entries both legs set).
-         */
         TradeDiffEntry: {
-            /** Instrument */
             instrument: string;
-            /**
-             * Executed At
-             * Format: date-time
-             */
             executed_at: string;
-            /** Side */
             side: string;
-            /** Quantity */
             quantity: number;
-            /** Price */
             price: number;
-            /**
-             * Leg
-             * @enum {string}
-             */
             leg: "a" | "b" | "common";
-            /** Pnl A */
             pnl_a?: number | null;
-            /** Pnl B */
             pnl_b?: number | null;
-            /** Pnl Delta */
             pnl_delta?: number | null;
         };
-        /**
-         * TrailingStopStateData
-         * @description Live trailing stop state from evaluator memory.
-         */
         TrailingStopStateData: {
-            /**
-             * Type
-             * @default trailing_stop_state
-             * @constant
-             */
             type: "trailing_stop_state";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Plan Public Id */
             plan_public_id: string;
-            /** Status */
             status: string;
-            /** Trailing Pct */
             trailing_pct: number;
-            /** Min Lock Pct */
             min_lock_pct: number;
-            /** Entry Price */
             entry_price: number;
-            /** Peak Price */
             peak_price: number;
-            /** Current Stop */
             current_stop: number;
-            /** Side */
             side: string;
         };
-        /**
-         * TrailingStopStateResponse
-         * @description Response wrapping live trailing stop state.
-         */
         TrailingStopStateResponse: {
-            /**
-             * Type
-             * @default trailing_stop_state
-             * @constant
-             */
             type: "trailing_stop_state";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["TrailingStopStateData"];
         };
-        /**
-         * UnderlyingAssetData
-         * @description Underlying asset with instrument count.
-         *
-         *     Provenance fields (public_id, session_id, sequence_id, timestamp)
-         *     come from the DB row via UnderlyingAssetRow.
-         *
-         *     Attributes:
-         *         ticker: Short code (e.g. 'SPX', 'GOLD').
-         *         name: Canonical name (e.g. 'S&P 500').
-         *         asset_class: Asset type category.
-         *         sector: Optional sector classification.
-         *         instrument_count: Number of instruments mapped to this underlying.
-         */
         UnderlyingAssetData: {
-            /**
-             * Type
-             * @default underlying_asset
-             * @constant
-             */
             type: "underlying_asset";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Ticker */
             ticker: string;
-            /** Name */
             name: string;
-            /** Asset Class */
             asset_class: string;
-            /** Sector */
             sector: string | null;
-            /** Instrument Count */
             instrument_count: number;
         };
-        /**
-         * UnderlyingAssetListResponse
-         * @description Underlying asset list response wrapper.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         payload: List of underlying asset data items.
-         *         count: Total number of underlying assets in the response.
-         */
         UnderlyingAssetListResponse: {
-            /**
-             * Type
-             * @default underlying_asset_list
-             * @constant
-             */
             type: "underlying_asset_list";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["UnderlyingAssetData"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * UnderlyingInstrumentData
-         * @description Instrument mapped to an underlying asset.
-         *
-         *     Provenance comes from the InstrumentUnderlyingMapping DB row.
-         *
-         *     Attributes:
-         *         instrument_public_id: Public ID of the instrument.
-         *         native_symbol: Symbol as known on the exchange.
-         *         exchange: Exchange identifier.
-         *         asset_type: Asset type of the symbol.
-         *         relationship_type: How instrument relates to underlying.
-         *         contract_family: Futures product root (nullable).
-         */
         UnderlyingInstrumentData: {
-            /**
-             * Type
-             * @default underlying_instrument
-             * @constant
-             */
             type: "underlying_instrument";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Instrument Public Id */
             instrument_public_id: string;
-            /** Native Symbol */
             native_symbol: string;
-            /** Exchange */
             exchange: string;
-            /** Asset Type */
             asset_type: string;
-            /** Relationship Type */
             relationship_type: string;
-            /** Contract Family */
             contract_family: string | null;
         };
-        /**
-         * UnderlyingInstrumentListResponse
-         * @description Underlying instrument list response wrapper.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         payload: List of underlying instrument data items.
-         *         count: Total number of instruments in the response.
-         */
         UnderlyingInstrumentListResponse: {
-            /**
-             * Type
-             * @default underlying_instrument_list
-             * @constant
-             */
             type: "underlying_instrument_list";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["UnderlyingInstrumentData"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * UserListResponse
-         * @description User list response schema.
-         *
-         *     Returned by user listing endpoints.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         payload: List of user profiles.
-         *         count: Total number of users.
-         */
         UserListResponse: {
-            /**
-             * Type
-             * @default user_list
-             * @constant
-             */
             type: "user_list";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["UserProfile"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * UserProfile
-         * @description User profile schema.
-         *
-         *     Represents authenticated user information returned by API
-         *     endpoints and stored in request state.
-         *
-         *     The multi-tenant operator fields (``operator_public_ids`` and
-         *     ``primary_operator_public_id``) are populated by the ``/auth/me``
-         *     endpoint from ``user_operator_memberships`` (with the ADMIN-wide
-         *     expansion rule applied, mirroring ``UserService.build_auth_principal``).
-         *     Write paths that project a raw DB ``User`` row return these fields
-         *     empty; the response builder in ``auth/routes.py`` enriches them
-         *     before returning to the client.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         username: User's login name (also the primary key).
-         *         email: Optional email address.
-         *         role: User's role (VIEWER, OPERATOR, ADMIN).
-         *         is_active: Whether user account is active.
-         *         created_at: Account creation timestamp.
-         *         operator_public_ids: Operators this user may act AS at the
-         *             current ``as_of``. ADMIN receives every active operator;
-         *             OPERATOR / VIEWER receive only their explicit memberships.
-         *         primary_operator_public_id: The membership row marked
-         *             ``is_primary=TRUE`` (``None`` when the user has no
-         *             primary membership yet).
-         *         active_wallet_public_id: Currently-selected wallet (UI state,
-         *             round-tripped through token claims). ``None`` on the
-         *             login path (user hasn't picked a wallet yet); populated
-         *             on refresh and ``/me`` from the authenticated principal.
-         *             The frontend reads this field to route WS subscriptions
-         *             and REST requests against the same wallet scope the
-         *             backend authorises.
-         */
         UserProfile: {
-            /**
-             * Type
-             * @default user_profile
-             * @constant
-             */
             type: "user_profile";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Username */
             username: string;
-            /** Email */
             email?: string | null;
             role: Components["schemas"]["UserRole"];
-            /**
-             * Is Active
-             * @default true
-             */
             is_active: boolean;
-            /**
-             * Created At
-             * Format: date-time
-             */
             created_at: string;
-            /** Operator Public Ids */
             operator_public_ids?: string[];
-            /** Primary Operator Public Id */
             primary_operator_public_id?: string | null;
-            /** Active Wallet Public Id */
             active_wallet_public_id?: string | null;
         };
-        /**
-         * UserResponse
-         * @description Single user response wrapper.
-         *
-         *     Wraps a UserProfile in a typed envelope for REST API consistency.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         payload: The user profile data.
-         */
         UserResponse: {
-            /**
-             * Type
-             * @default user_response
-             * @constant
-             */
             type: "user_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["UserProfile"];
         };
-        /**
-         * UserRole
-         * @description User role enumeration.
-         *
-         *     Defines the available roles in the system with hierarchical
-         *     access levels:
-         *
-         *     - AI_DELEGATE: Narrow permission set for AI-integration users
-         *       (observe market/signals/orders, submit/cancel trades via MCP).
-         *       **Ordinally below VIEWER** in the role_hierarchy dicts consulted
-         *       by ``require_role()`` (``snapper.auth.dependencies``) and
-         *       ``WebSocketAuthManager.has_permission()``
-         *       (``snapper.auth.websocket_auth``) so any
-         *       ``require_role(>= VIEWER)`` guard rejects AI_DELEGATE by
-         *       ordinal comparison — intentional: access beyond the narrow
-         *       permission set MUST go through
-         *       ``require_permission(specific_perm)``.
-         *       See ``plan_ai_integration_phase_a.md`` §3.4.
-         *     - VIEWER: Read-only access to market data and positions.
-         *     - OPERATOR: Can execute trades and manage strategies.
-         *     - ADMIN: Full system access including user management.
-         * @enum {string}
-         */
         UserRole: "ai_delegate" | "viewer" | "operator" | "admin";
-        /** ValidationError */
         ValidationError: {
-            /** Location */
             loc: (string | number)[];
-            /** Message */
             msg: string;
-            /** Error Type */
             type: string;
-            /** Input */
             input?: unknown;
-            /** Context */
             ctx?: Record<string, never>;
         };
-        /**
-         * WalletInfo
-         * @description Read projection of a single ``wallets`` SCD2 row.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         label: Human-readable wallet name (``default``, ``firm``...).
-         *         description: Optional free-form description.
-         *         is_paper: Paper-mode flag. Paper and live wallets sharing the
-         *             same label are disambiguated by this boolean because the
-         *             wallets table's active-unique index is
-         *             ``(label, is_paper)``.
-         */
         WalletInfo: {
-            /**
-             * Type
-             * @default wallet_info
-             * @constant
-             */
             type: "wallet_info";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Label */
             label: string;
-            /** Description */
             description?: string | null;
-            /** Is Paper */
             is_paper: boolean;
         };
-        /**
-         * WalletListResponse
-         * @description List wrapper for ``GET /api/wallets``.
-         */
         WalletListResponse: {
-            /**
-             * Type
-             * @default wallet_list_response
-             * @constant
-             */
             type: "wallet_list_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** Payload */
             payload: Components["schemas"]["WalletInfo"][];
-            /**
-             * Count
-             * @description Number of items in payload
-             */
             count: number;
         };
-        /**
-         * WalletResponse
-         * @description Singleton wrapper returned by ``POST /api/wallets``.
-         */
         WalletResponse: {
-            /**
-             * Type
-             * @default wallet_response
-             * @constant
-             */
             type: "wallet_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["WalletInfo"];
         };
-        /**
-         * WebSocketStats
-         * @description WebSocket connection statistics.
-         *
-         *     Attributes:
-         *         active_connections: Number of active WebSocket connections.
-         *         topic_subscribers: Subscriber count per topic.
-         *         client_count: Total client count.
-         */
         WebSocketStats: {
-            /**
-             * Active Connections
-             * @description Number of active WebSocket connections
-             */
             active_connections: number;
-            /**
-             * Topic Subscribers
-             * @description Subscriber count per topic
-             */
             topic_subscribers: {
                 [key: string]: number;
             };
-            /**
-             * Client Count
-             * @description Total client count
-             */
             client_count: number;
         };
-        /**
-         * WsStatsConfig
-         * @description WebSocket statistics configuration.
-         *
-         *     Attributes:
-         *         broker_xpub: ZMQ broker XPUB endpoint address.
-         *         heartbeat_interval_ms: Heartbeat interval in milliseconds.
-         */
         WsStatsConfig: {
-            /**
-             * Broker Xpub
-             * @description ZMQ broker XPUB endpoint
-             */
             broker_xpub: string;
-            /**
-             * Heartbeat Interval Ms
-             * @description Heartbeat interval in milliseconds
-             */
             heartbeat_interval_ms: number;
         };
-        /**
-         * WsStatsData
-         * @description Domain data for the WebSocket statistics endpoint.
-         *
-         *     Comprehensive statistics about WebSocket connections, ZMQ bridge,
-         *     and subscription state.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         websocket: WebSocket statistics.
-         *         zmq_bridge: ZMQ bridge statistics.
-         *         connections: Connection statistics.
-         *         topics: Topic message statistics.
-         *         subscriptions: Subscription details.
-         *         config: Configuration details.
-         */
         WsStatsData: {
-            /**
-             * Type
-             * @default ws_stats
-             * @constant
-             */
             type: "ws_stats";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /** @description WebSocket statistics */
             websocket: Components["schemas"]["WebSocketStats"];
-            /** @description ZMQ bridge statistics */
             zmq_bridge: Components["schemas"]["ZmqBridgeStats"];
-            /** @description Connection statistics */
             connections: Components["schemas"]["ConnectionStats"];
-            /**
-             * Topics
-             * @description Topic message statistics
-             */
             topics: {
                 [key: string]: Components["schemas"]["TopicMetricSnapshot"];
             };
-            /** @description Subscription details */
             subscriptions: Components["schemas"]["SubscriptionsStats"];
-            /** @description Configuration details */
             config: Components["schemas"]["WsStatsConfig"];
         };
-        /**
-         * WsStatsResponse
-         * @description WebSocket statistics endpoint response.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
         WsStatsResponse: {
-            /**
-             * Type
-             * @default ws_stats_response
-             * @constant
-             */
             type: "ws_stats_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["WsStatsData"];
         };
-        /**
-         * ZmqBridgeStats
-         * @description ZMQ bridge statistics.
-         *
-         *     Attributes:
-         *         active_topics: Number of active ZMQ topics.
-         *         subscriber_tasks: Number of subscriber tasks.
-         *         available_topics: List of available topics.
-         */
         ZmqBridgeStats: {
-            /**
-             * Active Topics
-             * @description Number of active ZMQ topics
-             */
             active_topics: number;
-            /**
-             * Subscriber Tasks
-             * @description Number of subscriber tasks
-             */
             subscriber_tasks: number;
-            /**
-             * Available Topics
-             * @description List of available topics
-             */
             available_topics: string[];
         };
-        /**
-         * ZmqComponents
-         * @description ZMQ infrastructure component status.
-         *
-         *     Attributes:
-         *         zmq_context: ZMQ context status (active/inactive).
-         *         websocket_manager: WebSocket manager status.
-         *         active_connections: Number of active WebSocket connections.
-         */
         ZmqComponents: {
-            /**
-             * Zmq Context
-             * @description ZMQ context status
-             * @enum {string}
-             */
             zmq_context: "ok" | "error";
-            /**
-             * Websocket Manager
-             * @description WebSocket manager status
-             * @enum {string}
-             */
             websocket_manager: "ok" | "error";
-            /**
-             * Active Connections
-             * @description Number of active WebSocket connections
-             */
             active_connections: number;
         };
-        /**
-         * ZmqConfig
-         * @description ZMQ configuration information.
-         *
-         *     Attributes:
-         *         available_topics: List of available ZMQ topics for subscription.
-         */
         ZmqConfig: {
-            /**
-             * Available Topics
-             * @description List of available ZMQ topics
-             */
             available_topics: string[];
         };
-        /**
-         * ZmqHealthData
-         * @description Domain data for the ZMQ bridge health check.
-         *
-         *     Provides detailed status of the ZMQ-to-WebSocket bridge including
-         *     component health, configuration, and message statistics.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         *         status: Overall ZMQ bridge health status.
-         *         components: Component status details.
-         *         config: ZMQ configuration.
-         *         connections: Connection statistics.
-         *         message_stats: Message statistics per topic.
-         *         errors: Error messages if not healthy.
-         */
         ZmqHealthData: {
-            /**
-             * Type
-             * @default zmq_health
-             * @constant
-             */
             type: "zmq_health";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
-            /**
-             * Status
-             * @description Overall ZMQ bridge health status
-             * @enum {string}
-             */
             status: "healthy" | "warning" | "error";
-            /** @description Component status details */
             components: Components["schemas"]["ZmqComponents"];
-            /** @description ZMQ configuration */
             config: Components["schemas"]["ZmqConfig"];
-            /** @description Connection statistics */
             connections: Components["schemas"]["ConnectionStats"];
-            /**
-             * Message Stats
-             * @description Message statistics per topic
-             */
             message_stats: {
                 [key: string]: Components["schemas"]["TopicMetricSnapshot"];
             };
-            /**
-             * Errors
-             * @description Error messages if not healthy
-             * @default []
-             */
             errors: string[];
         };
-        /**
-         * ZmqHealthResponse
-         * @description ZMQ bridge health check endpoint response.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
         ZmqHealthResponse: {
-            /**
-             * Type
-             * @default zmq_health_response
-             * @constant
-             */
             type: "zmq_health_response";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["ZmqHealthData"];
         };
-        /**
-         * LoginRequest
-         * @description Login request envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
         LoginRequest: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "login_request";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["LoginBody"];
         };
-        /**
-         * LoginBody
-         * @description Login request body.
-         *
-         *     Attributes:
-         *         username: User's login name.
-         *         password: User's password.
-         *         remember_me: If True, extends refresh token lifetime.
-         */
         LoginBody: {
-            /** Username */
             username: string;
-            /** Password */
             password: string;
-            /** Remember Me */
             remember_me?: boolean;
         };
-        /**
-         * RefreshTokenRequest
-         * @description Refresh-token request envelope.
-         *
-         *     Inherits the project's provenance envelope; ``payload`` carries
-         *     the optional domain command. Registered on the refresh route with
-         *     :func:`optional_json_body` so every existing zero-body caller
-         *     (``apiClient.refreshAndRetry``, ``stores/auth.refreshToken``,
-         *     WS ticket refresh) stays byte-identical.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
         RefreshTokenRequest: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "refresh_token_request";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["RefreshTokenPayload"];
         };
-        /**
-         * RefreshTokenPayload
-         * @description Optional refresh-token body (Phase 2c).
-         *
-         *     Both fields are optional; when absent the caller inherits the
-         *     existing JWT claims byte-identically. Set ``active_wallet_public_id``
-         *     to mint new tokens scoped to that wallet (after server-side
-         *     membership validation); set ``clear_active_wallet`` to explicitly
-         *     clear the claim to ``None`` ("All wallets" UI option).
-         *
-         *     Invariant: both fields MUST NOT be set simultaneously — enforced
-         *     by the ``@model_validator`` below (422 at parse time). The
-         *     ``active_wallet_public_id`` value must be a canonical UUID7 —
-         *     a Pydantic field validator rejects malformed input with 422
-         *     before any membership query fires.
-         *
-         *     Attributes:
-         *         active_wallet_public_id: Optional wallet to scope the new
-         *             tokens to. None means "leave the claim unchanged".
-         *         clear_active_wallet: Explicit clear signal. ``True`` mints
-         *             new tokens with ``active_wallet_public_id=None``. Cannot
-         *             co-exist with ``active_wallet_public_id``.
-         */
         RefreshTokenPayload: {
-            /** Active Wallet Public Id */
             active_wallet_public_id?: string | null;
-            /** Clear Active Wallet */
             clear_active_wallet?: boolean;
         };
-        /**
-         * CreateUserRequest
-         * @description Create user request envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
         CreateUserRequest: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "create_user_request";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["CreateUserBody"];
         };
-        /**
-         * CreateUserBody
-         * @description Create user request body.
-         *
-         *     Attributes:
-         *         username: Unique username (3-64 chars).
-         *         email: Optional email address.
-         *         password: Password (min 8 chars).
-         *         role: User role to assign.
-         *         is_active: Whether account is active.
-         */
         CreateUserBody: {
-            /** Username */
             username: string;
-            /** Email */
             email?: string | null;
-            /** Password */
             password: string;
             role: Components["schemas"]["UserRole"];
-            /** Is Active */
             is_active?: boolean;
         };
-        /**
-         * UpdateUserRequest
-         * @description Update user request envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
         UpdateUserRequest: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "update_user_request";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["UpdateUserBody"];
         };
-        /**
-         * UpdateUserBody
-         * @description Update user request body.
-         *
-         *     All fields are optional - only provided fields are updated.
-         *
-         *     Attributes:
-         *         email: New email address.
-         *         role: New role assignment.
-         *         is_active: New active status.
-         */
         UpdateUserBody: {
-            /** Email */
             email?: string | null;
             role?: Components["schemas"]["UserRole"] | null;
-            /** Is Active */
             is_active?: boolean | null;
         };
-        /**
-         * DeactivateUserRequest
-         * @description Deactivate user request envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
         DeactivateUserRequest: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "deactivate_user_request";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["DeactivateUserBody"];
         };
-        /**
-         * DeactivateUserBody
-         * @description Deactivate user command body.
-         *
-         *     Command-style endpoint with optional human-readable rationale that
-         *     is forwarded to the canonical `admin.user_deactivated` bus payload
-         *     (plan §3.6.5) so subscribers (`AuthenticatedWebSocketManager`,
-         *     cross-instance `TokenManager`, audit consumers) can record why the
-         *     kill switch fired.
-         *
-         *     Attributes:
-         *         reason: Optional admin note explaining the deactivation. ``None``
-         *             when the request body is omitted entirely (back-compat with
-         *             the pre-Day-3b empty body).
-         */
         DeactivateUserBody: {
-            /** Reason */
             reason?: string | null;
         };
-        /**
-         * ChangePasswordRequest
-         * @description Change password request envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
         ChangePasswordRequest: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "change_password_request";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["ChangePasswordBody"];
         };
-        /**
-         * ChangePasswordBody
-         * @description Change password request body.
-         *
-         *     Used by authenticated users to change their own password.
-         *
-         *     Attributes:
-         *         current_password: Current password for verification.
-         *         new_password: New password (min 8 chars).
-         */
         ChangePasswordBody: {
-            /** Current Password */
             current_password: string;
-            /** New Password */
             new_password: string;
         };
-        /**
-         * AdminResetPasswordRequest
-         * @description Admin password reset request envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
         AdminResetPasswordRequest: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "admin_reset_password_request";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["AdminResetPasswordBody"];
         };
-        /**
-         * AdminResetPasswordBody
-         * @description Admin password reset request body.
-         *
-         *     Used by admins to reset another user's password
-         *     without knowing the current password.
-         *
-         *     Attributes:
-         *         new_password: New password to set (min 8 chars).
-         */
         AdminResetPasswordBody: {
-            /** New Password */
             new_password: string;
         };
-        /**
-         * SettingUpdate
-         * @description Setting update request envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
         SettingUpdate: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "setting_update";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["SettingUpdateBody"];
         };
-        /**
-         * SettingUpdateBody
-         * @description Setting update request body.
-         *
-         *     Attributes:
-         *         value: New setting value as string.
-         *         category: Setting category (defaults to 'system').
-         *         description: Optional description.
-         */
         SettingUpdateBody: {
-            /**
-             * Value
-             * @description Setting value as string
-             */
             value: string;
-            /**
-             * Category
-             * @description Setting category
-             */
             category?: string;
-            /**
-             * Description
-             * @description Setting description
-             */
             description?: string | null;
         };
-        /**
-         * RemoveSettingRequest
-         * @description Remove setting request envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
         RemoveSettingRequest: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "remove_setting_request";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["RemoveSettingBody"];
         };
-        /**
-         * RemoveSettingBody
-         * @description Remove setting command body (empty).
-         *
-         *     Command-style endpoint: no domain fields needed, provenance
-         *     is carried on the PayloadRequest envelope.
-         *
-         *     Attributes:
-         *         (none — empty body signals intent via URL path)
-         */
         RemoveSettingBody: Record<string, never>;
-        /**
-         * DelegateCreateRequest
-         * @description Create-delegate request envelope.
-         */
         DelegateCreateRequest: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "delegate_create_request";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["DelegateCreateBody"];
         };
-        /**
-         * DelegateCreateBody
-         * @description Operator-supplied fields for creating a new AI delegate.
-         *
-         *     The operator chooses a human-readable ``label`` that becomes
-         *     the delegate's username (prefixed with ``ai-``). Caps are
-         *     optional — every cap defaulting to the Snapper-wide fallback
-         *     per plan §3.5.3. The operator also picks WHICH of their
-         *     authenticated operators the delegate inherits membership
-         *     on — the minted delegate's wallet-scope set equals the
-         *     chosen operator's scope grants (plan §2 item 3). The
-         *     selection MUST sit inside the caller's authenticated operator
-         *     set; omit to default to the caller's
-         *     ``primary_operator_public_id``.
-         *
-         *     Attributes:
-         *         label: Non-empty human-readable tag. Normalised to
-         *             ``ai-<label>`` as the username so the delegate is
-         *             listable in the standard user table without an
-         *             auxiliary display-name column.
-         *         caps: Optional per-delegate trading safety caps.
-         *         operator_public_id: Operator the delegate is bound to —
-         *             must be in the caller's claim set. ``None`` defers
-         *             to the caller's primary operator so simple callers
-         *             don't need to know their membership set.
-         */
         DelegateCreateBody: {
-            /**
-             * Label
-             * @description Delegate label
-             */
             label: string;
             caps?: Components["schemas"]["DelegateCapsBody"];
-            /**
-             * Operator Public Id
-             * @description Operator the delegate is bound to — must be in the caller's claim set. Null defers to the caller's primary operator.
-             */
             operator_public_id?: string | null;
         };
-        /**
-         * DelegateCapsUpdateRequest
-         * @description Update-delegate-caps request envelope.
-         */
         DelegateCapsUpdateRequest: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "delegate_caps_update_request";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["DelegateCapsUpdateBody"];
         };
-        /**
-         * DelegateCapsUpdateBody
-         * @description Body for ``PATCH /api/ai-delegates/{id}``.
-         *
-         *     Only the caps fields are mutable post-create. ``label`` and
-         *     ``username`` are immutable after mint (changing them would
-         *     invalidate live tokens without an atomic rotation).
-         *
-         *     Attributes:
-         *         caps: Replacement caps — every field replaces the
-         *             corresponding existing cap. Missing fields are treated
-         *             as ``None`` (unbounded).
-         */
         DelegateCapsUpdateBody: {
             caps: Components["schemas"]["DelegateCapsBody"];
         };
-        /**
-         * DelegateDeactivateRequest
-         * @description Deactivate-delegate request envelope.
-         */
         DelegateDeactivateRequest: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "delegate_deactivate_request";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["DelegateDeactivateBody"];
         };
-        /**
-         * DelegateDeactivateBody
-         * @description Body for ``POST /api/ai-delegates/{id}/deactivate``.
-         *
-         *     Attributes:
-         *         reason: Optional free-text reason recorded in audit logs
-         *             + propagated through ``admin.user_deactivated`` so
-         *             the WS listener's close-reason carries context.
-         */
         DelegateDeactivateBody: {
-            /**
-             * Reason
-             * @description Optional audit reason
-             */
             reason?: string | null;
         };
-        /**
-         * BacktestCreateCommand
-         * @description Request envelope for POST /api/backtests.
-         */
         BacktestCreateCommand: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "backtest_create_command";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["BacktestCreateBody"];
         };
-        /**
-         * BacktestCreateBody
-         * @description Request body for POST /api/backtests.
-         *
-         *     Attributes:
-         *         strategy_class: Registered strategy name.
-         *         instrument_public_id: Instrument to backtest.
-         *         exchange: Exchange name.
-         *         timeframe: Candle timeframe (e.g., "1h").
-         *         start_date: Backtest period start.
-         *         end_date: Backtest period end.
-         *         initial_cash: Starting cash balance.
-         *         strategy_params: Strategy-specific parameters.
-         */
         BacktestCreateBody: {
-            /** Strategy Class */
             strategy_class: string;
-            /** Instrument Public Id */
             instrument_public_id: string;
-            /** Exchange */
             exchange: string;
-            /** Timeframe */
             timeframe?: string;
-            /**
-             * Start Date
-             * Format: date-time
-             */
             start_date: string;
-            /**
-             * End Date
-             * Format: date-time
-             */
             end_date: string;
-            /** Initial Cash */
             initial_cash?: number;
             strategy_params?: Record<string, unknown>;
-            /** Execution Mode */
             execution_mode?: string;
-            /** Fill Model */
             fill_model?: string;
-            /** Slippage Bps */
             slippage_bps?: number;
-            /** Commission Bps */
             commission_bps?: number;
         };
-        /**
-         * BacktestCompareRequest
-         * @description Compare-request envelope.
-         */
         BacktestCompareRequest: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "backtest_compare_request";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["BacktestCompareBody"];
         };
-        /**
-         * BacktestCompareBody
-         * @description Phase 2c compare-request body (plan §4.3).
-         *
-         *     Auto-mode requires ``config_hash``; manual-mode requires both
-         *     ``run_a_public_id`` and ``run_b_public_id``.
-         */
         BacktestCompareBody: {
-            /**
-             * Mode
-             * @enum {string}
-             */
             mode: "manual" | "auto";
-            /** Run A Public Id */
             run_a_public_id?: string | null;
-            /** Run B Public Id */
             run_b_public_id?: string | null;
-            /** Config Hash */
             config_hash?: string | null;
-            /** Anchor Run Public Id */
             anchor_run_public_id?: string | null;
         };
-        /**
-         * BacktestCancelCommand
-         * @description Request envelope for POST /api/backtests/{id}/cancel.
-         */
         BacktestCancelCommand: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "backtest_cancel_command";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["BacktestCancelBody"];
         };
-        /**
-         * BacktestCancelBody
-         * @description Request body for POST /api/backtests/{id}/cancel.
-         *
-         *     Attributes:
-         *         reason: Optional cancellation reason.
-         */
         BacktestCancelBody: {
-            /** Reason */
             reason?: string;
         };
-        /**
-         * CreateCredentialCommand
-         * @description Request envelope for ``POST /api/wallets/{id}/credentials``.
-         */
         CreateCredentialCommand: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "create_credential_command";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["CreateCredentialBody"];
         };
-        /**
-         * CreateCredentialBody
-         * @description Request body for ``POST /api/wallets/{id}/credentials``.
-         *
-         *     The ``payload`` field carries the plaintext credential JSON that
-         *     will be Fernet-encrypted server-side before DB insert. The shape
-         *     is polymorphic on ``credential_type``:
-         *
-         *     - ``api_key_secret`` → ``{"api_key": ..., "api_secret": ...}``
-         *     - ``rsa_pem`` → ``{"api_key": ..., "private_key_pem": ...}``
-         *     - ``paper`` → ``{"initial_balance": ...}``
-         *     - ``oauth`` → ``{"client_id": ..., "client_secret": ..., "refresh_token": ...}``
-         *
-         *     The server validates required keys per credential_type before
-         *     accepting the payload.
-         *
-         *     Attributes:
-         *         exchange: Exchange identifier (lowercase enforced server-side).
-         *         credential_type: One of the four supported types.
-         *         credential_payload: Plaintext JSON dict that will be encrypted.
-         *         label: Optional human-readable description.
-         */
         CreateCredentialBody: {
-            /** Exchange */
             exchange: string;
-            /**
-             * Credential Type
-             * @enum {string}
-             */
             credential_type: "api_key_secret" | "rsa_pem" | "oauth" | "paper";
-            /**
-             * Credential Payload
-             * @description Plaintext credential fields, encrypted server-side
-             */
             credential_payload: {
                 [key: string]: string;
             };
-            /** Label */
             label?: string | null;
         };
-        /**
-         * RotateCredentialCommand
-         * @description Request envelope for ``POST /api/wallets/{id}/credentials/{cid}/rotate``.
-         */
         RotateCredentialCommand: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "rotate_credential_command";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["RotateCredentialBody"];
         };
-        /**
-         * RotateCredentialBody
-         * @description Request body for ``POST /api/wallets/{id}/credentials/{cid}/rotate``.
-         *
-         *     Same polymorphic payload as create — the new plaintext credential
-         *     fields replace the old ones. The old credential row is SCD2-closed
-         *     and a fresh row is inserted.
-         *
-         *     Attributes:
-         *         credential_payload: New plaintext credential fields.
-         *         label: Optional updated human-readable description (None
-         *             preserves the existing label).
-         */
         RotateCredentialBody: {
-            /**
-             * Credential Payload
-             * @description New plaintext credential fields, encrypted server-side
-             */
             credential_payload: {
                 [key: string]: string;
             };
-            /** Label */
             label?: string | null;
         };
-        /**
-         * BracketCreateCommand
-         * @description Request envelope for POST /api/execution-plans.
-         */
         BracketCreateCommand: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "create_bracket_command";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["BracketCreateBody"];
         };
-        /**
-         * BracketCreateBody
-         * @description Request body for POST /api/execution-plans (bracket creation).
-         *
-         *     Attributes:
-         *         position_cycle_public_id: Target position cycle to protect.
-         *         sl_price: Stop-loss trigger price (optional if tp_price set).
-         *         tp_price: Take-profit trigger price (optional if sl_price set).
-         *         idempotency_key: Optional dedup key for retries.
-         */
         BracketCreateBody: {
-            /** Position Cycle Public Id */
             position_cycle_public_id: string;
-            /** Sl Price */
             sl_price?: number | null;
-            /** Tp Price */
             tp_price?: number | null;
-            /** Idempotency Key */
             idempotency_key?: string | null;
         };
-        /**
-         * BracketCancelCommand
-         * @description Request envelope for POST /api/execution-plans/{id}/cancel.
-         */
         BracketCancelCommand: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "cancel_bracket_command";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["BracketCancelBody"];
         };
-        /**
-         * BracketCancelBody
-         * @description Request body for POST /api/execution-plans/{id}/cancel.
-         *
-         *     Attributes:
-         *         reason: Optional human-readable cancellation reason.
-         */
         BracketCancelBody: {
-            /** Reason */
             reason?: string | null;
         };
-        /**
-         * CreateOrderCommand
-         * @description Request envelope for POST /api/orders.
-         */
         CreateOrderCommand: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "create_order_command";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["CreateOrderBody"];
         };
-        /**
-         * CreateOrderBody
-         * @description Request body for POST /api/orders (manual order creation).
-         *
-         *     Attributes:
-         *         instrument: Native symbol (e.g. BTC-USD, ETH/USD).
-         *         instrument_public_id: Target instrument UUID.
-         *         exchange: Exchange to route the order to.
-         *         mode: Execution mode (live or paper).
-         *         side: Order side (buy or sell).
-         *         order_type: Order type (market, limit, stop, stop_limit).
-         *         quantity: Order quantity (must be positive).
-         *         price: Limit price (required for limit and stop_limit).
-         *         stop_price: Stop trigger price (required for stop and stop_limit).
-         *         time_in_force: Time-in-force policy (default GTC).
-         *         post_only: Post-only flag for maker orders.
-         *         leverage: Optional leverage multiplier.
-         *         reduce_only: Reduce-only flag for closing positions.
-         *         wallet_public_id: Target wallet UUID.
-         *         operator_public_id: Optional operator identity.
-         *         idempotency_key: Optional idempotency key for dedup.
-         */
         CreateOrderBody: {
-            /** Instrument */
             instrument: string;
-            /** Instrument Public Id */
             instrument_public_id: string;
-            /** Exchange */
             exchange: string;
-            /**
-             * Mode
-             * @enum {string}
-             */
             mode?: "live" | "paper";
-            /**
-             * Side
-             * @enum {string}
-             */
             side: "buy" | "sell";
-            /**
-             * Order Type
-             * @enum {string}
-             */
             order_type: "market" | "limit" | "stop" | "stop_limit";
-            /** Quantity */
             quantity: number;
-            /** Price */
             price?: number | null;
-            /** Stop Price */
             stop_price?: number | null;
-            /** Time In Force */
             time_in_force?: string;
-            /** Post Only */
             post_only?: boolean;
-            /** Leverage */
             leverage?: number | null;
-            /** Reduce Only */
             reduce_only?: boolean;
-            /** Wallet Public Id */
             wallet_public_id: string;
-            /** Operator Public Id */
             operator_public_id?: string | null;
-            /** Idempotency Key */
             idempotency_key?: string | null;
         };
-        /**
-         * CancelOrderCommand
-         * @description Request envelope for POST /api/orders/{id}/cancel.
-         */
         CancelOrderCommand: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "cancel_order_command";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["CancelOrderBody"];
         };
-        /**
-         * CancelOrderBody
-         * @description Request body for POST /api/orders/{id}/cancel.
-         *
-         *     Attributes:
-         *         reason: Optional human-readable cancellation reason.
-         */
         CancelOrderBody: {
-            /** Reason */
             reason?: string | null;
         };
-        /**
-         * ProcessCreateRequest
-         * @description Process creation request envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
         ProcessCreateRequest: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "process_create_request";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["ProcessCreateBody"];
         };
-        /**
-         * ProcessCreateBody
-         * @description Process creation request body.
-         *
-         *     Attributes:
-         *         name: Unique process name (lowercase alphanumeric with underscores).
-         *         template: Registered process identifier used as template.
-         *         enabled: Whether process should autostart on boot.
-         *         mode: Execution mode override (thread/process).
-         *         parameters: Constructor parameters dict.
-         *         note: Optional note stored alongside configuration.
-         */
         ProcessCreateBody: {
-            /**
-             * Name
-             * @description Unique process name
-             */
             name: string;
-            /**
-             * Template
-             * @description Registered process identifier used as template
-             */
             template: string;
-            /**
-             * Enabled
-             * @description Whether process should autostart on boot
-             */
             enabled?: boolean | null;
-            /**
-             * Mode
-             * @description Execution mode override (thread/process)
-             */
             mode?: ("thread" | "process") | null;
-            /** @description Constructor parameters */
             parameters?: Record<string, unknown> | null;
-            /**
-             * Note
-             * @description Optional note stored alongside configuration
-             */
             note?: string | null;
         };
-        /**
-         * ProcessStartRequest
-         * @description Process start request envelope.
-         *
-         *     Attributes:
-         *         type: Payload item type discriminator.
-         */
         ProcessStartRequest: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "process_start_request";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["ProcessStartBody"];
         };
-        /**
-         * ProcessStartBody
-         * @description Process start request body.
-         *
-         *     Runtime overrides apply to this run only and are not persisted
-         *     to boot config.  Use the Settings API to change persistent config.
-         *
-         *     Attributes:
-         *         mode: Execution mode (thread/process) override for this run.
-         *         parameters: Constructor parameters override for this run.
-         */
         ProcessStartBody: {
-            /**
-             * Mode
-             * @description Execution mode (thread/process) override for this run
-             * @example thread
-             * @example process
-             */
             mode?: ("thread" | "process") | null;
-            /**
-             * @description Constructor parameters override for this run
-             * @example {
-             *       "endpoint": "tcp://0.0.0.0:5555"
-             *     }
-             */
             parameters?: Record<string, unknown> | null;
         };
-        /**
-         * CreateScopeGrantCommand
-         * @description Request envelope for ``POST /api/scope-grants``.
-         */
         CreateScopeGrantCommand: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "create_scope_grant_command";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["CreateScopeGrantBody"];
         };
-        /**
-         * CreateScopeGrantBody
-         * @description Request body for ``POST /api/scope-grants``.
-         *
-         *     Exactly one of ``underlying_public_id`` / ``instrument_public_id``
-         *     must be supplied, matching the chosen ``scope_kind``. The server
-         *     fills in ``granted_by_user_public_id`` from
-         *     ``principal.user_public_id`` so the client never supplies an
-         *     audit identity it could spoof.
-         *
-         *     Attributes:
-         *         operator_public_id: The operator being granted scope.
-         *         wallet_public_id: The wallet covered by the grant.
-         *         scope_kind: Either ``"underlying"`` or ``"instrument"``.
-         *         underlying_public_id: Set iff ``scope_kind == "underlying"``.
-         *         instrument_public_id: Set iff ``scope_kind == "instrument"``.
-         *         note: Optional free-form audit note.
-         */
         CreateScopeGrantBody: {
-            /** Operator Public Id */
             operator_public_id: string;
-            /** Wallet Public Id */
             wallet_public_id: string;
-            /**
-             * Scope Kind
-             * @enum {string}
-             */
             scope_kind: "underlying" | "instrument";
-            /** Underlying Public Id */
             underlying_public_id?: string | null;
-            /** Instrument Public Id */
             instrument_public_id?: string | null;
-            /** Note */
             note?: string | null;
         };
-        /**
-         * HandoverScopeGrantCommand
-         * @description Request envelope for ``POST /api/scope-grants/handover``.
-         */
         HandoverScopeGrantCommand: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "handover_scope_grant_command";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["HandoverScopeGrantBody"];
         };
-        /**
-         * HandoverScopeGrantBody
-         * @description Request body for ``POST /api/scope-grants/handover``.
-         *
-         *     Attributes:
-         *         from_grant_public_id: Public ID of the active source grant.
-         *         to_operator_public_id: Public ID of the destination operator.
-         *         reason: Optional free-form audit note recorded on the new
-         *             grant's ``note`` column.
-         */
         HandoverScopeGrantBody: {
-            /** From Grant Public Id */
             from_grant_public_id: string;
-            /** To Operator Public Id */
             to_operator_public_id: string;
-            /** Reason */
             reason?: string | null;
         };
-        /**
-         * TrailingStopCreateCommand
-         * @description Request envelope for POST /api/trailing-stops.
-         */
         TrailingStopCreateCommand: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "create_trailing_stop_command";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["TrailingStopCreateBody"];
         };
-        /**
-         * TrailingStopCreateBody
-         * @description Request body for POST /api/trailing-stops.
-         *
-         *     Attributes:
-         *         position_cycle_public_id: Target position cycle to protect.
-         *         trailing_pct: Trailing distance as percentage (e.g., 2.0 = 2%).
-         *         min_lock_pct: Minimum profit % before trailing activates (0 = immediate).
-         *         idempotency_key: Optional dedup key for retries.
-         */
         TrailingStopCreateBody: {
-            /** Position Cycle Public Id */
             position_cycle_public_id: string;
-            /** Trailing Pct */
             trailing_pct: number;
-            /** Min Lock Pct */
             min_lock_pct?: number;
-            /** Idempotency Key */
             idempotency_key?: string | null;
         };
-        /**
-         * TrailingStopCancelCommand
-         * @description Request envelope for POST /api/trailing-stops/{id}/cancel.
-         */
         TrailingStopCancelCommand: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "cancel_trailing_stop_command";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["TrailingStopCancelBody"];
         };
-        /**
-         * TrailingStopCancelBody
-         * @description Request body for POST /api/trailing-stops/{id}/cancel.
-         *
-         *     Attributes:
-         *         reason: Optional human-readable cancellation reason.
-         */
         TrailingStopCancelBody: {
-            /** Reason */
             reason?: string | null;
         };
-        /**
-         * CreateWalletCommand
-         * @description Request envelope for ``POST /api/wallets``.
-         */
         CreateWalletCommand: {
-            /**
-             * Type
-             * @constant
-             */
             type?: "create_wallet_command";
-            /** Sequence Id */
             sequence_id: number;
-            /** Public Id */
             public_id: string;
-            /**
-             * Timestamp
-             * Format: date-time
-             */
             timestamp: string;
-            /** Session Id */
             session_id: string;
             payload: Components["schemas"]["CreateWalletBody"];
         };
-        /**
-         * CreateWalletBody
-         * @description Request body for ``POST /api/wallets``.
-         *
-         *     Attributes:
-         *         label: Human-readable wallet name (1-128 chars). The
-         *             ``(label, is_paper)`` active-unique index enforces that
-         *             two wallets sharing both fields cannot be active at the
-         *             same time.
-         *         description: Optional free-form description.
-         *         is_paper: Paper-mode flag. Paper and live wallets may share
-         *             the same label (e.g. ``default`` + ``default-paper``)
-         *             provided they differ on ``is_paper``.
-         */
         CreateWalletBody: {
-            /** Label */
             label: string;
-            /** Description */
             description?: string | null;
-            /** Is Paper */
             is_paper?: boolean;
         };
     };
@@ -9296,7 +3005,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9320,7 +3028,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9340,7 +3047,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9360,7 +3066,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9383,7 +3088,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9392,7 +3096,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["UserListResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -9416,7 +3119,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9442,7 +3144,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9451,7 +3152,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["UserResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -9477,7 +3177,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9486,7 +3185,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["MessageResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -9512,7 +3210,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9521,7 +3218,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["MessageResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -9547,7 +3243,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9556,7 +3251,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["MessageResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -9576,7 +3270,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9599,7 +3292,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9608,7 +3300,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["SettingListResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -9630,7 +3321,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9639,7 +3329,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["SettingCategoriesResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -9665,7 +3354,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9674,14 +3362,12 @@ export interface Operations {
                     "application/json": Components["schemas"]["SettingResponse"];
                 };
             };
-            /** @description Setting not found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -9707,7 +3393,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9716,14 +3401,12 @@ export interface Operations {
                     "application/json": Components["schemas"]["MessageResponse"];
                 };
             };
-            /** @description Setting not found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -9743,7 +3426,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9767,7 +3449,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9789,7 +3470,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9798,14 +3478,12 @@ export interface Operations {
                     "application/json": Components["schemas"]["DelegateResponse"];
                 };
             };
-            /** @description Delegate not found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -9831,7 +3509,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9840,14 +3517,12 @@ export interface Operations {
                     "application/json": Components["schemas"]["DelegateResponse"];
                 };
             };
-            /** @description Delegate not found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -9873,7 +3548,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9882,14 +3556,12 @@ export interface Operations {
                     "application/json": Components["schemas"]["DelegateResponse"];
                 };
             };
-            /** @description Delegate not found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -9909,7 +3581,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9929,7 +3600,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9949,7 +3619,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9973,7 +3642,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -9982,28 +3650,24 @@ export interface Operations {
                     "application/json": Components["schemas"]["ProcessCreateResponse"];
                 };
             };
-            /** @description Invalid process request */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Process scope denied */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Template not found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Process name already exists */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -10023,7 +3687,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10032,14 +3695,12 @@ export interface Operations {
                     "application/json": Components["schemas"]["ProcessSchemaResponse"];
                 };
             };
-            /** @description Process not found in registry */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10065,7 +3726,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10074,21 +3734,18 @@ export interface Operations {
                     "application/json": Components["schemas"]["ProcessStartResponse"];
                 };
             };
-            /** @description Invalid process request */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Process scope denied */
             403: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10110,7 +3767,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10119,7 +3775,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["ProcessStopResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10142,7 +3797,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10151,7 +3805,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["ProcessRunsResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10171,7 +3824,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10191,7 +3843,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10215,7 +3866,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10235,7 +3885,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10249,7 +3898,6 @@ export interface Operations {
     list_scope_grants_api_scope_grants_get: {
         parameters: {
             query: {
-                /** @description Public ID of the wallet whose active grants to list */
                 wallet_public_id: string;
             };
             header?: never;
@@ -10258,7 +3906,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10267,7 +3914,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["ScopeGrantListResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10291,7 +3937,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10315,7 +3960,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10337,7 +3981,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10346,7 +3989,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["CredentialListResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10372,7 +4014,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10381,7 +4022,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["CredentialResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10408,7 +4048,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10417,7 +4056,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["CredentialResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10431,19 +4069,12 @@ export interface Operations {
     get_orders_api_orders_get: {
         parameters: {
             query?: {
-                /** @description Symbol to filter by */
                 symbol?: string | null;
-                /** @description Filter by exchange */
                 exchange?: ("paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat") | null;
-                /** @description Number of orders to return */
                 limit?: number;
-                /** @description Number of orders to skip */
                 offset?: number;
-                /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
-                /** @description Scope to operator */
                 operator_public_id?: string | null;
-                /** @description Scope to wallet */
                 wallet_public_id?: string | null;
             };
             header?: never;
@@ -10452,7 +4083,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10461,7 +4091,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["OrderListResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10470,7 +4099,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Internal server error */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -10492,7 +4120,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10501,7 +4128,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["ExecutionPlanResponse"];
                 };
             };
-            /** @description Order request validation failed */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10525,7 +4151,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10534,7 +4159,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["ExecutionPlanResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10560,7 +4184,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10569,7 +4192,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["ExecutionPlanResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10593,7 +4215,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10619,7 +4240,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10628,7 +4248,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["ExecutionPlanResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10650,7 +4269,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10659,7 +4277,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["ExecutionPlanResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10685,7 +4302,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10696,7 +4312,6 @@ export interface Operations {
                     };
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10718,7 +4333,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10727,7 +4341,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["PositionCycleListResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10749,7 +4362,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10758,7 +4370,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["OrphanSweepResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10780,7 +4391,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10789,7 +4399,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["OrphanSweepResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10813,7 +4422,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10839,7 +4447,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10848,7 +4455,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["ExecutionPlanResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10870,7 +4476,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10879,7 +4484,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["ExecutionPlanResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10905,7 +4509,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10916,7 +4519,6 @@ export interface Operations {
                     };
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10938,7 +4540,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10949,7 +4550,6 @@ export interface Operations {
                     };
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10963,13 +4563,9 @@ export interface Operations {
     list_backtests_api_backtests_get: {
         parameters: {
             query?: {
-                /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
-                /** @description Filter by strategy name */
                 strategy?: string | null;
-                /** @description Filter by status */
                 status?: string | null;
-                /** @description Phase 2c pairing-stable hash filter (64-hex SHA-256) */
                 config_hash?: string | null;
                 limit?: number;
                 offset?: number;
@@ -10980,7 +4576,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -10989,14 +4584,12 @@ export interface Operations {
                     "application/json": Components["schemas"]["BacktestRunListResponse"];
                 };
             };
-            /** @description no active wallet selected */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11020,7 +4613,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11029,14 +4621,12 @@ export interface Operations {
                     "application/json": Components["schemas"]["BacktestRunResponse"];
                 };
             };
-            /** @description no active wallet selected */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Backtest request failed */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -11048,7 +4638,6 @@ export interface Operations {
     list_comparisons_api_backtests_compare_get: {
         parameters: {
             query?: {
-                /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
                 limit?: number;
                 offset?: number;
@@ -11059,7 +4648,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11068,14 +4656,12 @@ export interface Operations {
                     "application/json": Components["schemas"]["BacktestComparisonListResponse"];
                 };
             };
-            /** @description no active wallet selected */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11099,7 +4685,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11108,35 +4693,30 @@ export interface Operations {
                     "application/json": Components["schemas"]["BacktestComparisonResponse"];
                 };
             };
-            /** @description no active wallet selected */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Comparison or run not found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Backtest request conflict */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Backtest request validation failed */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Backtest request failed */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -11148,7 +4728,6 @@ export interface Operations {
     get_comparison_api_backtests_compare__comparison_public_id__get: {
         parameters: {
             query?: {
-                /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
             };
             header?: never;
@@ -11159,7 +4738,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11168,21 +4746,18 @@ export interface Operations {
                     "application/json": Components["schemas"]["BacktestComparisonDetailResponse"];
                 };
             };
-            /** @description no active wallet selected */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Comparison or run not found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11196,7 +4771,6 @@ export interface Operations {
     get_backtest_api_backtests__run_id__get: {
         parameters: {
             query?: {
-                /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
             };
             header?: never;
@@ -11207,7 +4781,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11216,21 +4789,18 @@ export interface Operations {
                     "application/json": Components["schemas"]["BacktestRunDetailResponse"];
                 };
             };
-            /** @description no active wallet selected */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Backtest run not found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11256,7 +4826,6 @@ export interface Operations {
             };
         };
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11265,28 +4834,24 @@ export interface Operations {
                     "application/json": Components["schemas"]["BacktestRunResponse"];
                 };
             };
-            /** @description no active wallet selected */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Backtest run not found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Backtest request conflict */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11295,7 +4860,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Backtest request failed */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -11315,7 +4879,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11324,21 +4887,18 @@ export interface Operations {
                     "application/json": Components["schemas"]["BacktestRunResponse"];
                 };
             };
-            /** @description no active wallet selected */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Backtest run not found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11352,7 +4912,6 @@ export interface Operations {
     get_backtest_trades_api_backtests__run_id__trades_get: {
         parameters: {
             query?: {
-                /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
                 limit?: number;
                 offset?: number;
@@ -11365,7 +4924,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11374,21 +4932,18 @@ export interface Operations {
                     "application/json": Components["schemas"]["BacktestTradeListResponse"];
                 };
             };
-            /** @description no active wallet selected */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Backtest run not found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11402,7 +4957,6 @@ export interface Operations {
     get_backtest_signals_api_backtests__run_id__signals_get: {
         parameters: {
             query?: {
-                /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
                 limit?: number;
                 offset?: number;
@@ -11415,7 +4969,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11424,21 +4977,18 @@ export interface Operations {
                     "application/json": Components["schemas"]["BacktestSignalListResponse"];
                 };
             };
-            /** @description no active wallet selected */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Backtest run not found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11452,7 +5002,6 @@ export interface Operations {
     get_backtest_events_api_backtests__run_id__events_get: {
         parameters: {
             query?: {
-                /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
             };
             header?: never;
@@ -11463,7 +5012,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11472,21 +5020,18 @@ export interface Operations {
                     "application/json": Components["schemas"]["BacktestEventListResponse"];
                 };
             };
-            /** @description no active wallet selected */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Backtest run not found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11500,10 +5045,8 @@ export interface Operations {
     get_backtest_equity_api_backtests__run_id__equity_get: {
         parameters: {
             query?: {
-                /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
                 limit?: number;
-                /** @description Forward cursor: return points strictly after this point_time */
                 after?: string | null;
             };
             header?: never;
@@ -11514,7 +5057,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11523,21 +5065,18 @@ export interface Operations {
                     "application/json": Components["schemas"]["BacktestEquityPointListResponse"];
                 };
             };
-            /** @description no active wallet selected */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Backtest run not found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11551,15 +5090,10 @@ export interface Operations {
     get_candles_api_candles_get: {
         parameters: {
             query: {
-                /** @description Instrument symbol */
                 instrument: string;
-                /** @description Exchange name */
                 exchange: "kraken" | "kraken_futures" | "kraken_equities" | "zonda" | "walutomat" | "polygon";
-                /** @description Timeframe */
                 timeframe: string;
-                /** @description Number of candles to return */
                 limit?: number;
-                /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
             };
             header?: never;
@@ -11568,7 +5102,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11577,7 +5110,6 @@ export interface Operations {
                     "application/json": unknown;
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11586,7 +5118,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Internal server error */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -11598,21 +5129,13 @@ export interface Operations {
     get_signals_api_signals_get: {
         parameters: {
             query?: {
-                /** @description Filter by instrument */
                 instrument?: string | null;
-                /** @description Filter by strategy */
                 strategy?: string | null;
-                /** @description Filter by exchange */
                 exchange?: ("paper" | "kraken" | "kraken_futures" | "zonda" | "walutomat") | null;
-                /** @description Hours of history to return */
                 hours?: number;
-                /** @description Number of signals to return */
                 limit?: number;
-                /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
-                /** @description Scope to operator */
                 operator_public_id?: string | null;
-                /** @description Scope to wallet */
                 wallet_public_id?: string | null;
             };
             header?: never;
@@ -11621,7 +5144,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11630,7 +5152,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["SignalListResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11639,7 +5160,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Internal server error */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -11651,7 +5171,6 @@ export interface Operations {
     get_exchanges_api_exchanges_get: {
         parameters: {
             query?: {
-                /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
             };
             header?: never;
@@ -11660,7 +5179,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11669,7 +5187,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["ExchangeListResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11678,7 +5195,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Internal server error */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -11690,7 +5206,6 @@ export interface Operations {
     get_exchange_instruments_api_exchanges__exchange__instruments_get: {
         parameters: {
             query?: {
-                /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
             };
             header?: never;
@@ -11701,7 +5216,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11710,7 +5224,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["InstrumentListResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11719,7 +5232,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Internal server error */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -11731,7 +5243,6 @@ export interface Operations {
     get_exchange_instruments_detail_api_exchanges__exchange__instruments_detail_get: {
         parameters: {
             query?: {
-                /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
             };
             header?: never;
@@ -11742,7 +5253,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11751,7 +5261,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["InstrumentDetailListResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11760,7 +5269,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Internal server error */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -11772,7 +5280,6 @@ export interface Operations {
     get_underlyings_api_underlyings_get: {
         parameters: {
             query?: {
-                /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
             };
             header?: never;
@@ -11781,7 +5288,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11790,7 +5296,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["UnderlyingAssetListResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11799,7 +5304,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Internal server error */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -11811,9 +5315,7 @@ export interface Operations {
     get_underlying_instruments_api_underlyings__ticker__instruments_get: {
         parameters: {
             query?: {
-                /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
-                /** @description Filter by relationship type */
                 relationship_type?: Components["schemas"]["RelationshipTypeEnum"] | null;
             };
             header?: never;
@@ -11824,7 +5326,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11833,14 +5334,12 @@ export interface Operations {
                     "application/json": Components["schemas"]["UnderlyingInstrumentListResponse"];
                 };
             };
-            /** @description Underlying not found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11849,7 +5348,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Internal server error */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -11861,11 +5359,8 @@ export interface Operations {
     get_front_month_api_underlyings__ticker__front_month_get: {
         parameters: {
             query?: {
-                /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
-                /** @description Filter by exchange */
                 exchange?: string | null;
-                /** @description Filter by product root (e.g. ES, MES) */
                 contract_family?: string | null;
             };
             header?: never;
@@ -11876,7 +5371,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11885,14 +5379,12 @@ export interface Operations {
                     "application/json": Components["schemas"]["FrontMonthResponse"];
                 };
             };
-            /** @description No active futures contracts or underlying not found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11901,7 +5393,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Internal server error */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -11913,13 +5404,9 @@ export interface Operations {
     get_contracts_api_underlyings__ticker__contracts_get: {
         parameters: {
             query?: {
-                /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
-                /** @description Filter by exchange */
                 exchange?: string | null;
-                /** @description Filter by product root (e.g. ES, MES) */
                 contract_family?: string | null;
-                /** @description Include expired contracts */
                 include_expired?: boolean;
             };
             header?: never;
@@ -11930,7 +5417,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11939,14 +5425,12 @@ export interface Operations {
                     "application/json": Components["schemas"]["ContractListResponse"];
                 };
             };
-            /** @description Underlying not found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11955,7 +5439,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Internal server error */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -11967,21 +5450,13 @@ export interface Operations {
     get_continuous_series_api_underlyings__ticker__continuous_get: {
         parameters: {
             query: {
-                /** @description Exchange to source contracts from */
                 exchange: string;
-                /** @description Product root (e.g. ES, GC) */
                 contract_family: string;
-                /** @description Candle timeframe (e.g. 1h, 1d) */
                 timeframe: string;
-                /** @description Series start time (UTC) */
                 start: string;
-                /** @description Series end time (UTC) */
                 end: string;
-                /** @description Adjustment method */
                 method?: string;
-                /** @description Days before expiry to roll (0-365) */
                 rollover_days_before?: number;
-                /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
             };
             header?: never;
@@ -11992,7 +5467,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -12001,21 +5475,18 @@ export interface Operations {
                     "application/json": Components["schemas"]["ContinuousCandleListResponse"] | Components["schemas"]["ContinuousSeriesPartialResponse"];
                 };
             };
-            /** @description Invalid parameters */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Underlying not found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -12024,7 +5495,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Internal server error */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -12036,13 +5506,9 @@ export interface Operations {
     get_executions_api_executions_get: {
         parameters: {
             query?: {
-                /** @description Number of executions to return */
                 limit?: number;
-                /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
-                /** @description Scope to operator */
                 operator_public_id?: string | null;
-                /** @description Scope to wallet */
                 wallet_public_id?: string | null;
             };
             header?: never;
@@ -12051,7 +5517,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -12060,7 +5525,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["ExecutionListResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -12069,7 +5533,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Internal server error */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -12081,11 +5544,8 @@ export interface Operations {
     get_positions_api_positions_get: {
         parameters: {
             query?: {
-                /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
-                /** @description Scope to operator */
                 operator_public_id?: string | null;
-                /** @description Scope to wallet */
                 wallet_public_id?: string | null;
             };
             header?: never;
@@ -12094,7 +5554,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -12103,7 +5562,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["PositionListResponse"];
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -12112,7 +5570,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Internal server error */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -12124,11 +5581,8 @@ export interface Operations {
     get_instrument_capabilities_api_instrument_capabilities_get: {
         parameters: {
             query?: {
-                /** @description Filter by exchange name */
                 exchange?: string | null;
-                /** @description Filter by instrument public ID */
                 instrument_public_id?: string | null;
-                /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
             };
             header?: never;
@@ -12137,7 +5591,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -12146,7 +5599,6 @@ export interface Operations {
                     "application/json": unknown;
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -12155,7 +5607,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Internal server error */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -12167,9 +5618,7 @@ export interface Operations {
     get_venue_fee_schedules_api_venue_fee_schedules_get: {
         parameters: {
             query?: {
-                /** @description Filter by exchange name */
                 exchange?: string | null;
-                /** @description Point-in-time query (UTC) */
                 as_of?: string | null;
             };
             header?: never;
@@ -12178,7 +5627,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -12187,7 +5635,6 @@ export interface Operations {
                     "application/json": unknown;
                 };
             };
-            /** @description Validation Error */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -12196,7 +5643,6 @@ export interface Operations {
                     "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Internal server error */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -12214,7 +5660,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -12234,7 +5679,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -12254,7 +5698,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -12274,7 +5717,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -12294,7 +5736,6 @@ export interface Operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;

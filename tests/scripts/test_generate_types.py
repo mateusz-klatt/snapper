@@ -14,6 +14,7 @@ from scripts.generate_types import ENTITY_EXCLUDE_FIELDS
 from scripts.generate_types import ENTITY_UNION_ID_FIELDS
 from scripts.generate_types import SWIFT_KEYWORD_RENAMES
 from scripts.generate_types import _register_openapi_schema
+from scripts.generate_types import _strip_jsdoc_blocks
 from scripts.generate_types import camel_to_lower
 from scripts.generate_types import derive_entity_name
 from scripts.generate_types import discover_ws_schemas
@@ -1046,7 +1047,7 @@ class TestGenerateIosPermissions:
 
         output = tmp_path / "ios" / "Snapper" / "Models" / "Generated" / "Permissions.swift"
         content = output.read_text()
-        assert '"overview": [.ai_delegate, .viewer, .operatorRole, .admin]' in content
+        assert '"overview": [.aiDelegate, .viewer, .operatorRole, .admin]' in content
         assert '"admin": [.admin]' in content
         assert '"settings": [.admin]' in content
         assert '"processes": [.operatorRole, .admin]' in content
@@ -2389,3 +2390,49 @@ class TestExtractRepeatedUnions:
         alias_lines = [line for line in result if line.startswith("type Exchange")]
         assert len(alias_lines) == 2
         assert any("Exchange2" in line for line in alias_lines)
+
+
+class TestStripJsdocBlocks:
+    """JSDoc-block stripper for openapi-typescript + json-schema-to-typescript output."""
+
+    def test_keeps_first_block_as_file_header(self) -> None:
+        """First JSDoc block is preserved as the file header marker."""
+        src = "/**\n * File header.\n */\nexport type T = string;\n"
+
+        result = _strip_jsdoc_blocks(src)
+
+        assert "File header" in result
+        assert "export type T = string" in result
+
+    def test_strips_subsequent_multiline_blocks(self) -> None:
+        """Multi-line JSDoc blocks after the header are stripped entirely."""
+        src = (
+            "/**\n * Header.\n */\n"
+            "export type A = number;\n"
+            "/**\n * Description of B.\n * More prose.\n */\n"
+            "export type B = string;\n"
+        )
+
+        result = _strip_jsdoc_blocks(src)
+
+        assert "Description of B" not in result
+        assert "More prose" not in result
+        assert "export type B = string" in result
+
+    def test_strips_single_line_block(self) -> None:
+        """Single-line ``/** ... */`` blocks are stripped too."""
+        src = "/**\n * Header.\n */\n/** one-liner */\nexport type C = string;\n"
+
+        result = _strip_jsdoc_blocks(src)
+
+        assert "one-liner" not in result
+        assert "export type C = string" in result
+
+    def test_keep_first_false_drops_every_block(self) -> None:
+        """When ``keep_first=False`` even the header block is removed."""
+        src = "/**\n * Header.\n */\nexport type T = string;\n"
+
+        result = _strip_jsdoc_blocks(src, keep_first=False)
+
+        assert "Header" not in result
+        assert "export type T = string" in result

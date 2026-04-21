@@ -1852,13 +1852,52 @@ class GenerateTypesArgs(argparse.Namespace):
     all: bool
 
 
+def _strip_jsdoc_blocks(content: str, keep_first: bool = True) -> str:
+    """Strip JSDoc ``/** ... */`` comment blocks from generated TypeScript.
+
+    The openapi-typescript + json-schema-to-typescript generators emit a JSDoc
+    block for every operation / schema / field carrying the backend's Python
+    docstring. Those descriptions duplicate the Python source of truth and
+    balloon the generated file by ~50%. Stripping them shrinks Sonar's
+    analyzed-code surface dramatically without changing any type.
+
+    When ``keep_first`` is True (default), the first JSDoc block is preserved
+    because generators emit it as the "do not hand-edit" file header.
+    """
+    lines = content.splitlines(keepends=True)
+    result: list[str] = []
+    in_skip = False
+    seen_first = False
+
+    for line in lines:
+        stripped = line.lstrip()
+        if in_skip:
+            if "*/" in line:
+                in_skip = False
+            continue
+        if stripped.startswith("/**"):
+            if keep_first and not seen_first:
+                seen_first = True
+                result.append(line)
+                continue
+            if "*/" in line[line.index("/**") + 3 :]:
+                continue
+            in_skip = True
+            continue
+        result.append(line)
+    return "".join(result)
+
+
 def postprocess_openapi_typescript_file(file_path: Path) -> None:
-    """Normalize openapi-typescript root export naming.
+    """Normalize openapi-typescript root export naming + strip JSDoc noise.
 
     This repository enforces naming conventions that prefer PascalCase for
     exported types. The `openapi-typescript` generator emits root exports named
     `paths`, `components`, and `operations`. This function renames those exports
     to `Paths`, `Components`, and `Operations` and updates intra-file references.
+
+    Also strips JSDoc blocks (duplicate Python docstrings) to shrink the file
+    footprint for static analysis tools.
 
     Args:
         file_path: Path to the generated `api.generated.ts` file.
@@ -1889,6 +1928,8 @@ def postprocess_openapi_typescript_file(file_path: Path) -> None:
     }
     for old, new in _json_type_replacements.items():
         updated = updated.replace(old, new)
+
+    updated = _strip_jsdoc_blocks(updated)
 
     if updated != content:
         file_path.write_text(updated, encoding="utf-8")
