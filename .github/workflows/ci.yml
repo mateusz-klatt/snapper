@@ -67,6 +67,10 @@ jobs:
       - name: Docker health check
         run: make server-check
 
+      - name: Docker logs (on failure)
+        if: failure()
+        run: docker logs snapper || true
+
       - name: Docker stop
         if: always()
         run: make docker-stop

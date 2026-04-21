@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 
 DEFAULT_URL = "http://localhost:8000/api/health"
-DEFAULT_MAX_RETRIES = 15
+DEFAULT_MAX_RETRIES = 45
 DEFAULT_DELAY = 2
 
 

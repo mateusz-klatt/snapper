@@ -201,13 +201,8 @@ class TestConstants:
         assert DEFAULT_URL == "http://localhost:8000/api/health"
 
     def test_default_max_retries(self) -> None:
-        """Verify DEFAULT_MAX_RETRIES constant has correct value.
-
-        Given: DEFAULT_MAX_RETRIES constant is imported from server_check module,
-        When: Value is checked,
-        Then: Equals 15.
-        """
-        assert DEFAULT_MAX_RETRIES == 15
+        """Verify DEFAULT_MAX_RETRIES constant has correct value."""
+        assert DEFAULT_MAX_RETRIES == 45
 
     def test_default_delay(self) -> None:
         """Verify DEFAULT_DELAY constant has correct value.
