@@ -1,11 +1,10 @@
-"""Tests for migration 0010_backtest_comparison_unique_pair.
+"""Tests for the squashed ``uq_bc_active_pair_per_wallet`` index.
 
-Verifies the partial unique index ``uq_bc_active_pair_per_wallet``
-rejects a second active ``backtest_comparisons`` row for the same
-``(wallet_public_id, run_a_public_id, run_b_public_id)`` triplet,
+Verifies the partial unique index rejects a second active
+``backtest_comparisons`` row for the same
+``(wallet_public_id, run_a_public_id, run_b_public_id)`` triplet and
 allows cross-wallet duplicates + same-pair replacements after the
-active row is SCD2-closed, and is round-trip removable via
-``alembic downgrade 0009``.
+active row is SCD2-closed.
 """
 
 from collections.abc import Iterator
@@ -213,25 +212,13 @@ class TestBacktestComparisonUniquePairMigration:
             run_b_public_id=run_b,
         )
 
-    def test_downgrade_drops_index_and_allows_duplicates(
+    def test_downgrade_to_0001_keeps_index_and_rejects_duplicates(
         self, migrated_db: tuple[sa.Engine, Config]
     ) -> None:
-        """Given ``alembic downgrade 0009``, the index is gone and duplicates insert.
-
-        Given:
-            A post-downgrade DB at revision 0009,
-
-        When:
-            Two active comparisons with the same triplet are inserted,
-
-        Then:
-            Both inserts succeed (no partial index to reject the
-            second) — this is the behaviour of any DB that came
-            through 0001..0009 before this migration shipped.
-        """
+        """Downgrade to revision 0001 is a no-op in the squashed chain."""
         engine, cfg = migrated_db
-        command.downgrade(cfg, "0009")
-        assert not _index_exists(engine)
+        command.downgrade(cfg, "0001")
+        assert _index_exists(engine)
         wallet = str(uuid7())
         run_a = str(uuid7())
         run_b = str(uuid7())
@@ -241,19 +228,20 @@ class TestBacktestComparisonUniquePairMigration:
             run_a_public_id=run_a,
             run_b_public_id=run_b,
         )
-        _insert_comparison(
-            engine,
-            wallet_public_id=wallet,
-            run_a_public_id=run_a,
-            run_b_public_id=run_b,
-        )
+        with pytest.raises(sa.exc.IntegrityError):
+            _insert_comparison(
+                engine,
+                wallet_public_id=wallet,
+                run_a_public_id=run_a,
+                run_b_public_id=run_b,
+            )
 
     def test_round_trip_restores_enforcement(self, migrated_db: tuple[sa.Engine, Config]) -> None:
         """Given upgrade -> downgrade -> upgrade, the index is reinstated.
 
         Given:
             A DB that has been through upgrade, then
-            ``downgrade 0009``, then ``upgrade head``,
+            ``downgrade 0001``, then ``upgrade head``,
 
         When:
             Two active comparisons with the same triplet are inserted,
@@ -263,7 +251,7 @@ class TestBacktestComparisonUniquePairMigration:
             re-created by the second upgrade.
         """
         engine, cfg = migrated_db
-        command.downgrade(cfg, "0009")
+        command.downgrade(cfg, "0001")
         command.upgrade(cfg, "head")
         assert _index_exists(engine)
         wallet = str(uuid7())

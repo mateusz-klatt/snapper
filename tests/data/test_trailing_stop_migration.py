@@ -1,10 +1,8 @@
-"""Tests for migration 0009_trailing_stop_unique_index.
+"""Tests for the squashed ``uq_ep_active_trailing_stop_per_cycle`` index.
 
-Verifies the partial unique index ``uq_ep_active_trailing_stop_per_cycle``
-rejects a second non-terminal ``trailing_stop`` plan on the same
-``position_cycle_public_id`` (mirroring the existing
-``uq_ep_active_bracket_per_cycle`` behaviour from migration 0001),
-is removed by the downgrade, and reappears after an upgrade round-trip.
+Verifies the partial unique index rejects a second non-terminal
+``trailing_stop`` plan on the same ``position_cycle_public_id``
+(mirroring ``uq_ep_active_bracket_per_cycle``).
 """
 
 from collections.abc import Iterator
@@ -194,44 +192,38 @@ class TestTrailingStopUniqueIndexMigration:
             position_cycle_public_id=_CYCLE_ID,
         )
 
-    def test_downgrade_drops_index_and_allows_duplicates(
+    def test_downgrade_to_0001_keeps_index_and_rejects_duplicates(
         self, migrated_db: tuple[sa.Engine, Config]
     ) -> None:
-        """Given `alembic downgrade 0008`, the index is gone and duplicates insert.
-
-        Given: a post-downgrade DB at revision 0008,
-        When: two active trailing_stops on the same cycle are inserted,
-        Then: both inserts succeed (no partial index to reject the
-            second) — this is the behaviour expected of any DB that
-            came through the 0001 init without this migration applied.
-        """
+        """Downgrade to revision 0001 is a no-op in the squashed chain."""
         engine, cfg = migrated_db
-        command.downgrade(cfg, "0008")
-        assert not _index_exists(engine)
+        command.downgrade(cfg, "0001")
+        assert _index_exists(engine)
         _insert_execution_plan(
             engine,
             plan_type="trailing_stop",
             status="armed",
             position_cycle_public_id=_CYCLE_ID,
         )
-        _insert_execution_plan(
-            engine,
-            plan_type="trailing_stop",
-            status="armed",
-            position_cycle_public_id=_CYCLE_ID,
-        )
+        with pytest.raises(sa.exc.IntegrityError):
+            _insert_execution_plan(
+                engine,
+                plan_type="trailing_stop",
+                status="armed",
+                position_cycle_public_id=_CYCLE_ID,
+            )
 
     def test_round_trip_restores_enforcement(self, migrated_db: tuple[sa.Engine, Config]) -> None:
         """Given upgrade -> downgrade -> upgrade, the index is reinstated.
 
-        Given: a DB that has been through upgrade, then `downgrade 0008`,
+        Given: a DB that has been through upgrade, then `downgrade 0001`,
             then `upgrade head`,
         When: two active trailing_stops on the same cycle are inserted,
         Then: the second raises ``IntegrityError`` — the index was
             re-created by the second upgrade.
         """
         engine, cfg = migrated_db
-        command.downgrade(cfg, "0008")
+        command.downgrade(cfg, "0001")
         command.upgrade(cfg, "head")
         assert _index_exists(engine)
         _insert_execution_plan(

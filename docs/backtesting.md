@@ -33,7 +33,7 @@ is structural rather than aspirational.
 
 ## At-most-one-running invariant
 
-Migration `0004_backtest_single_running` adds a partial unique index
+Migration `0001_init` includes a partial unique index
 `uq_bt_single_running` on `backtest_runs(status)` filtered to
 `status='running' AND known_to=KNOWN_TO_MAX`. This is a declarative DB
 guarantee — a second runner trying to transition `pending → running`

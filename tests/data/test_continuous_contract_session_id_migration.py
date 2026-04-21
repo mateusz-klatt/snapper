@@ -1,10 +1,7 @@
-"""Tests for migration 0008_continuous_contract_session_id_width.
+"""Tests for the squashed ``continuous_contract_configs.session_id`` schema.
 
-Verifies the column ``continuous_contract_configs.session_id`` narrows
-from ``VARCHAR(64)`` to ``VARCHAR(36)`` on upgrade, restores to
-``VARCHAR(64)`` on downgrade, round-trips across upgrade-downgrade-upgrade,
-and that the pre-migration oversize audit refuses to narrow when an
-existing row has ``LENGTH(session_id) > 36``.
+Verifies the column is ``VARCHAR(36)`` at head and remains stable across
+downgrade/upgrade calls within the squashed migration chain.
 """
 
 from collections.abc import Iterator
@@ -83,7 +80,7 @@ def migrated_db(tmp_path: Path) -> Iterator[tuple[sa.Engine, Config]]:
 
 
 class TestContinuousContractSessionIdMigration:
-    """Schema + audit behaviours across upgrade / downgrade / round-trip."""
+    """Schema behaviours across upgrade / downgrade / round-trip."""
 
     def test_upgrade_narrows_column_type(self, migrated_db: tuple[sa.Engine, Config]) -> None:
         """After upgrade the column type is VARCHAR(36)."""
@@ -91,12 +88,14 @@ class TestContinuousContractSessionIdMigration:
         col_type = _column_type(engine, "continuous_contract_configs", "session_id")
         assert col_type.upper() == "VARCHAR(36)"
 
-    def test_downgrade_restores_varchar_64(self, migrated_db: tuple[sa.Engine, Config]) -> None:
-        """Downgrade to revision 0007 restores VARCHAR(64)."""
+    def test_downgrade_to_0001_keeps_varchar_36(
+        self, migrated_db: tuple[sa.Engine, Config]
+    ) -> None:
+        """Downgrade to revision 0001 is a no-op in the squashed chain."""
         engine, cfg = migrated_db
-        command.downgrade(cfg, "0007")
+        command.downgrade(cfg, "0001")
         col_type = _column_type(engine, "continuous_contract_configs", "session_id")
-        assert col_type.upper() == "VARCHAR(64)"
+        assert col_type.upper() == "VARCHAR(36)"
 
     def test_round_trip_flips_type_back_and_forth(
         self, migrated_db: tuple[sa.Engine, Config]
@@ -107,10 +106,10 @@ class TestContinuousContractSessionIdMigration:
             _column_type(engine, "continuous_contract_configs", "session_id").upper()
             == "VARCHAR(36)"
         )
-        command.downgrade(cfg, "0007")
+        command.downgrade(cfg, "0001")
         assert (
             _column_type(engine, "continuous_contract_configs", "session_id").upper()
-            == "VARCHAR(64)"
+            == "VARCHAR(36)"
         )
         command.upgrade(cfg, "head")
         assert (
@@ -131,23 +130,15 @@ class TestContinuousContractSessionIdMigration:
         assert len(rows) == 1
         assert rows[0][0] == session_id
 
-    def test_upgrade_rejects_oversize_session_id(
+    def test_oversize_session_id_roundtrips_in_sqlite(
         self, migrated_db: tuple[sa.Engine, Config]
     ) -> None:
-        """A pre-migration LENGTH(session_id) > 36 row aborts the upgrade.
-
-        Sequence: downgrade to 0007 (column is VARCHAR(64)), insert an
-        oversize row (50 chars), attempt upgrade back to head — the
-        defensive audit must raise RuntimeError naming the offending
-        count, and the oversize row must survive untouched.
-        """
+        """SQLite stores oversize text values even when declared as VARCHAR(36)."""
         engine, cfg = migrated_db
-        command.downgrade(cfg, "0007")
+        command.downgrade(cfg, "0001")
         oversize_id = "x" * 50
         _insert_config(engine, session_id=oversize_id)
-
-        with pytest.raises(RuntimeError, match="LENGTH\\(session_id\\) > 36"):
-            command.upgrade(cfg, "head")
+        command.upgrade(cfg, "head")
 
         with engine.begin() as conn:
             rows = conn.execute(sa.text("SELECT session_id FROM continuous_contract_configs")).all()

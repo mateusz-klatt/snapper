@@ -33,6 +33,8 @@ _KNOWN_TO_ACTIVE_PG = "known_to = '9999-12-31T23:59:59+00:00'"
 _KNOWN_TO_ACTIVE_SQLITE = "known_to = '9999-12-31 23:59:59.000000'"
 _CK_SESSION_ID = "session_id != ''"
 _CK_SEQUENCE_ID = "sequence_id > 0"
+_CK_SESSION_ID_NONEMPTY = "length(session_id) > 0"
+_CK_SEQUENCE_ID_NONNEG = "sequence_id >= 0"
 
 revision: str = "0001"
 down_revision: str | None = None
@@ -576,6 +578,7 @@ def upgrade() -> None:
         sa.Column("password_hash", sa.String(255), nullable=False),
         sa.Column("role", sa.String(32), nullable=False),
         sa.Column("is_active", sa.Boolean(), nullable=False, server_default="1"),
+        sa.Column("created_by_user_public_id", sa.String(36), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("session_id", sa.String(36), nullable=False),
         sa.Column("sequence_id", sa.Integer(), nullable=False),
@@ -600,6 +603,70 @@ def upgrade() -> None:
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
         postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_users_created_by_user_public_id",
+        "users",
+        ["created_by_user_public_id"],
+    )
+    op.create_table(
+        "user_trading_caps",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("user_public_id", sa.String(36), nullable=False),
+        sa.Column("max_order_quantity_per_instrument", sa.JSON(), nullable=True),
+        sa.Column("max_open_orders", sa.Integer(), nullable=True),
+        sa.Column("max_daily_notional_usd", sa.Numeric(18, 2), nullable=True),
+        sa.Column("max_cancels_per_minute", sa.Integer(), nullable=True),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID_NONEMPTY, name="ck_user_trading_caps_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID_NONNEG, name="ck_user_trading_caps_sequence_id"),
+    )
+    op.create_index(
+        "ix_user_trading_caps_public_id",
+        "user_trading_caps",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_user_trading_caps_active",
+        "user_trading_caps",
+        ["user_public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_table(
+        "user_active_tokens",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("user_public_id", sa.String(36), nullable=False),
+        sa.Column("jti", sa.String(64), nullable=False),
+        sa.Column("token_hash", sa.String(64), nullable=False),
+        sa.Column("token_type", sa.String(10), nullable=False),
+        sa.Column("issued_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("public_id", name="uq_user_active_tokens_public_id"),
+        sa.UniqueConstraint("jti", name="uq_user_active_tokens_jti"),
+        sa.UniqueConstraint("token_hash", name="uq_user_active_tokens_token_hash"),
+    )
+    op.create_index(
+        "ix_user_active_tokens_user_public_id",
+        "user_active_tokens",
+        ["user_public_id"],
+    )
+    op.create_index(
+        "ix_user_active_tokens_user_revoked",
+        "user_active_tokens",
+        ["user_public_id", "revoked_at"],
     )
     op.create_table(
         "user_login_events",
@@ -692,6 +759,309 @@ def upgrade() -> None:
     op.create_index("ix_process_runs_process_name", "process_runs", ["process_name"])
     op.create_index("ix_process_runs_status", "process_runs", ["status"])
     op.create_index("ix_process_runs_started_at", "process_runs", ["started_at"])
+    op.create_table(
+        "backtest_runs",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("wallet_public_id", sa.String(36), nullable=False),
+        sa.Column("operator_public_id", sa.String(36), nullable=True),
+        sa.Column("strategy_name", sa.String(128), nullable=False),
+        sa.Column("strategy_params", sa.JSON(), nullable=False),
+        sa.Column("instrument_public_id", sa.String(36), nullable=False),
+        sa.Column("exchange", sa.String(32), nullable=False),
+        sa.Column("mode", sa.String(8), nullable=False, server_default="paper"),
+        sa.Column("timeframe", sa.String(16), nullable=False),
+        sa.Column("start_date", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("end_date", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("initial_cash", sa.Float(), nullable=False, server_default="10000.0"),
+        sa.Column("status", sa.String(24), nullable=False, server_default="pending"),
+        sa.Column("created_by_user_id", sa.String(64), nullable=True),
+        sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("error", sa.Text(), nullable=True),
+        sa.Column("process_name", sa.String(128), nullable=True),
+        sa.Column(
+            "execution_mode",
+            sa.String(16),
+            nullable=False,
+            server_default="direct_db",
+        ),
+        sa.Column(
+            "fill_model",
+            sa.String(32),
+            nullable=False,
+            server_default="market",
+        ),
+        sa.Column(
+            "slippage_bps",
+            sa.Float(),
+            nullable=False,
+            server_default="0",
+        ),
+        sa.Column(
+            "commission_bps",
+            sa.Float(),
+            nullable=False,
+            server_default="0",
+        ),
+        sa.Column("config_hash", sa.String(64), nullable=True),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(
+            "status IN ('pending', 'running', 'completed', 'failed', "
+            "'cancel_requested', 'cancelled')",
+            name="ck_br_status",
+        ),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_backtest_runs_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_backtest_runs_sequence_id"),
+        sa.CheckConstraint(
+            "execution_mode IN ('direct_db', 'zmq_replay')",
+            name="ck_br_execution_mode",
+        ),
+        sa.CheckConstraint(
+            "fill_model IN ('market')",
+            name="ck_br_fill_model",
+        ),
+        sa.CheckConstraint(
+            "slippage_bps >= 0 AND slippage_bps <= 500",
+            name="ck_br_slippage_bounds",
+        ),
+        sa.CheckConstraint(
+            "commission_bps >= 0 AND commission_bps <= 500",
+            name="ck_br_commission_bounds",
+        ),
+    )
+    op.create_index(
+        "ix_backtest_runs_wallet_status",
+        "backtest_runs",
+        ["wallet_public_id", "status"],
+    )
+    op.create_index(
+        "ix_backtest_runs_config_hash",
+        "backtest_runs",
+        ["wallet_public_id", "config_hash", "timestamp"],
+    )
+    op.create_index(
+        "ix_backtest_runs_public_id",
+        "backtest_runs",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "uq_bt_single_running",
+        "backtest_runs",
+        ["status"],
+        unique=True,
+        sqlite_where=text("status = 'running' AND " + _KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text("status = 'running' AND " + _KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_table(
+        "backtest_events",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("run_public_id", sa.String(36), nullable=False),
+        sa.Column("event_type", sa.String(64), nullable=False),
+        sa.Column("detail", sa.JSON(), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_backtest_events_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_backtest_events_sequence_id"),
+    )
+    op.create_index("ix_be_run_ts", "backtest_events", ["run_public_id", "timestamp"])
+    op.create_index("ix_backtest_events_run_public_id", "backtest_events", ["run_public_id"])
+    op.create_index(
+        "ix_be_public_id",
+        "backtest_events",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_table(
+        "backtest_results",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("run_public_id", sa.String(36), nullable=False),
+        sa.Column("total_trades", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("winning_trades", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("losing_trades", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("total_pnl", sa.Float(), nullable=False, server_default="0"),
+        sa.Column("max_drawdown", sa.Float(), nullable=False, server_default="0"),
+        sa.Column("sharpe_ratio", sa.Float(), nullable=True),
+        sa.Column("win_rate", sa.Float(), nullable=True),
+        sa.Column("profit_factor", sa.Float(), nullable=True),
+        sa.Column("final_equity", sa.Float(), nullable=False, server_default="0"),
+        sa.Column("max_equity", sa.Float(), nullable=False, server_default="0"),
+        sa.Column("extra_metrics", sa.JSON(), nullable=False),
+        sa.Column("sortino_ratio", sa.Float(), nullable=True),
+        sa.Column("cagr", sa.Float(), nullable=True),
+        sa.Column("calmar_ratio", sa.Float(), nullable=True),
+        sa.Column("expectancy", sa.Float(), nullable=True),
+        sa.Column("avg_trade_pnl", sa.Float(), nullable=True),
+        sa.Column("max_drawdown_duration_seconds", sa.Float(), nullable=True),
+        sa.Column("exposure_ratio", sa.Float(), nullable=True),
+        sa.Column("turnover_ratio", sa.Float(), nullable=True),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_backtest_results_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_backtest_results_sequence_id"),
+    )
+    op.create_index("ix_backtest_results_run_public_id", "backtest_results", ["run_public_id"])
+    op.create_index(
+        "uq_br_run_active",
+        "backtest_results",
+        ["run_public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_bres_public_id",
+        "backtest_results",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_table(
+        "backtest_signals",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("run_public_id", sa.String(36), nullable=False),
+        sa.Column("signal_time", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("signal_type", sa.String(32), nullable=False),
+        sa.Column("instrument", sa.String(64), nullable=False),
+        sa.Column("price", sa.Float(), nullable=False),
+        sa.Column("indicators", sa.JSON(), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_backtest_signals_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_backtest_signals_sequence_id"),
+    )
+    op.create_index("ix_bs_run_ts", "backtest_signals", ["run_public_id", "signal_time"])
+    op.create_index("ix_backtest_signals_run_public_id", "backtest_signals", ["run_public_id"])
+    op.create_index(
+        "ix_bs_public_id",
+        "backtest_signals",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_table(
+        "backtest_trades",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("run_public_id", sa.String(36), nullable=False),
+        sa.Column("executed_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("instrument", sa.String(64), nullable=False),
+        sa.Column("side", sa.String(8), nullable=False),
+        sa.Column("quantity", sa.Float(), nullable=False),
+        sa.Column("price", sa.Float(), nullable=False),
+        sa.Column("fee", sa.Float(), nullable=False, server_default="0"),
+        sa.Column("pnl", sa.Float(), nullable=True),
+        sa.Column("position_after", sa.Float(), nullable=False, server_default="0"),
+        sa.Column("signal_public_id", sa.String(36), nullable=True),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_backtest_trades_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_backtest_trades_sequence_id"),
+    )
+    op.create_index("ix_bt_run_ts", "backtest_trades", ["run_public_id", "executed_at"])
+    op.create_index("ix_backtest_trades_run_public_id", "backtest_trades", ["run_public_id"])
+    op.create_index(
+        "ix_bt_public_id",
+        "backtest_trades",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_table(
+        "backtest_equity_points",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("run_public_id", sa.String(36), nullable=False),
+        sa.Column("point_time", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("equity", sa.Float(), nullable=False),
+        sa.Column("cash", sa.Float(), nullable=False),
+        sa.Column("position_value", sa.Float(), nullable=False, server_default="0"),
+        sa.Column("drawdown", sa.Float(), nullable=False, server_default="0"),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_backtest_equity_points_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_backtest_equity_points_sequence_id"),
+    )
+    op.create_index("ix_bep_run_ts", "backtest_equity_points", ["run_public_id", "point_time"])
+    op.create_index(
+        "ix_backtest_equity_points_run_public_id",
+        "backtest_equity_points",
+        ["run_public_id"],
+    )
+    op.create_index(
+        "ix_bep_public_id",
+        "backtest_equity_points",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_table(
+        "backtest_comparisons",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("wallet_public_id", sa.String(36), nullable=False),
+        sa.Column("operator_public_id", sa.String(36), nullable=True),
+        sa.Column("created_by_user_id", sa.String(64), nullable=True),
+        sa.Column("run_a_public_id", sa.String(36), nullable=False),
+        sa.Column("run_b_public_id", sa.String(36), nullable=False),
+        sa.Column("config_hash", sa.String(64), nullable=True),
+        sa.Column("pairing_mode", sa.String(16), nullable=False),
+        sa.Column("anchor_run_public_id", sa.String(36), nullable=True),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_index(
+        "ix_bc_wallet_hash_time",
+        "backtest_comparisons",
+        ["wallet_public_id", "config_hash", "timestamp"],
+    )
+    op.create_index(
+        "ix_bc_public_id",
+        "backtest_comparisons",
+        ["public_id"],
+    )
+    op.create_index(
+        "uq_bc_active_pair_per_wallet",
+        "backtest_comparisons",
+        ["wallet_public_id", "run_a_public_id", "run_b_public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
     op.create_table(
         "instrument_specs",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
@@ -894,6 +1264,7 @@ def upgrade() -> None:
         sa.Column("correlation_id", sa.String(36), nullable=False),
         sa.Column("leverage", sa.Integer(), nullable=True),
         sa.Column("reduce_only", sa.Boolean(), nullable=False, server_default="0"),
+        sa.Column("source_surface", sa.String(20), nullable=False, server_default="rest"),
         sa.Column("wallet_public_id", sa.String(36), nullable=False),
         sa.Column("operator_public_id", sa.String(36), nullable=True),
         sa.Column("user_public_id", sa.String(36), nullable=True),
@@ -918,6 +1289,11 @@ def upgrade() -> None:
         unique=True,
         sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
         postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_trade_commands_outbox_pagination",
+        "trade_commands",
+        ["status", "created_at", "id"],
     )
     op.create_index("ix_trade_commands_plan_public_id", "trade_commands", ["plan_public_id"])
     op.create_table(
@@ -1102,7 +1478,7 @@ def upgrade() -> None:
         "continuous_contract_configs",
         sa.Column("id", sa.Integer(), autoincrement=True, primary_key=True),
         sa.Column("public_id", sa.String(36), nullable=False),
-        sa.Column("session_id", sa.String(64), nullable=False),
+        sa.Column("session_id", sa.String(36), nullable=False),
         sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.Column(
@@ -1707,6 +2083,16 @@ def upgrade() -> None:
                 f"AND {active_filter}"
             )
         )
+        op.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_ep_active_trailing_stop_per_cycle "
+                "ON execution_plans (position_cycle_public_id) "
+                "WHERE position_cycle_public_id IS NOT NULL "
+                f"AND plan_type = 'trailing_stop' "
+                f"AND status NOT IN {_terminal_statuses} "
+                f"AND {active_filter}"
+            )
+        )
 
     op.create_table(
         "execution_plan_checkpoints",
@@ -1746,6 +2132,7 @@ def upgrade() -> None:
         sa.Column("new_status", sa.String(20), nullable=True),
         sa.Column("reason", sa.String(512), nullable=False),
         sa.Column("decision_importance", sa.String(16), nullable=False),
+        sa.Column("source_surface", sa.String(20), nullable=False, server_default="strategy"),
         sa.Column("session_id", sa.String(36), nullable=False),
         sa.Column("sequence_id", sa.Integer(), nullable=False),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
@@ -1916,6 +2303,7 @@ def downgrade() -> None:
         op.execute(text("DROP INDEX IF EXISTS ix_pc_public_id"))
         op.execute(text("DROP INDEX IF EXISTS ix_epd_public_id"))
         op.execute(text("DROP INDEX IF EXISTS ix_epc_public_id"))
+        op.execute(text("DROP INDEX IF EXISTS uq_ep_active_trailing_stop_per_cycle"))
         op.execute(text("DROP INDEX IF EXISTS uq_ep_active_bracket_per_cycle"))
         op.execute(text("DROP INDEX IF EXISTS ix_ep_public_id"))
         op.execute(text("DROP INDEX IF EXISTS uq_ep_idempotency_key"))
@@ -1942,9 +2330,18 @@ def downgrade() -> None:
     op.drop_table("control")
     op.drop_table("market_snapshots")
     op.drop_table("instrument_specs")
+    op.drop_table("backtest_comparisons")
+    op.drop_table("backtest_equity_points")
+    op.drop_table("backtest_trades")
+    op.drop_table("backtest_signals")
+    op.drop_table("backtest_results")
+    op.drop_table("backtest_events")
+    op.drop_table("backtest_runs")
     op.drop_table("process_runs")
     op.drop_table("settings")
     op.drop_table("user_login_events")
+    op.drop_table("user_active_tokens")
+    op.drop_table("user_trading_caps")
     op.drop_table("users")
     op.drop_table("signals")
     op.drop_table("positions")

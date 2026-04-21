@@ -1,9 +1,8 @@
-"""Tests for migration 0004_backtest_single_running.
+"""Tests for the squashed schema constraint ``uq_bt_single_running``.
 
-Verifies the partial unique index ``uq_bt_single_running`` ensures at
-most one backtest_runs row may carry status='running' at known_to=MAX,
-that closed (SCD2) rows do not block follow-up runs, and that the
-downgrade path removes the index.
+Verifies the partial unique index ensures at most one backtest_runs row
+may carry status='running' at known_to=MAX and that closed (SCD2) rows
+do not block follow-up runs.
 """
 
 from collections.abc import Iterator
@@ -134,12 +133,13 @@ class TestSingleRunningMigration:
         _insert_run(engine, status="cancelled")
         _insert_run(engine, status="pending")
 
-    def test_downgrade_drops_index_and_allows_dual_running_rows(
+    def test_downgrade_to_0001_keeps_index_and_enforcement(
         self, migrated_db: tuple[sa.Engine, Config]
     ) -> None:
-        """After downgrade two running rows are accepted again."""
+        """Downgrade to revision 0001 is a no-op in the squashed chain."""
         engine, cfg = migrated_db
-        command.downgrade(cfg, "0003")
-        assert not _index_exists(engine)
+        command.downgrade(cfg, "0001")
+        assert _index_exists(engine)
         _insert_run(engine, status="running")
-        _insert_run(engine, status="running")
+        with pytest.raises(sa.exc.IntegrityError):
+            _insert_run(engine, status="running")
