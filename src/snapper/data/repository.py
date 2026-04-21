@@ -6693,29 +6693,23 @@ class SQLAlchemyRepository(Repository):
     ) -> str | None:
         """Resolve an instrument public_id back to its native symbol.
 
-        Joins active ``Instrument`` (filtered by public_id) to active
-        ``Symbol`` (filtered by its public_id = ``Instrument.symbol_public_id``)
-        at the requested temporal snapshot. Returns None when either row
-        is absent or no longer active at ``as_of``.
+        Single joined query over active ``Instrument`` + active ``Symbol``
+        at ``as_of`` — both ``where_active`` predicates are combined into
+        one SQL statement so the two rows are guaranteed to be from the
+        same temporal snapshot (avoids the subtle read-skew that two
+        sequential queries would expose under concurrent SCD2 writers).
         """
         async with self.session() as s:
             i_ts, i_kt = where_active(Instrument, as_of)
-            instrument_row = (
-                await s.execute(
-                    select(Instrument.symbol_public_id).where(
-                        Instrument.public_id == instrument_public_id,
-                        i_ts,
-                        i_kt,
-                    )
-                )
-            ).scalar_one_or_none()
-            if instrument_row is None:
-                return None
             s_ts, s_kt = where_active(Symbol, as_of)
             native = (
                 await s.execute(
-                    select(Symbol.native_symbol).where(
-                        Symbol.public_id == instrument_row,
+                    select(Symbol.native_symbol)
+                    .join(Instrument, Instrument.symbol_public_id == Symbol.public_id)
+                    .where(
+                        Instrument.public_id == instrument_public_id,
+                        i_ts,
+                        i_kt,
                         s_ts,
                         s_kt,
                     )

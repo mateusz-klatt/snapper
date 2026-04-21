@@ -260,12 +260,17 @@ sqlite3 snapper.db \
 
 # 3. Enable the symbol-updater + feed-publisher processes via DB
 #    Setting rows (NOT env vars — see feedback_no_asking_continue.md
-#    for the rollout preference).
+#    for the rollout preference). ``category='process'`` matches the
+#    existing ``registry_syncer`` writes; the column is NOT NULL on
+#    the settings table (see ``src/snapper/data/models.py::Setting``).
 sqlite3 snapper.db <<SQL
-INSERT OR REPLACE INTO settings (key, value, timestamp, session_id, sequence_id)
+INSERT OR REPLACE INTO settings
+    (key, value, category, timestamp, session_id, sequence_id)
 VALUES
-  ('process_kraken_equities_symbol_updater', '{"enabled":true}', datetime('now'), 'ops', 0),
-  ('process_kraken_equities_feed_publisher',  '{"enabled":true}', datetime('now'), 'ops', 0);
+  ('process_kraken_equities_symbol_updater',
+   '{"enabled":true}', 'process', datetime('now'), 'ops', 0),
+  ('process_kraken_equities_feed_publisher',
+   '{"enabled":true}', 'process', datetime('now'), 'ops', 0);
 SQL
 
 # 4. Restart the runtime OR trigger a live registry sync
