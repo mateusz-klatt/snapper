@@ -185,7 +185,16 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         channel = message.get("channel", "")
         msg_type = message.get("type", "")
         if channel == "ticker" and msg_type in ("snapshot", "update"):
-            envelope_delayed = bool(message.get("delayed", False))
+            raw_delayed = message.get("delayed", False)
+            if isinstance(raw_delayed, bool):
+                envelope_delayed = raw_delayed
+            else:
+                logger.warning(
+                    f"Kraken Equities envelope 'delayed' not a bool "
+                    f"(got {type(raw_delayed).__name__}={raw_delayed!r}); "
+                    "defaulting to False"
+                )
+                envelope_delayed = False
             self._handle_ticker_message(message, envelope_delayed=envelope_delayed)
             return
         if channel == "trade" and msg_type in ("snapshot", "update"):
@@ -281,12 +290,19 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
 
         Returns:
             Ordered list of ``OhlcvSnapshot`` entries (oldest first). Empty
-            list when the response contains no data.
+            list when the response contains no data rows for the requested
+            window (distinguished from upstream failures — see Raises).
 
         Raises:
             ValueError: When ``timeframe`` is not supported.
             httpx.HTTPStatusError: Propagated for non-2xx responses so the
                 caller can distinguish transient from permanent failures.
+            RuntimeError: When the endpoint returns HTTP 200 with an
+                application-layer failure envelope (``result=null`` or
+                non-empty ``errors``). Raising here prevents a broken
+                upstream from being silently observed as an empty candle
+                window, which would otherwise cause historical backfill
+                to skip rows it should have retried.
         """
         interval = _timeframe_to_interval(timeframe)
         ws_symbol = native_to_kraken_equities_ws(symbol)
@@ -301,7 +317,13 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
             response = await client.get(url, params=params, headers=_INSTRUMENTS_HEADERS)
             response.raise_for_status()
             payload = response.json()
-        result = payload.get("result") or {}
+        result = payload.get("result")
+        errors = payload.get("errors") or []
+        if result is None or errors:
+            raise RuntimeError(
+                f"Kraken Equities ticker/history failure for {symbol} "
+                f"(interval={interval}m): errors={errors!r}, result={result!r}"
+            )
         rows: list[dict[str, Any]] = result.get("data") or []
         snapshots: list[OhlcvSnapshot] = []
         for row in rows:

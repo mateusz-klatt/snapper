@@ -1141,14 +1141,20 @@ class TestGetOhlcv:
         assert snapshots == []
 
     @pytest.mark.asyncio
-    async def test_missing_result_key_returns_empty_list(
+    async def test_application_error_envelope_raises(
         self, client: KrakenEquitiesExchangeClient
     ) -> None:
-        """Tolerate payloads missing the ``result`` envelope without raising.
+        """Raise when the 200-response body signals application-layer failure.
 
-        Given: an iapi payload with only an ``errors`` field,
+        Given: an iapi payload with ``result=null`` + non-empty ``errors`` —
+            the shape the endpoint returns for "Unknown method" or other
+            upstream failures that still produce HTTP 200 (observed live
+            2026-04-21 when the endpoint is called without the required
+            Origin/Referer headers),
         When: ``get_ohlcv`` is called,
-        Then: an empty list is returned (endpoint absorbs transient failures).
+        Then: ``RuntimeError`` is raised so callers do not silently observe
+            the failure as an empty candle window. Prevents historical
+            backfill from skipping rows it should have retried.
         """
         mock_http = self._mock_httpx({"result": None, "errors": [{"msg": "transient"}]})
         with (
@@ -1160,9 +1166,53 @@ class TestGetOhlcv:
                 "snapper.infrastructure.exchanges.implementations.kraken_equities.native_to_kraken_equities_ws",
                 return_value="MNQM6.CME",
             ),
+            pytest.raises(RuntimeError, match="Kraken Equities ticker/history failure"),
         ):
-            snapshots = await client.get_ohlcv("MNQM6-CME")
-        assert snapshots == []
+            await client.get_ohlcv("MNQM6-CME")
+
+    @pytest.mark.asyncio
+    async def test_errors_present_with_result_still_raises(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Raise even when ``result`` is non-null if ``errors`` is non-empty.
+
+        Given: an iapi payload with both ``result.data`` populated and a
+            non-empty ``errors`` array (partial-failure shape),
+        When: ``get_ohlcv`` is called,
+        Then: ``RuntimeError`` is raised. Partial-failure responses are
+            treated as outright failures rather than silently returning
+            the partial data.
+        """
+        payload = {
+            "result": {
+                "data": [
+                    {
+                        "time": 1,
+                        "open": "1",
+                        "high": "1",
+                        "low": "1",
+                        "close": "1",
+                        "volume_wap": "1",
+                        "volume": "0",
+                        "count": 0,
+                    }
+                ]
+            },
+            "errors": [{"msg": "one feed failed"}],
+        }
+        mock_http = self._mock_httpx(payload)
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.httpx.AsyncClient",
+                return_value=mock_http,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.native_to_kraken_equities_ws",
+                return_value="MNQM6.CME",
+            ),
+            pytest.raises(RuntimeError, match="Kraken Equities ticker/history failure"),
+        ):
+            await client.get_ohlcv("MNQM6-CME")
 
     @pytest.mark.asyncio
     async def test_http_error_propagates(self, client: KrakenEquitiesExchangeClient) -> None:
@@ -1446,6 +1496,46 @@ class TestWsEnvelopeDelayedPropagation:
             msg = {
                 "channel": "ticker",
                 "type": "snapshot",
+                "data": [{"symbol": "MNQM6.CME"}],
+            }
+            await client._on_ws_message(msg)
+        assert parse_mock.call_args.kwargs == {"envelope_delayed": False}
+
+    @pytest.mark.asyncio
+    async def test_non_bool_envelope_delayed_coerces_to_false(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Reject non-bool ``delayed`` payloads and default to False.
+
+        Given: a WS frame whose ``delayed`` key is a truthy string (``"false"``)
+            under a hypothetical schema drift,
+        When: ``_on_ws_message`` dispatches the ticker item,
+        Then: the adapter receives ``envelope_delayed=False`` rather than
+            ``bool("false") == True``. Prevents a permissive ``bool(...)``
+            coercion from mis-flagging live ticks as delayed under an
+            unexpected wire shape.
+        """
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_equities.parse_kraken_equities_ticker",
+            return_value=TickerUpdate(
+                symbol="MNQM6-CME",
+                bid=0.0,
+                bid_qty=0.0,
+                ask=0.0,
+                ask_qty=0.0,
+                last=0.0,
+                volume=0.0,
+                vwap=0.0,
+                low=0.0,
+                high=0.0,
+                change=0.0,
+                change_pct=0.0,
+            ),
+        ) as parse_mock:
+            msg = {
+                "channel": "ticker",
+                "type": "snapshot",
+                "delayed": "false",
                 "data": [{"symbol": "MNQM6.CME"}],
             }
             await client._on_ws_message(msg)
