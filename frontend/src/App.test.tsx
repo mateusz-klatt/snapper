@@ -282,26 +282,70 @@ describe('App', () => {
     })
   })
   describe('AI Integration sidebar cascade', () => {
-    it('shows AI Integration entry when canAccess returns true (operator/admin)', async () => {
+    it('shows AI Integration entry for admin role via App.tsx:22 canAccess filter', async () => {
       const { useAuth } = await import('./stores/auth')
 
       vi.mocked(useAuth).mockReturnValue({
         user: { username: 'admin', role: 'admin' },
         isAuthenticated: true,
-        canAccess: vi.fn((resource: string) => resource !== 'readonly-excluded'),
+        canAccess: vi.fn((resource: string) =>
+          [
+            'overview',
+            'market',
+            'processes',
+            'strategies',
+            'orders',
+            'positions',
+            'signals',
+            'backtests',
+            'health',
+            'admin',
+            'ai-integration',
+            'settings',
+          ].includes(resource)
+        ),
       } as unknown as ReturnType<typeof useAuth>)
       renderWithProviders(<App />)
       await waitFor(() => {
         expect(screen.getAllByText('AI Integration').length).toBeGreaterThan(0)
       })
     })
-    it('hides AI Integration entry when canAccess returns false (readonly role)', async () => {
+    it('shows AI Integration entry for operator role via App.tsx:22 canAccess filter', async () => {
+      const { useAuth } = await import('./stores/auth')
+
+      vi.mocked(useAuth).mockReturnValue({
+        user: { username: 'op', role: 'operator' },
+        isAuthenticated: true,
+        canAccess: vi.fn((resource: string) =>
+          [
+            'overview',
+            'market',
+            'processes',
+            'strategies',
+            'orders',
+            'positions',
+            'signals',
+            'backtests',
+            'health',
+            'ai-integration',
+            'settings',
+          ].includes(resource)
+        ),
+      } as unknown as ReturnType<typeof useAuth>)
+      renderWithProviders(<App />)
+      await waitFor(() => {
+        expect(screen.getAllByText('AI Integration').length).toBeGreaterThan(0)
+      })
+    })
+    it('hides AI Integration entry for readonly role via App.tsx:22 canAccess filter', async () => {
       const { useAuth } = await import('./stores/auth')
 
       vi.mocked(useAuth).mockReturnValue({
         user: { username: 'ro', role: 'readonly' },
         isAuthenticated: true,
-        canAccess: vi.fn((resource: string) => resource !== 'ai-integration'),
+        canAccess: vi.fn((resource: string) =>
+          ['overview', 'market', 'orders', 'positions', 'signals', 'health'].includes(resource)
+        ),
       } as unknown as ReturnType<typeof useAuth>)
       renderWithProviders(<App />)
       await waitFor(() => {

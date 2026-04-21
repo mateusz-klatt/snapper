@@ -75,6 +75,13 @@ describe('AIIntegration', () => {
     expect(mockUseAiDelegates).not.toHaveBeenCalled()
   })
 
+  it('renders_disabled_panel_on_fetch_error', () => {
+    mockUseFeatureFlags.mockReturnValue({ isEnabled: false, isLoading: false, isError: true })
+    renderWithProviders(<AIIntegration />)
+    expect(screen.getByText('AI Integration is disabled')).toBeInTheDocument()
+    expect(mockUseAiDelegates).not.toHaveBeenCalled()
+  })
+
   it('enabled_shell_calls_useAiDelegates_when_feature_flag_true', () => {
     mockUseFeatureFlags.mockReturnValue({ isEnabled: true, isLoading: false })
     mockUseAiDelegates.mockReturnValue({ data: mkListResponse([]), isLoading: false })
