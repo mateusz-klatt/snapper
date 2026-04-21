@@ -2813,5 +2813,64 @@ describe('cacheWsTicketFromResponse', () => {
         expect(typed.message).toBe('server exploded')
       }
     })
+
+    it('APIError falls back to HTTP status text when detail is null', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        json: vi.fn().mockResolvedValue({ detail: null }),
+      })
+
+      try {
+        await apiClient.getExchangeInstrumentsDetail('y')
+        throw new Error('expected request to fail')
+      } catch (err) {
+        const typed = err as { message: string; details?: unknown }
+
+        expect(typed.message).toBe('HTTP 500: Internal Server Error')
+        expect(typed.details).toBeUndefined()
+      }
+    })
+
+    it('APIError preserves FastAPI validation-error arrays as details', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        statusText: 'Unprocessable Entity',
+        json: vi.fn().mockResolvedValue({
+          detail: [{ loc: ['body', 'instrument'], msg: 'field required', type: 'missing' }],
+        }),
+      })
+
+      try {
+        await apiClient.getExchangeInstrumentsDetail('y')
+        throw new Error('expected request to fail')
+      } catch (err) {
+        const typed = err as { message: string; details?: unknown }
+
+        expect(typed.message).toBe('field required')
+        expect(Array.isArray(typed.details)).toBe(true)
+      }
+    })
+
+    it('APIError falls back gracefully for array details without msg', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        statusText: 'Unprocessable Entity',
+        json: vi.fn().mockResolvedValue({ detail: ['a', 'b'] }),
+      })
+
+      try {
+        await apiClient.getExchangeInstrumentsDetail('y')
+        throw new Error('expected request to fail')
+      } catch (err) {
+        const typed = err as { message: string; details?: unknown }
+
+        expect(typed.message).toBe('HTTP 422: Unprocessable Entity')
+        expect(Array.isArray(typed.details)).toBe(true)
+      }
+    })
   })
 })

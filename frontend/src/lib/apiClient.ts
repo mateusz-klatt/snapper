@@ -317,8 +317,23 @@ class APIClient {
       if (data && typeof data === 'object') {
         if ('detail' in data) {
           const detail = (data as { detail?: unknown }).detail
+          const fallbackMessage = `HTTP ${response.status}: ${response.statusText}`
 
-          if (detail !== null && typeof detail === 'object') {
+          if (detail === null) {
+            return { message: fallbackMessage }
+          }
+
+          if (Array.isArray(detail)) {
+            const first = detail[0]
+            const arrayMessage =
+              first !== null && typeof first === 'object' && 'msg' in first
+                ? String((first as { msg: unknown }).msg)
+                : fallbackMessage
+
+            return { message: arrayMessage, details: detail }
+          }
+
+          if (typeof detail === 'object') {
             const detailRecord = detail as Record<string, unknown>
             const reason = detailRecord.reason
             const errorCode = detailRecord.error_code
@@ -327,7 +342,7 @@ class APIClient {
                 ? reason
                 : typeof errorCode === 'string' && errorCode.length > 0
                   ? errorCode
-                  : `HTTP ${response.status}: ${response.statusText}`
+                  : fallbackMessage
 
             return { message, details: detail }
           }

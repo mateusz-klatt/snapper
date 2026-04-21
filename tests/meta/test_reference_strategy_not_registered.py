@@ -22,6 +22,7 @@ from pathlib import Path
 
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.strategies.examples import tradfi_observe_crypto_execute
+from snapper.strategies.factory import StrategyFactory
 
 _REFERENCE_MODULE_PATH = Path(tradfi_observe_crypto_execute.__file__).resolve()
 _FORBIDDEN_DECORATORS: frozenset[str] = frozenset(
@@ -87,3 +88,27 @@ def _decorator_name(decorator: ast.expr) -> str | None:
     if isinstance(decorator, ast.Attribute):
         return decorator.attr
     return None
+
+
+def test_reference_class_not_in_strategy_factory() -> None:
+    """The reference class must not land in ``StrategyFactory.STRATEGY_CLASSES``.
+
+    Given: the reference module imported,
+    When: ``StrategyFactory.STRATEGY_CLASSES`` is inspected,
+    Then: no entry resolves to the reference module. Catches the
+        alias-bypass the AST scan can miss: even if a future maintainer
+        writes ``from ... import register_strategy as rs`` and
+        decorates the class with ``@rs(...)``, the factory side-effect
+        would still populate this dict, and this test would fail.
+    """
+    module_path = tradfi_observe_crypto_execute.__name__
+    offenders = {
+        name: cls.__module__
+        for name, cls in StrategyFactory.STRATEGY_CLASSES.items()
+        if cls.__module__ == module_path
+    }
+    assert (
+        not offenders
+    ), f"reference module {module_path!r} leaked into StrategyFactory: " + ", ".join(
+        f"{name}={mod}" for name, mod in sorted(offenders.items())
+    )
