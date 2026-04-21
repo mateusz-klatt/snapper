@@ -968,6 +968,7 @@ describe('domain API methods', () => {
             exchange: 'kraken_equities',
             can_trade: false,
             can_market_data: true,
+            instrument_resolved: true,
             instrument_kind: 'future',
             expiry_at: '2026-06-19T20:00:00Z',
           },

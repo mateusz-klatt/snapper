@@ -160,6 +160,27 @@ async def create_order(
 
     await require_tradable(repo, body.instrument, body.exchange, as_of=now)
 
+    resolved_instrument_public_id = await repo.get_instrument_public_id_by_symbol(
+        native_symbol=body.instrument,
+        exchange=body.exchange,
+        as_of=now,
+    )
+    if resolved_instrument_public_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "error_code": "unknown_instrument",
+                "symbol": body.instrument,
+                "exchange": body.exchange,
+                "reason": (
+                    "no active Instrument row resolves for this "
+                    "(symbol, exchange) pair; the capability guard accepted "
+                    "the symbol but Snapper cannot identify the instrument "
+                    "record to persist against"
+                ),
+            },
+        )
+
     await resolve_target_wallets(
         principal=principal,
         repo=repo,
@@ -195,7 +216,7 @@ async def create_order(
         user_public_id=principal.user_public_id,
         operator_public_id=body.operator_public_id,
         wallet_public_id=body.wallet_public_id,
-        instrument_public_id=body.instrument_public_id,
+        instrument_public_id=resolved_instrument_public_id,
         command_type="create",
         side=body.side,
         order_type=venue_order_type,
@@ -212,7 +233,7 @@ async def create_order(
                     "plan_type": "manual_once",
                     "created_by_user_id": user_pid,
                     "created_via": "api",
-                    "instrument_public_id": body.instrument_public_id,
+                    "instrument_public_id": resolved_instrument_public_id,
                     "exchange": body.exchange,
                     "mode": body.mode,
                     "shard_key": shard_key,

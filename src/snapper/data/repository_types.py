@@ -1427,6 +1427,15 @@ class InstrumentDetailRow(TypedDict):
     Joins Symbol + SymbolExchangeCapability + Instrument + InstrumentSpec
     at a single temporal snapshot. Consumed by
     ``GET /api/exchanges/{exchange}/instruments/detail``.
+
+    ``instrument_resolved`` distinguishes rows where
+    ``instrument_public_id`` is a real ``Instrument.public_id`` (True)
+    from rows where it fell back to ``Symbol.public_id`` because no
+    Instrument row was synced yet at the query snapshot (False).
+    Consumers that persist the identifier MUST gate on
+    ``instrument_resolved`` + re-resolve via
+    ``Repository.get_instrument_public_id_by_symbol`` at submit time
+    before using it as an Instrument reference.
     """
 
     instrument_public_id: str
@@ -1435,5 +1444,6 @@ class InstrumentDetailRow(TypedDict):
     exchange: str
     can_trade: bool
     can_market_data: bool
+    instrument_resolved: bool
     instrument_kind: str | None
     expiry_at: datetime | None

@@ -735,7 +735,17 @@ export interface InstrumentCapabilityData {
  * submit buttons without a separate round-trip for capability lookup.
  *
  * Attributes:
- *     instrument_public_id: Public ID of the Instrument row.
+ *     instrument_public_id: Public ID of the Instrument row when an
+ *         active Instrument exists at the query snapshot. When the
+ *         Symbol + capability rows are present but no Instrument row
+ *         has been synced yet (transient state during symbol-updater
+ *         runs), this field falls back to ``symbol_public_id`` so the
+ *         frontend still has a stable identifier for dropdown keys.
+ *         ``instrument_resolved=True`` marks the former case; callers
+ *         that need to persist an order-entry reference MUST gate on
+ *         that flag and re-resolve via
+ *         ``Repository.get_instrument_public_id_by_symbol`` at submit
+ *         time (the REST order-entry path already does this).
  *     symbol_public_id: Public ID of the Symbol row
  *         (same symbol can map to many instruments across exchanges).
  *     symbol: Native symbol string (e.g. ``MNQM6-CME``).
@@ -744,6 +754,13 @@ export interface InstrumentCapabilityData {
  *         means market-data only (frontend renders a "Market-data only"
  *         badge and disables order submit).
  *     can_market_data: Value of ``SymbolExchangeCapability.can_market_data``.
+ *     instrument_resolved: ``True`` when ``instrument_public_id`` is a
+ *         real ``Instrument.public_id``; ``False`` when it is the
+ *         fallback ``Symbol.public_id``. Consumers that persist the
+ *         instrument reference (order submission, cap tracking,
+ *         pricing) MUST reject rows where ``instrument_resolved=False``
+ *         and re-resolve via the authoritative symbol → instrument
+ *         resolver, since these identifiers cross different namespaces.
  *     instrument_kind: InstrumentSpec kind label (``future``, ``spot``,
  *         etc.); ``None`` when no spec row exists.
  *     expiry_at: InstrumentSpec expiry timestamp; ``None`` for perpetuals
@@ -761,6 +778,7 @@ export interface InstrumentDetailData {
   exchange: string;
   can_trade: boolean;
   can_market_data: boolean;
+  instrument_resolved: boolean;
   instrument_kind: InstrumentKind1;
   expiry_at: ExpiryAt1;
 }

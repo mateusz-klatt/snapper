@@ -243,6 +243,26 @@ export interface InstrumentCapability {
 }
 
 /**
+ * Canonical InstrumentDetail entity.
+ * From WebSocket InstrumentDetailData.
+ */
+export interface InstrumentDetail {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  instrumentPublicId: string
+  symbolPublicId: string
+  symbol: string
+  exchange: string
+  canTrade: boolean
+  canMarketData: boolean
+  instrumentResolved: boolean
+  instrumentKind: string | null
+  expiryAt: Date | null
+}
+
+/**
  * Canonical OrderCancel entity.
  * From WebSocket OrderCancelData.
  */

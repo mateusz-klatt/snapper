@@ -141,6 +141,146 @@ class TestOrderRouteCapabilityGuard:
         repo.insert_trade_command.assert_not_called()
         client.close()
 
+    def test_forged_instrument_public_id_is_canonicalised_server_side(self) -> None:
+        """A forged ``instrument_public_id`` cannot bypass the guard.
+
+        Given: a body where ``instrument`` is a tradable symbol (passes
+            the guard) but ``instrument_public_id`` is a DIFFERENT value
+            the client attempts to smuggle in (e.g., a market-data-only
+            instrument UUID),
+        When: the route canonicalises ``instrument_public_id`` via
+            ``repo.get_instrument_public_id_by_symbol(body.instrument,
+            body.exchange)``,
+        Then: the client-provided ``instrument_public_id`` is ignored;
+            the resolved Instrument.public_id from the (symbol, exchange)
+            pair flows into the trade-command insert instead. Closes the
+            final-gate regression flagged by gpt-5.4 + gpt-5.3-codex.
+        """
+        repo = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        repo.get_instrument_public_id_by_symbol = AsyncMock(
+            return_value="00000000-0000-7000-8000-000000000abc"
+        )
+        repo.insert_execution_plan = AsyncMock(return_value=(1, "plan-1"))
+        repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
+        repo.update_execution_plan_status = AsyncMock(return_value=2)
+        repo.get_execution_plan = AsyncMock(
+            return_value={
+                "public_id": "plan-1",
+                "timestamp": _ts(),
+                "session_id": "s1",
+                "sequence_id": 1,
+                "plan_type": "manual_once",
+                "created_by_user_id": "test_user",
+                "created_by_strategy": None,
+                "created_via": "api",
+                "instrument_public_id": "00000000-0000-7000-8000-000000000abc",
+                "exchange": "kraken",
+                "mode": "live",
+                "shard_key": "kraken:BTC-USD:live",
+                "wallet_public_id": "wallet-1",
+                "operator_public_id": None,
+                "total_quantity": 0.5,
+                "filled_quantity": 0.0,
+                "side": "buy",
+                "parent_plan_public_id": None,
+                "position_cycle_public_id": None,
+                "params": {"order_type": "limit", "side": "buy", "price": 50000.0},
+                "status": "active",
+                "created_at": _ts(),
+                "started_at": None,
+                "completed_at": None,
+                "expires_at": None,
+                "cancel_requested_at": None,
+                "last_evaluated_at": None,
+                "last_error": None,
+                "idempotency_key": None,
+            }
+        )
+        body = {
+            "type": "create_order_command",
+            "session_id": "s1",
+            "sequence_id": 1,
+            "public_id": "req-1",
+            "timestamp": _ts().isoformat(),
+            "payload": {
+                "instrument": "BTC-USD",
+                "instrument_public_id": "00000000-0000-7000-8000-0000000000f1",
+                "exchange": "kraken",
+                "mode": "live",
+                "side": "buy",
+                "order_type": "limit",
+                "quantity": 0.5,
+                "price": 50000.0,
+                "wallet_public_id": "wallet-1",
+            },
+        }
+        client = _create_client(repo)
+        with patch(
+            "snapper.server._capability_guard.is_tradeable",
+            return_value=True,
+        ):
+            response = client.post("/api/orders", json=body)
+        assert response.status_code == 200
+        call = repo.get_instrument_public_id_by_symbol.await_args
+        assert call is not None
+        assert call.kwargs["native_symbol"] == "BTC-USD"
+        assert call.kwargs["exchange"] == "kraken"
+        assert call.kwargs["as_of"] is not None
+        plan_insert_call = repo.insert_execution_plan.await_args
+        assert plan_insert_call is not None
+        persisted_plan_row = plan_insert_call.args[0]
+        assert persisted_plan_row["instrument_public_id"] == (
+            "00000000-0000-7000-8000-000000000abc"
+        )
+        client.close()
+
+    def test_create_order_rejects_unknown_instrument_after_tradable_check(self) -> None:
+        """Unresolvable ``(symbol, exchange)`` pairs return 422 unknown_instrument.
+
+        Given: a body where ``is_tradeable`` returns True (mapper cache
+            has the capability) but the Instrument row does not exist in
+            the repository (cache/DB drift),
+        When: canonicalisation runs after the guard,
+        Then: the route surfaces HTTP 422 with
+            ``error_code=unknown_instrument`` rather than silently
+            persisting a symbol-as-UUID value.
+        """
+        repo = AsyncMock()
+        repo.list_accessible_wallets_for_operators = AsyncMock(return_value=None)
+        repo.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
+        body = {
+            "type": "create_order_command",
+            "session_id": "s1",
+            "sequence_id": 1,
+            "public_id": "req-1",
+            "timestamp": _ts().isoformat(),
+            "payload": {
+                "instrument": "PHANTOM-USD",
+                "instrument_public_id": "PHANTOM-USD",
+                "exchange": "kraken",
+                "mode": "live",
+                "side": "buy",
+                "order_type": "limit",
+                "quantity": 0.5,
+                "price": 1.0,
+                "wallet_public_id": "wallet-1",
+            },
+        }
+        client = _create_client(repo)
+        with patch(
+            "snapper.server._capability_guard.is_tradeable",
+            return_value=True,
+        ):
+            response = client.post("/api/orders", json=body)
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert detail["error_code"] == "unknown_instrument"
+        assert detail["symbol"] == "PHANTOM-USD"
+        repo.insert_execution_plan.assert_not_called()
+        repo.insert_trade_command.assert_not_called()
+        client.close()
+
 
 @pytest.mark.capability_guard
 class TestBracketCapabilityGuard:

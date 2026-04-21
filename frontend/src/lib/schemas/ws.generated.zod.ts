@@ -235,6 +235,7 @@ export const InstrumentDetailDataSchema = z
     exchange: z.string(),
     can_trade: z.boolean(),
     can_market_data: z.boolean(),
+    instrument_resolved: z.boolean(),
     instrument_kind: z.string().nullable(),
     expiry_at: z.iso.datetime().nullable(),
   })

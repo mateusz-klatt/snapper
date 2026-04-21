@@ -40,6 +40,7 @@ from snapper.server.app import _clear_runtime_singletons
 from snapper.server.app import _reconcile_stale_backtests
 from snapper.server.app import _safe_get_caps_enforcer
 from snapper.server.app import _shutdown_user_service_publisher
+from snapper.server.app import _warn_on_tradfi_near_expiry
 from snapper.server.app import create_api_router
 from snapper.server.app import create_app
 from snapper.server.app import get_repository_dependency
@@ -2664,6 +2665,7 @@ class TestExchangeInstrumentsDetailEndpoint:
             "exchange": "kraken_equities",
             "can_trade": can_trade,
             "can_market_data": can_market_data,
+            "instrument_resolved": True,
             "instrument_kind": instrument_kind,
             "expiry_at": expiry_at,
         }
@@ -2996,3 +2998,151 @@ class TestReconcileStaleBacktests:
         app.state.rest_tracker = SequenceTracker()
 
         await _reconcile_stale_backtests(app)
+
+
+class TestWarnOnTradfiNearExpiry:
+    """Tests for the TradFi 14-day expiry WARN-log boot helper."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.server.app.get_repository_dependency")
+    async def test_logs_warning_when_symbol_expires_within_window(
+        self, mock_get_repo: MagicMock
+    ) -> None:
+        """A default TradFi symbol with ``expiry_at`` within 14 days logs WARN.
+
+        Given: AppSettings.instruments[KRAKEN_EQUITIES]=['MNQM6-CME'] +
+            a detail row whose ``expiry_at`` is 5 days from now,
+        When: the boot helper runs,
+        Then: ``get_exchange_instruments_detail`` is awaited once and
+            the helper completes without raising.
+        """
+        now = datetime.now(UTC)
+        soon = now + dt.timedelta(days=5)
+        mock_repo = AsyncMock()
+        mock_repo.get_exchange_instruments_detail = AsyncMock(
+            return_value=[
+                {
+                    "instrument_public_id": "i-1",
+                    "symbol_public_id": "s-1",
+                    "symbol": "MNQM6-CME",
+                    "exchange": "kraken_equities",
+                    "can_trade": False,
+                    "can_market_data": True,
+                    "instrument_resolved": True,
+                    "instrument_kind": "future",
+                    "expiry_at": soon,
+                }
+            ]
+        )
+        mock_get_repo.return_value = mock_repo
+        settings = MagicMock()
+        settings.instruments = {"kraken_equities": ["MNQM6-CME"]}
+        await _warn_on_tradfi_near_expiry(settings)
+        mock_repo.get_exchange_instruments_detail.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.server.app.get_repository_dependency")
+    async def test_no_warning_when_symbol_is_not_near_expiry(
+        self, mock_get_repo: MagicMock
+    ) -> None:
+        """Symbols with ``expiry_at`` > 14 days in the future do not trigger a WARN.
+
+        Given: a detail row whose ``expiry_at`` is 90 days out,
+        When: the boot helper runs,
+        Then: the helper completes silently (no crash) and the repo
+            query is still awaited once.
+        """
+        now = datetime.now(UTC)
+        far = now + dt.timedelta(days=90)
+        mock_repo = AsyncMock()
+        mock_repo.get_exchange_instruments_detail = AsyncMock(
+            return_value=[
+                {
+                    "instrument_public_id": "i-1",
+                    "symbol_public_id": "s-1",
+                    "symbol": "MNQU6-CME",
+                    "exchange": "kraken_equities",
+                    "can_trade": False,
+                    "can_market_data": True,
+                    "instrument_resolved": True,
+                    "instrument_kind": "future",
+                    "expiry_at": far,
+                }
+            ]
+        )
+        mock_get_repo.return_value = mock_repo
+        settings = MagicMock()
+        settings.instruments = {"kraken_equities": ["MNQU6-CME"]}
+        await _warn_on_tradfi_near_expiry(settings)
+        mock_repo.get_exchange_instruments_detail.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.server.app.get_repository_dependency")
+    async def test_no_defaults_configured_skips_query(self, mock_get_repo: MagicMock) -> None:
+        """Empty defaults list short-circuits before touching the repository."""
+        settings = MagicMock()
+        settings.instruments = {"kraken_equities": []}
+        await _warn_on_tradfi_near_expiry(settings)
+        mock_get_repo.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("snapper.server.app.get_repository_dependency")
+    async def test_ignores_non_default_symbols(self, mock_get_repo: MagicMock) -> None:
+        """Rows whose symbol is not in defaults are skipped even if near expiry."""
+        now = datetime.now(UTC)
+        soon = now + dt.timedelta(days=3)
+        mock_repo = AsyncMock()
+        mock_repo.get_exchange_instruments_detail = AsyncMock(
+            return_value=[
+                {
+                    "instrument_public_id": "i-1",
+                    "symbol_public_id": "s-1",
+                    "symbol": "UNUSED-CME",
+                    "exchange": "kraken_equities",
+                    "can_trade": False,
+                    "can_market_data": True,
+                    "instrument_resolved": True,
+                    "instrument_kind": "future",
+                    "expiry_at": soon,
+                }
+            ]
+        )
+        mock_get_repo.return_value = mock_repo
+        settings = MagicMock()
+        settings.instruments = {"kraken_equities": ["MNQM6-CME"]}
+        await _warn_on_tradfi_near_expiry(settings)
+        mock_repo.get_exchange_instruments_detail.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch("snapper.server.app.get_repository_dependency")
+    async def test_rows_without_expiry_are_skipped(self, mock_get_repo: MagicMock) -> None:
+        """Rows with ``expiry_at=None`` (perpetuals) are skipped safely."""
+        mock_repo = AsyncMock()
+        mock_repo.get_exchange_instruments_detail = AsyncMock(
+            return_value=[
+                {
+                    "instrument_public_id": "i-1",
+                    "symbol_public_id": "s-1",
+                    "symbol": "MNQM6-CME",
+                    "exchange": "kraken_equities",
+                    "can_trade": False,
+                    "can_market_data": True,
+                    "instrument_resolved": True,
+                    "instrument_kind": "future",
+                    "expiry_at": None,
+                }
+            ]
+        )
+        mock_get_repo.return_value = mock_repo
+        settings = MagicMock()
+        settings.instruments = {"kraken_equities": ["MNQM6-CME"]}
+        await _warn_on_tradfi_near_expiry(settings)
+
+    @pytest.mark.asyncio
+    @patch("snapper.server.app.get_repository_dependency")
+    async def test_exception_is_non_fatal(self, mock_get_repo: MagicMock) -> None:
+        """Exception during the expiry check is caught (non-fatal)."""
+        mock_get_repo.side_effect = RuntimeError("db down")
+        settings = MagicMock()
+        settings.instruments = {"kraken_equities": ["MNQM6-CME"]}
+        await _warn_on_tradfi_near_expiry(settings)

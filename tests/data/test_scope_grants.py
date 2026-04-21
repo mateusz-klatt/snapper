@@ -1194,6 +1194,7 @@ class TestGetExchangeInstrumentsDetail:
         assert row["can_trade"] is False
         assert row["can_market_data"] is True
         assert row["instrument_public_id"] == "00000000-0000-7000-8000-0000000000d1"
+        assert row["instrument_resolved"] is False
         assert row["instrument_kind"] is None
 
     @pytest.mark.asyncio
@@ -1250,3 +1251,4 @@ class TestGetExchangeInstrumentsDetail:
         assert len(rows) == 1
         assert rows[0]["instrument_public_id"] == instrument_public_id
         assert rows[0]["symbol"] == "MESM6-CME"
+        assert rows[0]["instrument_resolved"] is True

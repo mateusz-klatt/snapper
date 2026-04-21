@@ -132,6 +132,7 @@ from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
 from snapper.config.settings_routes import router as settings_router
 from snapper.core.types import ComponentStatusEnum
+from snapper.core.types import ExchangeEnum
 from snapper.core.types import HealthStatus
 from snapper.core.types import HealthStatusEnum
 from snapper.core.types import MarketDataExchange
@@ -354,6 +355,56 @@ async def _reconcile_stale_backtests(app: FastAPI) -> None:
         logger.warning("Backtest reconciliation failed (non-fatal): {}", exc)
 
 
+_TRADFI_EXPIRY_ALERT_WINDOW_DAYS = 14
+
+
+async def _warn_on_tradfi_near_expiry(settings: AppSettings) -> None:
+    """Log WARN for each configured TradFi default symbol near expiry.
+
+    Plan §5 item 13 mandates a 14-day expiry alert. Operators must
+    rotate the ``AppSettings.instruments[KRAKEN_EQUITIES]`` default list
+    before contracts drop below that window; this check turns the
+    docstring-only guidance into a runtime signal on every server
+    restart so the operator sees the warning in startup logs.
+
+    The check is best-effort: any query failure is logged at WARN and
+    swallowed so a partially-initialised database cannot prevent
+    application startup.
+
+    Args:
+        settings: Application settings; the KRAKEN_EQUITIES default
+            list is sourced from ``settings.instruments``.
+    """
+    try:
+        exchange = str(ExchangeEnum.KRAKEN_EQUITIES)
+        defaults = settings.instruments.get(exchange, [])
+        if not defaults:
+            return
+        repo: Repository = get_repository_dependency()
+        now = datetime.now(UTC)
+        threshold = now + timedelta(days=_TRADFI_EXPIRY_ALERT_WINDOW_DAYS)
+        detail_rows = await repo.get_exchange_instruments_detail(exchange=exchange, as_of=now)
+        for row in detail_rows:
+            if row["symbol"] not in defaults:
+                continue
+            expiry_at = row["expiry_at"]
+            if expiry_at is None:
+                continue
+            if expiry_at <= threshold:
+                days_remaining = max(0, (expiry_at - now).days)
+                logger.warning(
+                    "TradFi default symbol {} expires in {} day(s) "
+                    "(expiry_at={}); rotate AppSettings.instruments["
+                    "KRAKEN_EQUITIES] per docs/operations.md 'Kraken "
+                    "Equities (TradFi) market data' section.",
+                    row["symbol"],
+                    days_remaining,
+                    expiry_at.isoformat(),
+                )
+    except Exception as exc:
+        logger.warning("TradFi expiry check failed (non-fatal): {}", exc)
+
+
 async def _shutdown_zmq_bridge(app: FastAPI) -> None:
     """Stop ZMQ bridge and await its task during shutdown.
 
@@ -429,6 +480,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         manager_ref: WebSocketConnectionManager = app.state.manager
         app.state.zmq_bridge_task = asyncio.create_task(manager_ref.zmq_bridge.start())
         logger.info("Application startup complete")
+        await _warn_on_tradfi_near_expiry(settings)
         yield
     except asyncio.CancelledError:
         logger.info("Application lifespan cancelled by shutdown signal")
@@ -968,6 +1020,7 @@ def _create_exchange_router() -> APIRouter:
                     exchange=row["exchange"],
                     can_trade=row["can_trade"],
                     can_market_data=row["can_market_data"],
+                    instrument_resolved=row["instrument_resolved"],
                     instrument_kind=row["instrument_kind"],
                     expiry_at=row["expiry_at"],
                 )

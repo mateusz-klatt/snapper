@@ -3512,16 +3512,18 @@ class SQLAlchemyRepository(Repository):
             for row in result.mappings().all():
                 symbol_pid = str(row["symbol_public_id"])
                 instrument_pid = row["instrument_public_id"]
+                instrument_resolved = instrument_pid is not None
                 rows.append(
                     {
                         "instrument_public_id": (
-                            str(instrument_pid) if instrument_pid is not None else symbol_pid
+                            str(instrument_pid) if instrument_resolved else symbol_pid
                         ),
                         "symbol_public_id": symbol_pid,
                         "symbol": str(row["symbol"]),
                         "exchange": exchange,
                         "can_trade": bool(row["can_trade"]),
                         "can_market_data": bool(row["can_market_data"]),
+                        "instrument_resolved": instrument_resolved,
                         "instrument_kind": row["instrument_kind"],
                         "expiry_at": row["expiry_at"],
                     }
