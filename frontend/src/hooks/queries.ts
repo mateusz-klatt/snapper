@@ -90,6 +90,8 @@ const queryKeys = {
   settingCategories: (asOf: string | null) => ['settings', 'categories', asOf] as const,
   users: (includeInactive: boolean, asOf: string | null) =>
     ['users', includeInactive, asOf] as const,
+  featureFlags: () => ['feature-flags'] as const,
+  aiDelegates: () => ['ai-delegates'] as const,
 }
 
 export const useSystemStatus = () => {
@@ -841,5 +843,31 @@ export const useRerunBacktest = () => {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['backtests'] })
     },
+  })
+}
+
+export function useFeatureFlags(): { isEnabled: boolean; isLoading: boolean } {
+  const { isAuthenticated } = useAuth()
+  const query = useQuery({
+    queryKey: queryKeys.featureFlags(),
+    queryFn: () => apiClient.getFeatureFlags(),
+    enabled: isAuthenticated,
+    throwOnError: false,
+  })
+
+  return {
+    isEnabled: query.data?.payload.ai_integration_enabled === true,
+    isLoading: query.isLoading,
+  }
+}
+
+export const useAiDelegates = () => {
+  const { isAuthenticated } = useAuth()
+
+  return useQuery({
+    queryKey: queryKeys.aiDelegates(),
+    queryFn: () => apiClient.listAiDelegates(),
+    enabled: isAuthenticated,
+    throwOnError: false,
   })
 }

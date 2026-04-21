@@ -45,8 +45,10 @@ describe('useHashRouting', () => {
       'orders',
       'positions',
       'signals',
+      'backtests',
       'health',
       'admin',
+      'ai-integration',
       'settings',
     ]
     const { result } = renderHook(() => useTabRouting())

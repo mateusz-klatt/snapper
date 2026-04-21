@@ -36,6 +36,8 @@ import {
   PositionListResponseSchema,
   SignalListResponseSchema,
   ExecutionPlanResponseSchema,
+  FeatureFlagsResponseSchema,
+  DelegateListResponseSchema,
 } from './schemas/api.generated.zod'
 import type {
   ScopeGrantListResponse,
@@ -94,6 +96,8 @@ import type {
   BacktestComparisonResponse,
   BacktestComparisonDetailResponse,
   BacktestComparisonListResponse,
+  FeatureFlagsResponse,
+  DelegateListResponse,
 } from '../types/api'
 
 interface RequestOptions {
@@ -844,6 +848,16 @@ class APIClient {
     const data = await this.getJSON(`/api/backtests/compare?${params.toString()}`)
 
     return data as BacktestComparisonListResponse
+  }
+  async getFeatureFlags(): Promise<FeatureFlagsResponse> {
+    const data = await this.getJSON('/api/settings/features')
+
+    return validateResponse(data, FeatureFlagsResponseSchema, '/settings/features')
+  }
+  async listAiDelegates(): Promise<DelegateListResponse> {
+    const data = await this.getJSON('/api/ai-delegates')
+
+    return validateResponse(data, DelegateListResponseSchema, '/ai-delegates')
   }
 }
 

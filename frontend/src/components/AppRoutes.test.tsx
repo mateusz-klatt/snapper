@@ -47,6 +47,9 @@ vi.mock('../features/health/Health', () => ({
 vi.mock('../features/admin/Admin', () => ({
   Admin: () => <div data-testid='admin'>Admin Component</div>,
 }))
+vi.mock('../features/ai-integration/AIIntegration', () => ({
+  AIIntegration: () => <div data-testid='ai-integration'>AI Integration Component</div>,
+}))
 vi.mock('../features/settings/Settings', () => ({
   Settings: () => <div data-testid='settings'>Settings Component</div>,
 }))
@@ -151,6 +154,12 @@ describe('AppRoutes', () => {
     renderWithProviders(<AppRoutes activeTab='admin' />)
     await waitFor(() => {
       expect(screen.getByTestId('admin')).toBeTruthy()
+    })
+  })
+  it('renders AIIntegration component for ai-integration tab', async () => {
+    renderWithProviders(<AppRoutes activeTab='ai-integration' />)
+    await waitFor(() => {
+      expect(screen.getByTestId('ai-integration')).toBeTruthy()
     })
   })
   it('renders Settings component for settings tab', async () => {

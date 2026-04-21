@@ -110,3 +110,7 @@ export type MetricDiffRow = Components['schemas']['MetricDiffRow']
 export type EquityOverlayPoint = Components['schemas']['EquityOverlayPoint']
 export type TradeDiffEntry = Components['schemas']['TradeDiffEntry']
 export type SignalDiffEntry = Components['schemas']['SignalDiffEntry']
+
+export type FeatureFlagsResponse = Components['schemas']['FeatureFlagsResponse']
+export type DelegateRead = Components['schemas']['DelegateRead']
+export type DelegateListResponse = Components['schemas']['DelegateListResponse']

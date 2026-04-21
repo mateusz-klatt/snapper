@@ -23,6 +23,14 @@ if (typeof Element !== 'undefined') {
   Element.prototype.scrollIntoView = vi.fn()
 }
 
+if (typeof navigator !== 'undefined') {
+  Object.defineProperty(navigator, 'clipboard', {
+    value: { writeText: vi.fn().mockResolvedValue(undefined) },
+    writable: true,
+    configurable: true,
+  })
+}
+
 const localStorageMock = (() => {
   let store: Record<string, string> = {}
 

@@ -281,4 +281,33 @@ describe('App', () => {
       expect(screen.queryByText(/Time Travel Mode/)).not.toBeInTheDocument()
     })
   })
+  describe('AI Integration sidebar cascade', () => {
+    it('shows AI Integration entry when canAccess returns true (operator/admin)', async () => {
+      const { useAuth } = await import('./stores/auth')
+
+      vi.mocked(useAuth).mockReturnValue({
+        user: { username: 'admin', role: 'admin' },
+        isAuthenticated: true,
+        canAccess: vi.fn((resource: string) => resource !== 'readonly-excluded'),
+      } as unknown as ReturnType<typeof useAuth>)
+      renderWithProviders(<App />)
+      await waitFor(() => {
+        expect(screen.getAllByText('AI Integration').length).toBeGreaterThan(0)
+      })
+    })
+    it('hides AI Integration entry when canAccess returns false (readonly role)', async () => {
+      const { useAuth } = await import('./stores/auth')
+
+      vi.mocked(useAuth).mockReturnValue({
+        user: { username: 'ro', role: 'readonly' },
+        isAuthenticated: true,
+        canAccess: vi.fn((resource: string) => resource !== 'ai-integration'),
+      } as unknown as ReturnType<typeof useAuth>)
+      renderWithProviders(<App />)
+      await waitFor(() => {
+        expect(screen.getByText('Trading Console')).toBeInTheDocument()
+      })
+      expect(screen.queryByText('AI Integration')).not.toBeInTheDocument()
+    })
+  })
 })

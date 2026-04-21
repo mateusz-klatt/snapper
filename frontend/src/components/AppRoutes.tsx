@@ -14,6 +14,7 @@ import { ComparePage } from '../features/backtests/ComparePage'
 import { useHashSubpath } from '../hooks/useHashRouting'
 import { Health } from '../features/health/Health'
 import { Admin } from '../features/admin/Admin'
+import { AIIntegration } from '../features/ai-integration/AIIntegration'
 import { Settings } from '../features/settings/Settings'
 
 interface AppRoutesProps {
@@ -113,6 +114,14 @@ export function AppRoutes({ activeTab }: Readonly<AppRoutesProps>): React.ReactE
         <ErrorBoundary componentName='Administration'>
           <ProtectedRoute resource='admin'>
             <Admin />
+          </ProtectedRoute>
+        </ErrorBoundary>
+      )
+    case 'ai-integration':
+      return (
+        <ErrorBoundary componentName='AI Integration'>
+          <ProtectedRoute resource='ai-integration'>
+            <AIIntegration />
           </ProtectedRoute>
         </ErrorBoundary>
       )

@@ -11,6 +11,7 @@ import {
   Shield,
   TrendingUp,
   Workflow,
+  Zap,
 } from 'lucide-react'
 
 type TabType =
@@ -24,6 +25,7 @@ type TabType =
   | 'backtests'
   | 'health'
   | 'admin'
+  | 'ai-integration'
   | 'settings'
 interface TabConfig {
   id: TabType
@@ -42,5 +44,6 @@ export const ALL_TABS: readonly TabConfig[] = [
   { id: 'backtests', label: 'Backtests', icon: BarChart3 },
   { id: 'health', label: 'Health', icon: HeartPulse },
   { id: 'admin', label: 'Administration', icon: Shield },
+  { id: 'ai-integration', label: 'AI Integration', icon: Zap },
   { id: 'settings', label: 'Settings', icon: Settings },
 ] as const

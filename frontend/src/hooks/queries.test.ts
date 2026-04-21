@@ -44,6 +44,8 @@ import {
   useBacktestComparison,
   useBacktestComparisons,
   useCreateBacktestComparison,
+  useFeatureFlags,
+  useAiDelegates,
 } from './queries'
 import { useAuth } from '../stores/auth'
 import { apiClient, APIError } from '../lib/apiClient'
@@ -318,6 +320,16 @@ vi.mock('../lib/apiClient', () => ({
     getBacktestComparisons: vi.fn(() =>
       Promise.resolve({ type: 'backtest_comparison_list', payload: [], count: 0 })
     ),
+    getFeatureFlags: vi.fn(() =>
+      Promise.resolve(
+        envelope('feature_flags_response', {
+          payload: { ai_integration_enabled: true },
+        })
+      )
+    ),
+    listAiDelegates: vi.fn(() =>
+      Promise.resolve(envelope('delegate_list', { payload: [], count: 0 }))
+    ),
   },
   APIError: class APIError extends Error {
     constructor(
@@ -380,6 +392,8 @@ const mockedApiClient = apiClient as unknown as {
   createBacktestComparison: Mock
   getBacktestComparison: Mock
   getBacktestComparisons: Mock
+  getFeatureFlags: Mock
+  listAiDelegates: Mock
 }
 const createQueryClient = () =>
   new QueryClient({
@@ -1661,6 +1675,54 @@ describe('queries', () => {
       expect(invalidateSpy).toHaveBeenCalledWith({
         queryKey: ['backtest-compare', 'list', 'wallet-1'],
       })
+    })
+  })
+  describe('AI integration hooks', () => {
+    it('useFeatureFlags returns isEnabled=true when backend says ai_integration_enabled=true', async () => {
+      mockedApiClient.getFeatureFlags.mockResolvedValueOnce(
+        envelope('feature_flags_response', {
+          payload: { ai_integration_enabled: true },
+        })
+      )
+      const { result } = renderHook(() => useFeatureFlags(), { wrapper: createWrapper() })
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false))
+      expect(result.current.isEnabled).toBe(true)
+    })
+    it('useFeatureFlags returns isEnabled=false on fetch error (fail-closed)', async () => {
+      mockedApiClient.getFeatureFlags.mockRejectedValueOnce(new Error('server down'))
+      const { result } = renderHook(() => useFeatureFlags(), { wrapper: createWrapper() })
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false))
+      expect(result.current.isEnabled).toBe(false)
+    })
+    it('useAiDelegates returns delegate list', async () => {
+      mockedApiClient.listAiDelegates.mockResolvedValueOnce(
+        envelope('delegate_list', {
+          payload: [
+            {
+              public_id: 'd-1',
+              username: 'ai-alpha',
+              label: 'Alpha',
+              created_by_user_public_id: 'u-1',
+              created_at: '2026-04-21T00:00:00Z',
+              is_active: true,
+              caps: {
+                max_open_orders: 10,
+                max_daily_notional_usd: 1000,
+                max_cancels_per_minute: null,
+                max_order_quantity_per_instrument: null,
+              },
+            },
+          ],
+          count: 1,
+        })
+      )
+      const { result } = renderHook(() => useAiDelegates(), { wrapper: createWrapper() })
+
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      expect(result.current.data?.count).toBe(1)
+      expect(result.current.data?.payload[0].label).toBe('Alpha')
     })
   })
 })

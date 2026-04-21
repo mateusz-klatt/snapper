@@ -2874,4 +2874,89 @@ describe('cacheWsTicketFromResponse', () => {
       }
     })
   })
+  describe('AI integration', () => {
+    it('getFeatureFlags returns parsed response with ai_integration_enabled', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          type: 'feature_flags_response',
+          sequence_id: 1,
+          public_id: 'p',
+          timestamp: '2026-04-21T00:00:00Z',
+          session_id: 's',
+          payload: { ai_integration_enabled: true },
+        }),
+      })
+      const result = await apiClient.getFeatureFlags()
+
+      expect(result.payload.ai_integration_enabled).toBe(true)
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/settings/features'),
+        expect.any(Object)
+      )
+    })
+    it('getFeatureFlags throws APIError on non-ok response', async () => {
+      const jsonFn = async () => ({ detail: 'server error' })
+
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        json: jsonFn,
+        clone: () => ({ json: jsonFn }),
+      })
+      await expect(apiClient.getFeatureFlags()).rejects.toThrow('server error')
+    })
+    it('listAiDelegates returns validated delegate list', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          type: 'delegate_list',
+          sequence_id: 1,
+          public_id: 'p',
+          timestamp: '2026-04-21T00:00:00Z',
+          session_id: 's',
+          payload: [
+            {
+              public_id: 'd-1',
+              username: 'ai-alpha',
+              label: 'Alpha',
+              created_by_user_public_id: 'u-1',
+              created_at: '2026-04-21T00:00:00Z',
+              is_active: true,
+              caps: {
+                max_open_orders: 10,
+                max_daily_notional_usd: 1000,
+                max_cancels_per_minute: null,
+                max_order_quantity_per_instrument: null,
+              },
+            },
+          ],
+          count: 1,
+        }),
+      })
+      const result = await apiClient.listAiDelegates()
+
+      expect(result.count).toBe(1)
+      expect(result.payload[0].label).toBe('Alpha')
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/ai-delegates'),
+        expect.any(Object)
+      )
+    })
+    it('listAiDelegates throws APIError on non-ok response', async () => {
+      const jsonFn = async () => ({ detail: 'delegates endpoint unavailable' })
+
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        json: jsonFn,
+        clone: () => ({ json: jsonFn }),
+      })
+      await expect(apiClient.listAiDelegates()).rejects.toThrow('delegates endpoint unavailable')
+    })
+  })
 })
