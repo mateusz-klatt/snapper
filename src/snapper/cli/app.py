@@ -1079,7 +1079,7 @@ def polygon_backfill_aggregates(
         symbols: List of symbols to backfill.
         all_mapped: Backfill all symbols with Polygon mapping.
         multiplier: Timeframe multiplier.
-        timespan: Timespan unit (minute, hour, day).
+        timespan: Timespan unit.
         days_back: Number of days to backfill.
         resume: Resume from last saved timestamp.
         save_csv: Save data to CSV.gz files.

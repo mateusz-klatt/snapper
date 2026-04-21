@@ -71,7 +71,7 @@ _AI_INTEGRATION_FLAG_KEY = "ai_integration_enabled"
 async def get_public_feature_flags(
     request: Request,
 ) -> FeatureFlagsResponse:
-    """Return the public feature-flag projection (plan §4 Day 4 item 1).
+    """Return the public feature-flag projection.
 
     The frontend reads this endpoint on mount to decide whether to
     render the ``/ai-integration`` navigation entry. No auth is
@@ -86,7 +86,7 @@ async def get_public_feature_flags(
             stamps provenance on the response envelope.
 
     Returns:
-        :class:`FeatureFlagsResponse` with the current state of every
+        class:`FeatureFlagsResponse` with the current state of every
         public feature flag. Currently only
         ``ai_integration_enabled`` is exposed; future flags can be
         added to :class:`FeatureFlagsPayload` without changing the

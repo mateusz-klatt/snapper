@@ -1,44 +1,32 @@
 """ZMQ message logger for auditing and debugging.
 
 This module provides a message logging service that subscribes to ALL messages
-flowing through the ZMQ broker, creating an audit trail for debugging,
+flowing through the ZMQ broker, creating an audit trail for debugging
 compliance, and analysis.
-
 The logger writes messages to a JSONL (JSON Lines) file with configurable
-payload logging. It tracks statistics including message counts, byte counts,
+payload logging. It tracks statistics including message counts, byte counts
 and per-topic breakdowns.
-
 Classes
--------
 ZmqMessageLogger
     RegisterableProcess that logs all broker messages.
-
 Configuration
--------------
-The logger supports several configuration options:
-- log_to_file: Enable/disable file output
-- log_payload: Include message payload preview in logs
-- max_payload_length: Truncate long payloads at this length
-- audit_file: Custom path for JSONL audit file
-
+The logger supports several configuration options
+log_to_file: Enable/disable file output
+log_payload: Include message payload preview in logs
+max_payload_length: Truncate long payloads at this length
+audit_file: Custom path for JSONL audit file
 Output Format
--------------
-Each line in the audit file is a JSON object::
-
-    {"timestamp": "...", "topic": "...", "size_bytes": N, "message_number": M}
+Each line in the audit file is a JSON object
+    {"timestamp": "...", "topic": "...", "size_bytes": N, "message_number": M}.
 
 Example:
--------
-Enable message logging for debugging::
-
+Enable message logging for debugging
     logger = ZmqMessageLogger(
-        log_to_file=True,
-        log_payload=True,
-        max_payload_length=500,
+        log_to_file=True
+        log_payload=True
+        max_payload_length=500
         audit_file="data/debug_audit.jsonl"
-    )
     await logger.start()
-
     # Check statistics
     stats = logger.get_statistics()
     print(f"Messages: {stats.message_count}")

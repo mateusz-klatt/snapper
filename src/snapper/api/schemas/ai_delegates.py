@@ -1,15 +1,14 @@
-"""AI delegate schemas for the REST API (plan §4 Day 4b).
+"""AI delegate schemas for the REST API.
 
 This module defines request/response schemas for the
 ``/api/ai-delegates`` CRUD surface. Delegates are
-:class:`~snapper.auth.domain.roles.UserRole.AI_DELEGATE` users an
+class:`~snapper.auth.domain.roles.UserRole.AI_DELEGATE` users an
 operator creates so an MCP-compatible client can authenticate to
 Snapper with a scoped bearer token pair instead of the operator's
 primary credentials.
-
 Envelopes follow the standard Snapper pattern
 (:class:`~snapper.api.schemas.base.PayloadRequest` /
-:class:`~snapper.api.schemas.base.PayloadResponse`) so provenance
+class:`~snapper.api.schemas.base.PayloadResponse`) so provenance
 fields land on the envelope and the domain body carries only the
 caller's intent.
 """
@@ -30,10 +29,10 @@ class DelegateCapsBody(StrictBody):
     """Per-delegate trading safety caps.
 
     Every field is optional; a ``None`` cap means "inherit the
-    Snapper-wide default" per the plan §3.5.3 fallback policy.
+    Snapper-wide default" per the fallback policy.
     The underlying :class:`~snapper.data.models.UserTradingCaps`
     row is always written at create time (even for all-``None``
-    caps) so the Day 1c ``TradingCapsEnforcer.guard`` surface has
+    caps) so the ``TradingCapsEnforcer.guard`` surface has
     a row to read + cap history is SCD2-preserved.
 
     Attributes:
@@ -65,10 +64,10 @@ class DelegateCreateBody(StrictBody):
     The operator chooses a human-readable ``label`` that becomes
     the delegate's username (prefixed with ``ai-``). Caps are
     optional — every cap defaulting to the Snapper-wide fallback
-    per plan §3.5.3. The operator also picks WHICH of their
+     The operator also picks WHICH of their
     authenticated operators the delegate inherits membership
     on — the minted delegate's wallet-scope set equals the
-    chosen operator's scope grants (plan §2 item 3). The
+    chosen operator's scope grants. The
     selection MUST sit inside the caller's authenticated operator
     set; omit to default to the caller's
     ``primary_operator_public_id``.
@@ -79,7 +78,7 @@ class DelegateCreateBody(StrictBody):
             listable in the standard user table without an
             auxiliary display-name column.
         caps: Optional per-delegate trading safety caps.
-        operator_public_id: Operator the delegate is bound to —
+        operator_public_id: Operator the delegate is bound to
             must be in the caller's claim set. ``None`` defers
             to the caller's primary operator so simple callers
             don't need to know their membership set.

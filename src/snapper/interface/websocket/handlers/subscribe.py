@@ -119,16 +119,14 @@ def _enforce_backtest_wallet_scope(
 ) -> tuple[list[str], list[str]]:
     """Split ``backtest.*`` topics into (allowed, denied) by wallet RBAC.
 
-    Authoritative matrix (plan §2.1.2):
-
+    Authoritative matrix
     ====== ============ ========================= ===============================
-    Role   ``backtest.`` ``backtest.{own_wallet}.`` ``backtest.{foreign_wallet}.*``
+    Role ``backtest.`` ``backtest.{own_wallet}.`` ``backtest.{foreign_wallet}.*``
     ====== ============ ========================= ===============================
-    VIEWER denied       accepted                  denied
-    OPER.  denied       accepted                  denied
-    ADMIN  accepted     accepted                  accepted
+    VIEWER denied accepted denied
+    OPER. denied accepted denied
+    ADMIN accepted accepted accepted
     ====== ============ ========================= ===============================
-
     Wallet segment is extracted from the second dotted segment (the
     topic validator has already proven it is a UUID7). Non-backtest
     topics pass through unchanged on the allowed side.

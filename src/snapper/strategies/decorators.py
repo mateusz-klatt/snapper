@@ -52,11 +52,9 @@ def create_strategy_process[T: type[BaseStrategy]](
 
     Example:
         @create_strategy_process(
-            process_name="strategy_rsi",
-            default_config={"name": "rsi", ...}
-        )
-        class RSIStrategy(BaseStrategy):
-            ...
+            process_name="strategy_rsi"
+            default_config={"name": "rsi",...}
+        class RSIStrategy(BaseStrategy)
     """
 
     def decorator(cls: T) -> T:

@@ -1,37 +1,31 @@
 """BacktestReplayStrategy factory — dynamic subclass with 4 backtest overrides.
 
-Used by the ZMQ replay engine (Phase 2b-core Step 7) to wrap any concrete
+Used by the ZMQ replay engine to wrap any concrete
 ``BaseStrategy`` subclass in a stateless replay shim. The wrapped strategy
 runs the same indicator + signal logic as in production but receives
 candles from a per-run replay broker instead of the live bus, and never
 publishes orders or heartbeats.
-
-Four overrides relative to ``BaseStrategy``:
-
+Four overrides relative to ``BaseStrategy``
 1. ``start()``: skips ``_subscribe_inputs`` (which sleeps and subscribes to
    system topics) and skips ``_heartbeat_task``. Calls a market-only
    ``_replay_subscribe`` and the standard ``_setup_publisher`` then creates
    ``_listen_task`` AFTER the subscriber is wired so the publisher's
    echo-ack handshake cannot race the listener.
-
 2. ``_replay_subscribe()``: NEW method (not an override of any base
    method). Subscribes the SUB socket to ONLY the market topics from
    ``self.inputs`` — no system topic leakage, no ``await asyncio.sleep(0)``.
-
-3. ``_setup_publisher()``: connects the strategy's PUB socket to the per-
+3. ``_setup_publisher()``: connects the strategy's PUB socket to the per
    run replay broker's XSUB endpoint instead of the live bus, so any
    signals the strategy emits stay isolated from production traffic.
-
 4. ``_listen_loop()``: receives multipart frames, hard-skips non-market
    topics (defence in depth), recognizes the warmup sentinel and ACKs it
    into ``state.acked_topics`` (firing ``state.subscriber_ready`` when
    every expected topic has been seen), buffers real candles by
    ``open_at``, flushes per-time-batch through
-   :func:`snapper.application.backtest.batch_processor.process_time_batch`,
+   func:`snapper.application.backtest.batch_processor.process_time_batch`
    bumps ``drain.on_processed`` inside the market guard, and on exception
    sets ``self._running = False`` before re-raising so the base class's
    stop-side invariant survives.
-
 The factory captures ``state``, ``drain``, ``local_xsub``, ``local_xpub``
 and ``live_xsub`` as closure variables on the class definition. Python
 captures these by reference at definition time and resolves them at call

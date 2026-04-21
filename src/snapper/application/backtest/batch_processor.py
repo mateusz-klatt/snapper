@@ -1,26 +1,23 @@
 """Pure module-level batch processor shared by Direct-DB and ZMQ replay engines.
 
 Houses the per-timestamp candle-batch processing helper extracted from
-:mod:`snapper.application.backtest.direct_engine` so the forthcoming
-``ZmqReplayEngine`` (Phase 2b-core Step 7) can reuse the same fill
+mod:`snapper.application.backtest.direct_engine` so the forthcoming
+``ZmqReplayEngine`` can reuse the same fill
 simulation, signal recording, and equity sampling logic without
 inheritance gymnastics. Behaviour is byte-for-byte identical to the
 previous ``DirectDbEngine._process_time_batch``.
-
 Also re-homes the candle data structures (``CandleEvent`` /
 ``candle_row_to_data``) here so engines can depend downward on
-``batch_processor`` without circular imports — engines own loop control,
+``batch_processor`` without circular imports — engines own loop control
 this module owns per-batch semantics.
-
-Single source of truth for:
-
-- Updating ``latest_closes`` from every candle in the time batch.
-- Feeding candles through the strategy via ``_handle_candle_data``.
-- Honouring ``config.start_date`` warmup gating (signals before start_date
+Single source of truth for
+Updating ``latest_closes`` from every candle in the time batch.
+Feeding candles through the strategy via ``_handle_candle_data``.
+Honouring ``config.start_date`` warmup gating (signals before start_date
   are dropped before fills are simulated).
-- Allocating one ``signal_public_id`` per signal so the matching trade row
+Allocating one ``signal_public_id`` per signal so the matching trade row
   carries the same value (FK-style linkage required by parity tests).
-- Recording an equity point per unique timestamp.
+Recording an equity point per unique timestamp.
 """
 
 from datetime import datetime
@@ -91,7 +88,7 @@ async def process_time_batch(
 ) -> None:
     """Process all candle events at the same timestamp.
 
-    Updates all close prices first, then feeds candles to the strategy,
+    Updates all close prices first, then feeds candles to the strategy
     then records equity once. Signals before ``config.start_date`` are
     dropped without simulating fills (warmup gating). Each kept signal
     receives a fresh ``uuid7`` ``signal_public_id`` shared with its trade.
@@ -99,7 +96,7 @@ async def process_time_batch(
     Args:
         batch: All ``CandleEvent``s at the same ``open_at``.
         run_public_id: Backtest run identifier.
-        config: Backtest configuration (provides ``start_date``,
+        config: Backtest configuration (provides ``start_date``
             ``slippage_bps``, ``commission_bps``, ``timeframe``).
         strategy: Strategy instance.
         portfolio: Portfolio state (mutated by fills).
@@ -110,7 +107,7 @@ async def process_time_batch(
             batch (passed instead of read from a hidden engine attribute
             so the helper stays a pure function — same value for both
             Direct-DB and ZMQ replay engines).
-        emitter: Optional Phase 2c WS progress emitter. When supplied,
+        emitter: Optional WS progress emitter. When supplied
             ``on_candle_processed`` is called after the equity sample
             with the current equity + cumulative signal/trade counts.
             ``None`` keeps the helper byte-identical with pre-Phase-2c

@@ -70,12 +70,11 @@ def _looks_like_credential_key(key: str) -> bool:
 class SettingsService:
     """Singleton service for managing application settings.
 
-    Provides centralized settings management with:
-    - Database-backed persistence
-    - In-memory caching for fast reads
-    - Encryption support for sensitive values
-    - ZMQ broadcast on changes for distributed sync
-
+    Provides centralized settings management with
+    Database-backed persistence
+    In-memory caching for fast reads
+    Encryption support for sensitive values
+    ZMQ broadcast on changes for distributed sync
     Uses singleton pattern - same instance returned for same parameters.
 
     Attributes:
@@ -83,12 +82,9 @@ class SettingsService:
         zmq_broker_xsub: ZMQ broker XSUB address (publishers connect here
             per the broker proxy contract documented in
             `BootstrapSettingsLoader`). The legacy parameter name was
-            `zmq_broker_xpub` which mislabeled the field and was the
-            same-shape bug Day 3b R2 fix-up resolved on
-            `_build_user_service_publisher` — the SettingsService publisher
-            for `system.settings` had been silently dropping every
-            broadcast since Day 1 because PUB→XPUB does not deliver
-            through the XSUB/XPUB proxy.
+            `zmq_broker_xpub`, but publishers must connect to XSUB.
+            Connecting PUB to XPUB does not deliver through the
+            XSUB/XPUB proxy.
     """
 
     _instance: SettingsService | None = None
@@ -230,9 +226,7 @@ class SettingsService:
 
         Per the broker proxy contract (`Publishers ──[connect]──> XSUB
         ── proxy ── XPUB ──[connect]──> Subscribers`), the PUB socket
-        connects to the broker's XSUB endpoint. The pre-Day-3c-R3
-        shape connected to `zmq_broker_xpub` (subscriber-facing) and
-        silently dropped every `system.settings` broadcast.
+        connects to the broker's XSUB endpoint.
         """
         self._zmq_context = zmq.asyncio.Context()
         raw_pub_socket = self._zmq_context.socket(zmq.PUB)

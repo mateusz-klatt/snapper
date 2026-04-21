@@ -1,8 +1,7 @@
-"""Output normalization for MCP tool responses (plan §3.2, §7 item 12).
+"""Output normalization for MCP tool responses.
 
 Every value an MCP tool returns passes through :func:`sanitize_output`
-before serialization to the MCP client. The goal is two-fold:
-
+before serialization to the MCP client. The goal is two-fold
     1. **Prompt-injection hardening.** Market-data / user-supplied
        strings that reach the LLM-side MCP client can contain
        instruction-shaped text ("ignore previous instructions...")
@@ -12,7 +11,6 @@ before serialization to the MCP client. The goal is two-fold:
     2. **Transport hygiene.** 4096-char clipping prevents an
        accidental full-file dump from inflating a tool response to
        multi-megabyte JSON.
-
 The sanitizer walks dict / list / tuple containers recursively so
 nested payloads are covered. Non-string leaves (numbers, bool, None)
 pass through unchanged. Bytes are decoded best-effort (latin-1

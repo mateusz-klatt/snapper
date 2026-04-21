@@ -1,31 +1,28 @@
-"""MCP wallet-scope re-validation helper (plan §5 item 3).
+"""MCP wallet-scope re-validation helper.
 
-The Day 2a bearer-auth middleware verifies that an MCP caller holds
-a valid JWT, and the Day 3d-B DB-backed ``verify_token_with_db`` path
+The bearer-auth middleware verifies that an MCP caller holds
+a valid JWT, and the DB-backed ``verify_token_with_db`` path
 guarantees the token has not been revoked or the user deactivated.
 Neither check, however, covers the narrower question a write tool
-must answer on every call:
-
+must answer on every call
     *Does this caller still have an active wallet scope grant
     covering the wallet they just referenced in this tool
     invocation?*
-
 Token claims are snapshotted at login time; the enclosing scope
 grant row can be revoked at any later moment by an admin without
-invalidating the token itself. The plan's §3.8 WS design addresses
-this for subscriptions via the ``admin.scope_revoked`` subscriber;
-Phase A's synchronous MCP tool dispatch needs an equivalent
+invalidating the token itself. The plan's WS design addresses
+this for subscriptions via the ``admin.scope_revoked`` subscriber
+'s synchronous MCP tool dispatch needs an equivalent
 per-call gate.
-
-:func:`validate_user_wallet_scope` is that gate. It is a thin
+func:`validate_user_wallet_scope` is that gate. It is a thin
 adapter over
-:meth:`snapper.data.repository.Repository.list_accessible_wallets_for_operators`
+meth:`snapper.data.repository.Repository.list_accessible_wallets_for_operators`
 so cross-surface policy stays in one place (the REST list
 endpoints go through :func:`snapper.server.scoping.resolve_target_wallets`
 which consults the same primitive). Keeping the MCP helper
 *separate* from the REST scoping function is intentional: the REST
 variant raises :class:`HTTPException` whose semantics are
-REST-specific (status codes, detail strings, OpenAPI responses);
+REST-specific (status codes, detail strings, OpenAPI responses)
 the MCP variant raises :class:`PermissionError` which FastMCP
 surfaces as a structured tool error.
 """

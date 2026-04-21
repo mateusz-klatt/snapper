@@ -1,37 +1,34 @@
-"""Per-principal rate limiter for the MCP sub-app (plan §3.10).
+"""Per-principal rate limiter for the MCP sub-app.
 
 Parent-app slowapi middleware does not propagate into Starlette
 sub-apps mounted via ``app.mount`` (the same reason
-:class:`snapper.mcp.server.BearerAuthMiddleware` is re-applied
+class:`snapper.mcp.server.BearerAuthMiddleware` is re-applied
 here). Without a dedicated limiter, an automated AI client in a
 retry loop could pound ``/api/mcp`` faster than any other surface
 in Snapper — exactly the traffic pattern the MCP surface was
-designed to absorb. Day 5d-B2 closes that MAJOR by wiring a
+designed to absorb. closes that by wiring a
 Starlette middleware that consumes one
-:class:`~limits.limits.RateLimitItem` per request, keyed by the
+class:`~limits.limits.RateLimitItem` per request, keyed by the
 authenticated principal.
-
-Design choices:
-
-    - **Keying** — we prefer ``user_public_id`` from the
-      :class:`~snapper.auth.schemas.tokens.TokenClaims` stashed on
+Design choices
+    **Keying** — we prefer ``user_public_id`` from the
+      class:`~snapper.auth.schemas.tokens.TokenClaims` stashed on
       ``request.state`` by :class:`BearerAuthMiddleware`. If the
       claims never landed (misordered middleware), the limiter
       falls back to the client IP so a misconfigured deployment
       still has some throttling rather than none.
-    - **Storage** — the slowapi :class:`Limiter` singleton
+    **Storage** — the slowapi :class:`Limiter` singleton
       exported by :mod:`snapper.server.rate_limiting` carries the
       same in-memory backend the REST routes use, so there is no
       separate metrics surface to maintain. Keys are namespaced
       with the ``"mcp:"`` prefix so they do not collide with REST
       or login counters.
-    - **Error shape** — we emit a 429 JSON body with
+    **Error shape** — we emit a 429 JSON body with
       ``error_code='rate_limit_exceeded'`` matching the
       vendor-neutral envelope ``docs/ai-integration.md`` documents
       and the contract tests pin.
-
 The concrete cap (:data:`MCP_RATE_LIMIT`) is intentionally
-conservative for a Phase A default. Operators can raise it later
+conservative for a default. Operators can raise it later
 via configuration; the middleware does not try to be clever about
 per-tool budgets yet.
 """

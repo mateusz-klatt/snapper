@@ -4,8 +4,7 @@ Polls the TradeCommand table for undispatched commands and publishes
 them to ZMQ. Primary dispatch path uses asyncio.Event for low-latency
 wake-up after DB commit; polling at 50ms interval is the fallback for
 crash recovery.
-
-Phase 1c: standalone dispatcher coroutine, wired into trade runtime.
+Standalone dispatcher coroutine, wired into trade runtime.
 """
 
 import asyncio
@@ -31,14 +30,13 @@ class OutboxDispatcher:
     Runs as an asyncio task inside the trade runtime process. Uses
     asyncio.Event for immediate wake-up on new commands, with 50ms
     polling as crash-recovery fallback.
-
-    Phase 4 (plan §3.3 v1.2) — under multi-instance partitioning,
+     Under multi-instance partitioning
     every coordinator's OutboxDispatcher receives every ``created``
     row on a poll. The ``ownership`` kwarg filters rows in Python so
     each dispatcher only publishes its own shards. Scans paginate via
     the repository ``offset`` parameter up to ``max_scan_rows`` to
     avoid pathological starvation when foreign-owner rows dominate
-    the backlog (plan §D4 starvation analysis).
+    the backlog.
 
     Args:
         repository: Database repository for reading/updating commands.
@@ -46,8 +44,8 @@ class OutboxDispatcher:
             Signature: async (command_row) -> None.
         poll_interval: Seconds between fallback polls. Defaults to 0.05.
         batch_size: Max commands per poll cycle. Defaults to 10.
-        ownership: Phase 4 shard-ownership filter. ``None`` skips
-            filtering (pre-Phase-4 behavior / test fixtures).
+        ownership: shard-ownership filter. ``None`` skips
+            filtering.
         max_scan_rows: Operator-tunable cap on rows scanned per poll
             when filtering by ownership. ``None`` = unbounded.
             Default in production is wired from
@@ -71,7 +69,7 @@ class OutboxDispatcher:
             publish_fn: Async callback to publish command to ZMQ.
             poll_interval: Fallback polling interval in seconds.
             batch_size: Maximum commands per poll cycle.
-            ownership: Phase 4 shard-ownership filter (opt-in).
+            ownership: shard-ownership filter (opt-in).
             max_scan_rows: Pagination safety cap for ownership-filter
                 scans. ``None`` = scan until DB exhaustion.
         """
@@ -138,10 +136,9 @@ class OutboxDispatcher:
     async def _fetch_owned_batch(self, now: datetime) -> list[TradeCommandRow]:
         """Fetch the next batch of commands this coordinator owns.
 
-        When ``self._ownership`` is ``None`` (pre-Phase-4 / test mode),
+        When ``self._ownership`` is ``None``
         this is a straight pass-through to
-        :meth:`Repository.get_undispatched_commands` with ``limit=batch_size``.
-
+        meth:`Repository.get_undispatched_commands` with ``limit=batch_size``.
         When ``self._ownership`` is set, the method pages through the
         ``status='created'`` set with a larger page size, filters in
         Python, and stops when it has collected ``batch_size`` owned
@@ -149,7 +146,7 @@ class OutboxDispatcher:
         reached. The cap prevents pathological starvation when a
         foreign owner's backlog dominates the head of the queue; a
         WARN log surfaces the hit so operators can raise the cap or
-        investigate skew (plan §D4).
+        investigate skew.
 
         Returns:
             Up to ``batch_size`` rows owned by this coordinator.

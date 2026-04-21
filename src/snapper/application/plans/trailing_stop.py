@@ -28,14 +28,13 @@ from snapper.messaging.schemas.data import TickData
 class TrailingStopEvaluator(PlanEvaluator):
     """Evaluator for trailing stop plans on open position cycles.
 
-    Lifecycle:
+    Lifecycle
         1. Plan created with status=armed via POST /api/trailing-stops
         2. on_tick ratchets peak_price and current_stop on favorable moves
         3. First stop breach emits a single reduce_only market close command
         4. Service transitions plan to active on command insert
         5. On child fill -> completed; on child rejection -> failed
-
-    State (per plan, keyed by public_id):
+    State
         peak_price: Highest (long) or lowest (short) price seen since armed.
         current_stop: Computed trailing stop level (0.0 = not yet activated).
     """

@@ -68,10 +68,9 @@ async def _count_expected_batches(
     (exchange, instrument) pairs in the config. This helper counts those
     unique timestamps up-front so the emitter can compute ``progress_pct``
     and trigger 25 / 50 / 75 pct milestones.
-
     Returns ``None`` on any query failure so the runner silently degrades
     (milestones disabled, ``progress_pct`` pinned at 0.0) instead of
-    aborting the run. Matches plan §2.3: "``total_candles`` is
+    aborting the run. Matches : "``total_candles`` is
     pre-computed by the runner via a cheap repository count before
     ``engine.run()``; ``None`` only if the count query fails".
     """
@@ -157,8 +156,8 @@ class BacktestRunnerProcess(RegisterableProcess):
         Args:
             run_public_id: Public ID of the backtest run to execute.
             db_url: Database URL for repository access.
-            progress_publish: Optional override for the Phase 2c WS
-                progress publisher. When supplied (typically by tests),
+            progress_publish: Optional override for the WS
+                progress publisher. When supplied (typically by tests)
                 the runner uses it verbatim. When ``None`` (the
                 production path), ``start()`` constructs an owned ZMQ
                 PUB socket wired to the broker XSUB endpoint from

@@ -3,29 +3,25 @@
 This module provides the PolygonHistoricalLoader for fetching and caching
 historical market data from Polygon.io API. It supports aggregate (OHLCV)
 candles and grouped daily data with automatic CSV persistence.
-
-Features:
-    - Rate-limited API access with configurable delays
-    - Automatic CSV caching organized by archive_symbol, timespan, and date
-    - Support for resuming interrupted downloads
-    - Decimal precision for financial calculations
-    - Empty marker files for dates with no data
-
-Data classes:
+Features
+    Rate-limited API access with configurable delays
+    Automatic CSV caching organized by archive_symbol, timespan, and date
+    Support for resuming interrupted downloads
+    Decimal precision for financial calculations
+    Empty marker files for dates with no data
+Data classes
     AggregateCandle: Single OHLCV candle with timestamp and metadata.
     GroupedDailyRow: Daily aggregated data for market-wide snapshots.
 
 Example:
     >>> from snapper.infrastructure.historical.polygon.loader import (
-    ...     PolygonHistoricalLoader,
-    ... )
+    PolygonHistoricalLoader
     >>> loader = PolygonHistoricalLoader(client, Path("./cache"))
     >>> candles = await loader.fetch_aggregates(
-    ...     "AAPL", 1, "day",
-    ...     archive_symbol="AAPL",
-    ...     from_ts=datetime(2024, 1, 1),
-    ...     to_ts=datetime(2024, 1, 31),
-    ... )
+    "AAPL", 1, "day"
+    archive_symbol="AAPL"
+    from_ts=datetime(2024, 1, 1)
+    to_ts=datetime(2024, 1, 31)
 """
 
 import asyncio
@@ -276,8 +272,8 @@ class PolygonHistoricalLoader:
 
         Args:
             ticker: Security ticker symbol (e.g., ``AAPL``, ``C:BTCUSD``).
-            multiplier: Timespan multiplier (e.g., 1 for 1-day).
-            timespan: Timespan unit (``minute``, ``hour``, ``day``, etc.).
+            multiplier: Timespan multiplier.
+            timespan: Timespan unit.
             from_ts: Start of date range (UTC).
             to_ts: End of date range (UTC).
             archive_symbol: Stable archive symbol for CSV directory naming.

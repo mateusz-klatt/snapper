@@ -51,21 +51,19 @@ def _compute_shard_key(
 
     The formula MUST be byte-identical to the ``_shard_key`` built
     inside :meth:`TradingEngineService.__init__` at runtime, because
-    Phase 4 ownership checks (``TraderCoordinator._on_signal``,
+     Ownership checks (``TraderCoordinator._on_signal``
     ``_recover_engine_state``) compute the key BEFORE the engine is
     constructed and compare hashes against
-    :class:`snapper.core.partitioning.ShardOwnership`. Drift between
+    class:`snapper.core.partitioning.ShardOwnership`. Drift between
     the two call sites would split ownership across instances.
-
-    Structure:
-        - Base: ``{exchange}.{instrument}.{mode}``
-        - Wallet segment (appended when ``wallet_public_id`` is set):
+    Structure
+        Base: ``{exchange}.{instrument}.{mode}``
+        Wallet segment (appended when ``wallet_public_id`` is set)
           ``.w{short}`` where ``short`` is the first 12 lowercase hex
           characters of the wallet id with dashes stripped.
-        - Strategy tag (paper mode only, when non-empty):
+        Strategy tag (paper mode only, when non-empty)
           ``.{strategy_tag}``
-
-    Args:
+    Args
         instrument: The traded symbol (e.g., ``"BTC-USD"``).
         exchange: Order-capable exchange identifier.
         mode: Execution mode — ``"live"`` or ``"paper"``.
@@ -161,26 +159,26 @@ class TradingEngineService:
                 Paper engines with different tags get isolated shard_keys.
                 Ignored for live mode (one consolidated position per instrument).
             wallet_public_id: Wallet that owns positions and credentials for
-                this engine instance. Transitional default ``""``;
+                this engine instance. Transitional default ``""``
                 NOT NULL migration tightens the columns.
             operator_public_id: Trading-identity operator that initiated the
                 strategy this engine serves. Stored on the engine for audit
                 propagation onto every TradeCommand and OrderRequestData
                 this engine emits.
-            ownership: Phase 4 partitioning — the coordinator's
-                :class:`ShardOwnership` view, forwarded to
-                :meth:`Repository.insert_trade_command` as a
+            ownership: partitioning — the coordinator's
+                class:`ShardOwnership` view, forwarded to
+                meth:`Repository.insert_trade_command` as a
                 defense-in-depth guard against operational misconfig
-                (Day 3). ``None`` bypasses the guard (test fixtures,
-                CLI tools, and pre-Phase-4 single-instance deployments).
-            caps_enforcer: Phase A enforcer — when present,
+                ``None`` bypasses the guard (test fixtures,
+                CLI tools, and single-instance deployments).
+            caps_enforcer: enforcer — when present
                 ``_send_order`` wraps the insert with
-                :meth:`TradingCapsEnforcer.guard_service_principal`
+                meth:`TradingCapsEnforcer.guard_service_principal`
                 so cap enforcement logic is exercised even on the
                 strategy hot path (bypass is explicit at the call
-                site per plan §3.5.2). ``None`` preserves the
-                pre-Phase-A direct-insert path (test fixtures that
-                construct the engine without DI).
+                site). ``None`` preserves the
+                direct-insert path (test fixtures that construct
+                the engine without DI).
         """
         self.instrument = instrument
         self.execution_socket = execution_socket

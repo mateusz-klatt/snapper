@@ -84,8 +84,8 @@ _TIMEFRAME_TO_INTERVAL: dict[str, int] = {
 def _timeframe_to_interval(timeframe: str) -> int:
     """Map a Snapper-style timeframe to the iapi ticker/history ``interval`` minutes.
 
-    The Kraken FCM ``iapi.kraken.com`` ``ticker/history`` endpoint was probed
-    2026-04-21 and confirmed to accept ``1, 5, 15, 30, 60, 1440`` (minutes).
+    The Kraken FCM ``iapi.kraken.com`` ``ticker/history`` endpoint accepts
+    ``1, 5, 15, 30, 60, 1440`` minute intervals.
 
     Args:
         timeframe: Snapper timeframe string (e.g. ``"1m"``, ``"1h"``, ``"1d"``).

@@ -1,26 +1,24 @@
 """Order-entry capability guard shared by all submit routes.
 
 Single point of enforcement for the ``can_trade`` predicate on every
-REST submit handler (``order_routes``, ``execution_plan_routes``,
+REST submit handler (``order_routes``, ``execution_plan_routes``
 ``trailing_stop_routes``). Routes MUST call
 ``require_tradable(repo, identifier, exchange, as_of)`` before
 inserting a trade command so that market-data-only instruments
-(Kraken FCM / TradFi index futures being the Phase A driver, but
+(Kraken FCM / TradFi index futures being the driver, but
 applicable to any ``SymbolExchangeCapability(can_trade=False)`` row)
 fail submission with a structured 422 response rather than reaching
 the coordinator / trade-service path.
-
 The helper is deliberately thin: it owns only the identifier-to-native
 translation and the error-body shape. The authoritative ``can_trade``
 check itself lives in
 ``snapper.infrastructure.symbols.functions.is_tradeable``, which reads
 ``SymbolExchangeCapability.can_trade`` via the DB mapper cache
 (default-deny on missing capability rows). Routes that already resolve
-an instrument to a UUID before the guard runs simply pass the UUID in;
+an instrument to a UUID before the guard runs simply pass the UUID in
 routes that still carry a native symbol in the ``instrument_public_id``
 field pass that string in verbatim and the guard short-circuits
 the DB lookup.
-
 Do NOT use ``Repository.get_instrument_order_capabilities`` here — that
 method inspects ``InstrumentOrderCapability`` rows (order-feature
 metadata like limit types and TIF), which are a different capability
@@ -45,9 +43,9 @@ def _is_uuid_shape(identifier: str) -> bool:
     """Detect whether ``identifier`` is formatted as a UUID.
 
     UUID detection uses ``uuid.UUID`` strict parsing so that native
-    symbols that happen to contain hex characters + dashes (none exist
-    today but the contract is defensive) do not accidentally trigger
-    the DB lookup path.
+    symbols that happen to contain hex characters + dashes do not
+    accidentally trigger the DB lookup path; the contract stays
+    defensive even though such symbols are not currently expected.
     """
     try:
         UUID(identifier)

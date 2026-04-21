@@ -483,19 +483,17 @@ class SettingChangedData(StrictDataSchema[Literal["setting_changed"]]):
 
 
 class UserDeactivatedData(StrictDataSchema[Literal["user_deactivated"]]):
-    """Admin kill-switch event for a deactivated user (plan §3.6.5).
+    """Admin kill-switch event for a deactivated user.
 
     Published by `UserService.deactivate_user` as the SOLE publisher of
-    the `admin.user_deactivated` bus topic (plan §3.6.1 single-publisher
-    rule resolves R2-M1). Subscribers:
-
-    - `AuthenticatedWebSocketManager` — closes active WS connections
+    the `admin.user_deactivated` bus topic (single-publisher
+    rule resolves). Subscribers
+    `AuthenticatedWebSocketManager` — closes active WS connections
       whose principal matches `user_public_id` with code 4003.
-    - `TokenManager` (cross-instance) — evicts every LRU cache entry
+    `TokenManager` (cross-instance) — evicts every LRU cache entry
       where the cached `user_public_id` matches, eliminating the 30s
-      multi-instance cache-staleness gap (plan §3.6.3, R4-M5+R5-M3).
-    - Audit consumers — preserves `reason` for the kill-switch trail.
-
+      multi-instance cache-staleness gap.
+    Audit consumers — preserves `reason` for the kill-switch trail.
     `TokenManager.revoke_user_sessions` is invoked synchronously by
     the publisher BEFORE this event so the local instance is already
     guaranteed-rejecting; the bus event handles cross-instance fanout
@@ -932,8 +930,7 @@ class BacktestProgressData(StrictDataSchema[Literal["backtest_progress"]]):
     where ``event`` matches ``BacktestProgressEvent``. The bridge
     forwards the envelope verbatim to every WS client subscribed to the
     wallet + run prefix the topic falls under.
-
-    Cross-field invariant (plan R18 sonnet F3): ``milestone`` is
+    Cross-field invariant: ``milestone`` is
     non-null if-and-only-if ``event == "milestone"``. Without this
     guard, a malformed payload ``(event="progress", milestone="25pct")``
     would parse cleanly and the frontend milestone chip would fire on

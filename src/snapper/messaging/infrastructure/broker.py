@@ -3,49 +3,36 @@
 This module provides central message broker components that route messages between
 publishers and subscribers using the XPUB/XSUB proxy pattern. The broker acts as
 a central hub, eliminating the need for publishers to know subscriber addresses.
-
 Architecture
-------------
-The broker implements a bidirectional proxy:
-
+The broker implements a bidirectional proxy
     Publishers ──[connect]──> XSUB ─────┐
                                         │ proxy loop
     Subscribers <──[connect]── XPUB <───┘
-
-- XSUB socket: Binds and receives messages from publishers
-- XPUB socket: Binds and delivers messages to subscribers
-- Subscription messages flow from XPUB to XSUB (back-channel)
-
+XSUB socket: Binds and receives messages from publishers
+XPUB socket: Binds and delivers messages to subscribers
+Subscription messages flow from XPUB to XSUB (back-channel)
 Classes
--------
 ZmqBrokerProcess
     Async broker using asyncio, integrates with process manager.
 ZmqBrokerThread
     Synchronous broker using threading, for simpler use cases.
-
-Both implementations:
-- Support custom endpoint configuration
-- Handle graceful shutdown with socket cleanup
-- Provide status introspection via `get_status()`
-
-Example:
--------
-Using async broker::
-
+Both implementations
+Support custom endpoint configuration
+Handle graceful shutdown with socket cleanup
+Provide status introspection via `get_status()`
+Example
+Using async broker
     broker = ZmqBrokerProcess(
-        xsub_endpoint="tcp://*:5555",
+        xsub_endpoint="tcp://*:5555"
         xpub_endpoint="tcp://*:5556"
-    )
     await broker.start()
-    # ... application runs ...
+    #... application runs...
     await broker.stop()
-
-Using threaded broker::
-
+Using threaded broker
     broker = ZmqBrokerThread()
     broker.start()
-    # ... application runs ...
-    broker.stop()
+    #... application runs...
+    broker.stop().
 """
 
 import asyncio

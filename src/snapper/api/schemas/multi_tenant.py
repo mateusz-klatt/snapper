@@ -1,4 +1,4 @@
-"""Pydantic schemas for Phase 0d multi-tenant read endpoints.
+"""Pydantic schemas for multi-tenant read endpoints.
 
 Carries the minimal projection of the Wallet / Operator / Scope Grant
 tables needed by the frontend operator/wallet pickers and the admin
@@ -6,7 +6,6 @@ Scope Grants + Wallet Credentials tabs. Credential encrypted payloads
 are explicitly NOT included in any schema here — credential handling
 lives on separate write endpoints and never surfaces plaintext or
 ciphertext through the read surface.
-
 Each domain object is wrapped in a ``PayloadListResponse`` carrying
 session / sequence / public_id provenance so gap detection on the
 REST stream stays uniform with the rest of the API.

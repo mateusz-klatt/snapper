@@ -3,27 +3,23 @@
 This module provides stateless functions for converting trading symbols between
 Snapper's native format and exchange-specific formats. All functions delegate
 to the SymbolMapperService singleton for actual lookups.
-
-Functions are organized by exchange:
-    - Kraken: WebSocket and REST symbol conversions
-    - CCXT: CCXT library symbol format
-    - Zonda: Zonda exchange symbol format
-    - Walutomat: Walutomat WebSocket and REST formats
-    - Polygon: Polygon.io ticker format
-
-Each conversion direction has a corresponding function pair:
-    - ``native_to_<exchange>`` for outbound conversion
-    - ``<exchange>_to_native`` for inbound conversion
-
-Example:
+Functions are organized by exchange
+    Kraken: WebSocket and REST symbol conversions
+    CCXT: CCXT library symbol format
+    Zonda: Zonda exchange symbol format
+    Walutomat: Walutomat WebSocket and REST formats
+    Polygon: Polygon.io ticker format
+Each conversion direction has a corresponding function pair
+    ``native_to_<exchange>`` for outbound conversion
+    ``<exchange>_to_native`` for inbound conversion
+Example
     >>> from snapper.infrastructure.symbols.functions import (
-    ...     native_to_kraken_websocket,
-    ...     kraken_websocket_to_native,
-    ... )
+    native_to_kraken_websocket
+    kraken_websocket_to_native
     >>> native_to_kraken_websocket("BTC-USD")
     "XBT/USD"
     >>> kraken_websocket_to_native("XBT/USD")
-    "BTC-USD"
+    "BTC-USD".
 """
 
 from datetime import datetime

@@ -112,16 +112,12 @@ class ValidatedPublisher:
         _socket: Underlying async ZMQ PUB socket.
 
     Example:
-        ::
-
             raw_socket = context.socket(zmq.PUB)
             raw_socket.connect("tcp://localhost:5555")
             publisher = ValidatedPublisher(raw_socket)
-
             await publisher.send_multipart(
-                "market.kraken.BTC-USD.ticks",
+                "market.kraken.BTC-USD.ticks"
                 tick_data.encode()
-            )
     """
 
     def __init__(self, socket: zmq.asyncio.Socket):

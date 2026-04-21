@@ -2,23 +2,19 @@
 
 This module provides PolygonExchangeClient for accessing market data from
 Polygon.io, a comprehensive market data provider for stocks, forex, and
-cryptocurrencies. It supports:
-
-Market Data:
-    - Real-time and historical tickers
-    - OHLCV aggregates (minute, hour, day, etc.)
-    - Previous close data
-    - Grouped daily aggregates
-
-Features:
-    - Automatic rate limiting with configurable requests per minute
-    - Retry strategy with exponential backoff for 429 errors
-    - Local caching of symbol lists for performance
-    - Support for crypto (X:), forex (C:), and stock tickers
-
+cryptocurrencies. It supports
+Market Data
+    Real-time and historical tickers
+    OHLCV aggregates
+    Previous close data
+    Grouped daily aggregates
+Features
+    Automatic rate limiting with configurable requests per minute
+    Retry strategy with exponential backoff for 429 errors
+    Local caching of symbol lists for performance
+    Support for crypto (X:), forex (C:), and stock tickers
 Note: This is a read-only data provider. Order management methods raise
 NotImplementedError as Polygon.io does not support trading.
-
 The client uses a custom retry policy optimized for Polygon.io's rate
 limiting behavior, sleeping 24 seconds on 429 responses.
 """
@@ -294,7 +290,7 @@ class PolygonExchangeClient(ExchangeClientBase):
         Args:
             ticker: Symbol (e.g., 'X:BTCUSD', 'C:EURUSD').
             multiplier: Bar size multiplier.
-            timespan: Time unit (minute, hour, day).
+            timespan: Time unit.
             from_date: Start date/timestamp.
             to_date: End date/timestamp.
             adjusted: Whether to adjust for splits.

@@ -86,7 +86,7 @@ class AggregatesBackfillParameters(StrictBody):
     Attributes:
         symbols: Symbols to backfill (empty uses settings default).
         multiplier: Candle multiplier (e.g. 1 for 1-minute).
-        timespan: Candle timespan (minute, hour, day, etc.).
+        timespan: Candle timespan.
         days_back: Number of days to backfill from today.
         resume: Whether to resume from last stored candle.
         save_csv: Whether to save raw API responses as CSV cache.

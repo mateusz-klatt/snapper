@@ -261,18 +261,16 @@ def _build_user_service_publisher(
 ) -> tuple[MessagePublisher, zmq.asyncio.Context]:
     """Open a fresh ZMQ PUB socket for `admin.user_deactivated` fanout.
 
-    UserService is the SOLE publisher of `admin.user_deactivated` (plan
-    §3.6.1). The socket lives for the whole FastAPI lifespan: created
+    UserService is the SOLE publisher of `admin.user_deactivated`.
+    Created
     here and disposed in the lifespan `finally` so the broker side never
     sees a half-closed socket between requests.
-
     Per the broker contract documented in
     `snapper.config.bootstrap.BootstrapSettingsLoader` and the
     `ZmqBrokerProcess` proxy, publishers connect to the broker's XSUB
     endpoint (publishers ──[connect]──> XSUB ── proxy ── XPUB
     ──[connect]──> Subscribers). Wiring the PUB socket to the XPUB
-    endpoint silently drops every message — Day 3b R1 fix-up reviewer
-    (Copilot gpt-5.4) caught this regression on commit `f1c84d3`.
+    endpoint silently drops every message.
 
     Args:
         zmq_broker_xsub: Address of the broker's XSUB endpoint
@@ -361,12 +359,11 @@ _TRADFI_EXPIRY_ALERT_WINDOW_DAYS = 14
 async def _warn_on_tradfi_near_expiry(settings: AppSettings) -> None:
     """Log WARN for each configured TradFi default symbol near expiry.
 
-    Plan §5 item 13 mandates a 14-day expiry alert. Operators must
+     Mandates a 14-day expiry alert. Operators must
     rotate the ``AppSettings.instruments[KRAKEN_EQUITIES]`` default list
     before contracts drop below that window; this check turns the
     docstring-only guidance into a runtime signal on every server
     restart so the operator sees the warning in startup logs.
-
     The check is best-effort: any query failure is logged at WARN and
     swallowed so a partially-initialised database cannot prevent
     application startup.
@@ -408,7 +405,7 @@ async def _warn_on_tradfi_near_expiry(settings: AppSettings) -> None:
 async def _shutdown_zmq_bridge(app: FastAPI) -> None:
     """Stop ZMQ bridge and await its task during shutdown.
 
-    Day 3c R3 follow-up: tolerates partial-init state where
+    Tolerates partial-init state where
     `app.state.manager` was never attached (lifespan startup
     raised before the WebSocket connection manager was wired).
     Returns silently in that case so the rest of the lifespan

@@ -204,8 +204,8 @@ class TraderCoordinator(RegisterableProcess):
                 without going through the DB-backed settings service.
                 When ``None`` (production), :meth:`_initialize_settings`
                 upgrades ``self.settings`` via
-                :func:`get_settings_with_service` exactly as before
-                Phase 4. Phase 4 Day 2 contract — see plan §4 Day 4.
+                func:`get_settings_with_service` exactly as before
+                   Contract — see
         """
         self.settings = get_settings()
         self._injected_settings: AppSettings | None = settings
@@ -317,12 +317,11 @@ class TraderCoordinator(RegisterableProcess):
     async def start(self) -> None:
         """Start the trader coordinator.
 
-        Sets up ZMQ connections, initializes trading components,
+        Sets up ZMQ connections, initializes trading components
         and enters the main trading loop.
-
-        Phase 4: ``self._ownership`` is built AFTER settings resolve
+        ``self._ownership`` is built AFTER settings resolve
         (``_initialize_settings``) and BEFORE the trade service / outbox
-        / reconciliation loops are constructed — see plan §D8 + §4 Day 2.
+        / reconciliation loops are constructed — see.
         """
         logger.info("Starting ZMQ Signal TraderCoordinator")
         logger.info(f"Signal Topics: {self.signal_topics}")
@@ -378,13 +377,12 @@ class TraderCoordinator(RegisterableProcess):
 
         Wires ``USDConverter(repository)`` as the pricing oracle and
         hands both to the enforcer. Called once at
-        :meth:`start` after settings resolve + ownership is built so
+        meth:`start` after settings resolve + ownership is built so
         the enforcer is ready before any child engine is spawned.
-
         Returns ``None`` when the repository is not a
-        :class:`SQLAlchemyRepository` — test fixtures that inject a
+        class:`SQLAlchemyRepository` — test fixtures that inject a
         MagicMock repo fall through the enforcer entirely, which is
-        the same behavior the engine had before Phase A so pre-
+        the same behavior the engine had before so pre
         existing coordinator tests stay byte-identical.
         """
         if not isinstance(self.repository, SQLAlchemyRepository):
@@ -398,8 +396,7 @@ class TraderCoordinator(RegisterableProcess):
         Without this, accessing DB settings like risk_r_per_trade would
         raise RuntimeError because the bootstrap-only AppSettings does
         not have a SettingsService.
-
-        Phase 4 test-injection branch: when ``__init__`` received a
+        When ``__init__`` received a
         pre-built :class:`AppSettings` via the ``settings`` kwarg, the
         DB-service upgrade is skipped and the injected instance becomes
         ``self.settings``. This lets integration tests provide
@@ -683,7 +680,6 @@ class TraderCoordinator(RegisterableProcess):
         TradeService stay in sync — previously this path bypassed
         TradeService and left its projection flat, creating a latent
         ``old_qty == 0`` hazard in the first live fill on a non-flat shard.
-
         Skips engine_keys already recovered from checkpoints.
 
         Args:
@@ -691,7 +687,7 @@ class TraderCoordinator(RegisterableProcess):
             checkpoint_recovered: Engine keys already restored from checkpoints.
 
         Returns:
-            All recovered execution rows (for fill-gap detection in phase 2).
+            All recovered execution rows.
         """
         skip_keys = checkpoint_recovered or set()
         partitioned = self._ownership is not None and self._ownership.instance_count > 1
@@ -829,7 +825,7 @@ class TraderCoordinator(RegisterableProcess):
         }
 
     async def _recover_active_orders(self, now: datetime, executions: list[ExecutionRow]) -> None:
-        """Phase 2+3: Process active orders across all exchanges."""
+        """Process active orders across all exchanges."""
         valid_exchanges = get_args(OrderExchange)
         partitioned = self._ownership is not None and self._ownership.instance_count > 1
         all_active: list[Any] = []
@@ -1239,19 +1235,17 @@ class TraderCoordinator(RegisterableProcess):
     async def _dispatch_order_event(self, topic: str, payload: bytes) -> None:
         """Dispatch order event to appropriate handler based on message type.
 
-        Uses parse_message() to determine message type and routes accordingly:
-        - ExecutionData -> _handle_execution_fill
-        - OrderData -> _handle_order_status
-        - OrderEventData -> _handle_order_event
-
-        Phase 4 §3.2 v1.2 — under multi-instance partitioning
+        Uses parse_message() to determine message type and routes accordingly
+        ExecutionData -> _handle_execution_fill
+        OrderData -> _handle_order_status
+        OrderEventData -> _handle_order_event
+          V1.2 — under multi-instance partitioning
         (``instance_count > 1``) the shared ZMQ broker delivers every
         venue event to every coordinator. This method drops events that
         don't belong to this coordinator BEFORE the handlers would
         otherwise fall back to the flat ``{exchange}.{instrument}``
         shard key and mutate local :class:`TradeService` state for
-        foreign-instance orders. Three gate states:
-
+        foreign-instance orders. Three gate states
         1. Empty ``client_order_id`` under N>1 — impossible to route
            deterministically; drop. (N=1 preserves existing
            fallthrough for legacy payload shapes.)

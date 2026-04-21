@@ -2,13 +2,12 @@
 
 Computes aggregate metrics from equity curves and trade lists. Most
 ratio metrics return ``0.0`` when inputs are empty (zero-trade policy).
-The three Phase 2c advanced metrics that can be genuinely degenerate
-(``max_drawdown_duration_seconds``, ``exposure_ratio``,
+The three advanced metrics that can be genuinely degenerate
+(``max_drawdown_duration_seconds``, ``exposure_ratio``
 ``turnover_ratio``) return ``None`` plus a ``MetricWarning`` on the
 dataclass's ``warnings`` side-channel; the runner drains it and writes
 ``metric_warning`` events so metric computation stays independent of
 DB availability.
-
 ``PROMOTED_METRIC_NAMES`` is the single source of truth for which
 legacy ``extra_metrics`` JSON keys moved to typed columns in migration
 0005 — read-side fallback logic (route layer + comparison diff) uses
@@ -52,7 +51,7 @@ class BacktestMetrics:
     """Aggregate backtest performance metrics.
 
     Equity-curve-derived metrics use periodic returns. Trade-derived
-    metrics use per-fill PnL from FIFO matching. The three Phase 2c
+    metrics use per-fill PnL from FIFO matching. The three
     additions carry ``None`` defaults because they can be legitimately
     degenerate (see edge-case policy in module docstring).
     """
@@ -395,7 +394,7 @@ def _compute_exposure_ratio(
     Returns ``None`` when the total run duration is zero (single-sample
     or zero-duration curve). Zero-trade runs with non-zero duration
     return ``0.0`` — this is a well-defined "never exposed" answer, not
-    a degenerate case, per R10 sonnet fix.
+    a degenerate case.
     """
     if len(equity_points) < 2:
         _warn_metric(warnings, "exposure_ratio", "fewer_than_two_equity_points")

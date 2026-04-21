@@ -388,14 +388,14 @@ async def cancel_trailing_stop(
         command: Cancel command envelope.
         repo: Repository dependency.
         caps_enforcer: Per-user :class:`TradingCapsEnforcer` used to
-            gate the cancel TradeCommand insert against §3.5
+            gate the cancel TradeCommand insert against
             caps (cancel rate limit).
 
     Returns:
         ExecutionPlanResponse wrapping the updated plan.
 
     Raises:
-        HTTPException: 404 if not found, 409 if already terminal,
+        HTTPException: 404 if not found, 409 if already terminal
             403 if wallet not accessible, 503 if executor unavailable.
     """
     service = _get_plan_executor(request)

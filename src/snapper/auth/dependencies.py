@@ -64,30 +64,27 @@ async def get_current_user(
 ) -> AuthPrincipal | None:
     """Extract current auth principal via DB-backed verification.
 
-    Per plan §3.7: the ``Authorization: Bearer <jwt>`` header is
+    The ``Authorization: Bearer <jwt>`` header is
     consulted FIRST; the ``access_token`` cookie is the fallback. This
     lets MCP clients (which have no cookie jar) authenticate against
     the same `/api/*` surface as the browser UI while preserving the
     existing cookie flow for the frontend.
-
-    Per plan §3.6.3 (Day 3d-B): verification now calls
-    :meth:`TokenManager.verify_token_with_db` so each request
+    Verification now calls
+    meth:`TokenManager.verify_token_with_db` so each request
     checks the ``user_active_tokens`` inventory + ``users.is_active``
-    via the 30-second LRU cache. Kill-switch propagation:
-
-        - **Same-instance** — immediate via the JTI blacklist
+    via the 30-second LRU cache. Kill-switch propagation
+        **Same-instance** — immediate via the JTI blacklist
           seeded by :meth:`TokenManager.revoke_user_sessions` on
           ``UserService.deactivate_user``. The blacklist is
           consulted inside the sync ``verify_token`` step of
           ``verify_token_with_db`` and short-circuits BEFORE the
           LRU lookup, so revoked tokens never serve from cache
           even if a stale positive verdict is still resident.
-        - **Cross-instance** — bounded by the 30-second LRU TTL
-          until the Day 3d-C admin-bus subscriber calls
-          :meth:`TokenManager.invalidate_user_cache` on
+        **Cross-instance** — bounded by the 30-second LRU TTL
+          until the admin-bus subscriber calls
+          meth:`TokenManager.invalidate_user_cache` on
           ``admin.user_deactivated`` receipt, collapsing the
           latency to one bus-message round-trip.
-
     Either way, the effective ceiling drops from the 15-minute
     access-token TTL to 30 s.
 
@@ -389,10 +386,9 @@ def validate_csrf_token(
 ) -> None:
     """Validate CSRF token for state-changing requests.
 
-    Validates origin, presence in both cookie and header,
+    Validates origin, presence in both cookie and header
     and signature integrity.
-
-    Per plan §3.7: requests carrying an ``Authorization: Bearer``
+    Requests carrying an ``Authorization: Bearer``
     header bypass CSRF validation — they are not subject to
     cookie-based request forgery because they present the access
     token explicitly in a header the browser cannot forge via

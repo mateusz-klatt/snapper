@@ -1,16 +1,14 @@
-"""Phase 0d multi-tenant wallet scoping for list endpoints.
+"""Multi-tenant wallet scoping for list endpoints.
 
 Provides a single ``resolve_target_wallets`` function that every
 scoped list endpoint (orders, executions, positions, signals) calls
 to derive the ``wallet_public_ids`` filter from the authenticated
 principal and optional ``operator_public_id`` / ``wallet_public_id``
 query parameters.
-
-Authorization rules:
-
-- ADMIN: when neither query param is set, returns ``None`` (no
+Authorization rules
+ADMIN: when neither query param is set, returns ``None`` (no
   filter — see all). When a param is set, narrows accordingly.
-- VIEWER / OPERATOR: always scoped to the wallets their operator set
+VIEWER / OPERATOR: always scoped to the wallets their operator set
   covers via ``list_accessible_wallets_for_operators``. An explicit
   ``operator_public_id`` narrows to a single operator; an explicit
   ``wallet_public_id`` narrows to a single wallet. 403 is raised

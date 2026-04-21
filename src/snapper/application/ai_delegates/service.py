@@ -1,4 +1,4 @@
-"""AI delegate lifecycle management (plan §4 Day 4b).
+"""AI delegate lifecycle management.
 
 Bundles the atomic create-delegate flow + the read/update/
 deactivate helpers that back the ``/api/ai-delegates`` routes.
@@ -6,11 +6,11 @@ Creation is the load-bearing path: a single DB transaction must
 insert the :class:`~snapper.data.models.User` row (with
 ``role=AI_DELEGATE`` and ``created_by_user_public_id`` pointing
 at the creating operator), the per-delegate
-:class:`~snapper.data.models.UserTradingCaps` row, AND the
-:class:`~snapper.data.models.UserActiveToken` rows for the
+class:`~snapper.data.models.UserTradingCaps` row, AND the
+class:`~snapper.data.models.UserActiveToken` rows for the
 newly-minted access+refresh pair. Splitting those across
 independent transactions opens the same stranded-user failure
-mode the Day 3d-A R1 review flagged for refresh rotation — so
+mode the flagged for refresh rotation — so
 this service holds ONE session scope for the whole flow.
 """
 
@@ -81,16 +81,14 @@ class DelegateLabelConflictError(Exception):
 class DelegateOperatorBindingError(Exception):
     """Raised when the delegate cannot be bound to a valid operator.
 
-    Day 5c BLOCKER fix: the delegate MUST carry a
+    The delegate MUST carry a
     ``UserOperatorMembership`` row so its minted tokens decode with
-    ``operator_public_ids`` populated; otherwise the Day 5b MCP
-    wallet-scope gate rejects every write. Triggered when:
-
-        - the caller chose an ``operator_public_id`` outside their
+    ``operator_public_ids`` populated; otherwise the MCP
+    wallet-scope gate rejects every write. Triggered when
+        the caller chose an ``operator_public_id`` outside their
           own authenticated set (cross-operator spoof attempt), or
-        - the caller has NO primary operator AND did not specify
+        the caller has NO primary operator AND did not specify
           one explicitly (ambiguous delegate scope).
-
     Route handler maps this to HTTP 422 with a ``detail`` that
     names the offending operator so clients can self-correct.
     """
@@ -99,10 +97,10 @@ class DelegateOperatorBindingError(Exception):
 class InvalidOwnerPrincipalError(Exception):
     """Raised when the caller's principal is missing a usable ``user_public_id``.
 
-    Day 4b R1 (Copilot MAJOR): a legacy / misconfigured token whose
+    A legacy / misconfigured token whose
     ``user_public_id`` decodes to an empty string must not be
     allowed to create a delegate with ``created_by_user_public_id=""``
-    — that would make every other blank-ID principal see the
+    that would make every other blank-ID principal see the
     delegate. We fail-closed at the service boundary so the route
     can surface a clean 401 instead of silently minting ownerless
     rows.
@@ -113,20 +111,13 @@ class DelegateService:
     """Create + manage AI delegates owned by an operator."""
 
     _owner_locks: ClassVar[dict[str, asyncio.Lock]] = {}
-    """In-process serialisation for the proliferation guard + insert.
+    """In-process serialization for the proliferation guard + insert.
 
-    Day 5d-C R2 review (security BLOCKER): the count-then-
-    insert path is open to races under PostgreSQL's default READ
-    COMMITTED isolation because two concurrent
-    ``POST /api/ai-delegates`` can both read ``count=4`` and both
-    commit. A ``SELECT … FOR UPDATE`` on the owner row closes
-    cross-instance races on PG, but SQLite's transaction model
-    does not emulate FOR UPDATE, so the in-test concurrency still
-    bypasses the cap. This dict maps ``owner_public_id`` to a
-    per-owner :class:`asyncio.Lock` so every create inside a
-    single Python process serialises before the DB round-trips —
-    closing both the SQLite-test race AND the in-process PG
-    race. Cross-process PG races are still covered by the
+    The count-then-insert path can race under concurrent
+    ``POST /api/ai-delegates`` calls. This map keys
+    ``owner_public_id`` to a per-owner :class:`asyncio.Lock` so each
+    create operation serializes inside one Python process before DB
+    round trips. Cross-process races are still guarded by the
     transactional row lock in :meth:`_guard_proliferation`.
 
     The dict is a class-level attribute so the lock survives
@@ -182,19 +173,16 @@ class DelegateService:
     ) -> DelegateCreatedPayload:
         """Atomically mint a new AI delegate + trading caps + token pair.
 
-        Steps (all in one transaction):
-
+        Steps (all in one transaction)
             1. Resolve + validate the target operator binding via
-               :meth:`_resolve_operator_binding` so the delegate
+               meth:`_resolve_operator_binding` so the delegate
                inherits a concrete ``operator_public_id`` the
-               caller is authorised to act AS (Day 5c BLOCKER
-               fix — fresh delegates were otherwise rejected by
-               the MCP wallet gate).
+               caller is authorised to act AS.
             2. Derive a unique username ``ai-<slug>-<suffix>`` from
                ``body.label`` — retries with a fresh suffix on
                collision up to a small bound.
             3. Insert the :class:`User` row with
-               ``role=AI_DELEGATE``,
+               ``role=AI_DELEGATE``
                ``is_active=True``, and
                ``created_by_user_public_id`` pointing at
                ``owner.user_public_id`` so the per-owner listing
@@ -209,20 +197,18 @@ class DelegateService:
                can later re-resolve identical
                ``operator_public_ids`` from DB.
             6. Mint an access+refresh pair via
-               :meth:`TokenManager.create_tokens`. The principal
+               meth:`TokenManager.create_tokens`. The principal
                passed in carries ``operator_public_ids=[bound]``
                so the minted JWT decodes with populated operator
-               scope and Day 5b
-               :func:`~snapper.mcp.auth.validate_user_wallet_scope`
+               scope and
+               func:`~snapper.mcp.auth.validate_user_wallet_scope`
                admits the delegate's first write call.
-            7. Insert both ``user_active_tokens`` rows so Day 3d-B
+            7. Insert both ``user_active_tokens`` rows so
                ``verify_token_with_db`` admits them on the next
                request.
-
         If any step raises, the outer ``async with session`` rolls
         back — no partial User row, no orphan caps, no membership
-        without a User, no phantom tokens (R2 atomicity guarantee
-        matching Day 3d-A ``rotate_user_active_token``).
+        without a User, no phantom tokens.
 
         Args:
             owner: The creating operator's principal. Must be
@@ -232,7 +218,7 @@ class DelegateService:
                 human-readable label + optional caps.
 
         Returns:
-            :class:`DelegateCreatedPayload` with the delegate's
+            class:`DelegateCreatedPayload` with the delegate's
             read projection + the access/refresh JWT pair. The
             tokens are surfaced EXACTLY ONCE (no re-serve).
 
@@ -240,15 +226,13 @@ class DelegateService:
             DelegateLabelConflictError: If a unique username can't
                 be derived from the label within the retry bound.
             InvalidOwnerPrincipalError: If the caller's principal
-                does not carry a usable ``user_public_id`` (R1
-                blank-owner guard).
+                does not carry a usable ``user_public_id``.
             DelegateOperatorBindingError: If
                 ``body.operator_public_id`` is outside the caller's
                 claim set OR no explicit binding is given and the
                 caller has no primary operator.
             DelegateProliferationError: If the owner already owns
                 :data:`MAX_AI_DELEGATES_PER_OWNER` active delegates
-                (plan §5 item 5 cap).
         """
         self._guard_owner(owner.user_public_id)
         bound_operator_public_id = self._resolve_operator_binding(owner, body)
@@ -375,20 +359,18 @@ class DelegateService:
     ) -> str:
         """Pick + validate the operator the new delegate inherits.
 
-        Closes the Day 5c 3-model review BLOCKER: a delegate created
+         delegate created
         without a :class:`UserOperatorMembership` row has empty
         ``operator_public_ids`` on its minted JWT and is rejected
-        by every Day 5b MCP wallet-scope + operator-scope gate. The
+        by every MCP wallet-scope + operator-scope gate. The
         binding MUST land in the same transaction as the User +
         caps + token rows so a partial insert cannot leak a delegate
         that can authenticate but cannot act.
-
-        Resolution order:
-
+        Resolution order
             1. ADMIN caller + explicit ``operator_public_id`` → use
                it unchanged. ADMIN implicitly spans every operator.
             2. Non-ADMIN caller + explicit ``operator_public_id``
-               → MUST sit inside ``owner.operator_public_ids``;
+               → MUST sit inside ``owner.operator_public_ids``
                otherwise raise :class:`DelegateOperatorBindingError`
                (cross-operator spoof attempt).
             3. No explicit pick → fall back to
@@ -434,8 +416,6 @@ class DelegateService:
         Fails closed with :class:`InvalidOwnerPrincipalError` when
         the ``owner_public_id`` is empty — prevents legacy blank-ID
         tokens from enumerating other blank-ID operators' delegates
-        (R1 Copilot MAJOR fix).
-
         Excludes deactivated delegates (``is_active=False``) so
         the frontend list view matches the
         ``POST /deactivate`` semantic — a deactivated delegate
@@ -499,15 +479,15 @@ class DelegateService:
             owner_public_id: Calling operator's UUID; the
                 DB-level WHERE clause enforces the ownership
                 predicate so cross-tenant reads surface as
-                :class:`DelegateNotFoundError` (404 upstream).
+                class:`DelegateNotFoundError` (404 upstream).
 
         Returns:
-            :class:`DelegateRead` projection of the active
+            class:`DelegateRead` projection of the active
             delegate + its caps.
 
         Raises:
             InvalidOwnerPrincipalError: if ``owner_public_id`` is
-                empty (R1 blank-owner guard).
+                empty.
         """
         self._guard_owner(owner_public_id)
         async with self.repository.session() as session:
@@ -531,7 +511,6 @@ class DelegateService:
         Closes the current ``user_trading_caps`` row and inserts a
         fresh one carrying ``body.caps``. Cap history is fully
         auditable via SCD2 point-in-time queries.
-
         Raises :class:`DelegateNotFoundError` when the delegate
         either doesn't exist or is owned by a different operator.
 
@@ -545,12 +524,12 @@ class DelegateService:
                 ``None`` field means "unbounded" on that axis.
 
         Returns:
-            :class:`DelegateRead` projection after the new caps
+            class:`DelegateRead` projection after the new caps
             row has committed.
 
         Raises:
             InvalidOwnerPrincipalError: if ``owner_public_id`` is
-                empty (R1 blank-owner guard).
+                empty.
         """
         self._guard_owner(owner_public_id)
         async with self.repository.session() as session:
@@ -585,25 +564,23 @@ class DelegateService:
     async def _guard_proliferation(session: AsyncSession, owner_public_id: str) -> None:
         """Cap live delegates per operator at :data:`MAX_AI_DELEGATES_PER_OWNER`.
 
-        Plan §5 item 5 — bounds the blast radius of a leaked
+         Bounds the blast radius of a leaked
         operator session. Counts ONLY active (``is_active=True``)
         SCD2-current delegate Users; deactivated rows don't count
         so rotations remain unbounded. Fails-closed with
-        :class:`DelegateProliferationError` so the route can map
+        class:`DelegateProliferationError` so the route can map
         to 409 before the atomic create transaction opens.
-
-        Day 5d-C R2 review (security BLOCKER): the count
+        The count
         + insert pair runs under PostgreSQL's default READ
         COMMITTED isolation, which does NOT serialise two
         concurrent ``POST /api/ai-delegates`` calls from the same
         owner — both could read count=4, both pass the guard, and
         both commit (minting 6 delegates through a 5-delegate cap).
         Since the cap is the blast-radius control for a leaked
-        operator session, serialisation is a security invariant,
+        operator session, serialisation is a security invariant
         not just a data-integrity nit.
-
         Closure: lock the owning User row with
-        ``SELECT ... FOR UPDATE`` BEFORE counting. On PostgreSQL
+        ``SELECT... FOR UPDATE`` BEFORE counting. On PostgreSQL
         this blocks any concurrent transaction that would also lock
         the same owner row until this commit completes; on SQLite
         the write lock already serialises transactions so the
@@ -650,12 +627,12 @@ class DelegateService:
     def _guard_owner(owner_public_id: str) -> None:
         """Reject empty ``owner_public_id`` so ownerless rows can't appear.
 
-        Day 4b R1 Copilot MAJOR fix: a legacy/misconfigured token
+        A legacy/misconfigured token
         could decode with ``user_public_id=""``. Allowing that
         through would persist ``created_by_user_public_id=""`` on
         new delegates, visible to every other blank-ID operator
         principal. Fail closed with
-        :class:`InvalidOwnerPrincipalError` so the route layer
+        class:`InvalidOwnerPrincipalError` so the route layer
         raises 401 instead of silently creating orphan rows.
         """
         if not owner_public_id:

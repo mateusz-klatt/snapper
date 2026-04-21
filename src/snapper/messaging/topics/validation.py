@@ -903,7 +903,7 @@ def _validate_replay_source(exchange: str) -> tuple[bool, str]:
 def _is_valid_timeframe(timeframe: str) -> bool:
     """Check if timeframe string matches valid pattern.
 
-    Valid timeframes: digit(s) + unit (m=minute, h=hour, d=day, w=week, M=month).
+    Valid timeframes: digit(s) + unit.
     Examples: 1m, 5m, 15m, 1h, 4h, 1d, 1w, 1M.
 
     Args:

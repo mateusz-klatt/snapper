@@ -1,14 +1,11 @@
 """Reference strategy — observe TradFi index futures, execute on crypto.
 
 **NOT auto-registered.** This module demonstrates the cross-asset pattern
-supported by Snapper Phase A / TradFi Market Data P3: subscribe to
+supported by Snapper / TradFi Market Data P3: subscribe to
 market-data-only instruments (``can_trade=False`` on ``SymbolExchangeCapability``
 rows, e.g. Kraken FCM index futures) and emit signals whose target is an
 execution-capable instrument (``can_trade=True``) on a different venue.
-
 How to activate a copy of this strategy
----------------------------------------
-
 1. Copy this file to ``src/snapper/strategies/`` (package root).
 2. Add ``@register_strategy("TradFiObserveCryptoExecute")`` and
    ``@create_strategy_process(...)`` decorators.
@@ -17,25 +14,21 @@ How to activate a copy of this strategy
    the crypto execution instrument (for example ``BTC-USD``).
 4. Point ``exchange`` at the execution venue (for example
    ``ExchangeEnum.KRAKEN``).
-
 Safety rails
-------------
-
-- The 10-minute FCM delay on ``kraken_equities`` ticks propagates onto
+The 10-minute FCM delay on ``kraken_equities`` ticks propagates onto
   every ``TickData.is_delayed=True``. Any tick-driven variant of this
   pattern MUST gate on that flag. Candle-driven variants (this example)
-  do not see ``is_delayed`` but still have the same effective latency —
+  do not see ``is_delayed`` but still have the same effective latency
   document the implicit ~10 minute lag in the live runbook.
-- Emitting a signal with ``instrument`` that is ``can_trade=False``
+Emitting a signal with ``instrument`` that is ``can_trade=False``
   would be rejected by the order-entry capability guard
   (``require_tradable`` in ``src/snapper/server/_capability_guard.py``)
   with HTTP 422 ``error_code='instrument_market_data_only'``. This
   example targets a crypto spot instrument in ``_CRYPTO_EXECUTION_SYMBOL``
   so the guard always passes.
-- The ``outputs`` list on the ``StrategyConfig`` is validated against
+The ``outputs`` list on the ``StrategyConfig`` is validated against
   the launching operator's scope grants at startup; ensure the execution
   instrument falls within the operator's granted scope.
-
 The class below is intentionally minimal: a pair of exponential moving
 averages over the TradFi series, crossing to generate a BUY/SELL signal.
 Real-world cross-asset strategies typically add drift and spread

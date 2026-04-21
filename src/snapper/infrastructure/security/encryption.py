@@ -3,23 +3,20 @@
 This module provides the SettingsEncryptionService for protecting sensitive
 configuration values like API keys and secrets. It uses PBKDF2-HMAC-SHA256
 for key derivation and Fernet (AES-128-CBC + HMAC-SHA256) for encryption.
-
-Security features:
-    - Master password-derived encryption keys via PBKDF2
-    - Salt derived deterministically from master password via SHA-256
-    - 100,000 iterations for key derivation (OWASP recommendation)
-    - Automatic detection of encrypted vs cleartext values
-    - Pattern-based identification of sensitive settings
-
-Example:
+Security features
+    Master password-derived encryption keys via PBKDF2
+    Salt derived deterministically from master password via SHA-256
+    100,000 iterations for key derivation (OWASP recommendation)
+    Automatic detection of encrypted vs cleartext values
+    Pattern-based identification of sensitive settings
+Example
     >>> from snapper.infrastructure.security.encryption import (
-    ...     get_encryption_service,
-    ...     encrypt_if_sensitive,
-    ...     decrypt_if_encrypted,
-    ... )
+    get_encryption_service
+    encrypt_if_sensitive
+    decrypt_if_encrypted
     >>> encryption = get_encryption_service()
     >>> value, encrypted = encrypt_if_sensitive("api_key", "secret123")
-    >>> original = decrypt_if_encrypted(value, encrypted)
+    >>> original = decrypt_if_encrypted(value, encrypted).
 """
 
 import base64

@@ -41,7 +41,7 @@ class PatternRule(BaseModel):
     """Single pattern rule matching instruments to an underlying asset.
 
     Fields ``instrument_type`` and ``expiry_override`` are accepted from YAML
-    for Phase 2 (front-month rollover) but do not participate in Phase 1
+    for (front-month rollover) but do not participate in
     pattern matching. They are only used to detect intra-underlying metadata
     conflicts when multiple rules match the same instrument.
     """

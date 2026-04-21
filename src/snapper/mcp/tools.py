@@ -1,30 +1,25 @@
-"""MCP tool registrations (plan §4 Day 2 item 7).
+"""MCP tool registrations.
 
 Thin wrappers over the existing :class:`Repository` and trade-command
-insertion pipeline. Every tool:
-
-    - Reads the authenticated :class:`TokenClaims` from
-      :data:`snapper.mcp.server.TOKEN_CLAIMS_CTX` via a caller-supplied
+insertion pipeline. Every tool
+    Reads the authenticated :class:`TokenClaims` from
+      data:`snapper.mcp.server.TOKEN_CLAIMS_CTX` via a caller-supplied
       ``claims_getter``.
-    - Enforces the plan's permission matrix: AI_DELEGATE (and every
+    Enforces the plan's permission matrix: AI_DELEGATE (and every
       higher role) is admitted for read tools; write tools additionally
       require the caller to hold the corresponding Permission (e.g.
       ``CREATE_ORDERS`` for ``submit_manual_order``).
-    - Write tools stamp ``source_surface="mcp"`` and wrap the insert
+    Write tools stamp ``source_surface="mcp"`` and wrap the insert
       with :meth:`TradingCapsEnforcer.guard` so per-user caps apply
-      identically to REST-initiated writes (plan §3.5 / §3.9).
-
-Day 2c MVP ships two tools covering the plan's acceptance criteria:
-
-    - ``list_instruments(exchange)`` — read-only, returns native
+      identically to REST-initiated writes.
+    ``list_instruments(exchange)`` — read-only, returns native
       symbols available on the given exchange (read permission).
-    - ``submit_manual_order(...)`` — write, inserts a ``manual_once``
-      :class:`ExecutionPlan` + its initial ``TradeCommand`` with
+    ``submit_manual_order(...)`` — write, inserts a ``manual_once``
+      class:`ExecutionPlan` + its initial ``TradeCommand`` with
       ``source_surface="mcp"`` and ``idempotency_key`` required. Caps
       evaluated via the shared enforcer before persistence.
-
-Additional tools (cancel_order, list_positions, list_signals,
-list_plans, get_status) are Day 2d / Day 3 scope.
+Additional tools (cancel_order, list_positions, list_signals
+list_plans, get_status) are / scope.
 """
 
 import datetime as dt
@@ -203,7 +198,7 @@ def register_mcp_tools(
         """Submit a single manual order — wraps REST ``create_order`` via MCP.
 
         Caps are evaluated against the caller's
-        :class:`UserTradingCaps` row before persistence. Writes are
+        class:`UserTradingCaps` row before persistence. Writes are
         tagged ``source_surface="mcp"`` on both the plan decision and
         the trade command for audit parity with REST writes.
 
@@ -212,13 +207,13 @@ def register_mcp_tools(
             instrument: Native venue symbol (e.g. ``BTC-USD``).
             instrument_public_id: UUID7 of the Snapper instrument row.
             side: ``buy`` or ``sell``.
-            order_type: One of ``market``, ``limit``, ``stop``,
+            order_type: One of ``market``, ``limit``, ``stop``
                 ``stop_limit``.
             quantity: Order size in base asset units.
             wallet_public_id: UUID7 of the wallet the order attaches
                 to. Caller must have scope access to this wallet.
             idempotency_key: Client-supplied uniqueness key; required
-                (plan §4 Day 2 #7) because MCP clients are the most
+        because MCP clients are the most
                 likely source of accidental retries.
             price: Limit / stop price. Required for non-market order
                 types.
@@ -231,7 +226,7 @@ def register_mcp_tools(
 
         Raises:
             PermissionError: if the caller lacks
-                :data:`Permission.CREATE_ORDERS`.
+                data:`Permission.CREATE_ORDERS`.
             RuntimeError: if repository / caps enforcer are not
                 initialized yet.
             CapsViolationError: on a caps rejection — surfaced to the

@@ -196,12 +196,12 @@ def _resolve_cache_path(
     """Resolve CSV path for candle cache export.
 
     Matches the layout used by Polygon loader for round-trip
-    compatibility.  Daily timespan uses monthly files.
+    compatibility. Daily timespan uses monthly files.
 
     Args:
         base_dir: Base data directory (e.g. ``Path("data")``).
         exchange: Exchange name (e.g. ``polygon``, ``kraken``).
-        timespan: Candle timespan label (e.g. ``minute``, ``day``).
+        timespan: Candle timespan label.
         archive_symbol: Stable archive symbol directory name.
         day: Date for the file.
 
@@ -230,7 +230,7 @@ def _timeframe_to_timespan(timeframe: str) -> str:
         timeframe: Short label (e.g. ``1m``, ``1h``, ``1d``).
 
     Returns:
-        Timespan string (``minute``, ``hour``, ``day``).
+        Timespan string.
     """
     return _TIMEFRAME_TO_TIMESPAN.get(timeframe, "minute")
 

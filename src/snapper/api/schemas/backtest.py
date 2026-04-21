@@ -98,7 +98,7 @@ class BacktestCreateBody(StrictBody):
     @field_validator("fill_model")
     @classmethod
     def validate_fill_model(cls, v: str) -> str:
-        """Phase 2a only ships the 'market' fill model.
+        """Only ships the 'market' fill model.
 
         Args:
             v: Fill model value.
@@ -215,7 +215,7 @@ class BacktestRunData(StrictDataSchema[Literal["backtest_run"]]):
 class BacktestResultInline(StrictBody):
     """Inline backtest aggregate metrics embedded in BacktestRunDetailData.
 
-    Phase 2c Step 1 promotes 5 metrics from ``extra_metrics`` to typed
+     Promotes 5 metrics from ``extra_metrics`` to typed
     nullable-float columns and adds 3 new metrics. Mixed-vintage reads
     are handled at the route layer via an explicit null-coalescing
     fallback (typed column else ``extra_metrics.get(name)``) — see
@@ -327,7 +327,7 @@ class BacktestRunListResponse(PayloadListResponse[Literal["backtest_run_list"], 
 class BacktestResultData(StrictDataSchema[Literal["backtest_result"]]):
     """Backtest result metrics payload.
 
-    Phase 2c Step 1 extension: see ``BacktestResultInline`` for the 8
+    See ``BacktestResultInline`` for the 8
     advanced metrics; this schema mirrors them so future standalone
     result endpoints surface the same shape.
 
@@ -379,7 +379,7 @@ class BacktestResultData(StrictDataSchema[Literal["backtest_result"]]):
 
 
 class BacktestCompareBody(StrictBody):
-    """Phase 2c compare-request body (plan §4.3).
+    """Compare-request body.
 
     Auto-mode requires ``config_hash``; manual-mode requires both
     ``run_a_public_id`` and ``run_b_public_id``.
@@ -506,9 +506,9 @@ class BacktestTradeData(StrictDataSchema[Literal["backtest_trade"]]):
         fee: Commission fee.
         pnl: Per-fill PnL (None for entries).
         position_after: Portfolio position after fill.
-        signal_public_id: ``public_id`` of the originating ``backtest_signal``;
+        signal_public_id: ``public_id`` of the originating ``backtest_signal``
             None for synthetic fills with no triggering signal. Surfaces the
-            FK-style linkage required by Phase 2b parity tests.
+            FK-style linkage required by parity tests.
     """
 
     type: Literal["backtest_trade"] = "backtest_trade"

@@ -1,22 +1,20 @@
-"""AI delegate CRUD routes (plan §4 Day 4b).
+"""AI delegate CRUD routes.
 
 Mounted at ``/api/ai-delegates``. Only operators (OPERATOR /
-ADMIN) can create + manage delegates; the plan §3 role hierarchy
+ADMIN) can create + manage delegates; the role hierarchy
 gates access via ``require_role``. Delegates themselves are
 AI_DELEGATE users and cannot manage other delegates — the
 ``role_hierarchy`` dict in ``require_role`` puts AI_DELEGATE
 below VIEWER.
-
-Routes:
-
-    - ``POST /api/ai-delegates`` — atomic create returning a
-      one-shot access+refresh pair (plan §4 Day 4 item 2).
-    - ``GET /api/ai-delegates`` — list the caller's delegates.
-    - ``GET /api/ai-delegates/{id}`` — single-delegate detail.
-    - ``PATCH /api/ai-delegates/{id}`` — SCD2-close+insert new
+Routes
+    ``POST /api/ai-delegates`` — atomic create returning a
+      one-shot access+refresh pair.
+    ``GET /api/ai-delegates`` — list the caller's delegates.
+    ``GET /api/ai-delegates/{id}`` — single-delegate detail.
+    ``PATCH /api/ai-delegates/{id}`` — SCD2-close+insert new
       caps. Username/label are immutable post-mint (would
       invalidate live tokens without rotation).
-    - ``POST /api/ai-delegates/{id}/deactivate`` — reuse
+    ``POST /api/ai-delegates/{id}/deactivate`` — reuse
       ``UserService.deactivate_user`` so the shared kill-switch
       bus event + token revocation logic kicks in.
 """
@@ -76,21 +74,21 @@ class AiIntegrationDisabledError(Exception):
     the FastAPI app in :mod:`snapper.server.app`) and translated
     into a 503 :class:`JSONResponse` whose body matches the MCP
     sub-app's :class:`FeatureFlagMiddleware` envelope EXACTLY
-    (``{"error_code": "feature_disabled", "detail": "..."}``). Day
-    5d-B1 Rfollowup: gpt-5.4 review caught that the previous
+    (``{"error_code": "feature_disabled", "detail": "..."}``).
+    This path exists because the previous
     ``HTTPException`` path emitted FastAPI's default
-    ``{"detail": ...}`` wrapper, breaking plan §3.12 parity.
+    ``{"detail":...}`` wrapper, breaking parity.
     """
 
 
 def require_ai_integration_enabled(request: Request) -> None:
     """Reject the request when the AI integration feature flag is off.
 
-    Day 5c review MAJOR closure: plan §3.12 requires
+     Requires
     ``/api/ai-delegates/*`` to share the same feature gate as
     ``/api/mcp``. Without this dependency, operators could mint
     delegates + tokens while the feature is disabled, leaking a
-    management surface that the rest of Phase A refuses to serve.
+    management surface that the rest of refuses to serve.
 
     Args:
         request: Active FastAPI request; settings service is pulled
@@ -126,9 +124,9 @@ def ai_integration_disabled_handler(
     """Translate :class:`AiIntegrationDisabledError` to MCP-parity 503.
 
     The body shape is identical to
-    :class:`~snapper.mcp.server.FeatureFlagMiddleware`'s 503 so a
+    class:`~snapper.mcp.server.FeatureFlagMiddleware`'s 503 so a
     frontend / CLI branching on ``error_code`` sees one payload
-    regardless of which surface returned the 503 (plan §3.12).
+    regardless of which surface returned the 503.
 
     Args:
         _request: The inbound FastAPI request (unused — the
@@ -136,7 +134,7 @@ def ai_integration_disabled_handler(
         exc: The caught exception. Annotated as :class:`Exception`
             to match Starlette's exception-handler signature
             (Starlette calls through a shared dispatcher that
-            types every handler as ``Callable[[Request, Exception],
+            types every handler as ``Callable[[Request, Exception]
             Response]``). In practice the app-level registration
             only routes :class:`AiIntegrationDisabledError` here.
 
@@ -184,9 +182,8 @@ async def create_delegate(
             transactional scope underneath.
         _csrf: CSRF validation dep. Required because create is a
             cookie-flow-admitting endpoint; pure-Bearer clients
-            bypass via the middleware rule in plan §3.7.
-
-    Returns:
+            bypass via the middleware rule in
+    Returns
         201-shaped :class:`DelegateCreatedResponse`.
 
     Raises:

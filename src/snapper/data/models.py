@@ -1122,7 +1122,7 @@ class ContinuousContractConfig(TemporalMixin, Base):
     Stores parameters for on-demand continuous contract computation.
     The series data itself is NOT persisted — it is computed per request
     by ContinuousContractBuilder. CRUD endpoints deferred to a future
-    phase; Phase 3 ships schema/migration only.
+    phase; ships schema/migration only.
     """
 
     __tablename__ = "continuous_contract_configs"
@@ -2126,25 +2126,22 @@ class UserTradingCaps(TemporalMixin, Base):
     ``known_to = KNOWN_TO_MAX``. Updates close + insert a new version
     per the standard TemporalMixin lifecycle so cap history is
     auditable.
-
     All cap columns are nullable; a NULL cap means "unbounded" for
-    that axis. Default enforcement policy (plan §3.5.3):
-
-        - ``max_order_quantity_per_instrument``: JSON dict
+    that axis. Default enforcement policy
+        ``max_order_quantity_per_instrument``: JSON dict
           ``{instrument_public_id: Decimal}`` OR a scalar Decimal
           (applied to every instrument when scalar).
-        - ``max_open_orders``: all-time count of user's in-flight
+        ``max_open_orders``: all-time count of user's in-flight
           commands (status IN created/dispatched/acked/accepted/
           partially_filled). No time window — this is an in-flight
-          exposure cap, not a rate cap (R3-M2 resolution).
-        - ``max_daily_notional_usd``: rolling 24h sum of
+          exposure cap, not a rate cap.
+        ``max_daily_notional_usd``: rolling 24h sum of
           ``submit_quantity * submit_price_usd`` over non-rejected
           commands. Submit-time commitment basis; partial fills do
-          not change accounting (R2-B3 resolution).
-        - ``max_cancels_per_minute``: sliding 60-second count of
+          not change accounting.
+        ``max_cancels_per_minute``: sliding 60-second count of
           the user's cancel commands.
-
-    See ``plan_ai_integration_phase_a.md`` §3.5 + §4 Day 1 #4.
+    See ``plan_ai_integration_phase_a.md`` + #4.
     """
 
     __tablename__ = "user_trading_caps"
@@ -2176,23 +2173,20 @@ class UserTradingCaps(TemporalMixin, Base):
 class UserActiveToken(Base):
     """Non-temporal token inventory for kill-switch + fast-path blacklist.
 
-    Rows carry explicit lifecycle (``issued_at``, ``expires_at``,
+    Rows carry explicit lifecycle (``issued_at``, ``expires_at``
     ``revoked_at``) — NOT SCD2 versioned — so deactivation flips
     ``revoked_at`` in place rather than closing + inserting a new
-    row (R2-M3 resolution). Cleaned by ``token_cleanup_loop``
+    row. Cleaned by ``token_cleanup_loop``
     (``snapper.application.admin.token_cleanup``) on a daily cycle.
-
     The ``jti`` column enables ``TokenManager.revoke_user_sessions``
     to push every active token's JWT ID into the in-memory
     ``_blacklisted_tokens`` fast-path cache — since SHA-256 is not
     reversible to the JTI but the JWT payload carries the JTI for
-    fast lookup in ``verify_token()`` (R2-M6 resolution).
-
+    fast lookup in ``verify_token()``.
     ``token_hash`` is SHA-256 HEX of the full token so the DB-backed
     inventory can be checked per-request in ``verify_token()``
     without holding the raw JWT plaintext in storage.
-
-    See ``plan_ai_integration_phase_a.md`` §3.6.2.
+    See ``plan_ai_integration_phase_a.md``.
     """
 
     __tablename__ = "user_active_tokens"

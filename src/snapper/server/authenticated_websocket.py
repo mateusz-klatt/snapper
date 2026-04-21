@@ -2,30 +2,24 @@
 
 This module provides the WebSocket endpoint that requires authentication
 before allowing subscription to real-time market data topics.
-
-Authentication Flow:
+Authentication Flow
     1. Client connects to ``/api/ws``
     2. Server validates origin header against allowed origins
     3. Client sends auth message with WebSocket token
     4. Server validates token and extracts user profile
     5. Server sends auth_complete with allowed topics for user's role
     6. Client can subscribe to topics based on permissions
-
-Topics are role-based:
-    - VIEWER: market data topics only
-    - OPERATOR: market data + signals
-    - ADMIN: all topics including system events
-
-Example:
-    Client-side WebSocket connection::
-
-        const ws = new WebSocket('wss://host/api/ws');
+Topics are role-based
+    VIEWER: market data topics only
+    OPERATOR: market data + signals
+    ADMIN: all topics including system events
+Example
+    Client-side WebSocket connection
+        const ws = new WebSocket('wss://host/api/ws')
         ws.onopen = () => {
             ws.send(JSON.stringify({
-                type: 'auth',
-                token: wsToken
-            }));
-        };
+                type: 'auth'
+                token: wsToken.
 """
 
 from fastapi import APIRouter
@@ -99,7 +93,7 @@ async def _authenticate_and_dispatch(
 ) -> None:
     """Authenticate, connect, and run the WebSocket dispatch loop.
 
-    Sets state[0] to True once the websocket is connected to the manager,
+    Sets state[0] to True once the websocket is connected to the manager
     so the caller knows cleanup is needed even if an exception occurs later.
 
     Args:
@@ -108,7 +102,7 @@ async def _authenticate_and_dispatch(
         ws_auth_manager: WebSocket authentication manager.
         ws_token_service: WebSocket token service.
         repository: Active :class:`Repository` threaded through to the
-            DB-backed verify path (plan §3.6.3 Day 3d-B).
+            DB-backed verify path.
         state: Single-element list; set to [True] once connected.
         db_url: Optional database URL for control recording.
     """

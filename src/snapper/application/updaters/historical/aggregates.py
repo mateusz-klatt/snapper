@@ -78,7 +78,7 @@ def _timeframe_label(multiplier: int, timespan: str) -> str:
 
     Args:
         multiplier: Time multiplier (e.g., 1, 5, 15).
-        timespan: Timespan string (minute, hour, day).
+        timespan: Timespan string.
 
     Returns:
         Short label like "1m", "5m", "1h", "1d".
@@ -112,19 +112,18 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
     """Service for backfilling Polygon aggregate (OHLCV) data.
 
     Downloads historical candle data from Polygon.io API and stores it
-    in both compressed CSV files and the database. Supports:
-    - Configurable timeframes (minute, hour, day)
-    - Resume from last downloaded data
-    - All mapped symbols or specific symbol list
-    - Rate limiting and chunked requests
-
+    in both compressed CSV files and the database. Supports
+    Configurable timeframes
+    Resume from last downloaded data
+    All mapped symbols or specific symbol list
+    Rate limiting and chunked requests
     Registered as one-shot task process.
 
     Attributes:
         BATCH_COMMIT_SIZE: Maximum rows per ``upsert_candles`` call.
             Each call runs in its own DB transaction, so smaller values
             reduce SQLite write-lock hold time at the cost of more
-            round-trips.  Default 500 balances throughput with write
+            round-trips. Default 500 balances throughput with write
             contention on single-writer databases.
     """
 
@@ -165,7 +164,7 @@ class PolygonAggregatesBackfillService(RegisterableProcess):
             symbols: Specific symbols to backfill. Defaults to settings.
             all_mapped: If True, backfill all symbols with Polygon mapping.
             multiplier: Timeframe multiplier (e.g., 1, 5).
-            timespan: Timespan string ("minute", "hour", "day").
+            timespan: Timespan string.
             days_back: Number of days to backfill.
             resume: Whether to skip existing data.
             save_csv: Whether to save CSV files.

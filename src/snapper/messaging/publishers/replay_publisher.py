@@ -1,12 +1,11 @@
 """ReplayPublisher — streams historical candles into a per-run ZMQ broker.
 
-Used by the backtest ZMQ replay engine (Phase 2b-core Step 7). Connects a
+Used by the backtest ZMQ replay engine. Connects a
 PUB socket to the per-run XSUB endpoint (allocated in
-:mod:`snapper.application.backtest.endpoints`), proves the strategy is
-actually receiving on every expected topic via an echo-ack handshake,
+mod:`snapper.application.backtest.endpoints`), proves the strategy is
+actually receiving on every expected topic via an echo-ack handshake
 then streams real candles in time-sorted order.
-
-Echo-ack handshake (Phase A):
+Echo-ack handshake
     The PUB socket has an asynchronous filter map that becomes populated
     once an upstream subscription frame arrives, but the PUB → SUB filter
     can lag behind even a successful XPUB_VERBOSE observation. The plan
@@ -18,8 +17,7 @@ Echo-ack handshake (Phase A):
     delay). After ``WARMUP_MAX_RETRIES`` rounds of
     ``WARMUP_READY_TIMEOUT_S`` seconds each, the publisher gives up with
     ``BacktestReadinessTimeoutError``.
-
-Streaming + drain (Phase B):
+Streaming + drain
     Iterates ``iter_sorted_candle_chunks`` and publishes each candle on
     ``market.{exchange}.{instrument}.candles.{timeframe}``. Each publish
     bumps ``DrainCoordinator.on_publish``. After the last candle the
@@ -28,7 +26,6 @@ Streaming + drain (Phase B):
     ``BacktestDrainTimeoutError`` with the published / processed counters
     in the message so an operator can tell publisher-stall from
     strategy-death.
-
 The publisher always closes the socket and terminates the context in a
 ``finally`` block, regardless of which phase raised.
 """
@@ -137,7 +134,7 @@ class ReplayPublisher:
         ).encode()
 
     async def _handshake(self, socket: zmq.asyncio.Socket) -> None:
-        """Run the per-topic echo-ack handshake (Phase A).
+        """Run the per-topic echo-ack handshake.
 
         Retries warmup on every subscribed topic each round until the
         strategy sets ``subscriber_ready`` (only after ACKing every
@@ -174,7 +171,7 @@ class ReplayPublisher:
         raise BacktestReadinessTimeoutError(timeout_message)
 
     async def _stream_candles(self, socket: zmq.asyncio.Socket) -> None:
-        """Stream every historical candle in time-sorted order (Phase B).
+        """Stream every historical candle in time-sorted order.
 
         Each publish bumps ``drain.on_publish`` so the strategy knows how
         many candles to wait for. After the last candle, signals

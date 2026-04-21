@@ -29,12 +29,11 @@ class ReconciliationLoop:
 
     Runs as an asyncio task, polling the exchange at a configurable
     interval and comparing state with the local database.
-
-    Phase 4 (plan §3.4) — under multi-instance partitioning, every
+     Under multi-instance partitioning, every
     coordinator runs a reconciliation loop per exchange but filters
     the retrieved command set by ``ownership`` so each loop only
     observes its own shards. Without the filter, two instances would
-    both record success/failure on the same stale command,
+    both record success/failure on the same stale command
     double-counting the circuit breaker and duplicating logs.
 
     Args:
@@ -42,8 +41,8 @@ class ReconciliationLoop:
         repository: Database repository for reading/writing state.
         trade_service: Trade service for circuit breaker feedback.
         interval_seconds: Seconds between reconciliation cycles.
-        ownership: Phase 4 shard-ownership filter. ``None`` skips
-            filtering (pre-Phase-4 behavior / test fixtures).
+        ownership: shard-ownership filter. ``None`` skips
+            filtering.
     """
 
     def __init__(
@@ -62,7 +61,7 @@ class ReconciliationLoop:
             repository: DB repository for state queries.
             trade_service: Trade service for circuit breaker feedback.
             interval_seconds: Polling interval in seconds.
-            ownership: Optional shard-ownership filter for Phase 4.
+            ownership: Optional shard-ownership filter for
         """
         self._exchange = exchange_name
         self._repo = repository

@@ -1,32 +1,20 @@
-"""USD price oracle for :class:`TradingCapsEnforcer` (plan §3.5.4).
+"""USD price oracle for :class:`TradingCapsEnforcer`.
 
 Resolves ``submission.quantity × price_usd`` for the rolling
-24h-notional cap (plan §3.5.3). Reads the active
-:class:`~snapper.data.models.MarketSnapshot` for the instrument
+24h-notional cap. Reads the active
+class:`~snapper.data.models.MarketSnapshot` for the instrument
 and uses its ``last_price`` as the submit-time commitment value.
 
-**Phase A scope — one-hop conversion only** (locked per 4-model
-consultation 2026-04-18; opus + sonnet argued defer cross-pair):
+Scope: one-hop conversion only.
+If ``Instrument.quote == "USD"``, returns ``last_price × quantity``.
+If ``Instrument.quote != "USD"``, raises
+class:`PriceUnavailableError` with ``quote_currency_not_usd``.
 
-    - If ``Instrument.quote == "USD"``: return
-      ``last_price × quantity`` directly.
-    - If ``Instrument.quote != "USD"``: raise
-      :class:`PriceUnavailableError` with
-      ``quote_currency_not_usd``. Cross-pair conversion is
-      deferred to a follow-up plan when a non-USD instrument is
-      actually onboarded. This avoids debugging stale-rate /
-      missing-pair edge cases in the same PR that stands up the
-      entire cap enforcement pipeline.
-
-**Cache + staleness:**
-
-    - In-process TTL cache (60s) keyed by ``instrument_public_id``.
-      Holds ``(last_price, snapshot_timestamp, cached_at)``.
-    - 300s staleness threshold: if
-      ``snapshot_timestamp < now - 300s`` → raise
-      :class:`PriceUnavailableError` with
-      ``price_stale``. Caller (enforcer) maps to
-      ``caps_price_unavailable`` error per §9.2.
+Cache + staleness:
+In-process TTL cache (60s) keyed by ``instrument_public_id`` stores
+``(last_price, snapshot_timestamp, cached_at)``.
+If ``snapshot_timestamp < now - 300s``, raises
+class:`PriceUnavailableError` with ``price_stale``.
 """
 
 import asyncio
@@ -51,20 +39,18 @@ STALENESS_THRESHOLD_SECONDS = 300
 class PriceUnavailableError(Exception):
     """Raised when USD pricing cannot be resolved for an instrument.
 
-    Carries ``reason`` so the cap enforcer can map to the §9.2
+    Carries ``reason`` so the cap enforcer can map to the
     error_code ``caps_price_unavailable`` with appropriate context.
-
-    Reasons:
-        - ``instrument_not_found``: no active Instrument row.
-        - ``snapshot_missing``: Instrument exists but no active
+    Reasons
+        ``instrument_not_found``: no active Instrument row.
+        ``snapshot_missing``: Instrument exists but no active
           MarketSnapshot row (market data pipeline hasn't produced
           a tick yet).
-        - ``last_price_null``: MarketSnapshot row exists but
+        ``last_price_null``: MarketSnapshot row exists but
           ``last_price`` is NULL (venue never reported a trade).
-        - ``price_stale``: snapshot timestamp is older than 300s.
-        - ``quote_currency_not_usd``: Phase A one-hop scope —
-          non-USD quote instruments are rejected until cross-pair
-          conversion ships in a follow-up plan.
+        ``price_stale``: snapshot timestamp is older than 300s.
+        ``quote_currency_not_usd``: one-hop scope
+          non-USD quote instruments are rejected.
     """
 
     def __init__(self, reason: str, instrument_public_id: str, detail: str = "") -> None:

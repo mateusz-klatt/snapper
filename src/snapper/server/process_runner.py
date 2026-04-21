@@ -1,27 +1,20 @@
 """Subprocess entry point for running processes in isolation.
 
 This module provides the entry point for processes spawned as subprocesses
-by the ProcessLauncherService. It handles:
-
+by the ProcessLauncherService. It handles
 1. JSON configuration parsing from command line
 2. Dynamic class loading and instantiation
 3. Async/sync method invocation
 4. Logging setup with process-specific context
-
-Usage:
-    Called by ProcessLauncherService when mode='subprocess'::
-
+Usage
+    Called by ProcessLauncherService when mode='subprocess'
         python -m snapper.server.process_runner --config '{...}'
-
-Configuration JSON:
-    {
-        "name": "process-name",
-        "class_path": "snapper.strategies.rsi.RSIReversion",
-        "method": "start",
+Configuration JSON
+        "name": "process-name"
+        "class_path": "snapper.strategies.rsi.RSIReversion"
+        "method": "start"
         "parameters": {"symbols": ["BTC-USD"]}
-    }
-
-The subprocess runs independently with its own Python interpreter,
+The subprocess runs independently with its own Python interpreter
 allowing true parallelism and isolation from the main server process.
 """
 

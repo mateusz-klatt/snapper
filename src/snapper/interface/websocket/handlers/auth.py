@@ -156,10 +156,10 @@ async def authenticate_websocket(
 ) -> AuthResult:
     """Authenticate a new WebSocket connection.
 
-    Implements the full authentication flow:
+    Implements the full authentication flow
     1. Verify session cookie via DB-backed
-       :meth:`WebSocketAuthManager.verify_session_cookie`
-       (plan §3.6.3 Day 3d-B — checks ``user_active_tokens`` +
+       meth:`WebSocketAuthManager.verify_session_cookie`
+       (— checks ``user_active_tokens`` +
        SCD2-active ``users.is_active``).
     2. Request ws_token from client.
     3. Verify ws_token against session.

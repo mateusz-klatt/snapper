@@ -1,12 +1,11 @@
 """REST API routes for wallet credential management.
 
 All endpoints require ``MANAGE_WALLET_CREDENTIALS`` (ADMIN only at
-Phase 0d launch). The GET listing returns ``CredentialSummary``
+ Launch). The GET listing returns ``CredentialSummary``
 projections that deliberately omit the ``encrypted_payload`` column
 so ciphertext never reaches the wire. Create and rotate accept
 plaintext credential fields in the request body and Fernet-encrypt
 them server-side before the DB insert.
-
 Credential rotation is an SCD2 close + insert: the old row's
 ``known_to`` is stamped at the rotation bus time and a new active
 row carries the updated encrypted payload. The closed row remains

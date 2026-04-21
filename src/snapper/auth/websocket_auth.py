@@ -149,19 +149,17 @@ class WebSocketAuthManager:
     ) -> tuple[AuthPrincipal, TokenClaims] | None:
         """Verify session from WebSocket auth header or cookie.
 
-        Per plan §3.7: the ``Authorization: Bearer <jwt>`` request
+        The ``Authorization: Bearer <jwt>`` request
         header is consulted FIRST on the WebSocket upgrade; the
         ``access_token`` cookie is the fallback. MCP / CLI clients
         without cookie jars present the header; browser clients
         continue to use the cookie.
-
-        Per plan §3.6.3 (Day 3d-B): the method is now async and
+        The method is now async and
         runs through :meth:`TokenManager.verify_token_with_db` so
         the WebSocket upgrade check consults the
         ``user_active_tokens`` inventory + SCD2-active
-        ``users.is_active`` join. Kill-switch propagation:
-
-            - **Same-instance** — immediate. The JTI blacklist
+        ``users.is_active`` join. Kill-switch propagation
+            **Same-instance** — immediate. The JTI blacklist
               seeded by :meth:`TokenManager.revoke_user_sessions`
               on ``UserService.deactivate_user`` is consulted
               inside the sync ``verify_token`` layer that
@@ -169,14 +167,12 @@ class WebSocketAuthManager:
               a reconnect attempt with a revoked token is
               rejected even when a stale positive verdict is
               still resident in cache.
-            - **Cross-instance** — bounded by the 30-second LRU
-              TTL until the Day 3d-C admin-bus subscriber calls
-              :meth:`TokenManager.invalidate_user_cache` on
+            **Cross-instance** — bounded by the 30-second LRU
+              TTL until the admin-bus subscriber calls
+              meth:`TokenManager.invalidate_user_cache` on
               receipt of ``admin.user_deactivated``.
-
-        The effective ceiling drops from the 15-minute access-
+        The effective ceiling drops from the 15-minute access
         token TTL to 30 s.
-
         The method name is preserved for call-site stability — the
         semantics are now "verify session token transport, header or
         cookie", not strictly "cookie".
@@ -347,21 +343,19 @@ class WebSocketAuthManager:
     async def start_admin_listener(self, zmq_broker_xpub: str) -> None:
         """Open the admin-bus subscriber and start the dispatch task.
 
-        Subscribes to ``admin.user_deactivated`` (plan §3.6.1) so the
-        kill switch fanout from `UserService.deactivate_user` (Day 3b
+        Subscribes to ``admin.user_deactivated`` so the
+        kill switch fanout from `UserService.deactivate_user` (
         sole publisher) reaches every authenticated WebSocket on this
         instance and closes it with code 4003 on the next event-loop
         tick.
-
         Idempotent + restart-safe via `_admin_listener_lock`: a second
-        call while a healthy listener is already running is a no-op;
+        call while a healthy listener is already running is a no-op
         a second call after the previous task finished early (e.g.
         the loop unwound on an unexpected exception) reaps the dead
         task and re-allocates so the kill-switch path stays live
         across single-listener failures.
-
-        `admin.scope_revoked` subscription wiring is deferred to Day 3f
-        (`validate_ai_delegate_subscription` per plan §3.8 — the
+        `admin.scope_revoked` subscription wiring is deferred to
+        (`validate_ai_delegate_subscription` — the
         re-validation algorithm needs the wallet-scope check that
         ships in that step).
 
@@ -400,8 +394,7 @@ class WebSocketAuthManager:
         refs are captured into locals BEFORE attributes are nulled so
         a concurrent operation that races into the lock cannot
         observe stale references after the close.
-
-        Order mirrors `_shutdown_user_service_publisher` (Day 3b):
+        Order mirrors `_shutdown_user_service_publisher`
         flip the running flag first so the loop exits on the next
         iteration, cancel the task, then dispose socket + context with
         suppressed exceptions so a transient broker issue cannot mask
@@ -513,21 +506,19 @@ class WebSocketAuthManager:
     async def close_user_connections(self, user_public_id: str, reason: str) -> int:
         """Close every authenticated WS matching `user_public_id` (code 4003).
 
-        Per-connection sequence:
-
+        Per-connection sequence
         1. `self.disconnect(ws)` first — synchronously cancels the
            connection's `warn_task` + `hard_task` timers so a pending
            expiration handler cannot wake during the `await
            ws.close()` yield and try to write/close the socket
-           concurrently with the kill switch (Day 3b R2 review:
-           Copilot gpt-5.4 flagged the original
+           concurrently with the kill switch (
+             flagged the original
            close-then-disconnect order as a race).
         2. `await ws.close(code=4003, reason=…)` — the kill-switch
            close itself.
-
         Iterates a snapshot so the `disconnect` side-effect (which
         mutates `authenticated_connections`) does not invalidate the
-        iterator. A `ws.close()` failure (already-closed socket,
+        iterator. A `ws.close()` failure (already-closed socket
         broken pipe, etc.) is logged + swallowed so one stuck
         connection cannot block the rest from being torn down. Match
         is by `user_public_id` (stable UUID7); username is mutable so
@@ -537,7 +528,7 @@ class WebSocketAuthManager:
             user_public_id: UUID7 of the user whose sessions are
                 being terminated.
             reason: Free-text reason carried in the WS close frame.
-                Truncated to 123 UTF-8 bytes because RFC 6455 §5.5.1
+                Truncated to 123 UTF-8 bytes because RFC 6455
                 limits the close-reason field to 123 bytes (the
                 encoded length, not the codepoint count); a Unicode
                 reason is truncated on a UTF-8 boundary via

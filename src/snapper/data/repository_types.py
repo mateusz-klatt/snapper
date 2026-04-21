@@ -334,11 +334,11 @@ class TradeCommandRow(TypedDict):
 
 
 class UserTradingCapsRow(TypedDict):
-    """Active per-user trading-caps row projection (plan §3.5.3).
+    """Active per-user trading-caps row projection.
 
     Every cap field is nullable — a NULL cap means unbounded for
     that axis. Consumed by
-    :class:`~snapper.application.trade.caps_enforcer.TradingCapsEnforcer`
+    class:`~snapper.application.trade.caps_enforcer.TradingCapsEnforcer`
     to evaluate submission admissibility.
     """
 
@@ -351,7 +351,7 @@ class UserTradingCapsRow(TypedDict):
 
 
 class UserActiveTokenInsertRow(TypedDict):
-    """Insert row for ``user_active_tokens`` (plan §3.6.2).
+    """Insert row for ``user_active_tokens``.
 
     Populated by :meth:`TokenManager.persist_tokens` on every
     successful ``create_tokens()`` so the inventory mirrors every
@@ -360,9 +360,8 @@ class UserActiveTokenInsertRow(TypedDict):
     SHA-256 hex of the full JWT (reversing to raw JWT is not
     supported — only byte-for-byte equality on the hash column is
     used by :meth:`Repository.get_active_token_by_hash`).
-
     Every field maps 1:1 to a NOT NULL column on
-    :class:`~snapper.data.models.UserActiveToken` except
+    class:`~snapper.data.models.UserActiveToken` except
     ``revoked_at`` which starts NULL and is flipped by the kill
     switch / refresh-rotation paths.
     """
@@ -377,7 +376,7 @@ class UserActiveTokenInsertRow(TypedDict):
 
 
 class UserActiveTokenVerificationRow(TypedDict):
-    """Read projection for DB-backed ``verify_token`` (plan §3.6.3).
+    """Read projection for DB-backed ``verify_token``.
 
     Returned by :meth:`Repository.get_active_token_by_hash` for the
     per-request validation path. The row combines the non-temporal
@@ -385,7 +384,6 @@ class UserActiveTokenVerificationRow(TypedDict):
     ``users.is_active`` flag so the verifier can reject tokens owned
     by a deactivated user in a single round-trip instead of issuing
     a second SELECT.
-
     ``revoked_at IS NOT NULL`` or ``user_is_active is False`` →
     verify fails. Both states are cached in the 30-second LRU to
     keep the hot path O(1).
@@ -406,8 +404,7 @@ class UserRecentSubmitRow(TypedDict):
     ``exchange``; these are carried so the enforcer can optionally
     resolve to ``instrument_public_id`` for converter lookups on
     market orders where ``price`` is NULL.
-
-    Phase A limitation: for market orders with ``price IS NULL``,
+    For market orders with ``price IS NULL``
     the enforcer skips the row from the rolling sum and emits a
     WARN log. A follow-up plan can snapshot the submit-time USD
     notional into a dedicated column when non-USD-quoted
@@ -852,8 +849,8 @@ class OperatorRow(TypedDict):
 class WalletRow(TypedDict):
     """Row dict returned by wallet queries.
 
-    One row per active ``wallets`` SCD2 version. Exposes the label,
-    description, and paper flag so Phase 0d frontend pickers can
+    One row per active ``wallets`` SCD2 version. Exposes the label
+    description, and paper flag so frontend pickers can
     render the accessible wallet catalogue without a second lookup.
     The encrypted credential payload lives on a separate table
     (``wallet_credentials``) and is never co-returned with WalletRow
@@ -1026,11 +1023,11 @@ class CreateScopeGrantRequest(TypedDict):
 class ExecutionPlanDecisionInsertRow(TypedDict):
     """Insert params for insert_execution_plan_decision.
 
-    ``source_surface`` threads the plan §3.9 audit enum
+    ``source_surface`` threads the audit enum
     (``mcp | rest | strategy | ws``) from the caller all the way to
     the persisted row. The repository used to rely on the column's
-    ``server_default="strategy"`` to backfill every insert; the Day
-    5c 3-model review flagged that typing hole as a MINOR because
+    ``server_default="strategy"`` to backfill every insert; that typing
+    hole meant
     any future MCP-originated decision path would silently write
     ``"strategy"`` and collapse audit provenance. Marking the field
     required here (and ``total=True``) forces every caller to make
@@ -1123,7 +1120,7 @@ class PositionCycleInsertRow(TypedDict, total=False):
 class BacktestRunInsertRow(TypedDict, total=False):
     """Insert payload for backtest_runs.
 
-    Phase 2c Step 3 adds ``config_hash`` — the caller (API route,
+     Adds ``config_hash`` — the caller (API route
     runner, or CLI) computes
     ``compute_fingerprint(config, for_pairing=True)`` and passes the
     resulting hex digest so the auto-pair comparison UI can group
@@ -1187,7 +1184,7 @@ class BacktestRunRow(TypedDict):
 
 
 class BacktestComparisonInsertRow(TypedDict, total=False):
-    """Insert payload for backtest_comparisons (Phase 2c Step 4).
+    """Insert payload for backtest_comparisons.
 
     Pair is expected to be normalised to (min, max) lexically by the
     caller before insert, so (A,B) and (B,A) collapse to the same
@@ -1250,10 +1247,10 @@ class BacktestEventRow(TypedDict):
 class BacktestResultInsertRow(TypedDict, total=False):
     """Insert payload for backtest_results.
 
-    Phase 2c Step 1 promotes 5 metrics (``sortino_ratio``, ``cagr``,
+     Promotes 5 metrics (``sortino_ratio``, ``cagr``
     ``calmar_ratio``, ``expectancy``, ``avg_trade_pnl``) from the
     ``extra_metrics`` JSON blob to typed nullable-float columns, and
-    adds 3 new metrics (``max_drawdown_duration_seconds``,
+    adds 3 new metrics (``max_drawdown_duration_seconds``
     ``exposure_ratio``, ``turnover_ratio``). All 8 fields are
     ``float | None`` — degenerate inputs emit ``None`` plus a
     ``metric_warning`` event (see metrics.py).
@@ -1287,7 +1284,7 @@ class BacktestResultInsertRow(TypedDict, total=False):
 class BacktestResultRow(TypedDict):
     """Read projection for backtest_results.
 
-    Phase 2c Step 1 adds 8 advanced-metric fields. Pre-0005 rows leave
+     Adds 8 advanced-metric fields. Pre-0005 rows leave
     the 5 promoted fields as ``None`` (with the value still reachable
     via ``extra_metrics``); post-0005 rows populate the typed columns
     and the 5 promoted keys are absent from ``extra_metrics``.

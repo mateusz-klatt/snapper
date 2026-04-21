@@ -403,8 +403,7 @@ class UserService:
     async def deactivate_user(self, user_public_id: str, reason: str | None) -> bool:
         """Deactivate a user as the SOLE publisher of `admin.user_deactivated`.
 
-        Implements the canonical kill-switch flow from plan §3.6.1:
-
+        Implements the canonical kill-switch flow from
         1. SCD2 close+insert on the active `users` row with `is_active=False`.
         2. `TokenManager.revoke_user_sessions(...)` — direct in-process call
            that revokes every active token row in the `user_active_tokens`
@@ -412,7 +411,6 @@ class UserService:
            method commits its own transaction (`Repository.revoke_user_active_tokens`
            opens its own session) and deliberately does NOT publish a bus
            event so the single-publisher rule is preserved (resolves
-           R2-M1).
         3. Commit the user SCD2 mutation. Token revocation has already
            landed; if this commit fails the user row stays active but
            tokens remain revoked — the safer failure mode (kill switch
@@ -420,7 +418,7 @@ class UserService:
         4. Publish `admin.user_deactivated` AFTER the commit so
            subscribers always see the committed state. Cross-instance
            `TokenManager` LRU eviction is driven exclusively by this
-           bus event (plan §3.6.3 R4-M5+R5-M3).
+           bus event.
 
         Args:
             user_public_id: UUID7 of the user row to deactivate.

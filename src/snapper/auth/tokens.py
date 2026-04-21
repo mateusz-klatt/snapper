@@ -45,7 +45,7 @@ BLACKLIST_CLEANUP_MULTIPLIER: Final[int] = 2
 """Factor applied to grace period when deciding when to purge old entries."""
 
 VERIFY_CACHE_TTL_SECONDS: Final[float] = 30.0
-"""Seconds a verify_token_with_db verdict is reused from the LRU (plan §3.6.3)."""
+"""Seconds a verify_token_with_db verdict is reused from the LRU."""
 
 VERIFY_CACHE_MAX_ENTRIES: Final[int] = 10000
 """Upper bound on the verify-cache size before an opportunistic prune runs."""
@@ -53,18 +53,14 @@ VERIFY_CACHE_MAX_ENTRIES: Final[int] = 10000
 BLACKLIST_MAX_ENTRIES: Final[int] = 50000
 """Hard cap on in-memory JTI blacklist entries.
 
-Closes the Day 5c 3-model review MAJOR: mass deactivation via
-``TokenManager.revoke_user_sessions`` bulk-adds every active JTI
-to the blacklist, and the opportunistic cleanup only runs on the
-verify path. A low-traffic instance that survives a large
-deactivation batch would leak memory until the grace period
-expired for every entry. The hard cap pairs with the heapq
-eviction in :meth:`_enforce_blacklist_cap` to bound the set even
-when verify traffic is sparse.
+Mass deactivation can bulk-add many active JTIs to the blacklist.
+Opportunistic cleanup runs on the verify path, so low-traffic nodes
+also enforce this hard cap via :meth:`_enforce_blacklist_cap` to
+bound memory growth.
 """
 
 _ADMIN_USER_DEACTIVATED_TOPIC: Final[str] = "admin.user_deactivated"
-"""Bus topic that Day 3b `UserService.deactivate_user` publishes under."""
+"""Bus topic that ``UserService.deactivate_user`` publishes under."""
 
 _ADMIN_LISTEN_RECV_BACKOFF_S: Final[float] = 0.1
 """Backoff after a non-cancellation recv error so the loop cannot tight-spin."""
@@ -74,7 +70,7 @@ _ADMIN_LISTEN_RECV_BACKOFF_S: Final[float] = 0.1
 class _VerifyCacheEntry:
     """Frozen verdict returned by the DB-backed verify path.
 
-    Shape extended per R5-M4 so the admin-bus subscriber can evict
+    Shape extended per so the admin-bus subscriber can evict
     every cached token for a deactivated user without scanning the
     raw JWTs (which we never retain). ``expires_at_ts`` holds the
     JWT ``exp`` claim as a unix timestamp so expired entries are
@@ -97,21 +93,14 @@ REJECTION_REASON_INVALID: Final[str] = "invalid"
 
 @dataclass(slots=True, frozen=True)
 class VerifyOutcome:
-    """Verdict + rejection reason returned by the DB-backed verify path (plan §3.6.3).
+    """Verdict + rejection reason returned by the DB-backed verify path.
 
-    Day 3d-D R1 review (Copilot gpt-5.4 MAJOR + Codex gpt-5.3-codex
-    MINOR) flagged that the MCP middleware's cache re-lookup could
-    misclassify a later JWT-layer failure (expiry, signature,
-    blacklist) as ``user_deactivated`` if a stale deactivation
-    entry was still in the 30-second LRU. Returning the reason
-    alongside the claims removes the indirection: callers that
-    only care about the happy path read ``claims``; the MCP
-    middleware branches on ``rejection_reason`` directly without
-    re-reading cache.
-
+    ``rejection_reason`` is returned alongside ``claims`` so
+    callers can branch directly on the failure type without
+    re-reading cache state.
     ``rejection_reason`` is ``None`` on success, one of
-    :data:`REJECTION_REASON_USER_DEACTIVATED` /
-    :data:`REJECTION_REASON_INVALID` on failure.
+    data:`REJECTION_REASON_USER_DEACTIVATED` /
+    data:`REJECTION_REASON_INVALID` on failure.
     """
 
     claims: TokenClaims | None
@@ -121,9 +110,9 @@ class VerifyOutcome:
 def hash_token(raw_token: str) -> str:
     """Return the SHA-256 hex digest of a raw JWT.
 
-    Centralised so the inventory insert, the DB-backed verify lookup,
+    Centralised so the inventory insert, the DB-backed verify lookup
     and the kill-switch revocation paths all agree on the hash shape
-    used as the lookup key in ``user_active_tokens`` (plan §3.6.2).
+    used as the lookup key in ``user_active_tokens``.
 
     Args:
         raw_token: The JWT string exactly as emitted by
@@ -272,7 +261,7 @@ class TokenManager:
         )
 
     def decode_fresh_token(self, token: str) -> TokenClaims:
-        """Public alias for :meth:`_decode_fresh_token` (Day 4b R1 resolution).
+        """Public alias for :meth:`_decode_fresh_token`.
 
         Use this from external services (e.g. DelegateService) that
         need to project freshly-minted JWT claims into inventory
@@ -291,15 +280,15 @@ class TokenManager:
         """Decode a token we just minted, returning typed claims.
 
         Trust context: the token was produced inside the same
-        process by ``create_tokens`` using our secret and algorithm,
+        process by ``create_tokens`` using our secret and algorithm
         so signature failure here would be a programming error, not
         an auth failure. We still pass through :mod:`jwt.decode` so
         the exp/iat validation behaviour matches the verify path and
         any future signing-key rotation surfaces a clear exception
         instead of silent misbehaviour. No blacklist or DB check is
         performed — this helper is exclusively for
-        :meth:`persist_tokens` extracting ``jti``/``iat``/``exp``
-        from a freshly-minted pair (plan §3.6.2).
+        meth:`persist_tokens` extracting ``jti``/``iat``/``exp``
+        from a freshly-minted pair.
 
         Args:
             token: JWT string emitted by ``create_tokens``.
@@ -363,25 +352,23 @@ class TokenManager:
         Called by the login route handler immediately after
         ``create_tokens`` returns so every outstanding token is
         reflected in the DB inventory. This is the precondition for
-        the Day 3d DB-backed ``verify_token`` path: any JWT without
-        a matching row fails verification per §3.6.3's deployment
+        the DB-backed ``verify_token`` path: any JWT without
+        a matching row fails verification per 's deployment
         note ("pre-existing JWTs issued before migration have no
         row → verify_token() will 401 them").
-
         Insertion is batched through
-        :meth:`Repository.insert_user_active_tokens` so both the
+        meth:`Repository.insert_user_active_tokens` so both the
         access and refresh rows land in one transaction. If the
         batch fails the caller's transactional scope surfaces the
         exception — the route handler then returns 500 and the
         client must retry login.
-
         The refresh-rotation path uses :meth:`rotate_tokens`
         instead; this method is reserved for the login (no old JTI
         to revoke) case.
 
         Args:
             pair: The freshly-minted :class:`TokenPair` from
-                :meth:`create_tokens`.
+                meth:`create_tokens`.
             user_public_id: UUID of the authenticated user — the
                 inventory's foreign key to ``users``.
             repository: Active :class:`Repository` bound to the
@@ -532,8 +519,7 @@ class TokenManager:
         (``get_current_user``, refresh route, ``verify_session_cookie``).
         The MCP middleware uses :meth:`verify_token_with_reason`
         directly so it can branch on the exact failure mode without
-        re-reading the cache (Day 3d-D R1 fix).
-
+        re-reading the cache.
         See :meth:`verify_token_with_reason` for the full contract.
 
         Args:
@@ -543,7 +529,7 @@ class TokenManager:
 
         Returns:
             The :class:`TokenClaims` on success, ``None`` on any
-            rejection (signature, expiry, blacklist, not-in-inventory,
+            rejection (signature, expiry, blacklist, not-in-inventory
             revoked, user deactivated).
         """
         outcome = await self.verify_token_with_reason(token, repository)
@@ -554,15 +540,14 @@ class TokenManager:
         token: str,
         repository: Repository,
     ) -> VerifyOutcome:
-        """DB-backed verify (plan §3.6.3) with 30s LRU cache.
+        """DB-backed verify with 30s LRU cache.
 
         Fully validates a JWT against the ``user_active_tokens``
-        inventory so that the Day 3a/3b kill switch propagates to
+        inventory so that the kill switch propagates to
         every request on the NEXT call instead of waiting for the
-        access-token expiry. The request-path sequence is:
-
+        access-token expiry. The request-path sequence is
             1. Run :meth:`verify_token` for the cheap checks
-               (signature, expiry, JTI blacklist). A failure short-
+               (signature, expiry, JTI blacklist). A failure short
                circuits so we never touch the DB or the cache for
                malformed / forged / blacklisted tokens.
             2. Hash the token and consult the 30-second LRU cache.
@@ -570,7 +555,7 @@ class TokenManager:
                negative verdict also short-circuits with ``None``
                so repeated replays don't amplify DB load.
             3. On cache miss, call
-               :meth:`Repository.get_active_token_by_hash` which
+               meth:`Repository.get_active_token_by_hash` which
                joins ``user_active_tokens`` with the SCD2-active
                ``users`` row. The projection carries
                ``user_is_active`` so the deactivated-user state
@@ -579,11 +564,10 @@ class TokenManager:
                (positive AND negative — bounded cost for replayed
                invalid tokens) and return the claims when every
                gate passes.
-
         Cross-instance invariant: the 30-second TTL is a staleness
-        ceiling; the admin-bus subscriber wired in Day 3c calls
-        :meth:`invalidate_user_cache` on ``admin.user_deactivated``
-        so kill-switch latency collapses to one bus-message-round-
+        ceiling; the admin-bus subscriber wired in calls
+        meth:`invalidate_user_cache` on ``admin.user_deactivated``
+        so kill-switch latency collapses to one bus-message-round
         trip instead of 30 s.
 
         Args:
@@ -598,10 +582,10 @@ class TokenManager:
             A :class:`VerifyOutcome` with ``claims`` populated on
             success (``rejection_reason=None``) OR ``claims=None``
             plus a populated ``rejection_reason`` of
-            :data:`REJECTION_REASON_USER_DEACTIVATED` or
-            :data:`REJECTION_REASON_INVALID`. Callers that only
+            data:`REJECTION_REASON_USER_DEACTIVATED` or
+            data:`REJECTION_REASON_INVALID`. Callers that only
             need the success-path claims can use
-            :meth:`verify_token_with_db` for the backward-
+            meth:`verify_token_with_db` for the backward
             compatible ``TokenClaims | None`` shape.
         """
         token_data = self.verify_token(token)
@@ -686,17 +670,15 @@ class TokenManager:
     ) -> None:
         """Insert a verdict row, prune on overflow, and skip on stale generation.
 
-        The ``gen_before`` parameter closes the Day 5c review MAJOR
+        The ``gen_before`` parameter guards against a race:
         race finding: if the caller sampled the per-user generation
         before the DB read and a concurrent
-        :meth:`invalidate_user_cache` incremented it during that
+        meth:`invalidate_user_cache` incremented it during that
         read, the verdict we are about to cache may reflect a user
         state that an admin event has already superseded. In that
         case we do NOT cache — the next verify hit re-reads the DB
         rather than serving a stale positive from the LRU.
-
-        Day 5d re-review hardening (gpt-5.3-codex, R2 on
-        ``e035e9c``): legacy tokens pre-dating Day 1c have a blank
+        Legacy tokens pre-dating this flow can have a blank
         claim ``user_public_id=""``. The sample for the race guard
         MUST come from a key sampled BEFORE the DB await so a
         concurrent ``invalidate_user_cache`` that bumps the real
@@ -706,7 +688,7 @@ class TokenManager:
         The safe resolution is to skip caching blank-claim tokens
         completely — fail-closed. These legacy tokens pay a perf
         penalty (always DB-backed) but cannot slip a stale positive
-        into cache during a race. Phase A issuance never emits
+        into cache during a race. issuance never emits
         blank-claim tokens, so the penalty is bounded by legacy
         session lifetimes (≤ 15 min access-token TTL).
 
@@ -754,8 +736,7 @@ class TokenManager:
         """Drop stale entries AND hard-evict the oldest to stay bounded.
 
         Called opportunistically when the cache exceeds
-        :data:`VERIFY_CACHE_MAX_ENTRIES`. Two passes:
-
+        data:`VERIFY_CACHE_MAX_ENTRIES`. Two passes
             1. Stale pass — drop every entry whose 30-second TTL has
                lapsed or whose JWT ``exp`` has passed. Cheap and
                usually enough under steady-state traffic.
@@ -765,10 +746,9 @@ class TokenManager:
                ``cached_at_ts`` via :func:`heapq.nsmallest`
                (O(n log overflow), typically O(n) for
                overflow=1). Guarantees bounded memory even under
-               pathological spray-of-fresh-tokens load without
-               paying the O(n log n) cost of a full sort on every
-               insert at capacity (Codex R1 MAJOR + Copilot R2
-               MINOR resolutions).
+                pathological spray-of-fresh-tokens load without
+                paying the O(n log n) cost of a full sort on every
+               insert at capacity.
         """
         stale_keys: list[str] = [
             key
@@ -799,12 +779,11 @@ class TokenManager:
     def invalidate_user_cache(self, user_public_id: str) -> int:
         """Evict every cache entry whose ``user_public_id`` matches.
 
-        Called by the Day 3c/3d-C admin-bus subscriber on receipt of
+        Called by the admin-bus subscriber on receipt of
         ``admin.user_deactivated`` so a cross-instance deactivation
         propagates to this TokenManager's LRU without waiting for
-        the 30-second TTL. Plan §3.6.3 resolution of R4-M5 + R5-M3.
-
-        Day 5d-C closes the 3-model review MAJOR race: the user's
+        the 30-second TTL. resolution of +.
+        The user's
         generation counter is bumped FIRST so any ``verify_token_with_reason``
         that is mid-flight on this user (already past the DB read)
         sees a generation mismatch in :meth:`_cache_verdict` and
@@ -820,7 +799,7 @@ class TokenManager:
 
         Returns:
             Number of entries evicted. Observable via the return
-            value for Day 3c tests — no additional metrics surface
+            value for tests — no additional metrics surface
             is required.
         """
         self._user_cache_generations[user_public_id] = (
@@ -899,18 +878,17 @@ class TokenManager:
         logger.info(f"Immediately blacklisted token: {jti}")
 
     def _enforce_blacklist_cap(self) -> None:
-        """Hard-cap the in-memory JTI blacklist (Day 5c MAJOR closure).
+        """Hard-cap the in-memory JTI blacklist.
 
         Opportunistic cleanup via :meth:`_cleanup_old_blacklist_entries`
         only runs on the verify path, so a low-traffic instance that
         absorbs a mass deactivation can leak memory until every grace
-        period expires — the 3-model review flagged this as a
-        MAJOR. The cap below uses the same ``heapq.nsmallest`` pattern
+        period expires.
+        The cap uses the same ``heapq.nsmallest`` pattern
         as the verify-cache prune: when the set exceeds
-        :data:`BLACKLIST_MAX_ENTRIES`, evict the oldest overflow so
+        data:`BLACKLIST_MAX_ENTRIES`, evict the oldest overflow so
         the set stays bounded by a predictable multiplier of the
-        plan's expected live-token population.
-
+        expected live-token population.
         A bounded eviction window can drop an entry that is still
         inside its grace period; that is acceptable because the
         underlying ``user_active_tokens`` inventory + SCD2-active
@@ -935,27 +913,25 @@ class TokenManager:
         )
 
     async def revoke_user_sessions(self, user_public_id: str, repository: Repository) -> int:
-        """Revoke every active session for a user (kill switch — plan §3.6.1).
+        """Revoke every active session for a user.
 
         Two-phase revocation pushes state into BOTH the DB inventory
         AND the in-memory fast-path blacklist so ``verify_token``
         rejects the next request regardless of which layer it
-        consults first:
-
+        consults first
             1. Load every unrevoked JTI from ``user_active_tokens``
                via :meth:`Repository.list_active_user_token_jtis`.
             2. Flip ``revoked_at=NOW()`` on those rows via
-               :meth:`Repository.revoke_user_active_tokens` — atomic
+               meth:`Repository.revoke_user_active_tokens` — atomic
                per SQLAlchemy UPDATE.
             3. For every JTI loaded in step 1, add it to
-               :attr:`_blacklisted_tokens` with grace period so
+               attr:`_blacklisted_tokens` with grace period so
                concurrent in-flight requests still complete but new
                verifications fail.
-
         Caller (``UserService.deactivate_user``) publishes the
         ``admin.user_deactivated`` bus event AFTER commit — this
         method deliberately does NOT publish the event itself so
-        the single-publisher contract (§3.6.1 resolution of R2-M1)
+        the single-publisher contract
         is preserved: any cross-instance TokenManager will evict on
         receipt of the bus event, NOT on a competing publish from
         here.
@@ -1027,16 +1003,14 @@ class TokenManager:
     async def start_admin_listener(self, zmq_broker_xpub: str) -> None:
         """Open the admin-bus subscriber and start the dispatch task.
 
-        Subscribes to ``admin.user_deactivated`` (plan §3.6.1 Day 3
+        Subscribes to ``admin.user_deactivated`` (
         deliverable 1a) so a cross-instance kill-switch event
         published by ``UserService.deactivate_user`` collapses the
         30-second LRU TTL ceiling to one bus-message round-trip.
         On receipt, :meth:`invalidate_user_cache` walks
         ``_verify_cache`` and drops every entry whose cached
         ``user_public_id`` matches the deactivated user's UUID.
-
         Idempotent + restart-safe via ``_admin_listener_lock``
-        (mirrors the Day 3c WebSocketAuthManager listener pattern):
         a second call while a healthy listener is running is a
         no-op; a second call after the previous task finished
         early reaps the dead task and re-allocates so the
@@ -1087,10 +1061,9 @@ class TokenManager:
 
         Captures every resource reference into locals BEFORE
         clearing the attributes so a follow-up
-        :meth:`start_admin_listener` (which runs after we release
+        meth:`start_admin_listener` (which runs after we release
         the lock) sees a fully-clean slate and cannot interfere
-        with the close + term calls below (Day 3c R1 MAJOR
-        pattern).
+        with the close + term calls below.
         """
         self._admin_running = False
         task = self._admin_listen_task

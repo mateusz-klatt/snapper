@@ -76,15 +76,14 @@ def register_process[T: type[RegisterableProcess]](
 
     Example:
         >>> @register_process(
-        ...     "my_service",
-        ...     description="My custom service",
-        ...     priority=10,
-        ...     lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
-        ...     enabled=True,
-        ... )
-        ... class MyService(RegisterableProcess):
-        ...     async def start(self) -> None:
-        ...         pass
+        "my_service"
+        description="My custom service"
+        priority=10
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING
+        enabled=True
+        class MyService(RegisterableProcess)
+        async def start(self) -> None
+        pass
     """
 
     def decorator(cls: T) -> T:

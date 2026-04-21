@@ -7,29 +7,27 @@ across Python restarts, machines, and versions because the hash is
 SHA-256 over the UTF-8 encoding of the shard key (the first 8 bytes
 interpreted as a big-endian unsigned 64-bit integer, modulo
 ``instance_count``).
-
-Design notes:
-    - Python's builtin ``hash()`` is randomised per process by
+Design notes
+    Python's builtin ``hash()`` is randomised per process by
       ``PYTHONHASHSEED``. SHA-256 is deterministic, uniform, and uses
       well-understood library code. The uint64 prefix is plenty of
       entropy for a modulo into a small instance count.
-    - ``instance_count=1`` is the default / pre-partitioning mode —
+    ``instance_count=1`` is the default / pre-partitioning mode
       every shard key is owned, so :meth:`ShardOwnership.owns` returns
       True unconditionally.
-    - Validation is fail-fast at construction time via ``__post_init__``.
+    Validation is fail-fast at construction time via ``__post_init__``.
       ``instance_count < 1`` or ``instance_id`` outside
       ``[0, instance_count)`` raises :class:`ValueError`.
 
 Example:
     >>> ownership = ShardOwnership(instance_id=0, instance_count=2)
-    >>> ownership.owns("kraken.BTC-USD.live")  # deterministic bool
+    >>> ownership.owns("kraken.BTC-USD.live") # deterministic bool
     True
-
-Raises:
+Raises
     ShardOwnershipError: Raised by the repository insert guard when a
         TradeCommand row's shard_key is not owned by the caller's
-        :class:`ShardOwnership`. Callers that legitimately insert
-        foreign-shard rows (HTTP handlers, plan services) pass
+        class:`ShardOwnership`. Callers that legitimately insert
+        foreign-shard rows pass
         ``ownership=None`` to bypass the check.
 """
 
@@ -91,7 +89,7 @@ class ShardOwnership:
         """Decide whether this coordinator owns ``shard_key``.
 
         At ``instance_count == 1`` every shard is owned, so the result
-        is always True — Phase 4 is a pure no-op in single-instance
+        is always True — is a pure no-op in single-instance
         deployments.
 
         Args:

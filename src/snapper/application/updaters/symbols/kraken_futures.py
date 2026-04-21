@@ -107,11 +107,10 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
     async def _update_database(self, symbols: list[dict[str, Any]]) -> None:
         """Persist Kraken Futures symbol catalog to the database.
 
-        Each tradeable instrument produces one symbol row, one WS alias,
+        Each tradeable instrument produces one symbol row, one WS alias
         one CCXT alias (if available), and a capability row with
-        ``can_trade=False`` (Phase 1 is market data only) and
+        ``can_trade=False`` and
         ``can_market_data=True``.
-
         Non-tradeable instruments are skipped.
 
         Args:

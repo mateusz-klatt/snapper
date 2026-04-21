@@ -56,8 +56,8 @@ def optional_json_body[ModelT: BaseModel](
 
     Used by endpoints that historically accepted no body but now want
     to accept an optional body without breaking existing zero-body
-    callers (R15 blocker fix — the naive ``model()`` synthesis path
-    is infeasible under ``PayloadRequest[...]`` envelopes whose
+    callers. The naive ``model()`` synthesis path is infeasible under
+    ``PayloadRequest[...]`` envelopes whose
     required fields have no defaults).
 
     Args:
@@ -211,18 +211,16 @@ def openapi_schema(model: type[BaseModel], *, required: bool = True) -> dict[str
     FastAPI does not generate requestBody for ``Depends()`` parameters.
     Pass the return value as ``openapi_extra`` on the route decorator to
     restore the schema in the OpenAPI spec.
-
     The model and its sub-schemas are registered for injection by
-    :func:`patch_openapi`.  The returned dict uses a ``$ref`` pointer
+    func:`patch_openapi`. The returned dict uses a ``$ref`` pointer
     to ``components/schemas/{ModelName}``.
 
     Args:
         model: The Pydantic model whose JSON schema to embed.
         required: Whether the requestBody is mandatory. Pass
             ``required=False`` for endpoints using
-            :func:`optional_json_body` so the generated OpenAPI / typed
-            clients don't wrongly mark the body required (R14 gpt-5.4
-            fix #4).
+            func:`optional_json_body` so the generated OpenAPI / typed
+            clients don't wrongly mark the body required.
 
     Returns:
         Dict suitable for the ``openapi_extra`` keyword argument.

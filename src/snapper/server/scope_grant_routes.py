@@ -2,19 +2,16 @@
 
 Returns the active ``wallet_operator_scope_grants`` rows on a given
 wallet and accepts create + handover commands.
-
-Authorization rules:
-
-- ADMIN principals may query / mutate any wallet.
-- VIEWER / OPERATOR may query only wallets covered by at least one
+Authorization rules
+ADMIN principals may query / mutate any wallet.
+VIEWER / OPERATOR may query only wallets covered by at least one
   active scope grant from their operator set (read gate). Mutation
-  additionally requires the ``MANAGE_SCOPE_GRANTS`` permission,
-  which is ADMIN-only at Phase 0d launch — the permission exists so
+  additionally requires the ``MANAGE_SCOPE_GRANTS`` permission
+  which is ADMIN-only at launch — the permission exists so
   a future delegated-admin role can hold grant-management power
   without full ADMIN.
-
 Create-grant conflicts (409) and handover cross-scope violations
-(409) flow up from the repository via ``ScopeGrantConflictError``;
+(409) flow up from the repository via ``ScopeGrantConflictError``
 validation failures (XOR mismatch, unknown operator / grant) flow
 up via ``ScopeGrantNotFoundError`` / ``ScopeGrantValidationError``.
 """

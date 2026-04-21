@@ -1,9 +1,9 @@
-"""Backtest comparison diff computation (Phase 2c Step 4).
+"""Backtest comparison diff computation.
 
 Pure functions that turn two sets of run artifacts into the diff
 shapes exposed by ``GET /api/backtests/compare/{id}``. Diff is
 always recomputed on GET from the current artifact rows so a
-metric-schema change never stales a persisted diff — see plan §4.3.
+metric-schema change never stales a persisted diff — see.
 """
 
 from collections import Counter
@@ -44,8 +44,7 @@ def _promoted_lookup(result: BacktestResultRow | None, name: str) -> float | Non
     """Typed-column-first with JSON fallback for the 5 promoted names.
 
     ``is not None`` coalescing (NOT Python truthiness) so a typed
-    ``0.0`` is preserved against a stale non-zero JSON fallback
-    (plan §4.3 R6 gpt-5.3-codex fix).
+    ``0.0`` is preserved against a stale non-zero JSON fallback.
     """
     if result is None:
         return None
@@ -92,7 +91,7 @@ def _delta_pct(a: float | None, b: float | None) -> tuple[float | None, float | 
 def compute_metrics_diff(
     result_a: BacktestResultRow | None, result_b: BacktestResultRow | None
 ) -> list[dict[str, Any]]:
-    """Build the side-by-side metrics diff (plan §4.3).
+    """Build the side-by-side metrics diff.
 
     Each metric name emits exactly one row. The 5 promoted names are
     explicitly subtracted from the ``extra_metrics`` union so a
@@ -105,7 +104,7 @@ def compute_metrics_diff(
         result_b: Result row for the second leg (None when missing).
 
     Returns:
-        List of dicts with ``name``, ``run_a``, ``run_b``, ``delta``,
+        List of dicts with ``name``, ``run_a``, ``run_b``, ``delta``
         and ``pct`` keys — one per metric.
     """
     rows: list[dict[str, Any]] = []

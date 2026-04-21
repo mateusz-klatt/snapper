@@ -2,7 +2,7 @@
 
 Reads historical candles from the database, feeds them to a strategy
 instance, simulates fills via the fill model, and collects results.
-Phase 1 MVP: single execution mode, no ZMQ replay.
+Single execution mode, no ZMQ replay.
 """
 
 import asyncio
@@ -115,11 +115,11 @@ class DirectDbEngine:
                 is supplied.
             cancel_poll_ms: Throttle between probes when an inline probe is
                 used. Ignored when ``cancel_probe`` is supplied.
-            cancel_probe: Pre-built shared probe (Phase 2b-hardening Step 3).
+            cancel_probe: Pre-built shared probe.
                 When provided, the engine delegates entirely to it; both
                 Direct-DB and ZMQ replay engines can share the same instance
                 so cancel detection is uniform.
-            emitter: Optional Phase 2c progress emitter. When supplied the
+            emitter: Optional progress emitter. When supplied the
                 engine calls ``emitter.on_candle_processed`` after each
                 time-batch drain so WS clients receive live progress.
                 ``None`` is a no-op — direct-DB parity tests that don't
@@ -272,7 +272,7 @@ class DirectDbEngine:
         collector: ResultCollector,
         tracker: SequenceTracker,
     ) -> None:
-        """Delegate to ``batch_processor.process_time_batch`` (Phase 2b Step 3).
+        """Delegate to ``batch_processor.process_time_batch``.
 
         Kept as a thin instance wrapper so existing call sites and unit tests
         that drive ``await engine._process_time_batch(...)`` keep working

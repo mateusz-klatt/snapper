@@ -3,28 +3,24 @@
 Emits ``BacktestProgressData`` events to the 4-segment ZMQ topic family
 ``backtest.{wallet_public_id}.{run_public_id}.{event}``. The existing
 ZMQ→WS bridge forwards those envelopes to every subscribed client
-scoped by the wallet segment (see plan §2.1.2 RBAC matrix).
-
-Emit ordering invariants (plan §2.3):
-
-- ``on_started`` — fires exactly once at ``event="started"`` before the
+scoped by the wallet segment.
+Emit ordering invariants
+``on_started`` — fires exactly once at ``event="started"`` before the
   first candle. Bypasses the throttle.
-- ``on_candle_processed`` — each call bumps the internal
-  ``candles_done`` counter and:
+``on_candle_processed`` — each call bumps the internal
+  ``candles_done`` counter and
   1. Checks 25 / 50 / 75 pct milestone buckets. Each bucket fires at
      most once per run even if recrossed (``_milestones_seen`` dedup).
      Milestones bypass the throttle and do NOT consume the throttle
      window (orthogonal to ``progress`` events).
   2. Gate-checks the 250 ms throttle for a ``progress`` event.
-- ``on_terminal`` — fires exactly once for one of
+``on_terminal`` — fires exactly once for one of
   ``{completed, failed, cancelled}`` after the engine exits. Bypasses
   the throttle.
-
 When ``total_candles`` is ``None`` or ``<= 0`` (the runner's count
 query failed or the run is empty), ``progress_pct`` stays ``0.0`` and
 milestones are silently disabled. The ``started`` / ``progress`` /
 terminal events still fire.
-
 The emitter is transport-agnostic: it writes into a ``PublishFn``
 callable injected by the owner. In production the runner wires this
 to ``MessagePublisher.send``; tests inject an in-memory collector.

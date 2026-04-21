@@ -1,13 +1,12 @@
 """REST API routes for operator catalogue read access.
 
-Provides the Phase 0d frontend operator picker with the list of
+Provides the frontend operator picker with the list of
 operators the current principal may act AS. ADMIN principals see
 every active operator (matching the ADMIN-wide expansion rule in
-``UserService.build_auth_principal`` / ``get_user_with_operators``);
+``UserService.build_auth_principal`` / ``get_user_with_operators``)
 VIEWER and OPERATOR principals see only the operators covered by
 their ``user_operator_memberships`` (exposed on the principal as
 ``operator_public_ids`` at token issue time).
-
 The endpoint performs a server-side filter even though
 ``/auth/me`` already returns ``operator_public_ids`` — callers may
 want a richer projection (``label``, ``description``) for the

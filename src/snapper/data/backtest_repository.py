@@ -287,8 +287,8 @@ class BacktestRepository:
             wallet_public_id: Optional wallet filter.
             strategy: Optional strategy_name filter.
             status: Optional status filter.
-            config_hash: Optional Phase 2c pairing-stable hash filter
-                — selects runs with the same ``compute_fingerprint(
+            config_hash: Optional pairing-stable hash filter
+                selects runs with the same ``compute_fingerprint(
                 config, for_pairing=True)`` digest for auto-pair UI.
             limit: Max rows to return.
             offset: Rows to skip.
@@ -805,7 +805,7 @@ class BacktestRepository:
         session_id: str,
         sequence_id: int,
     ) -> tuple[int, str]:
-        """Insert a new backtest_comparisons row (Phase 2c Step 4).
+        """Insert a new backtest_comparisons row.
 
         Caller is responsible for pair normalisation ((min, max) by
         lexical public_id) before calling.

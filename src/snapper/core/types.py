@@ -207,13 +207,13 @@ class TradeCommandStatusEnum(StrEnum):
 class ExecutionPlanStatusEnum(StrEnum):
     """Lifecycle state of an ExecutionPlan row.
 
-    Covers every state the PlanExecutorService transitions through:
+    Covers every state the PlanExecutorService transitions through
     ``armed`` (waiting for first tick / command), ``active`` (has
-    in-flight child commands), ``paused`` (operator intervention),
-    ``cancel_requested`` (cancel issued but children still racing),
+    in-flight child commands), ``paused`` (operator intervention)
+    ``cancel_requested`` (cancel issued but children still racing)
     terminal states ``completed`` / ``cancelled`` / ``failed`` /
     ``expired``. Mirrors the state machine documented in
-    ``proprietary/plans/plan_execution_plans.md`` §2.
+    ``proprietary/plans/plan_execution_plans.md``.
     """
 
     ARMED = "armed"

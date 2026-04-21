@@ -152,14 +152,13 @@ class DeactivateUserBody(StrictBody):
 
     Command-style endpoint with optional human-readable rationale that
     is forwarded to the canonical `admin.user_deactivated` bus payload
-    (plan §3.6.5) so subscribers (`AuthenticatedWebSocketManager`,
+    so subscribers (`AuthenticatedWebSocketManager`,
     cross-instance `TokenManager`, audit consumers) can record why the
     kill switch fired.
 
     Attributes:
         reason: Optional admin note explaining the deactivation. ``None``
-            when the request body is omitted entirely (back-compat with
-            the pre-Day-3b empty body).
+            when the request body is omitted entirely.
     """
 
     reason: str | None = None
@@ -176,17 +175,16 @@ class DeactivateUserRequest(PayloadRequest[Literal["deactivate_user_request"], D
 
 
 class RefreshTokenPayload(StrictBody):
-    """Optional refresh-token body (Phase 2c).
+    """Optional refresh-token body.
 
     Both fields are optional; when absent the caller inherits the
     existing JWT claims byte-identically. Set ``active_wallet_public_id``
     to mint new tokens scoped to that wallet (after server-side
     membership validation); set ``clear_active_wallet`` to explicitly
     clear the claim to ``None`` ("All wallets" UI option).
-
     Invariant: both fields MUST NOT be set simultaneously — enforced
     by the ``@model_validator`` below (422 at parse time). The
-    ``active_wallet_public_id`` value must be a canonical UUID7 —
+    ``active_wallet_public_id`` value must be a canonical UUID7
     a Pydantic field validator rejects malformed input with 422
     before any membership query fires.
 

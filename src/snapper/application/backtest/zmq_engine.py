@@ -1,30 +1,25 @@
 """ZmqReplayEngine — backtest engine driven by an in-process ZMQ replay broker.
 
-Wires together the Phase 2b-core building blocks:
-
-- :func:`snapper.application.backtest.endpoints.allocate_replay_endpoints` for an
+Wires together the building blocks
+:func:`snapper.application.backtest.endpoints.allocate_replay_endpoints` for an
   ephemeral per-run XPUB/XSUB broker (xpub_verbose=True).
-- :class:`snapper.application.backtest.drain.DrainCoordinator` for end-of-stream
+:class:`snapper.application.backtest.drain.DrainCoordinator` for end-of-stream
   parity between publisher and strategy.
-- :func:`snapper.strategies.backtest_strategy.make_backtest_replay_strategy` for
+:func:`snapper.strategies.backtest_strategy.make_backtest_replay_strategy` for
   the replay-shimmed strategy (skips heartbeat, market-only subs, echo-ack
   detection in _listen_loop).
-- :class:`snapper.messaging.publishers.replay_publisher.ReplayPublisher` for the
+:class:`snapper.messaging.publishers.replay_publisher.ReplayPublisher` for the
   echo-ack handshake + candle streaming.
-
 Field-for-field parity with ``DirectDbEngine.run`` on the same config, but
 candles travel publisher → broker → strategy via ZMQ so the strategy's
 production message-bus path is exercised end-to-end.
-
-Cancellation, drain, and broker cleanup are bounded:
-
-- ``asyncio.wait({publisher_task, strategy._listen_task}, FIRST_COMPLETED)`` —
+Cancellation, drain, and broker cleanup are bounded
+``asyncio.wait({publisher_task, strategy._listen_task}, FIRST_COMPLETED)``
   whichever finishes first decides the outcome; exceptions bubble up.
-- ``finally``: cancel both tasks, ``asyncio.wait(timeout=2.0)`` with leak
+``finally``: cancel both tasks, ``asyncio.wait(timeout=2.0)`` with leak
   logging on tasks that refuse to terminate, then strategy.stop() and
   broker.stop() in that order so the strategy's socket is closed before
   the broker tears down its sockets.
-
 Empty-instrument config fast-fails with ValueError before any broker is
 allocated so misconfigured runs do not consume ephemeral ports.
 """
@@ -74,12 +69,12 @@ class ZmqReplayEngine:
         Args:
             repository: Source of historical candles.
             snapshot_as_of: Bitemporal snapshot for all DB reads.
-            cancel_probe: Optional shared CancelProbe (Phase 2b-hardening
+            cancel_probe: Optional shared CancelProbe (
                 Step 3). When supplied, the strategy mixin's ``_listen_loop``
                 calls ``await probe.check()`` per processed candle so a
                 cancel_requested status is detected within ``cancel_poll_ms``
                 + ``probe_timeout_s``.
-            emitter: Optional Phase 2c progress emitter shared with
+            emitter: Optional progress emitter shared with
                 ``DirectDbEngine`` so both replay modes emit identical
                 WS progress events.
         """

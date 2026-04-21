@@ -1,19 +1,17 @@
-"""Pre-insert DTO for trade-command submissions (plan §3.5.1).
+"""Pre-insert DTO for trade-command submissions.
 
-:class:`TradeCommandSubmission` is the value object every insert
+class:`TradeCommandSubmission` is the value object every insert
 site constructs BEFORE acquiring the cap-enforcer guard. It is
 intentionally **distinct** from :class:`TradeCommandRow` (the
 post-insert DB-projection TypedDict): this one carries the request
 context that the enforcer needs for cap evaluation, without the
-DB-assigned fields (``public_id``, ``created_at``, ``session_id``,
+DB-assigned fields (``public_id``, ``created_at``, ``session_id``
 ``sequence_id``, ``timestamp``) which are populated at insert
 time.
-
 The DTO is frozen so an insert pipeline can pass it by reference
 without worrying about mutations between cap check and actual
 insert.
-
-See ``plan_ai_integration_phase_a.md`` §3.5.1 (R2-M7 resolution).
+See ``plan_ai_integration_phase_a.md``.
 """
 
 from dataclasses import dataclass
@@ -51,9 +49,9 @@ class TradeCommandSubmission:
         price: Limit price for limit orders; ``None`` for market
             orders or cancels.
         source_surface: One of ``"mcp" | "rest" | "strategy" |
-            "ws"`` (§3.9). Threaded into the inserted row.
+            "ws"``. Threaded into the inserted row.
         idempotency_key: Optional caller-supplied dedupe key.
-            Required on MCP ``submit_manual_order`` (§4 Day 2).
+            Required on MCP ``submit_manual_order``.
     """
 
     user_public_id: str | None

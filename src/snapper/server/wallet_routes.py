@@ -1,12 +1,11 @@
 """REST API routes for wallet catalogue read + create access.
 
-Provides the Phase 0d frontend wallet picker with the list of
+Provides the frontend wallet picker with the list of
 wallets the current principal can act on, plus a guarded create
 endpoint backing the admin Wallet Credentials tab. ADMIN
 principals see every active wallet; VIEWER and OPERATOR principals
 see only the subset covered by at least one of their active scope
 grants.
-
 Credential management (add / rotate / restart) lives on the
 future routes under ``/wallets/{id}/credentials`` and never
 co-returns the encrypted payload. Gap detection provenance
@@ -72,7 +71,7 @@ async def list_wallets(
 
     ADMIN sees every active wallet. VIEWER and OPERATOR see only the
     wallets covered by at least one active scope grant from the
-    principal's operator set — matching the Phase 0d wallet picker
+    principal's operator set — matching the wallet picker
     contract that the picker is filtered server-side.
 
     Args:
@@ -120,10 +119,9 @@ async def create_wallet(
     """Create a new active wallet.
 
     Guarded by the ``MANAGE_WALLET_CREDENTIALS`` permission, which
-    is ADMIN-only at Phase 0d launch. A wallet is the container for
+    is ADMIN-only at launch. A wallet is the container for
     credentials, so the same permission that manages credential
     rotation also creates the wallets that hold them.
-
     The active-unique index on ``(label, is_paper)`` is enforced at
     the DB layer and bubbles up as HTTP 409 via
     ``WalletConflictError``. Paper and live wallets may share the

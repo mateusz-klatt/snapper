@@ -821,7 +821,7 @@ class Repository(ABC):
             as_of: Point-in-time for temporal query.
             symbol: Optional native symbol filter.
             exchange: Optional exchange filter.
-            wallet_public_ids: Optional wallet scope filter for Phase 0d
+            wallet_public_ids: Optional wallet scope filter for
                 multi-tenant scoping. When ``None``, no wallet filter is
                 applied (ADMIN sees all). When a non-empty list, only
                 orders on the listed wallets are returned.
@@ -1599,11 +1599,11 @@ class Repository(ABC):
 
         Args:
             row: Trade command insert payload.
-            ownership: Optional Phase 4 partitioning guard. When
+            ownership: Optional partitioning guard. When
                 provided, the row's ``shard_key`` MUST be owned by
                 this ownership view or :class:`ShardOwnershipError`
                 is raised before the DB write. Opt-in — callers that
-                legitimately write foreign-shard rows (HTTP handlers,
+                legitimately write foreign-shard rows (HTTP handlers
                 plan services) pass ``None`` and rely on downstream
                 filtering (outbox + coordinator) to route commands
                 to the owning coordinator.
@@ -1639,8 +1639,8 @@ class Repository(ABC):
     async def count_user_open_commands(self, user_public_id: str) -> int:
         """Count user's non-terminal trade-commands (``max_open_orders`` cap).
 
-        All-time count (no time window — see §3.5.3 R3-M2 resolution).
-        Non-terminal statuses: ``created``, ``dispatched``,
+        All-time count.
+        Non-terminal statuses: ``created``, ``dispatched``
         ``acked``, ``accepted``, ``partially_filled``. Only
         command_type ``submit`` / ``replace`` rows count — cancels
         are not in-flight exposure.
@@ -1661,7 +1661,7 @@ class Repository(ABC):
 
         Used by the ``max_daily_notional_usd`` cap: the enforcer
         sums ``quantity × price`` over these rows to get the
-        rolling 24h USD commitment (§3.5.3). Excludes rows whose
+        rolling 24h USD commitment. Excludes rows whose
         current status is ``rejected``.
 
         Args:
@@ -1679,7 +1679,7 @@ class Repository(ABC):
         """Count user's cancel commands since a cut-off.
 
         Used by the ``max_cancels_per_minute`` cap (sliding 60s
-        window per §3.5.3). Counts every row where
+        window per). Counts every row where
         ``command_type == 'cancel'`` AND
         ``created_at >= since``, regardless of terminal status
         (a cancel that was later rejected still counts against
@@ -1706,17 +1706,17 @@ class Repository(ABC):
 
         Driven by :meth:`TokenManager.persist_tokens` after each
         successful ``create_tokens()`` — the inventory is what the
-        Day 3d DB-backed ``verify_token`` SELECTs against and what
-        :meth:`TokenManager.revoke_user_sessions` flips on the kill
+         DB-backed ``verify_token`` SELECTs against and what
+        meth:`TokenManager.revoke_user_sessions` flips on the kill
         switch. Insertion is batched because both tokens in a pair
         share the same ``issued_at`` and a single round-trip
         preserves the invariant that either both rows land or
-        neither does (plan §3.6.2).
+        neither does.
 
         Args:
             rows: Insert-row batch. Empty list is a no-op. Each row
                 must supply every NOT NULL column on
-                :class:`~snapper.data.models.UserActiveToken`; the
+                class:`~snapper.data.models.UserActiveToken`; the
                 ``revoked_at`` column defaults to ``NULL`` (active).
         """
         ...
@@ -1731,13 +1731,11 @@ class Repository(ABC):
         """Atomic refresh-rotation: revoke ``old_jti`` AND insert new rows.
 
         The refresh endpoint exchanges a redeemed refresh JWT for a
-        fresh access + refresh pair. Plan §3.6.2 requires this
+        fresh access + refresh pair. This flow requires the
         exchange be atomic at the DB layer: the old row's
         ``revoked_at`` must flip ONLY if the new pair lands, and
         vice-versa. Splitting the two operations across two
-        independent transactions opens two failure modes the Day
-        3d-A R1 multi-model review flagged as MAJOR:
-
+        independent transactions opens two failure modes:
             1. Replay: if the old row is already revoked (count=0)
                and the caller still rotates, a compromised refresh
                JWT could issue multiple successor pairs inside the
@@ -1745,12 +1743,11 @@ class Repository(ABC):
                surfaces count=0 so the route can return 401 BEFORE
                minting a new pair.
             2. Stranded user: if revoke commits but the subsequent
-               insert fails (transient DB error, connection reset),
+               insert fails (transient DB error, connection reset)
                the user loses their refresh token without receiving
                a replacement. One transaction → either both stick
                or both roll back; the caller retries with the
                original refresh JWT.
-
         The method does NOT seed the in-memory blacklist — that's
         the caller's responsibility AFTER this call returns a
         positive rowcount, so the blacklist grace period starts at
@@ -1763,7 +1760,7 @@ class Repository(ABC):
                 and NOTHING is inserted (rollback contract).
             new_rows: Insert batch for the successor access +
                 refresh rows. Typically 2 rows produced by
-                :meth:`TokenManager.persist_tokens`-style decoding.
+                meth:`TokenManager.persist_tokens`-style decoding.
             revoked_at: Timestamp stamped on the old row's
                 ``revoked_at`` when the rotation commits.
 
@@ -1783,8 +1780,8 @@ class Repository(ABC):
         """Flip ``revoked_at`` on a single row identified by ``jti``.
 
         Single-row counterpart to
-        :meth:`revoke_user_active_tokens` used on the refresh-token
-        rotation path (plan §3.6.3): when a caller redeems a refresh
+        meth:`revoke_user_active_tokens` used on the refresh-token
+        rotation path: when a caller redeems a refresh
         JWT, the old row is marked revoked immediately so a replay
         of the same refresh JWT post-rotation fails even before the
         blacklist grace period elapses. The call is idempotent — a
@@ -1812,10 +1809,10 @@ class Repository(ABC):
     ) -> UserActiveTokenVerificationRow | None:
         """Return verify-path row by ``token_hash``, joined with ``users.is_active``.
 
-        Used by the Day 3d async ``verify_token`` to check in a
+        Used by the async ``verify_token`` to check in a
         single round-trip that (a) the presented JWT has a matching
         ``user_active_tokens`` row (rejects pre-migration tokens per
-        §3.6.3 deployment note), (b) it has not been revoked
+         Deployment note), (b) it has not been revoked
         (``revoked_at IS NULL``), (c) the owner is still active
         (``users.is_active = True``), and (d) the cached
         ``expires_at`` matches what the JWT payload carries. The
@@ -1846,12 +1843,12 @@ class Repository(ABC):
         Reads the non-temporal ``user_active_tokens`` table and
         returns the JWT IDs whose ``revoked_at`` is still NULL. Used
         by :meth:`TokenManager.revoke_user_sessions` to load the
-        in-memory fast-path blacklist before flipping DB state —
+        in-memory fast-path blacklist before flipping DB state
         every JTI the kill switch revokes must appear in both the
         ``user_active_tokens.revoked_at`` column AND the
-        :attr:`TokenManager._blacklisted_tokens` cache so ``verify_token``
+        attr:`TokenManager._blacklisted_tokens` cache so ``verify_token``
         rejects it on the very next request regardless of which code
-        path checks first (plan §3.6.1).
+        path checks first.
 
         Args:
             user_public_id: UUID of the user whose tokens are being
@@ -2309,8 +2306,7 @@ class Repository(ABC):
         ``wallets``: two concurrent active rows sharing both columns
         are rejected by the DB layer, which bubbles up as
         ``WalletConflictError`` from this method.
-
-        Used by the Phase 0d admin wallet creation endpoint
+        Used by the admin wallet creation endpoint
         (``POST /api/wallets``).
 
         Args:
@@ -2334,7 +2330,7 @@ class Repository(ABC):
     async def list_active_wallets(self, as_of: datetime) -> list[WalletRow]:
         """Return every active wallet at the given bus time.
 
-        Used by the Phase 0d wallet catalogue endpoint (ADMIN only —
+        Used by the wallet catalogue endpoint (ADMIN only
         non-admin callers must go through
         ``list_accessible_wallets_for_operators`` so they only see
         wallets covered by at least one of their active scope grants).
@@ -2358,10 +2354,10 @@ class Repository(ABC):
         """Wallets covered by at least one active grant from the given operators.
 
         Scoped variant of ``list_active_wallets`` for VIEWER / OPERATOR
-        principals. The result is the set union over all operator IDs:
+        principals. The result is the set union over all operator IDs
         a wallet is accessible if ANY of the principal's operators
         holds an active ``wallet_operator_scope_grants`` row on it.
-        This matches the Phase 0d wallet picker contract: the picker
+        This matches the wallet picker contract: the picker
         is filtered server-side to the wallets the current operator
         can act on.
 
@@ -4027,10 +4023,9 @@ class SQLAlchemyRepository(Repository):
         explicit wallet default to the empty-string legacy sentinel
         (the same default that :class:`ExchangeExecutorService` uses
         for single-wallet template instantiations).
-
-        Phase 4 partitioning guard (opt-in, Day 3): when ``ownership``
+        When ``ownership``
         is non-None, the row's ``shard_key`` MUST be owned by it or
-        :class:`ShardOwnershipError` is raised before the DB write.
+        class:`ShardOwnershipError` is raised before the DB write.
         """
         if ownership is not None and not ownership.owns(row["shard_key"]):
             raise ShardOwnershipError(
@@ -4083,13 +4078,12 @@ class SQLAlchemyRepository(Repository):
     async def count_user_open_commands(self, user_public_id: str) -> int:
         """Count non-terminal submit-type commands for a user.
 
-        All-time count per plan §3.5.3 (no time window). Cancel
+        All-time count (no time window). Cancel
         commands are excluded: they are not in-flight exposure.
-
         The DB persists two submit-type vocabularies: REST routes and
-        plan helpers (bracket, trailing_stop) insert ``"create"``;
+        plan helpers (bracket, trailing_stop) insert ``"create"``
         strategy/engine paths insert ``"submit"`` via
-        :class:`OrderCommandEnum`; replace paths insert ``"replace"``.
+        class:`OrderCommandEnum`; replace paths insert ``"replace"``.
         All three are counted against ``max_open_orders`` — the cap
         limits user exposure regardless of origin surface.
         """
@@ -4508,19 +4502,17 @@ class SQLAlchemyRepository(Repository):
     ) -> list[TradeCommandRow]:
         """Return trade commands with status='created' for outbox dispatch.
 
-        Phase 4 pagination: when ``offset > 0``, the query skips the
+        When ``offset > 0``, the query skips the
         first ``offset`` rows. Used by
-        :class:`OutboxDispatcher._dispatch_batch` to page through the
+        class:`OutboxDispatcher._dispatch_batch` to page through the
         ``created`` backlog while filtering for owned shards in Python
-        — see plan §3.3 / §D4 for the starvation-bound contract.
-
-        Ordering is ``(created_at, id)`` for deterministic pagination:
+        see for the starvation-bound contract.
+        Ordering is ``(created_at, id)`` for deterministic pagination
         plan-service dispatch inserts multiple commands within a single
         ``now`` tick (see ``application/plans/service.py``) so ties on
-        ``created_at`` are realistic. Without the ``id`` tie-breaker,
+        ``created_at`` are realistic. Without the ``id`` tie-breaker
         ``OFFSET`` pagination could skip or duplicate rows across pages
-        → double-dispatch. Ticket: R1 review of Phase 4 Day 3 commit
-        c640505.
+        → double-dispatch.
         """
         async with self.session() as s:
             result = await s.execute(

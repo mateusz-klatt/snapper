@@ -4,36 +4,29 @@
 outgoing REST call to an external exchange and exposes rolling-window
 rates + utilization against the published per-exchange limit. The goal
 is to close the "we have no idea how close we are to 429" blind spot
-that every exchange-integration roadmap has flagged since Phase 1.
-
-Known upstream limits (2026-04, public API docs):
-
-- Walutomat: 20 req/s per account.
-- Kraken Spot (REST): 15 req/s per nonce window.
-- Polygon.io: 5 req/min on the free tier.
-- Kraken Futures / Kraken Equities / Zonda: not publicly documented
+that every exchange-integration roadmap has flagged since
+Known upstream limits (public API docs)
+Walutomat: 20 req/s per account.
+Kraken Spot (REST): 15 req/s per nonce window.
+Polygon.io: 5 req/min on the free tier.
+Kraken Futures / Kraken Equities / Zonda: not publicly documented
   as a flat req/s; left as `None` and the tracker reports only raw
   rates (no utilization).
-
-Design:
-
-- Per-exchange deque of monotonic timestamps. On `record_call`, the
+Design
+Per-exchange deque of monotonic timestamps. On `record_call`, the
   tracker appends `time.monotonic()` and trims entries older than the
   longest configured window (60 s).
-- `get_rate(exchange, window_s)` counts entries newer than
+`get_rate(exchange, window_s)` counts entries newer than
   `now - window_s` and returns `count / window_s` (req/s).
-- `get_utilization(exchange)` returns the 1 s rate divided by the
+`get_utilization(exchange)` returns the 1 s rate divided by the
   exchange's configured limit, or `None` when no limit is configured.
-- `snapshot()` emits a flat dict suitable for JSON APIs / logs.
-
-Threading:
-
+`snapshot()` emits a flat dict suitable for JSON APIs / logs.
+Threading
 The tracker uses a `threading.Lock` so it is safe from async code
 running on different threads (the publisher + executor stacks run in
 separate `ProcessModeEnum.THREAD` workers). All operations are O(1)
-amortised — the deque only trims entries older than the 60 s window,
+amortised — the deque only trims entries older than the 60 s window
 so memory is bounded at ~60 x max_rps per exchange.
-
 The tracker is intentionally NOT auto-backoff. Enforcement lives in
 each exchange's `_with_retry` / ccxt rate-limit handler. The tracker
 is observability only — logging and (future) metrics endpoints read

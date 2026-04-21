@@ -4,9 +4,8 @@ BalanceService consumes PositionChanged events from TradeService and
 MarkPrice updates from the quote pipeline. It computes derived metrics
 (equity, exposure, drawdown) and provides a read model for
 TradingEngineService and API endpoints.
-
-Phase 1b: service class + in-memory projection.
-Phase 1c: wired to TradeService events + mark prices.
+Service class + in-memory projection.
+Wired to TradeService events + mark prices.
 """
 
 import math

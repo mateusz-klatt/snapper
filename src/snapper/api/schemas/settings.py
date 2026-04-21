@@ -121,11 +121,11 @@ class SettingListResponse(PayloadListResponse[Literal["setting_list"], SettingRe
 
 
 class FeatureFlagsPayload(StrictBody):
-    """Public feature-flag projection (plan §4 Day 4 item 1, resolves R2-M5).
+    """Public feature-flag projection.
 
     Exposes ONLY the boolean feature flags that the frontend needs
     on mount to decide whether to render the ``/ai-integration``
-    surface. No secrets, no per-user state, no setting values —
+    surface. No secrets, no per-user state, no setting values
     just the on/off state of feature gates that are safe to reveal
     to an unauthenticated caller.
 
@@ -134,7 +134,7 @@ class FeatureFlagsPayload(StrictBody):
             activated. When ``False``, the frontend hides the
             AI Integration navigation entry and the ``/api/mcp``
             endpoint returns ``503 feature_disabled`` per plan
-            §3.12 always-mounted-but-gated semantics.
+             Always-mounted-but-gated semantics.
     """
 
     ai_integration_enabled: bool = Field(

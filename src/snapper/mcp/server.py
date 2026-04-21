@@ -1,4 +1,4 @@
-"""MCP sub-application factory (plan §3.2 + §3.12).
+"""MCP sub-application factory.
 
 Constructs the Starlette sub-app mounted under ``/api/mcp``. The
 sub-app is ALWAYS mounted; the :class:`FeatureFlagMiddleware`
@@ -6,13 +6,12 @@ returns HTTP 503 with ``{"error_code": "feature_disabled"}`` when
 the ``ai_integration_enabled`` DB setting is ``False`` (default).
 This lets operators flip the flag at runtime without restarting
 the API server.
-
-The bearer-header auth extension shipped in Day 2a
+The bearer-header auth extension shipped in
 (:func:`snapper.auth.dependencies.get_current_user`) provides the
 transport; this module's auth middleware translates its absence /
 invalidity into MCP-compatible JSON error responses. Per-tool
 fine-grained authorization is handled by the individual tool
-wrappers (Day 2c scope).
+wrappers.
 """
 
 from collections.abc import Callable
@@ -81,7 +80,7 @@ def get_current_claims() -> TokenClaims:
 class FeatureFlagMiddleware(BaseHTTPMiddleware):
     """Reject every request with 503 when the AI integration flag is off.
 
-    Always-mounted endpoint per plan §3.12: the sub-app is installed
+    Always-mounted endpoint : the sub-app is installed
     at app startup unconditionally; toggling the DB setting flips
     availability without a restart. A 503 response with
     ``error_code="feature_disabled"`` lets MCP clients distinguish a
@@ -155,11 +154,11 @@ class FeatureFlagMiddleware(BaseHTTPMiddleware):
 def _build_rejection_response(rejection_reason: str | None) -> JSONResponse:
     """Return a 401 JSONResponse whose ``error_code`` matches ``rejection_reason``.
 
-    Plan §2 item 6 (R3-B2 resolution) + Day 3d-D R1 review
-    (Copilot MAJOR + Codex MINOR): the reason comes straight from
-    :meth:`TokenManager.verify_token_with_reason` so the classifier
+     +
+    the reason comes straight from
+    meth:`TokenManager.verify_token_with_reason` so the classifier
     cannot be fooled by a stale cache entry left over from an
-    earlier request (the race the R1 review flagged). Success is
+    earlier request. Success is
     never routed here; only rejection reasons land in this
     function.
 
@@ -199,28 +198,23 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
     Rejects with 401 when the header is absent, malformed, or carries
     an unverifiable JWT. The verified :class:`TokenClaims` is stashed
     on ``request.state.token_claims`` for downstream tool dispatch
-    (Day 2c wires per-tool permission checks off this state).
-
-    The MCP transport (Streamable HTTP per plan §3.2) has no cookie
+    The MCP transport has no cookie
     semantics — clients exclusively present the bearer token they
-    obtained via ``POST /api/auth/login?return_tokens=true`` (Day 2a).
-
-    Per plan §3.6.3 (Day 3d-B): verification routes through
-    :meth:`TokenManager.verify_token_with_db` so each MCP call
+    obtained via ``POST /api/auth/login?return_tokens=true``.
+    Verification routes through
+    meth:`TokenManager.verify_token_with_db` so each MCP call
     checks the ``user_active_tokens`` inventory + SCD2-active
     ``users.is_active`` via the 30-second LRU cache. Kill-switch
-    propagation:
-
-        - **Same-instance** — immediate. The JTI blacklist seeded
+    propagation
+        **Same-instance** — immediate. The JTI blacklist seeded
           by :meth:`TokenManager.revoke_user_sessions` is
           consulted inside the sync ``verify_token`` layer BEFORE
           the LRU, so revoked tokens cannot serve from cache.
-        - **Cross-instance** — bounded by the 30-second LRU TTL
-          until the Day 3d-C admin-bus subscriber calls
-          :meth:`TokenManager.invalidate_user_cache` on
+        **Cross-instance** — bounded by the 30-second LRU TTL
+          until the admin-bus subscriber calls
+          meth:`TokenManager.invalidate_user_cache` on
           ``admin.user_deactivated``, collapsing latency to one
           bus round-trip.
-
     The effective ceiling drops from the 15-minute access-token
     TTL to 30 s.
     """
@@ -314,43 +308,41 @@ def build_mcp_app(
 ) -> Starlette:
     """Return the Starlette sub-app to be mounted under ``/api/mcp``.
 
-    Composition order matters (outermost middleware runs first):
-
-        1. :class:`FeatureFlagMiddleware` — cheapest reject path;
+    Composition order matters (outermost middleware runs first)
+        1. :class:`FeatureFlagMiddleware` — cheapest reject path
            short-circuits when the flag is off so disabled
            deployments don't even verify JWTs.
         2. :class:`BearerAuthMiddleware` — auth gate; populates
            ``request.state.token_claims`` before tool dispatch.
         3. :class:`PrincipalRateLimitMiddleware` — per-principal
-           throttle keyed off the claims set by (2). Plan §3.10 +
-           Day 5d-B2 closure of the Day 5c review MAJOR finding.
+           throttle keyed off the claims set by (2). +
         4. Downstream FastMCP Streamable HTTP app with tools
            registered via :func:`register_mcp_tools`.
 
     Args:
         settings_service_getter: Zero-arg callable returning the
-            :class:`SettingsService` singleton at request time. This
+            class:`SettingsService` singleton at request time. This
             must be a getter (not the service itself) because the
             sub-app is constructed in ``create_app()`` BEFORE the
             FastAPI lifespan has initialized the settings service.
             The typical wiring is
             ``build_mcp_app(lambda: getattr(app.state, "settings_service", None))``.
         repository_getter: Zero-arg callable returning the shared
-            :class:`Repository` singleton. Tools read-only methods
+            class:`Repository` singleton. Tools read-only methods
             (``list_instruments``, ``list_positions``, etc.) call
             through this. ``None`` at construction time is supported
             and treated as "tools unavailable" at request time — so
             the sub-app can still be mounted before lifespan startup
             completes.
         caps_enforcer_getter: Zero-arg callable returning the shared
-            :class:`TradingCapsEnforcer` singleton. Write tools
+            class:`TradingCapsEnforcer` singleton. Write tools
             (``submit_manual_order``, ``cancel_order``) wrap inserts
             in ``guard(submission)`` against this enforcer so
             per-user caps apply to MCP-initiated writes identically
             to REST-initiated writes.
 
     Returns:
-        A Starlette sub-app ready for ``FastAPI.mount("/api/mcp", ...)``.
+        A Starlette sub-app ready for ``FastAPI.mount("/api/mcp",...)``.
     """
     mcp_server = FastMCP(
         _MCP_SERVER_NAME,

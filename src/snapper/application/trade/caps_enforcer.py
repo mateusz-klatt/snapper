@@ -1,43 +1,31 @@
-"""Per-user trading-caps enforcer (plan §3.5.2).
+"""Per-user trading-caps enforcer.
 
-Transaction-scoped async context manager spanning cap-check +
-insert + commit. Holds a per-user :class:`asyncio.Lock` across
+Transaction-scoped async context manager spanning cap check,
+insert, and commit. Holds a per-user :class:`asyncio.Lock` across
 the entire guarded block so TOCTOU races between concurrent
 submissions for the same user cannot bypass caps.
 
-**Two-method API** (locked per 4-model consultation 2026-04-18):
-
-    - :meth:`guard` — user-bound path. Requires
-      ``submission.user_public_id is not None``; enforces all four
+Two-method API:
+    :meth:`guard` — user-bound path. Requires
+      ``submission.user_public_id is not None`` and enforces all four
       caps (quantity, open orders, 24h USD notional, 60s cancels).
-      Used by the 6 REST + plan call sites.
-    - :meth:`guard_service_principal` — strategy hot-path. Skips
-      all caps; yields :class:`Guard` for UUID7 pre-generation
-      consistency. The single engine
-      ``TradingEngineService._send_order`` call site uses this.
-      The *explicit* method name makes the bypass audit-visible so
-      a future REST handler that drops the user ID silently cannot
-      hit the unchecked path.
+    :meth:`guard_service_principal` — strategy hot-path. Skips
+      all caps and yields :class:`Guard` for UUID7 pre-generation
+      consistency.
 
-**Locking** (Q1 from consultation — WeakValueDictionary; all 4
-models APPROVED):
-
+Locking:
     ``WeakValueDictionary[str, asyncio.Lock]`` keyed by
     ``user_public_id`` so idle users are GC'd automatically. A
     caller inside ``async with lock`` keeps a strong reference
-    through the critical section, so GC cannot reclaim a live
-    lock.
+    through the critical section, so GC cannot reclaim a live lock.
 
-**SQLite advisory lock** (Q2 — all 4 models APPROVED no-op):
-SQLite dev is single-process; the asyncio lock is sufficient.
-Postgres gets ``pg_advisory_xact_lock`` in a follow-up when multi-
-instance caps accounting is needed.
-
+SQLite is single-process in local dev, so the asyncio lock is
+sufficient.
 Pricing for the 24h-notional cap is delegated to
-:class:`~snapper.application.pricing.usd_converter.USDConverter`.
+class:`~snapper.application.pricing.usd_converter.USDConverter`.
 A :class:`PriceUnavailableError` from the converter is mapped to
-:class:`CapsViolationError` with ``cap_type='price_unavailable'``
-so the HTTP layer can return the §9.2 ``caps_price_unavailable``
+class:`CapsViolationError` with ``cap_type='price_unavailable'``
+so the HTTP layer can return the ``caps_price_unavailable``
 error code.
 """
 
@@ -69,20 +57,19 @@ ROLLING_CANCELS_WINDOW = timedelta(seconds=60)
 class CapsViolationError(Exception):
     """Trading cap exceeded — raised inside the enforcer guard.
 
-    Carries structured fields so the §9.2 ``caps_violation`` HTTP
+    Carries structured fields so the ``caps_violation`` HTTP
     response body can surface ``cap_type`` / ``attempted`` /
-    ``limit`` to the client. ``cap_type`` takes one of:
-
-        - ``max_order_quantity_per_instrument``
-        - ``max_open_orders``
-        - ``max_daily_notional_usd``
-        - ``max_cancels_per_minute``
-        - ``missing_user_public_id`` — caller invoked
-          :meth:`TradingCapsEnforcer.guard` without threading a
-          user; fail-closed per §3.4 canonical rule (prevents
+    ``limit`` to the client. ``cap_type`` takes one of
+        ``max_order_quantity_per_instrument``
+        ``max_open_orders``
+        ``max_daily_notional_usd``
+        ``max_cancels_per_minute``
+        ``missing_user_public_id`` — caller invoked
+          meth:`TradingCapsEnforcer.guard` without threading a
+          user; fail-closed per canonical rule (prevents
           silent cap bypass).
-        - ``price_unavailable`` — USDConverter could not resolve
-          the submission's USD notional. Maps to §9.2
+        ``price_unavailable`` — USDConverter could not resolve
+          the submission's USD notional. Maps to
           ``caps_price_unavailable``.
     """
 
@@ -127,16 +114,15 @@ class Guard:
 
 
 class TradingCapsEnforcer:
-    """Process-singleton enforcer wired at app startup (plan §3.14).
+    """Process-singleton enforcer wired at app startup.
 
-    Constructor:
+    Constructor
         ``TradingCapsEnforcer(repository, pricing, now=...)``
-
-        - ``repository`` — shared :class:`Repository` singleton for
+        ``repository`` — shared :class:`Repository` singleton for
           cap lookups + recent-command projections.
-        - ``pricing`` — shared :class:`USDConverter` for notional
+        ``pricing`` — shared :class:`USDConverter` for notional
           math.
-        - ``now`` — optional wall-clock injector; tests override
+        ``now`` — optional wall-clock injector; tests override
           to control the 24h / 60s sliding windows
           deterministically.
     """
@@ -233,25 +219,22 @@ class TradingCapsEnforcer:
             A :class:`Guard` carrying the original submission + a
             freshly-generated UUID7 ``assigned_public_id``. No lock
             is held and no cap state is consulted.
-
         Given: a :class:`TradeCommandSubmission` from a service
             principal (strategy engine) where no user is the
-            actor,
+            actor
         When: the caller enters ``async with
-            enforcer.guard_service_principal(s):``,
+            enforcer.guard_service_principal(s):``
         Then: cap evaluation is skipped entirely. No lock is
             acquired (no user to contend on).
             ``assigned_public_id`` is still pre-generated so the
             engine sees the same identity-generation pattern as
             the user-bound path.
-
         Rationale: the bypass is an *explicit* named method so the
         audit trail at every insert site reveals whether caps are
         on or off. A REST handler that silently drops the user ID
         cannot accidentally hit this path — it would call
-        :meth:`guard`, which fails closed with
-        ``missing_user_public_id`` (plan §3.4 canonical rule +
-        2026-04-18 4-model consultation Q4 resolution).
+        meth:`guard`, which fails closed with
+        ``missing_user_public_id``.
         """
         assigned = str(uuid7())
         yield Guard(submission=submission, assigned_public_id=assigned)
@@ -261,7 +244,7 @@ class TradingCapsEnforcer:
 
         Submit / replace branches exercise quantity + open-orders
         + notional caps. Cancel branch exercises only the
-        cancels-per-minute cap per §3.5.3.
+        cancels-per-minute cap per.
         """
         assert (
             submission.user_public_id is not None
@@ -341,14 +324,13 @@ class TradingCapsEnforcer:
     ) -> None:
         """Reject if new submission pushes rolling 24h USD above cap.
 
-        Sum basis (§3.5.3): ``submit_qty × submit_price`` per
-        prior non-rejected row. For Phase A, prior rows where
+        Sum basis: ``submit_qty × submit_price`` per
+        prior non-rejected row. For, prior rows where
         ``price IS NULL`` (market orders) are SKIPPED with a WARN
         log — a follow-up plan can stamp the submit-time USD
         notional into a dedicated column when needed.
-
         The NEW submission's notional is computed via
-        :meth:`USDConverter.to_usd` (falls back to
+        meth:`USDConverter.to_usd` (falls back to
         ``CapsViolationError(price_unavailable)`` if the oracle
         is stale / missing).
 

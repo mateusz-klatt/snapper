@@ -40,7 +40,7 @@ class BacktestConfig(StrictBody):
         end_date: Backtest period end.
         wallet_public_id: Multi-tenant scoping.
         operator_public_id: Optional operator scope.
-        execution_mode: Candle feed mode (Phase 1: direct_db only).
+        execution_mode: Candle feed mode.
         initial_balance: Starting cash balance.
         strategy_params: Strategy-specific parameters.
         timeframe: Candle timeframe (e.g., "1h", "15m").
@@ -175,23 +175,19 @@ def compute_fingerprint(
     """Compute deterministic SHA-256 fingerprint for a backtest configuration.
 
     Used for dedup detection (``for_pairing=False``, the default) and
-    for Phase 2c auto-pair comparison (``for_pairing=True``).
-
+    for auto-pair comparison (``for_pairing=True``).
     When ``for_pairing=True``, fields that do NOT affect
     comparability are excluded from the serialised payload so two
     runs with the same business config but different execution modes
-    or ephemeral knobs hash to the same value:
-
-    - ``execution_mode`` — Direct-DB and ZMQ replay are considered
+    or ephemeral knobs hash to the same value
+    ``execution_mode`` — Direct-DB and ZMQ replay are considered
       comparable at the engine-output level.
-    - ``snapshot_as_of`` — per-invocation noise, not a config
+    ``snapshot_as_of`` — per-invocation noise, not a config
       attribute.
-    - ``warmup_bars`` / ``buffer_size`` — ephemeral engine knobs.
-
+    ``warmup_bars`` / ``buffer_size`` — ephemeral engine knobs.
     ``fill_model``, ``slippage_bps``, and ``commission_bps`` ARE
-    included in the pairing hash (R11 sonnet fix) because runs that
-    differ only in those three fields are NOT engine-comparable.
-
+    included in the pairing hash because runs that differ only in
+    those three fields are NOT engine-comparable.
     Default path (``for_pairing=False``) preserves the existing
     byte-for-byte fingerprint semantics — every existing caller
     (run provenance, dedup cache, tests) keeps its exact hash.
@@ -201,7 +197,7 @@ def compute_fingerprint(
         snapshot_as_of: Data snapshot timestamp (None = latest).
         warmup_bars: Number of warm-up candle bars.
         buffer_size: Additional buffer bars.
-        for_pairing: Phase 2c flag — when True, produce the
+        for_pairing: flag — when True, produce the
             pairing-stable hash by omitting execution_mode +
             snapshot_as_of + warmup_bars + buffer_size.
 

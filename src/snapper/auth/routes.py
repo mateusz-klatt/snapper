@@ -86,13 +86,13 @@ def _should_return_tokens(request: Request) -> bool:
     ``/api/auth/refresh`` to receive the access + refresh JWTs in the
     response body for subsequent ``Authorization: Bearer`` calls. The
     browser flow omits the query param and gets cookie-only behavior
-    (unchanged). Per plan §3.7.
+    (unchanged).
 
     Args:
         request: FastAPI request whose ``query_params`` are consulted.
 
     Returns:
-        ``True`` if ``?return_tokens=true`` (case-insensitive),
+        ``True`` if ``?return_tokens=true`` (case-insensitive)
         ``False`` otherwise — including the canonical absent-param
         default, which preserves the cookie-only browser flow.
     """
@@ -103,7 +103,7 @@ def _should_return_tokens(request: Request) -> bool:
 def _extract_refresh_bearer_token(request: Request) -> str | None:
     """Pull a refresh JWT from the ``Authorization: Bearer`` header.
 
-    Per plan §3.7: ``POST /api/auth/refresh`` reads the bearer header
+    ``POST /api/auth/refresh`` reads the bearer header
     FIRST and falls back to the ``refresh_token`` cookie. MCP clients
     without cookie jars exclusively use the header path; browser
     clients continue to hit the cookie path untouched.
@@ -161,8 +161,7 @@ async def login(
     """Authenticate user and create session.
 
     Sets access_token, refresh_token, and csrf_token cookies.
-
-    Per plan §3.7: when the caller passes ``?return_tokens=true``,
+    When the caller passes ``?return_tokens=true``
     the access / refresh JWTs are ALSO embedded in the response body
     so MCP / CLI clients with no cookie jar can store them for
     subsequent ``Authorization: Bearer`` calls. Cookies are still
@@ -173,8 +172,8 @@ async def login(
         response: FastAPI response for setting cookies.
         login_data: Login credentials.
         repo: Repository used to persist the freshly-minted token
-            pair in ``user_active_tokens`` (plan §3.6.2) so the
-            Day 3d-B DB-backed ``verify_token`` and the kill switch
+            pair in ``user_active_tokens`` so the
+             DB-backed ``verify_token`` and the kill switch
             can see the rows on the next request.
 
     Returns:
@@ -260,8 +259,7 @@ async def _apply_wallet_hint(
 ) -> AuthPrincipal:
     """Apply an optional wallet hint to the authenticated principal.
 
-    Role-branched membership validation (plan §2.5, R12 triple-convergent
-    security fix): ADMIN sees every active wallet via
+    Role-branched membership validation: ADMIN sees every active wallet via
     ``list_active_wallets``; non-admins see only wallets their
     operator memberships grant access to via
     ``list_accessible_wallets_for_operators``. A hint that doesn't
@@ -301,9 +299,7 @@ async def refresh_token(
 ) -> RefreshResponse:
     """Refresh session tokens with optional wallet-scope change.
 
-    Order (plan §2.5 R14 gpt-5.4 fix #3 — verify → parse → validate →
-    rotate → blacklist):
-
+    Order (verify → parse → validate → rotate → blacklist)
     1. Verify refresh-token signature + blacklist status.
     2. Parse optional body (422 on malformed UUID7 or mutually
        exclusive fields — fires before any DB work via Pydantic
@@ -313,33 +309,28 @@ async def refresh_token(
     4. Mint new tokens from the post-validation principal, then
        call :meth:`TokenManager.rotate_tokens` which revokes the
        old refresh row AND inserts the new pair inside a SINGLE DB
-       transaction (plan §3.6.2 R1 fix). Outcome matrix:
-
-           - Rowcount == 1 (atomic success): route continues.
-           - Rowcount == 0 (replay / unknown JTI): transaction
+       transaction. Outcome matrix
+           Rowcount == 1 (atomic success): route continues.
+           Rowcount == 0 (replay / unknown JTI): transaction
              rolls back and returns False → route raises 401.
-           - DB exception (connection reset, integrity error on
+           DB exception (connection reset, integrity error on
              the new-pair insert): the ``async with session()``
              scope rolls back; the exception propagates out of
              ``rotate_tokens`` and surfaces as a 5xx so the
-             client can retry with the original refresh JWT —
+             client can retry with the original refresh JWT
              no cookies / no successor tokens leaked.
-
     5. Seed the in-memory JTI blacklist AFTER the rotation commits
        so the grace-period window starts at the post-commit moment
        (cross-instance consistency).
-
     Response ``user.active_wallet_public_id`` is projected from
     ``principal.active_wallet_public_id`` (NOT ``token_data``) so
     a hinted refresh surfaces the NEW wallet, matching the
     freshly-minted token claims.
-
     Empty body preserved byte-identically for the three zero-body
-    callers (``stores/auth.refreshToken``, WS ticket refresh,
+    callers (``stores/auth.refreshToken``, WS ticket refresh
     ``apiClient.refreshAndRetry``): ``body is None`` → empty
     ``RefreshTokenPayload()`` → validation is a no-op.
-
-    Per plan §3.7: the refresh JWT is read from the
+    The refresh JWT is read from the
     ``Authorization: Bearer`` header FIRST and the ``refresh_token``
     cookie second. MCP / CLI clients without cookie jars use the
     header path exclusively. Passing ``?return_tokens=true``
@@ -718,7 +709,7 @@ async def deactivate_user(
 
     Resolves the username path segment to a `user_public_id` and
     delegates to `UserService.deactivate_user`, which is the SOLE
-    publisher of `admin.user_deactivated` (plan §3.6.1). The service
+    publisher of `admin.user_deactivated`. The service
     layer also drives `TokenManager.revoke_user_sessions` synchronously
     so the local instance rejects subsequent requests immediately.
 
@@ -733,7 +724,7 @@ async def deactivate_user(
         Success message.
 
     Raises:
-        HTTPException: 400 when the caller targets their own account;
+        HTTPException: 400 when the caller targets their own account
             404 when no active user matches `user_id`.
     """
     user_service = get_user_service()

@@ -215,10 +215,9 @@ _BACKTEST_COMPARISON_WRITE_RESPONSES: dict[int | str, dict[str, Any]] = {
 def _enforce_wallet_scope(principal: AuthPrincipal, run: BacktestRunRow | dict[str, Any]) -> None:
     """Fail-closed wallet scope check for backtest read endpoints.
 
-    Plan §2.5 R18 gpt-5.4 F1 expansion: the pre-Phase-2c truthy guard
-    ``if principal.active_wallet_public_id and run[...] != ...`` becomes
-    a no-op when the wallet claim is cleared to ``None`` (which Phase
-    2c explicitly enables via ``clear_active_wallet: true``). Every
+    The old truthy guard
+    ``if principal.active_wallet_public_id and run[...]!=...`` becomes
+    a no-op when the wallet claim is cleared to ``None``. Every
     backtest read must instead fail-closed on no-active-wallet (400)
     and 404 on cross-tenant mismatch to match the
     ``create_backtest`` guard's shape.
@@ -235,19 +234,18 @@ def _enforce_wallet_scope(principal: AuthPrincipal, run: BacktestRunRow | dict[s
 def _project_inline_result(result_row: BacktestResultRow) -> BacktestResultInline:
     """Build the detail-view inline result with typed-column precedence.
 
-    Phase 2c Step 1 read-side fallback: for the 5 promoted metric names
-    (``sortino_ratio``, ``cagr``, ``calmar_ratio``, ``expectancy``,
+    For the 5 promoted metric names
+    (``sortino_ratio``, ``cagr``, ``calmar_ratio``, ``expectancy``
     ``avg_trade_pnl``), the typed column takes precedence over any value
     the pre-0005 writer left inside ``extra_metrics``. The test is
     explicit ``is not None`` to preserve a legitimate ``0.0`` typed
     value against a stale non-zero JSON fallback. The 3 new metrics
-    (``max_drawdown_duration_seconds``, ``exposure_ratio``,
+    (``max_drawdown_duration_seconds``, ``exposure_ratio``
     ``turnover_ratio``) have no JSON fallback — pre-0005 rows simply
     emit ``None``.
-
     Response ``extra_metrics`` strips the 5 promoted names so a pre-0005
     row never emits them twice (once in the typed slot, once via the
-    unfiltered JSON blob). Parallel to the §4.3 comparison-diff set
+    unfiltered JSON blob). Parallel to the comparison-diff set
     subtraction that uses the same ``PROMOTED_METRIC_NAMES`` source of
     truth. Defensive against a post-0005 writer mistakenly including
     promoted keys in ``extra_metrics``.
@@ -453,7 +451,7 @@ async def list_backtests(
         as_of: Temporal query parameter.
         strategy: Optional strategy filter.
         run_status: Optional status filter.
-        config_hash: Phase 2c pairing-stable SHA-256 filter used by
+        config_hash: pairing-stable SHA-256 filter used by
             the Step 4 auto-pair UI to fetch sibling runs.
         limit: Page size.
         offset: Page offset.
@@ -509,7 +507,7 @@ async def _resolve_auto_pair(
     anchor: str | None,
     ts: datetime,
 ) -> tuple[str, str]:
-    """Resolve the (run_a, run_b) pair for auto-mode (plan §4.3).
+    """Resolve the (run_a, run_b) pair for auto-mode.
 
     With an anchor: validate anchor belongs to caller's wallet, is
     terminal, has the requested hash. Pair it with the most-recent
@@ -518,7 +516,7 @@ async def _resolve_auto_pair(
     if available; same for the reverse). Falls back to any
     most-recent-OTHER when no opposite-mode candidate exists. Without
     an anchor: pair the two most-recent terminal runs, preferring one
-    Direct-DB plus one ZMQ-replay (the plan §3.2 line 763
+    Direct-DB plus one ZMQ-replay (the line 763
     "cross-execution-mode when available" contract). Falls back to the
     two most-recent terminal runs when only one mode is present.
     """
@@ -623,17 +621,16 @@ async def create_comparison(
 ) -> BacktestComparisonResponse:
     """Create (or return idempotent existing) backtest comparison.
 
-    Plan §4.3 duplicate-submit contract: SELECT on normalised pair
+    SELECT on normalised pair
     first; 200 with existing if found. If the INSERT races past that
     SELECT, the DB-enforced partial unique index
     ``uq_bc_active_pair_per_wallet`` (migration 0010) raises
-    ``IntegrityError`` during the ``create_comparison`` commit;
+    ``IntegrityError`` during the ``create_comparison`` commit
     ``SQLAlchemyRepository.session()`` rolls the failed session back
     at the contextmanager boundary, then this handler opens a fresh
     session via ``get_comparison_by_pair`` and returns the committed
     winner with 200. Route registered BEFORE ``/{run_id}`` so
-    ``/compare`` is not captured as ``id="compare"`` (R14 sonnet
-    route-order fix).
+    ``/compare`` is not captured as ``id="compare"``.
 
     Args:
         request: FastAPI request (provides REST tracker).

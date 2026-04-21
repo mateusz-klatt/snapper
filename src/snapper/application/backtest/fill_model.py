@@ -1,7 +1,7 @@
 """Backtest fill simulation model.
 
 Simulates order fills at candle close prices with configurable slippage
-and commission. Phase 1 supports only MARKET fills (close-price execution).
+and commission. supports only MARKET fills (close-price execution).
 """
 
 from dataclasses import dataclass
@@ -21,7 +21,7 @@ class BacktestFill:
         size: Fill quantity.
         price: Execution price (after slippage).
         fee: Trading fee.
-        fee_currency: Currency of the fee (always 'USD' for Phase 1).
+        fee_currency: Currency of the fee.
         fill_at: Timestamp of the fill.
         pnl: Per-fill realized PnL (None for entry trades).
         signal_reason: Strategy signal reason.

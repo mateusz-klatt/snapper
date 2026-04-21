@@ -117,7 +117,7 @@ async def create_order(
 ) -> ExecutionPlanResponse:
     """Create a manual order via a manual_once execution plan.
 
-    Creates the plan with status=pending, inserts the TradeCommand,
+    Creates the plan with status=pending, inserts the TradeCommand
     then transitions to active. On command insert failure the plan
     is marked failed. This two-phase approach prevents orphaned
     active plans without commands.
@@ -129,9 +129,9 @@ async def create_order(
         command: Create order command envelope.
         repo: Repository dependency.
         caps_enforcer: Per-user :class:`TradingCapsEnforcer`
-            injected by :func:`get_caps_enforcer_dependency` —
+            injected by :func:`get_caps_enforcer_dependency`
             wraps the TradeCommand insert with
-            :meth:`guard` so the caller's §3.5 caps
+            meth:`guard` so the caller's caps
             (quantity, open orders, daily USD notional) are
             evaluated before persistence.
 
@@ -139,7 +139,7 @@ async def create_order(
         ExecutionPlanResponse wrapping the newly-created plan.
 
     Raises:
-        HTTPException: 422 if params invalid, 403 if wallet not accessible,
+        HTTPException: 422 if params invalid, 403 if wallet not accessible
             409 if idempotency key already used.
     """
     tracker: SequenceTracker = request.app.state.rest_tracker
@@ -363,14 +363,14 @@ async def _cancel_plan(
         principal: Authenticated caller.
         plan_public_id: Plan to cancel.
         caps_enforcer: Per-user :class:`TradingCapsEnforcer` used to
-            gate the cancel TradeCommand insert against §3.5
+            gate the cancel TradeCommand insert against
             caps (cancel rate limit).
 
     Returns:
         ExecutionPlanResponse wrapping the updated plan.
 
     Raises:
-        HTTPException: 404 if plan not found, 403 if wallet not accessible,
+        HTTPException: 404 if plan not found, 403 if wallet not accessible
             409 if already terminal or a concurrent status change lost the race.
     """
     now = datetime.now(UTC)
@@ -562,13 +562,13 @@ async def cancel_order(
         _csrf: CSRF token validation.
         command: Cancel command envelope.
         repo: Repository dependency.
-        caps_enforcer: Per-user cap enforcer (see §3.5).
+        caps_enforcer: Per-user cap enforcer.
 
     Returns:
         ExecutionPlanResponse wrapping the updated plan.
 
     Raises:
-        HTTPException: 404 if plan not found, 403 if wallet not accessible,
+        HTTPException: 404 if plan not found, 403 if wallet not accessible
             409 if already terminal.
     """
     del command
@@ -612,13 +612,13 @@ async def cancel_order_by_client_order_id(
         _csrf: CSRF token validation.
         command: Cancel command envelope.
         repo: Repository dependency.
-        caps_enforcer: Per-user cap enforcer (see §3.5).
+        caps_enforcer: Per-user cap enforcer.
 
     Returns:
         ExecutionPlanResponse wrapping the updated plan.
 
     Raises:
-        HTTPException: 404 if no plan linked to this client_order_id,
+        HTTPException: 404 if no plan linked to this client_order_id
             403 if wallet not accessible, 409 if already terminal.
     """
     del command

@@ -4,8 +4,7 @@ Subscribes to tick and execution ZMQ topics and dispatches events to
 the correct PlanEvaluator instance for each active plan. Handles plan
 lifecycle (create → active → completed/cancelled/failed), periodic
 checkpointing, and crash recovery from persisted checkpoints.
-
-Phase 1 MVP: only ManualOnceEvaluator. Other evaluators added in
+Only ManualOnceEvaluator. Other evaluators added in
 Phases 2-5.
 """
 
@@ -292,15 +291,14 @@ class PlanExecutorService(RegisterableProcess):
         """Insert a plan-originated trade command via the caps enforcer.
 
         Builds a :class:`TradeCommandSubmission` from the plan's
-        creator (``plan["created_by_user_id"]``). When a user is
+        creator. When a user is
         present, routes through :meth:`TradingCapsEnforcer.guard`
         (per-user caps apply). When absent (system / strategy-created
         plan), routes through
-        :meth:`TradingCapsEnforcer.guard_service_principal` so the
+        meth:`TradingCapsEnforcer.guard_service_principal` so the
         bypass is audit-visible at the call site.
-
         When the service was constructed without a caps enforcer
-        (legacy test fixtures), the insert is issued directly —
+        (legacy test fixtures), the insert is issued directly
         matches pre-Phase-A behavior so existing tests continue to
         pass unchanged.
         """
