@@ -467,3 +467,42 @@ is swept by the cycle-close handler.
 - No time-based activation (arm after N minutes regardless of price).
 - Live rollout gated on the same Phase 2 follow-ups (wallet-safe
   routing + orphan-cycle admin) that brackets depend on.
+
+## Cross-asset market-data pattern
+
+Snapper Phase A / TradFi Market Data P3 enables strategies to subscribe
+to a market-data-only feed (``SymbolExchangeCapability.can_trade=False``)
+and emit signals whose target is an execution-capable instrument on a
+different venue. Kraken FCM index futures (``kraken_equities``) are the
+primary driver: they publish ~10-minute-delayed candles + ticks but have
+no order API.
+
+### Rules
+
+- Strategies MAY subscribe to any combination of ``can_market_data=True``
+  topics regardless of the ``can_trade`` state of the source instrument.
+- Every emitted ``StrategySignal.instrument`` MUST point at an
+  ``can_trade=True`` instrument on the strategy's configured ``exchange``.
+  Snapper's order-entry capability guard
+  (``snapper.server._capability_guard.require_tradable``) rejects
+  submits against ``can_trade=False`` pairs with HTTP 422
+  ``error_code='instrument_market_data_only'`` — the signal would be
+  dropped before reaching the venue.
+- Tick-driven strategies that consume delayed feeds MUST gate on
+  ``TickData.is_delayed=True`` before treating the price as current.
+  Candle-driven cross-asset strategies inherit the source-feed latency
+  implicitly; document the lag in the live runbook.
+- Output instruments listed in ``StrategyConfig.outputs`` are validated
+  at startup against the launching operator's scope grants. The
+  execution target must fall within the operator's scope.
+
+### Reference implementation
+
+See ``src/snapper/strategies/examples/tradfi_observe_crypto_execute.py``
+for a minimal EMA-crossover strategy that observes
+``MNQM6-CME`` on ``kraken_equities`` and targets ``BTC-USD`` on
+``kraken``. The file is NOT registered with the process registry —
+it ships as a copy-paste starting point. Activation steps live in the
+module docstring; ``tests/meta/test_reference_strategy_not_registered.py``
+enforces the non-registration invariant so future maintainers cannot
+accidentally promote the illustration into a live process.

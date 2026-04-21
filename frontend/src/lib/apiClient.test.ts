@@ -945,6 +945,46 @@ describe('domain API methods', () => {
       expect.any(Object)
     )
   })
+  it('getExchangeInstrumentsDetail returns capability-aware instrument rows', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        type: 'instrument_detail_list',
+        sequence_id: 0,
+        public_id: 'test-pid',
+        timestamp: '2026-04-21T00:00:00Z',
+        session_id: 'test-sid',
+        payload: [
+          {
+            type: 'instrument_detail',
+            sequence_id: 0,
+            public_id: 'row-1',
+            timestamp: '2026-04-21T00:00:00Z',
+            session_id: 'test-sid',
+            instrument_public_id: 'inst-1',
+            symbol_public_id: 'sym-1',
+            symbol: 'MNQM6-CME',
+            exchange: 'kraken_equities',
+            can_trade: false,
+            can_market_data: true,
+            instrument_kind: 'future',
+            expiry_at: '2026-06-19T20:00:00Z',
+          },
+        ],
+        count: 1,
+      }),
+    })
+    const result = await apiClient.getExchangeInstrumentsDetail('kraken_equities')
+
+    expect(result.payload).toHaveLength(1)
+    expect(result.payload[0].symbol).toBe('MNQM6-CME')
+    expect(result.payload[0].can_trade).toBe(false)
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/exchanges/kraken_equities/instruments/detail'),
+      expect.any(Object)
+    )
+  })
   it('getSettings returns settings with optional category', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
@@ -2681,6 +2721,97 @@ describe('cacheWsTicketFromResponse', () => {
         status: 422,
         statusText: 'Unprocessable Entity',
       })
+    })
+
+    it('APIError preserves structured detail object with error_code + reason', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        statusText: 'Unprocessable Entity',
+        json: vi.fn().mockResolvedValue({
+          detail: {
+            error_code: 'instrument_market_data_only',
+            symbol: 'MNQM6-CME',
+            exchange: 'kraken_equities',
+            reason: 'SymbolExchangeCapability.can_trade is False for this (symbol, exchange)',
+          },
+        }),
+      })
+
+      try {
+        await apiClient.getExchangeInstrumentsDetail('kraken_equities')
+        throw new Error('expected request to fail')
+      } catch (err) {
+        const { APIError } = await import('./apiClient')
+
+        expect(err).toBeInstanceOf(APIError)
+
+        const typed = err as InstanceType<typeof APIError>
+
+        expect(typed.status).toBe(422)
+        expect(typed.message).toMatch(/can_trade is False/)
+        expect(typed.details).toMatchObject({
+          error_code: 'instrument_market_data_only',
+          symbol: 'MNQM6-CME',
+        })
+      }
+    })
+
+    it('APIError falls back to error_code when reason is missing', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        statusText: 'Unprocessable Entity',
+        json: vi.fn().mockResolvedValue({
+          detail: { error_code: 'unknown_instrument', symbol: 'X', exchange: 'y' },
+        }),
+      })
+
+      try {
+        await apiClient.getExchangeInstrumentsDetail('y')
+        throw new Error('expected request to fail')
+      } catch (err) {
+        const typed = err as { message: string; details?: unknown }
+
+        expect(typed.message).toBe('unknown_instrument')
+        expect(typed.details).toBeDefined()
+      }
+    })
+
+    it('APIError falls back to status + statusText when detail object is empty', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        statusText: 'Unprocessable Entity',
+        json: vi.fn().mockResolvedValue({ detail: {} }),
+      })
+
+      try {
+        await apiClient.getExchangeInstrumentsDetail('y')
+        throw new Error('expected request to fail')
+      } catch (err) {
+        const typed = err as { message: string }
+
+        expect(typed.message).toBe('HTTP 422: Unprocessable Entity')
+      }
+    })
+
+    it('APIError uses message key from body when neither detail nor reason is set', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        json: vi.fn().mockResolvedValue({ message: 'server exploded' }),
+      })
+
+      try {
+        await apiClient.getExchangeInstrumentsDetail('y')
+        throw new Error('expected request to fail')
+      } catch (err) {
+        const typed = err as { message: string }
+
+        expect(typed.message).toBe('server exploded')
+      }
     })
   })
 })

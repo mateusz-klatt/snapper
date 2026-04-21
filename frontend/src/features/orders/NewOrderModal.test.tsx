@@ -32,13 +32,23 @@ vi.mock('../../components/ThemeSelect', () => ({
 
 const mockMutateAsync = vi.fn()
 const mockCreateOrderState = { isPending: false }
+
+type MockInstrumentRow = {
+  symbol: string
+  can_trade: boolean
+}
 const mockHookState: {
   exchanges: { payload: string[] } | undefined
-  instruments: { payload: string[] } | undefined
+  instruments: { payload: MockInstrumentRow[] } | undefined
   wallets: { public_id: string; label: string; is_paper: boolean }[] | undefined
 } = {
   exchanges: { payload: ['kraken', 'zonda'] },
-  instruments: { payload: ['BTC-USD', 'ETH-USD'] },
+  instruments: {
+    payload: [
+      { symbol: 'BTC-USD', can_trade: true },
+      { symbol: 'ETH-USD', can_trade: true },
+    ],
+  },
   wallets: [
     { public_id: 'wallet-1', label: 'default', is_paper: false },
     { public_id: 'wallet-2', label: 'paper', is_paper: true },
@@ -49,7 +59,7 @@ vi.mock('../../hooks/queries', () => ({
   useExchanges: () => ({
     data: mockHookState.exchanges,
   }),
-  useExchangeInstruments: () => ({
+  useExchangeInstrumentsDetail: () => ({
     data: mockHookState.instruments,
   }),
   useWallets: () => ({
@@ -429,5 +439,104 @@ describe('NewOrderModal', () => {
     })
     await userEvent.click(screen.getByText('Cancel'))
     expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('disables submit and shows inline notice when instrument is market-data-only', async () => {
+    const prev = mockHookState.instruments
+
+    mockHookState.instruments = {
+      payload: [{ symbol: 'MNQM6-CME', can_trade: false }],
+    }
+
+    try {
+      render(<NewOrderModal open={true} onClose={vi.fn()} />, {
+        wrapper: createWrapper(),
+      })
+      await waitFor(() => {
+        const badges = screen.getAllByTestId('market-data-only-badge')
+
+        expect(badges.length).toBeGreaterThan(0)
+      })
+      expect(
+        screen.getByText(
+          /This instrument is observation-only — place orders on an execution-capable instrument\./
+        )
+      ).toBeTruthy()
+      const reviewBtn = screen.getByText('Review Order') as HTMLButtonElement
+
+      expect(reviewBtn.disabled).toBe(true)
+    } finally {
+      mockHookState.instruments = prev
+    }
+  })
+
+  it('does not show badge or disable submit for tradable instruments', () => {
+    render(<NewOrderModal open={true} onClose={vi.fn()} />, {
+      wrapper: createWrapper(),
+    })
+    expect(screen.queryByTestId('market-data-only-badge')).toBeNull()
+    const reviewBtn = screen.getByText('Review Order') as HTMLButtonElement
+
+    expect(reviewBtn.disabled).toBe(false)
+  })
+
+  it('shows mapped error when APIError carries instrument_market_data_only code', async () => {
+    const { APIError } = await import('../../lib/apiClient')
+    const rejection = new APIError('raw reason text', 422, 'Unprocessable Entity', {
+      error_code: 'instrument_market_data_only',
+      symbol: 'MNQM6-CME',
+      exchange: 'kraken_equities',
+      reason: 'raw reason text',
+    })
+
+    mockMutateAsync.mockRejectedValueOnce(rejection)
+
+    render(<NewOrderModal open={true} onClose={vi.fn()} />, {
+      wrapper: createWrapper(),
+    })
+
+    const inputs = screen.getAllByPlaceholderText('0.00')
+
+    fireEvent.change(inputs[0], { target: { value: '0.5' } })
+    fireEvent.change(inputs[1], { target: { value: '50000' } })
+    await userEvent.click(screen.getByText('Review Order'))
+    await waitFor(() => {
+      expect(screen.getAllByText('Confirm Order').length).toBeGreaterThan(0)
+    })
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm Order' }))
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          /This instrument is observation-only — place orders on an execution-capable instrument\./
+        )
+      ).toBeTruthy()
+    })
+  })
+
+  it('falls back to APIError.message when error_code is unknown', async () => {
+    const { APIError } = await import('../../lib/apiClient')
+    const rejection = new APIError('raw 500 message', 500, 'Internal Server Error', {
+      error_code: 'not_in_map',
+      reason: 'raw 500 message',
+    })
+
+    mockMutateAsync.mockRejectedValueOnce(rejection)
+
+    render(<NewOrderModal open={true} onClose={vi.fn()} />, {
+      wrapper: createWrapper(),
+    })
+
+    const inputs = screen.getAllByPlaceholderText('0.00')
+
+    fireEvent.change(inputs[0], { target: { value: '0.5' } })
+    fireEvent.change(inputs[1], { target: { value: '50000' } })
+    await userEvent.click(screen.getByText('Review Order'))
+    await waitFor(() => {
+      expect(screen.getAllByText('Confirm Order').length).toBeGreaterThan(0)
+    })
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm Order' }))
+    await waitFor(() => {
+      expect(screen.getByText('raw 500 message')).toBeTruthy()
+    })
   })
 })

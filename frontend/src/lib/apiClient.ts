@@ -29,6 +29,7 @@ import {
   UserListResponseSchema,
   UserResponseSchema,
   ExchangeListResponseSchema,
+  InstrumentDetailListResponseSchema,
   InstrumentListResponseSchema,
   OrderListResponseSchema,
   ExecutionListResponseSchema,
@@ -71,6 +72,7 @@ import type {
   UpdateUserBody,
   AdminResetPasswordBody,
   ExchangeListResponse,
+  InstrumentDetailListResponse,
   InstrumentListResponse,
   OrderListResponse,
   ExecutionListResponse,
@@ -117,7 +119,8 @@ export class APIError extends Error {
   constructor(
     message: string,
     public readonly status: number,
-    public readonly statusText: string
+    public readonly statusText: string,
+    public readonly details?: unknown
   ) {
     super(message)
     this.name = 'APIError'
@@ -303,28 +306,44 @@ class APIClient {
     })
   }
   private async raiseHttpError(response: Response): Promise<never> {
-    const message = await this.extractErrorMessage(response)
+    const { message, details } = await this.extractError(response)
 
-    throw new APIError(message, response.status, response.statusText)
+    throw new APIError(message, response.status, response.statusText, details)
   }
-  private async extractErrorMessage(response: Response): Promise<string> {
+  private async extractError(response: Response): Promise<{ message: string; details?: unknown }> {
     try {
       const data = await response.json()
 
       if (data && typeof data === 'object') {
         if ('detail' in data) {
-          return String(data.detail)
+          const detail = (data as { detail?: unknown }).detail
+
+          if (detail !== null && typeof detail === 'object') {
+            const detailRecord = detail as Record<string, unknown>
+            const reason = detailRecord.reason
+            const errorCode = detailRecord.error_code
+            const message =
+              typeof reason === 'string' && reason.length > 0
+                ? reason
+                : typeof errorCode === 'string' && errorCode.length > 0
+                  ? errorCode
+                  : `HTTP ${response.status}: ${response.statusText}`
+
+            return { message, details: detail }
+          }
+
+          return { message: String(detail) }
         }
 
         if ('message' in data) {
-          return String(data.message)
+          return { message: String((data as { message: unknown }).message) }
         }
       }
     } catch {
       void 0
     }
 
-    return `HTTP ${response.status}: ${response.statusText}`
+    return { message: `HTTP ${response.status}: ${response.statusText}` }
   }
   public async getJSON<T>(url: string, options: RequestOptions = {}): Promise<T> {
     const response = await this.get(url, options)
@@ -462,6 +481,17 @@ class APIClient {
       data,
       InstrumentListResponseSchema,
       `/exchanges/${exchange}/instruments`
+    )
+  }
+  async getExchangeInstrumentsDetail(exchange: string): Promise<InstrumentDetailListResponse> {
+    const data = await this.getJSON(
+      `/api/exchanges/${encodeURIComponent(exchange)}/instruments/detail`
+    )
+
+    return validateResponse(
+      data,
+      InstrumentDetailListResponseSchema,
+      `/exchanges/${exchange}/instruments/detail`
     )
   }
   async getOperators(): Promise<OperatorListResponse> {

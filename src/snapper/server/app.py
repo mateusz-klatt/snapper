@@ -75,6 +75,7 @@ from snapper.api.schemas.data_responses import ExchangeListResponse
 from snapper.api.schemas.data_responses import ExecutionListResponse
 from snapper.api.schemas.data_responses import FrontMonthResponse
 from snapper.api.schemas.data_responses import InstrumentCapabilityListResponse
+from snapper.api.schemas.data_responses import InstrumentDetailListResponse
 from snapper.api.schemas.data_responses import InstrumentListResponse
 from snapper.api.schemas.data_responses import OrderListResponse
 from snapper.api.schemas.data_responses import PositionListResponse
@@ -159,6 +160,7 @@ from snapper.messaging.schemas.data import ContractData
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import FrontMonthData
 from snapper.messaging.schemas.data import InstrumentCapabilityData
+from snapper.messaging.schemas.data import InstrumentDetailData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import PositionData
 from snapper.messaging.schemas.data import RollPointDetail
@@ -917,6 +919,73 @@ def _create_exchange_router() -> APIRouter:
         except Exception as exc:
             logger.error(f"Failed to fetch instruments for {exchange}: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch instruments") from exc
+
+    @router.get(
+        "/exchanges/{exchange}/instruments/detail",
+        responses={500: {"description": "Internal server error"}},
+    )
+    async def get_exchange_instruments_detail(
+        request: Request,
+        exchange: str,
+        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
+        _csrf: Annotated[None, Depends(validate_csrf_token)],
+        repo: Annotated[Repository, Depends(get_repository_dependency)],
+        as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
+    ) -> InstrumentDetailListResponse:
+        """Return capability-aware instrument rows for a given exchange.
+
+        Each row carries ``can_trade``, ``can_market_data``,
+        ``instrument_kind``, and ``expiry_at`` so the frontend can render
+        a "Market-data only" badge and disable order-entry for
+        TradFi-style instruments without a second round-trip.
+
+        Args:
+            request: FastAPI request (provides REST tracker for provenance).
+            exchange: Exchange name to query instruments for.
+            _auth: Authenticated user with READ_MARKET_DATA permission.
+            _csrf: CSRF token validation.
+            repo: Database repository.
+            as_of: Optional point-in-time query timestamp.
+
+        Returns:
+            InstrumentDetailListResponse wrapping the instrument detail list.
+        """
+        try:
+            now = as_of or datetime.now(UTC)
+            rows = await repo.get_exchange_instruments_detail(exchange=exchange, as_of=now)
+            tracker: SequenceTracker = request.app.state.rest_tracker
+            sid = tracker.session_id
+            ts = dt.datetime.now(dt.UTC)
+            payload = [
+                InstrumentDetailData(
+                    session_id=sid,
+                    sequence_id=tracker.next_sequence(_REST_DATA_STREAM),
+                    public_id=str(uuid7()),
+                    timestamp=ts,
+                    instrument_public_id=row["instrument_public_id"],
+                    symbol_public_id=row["symbol_public_id"],
+                    symbol=row["symbol"],
+                    exchange=row["exchange"],
+                    can_trade=row["can_trade"],
+                    can_market_data=row["can_market_data"],
+                    instrument_kind=row["instrument_kind"],
+                    expiry_at=row["expiry_at"],
+                )
+                for row in rows
+            ]
+            return InstrumentDetailListResponse(
+                session_id=sid,
+                sequence_id=tracker.next_sequence(_REST_DATA_STREAM),
+                public_id=str(uuid7()),
+                timestamp=ts,
+                payload=payload,
+                count=len(payload),
+            )
+        except Exception as exc:
+            logger.error(f"Failed to fetch instrument detail for {exchange}: {exc}")
+            raise HTTPException(
+                status_code=500, detail="Failed to fetch instrument detail"
+            ) from exc
 
     return router
 

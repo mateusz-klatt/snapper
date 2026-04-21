@@ -28,6 +28,7 @@ from sqlalchemy.exc import IntegrityError
 from snapper.data.models import InstrumentUnderlyingMapping
 from snapper.data.models import Operator
 from snapper.data.models import Symbol
+from snapper.data.models import SymbolExchangeCapability
 from snapper.data.models import UnderlyingAsset
 from snapper.data.models import UserOperatorMembership
 from snapper.data.models import Wallet
@@ -1117,3 +1118,135 @@ class TestGetSymbolForInstrument:
             as_of=datetime.now(UTC),
         )
         assert result == "MNQM6-CME"
+
+
+class TestGetExchangeInstrumentsDetail:
+    """Tests for the capability-aware instrument-detail repo method."""
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_list_for_exchange_without_capabilities(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Exchange with no capability rows returns an empty list.
+
+        Given: no ``SymbolExchangeCapability`` rows for the exchange,
+        When: ``get_exchange_instruments_detail`` is called,
+        Then: an empty list is returned (the front end renders no badges).
+        """
+        rows = await repo.get_exchange_instruments_detail(
+            exchange="no_such_exchange",
+            as_of=datetime.now(UTC),
+        )
+        assert rows == []
+
+    @pytest.mark.asyncio
+    async def test_returns_capability_rows_joined_with_symbol(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Active Symbol+Capability rows round-trip through the repo method.
+
+        Given: a seeded Symbol and a ``SymbolExchangeCapability`` row
+            (``can_trade=False``, ``can_market_data=True``) for the
+            ``kraken_equities`` exchange,
+        When: ``get_exchange_instruments_detail`` is called,
+        Then: exactly one row is returned with ``symbol='MNQM6-CME'``,
+            ``can_trade=False``, and the Instrument+Spec joins degrade
+            gracefully to the symbol UUID when no Instrument row exists.
+        """
+        as_of = datetime.now(UTC)
+        async with repo.session() as s:
+            s.add(
+                Symbol(
+                    public_id="00000000-0000-7000-8000-0000000000d1",
+                    native_symbol="MNQM6-CME",
+                    base="MNQ",
+                    quote="USD",
+                    asset_type="index",
+                    created_at=as_of,
+                    session_id="t",
+                    sequence_id=1,
+                    timestamp=as_of,
+                )
+            )
+            s.add(
+                SymbolExchangeCapability(
+                    public_id="00000000-0000-7000-8000-0000000000d2",
+                    symbol_public_id="00000000-0000-7000-8000-0000000000d1",
+                    exchange="kraken_equities",
+                    can_market_data=True,
+                    can_trade=False,
+                    source="test",
+                    reason=None,
+                    created_at=as_of,
+                    session_id="t",
+                    sequence_id=2,
+                    timestamp=as_of,
+                )
+            )
+            await s.commit()
+        rows = await repo.get_exchange_instruments_detail(
+            exchange="kraken_equities",
+            as_of=as_of,
+        )
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["symbol"] == "MNQM6-CME"
+        assert row["can_trade"] is False
+        assert row["can_market_data"] is True
+        assert row["instrument_public_id"] == "00000000-0000-7000-8000-0000000000d1"
+        assert row["instrument_kind"] is None
+
+    @pytest.mark.asyncio
+    async def test_joins_instrument_when_present(self, repo: SQLAlchemyRepository) -> None:
+        """When an Instrument row exists, its public_id replaces the symbol_public_id.
+
+        Given: a seeded Symbol + Capability + Instrument triple,
+        When: ``get_exchange_instruments_detail`` is called,
+        Then: the returned row's ``instrument_public_id`` matches the
+            Instrument row's ``public_id`` (not the Symbol's).
+        """
+        as_of = datetime.now(UTC)
+        async with repo.session() as s:
+            s.add(
+                Symbol(
+                    public_id="00000000-0000-7000-8000-0000000000e1",
+                    native_symbol="MESM6-CME",
+                    base="MES",
+                    quote="USD",
+                    asset_type="index",
+                    created_at=as_of,
+                    session_id="t",
+                    sequence_id=1,
+                    timestamp=as_of,
+                )
+            )
+            s.add(
+                SymbolExchangeCapability(
+                    public_id="00000000-0000-7000-8000-0000000000e2",
+                    symbol_public_id="00000000-0000-7000-8000-0000000000e1",
+                    exchange="kraken_equities",
+                    can_market_data=True,
+                    can_trade=False,
+                    source="test",
+                    reason=None,
+                    created_at=as_of,
+                    session_id="t",
+                    sequence_id=2,
+                    timestamp=as_of,
+                )
+            )
+            await s.commit()
+        _id, instrument_public_id = await repo.ensure_instrument(
+            symbol_public_id="00000000-0000-7000-8000-0000000000e1",
+            exchange="kraken_equities",
+            session_id="t",
+            sequence_id=3,
+            timestamp=as_of,
+        )
+        rows = await repo.get_exchange_instruments_detail(
+            exchange="kraken_equities",
+            as_of=as_of,
+        )
+        assert len(rows) == 1
+        assert rows[0]["instrument_public_id"] == instrument_public_id
+        assert rows[0]["symbol"] == "MESM6-CME"

@@ -55,6 +55,8 @@ const queryKeys = {
   exchanges: (asOf: string | null) => ['exchanges', asOf] as const,
   exchangeInstruments: (exchange: string, asOf: string | null) =>
     ['exchanges', exchange, 'instruments', asOf] as const,
+  exchangeInstrumentsDetail: (exchange: string, asOf: string | null) =>
+    ['exchanges', exchange, 'instruments', 'detail', asOf] as const,
   orders: (
     filters?: { symbol?: string; limit?: number; offset?: number },
     asOf?: string | null,
@@ -144,6 +146,20 @@ export const useExchangeInstruments = (exchange: string | null) => {
   return useQuery({
     queryKey: queryKeys.exchangeInstruments(exchangeKey, asOf),
     queryFn: () => apiClient.getExchangeInstruments(exchangeKey),
+    enabled: isAuthenticated && !!exchange,
+    staleTime: 5 * 60 * 1000,
+    throwOnError: false,
+  })
+}
+
+export const useExchangeInstrumentsDetail = (exchange: string | null) => {
+  const { isAuthenticated } = useAuth()
+  const asOf = useAppStore(s => s.asOf)
+  const exchangeKey = exchange ?? ''
+
+  return useQuery({
+    queryKey: queryKeys.exchangeInstrumentsDetail(exchangeKey, asOf),
+    queryFn: () => apiClient.getExchangeInstrumentsDetail(exchangeKey),
     enabled: isAuthenticated && !!exchange,
     staleTime: 5 * 60 * 1000,
     throwOnError: false,

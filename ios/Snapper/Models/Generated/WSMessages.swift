@@ -573,6 +573,8 @@ struct TickData: Codable, Sendable {
     let bid: Double?
     let ask: Double?
     let last: Double?
+    let isDelayed: Bool?
+    let isExtendedHours: Bool?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -586,6 +588,8 @@ struct TickData: Codable, Sendable {
         case bid
         case ask
         case last
+        case isDelayed = "is_delayed"
+        case isExtendedHours = "is_extended_hours"
     }
 }
 

@@ -7,6 +7,7 @@ import {
   useCandles,
   useExchanges,
   useExchangeInstruments,
+  useExchangeInstrumentsDetail,
   useOperators,
   useWallets,
   useScopeGrants,
@@ -83,6 +84,30 @@ vi.mock('../lib/apiClient', () => ({
     ),
     getExchangeInstruments: vi.fn(() =>
       Promise.resolve(envelope('instrument_list', { payload: ['BTC/USD', 'ETH/USD'], count: 2 }))
+    ),
+    getExchangeInstrumentsDetail: vi.fn(() =>
+      Promise.resolve(
+        envelope('instrument_detail_list', {
+          payload: [
+            {
+              type: 'instrument_detail',
+              sequence_id: 0,
+              public_id: 'row-1',
+              timestamp: '2026-04-21T00:00:00Z',
+              session_id: 'sid',
+              instrument_public_id: 'inst-1',
+              symbol_public_id: 'sym-1',
+              symbol: 'MNQM6-CME',
+              exchange: 'kraken_equities',
+              can_trade: false,
+              can_market_data: true,
+              instrument_kind: 'future',
+              expiry_at: null,
+            },
+          ],
+          count: 1,
+        })
+      )
     ),
     getOperators: vi.fn(() =>
       Promise.resolve(envelope('operator_list', { payload: [], count: 0 }))
@@ -330,6 +355,7 @@ const mockedApiClient = apiClient as unknown as {
   getCandles: Mock
   getExchanges: Mock
   getExchangeInstruments: Mock
+  getExchangeInstrumentsDetail: Mock
   getOperators: Mock
   getWallets: Mock
   getOrders: Mock
@@ -445,6 +471,29 @@ describe('queries', () => {
       })
       expect(result.current.data).toBeUndefined()
       expect(mockedApiClient.getExchangeInstruments).not.toHaveBeenCalled()
+    })
+  })
+  describe('useExchangeInstrumentsDetail', () => {
+    it('returns capability rows when exchange is provided', async () => {
+      const { result } = renderHook(() => useExchangeInstrumentsDetail('kraken_equities'), {
+        wrapper: createWrapper(),
+      })
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false)
+      })
+      expect(result.current.data?.payload).toHaveLength(1)
+      expect(result.current.data?.payload[0].can_trade).toBe(false)
+    })
+    it('does not fetch when exchange is null', async () => {
+      const { result } = renderHook(() => useExchangeInstrumentsDetail(null), {
+        wrapper: createWrapper(),
+      })
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false)
+      })
+      expect(result.current.data).toBeUndefined()
     })
   })
   describe('useOperators', () => {

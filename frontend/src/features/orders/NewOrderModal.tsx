@@ -1,13 +1,16 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import { v7 as uuid7 } from 'uuid'
 import { Modal } from '../../components/ui/Modal'
 import { ThemeSelect } from '../../components/ThemeSelect'
+import { MarketDataOnlyBadge } from '../../components/MarketDataOnlyBadge'
 import {
   useExchanges,
-  useExchangeInstruments,
+  useExchangeInstrumentsDetail,
   useWallets,
   useCreateOrder,
 } from '../../hooks/queries'
+import { APIError } from '../../lib/apiClient'
+import { lookupOrderErrorMessage } from './errorMessages'
 
 interface NewOrderModalProps {
   open: boolean
@@ -58,7 +61,17 @@ export const NewOrderModal: React.FC<NewOrderModalProps> = ({ open, onClose }) =
   const [error, setError] = useState('')
   const [confirming, setConfirming] = useState(false)
 
-  const { data: instruments } = useExchangeInstruments(exchange || null)
+  const { data: instruments } = useExchangeInstrumentsDetail(exchange || null)
+  const capabilityMap = useMemo(() => {
+    const map = new Map<string, boolean>()
+
+    for (const row of instruments?.payload ?? []) {
+      map.set(row.symbol, row.can_trade)
+    }
+
+    return map
+  }, [instruments])
+  const selectedIsMarketDataOnly = instrument.length > 0 && capabilityMap.get(instrument) === false
 
   useEffect(() => {
     if (exchanges?.payload && exchanges.payload.length > 0 && !exchange) {
@@ -81,17 +94,17 @@ export const NewOrderModal: React.FC<NewOrderModalProps> = ({ open, onClose }) =
 
   useEffect(() => {
     if (instruments?.payload && instruments.payload.length > 0 && !instrument) {
-      const first = instruments.payload[0] as string
+      const first = instruments.payload[0]
 
-      setInstrument(first)
-      setInstrumentPublicId(first)
+      setInstrument(first.symbol)
+      setInstrumentPublicId(first.symbol)
     }
   }, [instruments, instrument])
 
   const exchangeOptions = (exchanges?.payload ?? []).map(e => ({ value: e, label: e }))
-  const instrumentOptions = (instruments?.payload ?? []).map((i: string) => ({
-    value: i,
-    label: i,
+  const instrumentOptions = (instruments?.payload ?? []).map(row => ({
+    value: row.symbol,
+    label: row.can_trade ? row.symbol : `${row.symbol} — market-data only`,
   }))
   const walletOptions = (wallets ?? []).map(w => ({
     value: w.public_id,
@@ -183,6 +196,15 @@ export const NewOrderModal: React.FC<NewOrderModalProps> = ({ open, onClose }) =
       handleClose()
     } catch (err) {
       setConfirming(false)
+
+      if (err instanceof APIError) {
+        const mapped = lookupOrderErrorMessage(err.details)
+
+        setError(mapped ?? err.message)
+
+        return
+      }
+
       setError(err instanceof Error ? err.message : 'Order creation failed')
     }
   }
@@ -293,8 +315,12 @@ export const NewOrderModal: React.FC<NewOrderModalProps> = ({ open, onClose }) =
                 />
               </div>
               <div>
-                <label htmlFor={instrumentSelectId} className='block text-xs text-muted-500 mb-1'>
-                  Instrument
+                <label
+                  htmlFor={instrumentSelectId}
+                  className='flex items-center gap-2 text-xs text-muted-500 mb-1'
+                >
+                  <span>Instrument</span>
+                  {selectedIsMarketDataOnly && <MarketDataOnlyBadge size='sm' />}
                 </label>
                 <ThemeSelect
                   id={instrumentSelectId}
@@ -304,6 +330,11 @@ export const NewOrderModal: React.FC<NewOrderModalProps> = ({ open, onClose }) =
                 />
               </div>
             </div>
+            {selectedIsMarketDataOnly && (
+              <div className='rounded-lg border border-warning-500/40 bg-warning-500/10 px-3 py-2 text-xs text-warning-600'>
+                {lookupOrderErrorMessage({ error_code: 'instrument_market_data_only' })}
+              </div>
+            )}
             <div className='grid grid-cols-2 gap-4'>
               <div>
                 <label htmlFor={sideSelectId} className='block text-xs text-muted-500 mb-1'>
@@ -410,7 +441,8 @@ export const NewOrderModal: React.FC<NewOrderModalProps> = ({ open, onClose }) =
               </button>
               <button
                 onClick={handleSubmit}
-                className='px-4 py-2 text-sm font-medium rounded-lg bg-brand-600 text-white hover:bg-brand-500 transition-colors'
+                disabled={selectedIsMarketDataOnly}
+                className='px-4 py-2 text-sm font-medium rounded-lg bg-brand-600 text-white hover:bg-brand-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors'
               >
                 Review Order
               </button>

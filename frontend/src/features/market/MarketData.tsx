@@ -1,7 +1,8 @@
 import { useMemo, useState, useRef, useEffect } from 'react'
 import { Card, LoadingSpinner } from '../../components/ui'
+import { MarketDataOnlyBadge } from '../../components/MarketDataOnlyBadge'
 import { LightweightChart } from '../../components/LightweightChart'
-import { useCandles, useExchanges, useExchangeInstruments } from '../../hooks/queries'
+import { useCandles, useExchanges, useExchangeInstrumentsDetail } from '../../hooks/queries'
 import { useAppStore } from '../../stores/app'
 import { useMarketStore } from '../../stores/market'
 import { useMarketSubscription } from '../../hooks/useMarketSubscription'
@@ -49,7 +50,18 @@ export function MarketData() {
   })
   const snapshotEnabled = subscribed || !isConnected || isTimeTraveling
   const { data: exchanges } = useExchanges()
-  const { data: instruments } = useExchangeInstruments(selectedExchange)
+  const { data: instruments } = useExchangeInstrumentsDetail(selectedExchange)
+  const capabilityMap = useMemo(() => {
+    const map = new Map<string, boolean>()
+
+    for (const row of instruments?.payload ?? []) {
+      map.set(row.symbol, row.can_trade)
+    }
+
+    return map
+  }, [instruments])
+  const isSelectedMarketDataOnly =
+    selectedInstrument !== null && capabilityMap.get(selectedInstrument) === false
   const {
     data: candles,
     isLoading,
@@ -84,7 +96,7 @@ export function MarketData() {
   const [instrumentDropdownOpen, setInstrumentDropdownOpen] = useState(false)
   const instrumentRef = useRef<HTMLDivElement>(null)
   const filteredInstruments = useMemo(() => {
-    const list = instruments?.payload ?? []
+    const list = (instruments?.payload ?? []).map(row => row.symbol)
 
     if (!instrumentSearch) return list
 
@@ -168,6 +180,7 @@ export function MarketData() {
       <div className='flex items-center justify-between'>
         <div className='flex items-center space-x-3'>
           <h2 className='text-xl font-bold'>Market Data</h2>
+          {isSelectedMarketDataOnly && <MarketDataOnlyBadge size='md' />}
         </div>
       </div>
       {}
@@ -224,20 +237,26 @@ export function MarketData() {
             {instrumentDropdownOpen && (
               <div className='absolute top-full left-0 mt-1 w-full min-w-48 max-h-60 overflow-y-auto z-50 bg-alpine-50 rounded-md shadow-lg border border-dark-600'>
                 {filteredInstruments.length > 0 ? (
-                  filteredInstruments.map(inst => (
-                    <button
-                      key={inst}
-                      type='button'
-                      onClick={() => {
-                        setSelectedInstrument(inst)
-                        setInstrumentDropdownOpen(false)
-                        setInstrumentSearch('')
-                      }}
-                      className='flex w-full select-none items-center px-3 py-2 text-sm text-alpine-900 rounded-sm hover:bg-dark-700 cursor-pointer'
-                    >
-                      {inst}
-                    </button>
-                  ))
+                  filteredInstruments.map(inst => {
+                    const canTrade = capabilityMap.get(inst)
+                    const isMarketDataOnly = canTrade === false
+
+                    return (
+                      <button
+                        key={inst}
+                        type='button'
+                        onClick={() => {
+                          setSelectedInstrument(inst)
+                          setInstrumentDropdownOpen(false)
+                          setInstrumentSearch('')
+                        }}
+                        className='flex w-full select-none items-center justify-between gap-3 px-3 py-2 text-sm text-alpine-900 rounded-sm hover:bg-dark-700 cursor-pointer'
+                      >
+                        <span>{inst}</span>
+                        {isMarketDataOnly && <MarketDataOnlyBadge size='sm' />}
+                      </button>
+                    )
+                  })
                 ) : (
                   <div className='px-3 py-2 text-sm text-muted-500'>No instruments found</div>
                 )}

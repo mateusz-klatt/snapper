@@ -467,6 +467,8 @@ export interface Tick {
   bid?: number | null
   ask?: number | null
   last?: number | null
+  isDelayed?: boolean
+  isExtendedHours?: boolean | null
 }
 
 /**

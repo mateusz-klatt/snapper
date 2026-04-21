@@ -102,6 +102,7 @@ from snapper.data.models import Setting
 from snapper.data.models import Signal
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
+from snapper.data.models import SymbolExchangeCapability
 from snapper.data.models import Tick
 from snapper.data.models import Trade
 from snapper.data.models import TradeCommand
@@ -132,6 +133,7 @@ from snapper.data.repository_types import ExecutionRow
 from snapper.data.repository_types import FundingRateInsertRow
 from snapper.data.repository_types import FundingRateRow
 from snapper.data.repository_types import InstrumentContractRow
+from snapper.data.repository_types import InstrumentDetailRow
 from snapper.data.repository_types import InstrumentFrontMonthRow
 from snapper.data.repository_types import InstrumentOrderCapabilityRow
 from snapper.data.repository_types import InstrumentSpecRow
@@ -746,6 +748,30 @@ class Repository(ABC):
 
         Returns:
             Sorted list of native symbol strings.
+        """
+        ...
+
+    @abstractmethod
+    async def get_exchange_instruments_detail(
+        self,
+        exchange: str,
+        as_of: datetime,
+    ) -> list[InstrumentDetailRow]:
+        """Return capability-aware instrument rows for a given exchange.
+
+        Joins ``Symbol`` + ``SymbolExchangeCapability`` + ``Instrument`` +
+        ``InstrumentSpec`` at the requested temporal snapshot.
+        Powers ``GET /api/exchanges/{exchange}/instruments/detail`` so the
+        frontend can render market-data-only badges + gate order-entry
+        without a separate capability round-trip.
+
+        Args:
+            exchange: Exchange identifier (lowercase; same canonicalization
+                as ``get_exchange_instruments``).
+            as_of: Point-in-time for the multi-table temporal join.
+
+        Returns:
+            Sorted list of ``InstrumentDetailRow`` entries (by native symbol).
         """
         ...
 
@@ -3416,6 +3442,91 @@ class SQLAlchemyRepository(Repository):
                 .order_by(Symbol.native_symbol)
             )
             return list(result.scalars().all())
+
+    async def get_exchange_instruments_detail(
+        self,
+        exchange: str,
+        as_of: datetime,
+    ) -> list[InstrumentDetailRow]:
+        """Return capability-aware instrument rows for a given exchange.
+
+        Single joined query over four temporal tables at ``as_of``:
+
+        1. ``Symbol`` (native symbol + asset type)
+        2. ``SymbolExchangeCapability`` (can_trade + can_market_data)
+        3. ``Instrument`` (instrument_public_id) — outer joined so that
+           capability rows without a synced Instrument row still surface
+           (``instrument_public_id`` defaults to ``symbol_public_id`` so
+           the frontend still has a stable identifier).
+        4. ``InstrumentSpec`` (instrument_kind + expiry_at) — outer joined
+           so specs that don't exist yet (FCM catalog load lag) do not
+           hide the instrument.
+
+        ``where_active`` predicates apply to each table so all rows come
+        from the same point-in-time snapshot.
+        """
+        async with self.session() as s:
+            sym_ts, sym_kt = where_active(Symbol, as_of)
+            cap_ts, cap_kt = where_active(SymbolExchangeCapability, as_of)
+            inst_ts, inst_kt = where_active(Instrument, as_of)
+            spec_ts, spec_kt = where_active(InstrumentSpec, as_of)
+            query = (
+                select(
+                    Symbol.public_id.label("symbol_public_id"),
+                    Symbol.native_symbol.label("symbol"),
+                    SymbolExchangeCapability.can_trade.label("can_trade"),
+                    SymbolExchangeCapability.can_market_data.label("can_market_data"),
+                    Instrument.public_id.label("instrument_public_id"),
+                    InstrumentSpec.instrument_kind.label("instrument_kind"),
+                    InstrumentSpec.expiry_at.label("expiry_at"),
+                )
+                .select_from(SymbolExchangeCapability)
+                .join(
+                    Symbol,
+                    Symbol.public_id == SymbolExchangeCapability.symbol_public_id,
+                )
+                .outerjoin(
+                    Instrument,
+                    (Instrument.symbol_public_id == Symbol.public_id)
+                    & (Instrument.exchange == SymbolExchangeCapability.exchange)
+                    & inst_ts
+                    & inst_kt,
+                )
+                .outerjoin(
+                    InstrumentSpec,
+                    (InstrumentSpec.instrument_public_id == Instrument.public_id)
+                    & spec_ts
+                    & spec_kt,
+                )
+                .where(
+                    SymbolExchangeCapability.exchange == exchange,
+                    cap_ts,
+                    cap_kt,
+                    sym_ts,
+                    sym_kt,
+                )
+                .order_by(Symbol.native_symbol)
+            )
+            result = await s.execute(query)
+            rows: list[InstrumentDetailRow] = []
+            for row in result.mappings().all():
+                symbol_pid = str(row["symbol_public_id"])
+                instrument_pid = row["instrument_public_id"]
+                rows.append(
+                    {
+                        "instrument_public_id": (
+                            str(instrument_pid) if instrument_pid is not None else symbol_pid
+                        ),
+                        "symbol_public_id": symbol_pid,
+                        "symbol": str(row["symbol"]),
+                        "exchange": exchange,
+                        "can_trade": bool(row["can_trade"]),
+                        "can_market_data": bool(row["can_market_data"]),
+                        "instrument_kind": row["instrument_kind"],
+                        "expiry_at": row["expiry_at"],
+                    }
+                )
+            return rows
 
     async def get_signals(
         self,

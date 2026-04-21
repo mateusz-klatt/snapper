@@ -222,6 +222,24 @@ export const InstrumentCapabilityDataSchema = z
   })
   .strict()
 
+export const InstrumentDetailDataSchema = z
+  .object({
+    type: z.literal('instrument_detail'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    instrument_public_id: z.string(),
+    symbol_public_id: z.string(),
+    symbol: z.string(),
+    exchange: z.string(),
+    can_trade: z.boolean(),
+    can_market_data: z.boolean(),
+    instrument_kind: z.string().nullable(),
+    expiry_at: z.iso.datetime().nullable(),
+  })
+  .strict()
+
 export const OrderCancelDataSchema = z
   .object({
     type: z.literal('order_cancel'),

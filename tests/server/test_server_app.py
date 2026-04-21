@@ -9,6 +9,7 @@ import sys
 import tempfile
 from collections.abc import AsyncGenerator
 from collections.abc import Generator
+from datetime import UTC
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -1213,6 +1214,13 @@ class MockRepository:
 
     async def get_exchange_instruments(self, exchange: str, as_of: Any) -> list[str]:
         """Return mock instrument list."""
+        self._raise_if_error()
+        return list(self._session_result)
+
+    async def get_exchange_instruments_detail(
+        self, exchange: str, as_of: Any
+    ) -> list[dict[str, Any]]:
+        """Return mock capability-aware instrument detail rows."""
         self._raise_if_error()
         return list(self._session_result)
 
@@ -2634,6 +2642,80 @@ class TestExchangeInstrumentsEndpoint:
         response = client.get("/api/exchanges/kraken/instruments")
         assert response.status_code == 500
         assert "Failed to fetch instruments" in response.json()["detail"]
+
+
+class TestExchangeInstrumentsDetailEndpoint:
+    """Tests for the capability-aware instrument-detail endpoint."""
+
+    def _make_row(
+        self,
+        *,
+        symbol: str = "MNQM6-CME",
+        can_trade: bool = False,
+        can_market_data: bool = True,
+        instrument_kind: str | None = "future",
+        expiry_at: datetime | None = datetime(2026, 6, 19, 20, 0, 0, tzinfo=UTC),
+    ) -> dict[str, Any]:
+        """Produce a typed mock detail row matching ``InstrumentDetailRow``."""
+        return {
+            "instrument_public_id": "00000000-0000-7000-8000-0000000000f1",
+            "symbol_public_id": "00000000-0000-7000-8000-0000000000e1",
+            "symbol": symbol,
+            "exchange": "kraken_equities",
+            "can_trade": can_trade,
+            "can_market_data": can_market_data,
+            "instrument_kind": instrument_kind,
+            "expiry_at": expiry_at,
+        }
+
+    def test_returns_detail_rows_with_capability_flags(self) -> None:
+        """Endpoint projects repo rows through InstrumentDetailData items.
+
+        Given: Repository returning two rows (one tradable, one market-data only),
+        When: GET /exchanges/kraken_equities/instruments/detail is called,
+        Then: Response is 200 with two items whose can_trade flags match.
+        """
+        rows = [
+            self._make_row(symbol="MNQM6-CME", can_trade=False),
+            self._make_row(symbol="BTC-USD", can_trade=True, instrument_kind="spot"),
+        ]
+        repo = MockRepository(session_result=rows)
+        client = create_app_with_overrides(repo)
+        response = client.get("/api/exchanges/kraken_equities/instruments/detail")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["type"] == "instrument_detail_list"
+        assert data["count"] == 2
+        symbols = {item["symbol"]: item["can_trade"] for item in data["payload"]}
+        assert symbols == {"MNQM6-CME": False, "BTC-USD": True}
+
+    def test_empty_result(self) -> None:
+        """Endpoint returns an empty list when the exchange has no rows.
+
+        Given: Repository returning an empty list,
+        When: GET /exchanges/unknown/instruments/detail is called,
+        Then: Response is 200 with empty payload and count=0.
+        """
+        repo = MockRepository(session_result=[])
+        client = create_app_with_overrides(repo)
+        response = client.get("/api/exchanges/unknown/instruments/detail")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["payload"] == []
+        assert data["count"] == 0
+
+    def test_database_error_returns_500(self) -> None:
+        """Endpoint returns 500 when the repository raises.
+
+        Given: A repository raising a generic database exception,
+        When: the detail endpoint is called,
+        Then: Response is 500 with ``Failed to fetch instrument detail`` detail.
+        """
+        repo = MockRepository(error=Exception("Database connection failed"))
+        client = create_app_with_overrides(repo)
+        response = client.get("/api/exchanges/kraken_equities/instruments/detail")
+        assert response.status_code == 500
+        assert "Failed to fetch instrument detail" in response.json()["detail"]
 
 
 class TestCandlesHttpExceptionReraise:

@@ -16,6 +16,7 @@ from snapper.messaging.schemas.data import ContractData
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import FrontMonthData
 from snapper.messaging.schemas.data import InstrumentCapabilityData
+from snapper.messaging.schemas.data import InstrumentDetailData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import PositionData
 from snapper.messaging.schemas.data import SignalData
@@ -120,6 +121,24 @@ class InstrumentListResponse(PayloadListResponse[Literal["instrument_list"], str
     """
 
     type: Literal["instrument_list"] = "instrument_list"
+
+
+class InstrumentDetailListResponse(
+    PayloadListResponse[Literal["instrument_detail_list"], InstrumentDetailData],
+):
+    """Capability-aware instrument list response wrapper.
+
+    Wraps ``InstrumentDetailData`` items so the frontend can render
+    market-data-only badges + disable order-entry for non-tradable
+    instruments without a second round-trip.
+
+    Attributes:
+        type: Payload item type discriminator.
+        payload: List of ``InstrumentDetailData`` items.
+        count: Total number of instruments in the response.
+    """
+
+    type: Literal["instrument_detail_list"] = "instrument_detail_list"
 
 
 class UnderlyingAssetListResponse(

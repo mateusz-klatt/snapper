@@ -2240,6 +2240,42 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
+    "/api/exchanges/{exchange}/instruments/detail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Exchange Instruments Detail
+         * @description Return capability-aware instrument rows for a given exchange.
+         *
+         *     Each row carries ``can_trade``, ``can_market_data``,
+         *     ``instrument_kind``, and ``expiry_at`` so the frontend can render
+         *     a "Market-data only" badge and disable order-entry for
+         *     TradFi-style instruments without a second round-trip.
+         *
+         *     Args:
+         *         request: FastAPI request (provides REST tracker for provenance).
+         *         exchange: Exchange name to query instruments for.
+         *         _auth: Authenticated user with READ_MARKET_DATA permission.
+         *         _csrf: CSRF token validation.
+         *         repo: Database repository.
+         *         as_of: Optional point-in-time query timestamp.
+         *
+         *     Returns:
+         *         InstrumentDetailListResponse wrapping the instrument detail list.
+         */
+        get: Operations["get_exchange_instruments_detail_api_exchanges__exchange__instruments_detail_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/underlyings": {
         parameters: {
             query?: never;
@@ -4849,6 +4885,103 @@ export type Components = {
              * @description Number of currently active topics
              */
             active: number;
+        };
+        /**
+         * InstrumentDetailData
+         * @description Capability-aware instrument projection for REST responses.
+         *
+         *     Joins Symbol + SymbolExchangeCapability + Instrument + InstrumentSpec
+         *     so the frontend can render the market-data-only badge + disable
+         *     submit buttons without a separate round-trip for capability lookup.
+         *
+         *     Attributes:
+         *         instrument_public_id: Public ID of the Instrument row.
+         *         symbol_public_id: Public ID of the Symbol row
+         *             (same symbol can map to many instruments across exchanges).
+         *         symbol: Native symbol string (e.g. ``MNQM6-CME``).
+         *         exchange: Exchange identifier.
+         *         can_trade: Value of ``SymbolExchangeCapability.can_trade`` — False
+         *             means market-data only (frontend renders a "Market-data only"
+         *             badge and disables order submit).
+         *         can_market_data: Value of ``SymbolExchangeCapability.can_market_data``.
+         *         instrument_kind: InstrumentSpec kind label (``future``, ``spot``,
+         *             etc.); ``None`` when no spec row exists.
+         *         expiry_at: InstrumentSpec expiry timestamp; ``None`` for perpetuals
+         *             + assets without a scheduled expiry.
+         */
+        InstrumentDetailData: {
+            /**
+             * Type
+             * @default instrument_detail
+             * @constant
+             */
+            type: "instrument_detail";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Instrument Public Id */
+            instrument_public_id: string;
+            /** Symbol Public Id */
+            symbol_public_id: string;
+            /** Symbol */
+            symbol: string;
+            /** Exchange */
+            exchange: string;
+            /** Can Trade */
+            can_trade: boolean;
+            /** Can Market Data */
+            can_market_data: boolean;
+            /** Instrument Kind */
+            instrument_kind: string | null;
+            /** Expiry At */
+            expiry_at: string | null;
+        };
+        /**
+         * InstrumentDetailListResponse
+         * @description Capability-aware instrument list response wrapper.
+         *
+         *     Wraps ``InstrumentDetailData`` items so the frontend can render
+         *     market-data-only badges + disable order-entry for non-tradable
+         *     instruments without a second round-trip.
+         *
+         *     Attributes:
+         *         type: Payload item type discriminator.
+         *         payload: List of ``InstrumentDetailData`` items.
+         *         count: Total number of instruments in the response.
+         */
+        InstrumentDetailListResponse: {
+            /**
+             * Type
+             * @default instrument_detail_list
+             * @constant
+             */
+            type: "instrument_detail_list";
+            /** Sequence Id */
+            sequence_id: number;
+            /** Public Id */
+            public_id: string;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Session Id */
+            session_id: string;
+            /** Payload */
+            payload: Components["schemas"]["InstrumentDetailData"][];
+            /**
+             * Count
+             * @description Number of items in payload
+             */
+            count: number;
         };
         /**
          * InstrumentListResponse
@@ -11556,6 +11689,47 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["InstrumentListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_exchange_instruments_detail_api_exchanges__exchange__instruments_detail_get: {
+        parameters: {
+            query?: {
+                /** @description Point-in-time query (UTC) */
+                as_of?: string | null;
+            };
+            header?: never;
+            path: {
+                exchange: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["InstrumentDetailListResponse"];
                 };
             };
             /** @description Validation Error */

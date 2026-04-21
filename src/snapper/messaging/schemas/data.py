@@ -600,6 +600,40 @@ class UnderlyingInstrumentData(StrictDataSchema[Literal["underlying_instrument"]
     contract_family: str | None
 
 
+class InstrumentDetailData(StrictDataSchema[Literal["instrument_detail"]]):
+    """Capability-aware instrument projection for REST responses.
+
+    Joins Symbol + SymbolExchangeCapability + Instrument + InstrumentSpec
+    so the frontend can render the market-data-only badge + disable
+    submit buttons without a separate round-trip for capability lookup.
+
+    Attributes:
+        instrument_public_id: Public ID of the Instrument row.
+        symbol_public_id: Public ID of the Symbol row
+            (same symbol can map to many instruments across exchanges).
+        symbol: Native symbol string (e.g. ``MNQM6-CME``).
+        exchange: Exchange identifier.
+        can_trade: Value of ``SymbolExchangeCapability.can_trade`` — False
+            means market-data only (frontend renders a "Market-data only"
+            badge and disables order submit).
+        can_market_data: Value of ``SymbolExchangeCapability.can_market_data``.
+        instrument_kind: InstrumentSpec kind label (``future``, ``spot``,
+            etc.); ``None`` when no spec row exists.
+        expiry_at: InstrumentSpec expiry timestamp; ``None`` for perpetuals
+            + assets without a scheduled expiry.
+    """
+
+    type: Literal["instrument_detail"] = "instrument_detail"
+    instrument_public_id: str
+    symbol_public_id: str
+    symbol: str
+    exchange: str
+    can_trade: bool
+    can_market_data: bool
+    instrument_kind: str | None
+    expiry_at: datetime | None
+
+
 class FrontMonthData(StrictDataSchema[Literal["front_month"]]):
     """Front-month futures contract for an underlying.
 

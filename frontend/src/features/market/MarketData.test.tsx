@@ -21,8 +21,15 @@ vi.mock('../../hooks/queries', () => ({
     isLoading: false,
     error: null,
   })),
-  useExchangeInstruments: vi.fn(() => ({
-    data: { payload: ['EUR-USD', 'GBP-USD', 'BTC-USD'], count: 3 },
+  useExchangeInstrumentsDetail: vi.fn(() => ({
+    data: {
+      payload: [
+        { symbol: 'EUR-USD', can_trade: true },
+        { symbol: 'GBP-USD', can_trade: true },
+        { symbol: 'BTC-USD', can_trade: true },
+      ],
+      count: 3,
+    },
     isLoading: false,
     error: null,
   })),
@@ -392,9 +399,9 @@ describe('MarketData', () => {
     expect(screen.getByText(/Market Data/i)).toBeInTheDocument()
   })
   it('handles undefined instruments data', async () => {
-    const { useExchangeInstruments } = await import('../../hooks/queries')
+    const { useExchangeInstrumentsDetail } = await import('../../hooks/queries')
 
-    vi.mocked(useExchangeInstruments).mockReturnValueOnce({
+    vi.mocked(useExchangeInstrumentsDetail).mockReturnValueOnce({
       data: undefined,
       isLoading: false,
       error: null,
@@ -538,5 +545,104 @@ describe('MarketData', () => {
       selector: (s: Record<string, unknown>) => unknown
     ) => selector({ asOf: null, isTimeTraveling: false })) as never)
     vi.mocked(useMarketSubscription).mockReturnValue(true)
+  })
+
+  it('renders the market-data-only badge next to the title when the selected instrument is observation-only', async () => {
+    const queries = await import('../../hooks/queries')
+    const marketStore = await import('../../stores/market')
+
+    vi.mocked(marketStore.useMarketStore).mockReturnValue({
+      selectedExchange: 'kraken',
+      selectedInstrument: 'EUR-USD',
+      selectedTimeframe: '1h',
+      setSelectedExchange: mockSetSelectedExchange,
+      setSelectedInstrument: mockSetSelectedInstrument,
+      setSelectedTimeframe: mockSetSelectedTimeframe,
+    } as never)
+    vi.mocked(queries.useExchangeInstrumentsDetail).mockImplementation((() => ({
+      data: {
+        payload: [
+          { symbol: 'EUR-USD', can_trade: false },
+          { symbol: 'GBP-USD', can_trade: true },
+        ],
+        count: 2,
+      },
+      isLoading: false,
+      error: null,
+    })) as never)
+
+    try {
+      renderWithProviders(<MarketData />)
+      const badges = await screen.findAllByTestId('market-data-only-badge')
+
+      expect(badges.length).toBeGreaterThan(0)
+    } finally {
+      vi.mocked(queries.useExchangeInstrumentsDetail).mockImplementation((() => ({
+        data: {
+          payload: [
+            { symbol: 'EUR-USD', can_trade: true },
+            { symbol: 'GBP-USD', can_trade: true },
+            { symbol: 'BTC-USD', can_trade: true },
+          ],
+          count: 3,
+        },
+        isLoading: false,
+        error: null,
+      })) as never)
+    }
+  })
+
+  it('hides the title badge when no instrument is selected', async () => {
+    const { useMarketStore } = await import('../../stores/market')
+
+    vi.mocked(useMarketStore).mockReturnValueOnce({
+      selectedExchange: 'kraken',
+      selectedInstrument: null,
+      selectedTimeframe: '1h',
+      setSelectedExchange: mockSetSelectedExchange,
+      setSelectedInstrument: mockSetSelectedInstrument,
+      setSelectedTimeframe: mockSetSelectedTimeframe,
+    } as never)
+    renderWithProviders(<MarketData />)
+    expect(screen.queryByTestId('market-data-only-badge')).toBeNull()
+  })
+
+  it('marks market-data-only rows in the instrument dropdown with a badge', async () => {
+    const { useExchangeInstrumentsDetail } = await import('../../hooks/queries')
+
+    vi.mocked(useExchangeInstrumentsDetail).mockImplementation((() => ({
+      data: {
+        payload: [
+          { symbol: 'MNQM6-CME', can_trade: false },
+          { symbol: 'BTC-USD', can_trade: true },
+        ],
+        count: 2,
+      },
+      isLoading: false,
+      error: null,
+    })) as never)
+
+    try {
+      renderWithProviders(<MarketData />)
+      const search = screen.getByPlaceholderText('Search instrument...') as HTMLInputElement
+
+      fireEvent.focus(search)
+      const badges = await screen.findAllByTestId('market-data-only-badge')
+
+      expect(badges.length).toBeGreaterThan(0)
+    } finally {
+      vi.mocked(useExchangeInstrumentsDetail).mockImplementation((() => ({
+        data: {
+          payload: [
+            { symbol: 'EUR-USD', can_trade: true },
+            { symbol: 'GBP-USD', can_trade: true },
+            { symbol: 'BTC-USD', can_trade: true },
+          ],
+          count: 3,
+        },
+        isLoading: false,
+        error: null,
+      })) as never)
+    }
   })
 })

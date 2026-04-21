@@ -256,6 +256,24 @@ export const HealthTopicsSchema = z
   })
   .strict()
 
+export const InstrumentDetailDataSchema = z
+  .object({
+    type: z.literal('instrument_detail'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    instrument_public_id: z.string(),
+    symbol_public_id: z.string(),
+    symbol: z.string(),
+    exchange: z.string(),
+    can_trade: z.boolean(),
+    can_market_data: z.boolean(),
+    instrument_kind: z.string().nullable(),
+    expiry_at: z.iso.datetime().nullable(),
+  })
+  .strict()
+
 export const InstrumentListResponseSchema = z
   .object({
     type: z.literal('instrument_list'),
@@ -1029,6 +1047,18 @@ export const GapDetectionStatsSchema = z
   .object({
     bridge: GapStatsSchema,
     rest_clients: z.record(z.string(), GapStatsSchema),
+  })
+  .strict()
+
+export const InstrumentDetailListResponseSchema = z
+  .object({
+    type: z.literal('instrument_detail_list'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: z.array(InstrumentDetailDataSchema),
+    count: z.number().int(),
   })
   .strict()
 
@@ -2294,6 +2324,7 @@ export type FeatureFlagsPayload = z.infer<typeof FeatureFlagsPayloadSchema>
 export type FrontMonthData = z.infer<typeof FrontMonthDataSchema>
 export type GapStats = z.infer<typeof GapStatsSchema>
 export type HealthTopics = z.infer<typeof HealthTopicsSchema>
+export type InstrumentDetailData = z.infer<typeof InstrumentDetailDataSchema>
 export type InstrumentListResponse = z.infer<typeof InstrumentListResponseSchema>
 export type JsonPrimitive = z.infer<typeof JsonPrimitiveSchema>
 export type MessageResponse = z.infer<typeof MessageResponseSchema>
@@ -2367,6 +2398,7 @@ export type ExecutionPlanResponse = z.infer<typeof ExecutionPlanResponseSchema>
 export type FeatureFlagsResponse = z.infer<typeof FeatureFlagsResponseSchema>
 export type FrontMonthResponse = z.infer<typeof FrontMonthResponseSchema>
 export type GapDetectionStats = z.infer<typeof GapDetectionStatsSchema>
+export type InstrumentDetailListResponse = z.infer<typeof InstrumentDetailListResponseSchema>
 export type JsonValue = z.infer<typeof JsonValueSchema>
 export type OperatorListResponse = z.infer<typeof OperatorListResponseSchema>
 export type OrderListResponse = z.infer<typeof OrderListResponseSchema>

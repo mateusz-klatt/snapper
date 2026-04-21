@@ -1419,3 +1419,21 @@ class BacktestEquityPointRow(TypedDict):
     cash: float
     position_value: float
     drawdown: float
+
+
+class InstrumentDetailRow(TypedDict):
+    """Read projection for the capability-aware instrument listing.
+
+    Joins Symbol + SymbolExchangeCapability + Instrument + InstrumentSpec
+    at a single temporal snapshot. Consumed by
+    ``GET /api/exchanges/{exchange}/instruments/detail``.
+    """
+
+    instrument_public_id: str
+    symbol_public_id: str
+    symbol: str
+    exchange: str
+    can_trade: bool
+    can_market_data: bool
+    instrument_kind: str | None
+    expiry_at: datetime | None
