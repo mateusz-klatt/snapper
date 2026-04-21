@@ -233,6 +233,65 @@ final class WebSocketManagerTests: XCTestCase {
 
     // MARK: - Commit 2 (FE-2) coverage
 
+    /// Server-driven `auth_failed` frame must route through the same
+    /// terminal `enterAuthFailedAndLogout` path as client-side token
+    /// refresh failure. Otherwise a server rejection would fall back to
+    /// the `.error` state and keep retrying against a backend that has
+    /// already refused us.
+    func testServerAuthFailedFrameTriggersTerminalLogout() async {
+        let fakeAuth = FakeAuthService(nextToken: "t")
+        let fakeTask = FakeWebSocketTask()
+        let factory = FakeWebSocketTaskFactory(task: fakeTask)
+        let manager = WebSocketManager(
+            authService: fakeAuth,
+            taskFactory: factory,
+            sleeper: FakeSleeper()
+        )
+        manager.connect()
+
+        manager.handleRawMessage(frame([
+            "type": "auth_failed",
+            "reason": "invalid_credentials"
+        ]))
+        await drainSendTasks()
+        await drainSendTasks()
+
+        if case .authFailed(let reason) = manager.connectionState {
+            XCTAssertTrue(reason.contains("invalid_credentials"), "authFailed reason should carry the server-sent text, got: \(reason)")
+        } else {
+            XCTFail("server auth_failed must enter .authFailed terminal state, got \(manager.connectionState)")
+        }
+        let logoutCalls = await fakeAuth.logoutCalls
+        XCTAssertEqual(logoutCalls, 1, "logout must fire on server-driven auth rejection")
+    }
+
+    /// Once `.authFailed` is reached, `connect()` must be a no-op —
+    /// reconnecting without an explicit re-login would defeat the
+    /// kill-switch the logout just armed.
+    func testConnectIsNoOpWhenAuthFailed() async {
+        let fakeAuth = FakeAuthService(nextToken: "t")
+        let task1 = FakeWebSocketTask()
+        let task2 = FakeWebSocketTask()
+        let factory = FakeWebSocketTaskFactory(tasks: [task1, task2])
+        let manager = WebSocketManager(
+            authService: fakeAuth,
+            taskFactory: factory,
+            sleeper: FakeSleeper()
+        )
+        manager.connect()
+        manager.handleRawMessage(frame([
+            "type": "auth_failed",
+            "reason": "stale_session"
+        ]))
+        await drainSendTasks()
+        await drainSendTasks()
+        XCTAssertTrue({ if case .authFailed = manager.connectionState { return true } else { return false } }())
+
+        let resumesBefore = task2.resumeCount
+        manager.connect()
+        XCTAssertEqual(task2.resumeCount, resumesBefore, "connect() while .authFailed must not create a new socket")
+    }
+
     /// When `fetchFreshWsToken` returns nil during `reauth_required`,
     /// the manager must flip to `.authFailed`, cancel the socket, clear
     /// `shouldReconnect`, and call `AuthService.logout()` exactly once.

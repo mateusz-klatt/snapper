@@ -66,6 +66,11 @@ class WebSocketManager: ObservableObject {
         if case .connected = connectionState { return }
         if case .connecting = connectionState { return }
         if case .authenticating = connectionState { return }
+        // `.authFailed` is terminal — the user must explicitly re-authenticate
+        // via `LoginView` (which resets AuthService.isAuthenticated and drives
+        // `SnapperApp`'s auth-change observer). Silently reconnecting from
+        // here would defeat the kill-switch the logout path just armed.
+        if case .authFailed = connectionState { return }
 
         guard let url = URL(string: AppConfig.wsBaseURL) else {
             connectionState = .error("Invalid WebSocket URL")
@@ -159,18 +164,14 @@ class WebSocketManager: ObservableObject {
                 }
             } catch {
                 guard let self = self else { return }
-                // Stale errors from a task we've already replaced/cancelled
+                // Stale errors from a task we've already replaced or nilled
                 // must not touch shared state — otherwise an old receive()
-                // resuming after reconnect would wipe the new socket via
-                // `handleDisconnection()`. Compare identity against the
-                // currently-owned task; if it no longer matches, the stale
-                // task was already taken offline by its replacement.
-                if let current = self.webSocketTask, current !== task {
-                    return
-                }
-                if self.webSocketTask == nil && self.intentionalDisconnect {
-                    // Expected close from `disconnect()`; the cancel path
-                    // has already cleared state. Nothing more to do.
+                // resuming after `disconnect()`, `enterAuthFailedAndLogout`,
+                // or a full reconnect swap would wipe the new socket via
+                // `handleDisconnection()`. The only case where this catch
+                // path has work to do is when the current task is STILL
+                // the one we suspended on.
+                guard let current = self.webSocketTask, current === task else {
                     return
                 }
                 if !self.intentionalDisconnect {
@@ -213,10 +214,11 @@ class WebSocketManager: ObservableObject {
 
         case "auth_failed":
             let reason = json["reason"] as? String ?? "unknown"
-            logger.error("WebSocket auth failed: \(reason)")
-            connectionState = .error("Auth failed: \(reason)")
-            webSocketTask?.cancel(with: .normalClosure, reason: nil)
-            webSocketTask = nil
+            logger.error("WebSocket auth rejected by server: \(reason)")
+            // Server rejection is also terminal — route through the same
+            // logout flow as client-side refresh failure so the UI
+            // consistently falls back to LoginView.
+            Task { await self.enterAuthFailedAndLogout(reason: "Server rejected auth: \(reason)") }
 
         case "reauth_required":
             Task { await self.performReauthentication() }
