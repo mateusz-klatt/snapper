@@ -35,6 +35,12 @@ class WebSocketManager: ObservableObject {
     /// so the proactive refresh fires before the server-issued ws_token
     /// actually expires (plan SC#5).
     private var proactiveRefreshTask: Task<Void, Never>?
+    /// Cancellable handle for the backoff-delayed reconnect attempt.
+    /// Cleared whenever the manager reaches a terminal/paused state so
+    /// `disconnect()` or `enterAuthFailedAndLogout()` actually stop the
+    /// client rather than just flipping `shouldReconnect = false` and
+    /// hoping the already-queued closure respects it.
+    private var reconnectWorkItem: DispatchWorkItem?
 
     /// Confirmed subscriptions — survive reconnects so the dispatcher can
     /// replay them on the next `auth_complete`.
@@ -96,6 +102,8 @@ class WebSocketManager: ObservableObject {
         pingTimer = nil
         proactiveRefreshTask?.cancel()
         proactiveRefreshTask = nil
+        reconnectWorkItem?.cancel()
+        reconnectWorkItem = nil
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
         connectionState = .disconnected
@@ -272,9 +280,14 @@ class WebSocketManager: ObservableObject {
         guard let exp = state.wsTokenExp else { return }
         let ttl = exp.timeIntervalSinceNow
         let fireAt = ttl * 0.8
-        guard fireAt > 0 else {
+        if fireAt <= 0 {
             logger.warning("ws_token already >= 80% expired on arrival; refreshing immediately")
-            Task { await self.performReauthentication() }
+            // Track the immediate-refresh path too so a disconnect
+            // arriving before the refresh fires cancels it cleanly.
+            proactiveRefreshTask = Task { [weak self] in
+                guard let self = self, !Task.isCancelled else { return }
+                await self.performReauthentication()
+            }
             return
         }
         let sleeper = self.sleeper
@@ -331,8 +344,25 @@ class WebSocketManager: ObservableObject {
         }
     }
 
+    /// True when the manager is still in a live session. Used by the
+    /// refresh-failure paths to distinguish a genuine auth failure from
+    /// a cancelled refresh (e.g. disconnect or background fired while
+    /// `fetchFreshWsToken()` was in flight). Without this check, a
+    /// racing disconnect would be converted into an `.authFailed` +
+    /// forced logout, which is wrong — disconnect is not auth failure.
+    private var isLiveSession: Bool {
+        switch connectionState {
+        case .connecting, .authenticating, .connected:
+            return true
+        case .disconnected, .error, .authFailed:
+            return false
+        }
+    }
+
     private func performAuthentication() async {
-        guard let token = await authService.fetchFreshWsToken() else {
+        let token = await authService.fetchFreshWsToken()
+        guard isLiveSession else { return }
+        guard let token = token else {
             logger.error("Failed to get ws_token for WebSocket auth — forcing logout")
             await enterAuthFailedAndLogout(reason: "Token refresh failed")
             return
@@ -341,7 +371,9 @@ class WebSocketManager: ObservableObject {
     }
 
     private func performReauthentication() async {
-        guard let token = await authService.fetchFreshWsToken() else {
+        let token = await authService.fetchFreshWsToken()
+        guard isLiveSession else { return }
+        guard let token = token else {
             logger.error("Failed to get ws_token for reauth — forcing logout")
             await enterAuthFailedAndLogout(reason: "Token refresh failed")
             return
@@ -357,6 +389,8 @@ class WebSocketManager: ObservableObject {
         shouldReconnect = false
         proactiveRefreshTask?.cancel()
         proactiveRefreshTask = nil
+        reconnectWorkItem?.cancel()
+        reconnectWorkItem = nil
         pingTimer?.invalidate()
         pingTimer = nil
         webSocketTask?.cancel(with: .normalClosure, reason: nil)
@@ -390,11 +424,20 @@ class WebSocketManager: ObservableObject {
 
         reconnectAttempts += 1
         let delay = nextReconnectDelay()
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+        // Cancel any previously-armed reconnect so we never double-fire.
+        reconnectWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
             Task { @MainActor in
-                self?.connect()
+                guard let self = self else { return }
+                // Re-check the intent right before reconnecting — a
+                // disconnect/background/logout that arrived while we
+                // were queued must win over the stale reconnect.
+                guard self.shouldReconnect else { return }
+                self.connect()
             }
         }
+        reconnectWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
     /// Exponential backoff capped at `maxReconnectDelay` (300s) with up to

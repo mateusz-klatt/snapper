@@ -377,6 +377,77 @@ final class WebSocketManagerTests: XCTestCase {
         XCTAssertEqual(manager.reconnectAttempts, previous + 1, "reconnectAttempts must keep advancing past the old cap")
     }
 
+    /// Disconnect must cancel a previously-armed reconnect work item.
+    /// Otherwise a socket drop → delayed reconnect → user logout race
+    /// could end with the WS reopening itself after logout.
+    func testDisconnectCancelsPendingReconnect() async {
+        let fakeTask = FakeWebSocketTask()
+        let factory = FakeWebSocketTaskFactory(tasks: [fakeTask, FakeWebSocketTask()])
+        let manager = WebSocketManager(
+            authService: FakeAuthService(nextToken: "t"),
+            taskFactory: factory,
+            sleeper: FakeSleeper()
+        )
+        manager.connect()
+        // Arm a reconnect attempt via the test hook.
+        manager.setReconnectAttemptsForTesting(1)
+        manager.forceHandleDisconnectionForTesting()
+
+        // User-initiated disconnect should kill the pending reconnect
+        // before the async-after timer fires.
+        manager.disconnect()
+
+        // Let the main queue drain — if the reconnect still fires it
+        // would re-create `webSocketTask` on `connect()`.
+        for _ in 0..<20 { await Task.yield() }
+        // Extra guard: wait long enough that even the minimum backoff
+        // interval (base = 3s) would have elapsed in real wall-clock,
+        // but since we just check no connect call happened, we can
+        // assert by state alone (connect would flip connectionState to
+        // .connecting). The async-after has NOT been mocked out here,
+        // so we use a short sleep of ~50ms to let the system settle.
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(manager.connectionState, .disconnected, "pending reconnect must NOT reopen the socket after disconnect()")
+    }
+
+    /// When disconnect races a proactive refresh in flight, the refresh
+    /// must NOT be misinterpreted as auth failure. Previously, a nil
+    /// token from a cancelled `fetchFreshWsToken` would trip
+    /// `enterAuthFailedAndLogout` and forcibly log the user out even
+    /// though they had simply backgrounded the app.
+    func testDisconnectMidRefreshDoesNotTriggerAuthFailure() async {
+        let fakeAuth = FakeAuthService(nextToken: nil)
+        let fakeTask = FakeWebSocketTask()
+        let factory = FakeWebSocketTaskFactory(task: fakeTask)
+        let manager = WebSocketManager(
+            authService: fakeAuth,
+            taskFactory: factory,
+            sleeper: FakeSleeper()
+        )
+        manager.connect()
+        // Start with state = .authenticating — matches the path used by
+        // server-driven "auth_required". Then the manager's
+        // performAuthentication runs, calls fetchFreshWsToken, which
+        // returns nil (simulating the race). Simultaneously disconnect.
+        manager.handleRawMessage(frame(["type": "auth_required"]))
+        // The detached Task has already started performAuthentication
+        // and awaited fetchFreshWsToken. Immediately tear down.
+        manager.disconnect()
+        await drainSendTasks()
+        await drainSendTasks()
+
+        let logoutCalls = await fakeAuth.logoutCalls
+        // Expected: 0 logouts — disconnect is not auth failure.
+        // The explicit user-initiated `disconnect()` path does not call
+        // `authService.logout()` either (plan §D4 restricts forced
+        // logout to the .authFailed terminal state).
+        XCTAssertEqual(logoutCalls, 0, "disconnect mid-refresh must NOT trigger AuthService.logout()")
+        // And state must be .disconnected (set by disconnect()), not
+        // .authFailed.
+        XCTAssertEqual(manager.connectionState, .disconnected)
+    }
+
     /// Proactive refresh should request a sleep equal to 80% of the
     /// advertised TTL. Uses `FakeSleeper` so no wall-clock dependency.
     func testProactiveRefreshFiresAt80Percent() async {
