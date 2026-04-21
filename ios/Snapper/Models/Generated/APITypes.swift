@@ -1579,6 +1579,61 @@ struct HealthTopics: Codable, Sendable {
     let active: Int
 }
 
+struct InstrumentDetailData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let instrumentPublicId: String
+    let symbolPublicId: String
+    let symbol: String
+    let exchange: String
+    let canTrade: Bool
+    let canMarketData: Bool
+    let instrumentResolved: Bool
+    let instrumentKind: String?
+    let expiryAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case instrumentPublicId = "instrument_public_id"
+        case symbolPublicId = "symbol_public_id"
+        case symbol
+        case exchange
+        case canTrade = "can_trade"
+        case canMarketData = "can_market_data"
+        case instrumentResolved = "instrument_resolved"
+        case instrumentKind = "instrument_kind"
+        case expiryAt = "expiry_at"
+    }
+}
+
+struct InstrumentDetailListResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: [InstrumentDetailData]
+    /// Number of items in payload
+    let count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+        case count
+    }
+}
+
 struct InstrumentListResponse: Codable, Sendable {
     let type: String?
     let sequenceId: Int
