@@ -4,6 +4,7 @@ import SwiftUI
 struct SnapperApp: App {
     @StateObject private var authService = AuthService.shared
     @StateObject private var webSocketManager = WebSocketManager.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -18,6 +19,43 @@ struct SnapperApp: App {
                 }
             }
             .tint(.brandGreen)
+            .onChange(of: scenePhase) { _, newPhase in
+                handleScenePhase(newPhase)
+            }
+            .onChange(of: authService.isAuthenticated) { _, isAuth in
+                handleAuthChange(isAuth)
+            }
+        }
+    }
+
+    /// Connect on foreground / disconnect on background. Matches the
+    /// iOS lifecycle: the socket must not hold the radio while the
+    /// app is suspended (plan §D8).
+    private func handleScenePhase(_ phase: ScenePhase) {
+        switch phase {
+        case .active:
+            if authService.isAuthenticated {
+                webSocketManager.connect()
+            }
+        case .background:
+            webSocketManager.disconnect()
+        case .inactive:
+            break
+        @unknown default:
+            break
+        }
+    }
+
+    /// Login flips `isAuthenticated` to true while the app is already
+    /// `.active` — scenePhase doesn't fire, so we need a second
+    /// observer to kick the WS connect. Logout is the mirror case.
+    /// `disconnect()` is idempotent so the compound "logout +
+    /// background" path is safe.
+    private func handleAuthChange(_ isAuth: Bool) {
+        if isAuth {
+            webSocketManager.connect()
+        } else {
+            webSocketManager.disconnect()
         }
     }
 }

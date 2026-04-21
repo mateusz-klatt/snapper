@@ -80,8 +80,13 @@ final class APIClientNetworkTests: XCTestCase {
             _ = try await apiClient.fetchOrders()
             XCTFail("Should throw error")
         } catch let error as APIError {
-            if case .serverError(let message) = error {
-                XCTAssertEqual(message, "Token expired")
+            // Post-Commit-3 contract: a 401 with no recoverable token
+            // (default FakeAuthService → nextToken == nil) force-logs-out
+            // the user and surfaces httpError(401). Backend-sent detail
+            // is intentionally dropped in this path so the UI routes to
+            // LoginView instead of showing a stale error message.
+            if case .httpError(let code) = error {
+                XCTAssertEqual(code, 401)
             } else {
                 XCTFail("Wrong error type: \(error)")
             }

@@ -14,7 +14,8 @@ final class APIClient: Sendable {
     private func request<T: Decodable>(
         endpoint: String,
         method: String = "GET",
-        body: Encodable? = nil
+        body: Encodable? = nil,
+        isRetry: Bool = false
     ) async throws -> T {
         guard let url = URL(string: "\(AppConfig.apiBaseURL)\(endpoint)") else {
             throw APIError.invalidURL
@@ -34,6 +35,21 @@ final class APIClient: Sendable {
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw APIError.invalidResponse
+        }
+
+        // 401 retry path: refresh ws_token exactly once, then replay.
+        // Second 401 → force logout so the UI routes to LoginView via
+        // SnapperApp's isAuthenticated observer (see plan §D7).
+        if httpResponse.statusCode == 401 {
+            if isRetry {
+                await authService.logout()
+                throw APIError.httpError(401)
+            }
+            guard await authService.fetchFreshWsToken() != nil else {
+                await authService.logout()
+                throw APIError.httpError(401)
+            }
+            return try await self.request(endpoint: endpoint, method: method, body: body, isRetry: true)
         }
 
         guard (200...299).contains(httpResponse.statusCode) else {
