@@ -2075,7 +2075,7 @@ def _run_ios_generator(args: GenerateTypesArgs, project_root: Path) -> None:
 
 
 def strip_eslint_disable_file(file_path: Path) -> None:
-    """Remove the eslint-disable header from a generated TypeScript file.
+    """Remove the eslint-disable header + JSDoc noise from a generated TS file.
 
     Args:
         file_path: Path to the generated file.
@@ -2085,6 +2085,7 @@ def strip_eslint_disable_file(file_path: Path) -> None:
 
     content = file_path.read_text(encoding="utf-8")
     updated = content.replace("/* eslint-disable */\n", "")
+    updated = _strip_jsdoc_blocks(updated)
 
     if updated != content:
         file_path.write_text(updated, encoding="utf-8")
