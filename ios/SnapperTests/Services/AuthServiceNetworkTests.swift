@@ -35,15 +35,28 @@ final class AuthServiceNetworkTests: XCTestCase {
             )!
 
             let json: [String: Any] = [
-                "message": "Login successful",
-                "expires_in": 900,
-                "user": [
-                    "id": "1",
-                    "username": "testuser",
-                    "email": "test@example.com",
-                    "role": "viewer",
-                    "is_active": true,
-                    "created_at": "2025-01-01T00:00:00Z"
+                "sequence_id": 1,
+                "public_id": "01961234-5678-7000-8000-000000000500",
+                "timestamp": "2025-01-01T00:00:00Z",
+                "session_id": "session-1",
+                "payload": [
+                    "sequence_id": 1,
+                    "public_id": "01961234-5678-7000-8000-000000000501",
+                    "timestamp": "2025-01-01T00:00:00Z",
+                    "session_id": "session-1",
+                    "message": "Login successful",
+                    "expires_in": 900,
+                    "user": [
+                        "sequence_id": 1,
+                        "public_id": "01961234-5678-7000-8000-000000000502",
+                        "timestamp": "2025-01-01T00:00:00Z",
+                        "session_id": "session-1",
+                        "username": "testuser",
+                        "email": "test@example.com",
+                        "role": "viewer",
+                        "is_active": true,
+                        "created_at": "2025-01-01T00:00:00Z"
+                    ]
                 ]
             ]
             let data = try JSONSerialization.data(withJSONObject: json)

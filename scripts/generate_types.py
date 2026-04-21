@@ -1761,16 +1761,21 @@ def _perm_name_to_swift_case(name: str) -> str:
 def _role_value_to_swift_case(value: str) -> str:
     """Return the Swift enum case name for a role string value.
 
-    Handles Swift keyword renames so that reserved words like ``operator``
-    become the safe alias defined in ``SWIFT_KEYWORD_RENAMES``.
+    Applies the same transformation pipeline used when ``UserRole`` is emitted
+    in ``APITypes.swift``: snake_case values like ``"ai_delegate"`` become
+    camelCase (``"aiDelegate"``), then ``SWIFT_KEYWORD_RENAMES`` maps reserved
+    words (e.g. ``"operator"`` → ``"operatorRole"``). Without the snake→camel
+    step, the generated ``rolePermissions`` / ``resourceAccess`` dictionaries
+    reference enum cases that do not exist.
 
     Args:
-        value: Raw role string value, e.g. ``"operator"``.
+        value: Raw role string value, e.g. ``"operator"`` or ``"ai_delegate"``.
 
     Returns:
-        Swift-safe case name, e.g. ``operatorRole``.
+        Swift-safe case name, e.g. ``"operatorRole"`` or ``"aiDelegate"``.
     """
-    return SWIFT_KEYWORD_RENAMES.get(value, value)
+    swift_case = snake_to_camel(value) if "_" in value else value
+    return SWIFT_KEYWORD_RENAMES.get(swift_case, swift_case)
 
 
 def generate_ios_permissions(project_root: Path) -> None:

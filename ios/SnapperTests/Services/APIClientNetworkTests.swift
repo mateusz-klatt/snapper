@@ -34,18 +34,28 @@ final class APIClientNetworkTests: XCTestCase {
                 headerFields: [AppConfig.HTTPHeader.contentType: AppConfig.ContentType.json]
             )!
 
-            let json: [[String: Any]] = [
-                [
-                    "public_id": "01961234-5678-7000-8000-000000000001",
-                    "instrument": "BTCUSD",
-                    "exchange": "kraken",
-                    "client_order_id": "client-123",
-                    "side": "buy",
-                    "order_type": "limit",
-                    "size": 1.0,
-                    "filled_size": 0.0,
-                    "status": "open",
-                    "created_at": "2025-11-22T10:00:00Z"
+            let json: [String: Any] = [
+                "sequence_id": 1,
+                "public_id": "01961234-5678-7000-8000-000000000100",
+                "timestamp": "2025-11-22T10:00:00Z",
+                "session_id": "session-1",
+                "count": 1,
+                "payload": [
+                    [
+                        "sequence_id": 1,
+                        "public_id": "01961234-5678-7000-8000-000000000001",
+                        "timestamp": "2025-11-22T10:00:00Z",
+                        "session_id": "session-1",
+                        "instrument": "BTCUSD",
+                        "exchange": "kraken",
+                        "client_order_id": "client-123",
+                        "side": "buy",
+                        "order_type": "limit",
+                        "size": 1.0,
+                        "filled_size": 0.0,
+                        "status": "open",
+                        "created_at": "2025-11-22T10:00:00Z"
+                    ]
                 ]
             ]
             let data = try JSONSerialization.data(withJSONObject: json)
@@ -103,15 +113,25 @@ final class APIClientNetworkTests: XCTestCase {
                 headerFields: [AppConfig.HTTPHeader.contentType: AppConfig.ContentType.json]
             )!
 
-            let json: [[String: Any]] = [
-                [
-                    "public_id": "01961234-5678-7000-8000-000000000002",
-                    "instrument": "BTCUSD",
-                    "exchange": "kraken",
-                    "quantity": 1.5,
-                    "average_price": 50000.0,
-                    "unrealized_pnl": 500.0,
-                    "realized_pnl": 0.0
+            let json: [String: Any] = [
+                "sequence_id": 1,
+                "public_id": "01961234-5678-7000-8000-000000000200",
+                "timestamp": "2025-11-22T10:00:00Z",
+                "session_id": "session-1",
+                "count": 1,
+                "payload": [
+                    [
+                        "sequence_id": 1,
+                        "public_id": "01961234-5678-7000-8000-000000000002",
+                        "timestamp": "2025-11-22T10:00:00Z",
+                        "session_id": "session-1",
+                        "instrument": "BTCUSD",
+                        "exchange": "kraken",
+                        "quantity": 1.5,
+                        "average_price": 50000.0,
+                        "unrealized_pnl": 500.0,
+                        "realized_pnl": 0.0
+                    ]
                 ]
             ]
             let data = try JSONSerialization.data(withJSONObject: json)
@@ -137,15 +157,25 @@ final class APIClientNetworkTests: XCTestCase {
                 headerFields: [AppConfig.HTTPHeader.contentType: AppConfig.ContentType.json]
             )!
 
-            let json: [[String: Any]] = [
-                [
-                    "public_id": "01961234-5678-7000-8000-000000000003",
-                    "instrument": "ETHUSD",
-                    "exchange": "kraken",
-                    "side": "buy",
-                    "strength": 0.8,
-                    "reason": "Strategy triggered",
-                    "timestamp": "2025-11-22T10:00:00Z"
+            let json: [String: Any] = [
+                "sequence_id": 1,
+                "public_id": "01961234-5678-7000-8000-000000000300",
+                "timestamp": "2025-11-22T10:00:00Z",
+                "session_id": "session-1",
+                "count": 1,
+                "payload": [
+                    [
+                        "sequence_id": 1,
+                        "public_id": "01961234-5678-7000-8000-000000000003",
+                        "timestamp": "2025-11-22T10:00:00Z",
+                        "session_id": "session-1",
+                        "instrument": "ETHUSD",
+                        "exchange": "kraken",
+                        "side": "buy",
+                        "strength": 0.8,
+                        "reason": "Strategy triggered",
+                        "fired_at": "2025-11-22T10:00:00Z"
+                    ]
                 ]
             ]
             let data = try JSONSerialization.data(withJSONObject: json)
@@ -166,18 +196,28 @@ final class APIClientNetworkTests: XCTestCase {
         MockURLProtocol.requestHandler = { request in
             capturedRequest = request
 
-            let json: [[String: Any]] = [
-                [
-                    "public_id": "01961234-5678-7000-8000-000000000001",
-                    "instrument": "BTCUSD",
-                    "exchange": "kraken",
-                    "client_order_id": "client-123",
-                    "side": "buy",
-                    "order_type": "limit",
-                    "size": 1.0,
-                    "filled_size": 0.0,
-                    "status": "open",
-                    "created_at": "2025-11-22T10:00:00Z"
+            let json: [String: Any] = [
+                "sequence_id": 1,
+                "public_id": "01961234-5678-7000-8000-000000000400",
+                "timestamp": "2025-11-22T10:00:00Z",
+                "session_id": "session-1",
+                "count": 1,
+                "payload": [
+                    [
+                        "sequence_id": 1,
+                        "public_id": "01961234-5678-7000-8000-000000000001",
+                        "timestamp": "2025-11-22T10:00:00Z",
+                        "session_id": "session-1",
+                        "instrument": "BTCUSD",
+                        "exchange": "kraken",
+                        "client_order_id": "client-123",
+                        "side": "buy",
+                        "order_type": "limit",
+                        "size": 1.0,
+                        "filled_size": 0.0,
+                        "status": "open",
+                        "created_at": "2025-11-22T10:00:00Z"
+                    ]
                 ]
             ]
             let data = try JSONSerialization.data(withJSONObject: json)

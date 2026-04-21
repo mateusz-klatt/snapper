@@ -96,32 +96,58 @@ final class LoginViewModelTests: XCTestCase {
             if requestCount == 1 {
 
                 let json: [String: Any] = [
-                    "message": "Login successful",
-                    "expires_in": 900,
-                    "user": [
-                        "id": "1",
-                        "username": "testuser",
-                        "email": "test@example.com",
-                        "role": "viewer",
-                        "is_active": true,
-                        "created_at": "2025-01-01T00:00:00Z"
+                    "sequence_id": 1,
+                    "public_id": "01961234-5678-7000-8000-000000000600",
+                    "timestamp": "2025-01-01T00:00:00Z",
+                    "session_id": "session-1",
+                    "payload": [
+                        "sequence_id": 1,
+                        "public_id": "01961234-5678-7000-8000-000000000601",
+                        "timestamp": "2025-01-01T00:00:00Z",
+                        "session_id": "session-1",
+                        "message": "Login successful",
+                        "expires_in": 900,
+                        "user": [
+                            "sequence_id": 1,
+                            "public_id": "01961234-5678-7000-8000-000000000602",
+                            "timestamp": "2025-01-01T00:00:00Z",
+                            "session_id": "session-1",
+                            "username": "testuser",
+                            "email": "test@example.com",
+                            "role": "viewer",
+                            "is_active": true,
+                            "created_at": "2025-01-01T00:00:00Z"
+                        ]
                     ]
                 ]
                 return MockURLProtocol.jsonResponse(statusCode: 200, json: json)
             } else {
 
                 let json: [String: Any] = [
-                    "message": "Token refreshed",
-                    "ws_token": "ws_token_value",
-                    "ws_token_exp": "2025-11-22T11:00:00Z",
-                    "csrf_token": "csrf_value",
-                    "user": [
-                        "id": "1",
-                        "username": "testuser",
-                        "email": "test@example.com",
-                        "role": "viewer",
-                        "is_active": true,
-                        "created_at": "2025-01-01T00:00:00Z"
+                    "sequence_id": 2,
+                    "public_id": "01961234-5678-7000-8000-000000000700",
+                    "timestamp": "2025-11-22T11:00:00Z",
+                    "session_id": "session-1",
+                    "payload": [
+                        "sequence_id": 2,
+                        "public_id": "01961234-5678-7000-8000-000000000701",
+                        "timestamp": "2025-11-22T11:00:00Z",
+                        "session_id": "session-1",
+                        "message": "Token refreshed",
+                        "ws_token": "ws_token_value",
+                        "ws_token_exp": "2025-11-22T11:00:00Z",
+                        "csrf_token": "csrf_value",
+                        "user": [
+                            "sequence_id": 1,
+                            "public_id": "01961234-5678-7000-8000-000000000702",
+                            "timestamp": "2025-01-01T00:00:00Z",
+                            "session_id": "session-1",
+                            "username": "testuser",
+                            "email": "test@example.com",
+                            "role": "viewer",
+                            "is_active": true,
+                            "created_at": "2025-01-01T00:00:00Z"
+                        ]
                     ]
                 ]
                 return MockURLProtocol.jsonResponse(statusCode: 200, json: json)
@@ -191,15 +217,28 @@ final class LoginViewModelTests: XCTestCase {
         MockURLProtocol.requestHandler = { request in
             Thread.sleep(forTimeInterval: 0.1)
             return MockURLProtocol.jsonResponse(statusCode: 200, json: [
-                "message": "Login successful",
-                "expires_in": 900,
-                "user": [
-                    "id": "1",
-                    "username": "testuser",
-                    "email": "test@example.com",
-                    "role": "viewer",
-                    "is_active": true,
-                    "created_at": "2025-01-01T00:00:00Z"
+                "sequence_id": 1,
+                "public_id": "01961234-5678-7000-8000-000000000800",
+                "timestamp": "2025-01-01T00:00:00Z",
+                "session_id": "session-1",
+                "payload": [
+                    "sequence_id": 1,
+                    "public_id": "01961234-5678-7000-8000-000000000801",
+                    "timestamp": "2025-01-01T00:00:00Z",
+                    "session_id": "session-1",
+                    "message": "Login successful",
+                    "expires_in": 900,
+                    "user": [
+                        "sequence_id": 1,
+                        "public_id": "01961234-5678-7000-8000-000000000802",
+                        "timestamp": "2025-01-01T00:00:00Z",
+                        "session_id": "session-1",
+                        "username": "testuser",
+                        "email": "test@example.com",
+                        "role": "viewer",
+                        "is_active": true,
+                        "created_at": "2025-01-01T00:00:00Z"
+                    ]
                 ]
             ])
         }

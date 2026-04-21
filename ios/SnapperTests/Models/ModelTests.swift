@@ -6,6 +6,10 @@ final class ModelTests: XCTestCase {
     func testUserProfileDecoding() throws {
         let json = """
         {
+            "sequence_id": 1,
+            "public_id": "01961234-5678-7000-8000-000000000001",
+            "timestamp": "2025-01-01T00:00:00Z",
+            "session_id": "session-1",
             "username": "testuser",
             "email": "test@example.com",
             "role": "viewer",
@@ -28,7 +32,10 @@ final class ModelTests: XCTestCase {
     func testOrderStatusDecoding() throws {
         let json = """
         {
+            "sequence_id": 1,
             "public_id": "01961234-5678-7000-8000-000000000001",
+            "timestamp": "2025-11-22T10:00:00Z",
+            "session_id": "session-1",
             "instrument": "BTCUSD",
             "exchange": "kraken",
             "client_order_id": "client-123",
@@ -61,15 +68,28 @@ final class ModelTests: XCTestCase {
     func testLoginResponseDecoding() throws {
         let json = """
         {
-            "message": "Login successful",
-            "expires_in": 900,
-            "user": {
-                "id": "1",
-                "username": "testuser",
-                "email": "test@example.com",
-                "role": "admin",
-                "is_active": true,
-                "created_at": "2025-01-01T00:00:00Z"
+            "sequence_id": 1,
+            "public_id": "01961234-5678-7000-8000-000000000001",
+            "timestamp": "2025-01-01T00:00:00Z",
+            "session_id": "session-1",
+            "payload": {
+                "sequence_id": 1,
+                "public_id": "01961234-5678-7000-8000-000000000002",
+                "timestamp": "2025-01-01T00:00:00Z",
+                "session_id": "session-1",
+                "message": "Login successful",
+                "expires_in": 900,
+                "user": {
+                    "sequence_id": 1,
+                    "public_id": "01961234-5678-7000-8000-000000000003",
+                    "timestamp": "2025-01-01T00:00:00Z",
+                    "session_id": "session-1",
+                    "username": "testuser",
+                    "email": "test@example.com",
+                    "role": "admin",
+                    "is_active": true,
+                    "created_at": "2025-01-01T00:00:00Z"
+                }
             }
         }
         """.data(using: .utf8)!
@@ -79,17 +99,20 @@ final class ModelTests: XCTestCase {
 
         let response = try decoder.decode(LoginResponse.self, from: json)
 
-        XCTAssertEqual(response.message, "Login successful")
-        XCTAssertEqual(response.expiresIn, 900)
-        XCTAssertEqual(response.user.username, "testuser")
-        XCTAssertEqual(response.user.role, .admin)
+        XCTAssertEqual(response.payload.message, "Login successful")
+        XCTAssertEqual(response.payload.expiresIn, 900)
+        XCTAssertEqual(response.payload.user.username, "testuser")
+        XCTAssertEqual(response.payload.user.role, .admin)
     }
 
     func testCandleEnvelopeDecoding() throws {
         let json = """
         {
             "type": "candle",
+            "sequence_id": 1,
+            "public_id": "01961234-5678-7000-8000-000000000010",
             "timestamp": "2025-11-22T10:00:00Z",
+            "session_id": "session-1",
             "instrument": "BTCUSD",
             "timeframe": "1m",
             "open_at": "2025-11-22T10:00:00Z",
@@ -123,17 +146,30 @@ final class ModelTests: XCTestCase {
     func testRefreshResponseDecoding() throws {
         let json = """
         {
-            "message": "Token refreshed",
-            "ws_token": "ws_token_value",
-            "ws_token_exp": "2025-11-22T11:00:00Z",
-            "csrf_token": "csrf_token_value",
-            "user": {
-                "id": "1",
-                "username": "testuser",
-                "email": "test@example.com",
-                "role": "viewer",
-                "is_active": true,
-                "created_at": "2025-01-01T00:00:00Z"
+            "sequence_id": 1,
+            "public_id": "01961234-5678-7000-8000-000000000020",
+            "timestamp": "2025-11-22T11:00:00Z",
+            "session_id": "session-1",
+            "payload": {
+                "sequence_id": 1,
+                "public_id": "01961234-5678-7000-8000-000000000021",
+                "timestamp": "2025-11-22T11:00:00Z",
+                "session_id": "session-1",
+                "message": "Token refreshed",
+                "ws_token": "ws_token_value",
+                "ws_token_exp": "2025-11-22T11:00:00Z",
+                "csrf_token": "csrf_token_value",
+                "user": {
+                    "sequence_id": 1,
+                    "public_id": "01961234-5678-7000-8000-000000000022",
+                    "timestamp": "2025-01-01T00:00:00Z",
+                    "session_id": "session-1",
+                    "username": "testuser",
+                    "email": "test@example.com",
+                    "role": "viewer",
+                    "is_active": true,
+                    "created_at": "2025-01-01T00:00:00Z"
+                }
             }
         }
         """.data(using: .utf8)!
@@ -143,9 +179,9 @@ final class ModelTests: XCTestCase {
 
         let response = try decoder.decode(RefreshResponse.self, from: json)
 
-        XCTAssertEqual(response.message, "Token refreshed")
-        XCTAssertEqual(response.wsToken, "ws_token_value")
-        XCTAssertEqual(response.csrfToken, "csrf_token_value")
-        XCTAssertEqual(response.user.username, "testuser")
+        XCTAssertEqual(response.payload.message, "Token refreshed")
+        XCTAssertEqual(response.payload.wsToken, "ws_token_value")
+        XCTAssertEqual(response.payload.csrfToken, "csrf_token_value")
+        XCTAssertEqual(response.payload.user.username, "testuser")
     }
 }

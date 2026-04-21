@@ -48,7 +48,7 @@ class AuthService: ObservableObject {
                 let decoder = JSONDecoder()
                 decoder.dateDecodingStrategy = .iso8601
                 let loginResponse = try decoder.decode(LoginResponse.self, from: data)
-                currentUser = loginResponse.user
+                currentUser = loginResponse.payload.user
                 errorMessage = nil
                 isAuthenticated = true
             } else {
@@ -129,8 +129,8 @@ class AuthService: ObservableObject {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             let refreshResponse = try decoder.decode(RefreshResponse.self, from: data)
-            wsToken = refreshResponse.wsToken
-            return refreshResponse.wsToken
+            wsToken = refreshResponse.payload.wsToken
+            return refreshResponse.payload.wsToken
         } catch {
             logger.error("Failed to fetch fresh ws_token: \(error)")
             return nil

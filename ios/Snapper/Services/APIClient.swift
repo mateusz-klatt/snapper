@@ -48,23 +48,28 @@ final class APIClient: Sendable {
     }
 
     func fetchOrders() async throws -> [OrderStatus] {
-        return try await request(endpoint: AppConfig.Endpoints.orders)
+        let envelope: OrderListResponse = try await request(endpoint: AppConfig.Endpoints.orders)
+        return envelope.payload
     }
 
     func fetchPositions() async throws -> [PositionSnapshot] {
-        return try await request(endpoint: AppConfig.Endpoints.positions)
+        let envelope: PositionListResponse = try await request(endpoint: AppConfig.Endpoints.positions)
+        return envelope.payload
     }
 
     func fetchSignals() async throws -> [TradingSignal] {
-        return try await request(endpoint: AppConfig.Endpoints.signals)
+        let envelope: SignalListResponse = try await request(endpoint: AppConfig.Endpoints.signals)
+        return envelope.payload
     }
 
     func fetchExecutions() async throws -> [ExecutionRecord] {
-        return try await request(endpoint: AppConfig.Endpoints.executions)
+        let envelope: ExecutionListResponse = try await request(endpoint: AppConfig.Endpoints.executions)
+        return envelope.payload
     }
 
     func fetchSystemStatus() async throws -> SystemStatus {
-        return try await request(endpoint: AppConfig.Endpoints.status)
+        let envelope: SystemStatusResponse = try await request(endpoint: AppConfig.Endpoints.status)
+        return envelope.payload
     }
 
     func fetchHealth() async throws -> HealthCheckResponse {

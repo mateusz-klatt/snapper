@@ -19,15 +19,28 @@ final class AuthServiceTests: XCTestCase {
     func testLoginResponseDecoding() throws {
         let json = """
         {
-            "message": "Login successful",
-            "expires_in": 900,
-            "user": {
-                "id": "1",
-                "username": "testuser",
-                "email": "test@example.com",
-                "role": "viewer",
-                "is_active": true,
-                "created_at": "2025-01-01T00:00:00Z"
+            "sequence_id": 1,
+            "public_id": "01961234-5678-7000-8000-000000000001",
+            "timestamp": "2025-01-01T00:00:00Z",
+            "session_id": "session-1",
+            "payload": {
+                "sequence_id": 1,
+                "public_id": "01961234-5678-7000-8000-000000000002",
+                "timestamp": "2025-01-01T00:00:00Z",
+                "session_id": "session-1",
+                "message": "Login successful",
+                "expires_in": 900,
+                "user": {
+                    "sequence_id": 1,
+                    "public_id": "01961234-5678-7000-8000-000000000003",
+                    "timestamp": "2025-01-01T00:00:00Z",
+                    "session_id": "session-1",
+                    "username": "testuser",
+                    "email": "test@example.com",
+                    "role": "viewer",
+                    "is_active": true,
+                    "created_at": "2025-01-01T00:00:00Z"
+                }
             }
         }
         """.data(using: .utf8)!
@@ -36,11 +49,11 @@ final class AuthServiceTests: XCTestCase {
         decoder.dateDecodingStrategy = .iso8601
         let response = try decoder.decode(LoginResponse.self, from: json)
 
-        XCTAssertEqual(response.message, "Login successful")
-        XCTAssertEqual(response.expiresIn, 900)
-        XCTAssertEqual(response.user.username, "testuser")
-        XCTAssertEqual(response.user.email, "test@example.com")
-        XCTAssertEqual(response.user.role, .viewer)
+        XCTAssertEqual(response.payload.message, "Login successful")
+        XCTAssertEqual(response.payload.expiresIn, 900)
+        XCTAssertEqual(response.payload.user.username, "testuser")
+        XCTAssertEqual(response.payload.user.email, "test@example.com")
+        XCTAssertEqual(response.payload.user.role, .viewer)
     }
 
     func testErrorResponseDecoding() throws {
@@ -95,11 +108,19 @@ final class AuthServiceTests: XCTestCase {
 
     private func makeUser(role: UserRole) -> UserProfile {
         UserProfile(
+            type: nil,
+            sequenceId: 0,
+            publicId: "01961234-5678-7000-8000-000000000099",
+            timestamp: Date(timeIntervalSince1970: 0),
+            sessionId: "test-session",
             username: "testuser",
             email: "test@example.com",
             role: role,
             isActive: true,
-            createdAt: nil
+            createdAt: Date(timeIntervalSince1970: 0),
+            operatorPublicIds: nil,
+            primaryOperatorPublicId: nil,
+            activeWalletPublicId: nil
         )
     }
 

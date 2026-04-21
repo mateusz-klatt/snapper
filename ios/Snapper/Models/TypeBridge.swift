@@ -5,6 +5,7 @@ typealias PositionSnapshot = PositionData
 typealias TradingSignal = SignalData
 typealias ExecutionRecord = ExecutionData
 typealias CandleEnvelope = CandleData
+typealias SystemStatus = SystemStatusData
 
 extension OrderData: Identifiable {
     var id: String { publicId ?? clientOrderId }

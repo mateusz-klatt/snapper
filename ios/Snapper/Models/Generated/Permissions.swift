@@ -28,23 +28,23 @@ enum Permission: String, CaseIterable, Codable, Sendable {
 }
 
 let rolePermissions: [UserRole: [Permission]] = [
-    .ai_delegate: [.cancelOrders, .createOrders, .managePositions, .readBacktests, .readMarketData, .readOrders, .readPositions, .readSignals, .readStrategies, .readSystemStatus],
+    .aiDelegate: [.cancelOrders, .createOrders, .managePositions, .readBacktests, .readMarketData, .readOrders, .readPositions, .readSignals, .readStrategies, .readSystemStatus],
     .viewer: [.readBacktests, .readMarketData, .readOrders, .readPositions, .readStrategies, .readSystemStatus],
     .operatorRole: [.cancelOrders, .createOrders, .manageBacktests, .managePositions, .manageProcesses, .readBacktests, .readMarketData, .readOrders, .readPositions, .readStrategies, .readSystemStatus, .startStrategies, .stopStrategies],
     .admin: [.cancelOrders, .configureStrategies, .configureSystem, .createOrders, .impersonateOperator, .manageBacktests, .managePositions, .manageProcesses, .manageScopeGrants, .manageUsers, .manageWalletCredentials, .readBacktests, .readMarketData, .readOrders, .readPositions, .readSignals, .readStrategies, .readSystemStatus, .readWalletCredentials, .startStrategies, .stopStrategies],
 ]
 
 let resourceAccess: [String: [UserRole]] = [
-    "overview": [.ai_delegate, .viewer, .operatorRole, .admin],
-    "market": [.ai_delegate, .viewer, .operatorRole, .admin],
+    "overview": [.aiDelegate, .viewer, .operatorRole, .admin],
+    "market": [.aiDelegate, .viewer, .operatorRole, .admin],
     "processes": [.operatorRole, .admin],
-    "strategies": [.ai_delegate, .viewer, .operatorRole, .admin],
-    "orders": [.ai_delegate, .viewer, .operatorRole, .admin],
-    "positions": [.ai_delegate, .viewer, .operatorRole, .admin],
-    "signals": [.ai_delegate, .viewer, .operatorRole, .admin],
-    "health": [.ai_delegate, .viewer, .operatorRole, .admin],
+    "strategies": [.aiDelegate, .viewer, .operatorRole, .admin],
+    "orders": [.aiDelegate, .viewer, .operatorRole, .admin],
+    "positions": [.aiDelegate, .viewer, .operatorRole, .admin],
+    "signals": [.aiDelegate, .viewer, .operatorRole, .admin],
+    "health": [.aiDelegate, .viewer, .operatorRole, .admin],
     "admin": [.admin],
     "settings": [.admin],
-    "backtests": [.ai_delegate, .viewer, .operatorRole, .admin],
+    "backtests": [.aiDelegate, .viewer, .operatorRole, .admin],
     "ai-integration": [.operatorRole, .admin],
 ]
