@@ -101,6 +101,37 @@ class TestParseKrakenEquitiesTicker:
         assert result.change == pytest.approx(0.0)
         assert result.change_pct == pytest.approx(0.0)
 
+    def test_envelope_delayed_default_is_false(self) -> None:
+        """Default ``envelope_delayed`` maps to ``TickerUpdate.is_delayed=False``.
+
+        Given: a ticker dict without the envelope-level delay flag,
+        When: parse_kraken_equities_ticker is called with defaults,
+        Then: the resulting TickerUpdate carries ``is_delayed=False``.
+        """
+        result = parse_kraken_equities_ticker({"symbol": "CLM6.NYMEX"})
+        assert result.is_delayed is False
+        assert result.is_extended_hours is None
+
+    def test_envelope_delayed_true_propagates(self) -> None:
+        """Forward ``envelope_delayed=True`` onto ``TickerUpdate.is_delayed``.
+
+        Given: a ticker dict and an envelope-level delayed flag,
+        When: parse_kraken_equities_ticker is called with envelope_delayed=True,
+        Then: the resulting TickerUpdate has ``is_delayed=True``.
+        """
+        result = parse_kraken_equities_ticker({"symbol": "CLM6.NYMEX"}, envelope_delayed=True)
+        assert result.is_delayed is True
+
+    def test_is_extended_hours_from_item_propagates(self) -> None:
+        """Read per-item ``is_extended_hours`` and propagate onto TickerUpdate.
+
+        Given: a ticker dict with ``is_extended_hours=True`` at the item level,
+        When: parse_kraken_equities_ticker is called,
+        Then: the TickerUpdate carries ``is_extended_hours=True``.
+        """
+        result = parse_kraken_equities_ticker({"symbol": "CLM6.NYMEX", "is_extended_hours": True})
+        assert result.is_extended_hours is True
+
 
 class TestParseKrakenEquitiesTickerList:
     """Tests for parse_kraken_equities_ticker_list."""

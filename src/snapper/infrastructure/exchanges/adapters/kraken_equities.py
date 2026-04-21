@@ -30,14 +30,23 @@ from snapper.infrastructure.exchanges.schemas.kraken_equities import KrakenEquit
 from snapper.infrastructure.symbols.functions import kraken_equities_ws_to_native
 
 
-def parse_kraken_equities_ticker(data: dict[str, Any]) -> TickerUpdate:
+def parse_kraken_equities_ticker(
+    data: dict[str, Any],
+    *,
+    envelope_delayed: bool = False,
+) -> TickerUpdate:
     """Parse a Kraken Equities ticker message into TickerUpdate.
 
     Args:
         data: Raw ticker data dictionary from WS ``ticker`` channel.
+        envelope_delayed: Value of the outer WS envelope's ``delayed`` flag.
+            Kraken FCM publishes this once per frame at the envelope level
+            rather than per item; the caller extracts it and passes it in so
+            that every TickerUpdate carries the correct ``is_delayed`` value.
 
     Returns:
-        TickerUpdate with normalized symbol and price data.
+        TickerUpdate with normalized symbol, price data, and delay/session
+        flags ready for downstream ZMQ propagation.
     """
     schema = KrakenEquitiesTickerSchema.model_validate(data)
     return TickerUpdate(
@@ -53,14 +62,22 @@ def parse_kraken_equities_ticker(data: dict[str, Any]) -> TickerUpdate:
         high=schema.high if schema.high is not None else 0.0,
         change=schema.change if schema.change is not None else 0.0,
         change_pct=schema.change_pct if schema.change_pct is not None else 0.0,
+        is_delayed=envelope_delayed,
+        is_extended_hours=schema.is_extended_hours,
     )
 
 
-def parse_kraken_equities_ticker_list(data: list[dict[str, Any]]) -> list[TickerUpdate]:
+def parse_kraken_equities_ticker_list(
+    data: list[dict[str, Any]],
+    *,
+    envelope_delayed: bool = False,
+) -> list[TickerUpdate]:
     """Parse a list of Kraken Equities ticker messages.
 
     Args:
         data: List of raw ticker data dictionaries.
+        envelope_delayed: Outer-envelope ``delayed`` flag applied to every
+            successfully-parsed item.
 
     Returns:
         List of successfully parsed TickerUpdate objects.
@@ -68,7 +85,7 @@ def parse_kraken_equities_ticker_list(data: list[dict[str, Any]]) -> list[Ticker
     results: list[TickerUpdate] = []
     for item in data:
         try:
-            results.append(parse_kraken_equities_ticker(item))
+            results.append(parse_kraken_equities_ticker(item, envelope_delayed=envelope_delayed))
         except (ValueError, KeyError) as exc:
             symbol = item.get("symbol", "?") if isinstance(item, dict) else "?"
             logger.warning(f"Skipping unparseable equities ticker (symbol={symbol}): {exc}")

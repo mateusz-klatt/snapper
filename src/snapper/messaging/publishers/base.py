@@ -590,6 +590,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             bid=message.bid if not math.isclose(message.bid, 0.0) else None,
             ask=message.ask if not math.isclose(message.ask, 0.0) else None,
             last=message.last,
+            is_delayed=message.is_delayed,
+            is_extended_hours=message.is_extended_hours,
         )
         await self._publish_message(topic, tick_msg)
         self._last_data_timestamps[native_symbol] = received_at.timestamp() * 1000

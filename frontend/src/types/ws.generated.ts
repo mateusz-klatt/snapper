@@ -168,6 +168,7 @@ export type Exchange10 = "kraken" | "kraken_futures" | "kraken_equities" | "zond
 export type Bid = number | null;
 export type Ask = number | null;
 export type Last = number | null;
+export type IsExtendedHours = boolean | null;
 export type Type22 = "trade";
 export type Exchange11 = "kraken" | "kraken_futures" | "kraken_equities" | "zonda" | "walutomat" | "polygon";
 export type ExecutedAt = string | null;
@@ -1065,6 +1066,12 @@ export interface SymbolAliasUpdateData {
  *     bid: Best bid price (highest buy order).
  *     ask: Best ask price (lowest sell order).
  *     last: Last traded price.
+ *     is_delayed: Whether the feed delivers ticks with an exchange-mandated
+ *         delay (Kraken FCM / TradFi index futures = ~10 min). Strategies
+ *         must gate on this flag before treating the price as current.
+ *     is_extended_hours: Whether the tick occurred during extended trading
+ *         hours (TradFi overnight session). ``None`` means the feed does
+ *         not distinguish extended-hours ticks.
  */
 export interface TickData {
   type: Type21;
@@ -1078,6 +1085,8 @@ export interface TickData {
   bid?: Bid;
   ask?: Ask;
   last?: Last;
+  is_delayed?: boolean;
+  is_extended_hours?: IsExtendedHours;
 }
 /**
  * Individual trade execution from the market.

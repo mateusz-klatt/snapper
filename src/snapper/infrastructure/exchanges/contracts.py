@@ -221,7 +221,17 @@ class ExchangeOrderSnapshot:
 
 @dataclass
 class TickerUpdate:
-    """Real-time ticker update with full market data."""
+    """Real-time ticker update with full market data.
+
+    ``is_delayed`` marks feeds that deliver ticks with an exchange-mandated
+    delay (Kraken FCM / TradFi index futures publishes ~10-minute-delayed
+    prices to non-subscribed users). Strategies subscribing via ZMQ must
+    gate on this flag before treating the price as current.
+
+    ``is_extended_hours`` indicates the tick occurred during extended trading
+    hours where applicable (TradFi equities overnight session); ``None``
+    means the feed does not distinguish extended-hours ticks.
+    """
 
     symbol: str
     bid: float
@@ -235,6 +245,8 @@ class TickerUpdate:
     high: float
     change: float
     change_pct: float
+    is_delayed: bool = False
+    is_extended_hours: bool | None = None
 
 
 @dataclass

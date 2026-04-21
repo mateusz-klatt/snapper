@@ -658,7 +658,15 @@ async def test_tick_loop_breaks_when_stopped(monkeypatch: pytest.MonkeyPatch) ->
     pub._exchange_client = SimpleNamespace()
 
     async def gen() -> AsyncIterator[Any]:
-        yield SimpleNamespace(symbol="BTC-USD", last=1.0, volume=1.0, bid=0.0, ask=0.0)
+        yield SimpleNamespace(
+            symbol="BTC-USD",
+            last=1.0,
+            volume=1.0,
+            bid=0.0,
+            ask=0.0,
+            is_delayed=False,
+            is_extended_hours=None,
+        )
 
     pub._exchange_client.subscribe_ticks = lambda symbols: gen()
     await pub._tick_loop(["BTC-USD"])
@@ -681,7 +689,15 @@ async def test_tick_loop_processes_message(monkeypatch: pytest.MonkeyPatch) -> N
     pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
 
     async def gen() -> AsyncIterator[Any]:
-        yield SimpleNamespace(symbol="BTC-USD", last=10.0, volume=5.0, bid=1.0, ask=2.0)
+        yield SimpleNamespace(
+            symbol="BTC-USD",
+            last=10.0,
+            volume=5.0,
+            bid=1.0,
+            ask=2.0,
+            is_delayed=False,
+            is_extended_hours=None,
+        )
         pub.running = False
 
     pub._exchange_client.subscribe_ticks = lambda symbols: gen()
@@ -1822,6 +1838,47 @@ class TestFeedPublisherCoverage:
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
+    async def test_process_tick_propagates_delay_flags(self, mock_get_settings: MagicMock) -> None:
+        """Verify ``_process_tick`` copies delay/session flags from TickerUpdate to TickData.
+
+        Given: a TickerUpdate with ``is_delayed=True`` + ``is_extended_hours=True``,
+        When: ``_process_tick`` is invoked,
+        Then: the TickData argument passed to ``_publish_message`` carries the same
+            values (guarantees downstream ZMQ subscribers see the flags).
+        """
+        mock_settings = MagicMock()
+        mock_settings.zmq_broker_xsub = "tcp://127.0.0.1:7500"
+        mock_get_settings.return_value = mock_settings
+        publisher = KrakenMarketDataPublisher(symbols=["MNQM6-CME"])
+        publisher_any = cast(Any, publisher)
+        publisher_any._publish_message = AsyncMock()
+        publisher_any._ensure_instrument = AsyncMock(return_value=None)
+        ticker = TickerUpdate(
+            symbol="MNQM6-CME",
+            bid=1.0,
+            bid_qty=1.0,
+            ask=2.0,
+            ask_qty=1.0,
+            last=1.5,
+            volume=10.0,
+            vwap=1.5,
+            low=1.0,
+            high=2.0,
+            change=0.0,
+            change_pct=0.0,
+            is_delayed=True,
+            is_extended_hours=True,
+        )
+        result = await publisher_any._process_tick(ticker, "kraken_equities")
+        assert result is None
+        publisher_any._publish_message.assert_awaited_once()
+        _, tick_data = publisher_any._publish_message.await_args.args
+        assert isinstance(tick_data, TickData)
+        assert tick_data.is_delayed is True
+        assert tick_data.is_extended_hours is True
+
+    @pytest.mark.asyncio
+    @patch("snapper.config.settings.get_settings")
     async def test_tick_loop_processes_tick_message(self, mock_get_settings: MagicMock) -> None:
         """Verify tick loop processes tick messages.
 
@@ -2809,7 +2866,15 @@ async def test_tick_loop_publishes_and_saves(monkeypatch: pytest.MonkeyPatch) ->
     pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
 
     async def gen() -> AsyncIterator[Any]:
-        yield SimpleNamespace(symbol="BTC-USD", last=10.0, volume=5.0, bid=1.0, ask=2.0)
+        yield SimpleNamespace(
+            symbol="BTC-USD",
+            last=10.0,
+            volume=5.0,
+            bid=1.0,
+            ask=2.0,
+            is_delayed=False,
+            is_extended_hours=None,
+        )
         pub.running = False
 
     pub._exchange_client.subscribe_ticks = lambda symbols: gen()
@@ -3043,7 +3108,15 @@ async def test_tick_loop_age_trigger_flush() -> None:
     flush_count = 0
 
     async def gen() -> AsyncIterator[Any]:
-        yield SimpleNamespace(symbol="BTC-USD", last=10.0, volume=5.0, bid=1.0, ask=2.0)
+        yield SimpleNamespace(
+            symbol="BTC-USD",
+            last=10.0,
+            volume=5.0,
+            bid=1.0,
+            ask=2.0,
+            is_delayed=False,
+            is_extended_hours=None,
+        )
         nonlocal flush_count
         await asyncio.sleep(0.05)
         flush_count = pub.repository.upsert_ticks.await_count
@@ -3074,7 +3147,15 @@ async def test_tick_loop_batch_size_threshold_flush() -> None:
     async def gen() -> AsyncIterator[Any]:
         nonlocal flush_after_two
         for i in range(3):
-            yield SimpleNamespace(symbol="BTC-USD", last=10.0 + i, volume=5.0, bid=1.0, ask=2.0)
+            yield SimpleNamespace(
+                symbol="BTC-USD",
+                last=10.0 + i,
+                volume=5.0,
+                bid=1.0,
+                ask=2.0,
+                is_delayed=False,
+                is_extended_hours=None,
+            )
             if i == 1:
                 await asyncio.sleep(0)
                 flush_after_two = pub.repository.upsert_ticks.await_count
@@ -3101,7 +3182,15 @@ async def test_tick_loop_skips_db_when_instrument_is_none() -> None:
     pub._ensure_instrument = AsyncMock(return_value=None)
 
     async def gen() -> AsyncIterator[Any]:
-        yield SimpleNamespace(symbol="BTC-USD", last=10.0, volume=5.0, bid=1.0, ask=2.0)
+        yield SimpleNamespace(
+            symbol="BTC-USD",
+            last=10.0,
+            volume=5.0,
+            bid=1.0,
+            ask=2.0,
+            is_delayed=False,
+            is_extended_hours=None,
+        )
         pub.running = False
 
     pub._exchange_client.subscribe_ticks = lambda symbols: gen()
@@ -3137,8 +3226,24 @@ async def test_tick_loop_cancelled_error() -> None:
     pub.msg_publisher.send = publish_then_cancel
 
     async def gen() -> AsyncIterator[Any]:
-        yield SimpleNamespace(symbol="BTC-USD", last=10.0, volume=5.0, bid=1.0, ask=2.0)
-        yield SimpleNamespace(symbol="BTC-USD", last=11.0, volume=6.0, bid=1.1, ask=2.1)
+        yield SimpleNamespace(
+            symbol="BTC-USD",
+            last=10.0,
+            volume=5.0,
+            bid=1.0,
+            ask=2.0,
+            is_delayed=False,
+            is_extended_hours=None,
+        )
+        yield SimpleNamespace(
+            symbol="BTC-USD",
+            last=11.0,
+            volume=6.0,
+            bid=1.1,
+            ask=2.1,
+            is_delayed=False,
+            is_extended_hours=None,
+        )
 
     pub._exchange_client.subscribe_ticks = lambda symbols: gen()
     with pytest.raises(asyncio.CancelledError):

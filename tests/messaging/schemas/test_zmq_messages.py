@@ -48,6 +48,46 @@ class TestMessages:
         assert data["volume"] == pytest.approx(0.1)
         assert "timestamp" in data
 
+    def test_tick_data_delay_defaults_and_override(self) -> None:
+        """Default ``is_delayed``/``is_extended_hours`` + explicit override survive round-trip.
+
+        Given: a TickData constructed without delay flags, and another with
+            both ``is_delayed=True`` + ``is_extended_hours=True`` set,
+        When: each is serialized to JSON and parsed back,
+        Then: defaults remain (``False``/``None``) and overrides are preserved.
+        """
+        default_msg = TickData(
+            session_id="",
+            sequence_id=0,
+            public_id="tick-default",
+            timestamp=datetime(2026, 4, 21, tzinfo=UTC),
+            instrument="MNQM6-CME",
+            volume=0.0,
+            exchange="kraken_equities",
+        )
+        assert default_msg.is_delayed is False
+        assert default_msg.is_extended_hours is None
+        round_default = TickData.from_json(default_msg.to_json())
+        assert isinstance(round_default, TickData)
+        assert round_default.is_delayed is False
+        assert round_default.is_extended_hours is None
+
+        override_msg = TickData(
+            session_id="",
+            sequence_id=1,
+            public_id="tick-override",
+            timestamp=datetime(2026, 4, 21, tzinfo=UTC),
+            instrument="MNQM6-CME",
+            volume=1.0,
+            exchange="kraken_equities",
+            is_delayed=True,
+            is_extended_hours=True,
+        )
+        round_override = TickData.from_json(override_msg.to_json())
+        assert isinstance(round_override, TickData)
+        assert round_override.is_delayed is True
+        assert round_override.is_extended_hours is True
+
     def test_market_data_bar_message(self) -> None:
         """Test CandleData round-trip serialization.
 

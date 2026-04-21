@@ -4,22 +4,30 @@ This module provides KrakenEquitiesExchangeClient, a market-data-only client
 for traditional commodity/index futures on Kraken's equities platform. It supports:
 
 REST API Operations:
-    - Instrument metadata (via internal ``iapi.kraken.com`` API)
+    - Instrument metadata (via internal ``iapi.kraken.com`` API).
+    - OHLCV history via ``ticker/history`` (delayed=true, per-interval
+      {1, 5, 15, 30, 60, 1440} minutes). Used by the historical aggregates
+      backfill service — see ``get_ohlcv``.
 
 WebSocket Subscriptions (via SpotWSClient with overridden URL):
-    - Public: tickers, trades
+    - Public: tickers, trades.
 
 The Kraken Equities WebSocket uses the same v2 protocol as Kraken Spot,
 with an additional ``asset_class`` field. This implementation reuses the
 ``SpotWSClient`` from the Kraken SDK by pointing it at
 ``wss://ws-equities.kraken.com``.
 
-Phase 1 Limitations:
-    - No order execution (create_order, cancel_order raise NotImplementedError)
-    - No execution subscriptions (subscribe_executions raises NotImplementedError)
-    - Candle subscriptions not available (use REST polling if needed)
-    - supports_websocket_executions = False
-    - Data is delayed (~10 minutes)
+Limitations:
+    - No order execution — ``create_order`` / ``cancel_order`` raise
+      ``NotImplementedError`` until the authenticated FCM order API is
+      reverse-engineered. Market-data only.
+    - No execution subscriptions (``subscribe_executions`` raises
+      ``NotImplementedError``).
+    - Live candle subscriptions not available — use REST ``get_ohlcv``
+      for historical + client-side tick aggregation for live.
+    - ``supports_websocket_executions = False``.
+    - Feed is delayed (~10 minutes). Every TickerUpdate carries
+      ``is_delayed=True`` via envelope-level routing in ``_on_ws_message``.
 """
 
 import asyncio
@@ -55,12 +63,48 @@ _NOT_IMPLEMENTED_MSG = "Order execution not available for Kraken Equities (marke
 _QUEUE_DRAIN_TIMEOUT = 0.1
 _QUEUE_MAX_SIZE = 10000
 _WS_URL = "wss://ws-equities.kraken.com"
-_INSTRUMENTS_URL = "https://iapi.kraken.com/api/internal/markets/all/futures-contracts"
+_IAPI_BASE_URL = "https://iapi.kraken.com/api/internal/markets"
+_INSTRUMENTS_URL = f"{_IAPI_BASE_URL}/all/futures-contracts"
+_TICKER_HISTORY_URL_TEMPLATE = f"{_IAPI_BASE_URL}/{{ws_symbol}}/ticker/history"
 _INSTRUMENTS_HEADERS = {
     "accept": "application/json",
     "origin": "https://pro.kraken.com",
     "referer": "https://pro.kraken.com/",
 }
+_TIMEFRAME_TO_INTERVAL: dict[str, int] = {
+    "1m": 1,
+    "5m": 5,
+    "15m": 15,
+    "30m": 30,
+    "1h": 60,
+    "1d": 1440,
+}
+
+
+def _timeframe_to_interval(timeframe: str) -> int:
+    """Map a Snapper-style timeframe to the iapi ticker/history ``interval`` minutes.
+
+    The Kraken FCM ``iapi.kraken.com`` ``ticker/history`` endpoint was probed
+    2026-04-21 and confirmed to accept ``1, 5, 15, 30, 60, 1440`` (minutes).
+
+    Args:
+        timeframe: Snapper timeframe string (e.g. ``"1m"``, ``"1h"``, ``"1d"``).
+
+    Returns:
+        The corresponding integer-minute interval accepted by the endpoint.
+
+    Raises:
+        ValueError: When ``timeframe`` is not in the supported set. The
+            message lists the accepted values so operators can correct the
+            call site.
+    """
+    try:
+        return _TIMEFRAME_TO_INTERVAL[timeframe]
+    except KeyError as exc:
+        allowed = ", ".join(sorted(_TIMEFRAME_TO_INTERVAL))
+        raise ValueError(
+            f"Unsupported Kraken Equities timeframe {timeframe!r} (allowed: {allowed})"
+        ) from exc
 
 
 def _enqueue_or_drop_oldest(queue: asyncio.Queue[Any], item: Any, label: str) -> None:
@@ -127,7 +171,10 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         """Route incoming WS messages to the appropriate queue.
 
         This is the callback passed to SpotWSClient. It dispatches
-        ticker and trade updates to their respective queues.
+        ticker and trade updates to their respective queues. The outer
+        WS envelope carries the ``delayed`` flag (Kraken FCM publishes
+        this once per frame rather than per item); ticker dispatch reads
+        it here and passes it into the adapter.
 
         Args:
             message: Parsed WebSocket message.
@@ -138,16 +185,28 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         channel = message.get("channel", "")
         msg_type = message.get("type", "")
         if channel == "ticker" and msg_type in ("snapshot", "update"):
-            self._handle_ticker_message(message)
+            envelope_delayed = bool(message.get("delayed", False))
+            self._handle_ticker_message(message, envelope_delayed=envelope_delayed)
             return
         if channel == "trade" and msg_type in ("snapshot", "update"):
             self._handle_trade_message(message)
 
-    def _handle_ticker_message(self, message: dict[str, Any]) -> None:
-        """Parse and enqueue equities ticker updates."""
+    def _handle_ticker_message(
+        self,
+        message: dict[str, Any],
+        *,
+        envelope_delayed: bool,
+    ) -> None:
+        """Parse and enqueue equities ticker updates.
+
+        Args:
+            message: Raw WS frame with ``data`` list of per-symbol items.
+            envelope_delayed: Value of the outer envelope's ``delayed`` flag,
+                propagated into every resulting TickerUpdate.
+        """
         for item in message.get("data", []):
             try:
-                tick = parse_kraken_equities_ticker(item)
+                tick = parse_kraken_equities_ticker(item, envelope_delayed=envelope_delayed)
                 _enqueue_or_drop_oldest(self._tick_queue, tick, "Tick")
             except (ValueError, KeyError) as exc:
                 logger.debug(f"Skipping unparseable equities ticker: {exc}")
@@ -194,21 +253,78 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         since: int | None = None,
         limit: int | None = None,
     ) -> list[OhlcvSnapshot]:
-        """Fetch OHLCV candles (not implemented for equities).
+        """Fetch OHLCV candles for an FCM contract from the internal iapi endpoint.
+
+        Hits ``iapi.kraken.com/api/internal/markets/{ws_symbol}/ticker/history``
+        with ``delayed=true`` + ``asset_class=futures_contract``. The endpoint
+        returns a bounded default window; ``since`` / ``limit`` are applied
+        client-side to match the base-class contract (see
+        ``ExchangeClientBase.get_ohlcv`` — ``since`` is Unix milliseconds).
+
+        Each raw row has shape
+        ``{time: int (unix seconds), open: str, high: str, low: str, close: str,
+        volume_wap: str, volume: str, count: int}``; we coerce the price/volume
+        strings to floats and keep ``timestamp`` in Unix seconds to match
+        ``OhlcvSnapshot``.
 
         Args:
-            symbol: Contract symbol (unused).
-            timeframe: Candle interval (unused).
-            since: Start timestamp (unused).
-            limit: Maximum candles (unused).
+            symbol: Contract symbol in native (dash-separated) form, e.g.
+                ``"MNQM6-CME"``. Converted to exchange-format
+                (``"MNQM6.CME"``) before the request.
+            timeframe: Snapper-style timeframe. Allowed values:
+                ``"1m", "5m", "15m", "30m", "1h", "1d"``. Others raise
+                ``ValueError`` via ``_timeframe_to_interval``.
+            since: Start timestamp in Unix **milliseconds**. When provided,
+                candles with ``timestamp * 1000 < since`` are filtered out.
+            limit: Maximum number of candles to return from the tail of the
+                response; ``None`` returns the full server window.
 
         Returns:
-            Never returns; always raises.
+            Ordered list of ``OhlcvSnapshot`` entries (oldest first). Empty
+            list when the response contains no data.
 
         Raises:
-            NotImplementedError: Always.
+            ValueError: When ``timeframe`` is not supported.
+            httpx.HTTPStatusError: Propagated for non-2xx responses so the
+                caller can distinguish transient from permanent failures.
         """
-        raise NotImplementedError("OHLCV not available for Kraken Equities")
+        interval = _timeframe_to_interval(timeframe)
+        ws_symbol = native_to_kraken_equities_ws(symbol)
+        url = _TICKER_HISTORY_URL_TEMPLATE.format(ws_symbol=ws_symbol)
+        params = {
+            "interval": str(interval),
+            "delayed": "true",
+            "asset_class": "futures_contract",
+        }
+        self._record_rest_call()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url, params=params, headers=_INSTRUMENTS_HEADERS)
+            response.raise_for_status()
+            payload = response.json()
+        result = payload.get("result") or {}
+        rows: list[dict[str, Any]] = result.get("data") or []
+        snapshots: list[OhlcvSnapshot] = []
+        for row in rows:
+            try:
+                ts_seconds = float(row["time"])
+                snapshots.append(
+                    OhlcvSnapshot(
+                        timestamp=ts_seconds,
+                        open=float(row["open"]),
+                        high=float(row["high"]),
+                        low=float(row["low"]),
+                        close=float(row["close"]),
+                        volume=float(row["volume"]),
+                    )
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                logger.warning(f"Skipping unparseable equities candle for {symbol}: {exc}")
+        if since is not None:
+            since_seconds = since / 1000.0
+            snapshots = [s for s in snapshots if s.timestamp >= since_seconds]
+        if limit is not None and len(snapshots) > limit:
+            snapshots = snapshots[-limit:]
+        return snapshots
 
     async def create_order(self, request: ExchangeOrderRequest) -> ExchangeOrderSnapshot:
         """Submit a new order (not available).

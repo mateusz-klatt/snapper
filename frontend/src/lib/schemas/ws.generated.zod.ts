@@ -441,6 +441,8 @@ export const TickDataSchema = z
     bid: z.number().nullable(),
     ask: z.number().nullable(),
     last: z.number().nullable(),
+    is_delayed: z.boolean(),
+    is_extended_hours: z.boolean().nullable(),
   })
   .strict()
 

@@ -10,6 +10,7 @@ from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import FundingRateSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
+from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import to_fill_status
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenCandleSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenOhlcEventEnvelope
@@ -202,3 +203,58 @@ class TestFundingRateSnapshot:
         )
         with pytest.raises(AttributeError):
             snap.rate = 0.0
+
+
+def test_ticker_update_default_is_delayed_is_false() -> None:
+    """``TickerUpdate`` defaults ``is_delayed`` to False + extended-hours to None.
+
+    Given: a TickerUpdate constructed without the new delay flags,
+    When: its fields are inspected,
+    Then: ``is_delayed`` is ``False`` and ``is_extended_hours`` is ``None``
+        (ensures existing adapters that construct TickerUpdate positionally
+        without the new kwargs stay no-op).
+    """
+    update = TickerUpdate(
+        symbol="BTC-USD",
+        bid=100.0,
+        bid_qty=1.0,
+        ask=101.0,
+        ask_qty=1.0,
+        last=100.5,
+        volume=10.0,
+        vwap=100.3,
+        low=99.0,
+        high=102.0,
+        change=0.5,
+        change_pct=0.5,
+    )
+    assert update.is_delayed is False
+    assert update.is_extended_hours is None
+
+
+def test_ticker_update_accepts_delay_overrides() -> None:
+    """``TickerUpdate`` accepts explicit delay/session overrides.
+
+    Given: a TickerUpdate constructed with ``is_delayed=True`` and
+        ``is_extended_hours=True``,
+    When: its fields are inspected,
+    Then: both overrides are preserved.
+    """
+    update = TickerUpdate(
+        symbol="MNQM6-CME",
+        bid=0.0,
+        bid_qty=0.0,
+        ask=0.0,
+        ask_qty=0.0,
+        last=0.0,
+        volume=0.0,
+        vwap=0.0,
+        low=0.0,
+        high=0.0,
+        change=0.0,
+        change_pct=0.0,
+        is_delayed=True,
+        is_extended_hours=True,
+    )
+    assert update.is_delayed is True
+    assert update.is_extended_hours is True

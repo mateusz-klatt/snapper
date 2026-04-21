@@ -68,6 +68,12 @@ class TickData(StrictDataSchema[Literal["tick"]]):
         bid: Best bid price (highest buy order).
         ask: Best ask price (lowest sell order).
         last: Last traded price.
+        is_delayed: Whether the feed delivers ticks with an exchange-mandated
+            delay (Kraken FCM / TradFi index futures = ~10 min). Strategies
+            must gate on this flag before treating the price as current.
+        is_extended_hours: Whether the tick occurred during extended trading
+            hours (TradFi overnight session). ``None`` means the feed does
+            not distinguish extended-hours ticks.
     """
 
     type: Literal["tick"] = "tick"
@@ -77,6 +83,8 @@ class TickData(StrictDataSchema[Literal["tick"]]):
     bid: float | None = None
     ask: float | None = None
     last: float | None = None
+    is_delayed: bool = False
+    is_extended_hours: bool | None = None
 
 
 class CandleData(StrictDataSchema[Literal["candle"]]):

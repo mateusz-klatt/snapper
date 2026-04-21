@@ -6,15 +6,18 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 from snapper.infrastructure.exchanges.contracts import InstrumentPairDescriptor
+from snapper.infrastructure.exchanges.contracts import OhlcvSnapshot
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.implementations.kraken_equities import (
     KrakenEquitiesExchangeClient,
 )
 from snapper.infrastructure.exchanges.implementations.kraken_equities import _enqueue_or_drop_oldest
+from snapper.infrastructure.exchanges.implementations.kraken_equities import _timeframe_to_interval
 
 
 @pytest.fixture()
@@ -461,17 +464,6 @@ class TestNotImplementedMethods:
         """
         with pytest.raises(NotImplementedError, match="WebSocket ticker"):
             await client.get_ticker("CLM6-NYMEX")
-
-    @pytest.mark.asyncio
-    async def test_get_ohlcv_raises(self, client: KrakenEquitiesExchangeClient) -> None:
-        """get_ohlcv raises NotImplementedError.
-
-        Given: Market-data-only client,
-        When: get_ohlcv is called,
-        Then: Raises NotImplementedError.
-        """
-        with pytest.raises(NotImplementedError, match="OHLCV not available"):
-            await client.get_ohlcv("CLM6-NYMEX")
 
     def test_subscribe_candles_raises(self, client: KrakenEquitiesExchangeClient) -> None:
         """subscribe_candles raises NotImplementedError.
@@ -1000,3 +992,461 @@ class TestGetInstrumentsSync:
         ):
             result = client.get_instruments_sync()
         assert len(result) == 0
+
+
+class TestTimeframeToInterval:
+    """Tests for the ``_timeframe_to_interval`` pure helper."""
+
+    @pytest.mark.parametrize(
+        ("timeframe", "expected"),
+        [
+            ("1m", 1),
+            ("5m", 5),
+            ("15m", 15),
+            ("30m", 30),
+            ("1h", 60),
+            ("1d", 1440),
+        ],
+    )
+    def test_supported_timeframe_maps_to_minutes(self, timeframe: str, expected: int) -> None:
+        """Accept every documented timeframe and return its minute-interval.
+
+        Given: a timeframe string from the iapi-probed support set,
+        When: ``_timeframe_to_interval`` is called,
+        Then: the corresponding integer minute value is returned.
+        """
+        assert _timeframe_to_interval(timeframe) == expected
+
+    def test_unknown_timeframe_raises_valueerror_with_allowed_list(self) -> None:
+        """Reject unsupported timeframes with a message listing allowed values.
+
+        Given: a timeframe string not in the support set,
+        When: ``_timeframe_to_interval`` is called,
+        Then: ``ValueError`` is raised and the message enumerates the accepted values.
+        """
+        with pytest.raises(ValueError, match="Unsupported Kraken Equities timeframe '2h'"):
+            _timeframe_to_interval("2h")
+        with pytest.raises(ValueError, match=r"allowed: .*1m.*"):
+            _timeframe_to_interval("bogus")
+
+
+class TestGetOhlcv:
+    """Tests for ``KrakenEquitiesExchangeClient.get_ohlcv``.
+
+    All tests patch ``native_to_kraken_equities_ws`` to bypass the DB-backed
+    symbol mapper, and stub ``httpx.AsyncClient`` to return a canned payload
+    mirroring the live iapi shape probed 2026-04-21.
+    """
+
+    @staticmethod
+    def _mock_httpx(payload: dict[str, object]) -> MagicMock:
+        """Build a MagicMock satisfying the async-context-manager + get protocol."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = payload
+        mock_response.raise_for_status = MagicMock()
+        mock_http_client = AsyncMock()
+        mock_http_client.get.return_value = mock_response
+        mock_http_client.__aenter__ = AsyncMock(return_value=mock_http_client)
+        mock_http_client.__aexit__ = AsyncMock(return_value=False)
+        return mock_http_client
+
+    @pytest.mark.asyncio
+    async def test_returns_ordered_snapshots_from_happy_path_payload(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Map live iapi rows into OhlcvSnapshot entries, preserving order.
+
+        Given: a canned iapi payload with two rows,
+        When: ``get_ohlcv`` is called,
+        Then: two ``OhlcvSnapshot`` entries are returned with coerced floats.
+        """
+        payload = {
+            "result": {
+                "data": [
+                    {
+                        "time": 1776556800,
+                        "open": "26600.5",
+                        "high": "26650.0",
+                        "low": "26580.25",
+                        "close": "26620.0",
+                        "volume_wap": "26610",
+                        "volume": "1234",
+                        "count": 42,
+                    },
+                    {
+                        "time": 1776643200,
+                        "open": "26658.25",
+                        "high": "26826.0",
+                        "low": "26569.0",
+                        "close": "26797.0",
+                        "volume_wap": "26706.44",
+                        "volume": "1638087",
+                        "count": 1403613,
+                    },
+                ]
+            }
+        }
+        mock_http = self._mock_httpx(payload)
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.httpx.AsyncClient",
+                return_value=mock_http,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.native_to_kraken_equities_ws",
+                return_value="MNQM6.CME",
+            ),
+        ):
+            snapshots = await client.get_ohlcv("MNQM6-CME", timeframe="1d")
+        assert len(snapshots) == 2
+        assert snapshots[0] == OhlcvSnapshot(
+            timestamp=1776556800.0,
+            open=26600.5,
+            high=26650.0,
+            low=26580.25,
+            close=26620.0,
+            volume=1234.0,
+        )
+        assert snapshots[-1].close == 26797.0
+        call = mock_http.get.call_args
+        assert call.args[0].endswith("/markets/MNQM6.CME/ticker/history")
+        assert call.kwargs["params"] == {
+            "interval": "1440",
+            "delayed": "true",
+            "asset_class": "futures_contract",
+        }
+
+    @pytest.mark.asyncio
+    async def test_empty_payload_returns_empty_list(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Return an empty list when the payload has no data rows.
+
+        Given: an iapi payload with ``result.data`` empty,
+        When: ``get_ohlcv`` is called,
+        Then: an empty list is returned.
+        """
+        mock_http = self._mock_httpx({"result": {"data": []}})
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.httpx.AsyncClient",
+                return_value=mock_http,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.native_to_kraken_equities_ws",
+                return_value="MNQM6.CME",
+            ),
+        ):
+            snapshots = await client.get_ohlcv("MNQM6-CME", timeframe="1h")
+        assert snapshots == []
+
+    @pytest.mark.asyncio
+    async def test_missing_result_key_returns_empty_list(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Tolerate payloads missing the ``result`` envelope without raising.
+
+        Given: an iapi payload with only an ``errors`` field,
+        When: ``get_ohlcv`` is called,
+        Then: an empty list is returned (endpoint absorbs transient failures).
+        """
+        mock_http = self._mock_httpx({"result": None, "errors": [{"msg": "transient"}]})
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.httpx.AsyncClient",
+                return_value=mock_http,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.native_to_kraken_equities_ws",
+                return_value="MNQM6.CME",
+            ),
+        ):
+            snapshots = await client.get_ohlcv("MNQM6-CME")
+        assert snapshots == []
+
+    @pytest.mark.asyncio
+    async def test_http_error_propagates(self, client: KrakenEquitiesExchangeClient) -> None:
+        """Propagate ``httpx.HTTPStatusError`` so callers can distinguish failures.
+
+        Given: an iapi response whose ``raise_for_status`` raises,
+        When: ``get_ohlcv`` is called,
+        Then: the exception escapes the method.
+        """
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock(
+            side_effect=httpx.HTTPStatusError(
+                "503", request=MagicMock(), response=MagicMock(status_code=503)
+            )
+        )
+        mock_http_client = AsyncMock()
+        mock_http_client.get.return_value = mock_response
+        mock_http_client.__aenter__ = AsyncMock(return_value=mock_http_client)
+        mock_http_client.__aexit__ = AsyncMock(return_value=False)
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.httpx.AsyncClient",
+                return_value=mock_http_client,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.native_to_kraken_equities_ws",
+                return_value="MNQM6.CME",
+            ),
+            pytest.raises(httpx.HTTPStatusError),
+        ):
+            await client.get_ohlcv("MNQM6-CME")
+
+    @pytest.mark.asyncio
+    async def test_since_filter_drops_older_candles(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Apply the ``since`` millisecond filter client-side.
+
+        Given: a 3-row payload spanning 3 daily candles,
+        When: ``get_ohlcv`` is called with ``since`` after the first row,
+        Then: only rows at or after ``since`` remain.
+        """
+        payload = {
+            "result": {
+                "data": [
+                    {
+                        "time": 1000,
+                        "open": "1",
+                        "high": "1",
+                        "low": "1",
+                        "close": "1",
+                        "volume_wap": "1",
+                        "volume": "0",
+                        "count": 0,
+                    },
+                    {
+                        "time": 2000,
+                        "open": "2",
+                        "high": "2",
+                        "low": "2",
+                        "close": "2",
+                        "volume_wap": "2",
+                        "volume": "0",
+                        "count": 0,
+                    },
+                    {
+                        "time": 3000,
+                        "open": "3",
+                        "high": "3",
+                        "low": "3",
+                        "close": "3",
+                        "volume_wap": "3",
+                        "volume": "0",
+                        "count": 0,
+                    },
+                ]
+            }
+        }
+        mock_http = self._mock_httpx(payload)
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.httpx.AsyncClient",
+                return_value=mock_http,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.native_to_kraken_equities_ws",
+                return_value="MNQM6.CME",
+            ),
+        ):
+            snapshots = await client.get_ohlcv("MNQM6-CME", since=2_000_000)
+        assert [s.timestamp for s in snapshots] == [2000.0, 3000.0]
+
+    @pytest.mark.asyncio
+    async def test_limit_truncates_from_tail(self, client: KrakenEquitiesExchangeClient) -> None:
+        """Keep the newest ``limit`` rows when the server returns more.
+
+        Given: a 3-row payload,
+        When: ``get_ohlcv`` is called with ``limit=2``,
+        Then: only the two most-recent (tail) rows are returned.
+        """
+        payload = {
+            "result": {
+                "data": [
+                    {
+                        "time": ts,
+                        "open": "1",
+                        "high": "1",
+                        "low": "1",
+                        "close": "1",
+                        "volume_wap": "1",
+                        "volume": "0",
+                        "count": 0,
+                    }
+                    for ts in (1000, 2000, 3000)
+                ]
+            }
+        }
+        mock_http = self._mock_httpx(payload)
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.httpx.AsyncClient",
+                return_value=mock_http,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.native_to_kraken_equities_ws",
+                return_value="MNQM6.CME",
+            ),
+        ):
+            snapshots = await client.get_ohlcv("MNQM6-CME", limit=2)
+        assert [s.timestamp for s in snapshots] == [2000.0, 3000.0]
+
+    @pytest.mark.asyncio
+    async def test_unparseable_row_skipped_not_raised(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Log-and-skip rows with missing or invalid fields.
+
+        Given: a 2-row payload where the first row is missing ``open``,
+        When: ``get_ohlcv`` is called,
+        Then: only the second row is returned; no exception escapes.
+        """
+        payload = {
+            "result": {
+                "data": [
+                    {"time": 1000, "close": "1"},
+                    {
+                        "time": 2000,
+                        "open": "2",
+                        "high": "2",
+                        "low": "2",
+                        "close": "2",
+                        "volume_wap": "2",
+                        "volume": "0",
+                        "count": 0,
+                    },
+                ]
+            }
+        }
+        mock_http = self._mock_httpx(payload)
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.httpx.AsyncClient",
+                return_value=mock_http,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.native_to_kraken_equities_ws",
+                return_value="MNQM6.CME",
+            ),
+        ):
+            snapshots = await client.get_ohlcv("MNQM6-CME")
+        assert [s.timestamp for s in snapshots] == [2000.0]
+
+    @pytest.mark.asyncio
+    async def test_unknown_timeframe_raises_valueerror(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Reject unsupported timeframes before any HTTP call is made.
+
+        Given: an unsupported timeframe string,
+        When: ``get_ohlcv`` is called,
+        Then: ``ValueError`` is raised and no request is issued.
+        """
+        with pytest.raises(ValueError, match="Unsupported Kraken Equities timeframe"):
+            await client.get_ohlcv("MNQM6-CME", timeframe="bogus")
+
+    @pytest.mark.asyncio
+    async def test_unknown_symbol_raises_without_http_call(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Symbol-mapper errors are surfaced before any HTTP call is made.
+
+        Given: the symbol mapper raises ValueError for an unmapped symbol,
+        When: ``get_ohlcv`` is called,
+        Then: the exception escapes and ``httpx.AsyncClient`` is never touched.
+        """
+        mock_http_client = AsyncMock()
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.httpx.AsyncClient",
+                return_value=mock_http_client,
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_equities.native_to_kraken_equities_ws",
+                side_effect=ValueError("Unknown native symbol: BOGUS-XX"),
+            ),
+            pytest.raises(ValueError, match="Unknown native symbol"),
+        ):
+            await client.get_ohlcv("BOGUS-XX")
+        mock_http_client.get.assert_not_called()
+
+
+class TestWsEnvelopeDelayedPropagation:
+    """Tests that the outer WS envelope's ``delayed`` flag reaches the adapter."""
+
+    @pytest.mark.asyncio
+    async def test_envelope_delayed_true_flows_into_adapter(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Forward ``message['delayed']=True`` as ``envelope_delayed=True``.
+
+        Given: a WS frame with ``delayed=True`` at the envelope level,
+        When: ``_on_ws_message`` dispatches the ticker item,
+        Then: ``parse_kraken_equities_ticker`` is invoked with
+              ``envelope_delayed=True``.
+        """
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_equities.parse_kraken_equities_ticker",
+            return_value=TickerUpdate(
+                symbol="MNQM6-CME",
+                bid=0.0,
+                bid_qty=0.0,
+                ask=0.0,
+                ask_qty=0.0,
+                last=0.0,
+                volume=0.0,
+                vwap=0.0,
+                low=0.0,
+                high=0.0,
+                change=0.0,
+                change_pct=0.0,
+                is_delayed=True,
+            ),
+        ) as parse_mock:
+            msg = {
+                "channel": "ticker",
+                "type": "update",
+                "delayed": True,
+                "data": [{"symbol": "MNQM6.CME"}],
+            }
+            await client._on_ws_message(msg)
+        parse_mock.assert_called_once()
+        assert parse_mock.call_args.kwargs == {"envelope_delayed": True}
+
+    @pytest.mark.asyncio
+    async def test_missing_envelope_delayed_defaults_to_false(
+        self, client: KrakenEquitiesExchangeClient
+    ) -> None:
+        """Default envelope-level delayed to False when the key is absent.
+
+        Given: a WS frame without the ``delayed`` key,
+        When: ``_on_ws_message`` dispatches the ticker item,
+        Then: the adapter receives ``envelope_delayed=False``.
+        """
+        with patch(
+            "snapper.infrastructure.exchanges.implementations.kraken_equities.parse_kraken_equities_ticker",
+            return_value=TickerUpdate(
+                symbol="MNQM6-CME",
+                bid=0.0,
+                bid_qty=0.0,
+                ask=0.0,
+                ask_qty=0.0,
+                last=0.0,
+                volume=0.0,
+                vwap=0.0,
+                low=0.0,
+                high=0.0,
+                change=0.0,
+                change_pct=0.0,
+            ),
+        ) as parse_mock:
+            msg = {
+                "channel": "ticker",
+                "type": "snapshot",
+                "data": [{"symbol": "MNQM6.CME"}],
+            }
+            await client._on_ws_message(msg)
+        assert parse_mock.call_args.kwargs == {"envelope_delayed": False}
