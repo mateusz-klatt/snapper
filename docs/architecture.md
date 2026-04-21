@@ -702,3 +702,76 @@ BacktestTrade, BacktestEquityPoint, BacktestResult) all with TemporalMixin.
 - CSRF tokens for mutating requests
 - WebSocket tokens (one-time)
 - Bcrypt password hashing
+
+## Kraken FCM market data (TradFi)
+
+Kraken's FCM platform hosts index-futures, energy, metals, and yield
+contracts (collective name: "TradFi" in this project). Unlike crypto
+spot + perpetuals, FCM has **no public order API** — Snapper treats
+these instruments as observation-only.
+
+### Data sources
+
+- REST instrument metadata:
+  `iapi.kraken.com/api/internal/markets/all/futures-contracts`.
+  Reverse-engineered from `pro.kraken.com` (requires
+  `Origin: https://pro.kraken.com` + `Referer: https://pro.kraken.com/`
+  headers). Powers the `kraken_equities_symbol_updater` process.
+- REST historical candles:
+  `iapi.kraken.com/api/internal/markets/{ws_symbol}/ticker/history`.
+  Same Origin/Referer requirement. Drives
+  `KrakenEquitiesExchangeClient.get_ohlcv()` and the
+  `kraken_equities_aggregates_backfill` process. Intervals
+  `{1, 5, 15, 30, 60, 1440}` minutes accepted.
+- WebSocket ticks + trades: `wss://ws-equities.kraken.com` (Kraken
+  Spot WS v2 protocol with `asset_class: futures_contract`). Feed is
+  delayed ~10 minutes per FCM policy. The outer envelope's
+  `delayed: true` flag propagates onto every
+  `TickData.is_delayed=True` so ZMQ subscribers can gate accordingly.
+
+### Capability model
+
+Each TradFi symbol is seeded with a
+`SymbolExchangeCapability(exchange="kraken_equities", can_trade=False,
+can_market_data=True)` row. Every order-entry REST route
+(`/api/orders`, `/api/execution-plans`, `/api/trailing-stops`) calls
+`snapper.server._capability_guard.require_tradable` before emitting a
+TradeCommand — market-data-only submits fail with HTTP 422
+`error_code=instrument_market_data_only`. The AST meta-test at
+`tests/meta/test_order_entry_capability_guard.py` enforces that every
+enumerated submit handler imports and calls the guard.
+
+### Frontend UX
+
+`GET /api/exchanges/{exchange}/instruments/detail` exposes
+capability-aware rows (`InstrumentDetailData` — symbol +
+`can_trade` + `can_market_data` + `instrument_kind` + `expiry_at`).
+`MarketData.tsx` renders a "Market-data only" badge next to the page
+title when the currently-selected instrument is observation-only and
+marks every `can_trade=false` row in the instrument dropdown with
+the same pill. `NewOrderModal.tsx` consumes the same endpoint, shows
+an amber inline notice, suffixes option labels with `— market-data
+only`, and disables the submit button. Submit failures branch on
+`APIError.details.error_code` via `errorMessages.ts`.
+
+### Cross-asset strategy pattern (informational)
+
+Strategies may subscribe TradFi candles via the normal
+`market.kraken_equities.{symbol}.candles.{timeframe}` topic and emit
+signals whose `instrument` targets a `can_trade=True` execution
+instrument (crypto spot, xStocks). See
+`src/snapper/strategies/examples/tradfi_observe_crypto_execute.py`
+for an illustrative EMA-crossover implementation + activation
+instructions in the module docstring. Cross-asset execution at the
+backtest-engine level is out of scope for Phase A — see
+`plan_tradfi_market_data_p3.md` §5 item 18 for the deferred follow-up
+(engine changes required: `batch_processor` needs to use
+`signal.instrument`/`signal.exchange` for target attribution, plus
+multi-feed `domain_time` alignment).
+
+### Operational runbook
+
+See `docs/operations.md` "Kraken Equities (TradFi) market data" for
+enable-the-feed steps (SQL DB `Setting` toggles), backfill invocation,
+quarterly rotation cadence, and troubleshooting (iapi reachability
+checks, WS disconnect loops).
