@@ -220,39 +220,51 @@ class TestProcessSymbol:
         assert rows[0]["instrument_public_id"] == "inst-001"
 
     @pytest.mark.asyncio
-    async def test_empty_response_does_not_upsert(
+    async def test_empty_response_does_not_upsert_but_still_sleeps(
         self, service: KrakenEquitiesAggregatesBackfillService
     ) -> None:
-        """Empty candle response performs no upsert.
+        """Empty window skips upsert but still honours the per-symbol throttle.
 
         Given: client returns an empty list (legitimately-empty window),
         When: ``_process_symbol`` is called,
-        Then: ``upsert_candles`` is not called.
+        Then: ``upsert_candles`` is not called AND the per-symbol
+            ``asyncio.sleep(_RATE_LIMIT_DELAY)`` fires exactly once. Guards
+            against a catch-up run over already-current symbols hammering
+            iapi back-to-back when every symbol returns an empty window.
         """
         mock_db = AsyncMock()
         mock_db.ensure_instrument = AsyncMock(return_value=(1, "inst-001"))
         service._db = mock_db
         client = AsyncMock()
         client.get_ohlcv = AsyncMock(return_value=[])
-        with patch(
-            "snapper.application.updaters.historical.kraken_equities_aggregates"
-            ".resolve_symbol_public_id",
-            return_value="sym-001",
+        with (
+            patch(
+                "snapper.application.updaters.historical.kraken_equities_aggregates"
+                ".resolve_symbol_public_id",
+                return_value="sym-001",
+            ),
+            patch(
+                "snapper.application.updaters.historical.kraken_equities_aggregates.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as mock_sleep,
         ):
             await service._process_symbol(client, "MNQM6-CME")
         mock_db.upsert_candles.assert_not_called()
+        mock_sleep.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_get_ohlcv_runtime_error_propagates(
+    async def test_get_ohlcv_runtime_error_propagates_and_sleeps(
         self, service: KrakenEquitiesAggregatesBackfillService
     ) -> None:
-        """Upstream failure from ``get_ohlcv`` propagates to the caller.
+        """Upstream failure propagates and throttle still fires.
 
         Given: ``client.get_ohlcv`` raises RuntimeError
             (iapi 200 with error envelope),
         When: ``_process_symbol`` is called,
-        Then: the RuntimeError escapes so the operator can distinguish
-            outage from an empty window.
+        Then: the RuntimeError escapes AND ``asyncio.sleep(_RATE_LIMIT_DELAY)``
+            fires once inside the finally block. Preserves the distinction
+            between outage and empty window while ensuring the per-symbol
+            throttle is never bypassed after an outbound request.
         """
         mock_db = AsyncMock()
         mock_db.ensure_instrument = AsyncMock(return_value=(1, "inst-001"))
@@ -265,10 +277,15 @@ class TestProcessSymbol:
                 ".resolve_symbol_public_id",
                 return_value="sym-001",
             ),
+            patch(
+                "snapper.application.updaters.historical.kraken_equities_aggregates.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as mock_sleep,
             pytest.raises(RuntimeError, match="iapi failure"),
         ):
             await service._process_symbol(client, "MNQM6-CME")
         mock_db.upsert_candles.assert_not_called()
+        mock_sleep.assert_awaited_once()
 
 
 class TestGetResumeSince:

@@ -218,10 +218,20 @@ class KrakenEquitiesAggregatesBackfillService(RegisterableProcess):
     ) -> None:
         """Backfill candles for a single symbol.
 
-        Determines the resume cursor, fetches candles in pages with rate
-        limiting, and batch-upserts to the database. Propagates
-        ``RuntimeError`` raised by ``get_ohlcv`` on upstream failure so
-        the operator can distinguish outage from an empty window.
+        Determines the resume cursor, fetches the full bounded window
+        from the iapi endpoint in one call, and batch-upserts to the
+        database. Propagates ``RuntimeError`` raised by ``get_ohlcv`` on
+        upstream failure so the operator can distinguish outage from an
+        empty window.
+
+        Throttle semantics: ``_RATE_LIMIT_DELAY`` is always awaited once
+        per symbol that reaches the ``get_ohlcv`` call — including on
+        the empty-window early-return path and when ``get_ohlcv`` raises.
+        This prevents a catch-up run over already-current symbols from
+        hammering ``iapi`` back-to-back (the sleep lives inside
+        ``try/finally``). Symbols that are skipped earlier in the flow
+        (no Symbol row, no instrument row) never reach this point and
+        therefore do not sleep.
 
         Args:
             client: Connected Kraken Equities exchange client.
@@ -242,32 +252,34 @@ class KrakenEquitiesAggregatesBackfillService(RegisterableProcess):
         logger.info(
             f"Starting backfill for {native_symbol} ({self._timeframe}, {self._days_back} days)"
         )
-        candles = await client.get_ohlcv(
-            symbol=native_symbol,
-            timeframe=self._timeframe,
-            since=since_ms,
-            limit=None,
-        )
-        if not candles:
-            logger.info(f"No new candles returned for {native_symbol}")
-            return
-        rows = self._build_candle_rows(
-            candles,
-            instrument_pid,
-            self._timeframe,
-            self._tracker.session_id,
-            lambda: self._tracker.next_sequence("candles"),
-        )
-        total_inserted = 0
-        for i in range(0, len(rows), self.BATCH_COMMIT_SIZE):
-            batch = rows[i : i + self.BATCH_COMMIT_SIZE]
-            inserted = await self._db.upsert_candles(batch)
-            total_inserted += inserted
-        logger.info(
-            f"Backfill complete for {native_symbol}: "
-            f"{total_inserted} inserted from {len(candles)} fetched"
-        )
-        await asyncio.sleep(_RATE_LIMIT_DELAY)
+        try:
+            candles = await client.get_ohlcv(
+                symbol=native_symbol,
+                timeframe=self._timeframe,
+                since=since_ms,
+                limit=None,
+            )
+            if not candles:
+                logger.info(f"No new candles returned for {native_symbol}")
+                return
+            rows = self._build_candle_rows(
+                candles,
+                instrument_pid,
+                self._timeframe,
+                self._tracker.session_id,
+                lambda: self._tracker.next_sequence("candles"),
+            )
+            total_inserted = 0
+            for i in range(0, len(rows), self.BATCH_COMMIT_SIZE):
+                batch = rows[i : i + self.BATCH_COMMIT_SIZE]
+                inserted = await self._db.upsert_candles(batch)
+                total_inserted += inserted
+            logger.info(
+                f"Backfill complete for {native_symbol}: "
+                f"{total_inserted} inserted from {len(candles)} fetched"
+            )
+        finally:
+            await asyncio.sleep(_RATE_LIMIT_DELAY)
 
     @staticmethod
     def _build_candle_rows(
