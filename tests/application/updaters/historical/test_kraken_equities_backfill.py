@@ -166,27 +166,42 @@ class TestProcessSymbol:
 
         Given: ``resolve_symbol_public_id`` returns None,
         When: ``_process_symbol`` is called,
-        Then: ``get_ohlcv`` is never invoked.
+        Then: ``get_ohlcv`` is never invoked AND
+            ``asyncio.sleep(_RATE_LIMIT_DELAY)`` does NOT fire. Locks in
+            the "no throttle before HTTP" contract: symbols that never
+            reach the outbound request must not burn the per-symbol
+            rate-limit budget, so a large catch-up run over unknown
+            symbols does not stall for (N * _RATE_LIMIT_DELAY) seconds.
         """
         service._db = AsyncMock()
         client = AsyncMock()
-        with patch(
-            "snapper.application.updaters.historical.kraken_equities_aggregates"
-            ".resolve_symbol_public_id",
-            return_value=None,
+        with (
+            patch(
+                "snapper.application.updaters.historical.kraken_equities_aggregates"
+                ".resolve_symbol_public_id",
+                return_value=None,
+            ),
+            patch(
+                "snapper.application.updaters.historical.kraken_equities_aggregates.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as mock_sleep,
         ):
             await service._process_symbol(client, "NO-SUCH-SYMBOL")
         client.get_ohlcv.assert_not_called()
+        mock_sleep.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_fetches_and_persists_candles(
         self, service: KrakenEquitiesAggregatesBackfillService
     ) -> None:
-        """Happy path: fetches candles and upserts to the database.
+        """Happy path: fetches candles, upserts them, and throttles once.
 
         Given: client returns one candle and instrument resolves,
         When: ``_process_symbol`` is called,
-        Then: ``upsert_candles`` is invoked once with the mapped row.
+        Then: ``upsert_candles`` is invoked once with the mapped row AND
+            ``asyncio.sleep(_RATE_LIMIT_DELAY)`` fires exactly once.
+            Captures the common-case throttle invariant so a future
+            refactor cannot regress the per-symbol rate-limit cadence.
         """
         candle = OhlcvSnapshot(
             timestamp=1700000000.0,
@@ -211,13 +226,14 @@ class TestProcessSymbol:
             patch(
                 "snapper.application.updaters.historical.kraken_equities_aggregates.asyncio.sleep",
                 new_callable=AsyncMock,
-            ),
+            ) as mock_sleep,
         ):
             await service._process_symbol(client, "MNQM6-CME")
         mock_db.upsert_candles.assert_awaited_once()
         rows = mock_db.upsert_candles.call_args[0][0]
         assert len(rows) == 1
         assert rows[0]["instrument_public_id"] == "inst-001"
+        mock_sleep.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_empty_response_does_not_upsert_but_still_sleeps(
