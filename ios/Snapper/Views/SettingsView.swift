@@ -110,7 +110,7 @@ struct SettingsView: View {
             return .brandGreen
         case .connecting, .authenticating:
             return .orange
-        case .disconnected, .error:
+        case .disconnected, .error, .authFailed:
             return .brandRed
         }
     }
@@ -127,6 +127,8 @@ struct SettingsView: View {
             return "Disconnected"
         case .error:
             return "Error"
+        case .authFailed:
+            return "Auth failed"
         }
     }
 

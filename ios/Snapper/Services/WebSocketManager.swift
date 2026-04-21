@@ -13,21 +13,28 @@ class WebSocketManager: ObservableObject {
     @Published var connectionState: ConnectionState = .disconnected
     @Published var availableTopics: [String] = []
     @Published private(set) var state = WSState()
+    @Published private(set) var reconnectAttempts = 0
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Snapper", category: "WebSocket")
 
     private let authService: AuthRefreshing
     private let taskFactory: WebSocketTaskFactory
-    // Exposed so Commit 2 (proactive refresh) and tests can inject a fake.
     let sleeper: Sleeper
 
     private var webSocketTask: WebSocketTaskProtocol?
     private var pingTimer: Timer?
     private var shouldReconnect = false
     private var intentionalDisconnect = false
-    private var reconnectAttempts = 0
-    private let maxReconnectAttempts = 10
     private let baseReconnectInterval: TimeInterval = 3
+    /// Per-attempt ceiling for backoff (5 minutes). No hard cap on the
+    /// attempt counter — the client keeps trying forever so that a phone
+    /// returning online after an extended offline period recovers without
+    /// user intervention (plan SC#4).
+    private let maxReconnectDelay: TimeInterval = 300
+    /// Cancelled on disconnect + re-scheduled after every `auth_complete`
+    /// so the proactive refresh fires before the server-issued ws_token
+    /// actually expires (plan SC#5).
+    private var proactiveRefreshTask: Task<Void, Never>?
 
     /// Confirmed subscriptions — survive reconnects so the dispatcher can
     /// replay them on the next `auth_complete`.
@@ -42,6 +49,11 @@ class WebSocketManager: ObservableObject {
         case authenticating
         case connected
         case error(String)
+        /// Terminal state reached when token refresh fails or auth is
+        /// rejected — the manager calls `AuthService.logout()` so the UI
+        /// routes back to `LoginView`. Distinct from `.error` so views
+        /// can render a logout-specific message.
+        case authFailed(String)
     }
 
     init(authService: AuthRefreshing, taskFactory: WebSocketTaskFactory, sleeper: Sleeper) {
@@ -77,6 +89,8 @@ class WebSocketManager: ObservableObject {
         reconnectAttempts = 0
         pingTimer?.invalidate()
         pingTimer = nil
+        proactiveRefreshTask?.cancel()
+        proactiveRefreshTask = nil
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
         connectionState = .disconnected
@@ -224,7 +238,7 @@ class WebSocketManager: ObservableObject {
 
     /// Two-pass decode: parse the full `WSAuthCompleteResponse` shape to
     /// surface `availableTopics`, `userRole`, and `wsTokenExp` (the last
-    /// of which Commit 2's proactive refresh consumes).
+    /// drives proactive refresh).
     private func handleAuthComplete(data: Data, rawJSON: [String: Any]) {
         reconnectAttempts = 0
         connectionState = .connected
@@ -242,6 +256,36 @@ class WebSocketManager: ObservableObject {
 
         replayPendingSubscriptions()
         startPingTimer()
+        scheduleProactiveTokenRefresh()
+    }
+
+    /// Schedule proactive reauth at 80% of the ws_token TTL.
+    ///
+    /// Uses the injected `Sleeper` so tests can assert the scheduled
+    /// interval without wall-clock dependency. If the token is already
+    /// past the 80% mark on arrival (short TTL, clock skew), refresh
+    /// immediately so the server doesn't time us out mid-session.
+    private func scheduleProactiveTokenRefresh() {
+        proactiveRefreshTask?.cancel()
+        guard let exp = state.wsTokenExp else { return }
+        let ttl = exp.timeIntervalSinceNow
+        let fireAt = ttl * 0.8
+        guard fireAt > 0 else {
+            logger.warning("ws_token already >= 80% expired on arrival; refreshing immediately")
+            Task { await self.performReauthentication() }
+            return
+        }
+        let sleeper = self.sleeper
+        proactiveRefreshTask = Task { [weak self] in
+            do {
+                try await sleeper.sleep(seconds: fireAt)
+                try Task.checkCancellation()
+                guard let self = self else { return }
+                await self.performReauthentication()
+            } catch {
+                // Task cancelled — normal on disconnect.
+            }
+        }
     }
 
     /// Decode typed payloads into `WSState` `@Published` properties.
@@ -287,10 +331,8 @@ class WebSocketManager: ObservableObject {
 
     private func performAuthentication() async {
         guard let token = await authService.fetchFreshWsToken() else {
-            logger.error("Failed to get ws_token for WebSocket auth")
-            connectionState = .error("No ws_token")
-            webSocketTask?.cancel(with: .normalClosure, reason: nil)
-            webSocketTask = nil
+            logger.error("Failed to get ws_token for WebSocket auth — forcing logout")
+            await enterAuthFailedAndLogout(reason: "Token refresh failed")
             return
         }
         sendJSON(["type": "authenticate", "ws_token": token])
@@ -298,10 +340,26 @@ class WebSocketManager: ObservableObject {
 
     private func performReauthentication() async {
         guard let token = await authService.fetchFreshWsToken() else {
-            logger.error("Failed to get ws_token for reauth")
+            logger.error("Failed to get ws_token for reauth — forcing logout")
+            await enterAuthFailedAndLogout(reason: "Token refresh failed")
             return
         }
         sendJSON(["type": "reauth", "ws_token": token])
+    }
+
+    /// Terminal auth-failure path. Stops reconnect loop, cancels the
+    /// socket, enters `.authFailed`, and logs the user out so the app
+    /// flips to `LoginView` via `SnapperApp`'s auth binding (Commit 3).
+    private func enterAuthFailedAndLogout(reason: String) async {
+        connectionState = .authFailed(reason)
+        shouldReconnect = false
+        proactiveRefreshTask?.cancel()
+        proactiveRefreshTask = nil
+        pingTimer?.invalidate()
+        pingTimer = nil
+        webSocketTask?.cancel(with: .normalClosure, reason: nil)
+        webSocketTask = nil
+        await authService.logout()
     }
 
     private func startPingTimer() {
@@ -321,19 +379,46 @@ class WebSocketManager: ObservableObject {
     private func handleDisconnection() {
         pingTimer?.invalidate()
         pingTimer = nil
+        proactiveRefreshTask?.cancel()
+        proactiveRefreshTask = nil
         webSocketTask = nil
         connectionState = .disconnected
 
-        guard shouldReconnect, reconnectAttempts < maxReconnectAttempts else {
-            return
-        }
+        guard shouldReconnect else { return }
 
         reconnectAttempts += 1
-        let delay = min(baseReconnectInterval * pow(1.5, Double(reconnectAttempts - 1)), 30)
+        let delay = nextReconnectDelay()
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             Task { @MainActor in
                 self?.connect()
             }
         }
+    }
+
+    /// Exponential backoff capped at `maxReconnectDelay` (300s) with up to
+    /// 30% jitter added. Exposed `internal` so unit tests can assert the
+    /// return range without having to mock `DispatchQueue.asyncAfter`.
+    func nextReconnectDelay() -> TimeInterval {
+        let exponent = Double(max(reconnectAttempts - 1, 0))
+        let base = baseReconnectInterval * pow(2.0, exponent)
+        let capped = min(base, maxReconnectDelay)
+        let jitter = Double.random(in: 0..<(capped * 0.3))
+        return capped + jitter
+    }
+
+    // MARK: - Test hooks (internal, @testable visibility only)
+    //
+    // Swift gives test bundles using `@testable import` visibility into
+    // `internal` symbols. These helpers expose just enough state to test
+    // the infinite-retry invariant + backoff range without bouncing off
+    // `DispatchQueue.asyncAfter` or `URLSession.webSocketTask`.
+
+    func setReconnectAttemptsForTesting(_ n: Int) {
+        reconnectAttempts = n
+    }
+
+    func forceHandleDisconnectionForTesting() {
+        shouldReconnect = true
+        handleDisconnection()
     }
 }

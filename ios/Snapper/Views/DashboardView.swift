@@ -82,7 +82,7 @@ struct DashboardView: View {
             return heartbeatColor(at: now)
         case .connecting, .authenticating:
             return .orange
-        case .disconnected, .error:
+        case .disconnected, .error, .authFailed:
             return .brandRed
         }
     }
@@ -120,6 +120,8 @@ struct DashboardView: View {
             return "Disconnected"
         case .error(let message):
             return "Error: \(message)"
+        case .authFailed(let message):
+            return "Auth failed: \(message)"
         }
     }
 

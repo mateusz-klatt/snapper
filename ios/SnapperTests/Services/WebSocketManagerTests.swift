@@ -230,4 +230,130 @@ final class WebSocketManagerTests: XCTestCase {
         XCTAssertNotNil(manager.state.wsTokenExp)
         XCTAssertEqual(manager.connectionState, .connected)
     }
+
+    // MARK: - Commit 2 (FE-2) coverage
+
+    /// When `fetchFreshWsToken` returns nil during `reauth_required`,
+    /// the manager must flip to `.authFailed`, cancel the socket, clear
+    /// `shouldReconnect`, and call `AuthService.logout()` exactly once.
+    func testAuthFailureTriggersLogout() async {
+        let fakeAuth = FakeAuthService(nextToken: nil)
+        let fakeTask = FakeWebSocketTask()
+        let factory = FakeWebSocketTaskFactory(task: fakeTask)
+        let manager = WebSocketManager(
+            authService: fakeAuth,
+            taskFactory: factory,
+            sleeper: FakeSleeper()
+        )
+        manager.connect()
+
+        manager.handleRawMessage(frame(["type": "reauth_required"]))
+        await drainSendTasks()
+        await drainSendTasks()
+
+        if case .authFailed(let reason) = manager.connectionState {
+            XCTAssertFalse(reason.isEmpty, "authFailed state must carry a reason string")
+        } else {
+            XCTFail("expected .authFailed state, got \(manager.connectionState)")
+        }
+        let logoutCalls = await fakeAuth.logoutCalls
+        XCTAssertEqual(logoutCalls, 1, "authService.logout() must be invoked exactly once")
+    }
+
+    /// Direct unit test on `nextReconnectDelay()` — per plan §D5 the
+    /// delay should be bounded by `[baseInterval * 2^n, baseInterval * 2^n * 1.3]`
+    /// up to a 300s cap, with infinite-attempt semantics (no hard attempt
+    /// ceiling). Exposed `internal` via `@testable import`.
+    func testReconnectBackoffExponentialWithJitter() {
+        let fakeTask = FakeWebSocketTask()
+        let factory = FakeWebSocketTaskFactory(task: fakeTask)
+        let manager = WebSocketManager(
+            authService: FakeAuthService(),
+            taskFactory: factory,
+            sleeper: FakeSleeper()
+        )
+        let base: TimeInterval = 3
+
+        // Drive attempts forward via disconnect() + connect()? Simpler —
+        // the test-only setter `setReconnectAttemptsForTesting` is
+        // exposed via @testable below. Here we force-dispatch by
+        // directly mutating via repeated `handleDisconnection` calls
+        // that we reach through the public surface.
+        //
+        // We use the simplest reachable path: set should-reconnect false
+        // to avoid the async-after fire, set reconnectAttempts through a
+        // dedicated helper, and read the returned delay.
+
+        let cases: [Int] = [1, 5, 10, 50]
+        for attempts in cases {
+            manager.setReconnectAttemptsForTesting(attempts)
+            let delay = manager.nextReconnectDelay()
+            let idealized = min(base * pow(2.0, Double(attempts - 1)), 300)
+            let lower = idealized
+            let upper = idealized * 1.3
+            XCTAssertGreaterThanOrEqual(delay, lower, "delay should be at least the base for attempts=\(attempts)")
+            XCTAssertLessThanOrEqual(delay, upper, "delay should not exceed jittered upper bound for attempts=\(attempts)")
+        }
+    }
+
+    /// `handleDisconnection()` must keep incrementing `reconnectAttempts`
+    /// past the pre-Plan-1 hard cap of 10 — infinite retry semantics.
+    func testReconnectAttemptsIncrementsUnbounded() async {
+        let fakeTask = FakeWebSocketTask()
+        let factory = FakeWebSocketTaskFactory(tasks: [fakeTask, FakeWebSocketTask(), FakeWebSocketTask()])
+        let manager = WebSocketManager(
+            authService: FakeAuthService(),
+            taskFactory: factory,
+            sleeper: FakeSleeper()
+        )
+        // Pre-seed to a value well past the old maxReconnectAttempts=10.
+        manager.setReconnectAttemptsForTesting(11)
+
+        // Drive one more disconnect; the attempt counter must advance.
+        let previous = manager.reconnectAttempts
+        manager.connect()
+        // Simulate a wire-level drop that would previously have been
+        // suppressed at attempts >= 10.
+        manager.forceHandleDisconnectionForTesting()
+        XCTAssertEqual(manager.reconnectAttempts, previous + 1, "reconnectAttempts must keep advancing past the old cap")
+    }
+
+    /// Proactive refresh should request a sleep equal to 80% of the
+    /// advertised TTL. Uses `FakeSleeper` so no wall-clock dependency.
+    func testProactiveRefreshFiresAt80Percent() async {
+        let fakeAuth = FakeAuthService(nextToken: "fresh")
+        let fakeSleeper = FakeSleeper()
+        let fakeTask = FakeWebSocketTask()
+        let factory = FakeWebSocketTaskFactory(task: fakeTask)
+        let manager = WebSocketManager(
+            authService: fakeAuth,
+            taskFactory: factory,
+            sleeper: fakeSleeper
+        )
+        manager.connect()
+
+        // TTL = 100s — so 80% fire target = 80s.
+        let exp = Date(timeIntervalSinceNow: 100)
+        let isoFormatter = ISO8601DateFormatter()
+        let expString = isoFormatter.string(from: exp)
+        manager.handleRawMessage(frame([
+            "type": "auth_complete",
+            "sequence_id": 1,
+            "public_id": "01961234-5678-7000-8000-000000000050",
+            "timestamp": "2025-11-22T10:00:00Z",
+            "session_id": "s1",
+            "available_topics": [],
+            "user_role": "viewer",
+            "ws_token_exp": expString
+        ]))
+        // Yield enough for the Task { try await sleeper.sleep(seconds:) }
+        // to register its interval.
+        await drainSendTasks()
+        await drainSendTasks()
+
+        let requested = await fakeSleeper.requestedIntervals
+        XCTAssertEqual(requested.count, 1, "proactive refresh should sleep exactly once per auth_complete")
+        XCTAssertEqual(requested.first ?? -1, 80, accuracy: 1.0, "scheduled interval must equal 80% of TTL")
+    }
 }
+
