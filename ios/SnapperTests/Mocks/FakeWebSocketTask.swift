@@ -47,13 +47,22 @@ final class FakeWebSocketTask: @unchecked Sendable, WebSocketTaskProtocol {
     }
 
     func receive() async throws -> URLSessionWebSocketTask.Message {
-        if let queued: URLSessionWebSocketTask.Message = lock.withLock({
-            inboundQueue.isEmpty ? nil : inboundQueue.removeFirst()
-        }) {
-            return queued
-        }
         return try await withCheckedThrowingContinuation { continuation in
-            lock.withLock { waiter = continuation }
+            // Single atomic critical section: either consume a queued
+            // message OR install the waiter. Splitting the lock would leave
+            // a gap where `pumpInbound` enqueues after our empty-check but
+            // before waiter install — the continuation would then hang
+            // forever even though a message is sitting in the queue.
+            let immediate: URLSessionWebSocketTask.Message? = lock.withLock {
+                if !inboundQueue.isEmpty {
+                    return inboundQueue.removeFirst()
+                }
+                waiter = continuation
+                return nil
+            }
+            if let msg = immediate {
+                continuation.resume(returning: msg)
+            }
         }
     }
 

@@ -159,6 +159,58 @@ final class WebSocketManagerTests: XCTestCase {
         XCTAssertTrue(task2Subscribes, "confirmed topic not replayed on reconnect — regression in dual-set tracking")
     }
 
+    /// A stale `receive()` error from task A (resolved after the manager
+    /// has already swapped to task B) must not mutate shared state.
+    /// Without identity guarding on the error path, the old task would
+    /// call `handleDisconnection()` and wipe out the live task B.
+    func testStaleReceiveErrorDoesNotDisruptNewSocket() async {
+        let task1 = FakeWebSocketTask()
+        let task2 = FakeWebSocketTask()
+        let factory = FakeWebSocketTaskFactory(tasks: [task1, task2])
+        let manager = WebSocketManager(
+            authService: FakeAuthService(nextToken: "t"),
+            taskFactory: factory,
+            sleeper: FakeSleeper()
+        )
+
+        manager.connect()
+        manager.handleRawMessage(frame([
+            "type": "auth_complete",
+            "sequence_id": 1,
+            "public_id": "01961234-5678-7000-8000-000000000040",
+            "timestamp": "2025-11-22T10:00:00Z",
+            "session_id": "s1",
+            "available_topics": [],
+            "user_role": "viewer",
+            "ws_token_exp": "2025-11-22T11:00:00Z"
+        ]))
+        XCTAssertEqual(manager.connectionState, .connected)
+
+        // Simulate a full reconnect swap BEFORE task1's receive() resumes.
+        manager.disconnect()
+        manager.connect()
+        manager.handleRawMessage(frame([
+            "type": "auth_complete",
+            "sequence_id": 2,
+            "public_id": "01961234-5678-7000-8000-000000000041",
+            "timestamp": "2025-11-22T10:00:00Z",
+            "session_id": "s2",
+            "available_topics": [],
+            "user_role": "viewer",
+            "ws_token_exp": "2025-11-22T11:00:00Z"
+        ]))
+        XCTAssertEqual(manager.connectionState, .connected, "task2 should own connected state")
+
+        // Now resume task1's receive() with a stale error. If the guard is
+        // missing, this call will trip handleDisconnection() and flip state
+        // back to .disconnected.
+        task1.pumpError(URLError(.networkConnectionLost))
+        await drainSendTasks()
+        await drainSendTasks()
+
+        XCTAssertEqual(manager.connectionState, .connected, "stale error from task1 must not disrupt task2")
+    }
+
     func testAuthCompleteDecodedAndAppliedToState() {
         let (manager, _, _, _) = makeManager()
         manager.connect()

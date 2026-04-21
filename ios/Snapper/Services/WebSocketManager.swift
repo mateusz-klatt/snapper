@@ -130,15 +130,35 @@ class WebSocketManager: ObservableObject {
             do {
                 let message = try await task.receive()
                 guard let self = self else { return }
-                self.handleRawMessage(message)
                 // Continue the read loop only while the in-flight task still
                 // matches the one we kicked off — guards against double-loops
                 // if the socket was swapped while `receive()` was suspended.
-                if let current = self.webSocketTask, current === task {
+                guard let current = self.webSocketTask, current === task else {
+                    return
+                }
+                self.handleRawMessage(message)
+                // handleRawMessage may have mutated webSocketTask (e.g.
+                // auth_failed cancels the task). Re-check before recursing
+                // so we never loop on a stale reference.
+                if let now = self.webSocketTask, now === task {
                     self.listenForMessages()
                 }
             } catch {
                 guard let self = self else { return }
+                // Stale errors from a task we've already replaced/cancelled
+                // must not touch shared state — otherwise an old receive()
+                // resuming after reconnect would wipe the new socket via
+                // `handleDisconnection()`. Compare identity against the
+                // currently-owned task; if it no longer matches, the stale
+                // task was already taken offline by its replacement.
+                if let current = self.webSocketTask, current !== task {
+                    return
+                }
+                if self.webSocketTask == nil && self.intentionalDisconnect {
+                    // Expected close from `disconnect()`; the cancel path
+                    // has already cleared state. Nothing more to do.
+                    return
+                }
                 if !self.intentionalDisconnect {
                     self.logger.error("WebSocket receive error: \(error)")
                 }
