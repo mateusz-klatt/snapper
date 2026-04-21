@@ -2186,6 +2186,28 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_symbol_for_instrument(
+        self,
+        instrument_public_id: str,
+        as_of: datetime,
+    ) -> str | None:
+        """Resolve an instrument public_id back to its native symbol string.
+
+        Joins active ``Instrument`` + active ``Symbol`` rows at ``as_of`` and
+        returns ``Symbol.native_symbol``. Returns ``None`` when the
+        instrument row does not exist or its joined Symbol is no longer
+        active at the requested snapshot.
+
+        Used by the order-entry capability guard to translate a UUID-shaped
+        ``instrument_public_id`` (as produced by backend-side Instrument
+        resolution) into the native symbol required by
+        ``snapper.infrastructure.symbols.functions.is_tradeable`` — which
+        reads ``SymbolExchangeCapability.can_trade`` keyed on the
+        native-symbol cache.
+        """
+        ...
+
+    @abstractmethod
     async def handover_grant(
         self,
         from_grant_public_id: str,
@@ -6663,6 +6685,43 @@ class SQLAlchemyRepository(Repository):
                 s, native_symbol=native_symbol, exchange=exchange, as_of=as_of
             )
             return instrument.public_id if instrument is not None else None
+
+    async def get_symbol_for_instrument(
+        self,
+        instrument_public_id: str,
+        as_of: datetime,
+    ) -> str | None:
+        """Resolve an instrument public_id back to its native symbol.
+
+        Joins active ``Instrument`` (filtered by public_id) to active
+        ``Symbol`` (filtered by its public_id = ``Instrument.symbol_public_id``)
+        at the requested temporal snapshot. Returns None when either row
+        is absent or no longer active at ``as_of``.
+        """
+        async with self.session() as s:
+            i_ts, i_kt = where_active(Instrument, as_of)
+            instrument_row = (
+                await s.execute(
+                    select(Instrument.symbol_public_id).where(
+                        Instrument.public_id == instrument_public_id,
+                        i_ts,
+                        i_kt,
+                    )
+                )
+            ).scalar_one_or_none()
+            if instrument_row is None:
+                return None
+            s_ts, s_kt = where_active(Symbol, as_of)
+            native = (
+                await s.execute(
+                    select(Symbol.native_symbol).where(
+                        Symbol.public_id == instrument_row,
+                        s_ts,
+                        s_kt,
+                    )
+                )
+            ).scalar_one_or_none()
+            return native
 
     async def handover_grant(
         self,

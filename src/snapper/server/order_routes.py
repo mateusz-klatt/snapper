@@ -41,6 +41,7 @@ from snapper.data.repository_types import ExecutionPlanInsertRow
 from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ExecutionPlanData
+from snapper.server._capability_guard import require_tradable
 from snapper.server.dependencies import get_caps_enforcer_dependency
 from snapper.server.dependencies import get_repository_dependency
 from snapper.server.json_body import json_body
@@ -156,6 +157,8 @@ async def create_order(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    await require_tradable(repo, body.instrument, body.exchange, as_of=now)
 
     await resolve_target_wallets(
         principal=principal,

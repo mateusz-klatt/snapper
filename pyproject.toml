@@ -185,6 +185,7 @@ pythonpath = ["src", "proprietary/src"]
 markers = [
     "real_settings: mark test to use real Settings instead of mocked version",
     "integration: real-broker integration test (excluded from default test run; opt in via make test-integration)",
+    "capability_guard: opt out of the tests/server bypass_capability_guard fixture so the real require_tradable runs",
 ]
 
 [tool.mypy]

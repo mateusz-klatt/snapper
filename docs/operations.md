@@ -220,3 +220,112 @@ not provide the per-instance lifecycle the contract requires.
 ## Verified environments
 
 Verified on 2026-04-18 against docker-compose-v2.29.7
+
+# Kraken Equities (TradFi) market data
+
+TradFi index futures (Kraken FCM: MNQ/ES/YM/RTY/NKD/M2K) are shipped
+in market-data-only mode. The symbol updater + publisher processes
+are disabled at code level; runtime enable lives in the DB
+`Setting` rows for the relevant processes so rollout + rollback
+happen without code deploys.
+
+Contracts used by this flow:
+
+- REST: `iapi.kraken.com/api/internal/markets/all/futures-contracts`
+  for instrument metadata; `.../{ws_symbol}/ticker/history` for
+  historical candles. Requires `Origin: https://pro.kraken.com` +
+  `Referer: https://pro.kraken.com/` headers.
+- WS: `wss://ws-equities.kraken.com` for live delayed (~10 min)
+  ticks + trades. The outer envelope's `delayed` flag propagates
+  into every `TickData` message as `is_delayed`.
+- No order API — every submit route (`POST /api/orders`,
+  `POST /api/execution-plans`, `POST /api/trailing-stops`) calls
+  `snapper.server._capability_guard.require_tradable` and rejects
+  TradFi instruments with HTTP 422
+  `error_code=instrument_market_data_only`.
+
+## Enable the feed
+
+```
+# 1. Populate Symbol + SymbolExchangeCapability rows from iapi.
+#    (kraken_equities entry must be present for is_tradeable
+#    cache hits; default deny on missing row.)
+snapper update-kraken-equities-symbols --force
+
+# 2. Verify the rows landed.
+sqlite3 snapper.db \
+  "SELECT COUNT(*) FROM symbol_exchange_capabilities
+   WHERE exchange='kraken_equities' AND valid_to='9999-12-31T23:59:59';"
+# expect >= 38 (indices only; full catalog up to ~180 contracts)
+
+# 3. Enable the symbol-updater + feed-publisher processes via DB
+#    Setting rows (NOT env vars — see feedback_no_asking_continue.md
+#    for the rollout preference).
+sqlite3 snapper.db <<SQL
+INSERT OR REPLACE INTO settings (key, value, timestamp, session_id, sequence_id)
+VALUES
+  ('process_kraken_equities_symbol_updater', '{"enabled":true}', datetime('now'), 'ops', 0),
+  ('process_kraken_equities_feed_publisher',  '{"enabled":true}', datetime('now'), 'ops', 0);
+SQL
+
+# 4. Restart the runtime OR trigger a live registry sync
+#    (registry_syncer picks up the Setting rows automatically
+#    on the next interval).
+```
+
+## Backfill historical candles
+
+```
+# 30-day 1-hour backfill of the four default TradFi symbols
+snapper kraken-equities-backfill-candles -t 1h -d 30
+
+# Or the Makefile wrapper (equivalent)
+make backfill-kraken-equities-candles
+
+# Single symbol, daily candles, 90 days
+snapper kraken-equities-backfill-candles -s MNQM6-CME -t 1d -d 90 --no-resume
+```
+
+The endpoint is undocumented/internal — upstream application-layer
+failures (HTTP 200 with `result=null` or non-empty `errors`) raise
+`RuntimeError` so they are distinguishable from legitimately-empty
+windows. See `src/snapper/infrastructure/exchanges/implementations/
+kraken_equities.py:get_ohlcv` for the error contract.
+
+## Quarterly rotation
+
+Default TradFi symbols are quarterly expiry contracts
+(`MNQM6-CME` = Jun 26, etc.) and must be rotated before the
+`SymbolExchangeCapability.maturity` timestamp on any default
+symbol drops below 14 days. Rotation cadence:
+
+1. Pull the current maturity list:
+   ```
+   sqlite3 snapper.db \
+     "SELECT native_symbol, datetime(maturity,'unixepoch')
+        FROM symbols JOIN symbol_exchange_capabilities
+             ON symbols.public_id = symbol_exchange_capabilities.symbol_public_id
+        WHERE exchange='kraken_equities'
+              AND valid_to='9999-12-31T23:59:59';"
+   ```
+2. Identify the next quarterly (e.g. `MNQU6-CME` Sep 26 when
+   `MNQM6-CME` Jun 26 drops below 14 days).
+3. Update `AppSettings.instruments[KRAKEN_EQUITIES]` in code
+   AND/OR the `instruments` DB Setting row to include the new
+   nearest contract. Deploy + roll back via git revert on the
+   code path; DB Setting path is immediate.
+
+## Troubleshooting
+
+- **Zero instruments after `update-kraken-equities-symbols --force`**:
+  iapi reachability / Origin header mismatch. Verify
+  `curl -H 'Origin: https://pro.kraken.com' -H 'Referer: https://pro.kraken.com/' \
+   'https://iapi.kraken.com/api/internal/markets/all/futures-contracts?delayed=true' | head -c 200`
+  returns JSON with `result.data[...]`, not `result:null,errors:[...]`.
+- **WS disconnect loops on `ws-equities.kraken.com`**: inspect Kraken
+  status page; no operator action required — the WS client backs
+  off on reconnect. If the symbol_updater keeps returning zero
+  rows across two consecutive runs, fire a monitoring alert.
+- **Submit returns `422 instrument_market_data_only`**: expected.
+  TradFi is observation-only. Point the strategy at a
+  `can_trade=True` instrument (crypto/xStocks) for execution.

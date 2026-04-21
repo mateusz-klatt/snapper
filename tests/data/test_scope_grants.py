@@ -1061,3 +1061,59 @@ class TestGetInstrumentPublicIdBySymbol:
             as_of=datetime.now(UTC),
         )
         assert result is not None
+
+
+class TestGetSymbolForInstrument:
+    """Tests for the new instrument-to-symbol reverse resolver."""
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_instrument_unknown(self, repo: SQLAlchemyRepository) -> None:
+        """Unknown instrument public_id returns None.
+
+        Given: a UUID that has no active Instrument row,
+        When: ``get_symbol_for_instrument`` is called,
+        Then: None is returned so the capability guard can raise
+            ``unknown_instrument`` rather than skipping the check.
+        """
+        result = await repo.get_symbol_for_instrument(
+            instrument_public_id="00000000-0000-7000-8000-00000000dead",
+            as_of=datetime.now(UTC),
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_native_symbol_for_active_pair(self, repo: SQLAlchemyRepository) -> None:
+        """Active Instrument + active Symbol resolves to native symbol.
+
+        Given: a seeded Symbol and an Instrument referencing it,
+        When: ``get_symbol_for_instrument`` is called with the
+            instrument public_id at the current snapshot,
+        Then: the Symbol's ``native_symbol`` string is returned.
+        """
+        async with repo.session() as s:
+            s.add(
+                Symbol(
+                    public_id="00000000-0000-7000-8000-0000000000c2",
+                    native_symbol="MNQM6-CME",
+                    base="MNQ",
+                    quote="USD",
+                    asset_type="index",
+                    created_at=datetime.now(UTC),
+                    session_id="t",
+                    sequence_id=1,
+                    timestamp=datetime.now(UTC),
+                )
+            )
+            await s.commit()
+        _id, instrument_public_id = await repo.ensure_instrument(
+            symbol_public_id="00000000-0000-7000-8000-0000000000c2",
+            exchange="kraken_equities",
+            session_id="t",
+            sequence_id=2,
+            timestamp=datetime.now(UTC),
+        )
+        result = await repo.get_symbol_for_instrument(
+            instrument_public_id=instrument_public_id,
+            as_of=datetime.now(UTC),
+        )
+        assert result == "MNQM6-CME"

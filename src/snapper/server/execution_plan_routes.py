@@ -40,6 +40,7 @@ from snapper.data.repository_types import ExecutionPlanInsertRow
 from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ExecutionPlanData
+from snapper.server._capability_guard import require_tradable
 from snapper.server.dependencies import get_caps_enforcer_dependency
 from snapper.server.dependencies import get_repository_dependency
 from snapper.server.json_body import json_body
@@ -169,6 +170,8 @@ async def create_bracket(
         wallet_public_id=cycle["wallet_public_id"],
         operator_public_id=cycle["operator_public_id"],
     )
+
+    await require_tradable(repo, cycle["instrument_public_id"], cycle["exchange"], as_of=now)
 
     missing = await service._check_capabilities(
         "bracket", cycle["exchange"], cycle["instrument_public_id"]

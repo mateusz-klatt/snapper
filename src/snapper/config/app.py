@@ -310,6 +310,19 @@ class AppSettings:
     def instruments(self) -> dict[str, list[str]]:
         """Return configured trading instruments per exchange.
 
+        ``KRAKEN_EQUITIES`` ships four micro index-futures Jun26 contracts
+        (``MNQM6-CME``, ``MESM6-CME``, ``MYMM6-CBOT``, ``M2KM6-CME``) so the
+        happy-path "enable the feed" runbook requires no ad-hoc
+        configuration. These are ``can_trade=False`` market-data-only
+        instruments; every order-entry route rejects submits against them
+        via ``snapper.server._capability_guard.require_tradable``.
+
+        FCM index-futures expire quarterly; operators must rotate the
+        default list ~2 weeks before the maturity column in
+        ``SymbolExchangeCapability`` reaches ``<= 14 days`` (see
+        ``docs/operations.md`` "Kraken Equities (TradFi) market data"
+        section for the rotation playbook + monitoring alert).
+
         Returns:
             Dictionary mapping exchange names to lists of instrument symbols.
         """
@@ -326,6 +339,12 @@ class AppSettings:
                     "SPY",
                 ],
                 ExchangeEnum.KRAKEN_FUTURES: [],
+                ExchangeEnum.KRAKEN_EQUITIES: [
+                    "MNQM6-CME",
+                    "MESM6-CME",
+                    "MYMM6-CBOT",
+                    "M2KM6-CME",
+                ],
                 ExchangeEnum.ZONDA: ["BTC-PLN", "USDC-PLN", "ETH-PLN", "SOL-USDC", "BTC-EUR"],
                 ExchangeEnum.WALUTOMAT: ["EUR-PLN", "USD-PLN", "EUR-USD"],
                 ExchangeEnum.POLYGON: ["BTC-USD", "BTC-EUR", "EUR-USD", "EUR-PLN", "USD-PLN"],
