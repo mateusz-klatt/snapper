@@ -347,12 +347,17 @@ class APIClient {
             const detailRecord = detail as Record<string, unknown>
             const reason = detailRecord.reason
             const errorCode = detailRecord.error_code
-            const message =
-              typeof reason === 'string' && reason.length > 0
-                ? reason
-                : typeof errorCode === 'string' && errorCode.length > 0
-                  ? errorCode
-                  : fallbackMessage
+            const hasReason = typeof reason === 'string' && reason.length > 0
+            const hasErrorCode = typeof errorCode === 'string' && errorCode.length > 0
+            let message: string
+
+            if (hasReason) {
+              message = reason
+            } else if (hasErrorCode) {
+              message = errorCode
+            } else {
+              message = fallbackMessage
+            }
 
             return { message, details: detail }
           }

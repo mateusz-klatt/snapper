@@ -139,30 +139,7 @@ export function DelegateDetailView({
 
       <section className='border-t border-dark-600 pt-4'>
         <h2 className='text-sm font-semibold text-muted-800 mb-2'>Trading caps</h2>
-        {!editing ? (
-          <dl className='grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-2 text-sm'>
-            <div>
-              <dt className='text-muted-500'>Max open orders</dt>
-              <dd>{delegate.caps.max_open_orders ?? '(default)'}</dd>
-            </div>
-            <div>
-              <dt className='text-muted-500'>Max daily notional USD</dt>
-              <dd>{delegate.caps.max_daily_notional_usd ?? '(default)'}</dd>
-            </div>
-            <div>
-              <dt className='text-muted-500'>Max cancels per minute</dt>
-              <dd>{delegate.caps.max_cancels_per_minute ?? '(default)'}</dd>
-            </div>
-            <div>
-              <dt className='text-muted-500'>Per-instrument max quantity</dt>
-              <dd className='font-mono text-xs'>
-                {delegate.caps.max_order_quantity_per_instrument
-                  ? JSON.stringify(delegate.caps.max_order_quantity_per_instrument)
-                  : '(default)'}
-              </dd>
-            </div>
-          </dl>
-        ) : (
+        {editing ? (
           draft !== null && (
             <div className='grid grid-cols-1 sm:grid-cols-2 gap-3'>
               <CapEditor
@@ -203,6 +180,29 @@ export function DelegateDetailView({
               </div>
             </div>
           )
+        ) : (
+          <dl className='grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-2 text-sm'>
+            <div>
+              <dt className='text-muted-500'>Max open orders</dt>
+              <dd>{delegate.caps.max_open_orders ?? '(default)'}</dd>
+            </div>
+            <div>
+              <dt className='text-muted-500'>Max daily notional USD</dt>
+              <dd>{delegate.caps.max_daily_notional_usd ?? '(default)'}</dd>
+            </div>
+            <div>
+              <dt className='text-muted-500'>Max cancels per minute</dt>
+              <dd>{delegate.caps.max_cancels_per_minute ?? '(default)'}</dd>
+            </div>
+            <div>
+              <dt className='text-muted-500'>Per-instrument max quantity</dt>
+              <dd className='font-mono text-xs'>
+                {delegate.caps.max_order_quantity_per_instrument
+                  ? JSON.stringify(delegate.caps.max_order_quantity_per_instrument)
+                  : '(default)'}
+              </dd>
+            </div>
+          </dl>
         )}
       </section>
 

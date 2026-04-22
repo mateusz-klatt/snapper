@@ -1,4 +1,4 @@
-import React, { useEffect, useId } from 'react'
+import React, { useEffect, useId, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import clsx from 'clsx'
 
@@ -18,24 +18,41 @@ export const Modal: React.FC<Readonly<ModalProps>> = ({
   size = 'md',
 }) => {
   const titleId = useId()
+  const dialogRef = useRef<HTMLDialogElement>(null)
 
   useEffect(() => {
+    const dialog = dialogRef.current
+
+    if (dialog === null || !open) {
+      return
+    }
+
+    dialog.showModal()
+    document.body.style.overflow = 'hidden'
+
+    return () => {
+      document.body.style.overflow = 'unset'
+    }
+  }, [open])
+
+  useEffect(() => {
+    if (!open) {
+      return
+    }
+
     const handleEsc = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         onClose()
       }
     }
 
-    if (open) {
-      document.addEventListener('keydown', handleEsc)
-      document.body.style.overflow = 'hidden'
-    }
+    document.addEventListener('keydown', handleEsc)
 
     return () => {
       document.removeEventListener('keydown', handleEsc)
-      document.body.style.overflow = 'unset'
     }
   }, [open, onClose])
+
   if (!open) return null
   const sizeClasses = {
     sm: 'max-w-md',
@@ -44,28 +61,24 @@ export const Modal: React.FC<Readonly<ModalProps>> = ({
     xl: 'max-w-4xl',
   }
   const modalContent = (
-    <div
-      className='fixed inset-0 z-50 overflow-y-auto'
-      role='dialog'
-      aria-modal='true'
+    <dialog
+      ref={dialogRef}
+      className='fixed inset-0 z-50 m-0 h-full max-h-none w-full max-w-none overflow-y-auto bg-transparent p-0 backdrop:bg-muted-900/40'
       aria-labelledby={title ? titleId : undefined}
     >
-      {}
       <button
         type='button'
-        className='fixed inset-0 w-full h-full bg-muted-900/40 transition-opacity cursor-default border-none'
-        onClick={onClose}
         aria-label='Close modal'
+        onClick={onClose}
+        className='fixed inset-0 w-full h-full cursor-default border-none bg-transparent'
       />
-      {}
-      <div className='flex min-h-full items-center justify-center p-4'>
+      <div className='relative flex min-h-full items-center justify-center p-4'>
         <div
           className={clsx(
             'relative w-full rounded-2xl border border-dark-600 bg-alpine-50 shadow-xl',
             sizeClasses[size]
           )}
         >
-          {}
           {title && (
             <div className='flex items-center justify-between border-b border-dark-600 p-6'>
               <h3 id={titleId} className='text-lg font-semibold text-alpine-900'>
@@ -87,11 +100,10 @@ export const Modal: React.FC<Readonly<ModalProps>> = ({
               </button>
             </div>
           )}
-          {}
           <div className='p-6'>{children}</div>
         </div>
       </div>
-    </div>
+    </dialog>
   )
 
   return createPortal(modalContent, document.body)

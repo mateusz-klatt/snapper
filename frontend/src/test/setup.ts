@@ -23,6 +23,24 @@ if (typeof Element !== 'undefined') {
   Element.prototype.scrollIntoView = vi.fn()
 }
 
+if (typeof HTMLDialogElement !== 'undefined') {
+  if (HTMLDialogElement.prototype.showModal === undefined) {
+    HTMLDialogElement.prototype.showModal = function showModal(this: HTMLDialogElement): void {
+      this.setAttribute('open', 'true')
+    }
+  }
+
+  if (HTMLDialogElement.prototype.close === undefined) {
+    HTMLDialogElement.prototype.close = function close(
+      this: HTMLDialogElement,
+      _returnValue?: string
+    ): void {
+      this.removeAttribute('open')
+      this.dispatchEvent(new Event('close'))
+    }
+  }
+}
+
 if (typeof navigator !== 'undefined') {
   Object.defineProperty(navigator, 'clipboard', {
     value: { writeText: vi.fn().mockResolvedValue(undefined) },
