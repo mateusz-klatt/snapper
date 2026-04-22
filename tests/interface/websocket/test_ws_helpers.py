@@ -11,6 +11,7 @@ from snapper.auth.user_service import UserService
 from snapper.interface.websocket.helpers import build_allowed_origins
 from snapper.interface.websocket.helpers import determine_topic_category
 from snapper.interface.websocket.helpers import get_allowed_topics_for_role
+from snapper.interface.websocket.helpers import parse_wallet_scoped_topic
 from snapper.interface.websocket.helpers import role_allowed_categories
 from snapper.messaging.infrastructure.logger import ZmqMessageLogger
 from snapper.utils.logging import _get_context_bg_color
@@ -272,3 +273,54 @@ class TestZmqLoggerErrorBranches:
             log_payload=False,
         )
         await logger_instance._log_message("test.topic", b'{"data": "test"}')
+
+
+class TestParseWalletScopedTopic:
+    """Tests for Day 3f :func:`parse_wallet_scoped_topic` helper."""
+
+    @pytest.mark.parametrize(
+        ("topic", "expected"),
+        [
+            ("signals.kraken.BTC-USD.live", ("kraken", "BTC-USD")),
+            ("signals.zonda.ETH-PLN.live", ("zonda", "ETH-PLN")),
+            ("orders.commands.kraken.BTC-USD.submit", ("kraken", "BTC-USD")),
+            ("orders.commands.kraken.BTC-USD.cancel", ("kraken", "BTC-USD")),
+            ("orders.commands.zonda.ETH-PLN.replace", ("zonda", "ETH-PLN")),
+            ("orders.events.kraken.BTC-USD.executed", ("kraken", "BTC-USD")),
+            ("orders.events.kraken.BTC-USD.submitted", ("kraken", "BTC-USD")),
+            ("orders.events.kraken.BTC-USD.accepted", ("kraken", "BTC-USD")),
+            ("orders.events.kraken.BTC-USD.rejected", ("kraken", "BTC-USD")),
+            ("orders.events.kraken.BTC-USD.cancelled", ("kraken", "BTC-USD")),
+            ("orders.events.kraken.BTC-USD.expired", ("kraken", "BTC-USD")),
+            ("orders.events.kraken.BTC-USD.replaced", ("kraken", "BTC-USD")),
+        ],
+    )
+    def test_wallet_scoped_topics_decompose(self, topic: str, expected: tuple[str, str]) -> None:
+        """Positive: every wallet-scoped family yields its ``(exchange, symbol)``."""
+        assert parse_wallet_scoped_topic(topic) == expected
+
+    @pytest.mark.parametrize(
+        "topic",
+        [
+            "signals.paper.BTC-USD.live",
+            "signals.paper.BTC-USD.my_strategy",
+            "signals.paper.MNQU6-CME.ema_cross",
+            "market.kraken.BTC-USD.ticks",
+            "system.heartbeats.strategy.my_strategy",
+            "backtest.00000000-0000-7000-8000-000000000001.run-7.progress",
+            "admin.user_deactivated",
+            "admin.scope_revoked",
+            "signals.",
+            "signals.kraken",
+            "orders.unknownkind.kraken.BTC-USD.submit",
+            "orders",
+            "signals.kraken.BTC-USD.historical",
+        ],
+    )
+    def test_non_wallet_scoped_topics_return_none(self, topic: str) -> None:
+        """Negative: every non-wallet-scoped topic passes through as ``None``.
+
+        Includes the ``signals.paper.BTC-USD.live`` edge case that hits
+        the paper-exchange guard AFTER the ``live`` suffix check.
+        """
+        assert parse_wallet_scoped_topic(topic) is None

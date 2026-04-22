@@ -397,8 +397,10 @@ def _build_dispatch_table(
     Returns:
         Dictionary mapping message types to async handler callables.
     """
+    settings = get_settings()
+    repository = get_repository(settings.db_url)
     return {
-        WSSubscribeRequest: lambda msg: handle_subscribe(websocket, msg, manager, user),
+        WSSubscribeRequest: lambda msg: handle_subscribe(websocket, msg, manager, user, repository),
         WSUnsubscribeRequest: lambda msg: handle_unsubscribe(websocket, msg, manager),
         WSGetSubscriptionsRequest: lambda msg: handle_get_subscriptions(
             websocket, manager, user.role

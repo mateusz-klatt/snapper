@@ -25,6 +25,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy.exc import IntegrityError
 
+from snapper.data.models import Instrument
 from snapper.data.models import InstrumentUnderlyingMapping
 from snapper.data.models import Operator
 from snapper.data.models import Symbol
@@ -1453,3 +1454,247 @@ class TestRevokeScopeGrant:
                 revoked_at=pre_close + timedelta(seconds=1),
                 reason=None,
             )
+
+
+async def _seed_instrument_chain(repo: SQLAlchemyRepository, ids: dict[str, str]) -> None:
+    """Seed active ``Symbol`` + ``Instrument`` rows for btc_perp and btc_spot.
+
+    ``_seed_world`` only seeds ``InstrumentUnderlyingMapping`` (mapping
+    instrument public_ids to an underlying) and does not create the
+    actual ``Instrument`` or ``Symbol`` rows those ids point at. The
+    Day 3f wallet-pair projection JOINs against those tables, so the
+    tests here extend the seed with the concrete rows.
+
+    Maps:
+
+    - ``btc_perp`` → Symbol "BTC-PERP" / Instrument on "kraken_futures"
+    - ``btc_spot`` → Symbol "BTC-USD" / Instrument on "kraken"
+    """
+    base_ts = datetime.now(UTC) - timedelta(minutes=4)
+    symbol_perp = "00000000-0000-7000-8000-0000000000s1"
+    symbol_spot = "00000000-0000-7000-8000-0000000000s2"
+    async with repo.session() as s:
+        s.add_all(
+            [
+                Symbol(
+                    public_id=symbol_perp,
+                    native_symbol="BTC-PERP",
+                    base="BTC",
+                    quote="USD",
+                    asset_type="crypto",
+                    created_at=base_ts,
+                    session_id="test-session",
+                    sequence_id=20,
+                    timestamp=base_ts,
+                ),
+                Symbol(
+                    public_id=symbol_spot,
+                    native_symbol="BTC-USD",
+                    base="BTC",
+                    quote="USD",
+                    asset_type="crypto",
+                    created_at=base_ts,
+                    session_id="test-session",
+                    sequence_id=21,
+                    timestamp=base_ts,
+                ),
+                Instrument(
+                    public_id=ids["btc_perp"],
+                    symbol_public_id=symbol_perp,
+                    exchange="kraken_futures",
+                    session_id="test-session",
+                    sequence_id=22,
+                    timestamp=base_ts,
+                ),
+                Instrument(
+                    public_id=ids["btc_spot"],
+                    symbol_public_id=symbol_spot,
+                    exchange="kraken",
+                    session_id="test-session",
+                    sequence_id=23,
+                    timestamp=base_ts,
+                ),
+            ]
+        )
+        await s.commit()
+
+
+class TestListScopeGrantInstrumentPairs:
+    """Tests for the Day 3f projection repository method."""
+
+    @pytest.mark.asyncio
+    async def test_empty_operator_list_returns_empty(self, repo: SQLAlchemyRepository) -> None:
+        """Fast path: no operators → empty set, no DB round-trip needed."""
+        pairs = await repo.list_scope_grant_instrument_pairs([], datetime.now(UTC))
+        assert pairs == set()
+
+    @pytest.mark.asyncio
+    async def test_operator_without_grants_returns_empty(self, repo: SQLAlchemyRepository) -> None:
+        """Existing operator with no grants yields an empty set."""
+        ids = await _seed_world(repo)
+        await _seed_instrument_chain(repo, ids)
+        pairs = await repo.list_scope_grant_instrument_pairs([ids["alice"]], datetime.now(UTC))
+        assert pairs == set()
+
+    @pytest.mark.asyncio
+    async def test_underlying_scoped_grant_expands_to_all_instrument_pairs(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """An underlying-scoped grant on BTC surfaces every mapped instrument.
+
+        Given: alice holds an underlying grant on BTC and the mapping
+            table links BTC → {btc_perp, btc_spot} at ``as_of``,
+        When: ``list_scope_grant_instrument_pairs([alice], now)`` runs,
+        Then: both the ``(kraken_futures, BTC-PERP)`` and
+            ``(kraken, BTC-USD)`` pairs are returned.
+        """
+        ids = await _seed_world(repo)
+        await _seed_instrument_chain(repo, ids)
+        await repo.create_scope_grant(
+            _make_request(
+                operator_public_id=ids["alice"],
+                wallet_public_id=ids["wallet"],
+                granted_by=ids["user_admin"],
+                scope_kind="underlying",
+                underlying_public_id=ids["underlying_btc"],
+            )
+        )
+        pairs = await repo.list_scope_grant_instrument_pairs([ids["alice"]], datetime.now(UTC))
+        assert pairs == {("kraken_futures", "BTC-PERP"), ("kraken", "BTC-USD")}
+
+    @pytest.mark.asyncio
+    async def test_instrument_scoped_grant_returns_singleton_pair(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """An instrument grant projects to exactly one pair."""
+        ids = await _seed_world(repo)
+        await _seed_instrument_chain(repo, ids)
+        await repo.create_scope_grant(
+            _make_request(
+                operator_public_id=ids["alice"],
+                wallet_public_id=ids["wallet"],
+                granted_by=ids["user_admin"],
+                scope_kind="instrument",
+                instrument_public_id=ids["btc_perp"],
+            )
+        )
+        pairs = await repo.list_scope_grant_instrument_pairs([ids["alice"]], datetime.now(UTC))
+        assert pairs == {("kraken_futures", "BTC-PERP")}
+
+    @pytest.mark.asyncio
+    async def test_multi_operator_unions_pairs(self, repo: SQLAlchemyRepository) -> None:
+        """Two operators holding different grants union to the combined set."""
+        ids = await _seed_world(repo)
+        await _seed_instrument_chain(repo, ids)
+        await repo.create_scope_grant(
+            _make_request(
+                operator_public_id=ids["alice"],
+                wallet_public_id=ids["wallet"],
+                granted_by=ids["user_admin"],
+                scope_kind="instrument",
+                instrument_public_id=ids["btc_perp"],
+                sequence_id=101,
+            )
+        )
+        await repo.create_scope_grant(
+            _make_request(
+                operator_public_id=ids["bob"],
+                wallet_public_id=ids["wallet"],
+                granted_by=ids["user_admin"],
+                scope_kind="instrument",
+                instrument_public_id=ids["btc_spot"],
+                sequence_id=102,
+            )
+        )
+        pairs = await repo.list_scope_grant_instrument_pairs(
+            [ids["alice"], ids["bob"]], datetime.now(UTC)
+        )
+        assert pairs == {("kraken_futures", "BTC-PERP"), ("kraken", "BTC-USD")}
+
+    @pytest.mark.asyncio
+    async def test_revoked_grant_excluded(self, repo: SQLAlchemyRepository) -> None:
+        """A closed grant no longer contributes to the pair set."""
+        ids = await _seed_world(repo)
+        await _seed_instrument_chain(repo, ids)
+        original = await repo.create_scope_grant(
+            _make_request(
+                operator_public_id=ids["alice"],
+                wallet_public_id=ids["wallet"],
+                granted_by=ids["user_admin"],
+                scope_kind="instrument",
+                instrument_public_id=ids["btc_perp"],
+            )
+        )
+        await repo.revoke_scope_grant(
+            grant_public_id=original["public_id"],
+            revoked_by_user_public_id=ids["user_admin"],
+            revoked_at=datetime.now(UTC),
+            reason=None,
+        )
+        pairs = await repo.list_scope_grant_instrument_pairs(
+            [ids["alice"]], datetime.now(UTC) + timedelta(seconds=1)
+        )
+        assert pairs == set()
+
+    @pytest.mark.asyncio
+    async def test_orphan_instrument_without_active_rows_is_skipped(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Grants pointing to instruments with no active Instrument/Symbol are dropped.
+
+        Covers the defensive case where ``instrument_underlying_mappings``
+        references an instrument_public_id that has no active
+        ``Instrument`` row (e.g. data-quality gap). The projection query
+        silently omits orphans instead of raising — the subscribe filter
+        will simply not extend allowed pairs to cover them, which is the
+        safe fail-closed default.
+        """
+        ids = await _seed_world(repo)
+        await repo.create_scope_grant(
+            _make_request(
+                operator_public_id=ids["alice"],
+                wallet_public_id=ids["wallet"],
+                granted_by=ids["user_admin"],
+                scope_kind="underlying",
+                underlying_public_id=ids["underlying_btc"],
+            )
+        )
+        pairs = await repo.list_scope_grant_instrument_pairs([ids["alice"]], datetime.now(UTC))
+        assert pairs == set()
+
+    @pytest.mark.asyncio
+    async def test_underlying_with_no_active_mappings_yields_empty_set(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Underlying-scoped grant on an underlying with zero mappings → empty.
+
+        Covers the early-return branch where grants exist (so we don't
+        hit the outer ``not grants`` bail-out) but the expansion step
+        produces zero instrument ids. Without this guard the code
+        would issue a pointless empty-IN() JOIN query.
+        """
+        ids = await _seed_world(repo)
+        base_ts = datetime.now(UTC) - timedelta(minutes=3)
+        async with repo.session() as s:
+            empty_underlying = UnderlyingAsset(
+                ticker="EMPTY",
+                name="No Mappings",
+                asset_class="crypto",
+                session_id="test-session",
+                sequence_id=30,
+                timestamp=base_ts,
+            )
+            s.add(empty_underlying)
+            await s.commit()
+            await s.refresh(empty_underlying)
+        await repo.create_scope_grant(
+            _make_request(
+                operator_public_id=ids["alice"],
+                wallet_public_id=ids["wallet"],
+                granted_by=ids["user_admin"],
+                scope_kind="underlying",
+                underlying_public_id=empty_underlying.public_id,
+            )
+        )
+        pairs = await repo.list_scope_grant_instrument_pairs([ids["alice"]], datetime.now(UTC))
+        assert pairs == set()

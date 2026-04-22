@@ -31,7 +31,56 @@ __all__ = [
     "determine_topic_category",
     "build_allowed_origins",
     "validate_origin",
+    "parse_wallet_scoped_topic",
 ]
+
+
+_SIGNALS_PAPER_EXCHANGE = "paper"
+
+
+def parse_wallet_scoped_topic(topic: str) -> tuple[str, str] | None:
+    """Decompose a topic into its ``(exchange, native_symbol)`` wallet-scope key.
+
+    Returns ``None`` for topics that are NOT subject to the AI_DELEGATE
+    wallet-scope filter: market data, system, backtest, accruals, admin,
+    bare prefixes, and the paper-signals pass-through
+    (``signals.paper.*``).
+
+    Returns the ``(exchange, native_symbol)`` tuple for the three
+    wallet-scoped families:
+
+    - ``signals.{exchange}.{instrument}.live`` (exchange != "paper")
+    - ``orders.commands.{exchange}.{instrument}.{submit|cancel|replace}``
+    - ``orders.events.{exchange}.{instrument}.{submitted|accepted|rejected|executed|cancelled|expired|replaced}``
+
+    Topic shape is already validated upstream by
+    ``_validate_ws_topics``; this helper assumes well-formed segment
+    counts and does not re-validate.
+
+    Args:
+        topic: A concrete, already-validated topic string.
+
+    Returns:
+        ``(exchange, native_symbol)`` tuple when the topic is wallet-
+        scoped; ``None`` otherwise (pass-through to category RBAC).
+    """
+    segments = topic.split(".")
+    if len(segments) < 4:
+        return None
+    head = segments[0]
+    if head == "signals":
+        if len(segments) != 4 or segments[3] != "live":
+            return None
+        exchange = segments[1]
+        if exchange == _SIGNALS_PAPER_EXCHANGE:
+            return None
+        return (exchange, segments[2])
+    if head == "orders" and len(segments) == 5:
+        kind = segments[1]
+        if kind not in ("commands", "events"):
+            return None
+        return (segments[2], segments[3])
+    return None
 
 
 def build_allowed_origins(settings: AppSettings, server_port: int = 8000) -> set[str]:

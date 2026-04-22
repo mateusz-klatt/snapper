@@ -14,9 +14,11 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.core.types import SubscriptionActionEnum
 from snapper.core.types import SubscriptionStatusEnum
+from snapper.data.repository import Repository
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
 from snapper.interface.websocket.helpers import filter_topics
 from snapper.interface.websocket.helpers import get_allowed_topics_for_role
+from snapper.interface.websocket.helpers import parse_wallet_scoped_topic
 from snapper.interface.websocket.helpers import role_allowed_categories
 from snapper.interface.websocket.models import SERVER_CONTROL_SEQ
 from snapper.interface.websocket.schemas import WSErrorResponse
@@ -114,6 +116,71 @@ def _validate_ws_topics(
     return valid, invalid
 
 
+async def _enforce_ai_delegate_wallet_scope(
+    topics: list[str],
+    principal: AuthPrincipal,
+    repository: Repository | None,
+    as_of: datetime,
+) -> tuple[list[str], list[str]]:
+    """Split wallet-scoped topics into (allowed, denied) for AI_DELEGATE.
+
+    Day 3f subscribe-time filter. Fast-paths any non-AI_DELEGATE
+    principal (role gate returns the topic set unchanged). For
+    AI_DELEGATE the filter:
+
+    1. Computes the delegate's allowed ``(exchange, native_symbol)``
+       pairs via ``repository.list_scope_grant_instrument_pairs`` (one
+       read per subscribe call per §D4 — no caching so scope changes
+       take effect immediately).
+    2. Decomposes every topic with
+       :func:`parse_wallet_scoped_topic`.
+    3. Passes non-wallet-scoped topics through unchanged (market,
+       system, backtest, accruals, admin, and the ``signals.paper.*``
+       sandbox per §D2).
+    4. Allows wallet-scoped topics whose pair is in the delegate's
+       set; denies everything else so they surface as
+       ``topic_outside_scope`` in the response envelope.
+
+    Raising on missing ``repository`` is intentional for the
+    AI_DELEGATE path: a delegate principal reaching this filter
+    without a live repository reference indicates a runtime wiring
+    bug, and silently passing topics through would leak wallet scope.
+
+    Args:
+        topics: Already shape-validated topic list.
+        principal: Authenticated caller; role gates the whole filter.
+        repository: Repository for the scope-grant pair projection.
+            Ignored for non-AI_DELEGATE roles. Required for
+            AI_DELEGATE.
+        as_of: Bus time for the temporal scope read.
+
+    Returns:
+        Tuple of (allowed, denied) in original input order.
+    """
+    if principal.role != UserRole.AI_DELEGATE:
+        return topics, []
+    if repository is None:
+        raise RuntimeError(
+            "AI_DELEGATE subscribe reached the wallet-scope filter without a "
+            "repository reference; dispatch table wiring is broken"
+        )
+    allowed_pairs = await repository.list_scope_grant_instrument_pairs(
+        principal.operator_public_ids, as_of
+    )
+    allowed: list[str] = []
+    denied: list[str] = []
+    for topic in topics:
+        pair = parse_wallet_scoped_topic(topic)
+        if pair is None:
+            allowed.append(topic)
+            continue
+        if pair in allowed_pairs:
+            allowed.append(topic)
+        else:
+            denied.append(topic)
+    return allowed, denied
+
+
 def _enforce_backtest_wallet_scope(
     topics: list[str], principal: AuthPrincipal
 ) -> tuple[list[str], list[str]]:
@@ -156,23 +223,29 @@ async def handle_subscribe(
     message: WSSubscribeRequest,
     manager: WebSocketConnectionManager,
     principal: AuthPrincipal,
+    repository: Repository | None = None,
 ) -> None:
     """Handle topic subscription request.
 
     Validates topic patterns, checks category-level RBAC, enforces the
-    backtest per-subscription wallet-scope rule, and registers
-    subscriptions with both the connection manager and ZMQ bridge.
+    backtest per-subscription wallet-scope rule, runs the Day 3f
+    AI_DELEGATE wallet-scope filter, and registers subscriptions with
+    both the connection manager and ZMQ bridge.
 
     Signature takes the full ``AuthPrincipal`` (not just the role) so
     backtest subscriptions can be constrained to the caller's
     ``active_wallet_public_id``. See :func:`_enforce_backtest_wallet_scope`
-    for the authoritative role/prefix matrix.
+    and :func:`_enforce_ai_delegate_wallet_scope` for the authoritative
+    role/prefix matrices.
 
     Args:
         websocket: The WebSocket connection.
         message: Subscription request with topic list.
         manager: WebSocket connection manager.
         principal: Authenticated caller — role + wallet scope.
+        repository: Repository for the Day 3f AI_DELEGATE wallet-scope
+            filter. Required for AI_DELEGATE principals; optional for
+            other roles (the filter fast-paths non-AI_DELEGATE calls).
     """
     role = principal.role
     topics, invalid_topics = _validate_ws_topics(message.topics)
@@ -188,6 +261,12 @@ async def handle_subscribe(
         await websocket.send_text(error_msg.model_dump_json())
         return
     topics, wallet_denied = _enforce_backtest_wallet_scope(topics, principal)
+    now = datetime.now(UTC)
+    topics, ai_delegate_denied = await _enforce_ai_delegate_wallet_scope(
+        topics, principal, repository, now
+    )
+    if ai_delegate_denied:
+        wallet_denied = [*wallet_denied, *ai_delegate_denied]
     allowed_topics = get_allowed_topics_for_role(role)
     allowed_set = set(allowed_topics)
     allowed_categories = role_allowed_categories(role)

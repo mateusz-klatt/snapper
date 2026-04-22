@@ -2274,6 +2274,40 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def list_scope_grant_instrument_pairs(
+        self,
+        operator_public_ids: list[str],
+        as_of: datetime,
+    ) -> set[tuple[str, str]]:
+        """Return ``(exchange, native_symbol)`` pairs covered by operators' grants.
+
+        Unions every instrument reachable from the operators' active scope
+        grants across ALL wallets, then projects each to the
+        ``(exchange, native_symbol)`` pair via active ``Instrument`` +
+        ``Symbol`` rows. Underlying-scoped grants expand dynamically via
+        ``instrument_underlying_mappings`` active at ``as_of``;
+        instrument-scoped grants resolve directly.
+
+        Used by the Day 3f subscribe-time AI_DELEGATE wallet-scope
+        filter and by the Day 3f admin-bus mid-session revalidation path.
+        No caching — grants / mappings / symbol-exchange joins can all
+        change between calls, so callers get an authoritative read.
+
+        Args:
+            operator_public_ids: Operator identity set (typically the
+                delegate principal's ``operator_public_ids``).
+            as_of: Bus time for the temporal reads on grants +
+                mappings + instruments + symbols.
+
+        Returns:
+            Set of ``(exchange, native_symbol)`` tuples. Empty set when
+            ``operator_public_ids`` is empty, when no active grants are
+            held, or when all reachable instruments lack active
+            ``Instrument`` / ``Symbol`` rows.
+        """
+        ...
+
+    @abstractmethod
     async def revoke_scope_grant(
         self,
         grant_public_id: str,
@@ -6967,6 +7001,58 @@ class SQLAlchemyRepository(Repository):
                 sequence_id=from_grant.sequence_id,
             )
             return closed_row, self._row_from_grant(new_grant)
+
+    async def list_scope_grant_instrument_pairs(
+        self,
+        operator_public_ids: list[str],
+        as_of: datetime,
+    ) -> set[tuple[str, str]]:
+        """Project active grants held by operators to (exchange, native_symbol) pairs."""
+        if not operator_public_ids:
+            return set()
+        async with self.session() as s:
+            grants_result = await s.execute(
+                select(WalletOperatorScopeGrant).where(
+                    WalletOperatorScopeGrant.operator_public_id.in_(operator_public_ids),
+                    *where_active(WalletOperatorScopeGrant, as_of),
+                )
+            )
+            grants = grants_result.scalars().all()
+            if not grants:
+                return set()
+
+            direct_instrument_ids: set[str] = set()
+            underlying_ids: set[str] = set()
+            for grant in grants:
+                if grant.scope_kind == "instrument":
+                    direct_instrument_ids.add(cast(str, grant.instrument_public_id))
+                else:
+                    underlying_ids.add(cast(str, grant.underlying_public_id))
+
+            expanded_instrument_ids: set[str] = set(direct_instrument_ids)
+            if underlying_ids:
+                mapping_result = await s.execute(
+                    select(InstrumentUnderlyingMapping.instrument_public_id).where(
+                        InstrumentUnderlyingMapping.underlying_public_id.in_(underlying_ids),
+                        *where_active(InstrumentUnderlyingMapping, as_of),
+                    )
+                )
+                expanded_instrument_ids.update(row[0] for row in mapping_result.all())
+
+            if not expanded_instrument_ids:
+                return set()
+
+            pairs_result = await s.execute(
+                select(Instrument.exchange, Symbol.native_symbol)
+                .select_from(Instrument)
+                .join(Symbol, Instrument.symbol_public_id == Symbol.public_id)
+                .where(
+                    Instrument.public_id.in_(expanded_instrument_ids),
+                    *where_active(Instrument, as_of),
+                    *where_active(Symbol, as_of),
+                )
+            )
+            return {(exchange, native_symbol) for exchange, native_symbol in pairs_result.all()}
 
     async def revoke_scope_grant(
         self,
