@@ -162,7 +162,8 @@ class ZmqReplayEngine:
             )
             await strategy.start()
 
-            await broker.wait_for_subscription(b"market.", timeout=_BROKER_SUB_TIMEOUT_S)
+            async with asyncio.timeout(_BROKER_SUB_TIMEOUT_S):
+                await broker.wait_for_subscription(b"market.")
 
             publisher = ReplayPublisher(
                 local_xsub=endpoints.xsub,

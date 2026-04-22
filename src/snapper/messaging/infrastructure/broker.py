@@ -304,7 +304,7 @@ class ZmqBrokerProcess(RegisterableProcess):
                     continue
                 await self.xsub_socket.send_multipart(message)
 
-    async def wait_for_subscription(self, topic_prefix: bytes, timeout: float) -> None:
+    async def wait_for_subscription(self, topic_prefix: bytes) -> None:
         """Return when a SUB has subscribed to a topic starting with ``topic_prefix``.
 
         Cheap defence-in-depth check used by the backtest ZMQ replay engine
@@ -316,34 +316,26 @@ class ZmqBrokerProcess(RegisterableProcess):
         the same lock around ``notify_all()``, so the change cannot land
         between the consumer's pre-check and its ``wait()``.
 
+        No timeout parameter: the function waits indefinitely on the
+        observation condition. Callers MUST wrap the ``await`` in an
+        ``asyncio.timeout(seconds)`` context manager if they need a
+        bounded wait; the ``asyncio.TimeoutError`` raised by the outer
+        context propagates cleanly.
+
         Args:
             topic_prefix: Byte prefix to match against observed subscription
                 topics (e.g. ``b"market."``).
-            timeout: Maximum seconds to wait before raising ``TimeoutError``.
 
         Raises:
             RuntimeError: If broker was not started with ``xpub_verbose=True``.
-            TimeoutError: If no matching subscription is observed before
-                ``timeout`` elapses; message includes the current observed-set.
         """
         if self._observed_subscriptions is None or self._observation_changed is None:
             raise RuntimeError("broker was not started with xpub_verbose=True")
-        deadline = asyncio.get_running_loop().time() + timeout
         async with self._observation_changed:
             while True:
                 if any(topic.startswith(topic_prefix) for topic in self._observed_subscriptions):
                     return
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    raise TimeoutError(
-                        f"no subscription for prefix {topic_prefix!r} within {timeout}s; "
-                        f"observed={list(self._observed_subscriptions)}"
-                    )
-                try:
-                    async with asyncio.timeout(remaining):
-                        await self._observation_changed.wait()
-                except TimeoutError:
-                    continue
+                await self._observation_changed.wait()
 
     async def _proxy_loop(self) -> None:
         """Forward messages between XSUB and XPUB sockets.

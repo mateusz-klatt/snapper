@@ -422,13 +422,14 @@ class TokenManager:
             new pair to the client.
         """
         rows = self._build_inventory_rows(pair, user_public_id)
-        count = await repository.rotate_user_active_token(old_refresh_jti, rows, datetime.now(UTC))
-        if count != 1:
+        rotated = await repository.rotate_user_active_token(
+            old_refresh_jti, rows, datetime.now(UTC)
+        )
+        if not rotated:
             logger.warning(
-                "rotate_tokens: refresh JTI replay/missing — user={} old_jti={} rowcount={}",
+                "rotate_tokens: refresh JTI replay/missing — user={} old_jti={}",
                 user_public_id,
                 old_refresh_jti,
-                count,
             )
             return False
         logger.debug(

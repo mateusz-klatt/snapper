@@ -79,7 +79,8 @@ async def _strategy_harness(
     sub.connect(broker.xpub_endpoint)
     for topic in topics:
         sub.setsockopt(zmq.SUBSCRIBE, topic.encode())
-    await broker.wait_for_subscription(b"market.", timeout=3.0)
+    async with asyncio.timeout(3.0):
+        await broker.wait_for_subscription(b"market.")
     acked: set[str] = set()
     real_count = 0
     seen_warmup_rounds_per_topic: dict[str, int] = dict.fromkeys(topics, 0)

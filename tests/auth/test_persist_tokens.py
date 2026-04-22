@@ -162,8 +162,8 @@ class TestRotateUserActiveToken:
                 expires_at=now + timedelta(days=7),
             ),
         ]
-        count = await repo.rotate_user_active_token("old-refresh", new_rows, now)
-        assert count == 1
+        rotated = await repo.rotate_user_active_token("old-refresh", new_rows, now)
+        assert rotated is True
         active_jtis = sorted(await repo.list_active_user_token_jtis("user-rot"))
         assert active_jtis == ["new-access", "new-refresh"]
 
@@ -205,8 +205,8 @@ class TestRotateUserActiveToken:
                 expires_at=now + timedelta(minutes=15),
             )
         ]
-        count = await repo.rotate_user_active_token("spent-jti", attempted, now)
-        assert count == 0
+        rotated = await repo.rotate_user_active_token("spent-jti", attempted, now)
+        assert rotated is False
         assert await repo.list_active_user_token_jtis("user-replay") == []
 
     @pytest.mark.asyncio
@@ -280,8 +280,8 @@ class TestRotateUserActiveToken:
                 expires_at=now + timedelta(minutes=15),
             )
         ]
-        count = await repo.rotate_user_active_token("no-such-jti", attempted, now)
-        assert count == 0
+        rotated = await repo.rotate_user_active_token("no-such-jti", attempted, now)
+        assert rotated is False
         assert await repo.list_active_user_token_jtis("u") == []
 
 

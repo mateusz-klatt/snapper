@@ -196,7 +196,8 @@ class TestStrategyFactory:
                 local_xpub=endpoints.xpub,
             )
             await strategy.start()
-            await broker.wait_for_subscription(b"market.", timeout=3.0)
+            async with asyncio.timeout(3.0):
+                await broker.wait_for_subscription(b"market.")
             try:
                 import zmq
                 import zmq.asyncio
@@ -251,7 +252,8 @@ class TestStrategyFactory:
                 local_xpub=endpoints.xpub,
             )
             await strategy.start()
-            await broker.wait_for_subscription(b"market.", timeout=3.0)
+            async with asyncio.timeout(3.0):
+                await broker.wait_for_subscription(b"market.")
             try:
                 import zmq
                 import zmq.asyncio
@@ -300,7 +302,8 @@ class TestStrategyFactory:
                 local_xpub=endpoints.xpub,
             )
             await strategy.start()
-            await broker.wait_for_subscription(b"market.", timeout=3.0)
+            async with asyncio.timeout(3.0):
+                await broker.wait_for_subscription(b"market.")
             try:
                 import zmq
                 import zmq.asyncio
@@ -360,9 +363,11 @@ class TestStrategyFactory:
             await strategy.start()
             try:
                 assert strategy.zmq_context is existing_ctx
-                await broker.wait_for_subscription(b"market.", timeout=3.0)
+                async with asyncio.timeout(3.0):
+                    await broker.wait_for_subscription(b"market.")
                 with pytest.raises(TimeoutError):
-                    await broker.wait_for_subscription(b"system.", timeout=0.2)
+                    async with asyncio.timeout(0.2):
+                        await broker.wait_for_subscription(b"system.")
             finally:
                 listen = strategy._listen_task
                 if listen is not None:

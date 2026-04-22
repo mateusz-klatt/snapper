@@ -133,6 +133,7 @@ from snapper.server.app import create_app
 _FORCE_UPDATE_HELP = "Force update even if recently updated"
 _CLI_SYMBOL_SOURCE_ALL_MAPPED = "all mapped"
 _CLI_SYMBOL_SOURCE_SETTINGS = "specified/settings"
+_CLI_RESUME_FLAG = "--resume/--no-resume"
 
 app = typer.Typer(add_completion=False, help="Snapper CLI")
 
@@ -1070,7 +1071,7 @@ def polygon_backfill_aggregates(
     multiplier: int = typer.Option(1, "--multiplier", "-m", help="Timeframe multiplier"),
     timespan: str = typer.Option("minute", "--timespan", "-t", help="Timespan: minute, hour, day"),
     days_back: int | None = typer.Option(None, "--days", "-d", help="Days back (from settings)"),
-    resume: bool = typer.Option(True, "--resume/--no-resume", help="Resume from last timestamp"),
+    resume: bool = typer.Option(True, _CLI_RESUME_FLAG, help="Resume from last timestamp"),
     save_csv: bool = typer.Option(True, "--csv/--no-csv", help="Save to CSV.gz files"),
 ) -> None:
     """Backfill historical aggregate data from Polygon API.
@@ -1125,7 +1126,7 @@ def kraken_futures_backfill_candles(
         "1h", "--timeframe", "-t", help="Candle interval: 1m, 1h, 4h, 1d"
     ),
     days_back: int = typer.Option(90, "--days", "-d", help="Days back to fetch"),
-    resume: bool = typer.Option(True, "--resume/--no-resume", help="Resume from latest candle"),
+    resume: bool = typer.Option(True, _CLI_RESUME_FLAG, help="Resume from latest candle"),
 ) -> None:
     """Backfill historical OHLCV candles from Kraken Futures.
 
@@ -1173,7 +1174,7 @@ def kraken_equities_backfill_candles(
         "1h", "--timeframe", "-t", help="Candle interval: 1m, 5m, 15m, 30m, 1h, 1d"
     ),
     days_back: int = typer.Option(30, "--days", "-d", help="Days back to fetch"),
-    resume: bool = typer.Option(True, "--resume/--no-resume", help="Resume from latest candle"),
+    resume: bool = typer.Option(True, _CLI_RESUME_FLAG, help="Resume from latest candle"),
 ) -> None:
     """Backfill historical OHLCV candles from Kraken Equities (TradFi FCM).
 

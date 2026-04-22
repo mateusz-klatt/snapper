@@ -37,7 +37,8 @@ class TestBrokerXpubVerbose:
             assert broker._observed_subscriptions is None
             assert broker._observation_changed is None
             with pytest.raises(RuntimeError, match="xpub_verbose=True"):
-                await broker.wait_for_subscription(b"market.", timeout=0.1)
+                async with asyncio.timeout(0.1):
+                    await broker.wait_for_subscription(b"market.")
         finally:
             await asyncio.wait_for(broker.stop(), timeout=2.0)
 
@@ -52,7 +53,8 @@ class TestBrokerXpubVerbose:
             sub.setsockopt(zmq.SUBSCRIBE, b"market.foo")
             loop = asyncio.get_running_loop()
             t0 = loop.time()
-            await broker.wait_for_subscription(b"market.", timeout=2.0)
+            async with asyncio.timeout(2.0):
+                await broker.wait_for_subscription(b"market.")
             elapsed = loop.time() - t0
             assert elapsed < 0.5
             assert broker._observed_subscriptions is not None
@@ -64,19 +66,28 @@ class TestBrokerXpubVerbose:
             await asyncio.wait_for(broker.stop(), timeout=2.0)
 
     @pytest.mark.timeout(10)
-    async def test_no_subscription_times_out_with_observed_in_message(self) -> None:
-        """Missing prefix raises TimeoutError listing the observed-set."""
+    async def test_no_subscription_raises_timeout_via_outer_context(self) -> None:
+        """Missing prefix lets the outer ``asyncio.timeout()`` fire ``TimeoutError``.
+
+        After the S7483 refactor the function waits indefinitely on its
+        internal condition and leaves timeout enforcement to callers;
+        the observed-set remains available via
+        ``broker._observed_subscriptions`` for debugging when the
+        timeout fires.
+        """
         broker = await _start_broker(xpub_verbose=True)
         ctx = zmq.asyncio.Context()
         sub = ctx.socket(zmq.SUB)
         sub.connect(broker.xpub_endpoint)
         try:
             sub.setsockopt(zmq.SUBSCRIBE, b"system.x")
-            await broker.wait_for_subscription(b"system.", timeout=2.0)
-            with pytest.raises(TimeoutError) as exc_info:
-                await broker.wait_for_subscription(b"missing.", timeout=0.2)
-            assert "missing." in str(exc_info.value)
-            assert "observed=" in str(exc_info.value)
+            async with asyncio.timeout(2.0):
+                await broker.wait_for_subscription(b"system.")
+            with pytest.raises(TimeoutError):
+                async with asyncio.timeout(0.2):
+                    await broker.wait_for_subscription(b"missing.")
+            assert broker._observed_subscriptions is not None
+            assert b"system.x" in broker._observed_subscriptions
         finally:
             sub.setsockopt(zmq.LINGER, 0)
             sub.close()
@@ -92,7 +103,8 @@ class TestBrokerXpubVerbose:
         sub.connect(broker.xpub_endpoint)
         try:
             sub.setsockopt(zmq.SUBSCRIBE, b"market.gone")
-            await broker.wait_for_subscription(b"market.", timeout=2.0)
+            async with asyncio.timeout(2.0):
+                await broker.wait_for_subscription(b"market.")
             sub.setsockopt(zmq.UNSUBSCRIBE, b"market.gone")
             assert broker._observed_subscriptions is not None
             for _ in range(50):
@@ -101,7 +113,8 @@ class TestBrokerXpubVerbose:
                 await asyncio.sleep(0.02)
             assert b"market.gone" not in broker._observed_subscriptions
             with pytest.raises(TimeoutError):
-                await broker.wait_for_subscription(b"market.", timeout=0.2)
+                async with asyncio.timeout(0.2):
+                    await broker.wait_for_subscription(b"market.")
         finally:
             sub.setsockopt(zmq.LINGER, 0)
             sub.close()
@@ -119,7 +132,8 @@ class TestBrokerXpubVerbose:
         try:
             for i in range(n):
                 sub.setsockopt(zmq.SUBSCRIBE, f"market.t{i}".encode())
-            await broker.wait_for_subscription(f"market.t{n - 1}".encode(), timeout=3.0)
+            async with asyncio.timeout(3.0):
+                await broker.wait_for_subscription(f"market.t{n - 1}".encode())
             assert broker._observed_subscriptions is not None
             assert len(broker._observed_subscriptions) == n
         finally:
@@ -136,8 +150,8 @@ class TestBrokerXpubVerbose:
         sub = ctx.socket(zmq.SUB)
         sub.connect(broker.xpub_endpoint)
         try:
-            waiter_a = asyncio.create_task(broker.wait_for_subscription(b"market.", timeout=3.0))
-            waiter_b = asyncio.create_task(broker.wait_for_subscription(b"market.", timeout=3.0))
+            waiter_a = asyncio.create_task(broker.wait_for_subscription(b"market."))
+            waiter_b = asyncio.create_task(broker.wait_for_subscription(b"market."))
             await asyncio.sleep(0.05)
             sub.setsockopt(zmq.SUBSCRIBE, b"market.btc")
             await asyncio.wait_for(asyncio.gather(waiter_a, waiter_b), timeout=3.0)
@@ -200,7 +214,7 @@ class TestBrokerXpubVerbose:
         try:
 
             async def waiter() -> None:
-                await broker.wait_for_subscription(b"market.race", timeout=3.0)
+                await broker.wait_for_subscription(b"market.race")
 
             for _ in range(10):
                 w = asyncio.create_task(waiter())
@@ -231,7 +245,8 @@ class TestBrokerXpubVerbose:
         sub.connect(broker.xpub_endpoint)
         try:
             sub.setsockopt(zmq.SUBSCRIBE, b"market.")
-            await broker.wait_for_subscription(b"market.", timeout=2.0)
+            async with asyncio.timeout(2.0):
+                await broker.wait_for_subscription(b"market.")
             await pub.send_multipart([b"market.btc", b"hello"])
             topic, payload = await asyncio.wait_for(sub.recv_multipart(), timeout=2.0)
             assert topic == b"market.btc"
