@@ -392,21 +392,20 @@ class WebSocketAuthManager:
     async def start_admin_listener(self, zmq_broker_xpub: str) -> None:
         """Open the admin-bus subscriber and start the dispatch task.
 
-        Subscribes to ``admin.user_deactivated`` so the
-        kill switch fanout from `UserService.deactivate_user` (
-        sole publisher) reaches every authenticated WebSocket on this
-        instance and closes it with code 4003 on the next event-loop
-        tick.
+        Subscribes to both ``admin.user_deactivated`` (Day 3c kill-switch
+        fanout from ``UserService.deactivate_user`` — sole publisher)
+        and ``admin.scope_revoked`` (Day 3f-B mid-session wallet-scope
+        revalidation from ``ScopeGrantService.revoke_grant`` — sole
+        publisher). The deactivation branch closes affected WebSockets
+        with code 4003; the scope-revoked branch narrows affected
+        AI_DELEGATE subscriptions in place without closing the WS (see
+        ``_handle_scope_revoked``).
         Idempotent + restart-safe via `_admin_listener_lock`: a second
         call while a healthy listener is already running is a no-op
         a second call after the previous task finished early (e.g.
         the loop unwound on an unexpected exception) reaps the dead
-        task and re-allocates so the kill-switch path stays live
+        task and re-allocates so the admin-bus path stays live
         across single-listener failures.
-        `admin.scope_revoked` subscription wiring is deferred to
-        (`validate_ai_delegate_subscription` — the
-        re-validation algorithm needs the wallet-scope check that
-        ships in that step).
 
         Args:
             zmq_broker_xpub: Address of the broker's XPUB endpoint.

@@ -400,6 +400,86 @@ class TestLifespan:
         mock_scope_grant_service.set_msg_publisher.assert_called_once_with(user_publisher)
 
     @pytest.mark.asyncio
+    async def test_lifespan_wires_ws_auth_manager_before_start_admin_listener(
+        self,
+    ) -> None:
+        """Day 3f-B: ``set_wiring`` MUST run BEFORE ``start_admin_listener``.
+
+        Ordering is load-bearing per plan §D6 — the admin subscriber
+        must never receive an ``admin.scope_revoked`` event before the
+        revalidation path (connection_manager + zmq_bridge +
+        repository_factory) is ready, otherwise the handler would
+        silently no-op with a warning and miss the fanout. This test
+        pins the call order at the lifespan seam.
+        """
+        mock_app = MagicMock()
+        mock_manager = MagicMock()
+        mock_manager.cleanup = AsyncMock()
+        mock_zmq_bridge = MagicMock()
+        mock_zmq_bridge.start = AsyncMock()
+        mock_zmq_bridge.stop = AsyncMock()
+        mock_manager.zmq_bridge = mock_zmq_bridge
+        mock_app.state.manager = mock_manager
+        recorded: list[str] = []
+        ws_auth_manager = MagicMock()
+        ws_auth_manager.set_wiring = MagicMock(
+            side_effect=lambda **_kwargs: recorded.append("set_wiring")
+        )
+
+        async def _start_listener(_xpub: str) -> None:
+            recorded.append("ws_start_admin_listener")
+
+        async def _stop_listener() -> None:
+            recorded.append("ws_stop_admin_listener")
+
+        ws_auth_manager.start_admin_listener = _start_listener
+        ws_auth_manager.stop_admin_listener = _stop_listener
+
+        with (
+            patch("snapper.server.app.discover_processes"),
+            patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
+            patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
+            patch(
+                "snapper.server.app._build_user_service_publisher",
+                return_value=(MagicMock(), MagicMock()),
+            ),
+            patch("snapper.server.app._shutdown_user_service_publisher"),
+            patch(
+                "snapper.server.app.get_ws_auth_manager",
+                return_value=ws_auth_manager,
+            ),
+            patch(
+                "snapper.server.app.get_token_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                ),
+            ),
+        ):
+            mock_settings_service = MagicMock()
+            mock_settings_service.shutdown = AsyncMock()
+            mock_get_settings_service.return_value = mock_settings_service
+            mock_factory = MagicMock()
+            mock_factory.sync_registry_to_database = AsyncMock()
+            mock_factory.start_all_processes = AsyncMock()
+            mock_factory.spawn_per_wallet_executors = AsyncMock(return_value=0)
+            mock_factory.stop_all_processes = AsyncMock()
+            mock_factory_cls.return_value = mock_factory
+            async with lifespan(mock_app):
+                pass
+
+        wiring_idx = recorded.index("set_wiring")
+        listener_idx = recorded.index("ws_start_admin_listener")
+        assert (
+            wiring_idx < listener_idx
+        ), f"set_wiring must precede start_admin_listener; recorded: {recorded}"
+        ws_auth_manager.set_wiring.assert_called_once()
+        call_kwargs = ws_auth_manager.set_wiring.call_args.kwargs
+        assert call_kwargs["connection_manager"] is mock_manager
+        assert call_kwargs["zmq_bridge"] is mock_zmq_bridge
+        assert callable(call_kwargs["repository_factory"])
+
+    @pytest.mark.asyncio
     async def test_lifespan_finally_runs_when_startup_raises_after_partial_init(
         self,
     ) -> None:
