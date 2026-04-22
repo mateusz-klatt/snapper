@@ -145,6 +145,7 @@ from snapper.core.types import SpawnerProcessStatusEnum
 from snapper.data.backtest_repository import BacktestRepository
 from snapper.data.repository import Repository
 from snapper.data.repository import dispose_repositories
+from snapper.data.repository import get_repository
 from snapper.infrastructure.rest.tracker import get_rest_call_tracker
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
@@ -466,7 +467,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         logger.info("UserService publisher wired to ZMQ broker for admin.user_deactivated")
         get_scope_grant_service().set_msg_publisher(user_publisher)
         logger.info("ScopeGrantService publisher wired to ZMQ broker for admin.scope_revoked")
-        await get_ws_auth_manager().start_admin_listener(settings.zmq_broker_xpub)
+        ws_auth_manager = get_ws_auth_manager()
+        manager_for_wiring: WebSocketConnectionManager = app.state.manager
+        ws_auth_manager.set_wiring(
+            connection_manager=manager_for_wiring,
+            zmq_bridge=manager_for_wiring.zmq_bridge,
+            repository_factory=lambda: get_repository(settings.db_url),
+        )
+        await ws_auth_manager.start_admin_listener(settings.zmq_broker_xpub)
         await get_token_manager().start_admin_listener(settings.zmq_broker_xpub)
         discover_processes()
         process_factory = ProcessLauncherService(settings)

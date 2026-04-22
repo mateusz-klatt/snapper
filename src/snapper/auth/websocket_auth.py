@@ -6,10 +6,14 @@ connections including session tracking and role-based access control.
 
 import asyncio
 import contextlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import UTC
 from datetime import datetime
+from typing import Any
+from typing import cast
+from uuid import uuid7
 
 import zmq
 import zmq.asyncio
@@ -22,16 +26,22 @@ from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.tokens import get_token_manager
 from snapper.data.repository import Repository
+from snapper.interface.websocket.helpers import parse_wallet_scoped_topic
+from snapper.interface.websocket.schemas import WSErrorResponse
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.validated_socket import HWM_AUDIT
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.infrastructure.validated_socket import apply_hwm
+from snapper.messaging.schemas.data import ScopeRevokedData
 from snapper.messaging.schemas.data import UserDeactivatedData
 
 _KILL_SWITCH_CLOSE_CODE = 4003
 _KILL_SWITCH_REASON_FALLBACK = "account_deactivated"
 _ADMIN_USER_DEACTIVATED_TOPIC = "admin.user_deactivated"
+_ADMIN_SCOPE_REVOKED_TOPIC = "admin.scope_revoked"
 _ADMIN_LISTEN_RECV_BACKOFF_S = 0.1
 _KILL_SWITCH_REASON_MAX_BYTES = 123
+_SCOPE_REVOKED_ERROR_PREFIX = "topic_outside_scope"
 
 
 @dataclass(slots=True)
@@ -116,6 +126,45 @@ class WebSocketAuthManager:
         self._admin_listen_task: asyncio.Task[None] | None = None
         self._admin_running: bool = False
         self._admin_listener_lock = asyncio.Lock()
+        self._scope_revoked_tracker = SequenceTracker()
+        self.connection_manager: Any | None = None
+        self.zmq_bridge: Any | None = None
+        self.repository_factory: Callable[[], Repository] | None = None
+
+    def set_wiring(
+        self,
+        connection_manager: Any | None,
+        zmq_bridge: Any | None,
+        repository_factory: Callable[[], Repository] | None,
+    ) -> None:
+        """Inject lifespan-managed dependencies for the scope-revoked handler.
+
+        Day 3f-B: the ``admin.scope_revoked`` dispatch branch needs
+        refs to the live connection manager (for subscription walks +
+        ``unsubscribe_client``), the ZMQ bridge (for
+        ``remove_subscription``), and a repository factory (for the
+        fresh ``list_scope_grant_instrument_pairs`` read). These are
+        passed through a separate setter — not constructor params — so
+        the parameterless ``WebSocketAuthManager()`` contract used by
+        existing tests stays untouched. Missing wiring degrades the
+        handler to a logged warning instead of raising, so a
+        single-instance dev server that boots without lifespan wiring
+        still serves user traffic correctly.
+
+        Types are intentionally ``Any`` because the concrete
+        ``WebSocketConnectionManager`` and ``ZmqWebSocketBridge``
+        classes live in ``snapper.interface.websocket`` which would
+        create a circular import if referenced here.
+
+        Args:
+            connection_manager: Live WebSocketConnectionManager or None.
+            zmq_bridge: Live ZMQ bridge reference or None.
+            repository_factory: Callable returning the shared
+                repository singleton, or None.
+        """
+        self.connection_manager = connection_manager
+        self.zmq_bridge = zmq_bridge
+        self.repository_factory = repository_factory
 
     @staticmethod
     def _extract_ws_bearer_token(websocket: WebSocket) -> str | None:
@@ -377,11 +426,13 @@ class WebSocketAuthManager:
             raw_sub_socket.connect(zmq_broker_xpub)
             self._admin_subscriber = ValidatedSubscriber(raw_sub_socket)
             self._admin_subscriber.subscribe(_ADMIN_USER_DEACTIVATED_TOPIC)
+            self._admin_subscriber.subscribe(_ADMIN_SCOPE_REVOKED_TOPIC)
             self._admin_running = True
             self._admin_listen_task = asyncio.create_task(self._admin_listen_loop())
             logger.info(
-                "WebSocketAuthManager: admin-bus listener subscribed to {} on {}",
+                "WebSocketAuthManager: admin-bus listener subscribed to {} + {} on {}",
                 _ADMIN_USER_DEACTIVATED_TOPIC,
+                _ADMIN_SCOPE_REVOKED_TOPIC,
                 zmq_broker_xpub,
             )
 
@@ -487,6 +538,8 @@ class WebSocketAuthManager:
         try:
             if topic == _ADMIN_USER_DEACTIVATED_TOPIC:
                 await self._handle_user_deactivated(UserDeactivatedData.from_json(payload))
+            elif topic == _ADMIN_SCOPE_REVOKED_TOPIC:
+                await self._handle_scope_revoked(ScopeRevokedData.from_json(payload))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -501,6 +554,110 @@ class WebSocketAuthManager:
         await self.close_user_connections(
             user_public_id=data.user_public_id,
             reason=data.reason or _KILL_SWITCH_REASON_FALLBACK,
+        )
+
+    async def _handle_scope_revoked(self, data: ScopeRevokedData) -> None:
+        """Mid-session revalidation for affected AI_DELEGATE connections.
+
+        Day 3f-B. Unlike ``_handle_user_deactivated`` (which closes the
+        entire WS — user is gone), this handler only narrows
+        subscriptions: for each AI_DELEGATE connection whose
+        ``operator_public_ids`` contains the revoked grant's operator,
+        recompute the delegate's allowed ``(exchange, symbol)`` pair set
+        against the post-revocation DB snapshot, then walk the client's
+        current subscriptions and unsubscribe + error-frame any
+        wallet-scoped topics no longer covered. The WS stays open so
+        unaffected subscriptions (market, system, backtest, accruals,
+        paper signals) keep flowing.
+
+        Per plan §D6: the structured error prefix
+        ``topic_outside_scope:`` rides on ``WSErrorResponse.message``
+        for MCP / CLI / log consumption; browser UIs that don't parse
+        the prefix see a generic toast + a silently-dropped
+        subscription (MVP acceptable).
+
+        Missing wiring (``set_wiring`` not called — single-instance dev
+        boot before lifespan attached) is logged as a warning and the
+        handler no-ops; production lifespan always wires.
+
+        Args:
+            data: Decoded ``admin.scope_revoked`` payload.
+        """
+        if (
+            self.connection_manager is None
+            or self.zmq_bridge is None
+            or self.repository_factory is None
+        ):
+            logger.warning(
+                "WebSocketAuthManager: admin.scope_revoked received without wiring "
+                "(grant_public_id={}, operator_public_id={}); skipping fanout",
+                data.grant_public_id,
+                data.operator_public_id,
+            )
+            return
+
+        repository = self.repository_factory()
+        now = datetime.now(UTC)
+        snapshot = tuple(self.authenticated_connections.items())
+        for ws, principal in snapshot:
+            if principal.role != UserRole.AI_DELEGATE:
+                continue
+            if data.operator_public_id not in principal.operator_public_ids:
+                continue
+            await self._revalidate_and_unsubscribe(ws, principal, repository, data, now)
+
+    async def _revalidate_and_unsubscribe(
+        self,
+        ws: WebSocket,
+        principal: AuthPrincipal,
+        repository: Repository,
+        event: ScopeRevokedData,
+        now: datetime,
+    ) -> None:
+        """Walk this WS's subscriptions and drop any now-out-of-scope wallet topics.
+
+        Recomputes allowed pairs once per connection; a per-topic
+        membership check then decides which subscriptions survive.
+        Errors during ``unsubscribe_client`` or bridge removal are
+        logged + swallowed so a single bad subscription cannot block
+        the rest of the fanout. A concise summary log entry captures
+        the affected topic count for ops.
+        """
+        connection_manager = cast(Any, self.connection_manager)
+        zmq_bridge = cast(Any, self.zmq_bridge)
+        allowed_pairs = await repository.list_scope_grant_instrument_pairs(
+            principal.operator_public_ids, now
+        )
+        current_topics = tuple(connection_manager.get_client_subscriptions(ws))
+        affected: list[str] = []
+        for topic in current_topics:
+            pair = parse_wallet_scoped_topic(topic)
+            if pair is None or pair in allowed_pairs:
+                continue
+            affected.append(topic)
+            error_message = (
+                f"{_SCOPE_REVOKED_ERROR_PREFIX}: {topic} — no active grant covers this pair"
+            )
+            frame = WSErrorResponse(
+                message=error_message,
+                session_id=self._scope_revoked_tracker.session_id,
+                sequence_id=self._scope_revoked_tracker.next_sequence(_ADMIN_SCOPE_REVOKED_TOPIC),
+                public_id=str(uuid7()),
+                timestamp=now,
+            )
+            with contextlib.suppress(Exception):
+                await ws.send_text(frame.model_dump_json())
+            with contextlib.suppress(Exception):
+                connection_manager.unsubscribe_client(ws, topic)
+            with contextlib.suppress(Exception):
+                await zmq_bridge.remove_subscription(ws, [topic])
+        logger.info(
+            "scope_revoked fanout: ws_peer={} affected_topics={} user_public_id={} "
+            "grant_public_id={}",
+            getattr(ws, "client", None),
+            len(affected),
+            principal.user_public_id,
+            event.grant_public_id,
         )
 
     async def close_user_connections(self, user_public_id: str, reason: str) -> int:
