@@ -513,6 +513,48 @@ class UserDeactivatedData(StrictDataSchema[Literal["user_deactivated"]]):
     reason: str | None = None
 
 
+class ScopeRevokedData(StrictDataSchema[Literal["scope_revoked"]]):
+    """Admin scope-revocation event for a wallet-operator scope grant.
+
+    Published by ``ScopeGrantService.revoke_grant`` as the SOLE publisher
+    of the ``admin.scope_revoked`` bus topic (single-publisher rule,
+    Day 3g). Subscriber: ``WebSocketAuthManager`` closes or narrows
+    affected AI_DELEGATE subscriptions via mid-session revalidation
+    (Day 3f-B) without dropping the WS connection itself.
+
+    The payload carries the full scope identity (grant, operator,
+    wallet, scope_kind, resource ids) so log readers and audit
+    consumers have enough context without a follow-up DB round-trip.
+    The subscriber, however, ignores the resource ids for revalidation
+    logic and re-runs ``list_scope_grant_instrument_pairs`` against
+    the post-revocation DB snapshot — the event is a wake-up signal,
+    not the authoritative new state.
+
+    Attributes:
+        grant_public_id: Closed grant identity (SCD2 row at the moment
+            of revocation).
+        operator_public_id: Operator that lost the scope.
+        wallet_public_id: Wallet on which the scope was revoked.
+        scope_kind: ``"underlying"`` or ``"instrument"``.
+        underlying_public_id: Populated when ``scope_kind='underlying'``.
+        instrument_public_id: Populated when ``scope_kind='instrument'``.
+        revoked_at: UTC timestamp of the SCD2 close bus-time.
+        revoked_by_user_public_id: ADMIN user who initiated the revoke.
+        reason: Optional admin-supplied rationale.
+    """
+
+    type: Literal["scope_revoked"] = "scope_revoked"
+    grant_public_id: str
+    operator_public_id: str
+    wallet_public_id: str
+    scope_kind: Literal["underlying", "instrument"]
+    underlying_public_id: str | None = None
+    instrument_public_id: str | None = None
+    revoked_at: datetime
+    revoked_by_user_public_id: str | None = None
+    reason: str | None = None
+
+
 class SymbolAliasUpdateData(StrictDataSchema[Literal["symbol_alias_update"]]):
     """Symbol alias cache invalidation message.
 

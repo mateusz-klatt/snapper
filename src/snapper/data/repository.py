@@ -2274,6 +2274,51 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def revoke_scope_grant(
+        self,
+        grant_public_id: str,
+        revoked_by_user_public_id: str,
+        revoked_at: datetime,
+        reason: str | None,
+    ) -> ScopeGrantRow:
+        """SCD2-close an active scope grant in place (no replacement row).
+
+        Differs from ``handover_grant`` in that no new grant row is
+        inserted — this is a terminal close. The SCD2 close sets the
+        row's ``known_to`` to ``revoked_at`` while preserving
+        ``timestamp`` and all scope columns, so audit queries can still
+        reconstruct the grant's lifetime.
+
+        The per-wallet advisory lock (``pg_advisory_xact_lock`` on
+        PostgreSQL, no-op on SQLite) serializes against concurrent
+        ``handover_grant`` / ``create_scope_grant`` on the same wallet.
+        A concurrent second revoke on the same grant is rejected as
+        ``ScopeGrantNotFoundError`` once the first commit lands (the
+        active-row predicate in the SELECT excludes it).
+
+        Args:
+            grant_public_id: Public ID of the active grant to revoke.
+            revoked_by_user_public_id: Audit identity of the ADMIN user
+                performing the revocation (NOT written to the row; the
+                caller passes it for authorization + logging; the event
+                payload carries it to subscribers).
+            revoked_at: Bus-time for the SCD2 close.
+            reason: Optional free-form audit note (NOT persisted to the
+                closed row; the handover pattern writes ``note`` on the
+                NEW row, but a revoke has no new row — the reason flows
+                to the ``admin.scope_revoked`` event payload only).
+
+        Returns:
+            ``ScopeGrantRow`` projection of the row as it exists
+            immediately after the close (``known_to == revoked_at``).
+
+        Raises:
+            ScopeGrantNotFoundError: Grant public_id does not exist OR
+                is no longer active at ``revoked_at`` (double-revoke).
+        """
+        ...
+
+    @abstractmethod
     async def list_active_operators(self, as_of: datetime) -> list[OperatorRow]:
         """Return every active operator at the given bus time.
 
@@ -6922,6 +6967,57 @@ class SQLAlchemyRepository(Repository):
                 sequence_id=from_grant.sequence_id,
             )
             return closed_row, self._row_from_grant(new_grant)
+
+    async def revoke_scope_grant(
+        self,
+        grant_public_id: str,
+        revoked_by_user_public_id: str,
+        revoked_at: datetime,
+        reason: str | None,
+    ) -> ScopeGrantRow:
+        """Atomic SCD2 close (no replacement row) under per-wallet advisory lock."""
+        del revoked_by_user_public_id, reason
+        async with self.session() as s:
+            grant = (
+                (
+                    await s.execute(
+                        select(WalletOperatorScopeGrant).where(
+                            WalletOperatorScopeGrant.public_id == grant_public_id,
+                            *where_active(WalletOperatorScopeGrant, revoked_at),
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if grant is None:
+                raise ScopeGrantNotFoundError(
+                    f"active scope grant {grant_public_id} not found at {revoked_at.isoformat()}"
+                )
+
+            await self._acquire_wallet_advisory_lock(s, grant.wallet_public_id)
+
+            await s.execute(
+                update(WalletOperatorScopeGrant)
+                .where(WalletOperatorScopeGrant.id == grant.id)
+                .values(known_to=revoked_at)
+            )
+            await s.commit()
+
+            return ScopeGrantRow(
+                public_id=grant.public_id,
+                operator_public_id=grant.operator_public_id,
+                wallet_public_id=grant.wallet_public_id,
+                granted_by_user_public_id=grant.granted_by_user_public_id,
+                scope_kind=grant.scope_kind,
+                underlying_public_id=grant.underlying_public_id,
+                instrument_public_id=grant.instrument_public_id,
+                note=grant.note,
+                timestamp=grant.timestamp,
+                known_to=revoked_at,
+                session_id=grant.session_id,
+                sequence_id=grant.sequence_id,
+            )
 
     async def list_active_operators(self, as_of: datetime) -> list[OperatorRow]:
         """Return every active operator at the given bus time."""

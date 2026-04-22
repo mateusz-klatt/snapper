@@ -229,6 +229,39 @@ class HandoverScopeGrantCommand(
     type: Literal["handover_scope_grant_command"] = "handover_scope_grant_command"
 
 
+class RevokeScopeGrantBody(StrictBody):
+    """Request body for ``POST /api/scope-grants/{grant_public_id}/revoke``.
+
+    Attributes:
+        reason: Optional free-form audit note forwarded verbatim to
+            the ``admin.scope_revoked`` event payload. Not persisted
+            on the closed grant row (SCD2 close in place, no new row).
+    """
+
+    reason: str | None = Field(default=None, max_length=512)
+
+
+class RevokeScopeGrantCommand(
+    PayloadRequest[Literal["revoke_scope_grant_command"], RevokeScopeGrantBody]
+):
+    """Request envelope for ``POST /api/scope-grants/{grant_public_id}/revoke``."""
+
+    type: Literal["revoke_scope_grant_command"] = "revoke_scope_grant_command"
+
+
+class RevokeScopeGrantResponse(
+    PayloadResponse[Literal["revoke_scope_grant_response"], ScopeGrantInfo]
+):
+    """Envelope wrapper for the closed grant projection.
+
+    The payload is the grant as it exists immediately after the SCD2
+    close (``known_to`` stamped at the revoke timestamp). Clients can
+    update caches without a second round-trip.
+    """
+
+    type: Literal["revoke_scope_grant_response"] = "revoke_scope_grant_response"
+
+
 class CredentialSummary(StrictDataSchema[Literal["credential_summary"]]):
     """Read projection of a wallet credential WITHOUT the encrypted payload.
 

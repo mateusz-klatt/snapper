@@ -33,8 +33,11 @@ from snapper.api.schemas.multi_tenant import CreateScopeGrantBody
 from snapper.api.schemas.multi_tenant import CreateScopeGrantCommand
 from snapper.api.schemas.multi_tenant import HandoverScopeGrantBody
 from snapper.api.schemas.multi_tenant import HandoverScopeGrantCommand
+from snapper.api.schemas.multi_tenant import RevokeScopeGrantBody
+from snapper.api.schemas.multi_tenant import RevokeScopeGrantCommand
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.auth.scope_grant_service import ScopeGrantService
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.repository import ScopeGrantConflictError
 from snapper.data.repository import ScopeGrantNotFoundError
@@ -45,6 +48,7 @@ from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.scope_grant_routes import create_scope_grant
 from snapper.server.scope_grant_routes import handover_scope_grant
 from snapper.server.scope_grant_routes import list_scope_grants
+from snapper.server.scope_grant_routes import revoke_scope_grant
 
 
 def _wallet_row(public_id: str) -> WalletRow:
@@ -478,3 +482,114 @@ class TestHandoverScopeGrant:
             )
 
         assert excinfo.value.status_code == status.HTTP_409_CONFLICT
+
+
+def _make_revoke_command(reason: str | None = "audit") -> RevokeScopeGrantCommand:
+    """Return a minimal valid revoke command envelope."""
+    return RevokeScopeGrantCommand(
+        session_id="test-sid",
+        sequence_id=1,
+        public_id="00000000-0000-7000-8000-000000000700",
+        timestamp=datetime.now(UTC),
+        payload=RevokeScopeGrantBody(reason=reason),
+    )
+
+
+def _closed_grant_row(public_id: str) -> ScopeGrantRow:
+    """Return a closed-grant projection as ``ScopeGrantService.revoke_grant`` would.
+
+    known_to is stamped at the revoke timestamp (mimicking the SCD2 close).
+    """
+    now = datetime.now(UTC)
+    return ScopeGrantRow(
+        public_id=public_id,
+        operator_public_id="00000000-0000-7000-8000-000000000101",
+        wallet_public_id="00000000-0000-7000-8000-000000000200",
+        granted_by_user_public_id="00000000-0000-7000-8000-000000000099",
+        scope_kind="underlying",
+        underlying_public_id="00000000-0000-7000-8000-0000000000aa",
+        instrument_public_id=None,
+        note=None,
+        timestamp=now,
+        known_to=now,
+        session_id="test-sid",
+        sequence_id=1,
+    )
+
+
+class TestRevokeScopeGrant:
+    """Behaviour of ``revoke_scope_grant`` POST handler (Day 3g)."""
+
+    @pytest.mark.asyncio
+    async def test_successful_revoke_returns_closed_row(self) -> None:
+        """Happy path: service returns closed projection, route wraps it.
+
+        Given: An ADMIN principal and a service that returns a closed row,
+        When: ``revoke_scope_grant`` is called,
+        Then: The response envelope carries the projected info; the service
+            was called exactly once with the caller's principal bound to
+            ``revoked_by_user_public_id``.
+        """
+        target_grant = "00000000-0000-7000-8000-0000000000c1"
+        service = AsyncMock()
+        service.revoke_grant = AsyncMock(return_value=_closed_grant_row(target_grant))
+
+        response = await revoke_scope_grant(
+            request=_make_request(),
+            grant_public_id=target_grant,
+            _principal=_admin_principal(),
+            command=_make_revoke_command(reason="alice left"),
+            scope_grant_service=service,
+        )
+
+        assert response.payload.public_id == target_grant
+        assert response.payload.scope_kind == "underlying"
+        service.revoke_grant.assert_awaited_once()
+        call_kwargs = service.revoke_grant.await_args.kwargs
+        assert call_kwargs["grant_public_id"] == target_grant
+        assert call_kwargs["revoked_by_user_public_id"] == _admin_principal().user_public_id
+        assert call_kwargs["reason"] == "alice left"
+
+    @pytest.mark.asyncio
+    async def test_not_found_maps_to_404(self) -> None:
+        """Missing / already-closed grant surfaces as HTTP 404."""
+        service = AsyncMock()
+        service.revoke_grant = AsyncMock(side_effect=ScopeGrantNotFoundError("no such grant"))
+
+        with pytest.raises(HTTPException) as excinfo:
+            await revoke_scope_grant(
+                request=_make_request(),
+                grant_public_id="00000000-0000-7000-8000-0000000000ff",
+                _principal=_admin_principal(),
+                command=_make_revoke_command(),
+                scope_grant_service=service,
+            )
+        assert excinfo.value.status_code == status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.asyncio
+    async def test_reason_is_forwarded_verbatim(self) -> None:
+        """None + non-None reason both round-trip to the service unchanged."""
+        target_grant = "00000000-0000-7000-8000-0000000000c1"
+        service = AsyncMock()
+        service.revoke_grant = AsyncMock(return_value=_closed_grant_row(target_grant))
+
+        await revoke_scope_grant(
+            request=_make_request(),
+            grant_public_id=target_grant,
+            _principal=_admin_principal(),
+            command=_make_revoke_command(reason=None),
+            scope_grant_service=service,
+        )
+        assert service.revoke_grant.await_args.kwargs["reason"] is None
+
+    def test_scope_grant_service_dependency_returns_singleton(self) -> None:
+        """The FastAPI dependency returns the shared ScopeGrantService instance."""
+        from snapper.server.scope_grant_routes import _scope_grant_service_dependency
+
+        ScopeGrantService.clear_instance()
+        try:
+            first = _scope_grant_service_dependency()
+            second = _scope_grant_service_dependency()
+            assert first is second
+        finally:
+            ScopeGrantService.clear_instance()

@@ -329,6 +329,77 @@ class TestLifespan:
         ]
 
     @pytest.mark.asyncio
+    async def test_lifespan_injects_scope_grant_service_publisher(
+        self,
+    ) -> None:
+        """Day 3g: ScopeGrantService shares the UserService publisher socket.
+
+        Plan §3 Commit 1 `app.py` lifespan wiring: after
+        ``UserService.set_msg_publisher(user_publisher)`` the lifespan
+        MUST call ``ScopeGrantService.set_msg_publisher(user_publisher)``
+        with the SAME publisher instance — single ZMQ PUB socket serves
+        both ``admin.user_deactivated`` and ``admin.scope_revoked``
+        (vs. opening a second socket and doubling broker connection
+        count).
+        """
+        mock_app = MagicMock()
+        mock_manager = MagicMock()
+        mock_manager.cleanup = AsyncMock()
+        mock_zmq_bridge = MagicMock()
+        mock_zmq_bridge.start = AsyncMock()
+        mock_zmq_bridge.stop = AsyncMock()
+        mock_manager.zmq_bridge = mock_zmq_bridge
+        mock_app.state.manager = mock_manager
+        user_publisher = MagicMock()
+        mock_user_service = MagicMock()
+        mock_scope_grant_service = MagicMock()
+        with (
+            patch("snapper.server.app.discover_processes"),
+            patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
+            patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
+            patch(
+                "snapper.server.app._build_user_service_publisher",
+                return_value=(user_publisher, MagicMock()),
+            ),
+            patch("snapper.server.app._shutdown_user_service_publisher"),
+            patch(
+                "snapper.server.app.get_user_service",
+                return_value=mock_user_service,
+            ),
+            patch(
+                "snapper.server.app.get_scope_grant_service",
+                return_value=mock_scope_grant_service,
+            ),
+            patch(
+                "snapper.server.app.get_ws_auth_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                ),
+            ),
+            patch(
+                "snapper.server.app.get_token_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                ),
+            ),
+        ):
+            mock_settings_service = MagicMock()
+            mock_settings_service.shutdown = AsyncMock()
+            mock_get_settings_service.return_value = mock_settings_service
+            mock_factory = MagicMock()
+            mock_factory.sync_registry_to_database = AsyncMock()
+            mock_factory.start_all_processes = AsyncMock()
+            mock_factory.spawn_per_wallet_executors = AsyncMock(return_value=0)
+            mock_factory.stop_all_processes = AsyncMock()
+            mock_factory_cls.return_value = mock_factory
+            async with lifespan(mock_app):
+                pass
+        mock_user_service.set_msg_publisher.assert_called_once_with(user_publisher)
+        mock_scope_grant_service.set_msg_publisher.assert_called_once_with(user_publisher)
+
+    @pytest.mark.asyncio
     async def test_lifespan_finally_runs_when_startup_raises_after_partial_init(
         self,
     ) -> None:

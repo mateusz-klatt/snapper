@@ -33,6 +33,8 @@ from snapper.api.schemas.multi_tenant import CreateScopeGrantCommand
 from snapper.api.schemas.multi_tenant import HandoverScopeGrantCommand
 from snapper.api.schemas.multi_tenant import HandoverScopeGrantResponse
 from snapper.api.schemas.multi_tenant import HandoverScopeGrantResult
+from snapper.api.schemas.multi_tenant import RevokeScopeGrantCommand
+from snapper.api.schemas.multi_tenant import RevokeScopeGrantResponse
 from snapper.api.schemas.multi_tenant import ScopeGrantInfo
 from snapper.api.schemas.multi_tenant import ScopeGrantListResponse
 from snapper.api.schemas.multi_tenant import ScopeGrantResponse
@@ -41,6 +43,8 @@ from snapper.auth.dependencies import require_permission
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.auth.scope_grant_service import ScopeGrantService
+from snapper.auth.scope_grant_service import get_scope_grant_service
 from snapper.data.repository import Repository
 from snapper.data.repository import ScopeGrantConflictError
 from snapper.data.repository import ScopeGrantNotFoundError
@@ -288,4 +292,69 @@ async def handover_scope_grant(
             closed_grant=_scope_grant_info(closed),
             new_grant=_scope_grant_info(new_row),
         ),
+    )
+
+
+def _scope_grant_service_dependency() -> ScopeGrantService:
+    """FastAPI dependency returning the shared ``ScopeGrantService`` singleton."""
+    return get_scope_grant_service()
+
+
+@router.post(
+    "/{grant_public_id}/revoke",
+    openapi_extra=openapi_schema(RevokeScopeGrantCommand),
+)
+async def revoke_scope_grant(
+    request: Request,
+    grant_public_id: str,
+    _principal: Annotated[
+        AuthPrincipal, Depends(require_permission(Permission.MANAGE_SCOPE_GRANTS))
+    ],
+    command: Annotated[RevokeScopeGrantCommand, Depends(json_body(RevokeScopeGrantCommand))],
+    scope_grant_service: Annotated[ScopeGrantService, Depends(_scope_grant_service_dependency)],
+) -> RevokeScopeGrantResponse:
+    """Atomically close an active scope grant (SCD2 close in place).
+
+    Publishes ``admin.scope_revoked`` after commit so the Day 3f-B
+    subscriber can narrow affected AI_DELEGATE subscriptions live
+    without reconnect. The closed row has ``known_to`` stamped at the
+    revoke timestamp; no new row is inserted.
+
+    ``revoked_by_user_public_id`` is taken from the principal so the
+    client cannot spoof an audit identity.
+
+    Args:
+        request: FastAPI request (provides REST tracker for provenance).
+        grant_public_id: Public ID of the active grant to revoke.
+        _principal: Authenticated caller holding MANAGE_SCOPE_GRANTS.
+        command: Revoke command envelope.
+        scope_grant_service: Service singleton (single-publisher per §D7).
+
+    Returns:
+        ``RevokeScopeGrantResponse`` wrapping the closed grant.
+
+    Raises:
+        HTTPException: 404 when the grant does not exist or is already
+            closed (double-revoke).
+    """
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    sid = tracker.session_id
+    seq = tracker.next_sequence(_REST_STREAM)
+    ts = dt.datetime.now(dt.UTC)
+    pid = str(uuid7())
+    try:
+        closed = await scope_grant_service.revoke_grant(
+            grant_public_id=grant_public_id,
+            revoked_by_user_public_id=_principal.user_public_id,
+            reason=command.payload.reason,
+            now=ts,
+        )
+    except ScopeGrantNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return RevokeScopeGrantResponse(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=pid,
+        timestamp=ts,
+        payload=_scope_grant_info(closed),
     )

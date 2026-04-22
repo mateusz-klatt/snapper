@@ -1252,3 +1252,148 @@ class TestGetExchangeInstrumentsDetail:
         assert rows[0]["instrument_public_id"] == instrument_public_id
         assert rows[0]["symbol"] == "MESM6-CME"
         assert rows[0]["instrument_resolved"] is True
+
+
+class TestRevokeScopeGrant:
+    """Tests for ``SQLAlchemyRepository.revoke_scope_grant`` (Day 3g)."""
+
+    @pytest.mark.asyncio
+    async def test_revoke_active_grant_closes_row(self, repo: SQLAlchemyRepository) -> None:
+        """Revoke closes an active grant in place (no new row inserted).
+
+        Given: alice holds an active instrument grant on BTC-USD,
+        When: revoke_scope_grant is called at t_revoke,
+        Then: returned projection has known_to == t_revoke and
+            list_active_scope_grants_for_wallet drops alice's row.
+        """
+        ids = await _seed_world(repo)
+        original = await repo.create_scope_grant(
+            _make_request(
+                operator_public_id=ids["alice"],
+                wallet_public_id=ids["wallet"],
+                granted_by=ids["user_admin"],
+                scope_kind="instrument",
+                instrument_public_id=ids["btc_perp"],
+            )
+        )
+        t_revoke = datetime.now(UTC)
+        closed = await repo.revoke_scope_grant(
+            grant_public_id=original["public_id"],
+            revoked_by_user_public_id=ids["user_admin"],
+            revoked_at=t_revoke,
+            reason="alice left the team",
+        )
+        assert closed["public_id"] == original["public_id"]
+        assert closed["operator_public_id"] == ids["alice"]
+        assert closed["known_to"] == t_revoke
+        assert closed["scope_kind"] == "instrument"
+        assert closed["instrument_public_id"] == ids["btc_perp"]
+
+        active = await repo.list_active_scope_grants_for_wallet(ids["wallet"], datetime.now(UTC))
+        assert active == []
+
+    @pytest.mark.asyncio
+    async def test_revoke_already_closed_grant_raises_not_found(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Double-revoke on the same grant raises ScopeGrantNotFoundError.
+
+        The active-row predicate in the SELECT excludes the already-closed
+        row, so the second revoke sees nothing to close.
+        """
+        ids = await _seed_world(repo)
+        original = await repo.create_scope_grant(
+            _make_request(
+                operator_public_id=ids["alice"],
+                wallet_public_id=ids["wallet"],
+                granted_by=ids["user_admin"],
+                scope_kind="underlying",
+                underlying_public_id=ids["underlying_btc"],
+            )
+        )
+        await repo.revoke_scope_grant(
+            grant_public_id=original["public_id"],
+            revoked_by_user_public_id=ids["user_admin"],
+            revoked_at=datetime.now(UTC),
+            reason=None,
+        )
+        with pytest.raises(ScopeGrantNotFoundError):
+            await repo.revoke_scope_grant(
+                grant_public_id=original["public_id"],
+                revoked_by_user_public_id=ids["user_admin"],
+                revoked_at=datetime.now(UTC) + timedelta(seconds=1),
+                reason=None,
+            )
+
+    @pytest.mark.asyncio
+    async def test_revoke_unknown_public_id_raises_not_found(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Revoke on a fabricated grant public_id raises NotFound."""
+        await _seed_world(repo)
+        with pytest.raises(ScopeGrantNotFoundError):
+            await repo.revoke_scope_grant(
+                grant_public_id="00000000-0000-7000-8000-0000000000ff",
+                revoked_by_user_public_id="00000000-0000-7000-8000-00000000aaaa",
+                revoked_at=datetime.now(UTC),
+                reason=None,
+            )
+
+    @pytest.mark.asyncio
+    async def test_revoke_does_not_persist_reason_or_revoker(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Reason + revoked_by flow to the event payload, NOT to the row.
+
+        The closed row keeps the original granted_by_user_public_id and
+        note — audit reconstruction is via the event log, not the row.
+        """
+        ids = await _seed_world(repo)
+        original = await repo.create_scope_grant(
+            _make_request(
+                operator_public_id=ids["alice"],
+                wallet_public_id=ids["wallet"],
+                granted_by=ids["user_admin"],
+                scope_kind="underlying",
+                underlying_public_id=ids["underlying_btc"],
+                note="original note",
+            )
+        )
+        other_user = "00000000-0000-7000-8000-0000000000ee"
+        closed = await repo.revoke_scope_grant(
+            grant_public_id=original["public_id"],
+            revoked_by_user_public_id=other_user,
+            revoked_at=datetime.now(UTC),
+            reason="REVOKED: alice left",
+        )
+        assert closed["granted_by_user_public_id"] == ids["user_admin"]
+        assert closed["note"] == "original note"
+
+    @pytest.mark.asyncio
+    async def test_revoke_acquires_advisory_lock(self, repo: SQLAlchemyRepository) -> None:
+        """revoke_scope_grant calls ``_acquire_wallet_advisory_lock`` once per call.
+
+        SQLite path is a no-op; the test patches the helper to count
+        invocations so we know the serialization primitive is wired.
+        """
+        ids = await _seed_world(repo)
+        original = await repo.create_scope_grant(
+            _make_request(
+                operator_public_id=ids["alice"],
+                wallet_public_id=ids["wallet"],
+                granted_by=ids["user_admin"],
+                scope_kind="underlying",
+                underlying_public_id=ids["underlying_btc"],
+            )
+        )
+        with patch.object(repo, "_acquire_wallet_advisory_lock", new=AsyncMock()) as lock_mock:
+            await repo.revoke_scope_grant(
+                grant_public_id=original["public_id"],
+                revoked_by_user_public_id=ids["user_admin"],
+                revoked_at=datetime.now(UTC),
+                reason=None,
+            )
+        assert lock_mock.await_count == 1
+        assert lock_mock.await_args is not None
+        _session, wallet_id = lock_mock.await_args.args
+        assert wallet_id == ids["wallet"]

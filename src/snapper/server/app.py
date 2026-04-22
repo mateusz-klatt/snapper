@@ -120,6 +120,8 @@ from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.routes import router as auth_router
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.auth.scope_grant_service import ScopeGrantService
+from snapper.auth.scope_grant_service import get_scope_grant_service
 from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import WebSocketTokenRotator
 from snapper.auth.tokens import get_token_manager
@@ -291,14 +293,16 @@ def _build_user_service_publisher(
 def _shutdown_user_service_publisher(app: FastAPI) -> None:
     """Close UserService's `admin.user_deactivated` publisher socket.
 
-    Mirrors `SettingsService.shutdown` ordering: clear the singleton's
-    reference first so any in-flight `deactivate_user` call observes a
-    None publisher (graceful degradation), then close the socket and
-    terminate the context. ``contextlib.suppress(Exception)`` mirrors
-    the `SettingsService.shutdown` resilience contract.
+    Mirrors `SettingsService.shutdown` ordering: clear both singleton
+    publisher references (UserService and ScopeGrantService share the
+    same socket per Day 3g wiring) so any in-flight
+    `deactivate_user` / `revoke_grant` call observes a None publisher
+    (graceful degradation), then close the socket and terminate the
+    context. ``contextlib.suppress(Exception)`` mirrors the
+    `SettingsService.shutdown` resilience contract.
     """
-    user_service = get_user_service()
-    user_service.set_msg_publisher(None)
+    get_user_service().set_msg_publisher(None)
+    get_scope_grant_service().set_msg_publisher(None)
     publisher = getattr(app.state, "user_service_publisher", None)
     context = getattr(app.state, "user_service_publisher_context", None)
     if publisher is not None:
@@ -320,6 +324,7 @@ def _clear_runtime_singletons() -> None:
         WebSocketAuthManager,
         WebSocketTokenRotator,
         UserService,
+        ScopeGrantService,
         WsTokenService,
         CSRFManager,
         TokenManager,
@@ -459,6 +464,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         app.state.user_service_publisher_context = user_publisher_context
         get_user_service().set_msg_publisher(user_publisher)
         logger.info("UserService publisher wired to ZMQ broker for admin.user_deactivated")
+        get_scope_grant_service().set_msg_publisher(user_publisher)
+        logger.info("ScopeGrantService publisher wired to ZMQ broker for admin.scope_revoked")
         await get_ws_auth_manager().start_admin_listener(settings.zmq_broker_xpub)
         await get_token_manager().start_admin_listener(settings.zmq_broker_xpub)
         discover_processes()
