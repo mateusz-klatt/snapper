@@ -24,20 +24,16 @@ if (typeof Element !== 'undefined') {
 }
 
 if (typeof HTMLDialogElement !== 'undefined') {
-  if (HTMLDialogElement.prototype.showModal === undefined) {
-    HTMLDialogElement.prototype.showModal = function showModal(this: HTMLDialogElement): void {
-      this.setAttribute('open', 'true')
-    }
+  HTMLDialogElement.prototype.showModal ??= function showModal(this: HTMLDialogElement): void {
+    this.setAttribute('open', 'true')
   }
 
-  if (HTMLDialogElement.prototype.close === undefined) {
-    HTMLDialogElement.prototype.close = function close(
-      this: HTMLDialogElement,
-      _returnValue?: string
-    ): void {
-      this.removeAttribute('open')
-      this.dispatchEvent(new Event('close'))
-    }
+  HTMLDialogElement.prototype.close ??= function close(
+    this: HTMLDialogElement,
+    _returnValue?: string
+  ): void {
+    this.removeAttribute('open')
+    this.dispatchEvent(new Event('close'))
   }
 }
 

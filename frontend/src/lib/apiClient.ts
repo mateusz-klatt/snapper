@@ -362,7 +362,9 @@ class APIClient {
             return { message, details: detail }
           }
 
-          return { message: String(detail) }
+          return {
+            message: typeof detail === 'string' ? detail : JSON.stringify(detail),
+          }
         }
 
         if ('message' in data) {

@@ -2724,6 +2724,21 @@ describe('cacheWsTicketFromResponse', () => {
       })
     })
 
+    it('APIError serialises non-string primitive detail via JSON.stringify', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        statusText: 'Bad Request',
+        json: vi.fn().mockResolvedValue({ detail: 42 }),
+      })
+      await expect(apiClient.getBacktestComparison('numeric-detail')).rejects.toMatchObject({
+        name: 'APIError',
+        message: '42',
+        status: 400,
+        statusText: 'Bad Request',
+      })
+    })
+
     it('APIError preserves structured detail object with error_code + reason', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: false,
