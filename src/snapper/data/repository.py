@@ -2293,6 +2293,14 @@ class Repository(ABC):
         No caching — grants / mappings / symbol-exchange joins can all
         change between calls, so callers get an authoritative read.
 
+        Implementation issues up to three sequential queries (grants,
+        optional mapping expansion, instrument+symbol JOIN). An earlier
+        draft of §D4 promised a single round-trip; the multi-query shape
+        was retained after Commit 2 review because the per-step JOIN is
+        cheaper than a CTE/UNION over four SCD2 tables when the first
+        query returns zero grants (the common case for operators that
+        hold no active grants at ``as_of``).
+
         Args:
             operator_public_ids: Operator identity set (typically the
                 delegate principal's ``operator_public_ids``).

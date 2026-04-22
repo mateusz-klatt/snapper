@@ -9,10 +9,15 @@ must stay callable by any standards-compliant WebSocket client
     - JSON frames over a plain WebSocket — no vendor envelope,
     - documented close codes (``4401`` auth, ``4003`` deactivation).
 
-Day 3f's AI_DELEGATE wallet-scope topic filter (plan §3.8) is
-still deferred; this module exercises the contract points that are
-shipped. The suite pairs with ``make check-vendor-neutral`` so the
-wire contract and the source-text contract both guard the seam.
+Day 3f-A ships the subscribe-time AI_DELEGATE wallet-scope filter —
+the wire contract is that an AI_DELEGATE subscribing to a mix of
+in-scope and out-of-scope wallet-scoped topics gets a standard
+``WSSubscriptionSuccessResponse`` with out-of-scope topics listed in
+``denied_topics`` (no vendor envelope, no hidden error code). Day 3f-B
+(mid-session revalidation via ``admin.scope_revoked``) lands in the
+next commit and is out of scope here. The suite pairs with
+``make check-vendor-neutral`` so the wire contract and the source-text
+contract both guard the seam.
 """
 
 from datetime import UTC
@@ -326,3 +331,86 @@ class TestWsSingletonStateIsolation:
             assert m2.authenticated_connections[sentinel_ws] is principal
         finally:
             del m1.authenticated_connections[sentinel_ws]
+
+
+class TestWsAiDelegateWalletScopeContract:
+    """Day 3f-A: the subscribe-time wallet-scope filter wire contract.
+
+    AI_DELEGATE subscribes to a mix of in-scope and out-of-scope
+    wallet-scoped topics. The response MUST be a standard
+    ``WSSubscriptionSuccessResponse`` with out-of-scope topics listed
+    in ``denied_topics`` (no vendor envelope, no hidden error code).
+    Non-wallet-scoped topics (market, system, paper-signals) pass
+    through unchanged.
+    """
+
+    @pytest.mark.asyncio
+    async def test_ai_delegate_mixed_subscribe_surfaces_denied_topics(self) -> None:
+        """Wire contract: AI_DELEGATE mixed subscribe → standard envelope.
+
+        Given: AI_DELEGATE principal with scope covering
+            ``(kraken, BTC-USD)`` only,
+        When: the client subscribes to the four-topic mix
+            ``[signals.kraken.BTC-USD.live,
+              signals.zonda.BTC-USD.live,
+              market.kraken.BTC-USD.ticks,
+              signals.paper.BTC-USD.my_strategy]``,
+        Then: the single response frame is a ``subscription_success``
+            envelope with ``status in {"denied", "partial"}``,
+            ``denied_topics`` includes ``signals.zonda.BTC-USD.live``,
+            and ``topics`` (accepted) includes the market +
+            paper-signals pass-throughs. MCP / CLI clients rely on
+            this being a plain-JSON frame on the standard WS endpoint
+            — NO wallet-filter-specific error code, NO structured
+            prefix in a separate error frame.
+        """
+        import json as _json
+
+        from snapper.core.types import SubscriptionStatusEnum
+        from snapper.interface.websocket.handlers.subscribe import handle_subscribe
+        from snapper.interface.websocket.schemas import WSSubscribeRequest
+        from snapper.messaging.infrastructure.publisher import SequenceTracker
+
+        ws = AsyncMock()
+        manager = MagicMock()
+        manager.get_client_subscriptions = MagicMock(return_value=set())
+        manager.subscribe_client = MagicMock()
+        manager.zmq_bridge = MagicMock()
+        manager.zmq_bridge.add_subscription = AsyncMock()
+        manager.tracker = SequenceTracker()
+
+        repo = AsyncMock()
+        repo.list_scope_grant_instrument_pairs = AsyncMock(return_value={("kraken", "BTC-USD")})
+        principal = AuthPrincipal(
+            username="delegate",
+            role=UserRole.AI_DELEGATE,
+            user_public_id="user-contract",
+            operator_public_ids=["op-contract"],
+        )
+        message = WSSubscribeRequest(
+            public_id="contract-pid",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            session_id="",
+            sequence_id=0,
+            topics=[
+                "signals.kraken.BTC-USD.live",
+                "signals.zonda.BTC-USD.live",
+                "market.kraken.BTC-USD.ticks",
+                "signals.paper.BTC-USD.my_strategy",
+            ],
+        )
+
+        await handle_subscribe(ws, message, manager, principal, repo)
+
+        frames = [call.args[0] for call in ws.send_text.call_args_list]
+        assert len(frames) == 1, "AI_DELEGATE mixed subscribe must surface a SINGLE envelope"
+        response: dict[str, Any] = _json.loads(frames[0])
+        assert response["type"] == "subscription_success"
+        assert response["status"] in {
+            SubscriptionStatusEnum.DENIED.value,
+            SubscriptionStatusEnum.PARTIAL.value,
+        }
+        assert "signals.zonda.BTC-USD.live" in response["denied_topics"]
+        accepted = set(response.get("topics") or [])
+        assert "signals.zonda.BTC-USD.live" not in accepted
+        assert "market.kraken.BTC-USD.ticks" in accepted
