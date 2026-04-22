@@ -858,6 +858,12 @@ export const HandoverScopeGrantBodySchema = z
   })
   .strict()
 
+export const RevokeScopeGrantBodySchema = z
+  .object({
+    reason: z.string().max(512).nullable().optional(),
+  })
+  .strict()
+
 export const TrailingStopCreateBodySchema = z
   .object({
     position_cycle_public_id: z.string(),
@@ -1201,6 +1207,17 @@ export const HandoverScopeGrantResultSchema = z
   .object({
     closed_grant: ScopeGrantInfoSchema,
     new_grant: ScopeGrantInfoSchema,
+  })
+  .strict()
+
+export const RevokeScopeGrantResponseSchema = z
+  .object({
+    type: z.literal('revoke_scope_grant_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: ScopeGrantInfoSchema,
   })
   .strict()
 
@@ -1601,6 +1618,17 @@ export const HandoverScopeGrantCommandSchema = z
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     payload: HandoverScopeGrantBodySchema,
+  })
+  .strict()
+
+export const RevokeScopeGrantCommandSchema = z
+  .object({
+    type: z.literal('revoke_scope_grant_command').optional(),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: RevokeScopeGrantBodySchema,
   })
   .strict()
 
@@ -2381,6 +2409,7 @@ export type CreateOrderBody = z.infer<typeof CreateOrderBodySchema>
 export type CancelOrderBody = z.infer<typeof CancelOrderBodySchema>
 export type CreateScopeGrantBody = z.infer<typeof CreateScopeGrantBodySchema>
 export type HandoverScopeGrantBody = z.infer<typeof HandoverScopeGrantBodySchema>
+export type RevokeScopeGrantBody = z.infer<typeof RevokeScopeGrantBodySchema>
 export type TrailingStopCreateBody = z.infer<typeof TrailingStopCreateBodySchema>
 export type TrailingStopCancelBody = z.infer<typeof TrailingStopCancelBodySchema>
 export type CreateWalletBody = z.infer<typeof CreateWalletBodySchema>
@@ -2413,6 +2442,7 @@ export type ProcessStopResponse = z.infer<typeof ProcessStopResponseSchema>
 export type RestRateData = z.infer<typeof RestRateDataSchema>
 export type ContinuousSeriesPartialResponse = z.infer<typeof ContinuousSeriesPartialResponseSchema>
 export type HandoverScopeGrantResult = z.infer<typeof HandoverScopeGrantResultSchema>
+export type RevokeScopeGrantResponse = z.infer<typeof RevokeScopeGrantResponseSchema>
 export type ScopeGrantListResponse = z.infer<typeof ScopeGrantListResponseSchema>
 export type ScopeGrantResponse = z.infer<typeof ScopeGrantResponseSchema>
 export type SettingListResponse = z.infer<typeof SettingListResponseSchema>
@@ -2450,6 +2480,7 @@ export type CreateOrderCommand = z.infer<typeof CreateOrderCommandSchema>
 export type CancelOrderCommand = z.infer<typeof CancelOrderCommandSchema>
 export type CreateScopeGrantCommand = z.infer<typeof CreateScopeGrantCommandSchema>
 export type HandoverScopeGrantCommand = z.infer<typeof HandoverScopeGrantCommandSchema>
+export type RevokeScopeGrantCommand = z.infer<typeof RevokeScopeGrantCommandSchema>
 export type TrailingStopCreateCommand = z.infer<typeof TrailingStopCreateCommandSchema>
 export type TrailingStopCancelCommand = z.infer<typeof TrailingStopCancelCommandSchema>
 export type CreateWalletCommand = z.infer<typeof CreateWalletCommandSchema>

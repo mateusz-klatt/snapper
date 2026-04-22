@@ -484,6 +484,22 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
+    "/api/scope-grants/{grant_public_id}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: Operations["revoke_scope_grant_api_scope_grants__grant_public_id__revoke_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/wallets/{wallet_public_id}/credentials": {
         parameters: {
             query?: never;
@@ -2208,6 +2224,14 @@ export type Components = {
             session_id: string;
             payload: Components["schemas"]["RestRateData"];
         };
+        RevokeScopeGrantResponse: {
+            type: "revoke_scope_grant_response";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            payload: Components["schemas"]["ScopeGrantInfo"];
+        };
         RollPointDetail: {
             from_contract: string;
             to_contract: string;
@@ -2943,6 +2967,17 @@ export type Components = {
         HandoverScopeGrantBody: {
             from_grant_public_id: string;
             to_operator_public_id: string;
+            reason?: string | null;
+        };
+        RevokeScopeGrantCommand: {
+            type?: "revoke_scope_grant_command";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            payload: Components["schemas"]["RevokeScopeGrantBody"];
+        };
+        RevokeScopeGrantBody: {
             reason?: string | null;
         };
         TrailingStopCreateCommand: {
@@ -3966,6 +4001,39 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["HandoverScopeGrantResponse"];
+                };
+            };
+        };
+    };
+    revoke_scope_grant_api_scope_grants__grant_public_id__revoke_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                grant_public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["RevokeScopeGrantCommand"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["RevokeScopeGrantResponse"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
                 };
             };
         };

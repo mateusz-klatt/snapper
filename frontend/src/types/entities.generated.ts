@@ -423,6 +423,26 @@ export interface ReplayStart {
 }
 
 /**
+ * Canonical ScopeRevoked entity.
+ * From WebSocket ScopeRevokedData.
+ */
+export interface ScopeRevoked {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  grantPublicId: string
+  operatorPublicId: string
+  walletPublicId: string
+  scopeKind: 'underlying' | 'instrument'
+  underlyingPublicId?: string | null
+  instrumentPublicId?: string | null
+  revokedAt: Date
+  revokedByUserPublicId?: string | null
+  reason?: string | null
+}
+
+/**
  * Canonical SettingChanged entity.
  * From WebSocket SettingChangedData.
  */

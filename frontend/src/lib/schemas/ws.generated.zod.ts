@@ -393,6 +393,25 @@ export const ReplayStartDataSchema = z
   })
   .strict()
 
+export const ScopeRevokedDataSchema = z
+  .object({
+    type: z.literal('scope_revoked'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    grant_public_id: z.string(),
+    operator_public_id: z.string(),
+    wallet_public_id: z.string(),
+    scope_kind: z.enum(['underlying', 'instrument']),
+    underlying_public_id: z.string().nullable(),
+    instrument_public_id: z.string().nullable(),
+    revoked_at: z.iso.datetime(),
+    revoked_by_user_public_id: z.string().nullable(),
+    reason: z.string().nullable(),
+  })
+  .strict()
+
 export const SettingChangedDataSchema = z
   .object({
     type: z.literal('setting_changed'),

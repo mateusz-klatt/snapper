@@ -20,6 +20,7 @@ next commit and is out of scope here. The suite pairs with
 contract both guard the seam.
 """
 
+import json as _json
 from datetime import UTC
 from datetime import datetime
 from typing import Any
@@ -35,6 +36,10 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.auth.websocket_auth import WebSocketAuthManager
+from snapper.core.types import SubscriptionStatusEnum
+from snapper.interface.websocket.handlers.subscribe import handle_subscribe
+from snapper.interface.websocket.schemas import WSSubscribeRequest
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 
 def _token_claims(username: str = "delegate-ws-contract") -> TokenClaims:
@@ -364,13 +369,6 @@ class TestWsAiDelegateWalletScopeContract:
             — NO wallet-filter-specific error code, NO structured
             prefix in a separate error frame.
         """
-        import json as _json
-
-        from snapper.core.types import SubscriptionStatusEnum
-        from snapper.interface.websocket.handlers.subscribe import handle_subscribe
-        from snapper.interface.websocket.schemas import WSSubscribeRequest
-        from snapper.messaging.infrastructure.publisher import SequenceTracker
-
         ws = AsyncMock()
         manager = MagicMock()
         manager.get_client_subscriptions = MagicMock(return_value=set())

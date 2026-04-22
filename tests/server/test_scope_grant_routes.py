@@ -35,6 +35,8 @@ from snapper.api.schemas.multi_tenant import HandoverScopeGrantBody
 from snapper.api.schemas.multi_tenant import HandoverScopeGrantCommand
 from snapper.api.schemas.multi_tenant import RevokeScopeGrantBody
 from snapper.api.schemas.multi_tenant import RevokeScopeGrantCommand
+from snapper.auth.dependencies import require_permission
+from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.scope_grant_service import ScopeGrantService
@@ -45,6 +47,7 @@ from snapper.data.repository import ScopeGrantValidationError
 from snapper.data.repository_types import ScopeGrantRow
 from snapper.data.repository_types import WalletRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.server.scope_grant_routes import _scope_grant_service_dependency
 from snapper.server.scope_grant_routes import create_scope_grant
 from snapper.server.scope_grant_routes import handover_scope_grant
 from snapper.server.scope_grant_routes import list_scope_grants
@@ -584,8 +587,6 @@ class TestRevokeScopeGrant:
 
     def test_scope_grant_service_dependency_returns_singleton(self) -> None:
         """The FastAPI dependency returns the shared ScopeGrantService instance."""
-        from snapper.server.scope_grant_routes import _scope_grant_service_dependency
-
         ScopeGrantService.clear_instance()
         try:
             first = _scope_grant_service_dependency()
@@ -608,9 +609,6 @@ class TestRevokeScopeGrant:
         the 403 branch of the dependency. This pins that contract so a
         future role-permission rewrite cannot silently relax the gate.
         """
-        from snapper.auth.dependencies import require_permission
-        from snapper.auth.domain.permissions import Permission
-
         checker = require_permission(Permission.MANAGE_SCOPE_GRANTS)
         principal = AuthPrincipal(
             username=f"non-admin-{role.value}",

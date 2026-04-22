@@ -104,6 +104,11 @@ enum OrderRequestDataOrderType: String, Codable, Sendable {
     case stopLimit = "stop_limit"
 }
 
+enum ScopeRevokedDataScopeKind: String, Codable, Sendable {
+    case underlying
+    case instrument
+}
+
 enum TickDataExchange: String, Codable, Sendable {
     case kraken
     case krakenFutures = "kraken_futures"
@@ -514,6 +519,40 @@ struct ReplayStartData: Codable, Sendable {
         case timestamp
         case sessionId = "session_id"
         case startedAt = "started_at"
+    }
+}
+
+struct ScopeRevokedData: Codable, Sendable {
+    let type: String
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let grantPublicId: String
+    let operatorPublicId: String
+    let walletPublicId: String
+    let scopeKind: String
+    let underlyingPublicId: String?
+    let instrumentPublicId: String?
+    let revokedAt: Date
+    let revokedByUserPublicId: String?
+    let reason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case grantPublicId = "grant_public_id"
+        case operatorPublicId = "operator_public_id"
+        case walletPublicId = "wallet_public_id"
+        case scopeKind = "scope_kind"
+        case underlyingPublicId = "underlying_public_id"
+        case instrumentPublicId = "instrument_public_id"
+        case revokedAt = "revoked_at"
+        case revokedByUserPublicId = "revoked_by_user_public_id"
+        case reason
     }
 }
 

@@ -2339,6 +2339,24 @@ struct RestRateResponse: Codable, Sendable {
     }
 }
 
+struct RevokeScopeGrantResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: ScopeGrantInfo
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
 struct RollPointDetail: Codable, Sendable {
     let fromContract: String
     let toContract: String
@@ -3906,6 +3924,28 @@ struct HandoverScopeGrantBody: Codable, Sendable {
         case toOperatorPublicId = "to_operator_public_id"
         case reason
     }
+}
+
+struct RevokeScopeGrantCommand: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: RevokeScopeGrantBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct RevokeScopeGrantBody: Codable, Sendable {
+    let reason: String?
 }
 
 struct TrailingStopCreateCommand: Codable, Sendable {

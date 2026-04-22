@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import update as _update
 from sqlalchemy.exc import IntegrityError
 
 from snapper.data.models import Instrument
@@ -33,6 +34,7 @@ from snapper.data.models import SymbolExchangeCapability
 from snapper.data.models import UnderlyingAsset
 from snapper.data.models import UserOperatorMembership
 from snapper.data.models import Wallet
+from snapper.data.models import WalletOperatorScopeGrant
 from snapper.data.repository import ScopeGrantConflictError
 from snapper.data.repository import ScopeGrantNotFoundError
 from snapper.data.repository import ScopeGrantValidationError
@@ -1413,10 +1415,6 @@ class TestRevokeScopeGrant:
         stale row (which would have produced a duplicate
         ``admin.scope_revoked`` event for a grant we did not revoke).
         """
-        from sqlalchemy import update as _update
-
-        from snapper.data.models import WalletOperatorScopeGrant
-
         ids = await _seed_world(repo)
         original = await repo.create_scope_grant(
             _make_request(
