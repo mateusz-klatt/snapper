@@ -34,7 +34,7 @@ type UserRole = 'ai_delegate' | 'viewer' | 'operator' | 'admin'
 export const ROLE_PERMISSIONS: Record<UserRole, readonly Permission[]> = {
   ai_delegate: ['cancel:orders', 'create:orders', 'manage:positions', 'read:backtests', 'read:market_data', 'read:orders', 'read:positions', 'read:signals', 'read:strategies', 'read:system_status'],
   viewer: ['read:backtests', 'read:market_data', 'read:orders', 'read:positions', 'read:strategies', 'read:system_status'],
-  operator: ['cancel:orders', 'create:orders', 'manage:backtests', 'manage:positions', 'manage:processes', 'read:backtests', 'read:market_data', 'read:orders', 'read:positions', 'read:strategies', 'read:system_status', 'start:strategies', 'stop:strategies'],
+  operator: ['cancel:orders', 'create:orders', 'manage:backtests', 'manage:positions', 'manage:processes', 'read:backtests', 'read:market_data', 'read:orders', 'read:positions', 'read:signals', 'read:strategies', 'read:system_status', 'start:strategies', 'stop:strategies'],
   admin: ['cancel:orders', 'configure:strategies', 'configure:system', 'create:orders', 'impersonate:operator', 'manage:backtests', 'manage:positions', 'manage:processes', 'manage:scope_grants', 'manage:users', 'manage:wallet_credentials', 'read:backtests', 'read:market_data', 'read:orders', 'read:positions', 'read:signals', 'read:strategies', 'read:system_status', 'read:wallet_credentials', 'start:strategies', 'stop:strategies'],
 } as const
 
