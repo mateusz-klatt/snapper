@@ -1,6 +1,8 @@
 """Tests for the vendor-neutrality scanner script (plan §3.11)."""
 
 from pathlib import Path
+from pathlib import PureWindowsPath
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -371,6 +373,28 @@ class TestCheckFileShouldPass:
 
 class TestRunScan:
     """End-to-end scan behaviour."""
+
+    def test_print_results_normalizes_windows_path_separators(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Verify printed paths always use POSIX separators.
+
+        Given: A Windows-style path in the scan results,
+        When: ``print_results`` renders the findings,
+        Then: It prints forward slashes so output remains stable across platforms.
+        """
+        root = cast(Path, PureWindowsPath("D:/projects/snapper"))
+        bad_file = cast(Path, PureWindowsPath("D:/projects/snapper/src/snapper/services/bad.py"))
+
+        total = checker.print_results(
+            {bad_file: [(1, "anthropic", "import anthropic")]},
+            root,
+        )
+
+        captured = capsys.readouterr()
+        assert total == 1
+        assert "src/snapper/services/bad.py" in captured.out
+        assert "src\\snapper\\services\\bad.py" not in captured.out
 
     def test_strict_mode_passes_on_clean_tree(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

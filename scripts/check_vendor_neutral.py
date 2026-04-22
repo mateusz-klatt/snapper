@@ -236,7 +236,7 @@ def print_results(
         return 0
     total = 0
     for filepath, findings in sorted(results.items()):
-        rel_path = filepath.relative_to(root)
+        rel_path = filepath.relative_to(root).as_posix()
         print(f"\n  {rel_path}")
         for line_num, token, line_text in findings:
             display_line = line_text[:80] + "..." if len(line_text) > 80 else line_text
