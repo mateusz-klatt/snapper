@@ -237,8 +237,8 @@ def determine_topic_category(topic: str) -> str | None:
     direct_prefix_map = {
         "market": "market",
         "market.": "market",
-        "signals": "strategy",
-        "signals.": "strategy",
+        "signals": "signals",
+        "signals.": "signals",
         "strategy": "strategy",
         "strategy.": "strategy",
         "system": "system",
@@ -256,10 +256,12 @@ def determine_topic_category(topic: str) -> str | None:
     if parse_market_topic(topic) is not None:
         return "market"
     if parse_signal_topic(topic) is not None:
-        return "strategy"
+        return "signals"
     if topic.startswith("market."):
         return "market"
-    if topic.startswith("signals.") or topic.startswith("strategy."):
+    if topic.startswith("signals."):
+        return "signals"
+    if topic.startswith("strategy."):
         return "strategy"
     if topic.startswith("system."):
         return "system"
@@ -270,7 +272,7 @@ def determine_topic_category(topic: str) -> str | None:
     category_map = {
         "candle": "market",
         "tick": "market",
-        "signal": "strategy",
+        "signal": "signals",
         "order": "trade",
         "execution": "trade",
         "heartbeat": "system",

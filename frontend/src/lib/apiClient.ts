@@ -114,7 +114,112 @@ interface RequestOptions {
   body?: string | FormData | URLSearchParams | null
 }
 
+interface ErrorPayload {
+  message: string
+  details?: unknown
+}
+
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'DELETE', 'PATCH'])
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object'
+}
+
+function fallbackErrorMessage(response: Pick<Response, 'status' | 'statusText'>): string {
+  return `HTTP ${response.status}: ${response.statusText}`
+}
+
+function stringifyErrorValue(value: unknown, fallbackMessage: string): string {
+  if (typeof value === 'string') {
+    return value
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return String(value)
+  }
+
+  if (value === null || value === undefined) {
+    return fallbackMessage
+  }
+
+  if (typeof value === 'object') {
+    try {
+      const serialized = JSON.stringify(value)
+
+      if (serialized !== undefined) {
+        return serialized
+      }
+    } catch {
+      return fallbackMessage
+    }
+  }
+
+  return fallbackMessage
+}
+
+function extractArrayDetail(detail: unknown[], fallbackMessage: string): ErrorPayload {
+  const first = detail[0]
+
+  if (isRecord(first) && Object.prototype.hasOwnProperty.call(first, 'msg')) {
+    return {
+      message: stringifyErrorValue(first.msg, fallbackMessage),
+      details: detail,
+    }
+  }
+
+  return { message: fallbackMessage, details: detail }
+}
+
+function extractObjectDetail(
+  detail: Record<string, unknown>,
+  fallbackMessage: string
+): ErrorPayload {
+  const reason = detail.reason
+
+  if (typeof reason === 'string' && reason.length > 0) {
+    return { message: reason, details: detail }
+  }
+
+  const errorCode = detail.error_code
+
+  if (typeof errorCode === 'string' && errorCode.length > 0) {
+    return { message: errorCode, details: detail }
+  }
+
+  return { message: fallbackMessage, details: detail }
+}
+
+function extractDetailPayload(detail: unknown, fallbackMessage: string): ErrorPayload {
+  if (detail === null) {
+    return { message: fallbackMessage }
+  }
+
+  if (Array.isArray(detail)) {
+    return extractArrayDetail(detail, fallbackMessage)
+  }
+
+  if (isRecord(detail)) {
+    return extractObjectDetail(detail, fallbackMessage)
+  }
+
+  return { message: stringifyErrorValue(detail, fallbackMessage) }
+}
+
+function extractErrorPayload(data: unknown, fallbackMessage: string): ErrorPayload {
+  if (!isRecord(data)) {
+    return { message: fallbackMessage }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(data, 'detail')) {
+    return extractDetailPayload(data.detail, fallbackMessage)
+  }
+
+  if (Object.prototype.hasOwnProperty.call(data, 'message')) {
+    return { message: stringifyErrorValue(data.message, fallbackMessage) }
+  }
+
+  return { message: fallbackMessage }
+}
 
 /**
  * HTTP error thrown by getJSON/postJSON when the response is not OK.
@@ -320,62 +425,16 @@ class APIClient {
 
     throw new APIError(message, response.status, response.statusText, details)
   }
-  private async extractError(response: Response): Promise<{ message: string; details?: unknown }> {
+  private async extractError(response: Response): Promise<ErrorPayload> {
+    const fallbackMessage = fallbackErrorMessage(response)
+
     try {
-      const data = await response.json()
+      const data: unknown = await response.json()
 
-      if (data && typeof data === 'object') {
-        if ('detail' in data) {
-          const detail = (data as { detail?: unknown }).detail
-          const fallbackMessage = `HTTP ${response.status}: ${response.statusText}`
-
-          if (detail === null) {
-            return { message: fallbackMessage }
-          }
-
-          if (Array.isArray(detail)) {
-            const first = detail[0]
-            const arrayMessage =
-              first !== null && typeof first === 'object' && 'msg' in first
-                ? String((first as { msg: unknown }).msg)
-                : fallbackMessage
-
-            return { message: arrayMessage, details: detail }
-          }
-
-          if (typeof detail === 'object') {
-            const detailRecord = detail as Record<string, unknown>
-            const reason = detailRecord.reason
-            const errorCode = detailRecord.error_code
-            const hasReason = typeof reason === 'string' && reason.length > 0
-            const hasErrorCode = typeof errorCode === 'string' && errorCode.length > 0
-            let message: string
-
-            if (hasReason) {
-              message = reason
-            } else if (hasErrorCode) {
-              message = errorCode
-            } else {
-              message = fallbackMessage
-            }
-
-            return { message, details: detail }
-          }
-
-          return {
-            message: typeof detail === 'string' ? detail : JSON.stringify(detail),
-          }
-        }
-
-        if ('message' in data) {
-          return { message: String((data as { message: unknown }).message) }
-        }
-      }
+      return extractErrorPayload(data, fallbackMessage)
     } catch {
-      void 0
+      return { message: fallbackMessage }
     }
-
-    return { message: `HTTP ${response.status}: ${response.statusText}` }
   }
   public async getJSON<T>(url: string, options: RequestOptions = {}): Promise<T> {
     const response = await this.get(url, options)

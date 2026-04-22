@@ -412,3 +412,10 @@ class TestWsAiDelegateWalletScopeContract:
         accepted = set(response.get("topics") or [])
         assert "signals.zonda.BTC-USD.live" not in accepted
         assert "market.kraken.BTC-USD.ticks" in accepted
+        assert "signals.kraken.BTC-USD.live" in accepted, (
+            "AI_DELEGATE holds READ_SIGNALS and the (kraken, BTC-USD) pair is in "
+            "scope, so the subscribe-time wallet filter + category RBAC must "
+            "BOTH accept this topic. Any regression here indicates the "
+            "signals-category split (READ_SIGNALS vs START_STRATEGIES) was "
+            "broken."
+        )

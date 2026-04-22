@@ -94,6 +94,7 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.READ_STRATEGIES,
         Permission.START_STRATEGIES,
         Permission.STOP_STRATEGIES,
+        Permission.READ_SIGNALS,
         Permission.READ_SYSTEM_STATUS,
         Permission.MANAGE_PROCESSES,
         Permission.READ_BACKTESTS,
@@ -106,6 +107,7 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
 CATEGORY_PERMISSIONS: dict[str, frozenset[Permission]] = {
     "market": frozenset({Permission.READ_MARKET_DATA}),
     "trade": frozenset({Permission.CREATE_ORDERS}),
+    "signals": frozenset({Permission.READ_SIGNALS}),
     "strategy": frozenset({Permission.START_STRATEGIES}),
     "system": frozenset({Permission.READ_SYSTEM_STATUS}),
     "admin": frozenset({Permission.MANAGE_USERS}),
@@ -117,6 +119,12 @@ A role is allowed a category when it holds **all** permissions in the
 category's frozenset.  This is intentionally stricter than REST read
 access: a VIEWER can GET /orders (READ_ORDERS) but cannot subscribe
 to live order events (requires CREATE_ORDERS, i.e. OPERATOR+).
+
+The ``signals`` category is intentionally split from ``strategy``: an
+AI_DELEGATE (holding ``READ_SIGNALS`` but NOT ``START_STRATEGIES``)
+must be able to subscribe to ``signals.*`` for Day 3f-A wallet-scope
+filtered read access, without gaining the operator-level
+strategy-management surface that ``strategy.*`` carries.
 
 Using frozensets instead of single permissions makes the model
 extensible: adding a second permission to a category's set is a

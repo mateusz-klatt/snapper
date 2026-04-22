@@ -2830,6 +2830,103 @@ describe('cacheWsTicketFromResponse', () => {
       }
     })
 
+    it('APIError serialises object message values without default object stringification', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        json: vi.fn().mockResolvedValue({
+          message: { code: 'server_error', retryable: false },
+        }),
+      })
+
+      try {
+        await apiClient.getExchangeInstrumentsDetail('y')
+        throw new Error('expected request to fail')
+      } catch (err) {
+        const typed = err as { message: string }
+
+        expect(typed.message).toBe('{"code":"server_error","retryable":false}')
+      }
+    })
+
+    it('APIError falls back to HTTP status text when message key is undefined', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        json: vi.fn().mockResolvedValue({ message: undefined }),
+      })
+
+      try {
+        await apiClient.getExchangeInstrumentsDetail('y')
+        throw new Error('expected request to fail')
+      } catch (err) {
+        const typed = err as { message: string }
+
+        expect(typed.message).toBe('HTTP 500: Internal Server Error')
+      }
+    })
+
+    it('APIError falls back when message object cannot be serialised', async () => {
+      const circular: { self?: unknown } = {}
+
+      circular.self = circular
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        json: vi.fn().mockResolvedValue({ message: circular }),
+      })
+
+      try {
+        await apiClient.getExchangeInstrumentsDetail('y')
+        throw new Error('expected request to fail')
+      } catch (err) {
+        const typed = err as { message: string }
+
+        expect(typed.message).toBe('HTTP 500: Internal Server Error')
+      }
+    })
+
+    it('APIError falls back when message object serialises to undefined', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        json: vi.fn().mockResolvedValue({
+          message: { toJSON: () => undefined },
+        }),
+      })
+
+      try {
+        await apiClient.getExchangeInstrumentsDetail('y')
+        throw new Error('expected request to fail')
+      } catch (err) {
+        const typed = err as { message: string }
+
+        expect(typed.message).toBe('HTTP 500: Internal Server Error')
+      }
+    })
+
+    it('APIError falls back when message value is an unsupported primitive', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        json: vi.fn().mockResolvedValue({ message: Symbol('server_error') }),
+      })
+
+      try {
+        await apiClient.getExchangeInstrumentsDetail('y')
+        throw new Error('expected request to fail')
+      } catch (err) {
+        const typed = err as { message: string }
+
+        expect(typed.message).toBe('HTTP 500: Internal Server Error')
+      }
+    })
+
     it('APIError falls back to HTTP status text when detail is null', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: false,

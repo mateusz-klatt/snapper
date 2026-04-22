@@ -2184,7 +2184,7 @@ def test_filter_topics_respects_allowed_sets() -> None:
     Then: Returns allowed and denied lists correctly.
     """
     allowed_topics = {"market.kraken.BTC-USD.candles.1m"}
-    allowed_categories = {"strategy"}
+    allowed_categories = {"signals"}
     topics = [
         "market.kraken.BTC-USD.candles.1m",
         "signals.kraken.BTC-USD.live",
@@ -2231,9 +2231,12 @@ def test_determine_topic_category_edge_cases() -> None:
     """
     assert DETERMINE_TOPIC_CATEGORY("market") == "market"
     assert DETERMINE_TOPIC_CATEGORY("market.") == "market"
-    assert DETERMINE_TOPIC_CATEGORY("signals") == "strategy"
-    assert DETERMINE_TOPIC_CATEGORY("signals.macd") == "strategy"
+    assert DETERMINE_TOPIC_CATEGORY("signals") == "signals"
+    assert DETERMINE_TOPIC_CATEGORY("signals.macd") == "signals"
+    assert DETERMINE_TOPIC_CATEGORY("signals.invalid") == "signals"
+    assert DETERMINE_TOPIC_CATEGORY("strategy.invalid") == "strategy"
     assert DETERMINE_TOPIC_CATEGORY("system") == "system"
+    assert DETERMINE_TOPIC_CATEGORY("system.metrics") == "system"
     assert DETERMINE_TOPIC_CATEGORY("system.heartbeats.executor.kraken") == "system"
     assert DETERMINE_TOPIC_CATEGORY("admin") == "admin"
     assert DETERMINE_TOPIC_CATEGORY("admin.users") == "admin"

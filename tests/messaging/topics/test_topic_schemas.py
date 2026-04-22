@@ -101,16 +101,16 @@ class TestTopicUtilities:
         assert len(market) == 1
         assert market[0].pattern == "market."
 
-    def test_get_topics_by_category_strategy(self) -> None:
-        """get_topics_by_category returns strategy topics.
+    def test_get_topics_by_category_signals(self) -> None:
+        """get_topics_by_category returns signals topics.
 
-        Given: Topics with category 'strategy',
-        When: Filtering by 'strategy',
+        Given: Topics with category 'signals',
+        When: Filtering by 'signals',
         Then: Returns signals schema only.
         """
-        strategy = get_topics_by_category("strategy")
-        assert len(strategy) == 1
-        assert strategy[0].pattern == "signals."
+        signals = get_topics_by_category("signals")
+        assert len(signals) == 1
+        assert signals[0].pattern == "signals."
 
     def test_get_topics_by_category_empty(self) -> None:
         """get_topics_by_category returns empty list for unknown category.

@@ -125,7 +125,7 @@ class TestWebSocketHelpersRuntimeError:
         Then: Matching category names are returned.
         """
         assert determine_topic_category("market") == "market"
-        assert determine_topic_category("signals") == "strategy"
+        assert determine_topic_category("signals") == "signals"
         assert determine_topic_category("system") == "system"
         assert determine_topic_category("admin") == "admin"
 
@@ -164,15 +164,19 @@ class TestRoleCategorySecurityMatrix:
         categories = role_allowed_categories(UserRole.VIEWER)
         assert categories == {"market", "system", "backtest"}
 
-    def test_operator_gets_market_trade_strategy_system_backtest(self) -> None:
-        """OPERATOR receives market, trade, strategy, system, and backtest.
+    def test_operator_gets_market_trade_signals_strategy_system_backtest(self) -> None:
+        """OPERATOR receives market, trade, signals, strategy, system, and backtest.
 
         Given: An OPERATOR role,
         When: Getting allowed categories,
-        Then: market, trade, strategy, system, backtest allowed but NOT admin.
+        Then: market, trade, signals, strategy, system, backtest allowed but NOT admin.
+            The ``signals`` category is separate from ``strategy`` so
+            AI_DELEGATE (READ_SIGNALS only, no START_STRATEGIES) can
+            subscribe to ``signals.*`` without the operator-level
+            strategy-management surface.
         """
         categories = role_allowed_categories(UserRole.OPERATOR)
-        assert categories == {"market", "trade", "strategy", "system", "backtest"}
+        assert categories == {"market", "trade", "signals", "strategy", "system", "backtest"}
         assert "admin" not in categories
 
     def test_admin_gets_all_categories_including_admin(self) -> None:
@@ -180,11 +184,19 @@ class TestRoleCategorySecurityMatrix:
 
         Given: An ADMIN role,
         When: Getting allowed categories,
-        Then: All six categories are allowed
-            (market, trade, strategy, system, admin, backtest).
+        Then: All seven categories are allowed
+            (market, trade, signals, strategy, system, admin, backtest).
         """
         categories = role_allowed_categories(UserRole.ADMIN)
-        assert categories == {"market", "trade", "strategy", "system", "admin", "backtest"}
+        assert categories == {
+            "market",
+            "trade",
+            "signals",
+            "strategy",
+            "system",
+            "admin",
+            "backtest",
+        }
 
     def test_admin_available_topics_include_admin_prefix(self) -> None:
         """ADMIN available topics include the admin. registry root.
