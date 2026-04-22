@@ -593,3 +593,66 @@ class TestRevokeScopeGrant:
             assert first is second
         finally:
             ScopeGrantService.clear_instance()
+
+    @pytest.mark.parametrize(
+        "role",
+        [UserRole.VIEWER, UserRole.OPERATOR, UserRole.AI_DELEGATE],
+    )
+    def test_revoke_route_rejects_non_admin_roles(self, role: UserRole) -> None:
+        """``require_permission(MANAGE_SCOPE_GRANTS)`` blocks every non-ADMIN role.
+
+        The POST /api/scope-grants/{id}/revoke route is guarded by
+        ``require_permission(MANAGE_SCOPE_GRANTS)`` per plan §D11
+        (ADMIN-only at MVP). The permission is granted to ADMIN only in
+        ``ROLE_PERMISSIONS``; VIEWER / OPERATOR / AI_DELEGATE all hit
+        the 403 branch of the dependency. This pins that contract so a
+        future role-permission rewrite cannot silently relax the gate.
+        """
+        from snapper.auth.dependencies import require_permission
+        from snapper.auth.domain.permissions import Permission
+
+        checker = require_permission(Permission.MANAGE_SCOPE_GRANTS)
+        principal = AuthPrincipal(
+            username=f"non-admin-{role.value}",
+            role=role,
+            user_public_id="00000000-0000-7000-8000-0000000000c0",
+        )
+        with pytest.raises(HTTPException) as excinfo:
+            checker(current_user=principal)
+        assert excinfo.value.status_code == status.HTTP_403_FORBIDDEN
+
+    @pytest.mark.asyncio
+    async def test_revoke_route_double_revoke_maps_to_404(self) -> None:
+        """Two successive revokes on the same grant both return 404 on the second.
+
+        Service raises ``ScopeGrantNotFoundError`` on the already-closed
+        grant; the route translates it to HTTP 404 at the second attempt.
+        Verifies the idempotency surface from the client's perspective.
+        """
+        target_grant = "00000000-0000-7000-8000-0000000000c1"
+        service = AsyncMock()
+        service.revoke_grant = AsyncMock(
+            side_effect=[
+                _closed_grant_row(target_grant),
+                ScopeGrantNotFoundError("grant already closed"),
+            ]
+        )
+
+        response = await revoke_scope_grant(
+            request=_make_request(),
+            grant_public_id=target_grant,
+            _principal=_admin_principal(),
+            command=_make_revoke_command(),
+            scope_grant_service=service,
+        )
+        assert response.payload.public_id == target_grant
+
+        with pytest.raises(HTTPException) as excinfo:
+            await revoke_scope_grant(
+                request=_make_request(),
+                grant_public_id=target_grant,
+                _principal=_admin_principal(),
+                command=_make_revoke_command(),
+                scope_grant_service=service,
+            )
+        assert excinfo.value.status_code == status.HTTP_404_NOT_FOUND

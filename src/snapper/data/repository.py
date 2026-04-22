@@ -6997,11 +6997,19 @@ class SQLAlchemyRepository(Repository):
 
             await self._acquire_wallet_advisory_lock(s, grant.wallet_public_id)
 
-            await s.execute(
+            result = await s.execute(
                 update(WalletOperatorScopeGrant)
-                .where(WalletOperatorScopeGrant.id == grant.id)
+                .where(
+                    WalletOperatorScopeGrant.id == grant.id,
+                    *where_active(WalletOperatorScopeGrant, revoked_at),
+                )
                 .values(known_to=revoked_at)
             )
+            if int(cast(Any, result).rowcount or 0) == 0:
+                raise ScopeGrantNotFoundError(
+                    f"active scope grant {grant_public_id} "
+                    f"no longer active at {revoked_at.isoformat()} (concurrent mutation)"
+                )
             await s.commit()
 
             return ScopeGrantRow(

@@ -1397,3 +1397,59 @@ class TestRevokeScopeGrant:
         assert lock_mock.await_args is not None
         _session, wallet_id = lock_mock.await_args.args
         assert wallet_id == ids["wallet"]
+
+    @pytest.mark.asyncio
+    async def test_revoke_loses_race_to_concurrent_close_raises_not_found(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """A concurrent close between our SELECT and our UPDATE is detected.
+
+        Simulates the read-before-lock race: a parallel writer closes the
+        grant in the window between our initial active-SELECT and the
+        post-lock UPDATE. The UPDATE's ``where_active`` predicate sees
+        ``known_to`` already in the past, so ``rowcount == 0`` and we
+        raise ``ScopeGrantNotFoundError`` instead of silently closing a
+        stale row (which would have produced a duplicate
+        ``admin.scope_revoked`` event for a grant we did not revoke).
+        """
+        from sqlalchemy import update as _update
+
+        from snapper.data.models import WalletOperatorScopeGrant
+
+        ids = await _seed_world(repo)
+        original = await repo.create_scope_grant(
+            _make_request(
+                operator_public_id=ids["alice"],
+                wallet_public_id=ids["wallet"],
+                granted_by=ids["user_admin"],
+                scope_kind="underlying",
+                underlying_public_id=ids["underlying_btc"],
+            )
+        )
+        pre_close = datetime.now(UTC)
+        real_lock = repo._acquire_wallet_advisory_lock
+
+        async def _close_under_lock(session: Any, wallet_public_id: str) -> None:
+            """Acquire the lock then close the target row in the same session.
+
+            Mirrors what a concurrent writer's commit looks like from
+            this transaction: the row's ``known_to`` flips to
+            ``pre_close`` before the outer revoke runs its UPDATE.
+            """
+            await real_lock(session, wallet_public_id)
+            await session.execute(
+                _update(WalletOperatorScopeGrant)
+                .where(WalletOperatorScopeGrant.public_id == original["public_id"])
+                .values(known_to=pre_close)
+            )
+
+        with (
+            patch.object(repo, "_acquire_wallet_advisory_lock", side_effect=_close_under_lock),
+            pytest.raises(ScopeGrantNotFoundError, match="concurrent mutation"),
+        ):
+            await repo.revoke_scope_grant(
+                grant_public_id=original["public_id"],
+                revoked_by_user_public_id=ids["user_admin"],
+                revoked_at=pre_close + timedelta(seconds=1),
+                reason=None,
+            )

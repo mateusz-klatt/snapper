@@ -278,3 +278,74 @@ class TestSingleton:
         second = ScopeGrantService()
         assert first is second
         assert second._msg_publisher is first._msg_publisher
+
+
+class TestStatelessness:
+    """Pins the §D10 "no coordinator-owned mutable state" invariant."""
+
+    @pytest.mark.asyncio
+    async def test_two_successive_revokes_do_not_leak_state(self) -> None:
+        """Two revokes on different grants use only their own inputs.
+
+        Each ``revoke_grant`` call must be self-contained: no cached
+        principal, no cached grant identity, no accumulating scratch.
+        Verifies by exercising two back-to-back revokes on distinct
+        grants/operators/wallets and asserting each emitted event
+        carries ONLY the fields of its corresponding call.
+        """
+        service = ScopeGrantService()
+        publisher = _RecordingPublisher()
+        service.set_msg_publisher(publisher)
+        now_a = datetime.now(UTC)
+        now_b = now_a
+
+        row_a = _make_row(
+            grant_public_id="grant-A",
+            operator_public_id="op-A",
+            wallet_public_id="wal-A",
+            scope_kind="underlying",
+            underlying_public_id="under-btc",
+            instrument_public_id=None,
+            revoked_at=now_a,
+        )
+        row_b = _make_row(
+            grant_public_id="grant-B",
+            operator_public_id="op-B",
+            wallet_public_id="wal-B",
+            scope_kind="instrument",
+            underlying_public_id=None,
+            instrument_public_id="inst-eth",
+            revoked_at=now_b,
+        )
+        service.repository = AsyncMock()
+        service.repository.revoke_scope_grant = AsyncMock(side_effect=[row_a, row_b])
+
+        await service.revoke_grant(
+            grant_public_id="grant-A",
+            revoked_by_user_public_id="user-A",
+            reason="A reason",
+            now=now_a,
+        )
+        await service.revoke_grant(
+            grant_public_id="grant-B",
+            revoked_by_user_public_id="user-B",
+            reason="B reason",
+            now=now_b,
+        )
+        assert len(publisher.sent) == 2
+        _, payload_a = publisher.sent[0]
+        _, payload_b = publisher.sent[1]
+        assert payload_a.grant_public_id == "grant-A"
+        assert payload_a.operator_public_id == "op-A"
+        assert payload_a.revoked_by_user_public_id == "user-A"
+        assert payload_a.reason == "A reason"
+        assert payload_a.scope_kind == "underlying"
+        assert payload_a.underlying_public_id == "under-btc"
+        assert payload_a.instrument_public_id is None
+        assert payload_b.grant_public_id == "grant-B"
+        assert payload_b.operator_public_id == "op-B"
+        assert payload_b.revoked_by_user_public_id == "user-B"
+        assert payload_b.reason == "B reason"
+        assert payload_b.scope_kind == "instrument"
+        assert payload_b.underlying_public_id is None
+        assert payload_b.instrument_public_id == "inst-eth"

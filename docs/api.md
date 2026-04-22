@@ -1457,6 +1457,15 @@ operator. Requires ``manage:scope_grants``. Body: ``from_grant_public_id``,
 ``to_operator_public_id``, optional ``reason``. Returns 404 if source
 grant missing, 400 on self-handover, 409 on cross-scope overlap.
 
+### POST /api/scope-grants/{grant_public_id}/revoke
+
+Atomic SCD2 close (no replacement row) of an active scope grant + emits
+``admin.scope_revoked`` on the bus for live AI_DELEGATE subscription
+revalidation. Requires ``manage:scope_grants`` (ADMIN only).
+Body: optional ``reason`` (flows to event payload, NOT to the closed
+row). Returns 404 if the grant does not exist or is already closed
+(double-revoke).
+
 ### POST /api/wallets
 
 Create a new wallet. Requires ``manage:wallet_credentials`` (ADMIN only).
