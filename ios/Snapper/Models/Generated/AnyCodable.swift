@@ -3,7 +3,6 @@
 
 import Foundation
 
-/// Type-erased Codable value for dynamic JSON fields.
 struct AnyCodable: Codable, @unchecked Sendable {
     let value: Any
 

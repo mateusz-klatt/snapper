@@ -366,7 +366,7 @@ def export_ws_schemas(project_root: Path) -> Path:
     assert isinstance(stripped, dict)
     combined_schema = stripped
 
-    with output_path.open("w") as f:
+    with output_path.open("w", encoding="utf-8") as f:
         json.dump(combined_schema, f, indent=2)
 
     print(f"Exported {len(schemas)} WebSocket schemas to {output_path}")
@@ -387,7 +387,7 @@ def export_openapi_spec(project_root: Path) -> Path:
     app = create_app()
     spec = app.openapi()
 
-    with output_path.open("w") as f:
+    with output_path.open("w", encoding="utf-8") as f:
         json.dump(spec, f, indent=2)
 
     print(f"Exported OpenAPI spec to {output_path}")
@@ -431,7 +431,7 @@ def export_openapi_schemas(project_root: Path) -> Path:
     openapi_path = project_root / "build" / _OPENAPI_FILE
     output_path = project_root / "build" / "openapi-schemas.json"
 
-    with openapi_path.open() as f:
+    with openapi_path.open(encoding="utf-8") as f:
         openapi_spec = json.load(f)
 
     schemas = openapi_spec.get("components", {}).get("schemas", {})
@@ -448,7 +448,7 @@ def export_openapi_schemas(project_root: Path) -> Path:
         fixed_schema = fix_refs_openapi(schema)
         _register_openapi_schema(name, fixed_schema, json_schema)
 
-    with output_path.open("w") as f:
+    with output_path.open("w", encoding="utf-8") as f:
         json.dump(json_schema, f, indent=2)
 
     print(f"Exported {len(schemas)} API schemas to {output_path}")
@@ -624,10 +624,6 @@ def generate_swift_struct(
         swift_name = to_camel_case(prop_name)
         is_required = prop_name in required
         swift_type = json_type_to_swift(prop_schema, definitions, optional=not is_required)
-
-        if "description" in prop_schema:
-            lines.append(f"    /// {prop_schema['description']}")
-
         lines.append(f"    let {swift_name}: {swift_type}")
 
         if swift_name != prop_name:
@@ -680,7 +676,6 @@ def get_any_codable_helper() -> list[str]:
         List of Swift code lines for the AnyCodable helper struct.
     """
     return [
-        "/// Type-erased Codable value for dynamic JSON fields.",
         "struct AnyCodable: Codable, @unchecked Sendable {",
         "    let value: Any",
         "",
@@ -829,7 +824,7 @@ def generate_swift_types(
     Returns:
         Tuple of (enum names, struct names) generated in this file.
     """
-    with schema_path.open() as f:
+    with schema_path.open(encoding="utf-8") as f:
         schema = json.load(f)
 
     definitions = schema.get("definitions", {})
@@ -844,7 +839,7 @@ def generate_swift_types(
     emitted_structs = _collect_structs(definitions, lines, exclude_structs)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text("\n".join(lines))
+    output_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"Generated {output_path} ({len(definitions)} types)")
     return generated_enums - (exclude_enums or set()), emitted_structs
 
@@ -861,7 +856,7 @@ def generate_ios_types(project_root: Path) -> None:
     any_codable_path = ios_gen_dir / "AnyCodable.swift"
     any_codable_lines = [*_SWIFT_HEADER_LINES]
     any_codable_lines.extend(get_any_codable_helper())
-    any_codable_path.write_text("\n".join(any_codable_lines))
+    any_codable_path.write_text("\n".join(any_codable_lines), encoding="utf-8")
     print(f"Generated {any_codable_path}")
 
     ws_schema_path = project_root / "build" / _WS_SCHEMAS_FILE

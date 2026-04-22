@@ -242,21 +242,13 @@ struct AvailableProcess: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
-    /// Process identifier
     let name: String
-    /// Full Python class path
     let classPath: String
-    /// Entry point method name
     let method: String
-    /// Human-readable description
     let description: String
-    /// Process lifecycle type
     let lifecycle: String
-    /// Process role category
     let role: String
-    /// Categorization tags
     let tags: [String]?
-    /// JSON Schema for parameters
     let parametersSchema: JsonObject?
 
     enum CodingKeys: String, CodingKey {
@@ -283,7 +275,6 @@ struct AvailableProcessesResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [AvailableProcess]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -380,7 +371,6 @@ struct BacktestComparisonListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [BacktestComparisonData]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -435,7 +425,6 @@ struct BacktestEquityPointListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [BacktestEquityPointInline]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -478,7 +467,6 @@ struct BacktestEventListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [BacktestEventData]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -667,7 +655,6 @@ struct BacktestRunListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [BacktestRunData]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -734,7 +721,6 @@ struct BacktestSignalListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [BacktestSignalData]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -791,7 +777,6 @@ struct BacktestTradeListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [BacktestTradeData]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -811,33 +796,19 @@ struct ConfiguredProcess: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
-    /// Unique process name
     let name: String
-    /// Whether process autostarts on boot
     let enabled: Bool
-    /// Whether process is currently running
     let running: Bool
-    /// Execution mode (thread/process)
     let mode: String
-    /// Full Python class path
     let classPath: String
-    /// Entry point method name
     let method: String
-    /// Constructor parameters
     let parameters: JsonObject?
-    /// Optional note
     let note: String?
-    /// Process lifecycle type
     let lifecycle: String
-    /// Process role category
     let role: String
-    /// Categorization tags
     let tags: [String]?
-    /// JSON Schema for parameters
     let parametersSchema: JsonObject?
-    /// Whether process is one-shot task
     let isOneShot: Bool
-    /// Active public ID if running
     let activePublicId: String?
 
     enum CodingKeys: String, CodingKey {
@@ -870,7 +841,6 @@ struct ConfiguredProcessesResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [ConfiguredProcess]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -885,15 +855,10 @@ struct ConfiguredProcessesResponse: Codable, Sendable {
 }
 
 struct ConnectionStats: Codable, Sendable {
-    /// Active WebSocket connections
     let activeConnections: Int?
-    /// Active ZMQ subscriber sockets
     let zmqSubscribers: Int?
-    /// Running subscriber tasks
     let subscriberTasks: Int?
-    /// Topics with subscribers
     let activeTopics: Int?
-    /// Unique connected clients
     let activeClients: Int?
 
     enum CodingKeys: String, CodingKey {
@@ -950,7 +915,6 @@ struct ContinuousCandleListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [ContinuousCandleData]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -1027,7 +991,6 @@ struct ContractListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [ContractData]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -1048,7 +1011,6 @@ struct CredentialListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [CredentialSummary]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -1105,13 +1067,9 @@ struct CredentialSummary: Codable, Sendable {
 }
 
 struct DelegateCapsBody: Codable, Sendable {
-    /// JSON dict {instrument_public_id: qty} or null for unbounded
     let maxOrderQuantityPerInstrument: JsonObject?
-    /// In-flight command cap (null = unbounded)
     let maxOpenOrders: Int?
-    /// Rolling 24h USD notional cap (null = unbounded)
     let maxDailyNotionalUsd: Double?
-    /// Sliding 60s cancel cap (null = unbounded)
     let maxCancelsPerMinute: Int?
 
     enum CodingKeys: String, CodingKey {
@@ -1161,7 +1119,6 @@ struct DelegateListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [DelegateRead]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -1232,7 +1189,6 @@ struct ExchangeListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [String]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -1305,7 +1261,6 @@ struct ExecutionListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [ExecutionData]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -1388,7 +1343,6 @@ struct ExecutionPlanResponse: Codable, Sendable {
 }
 
 struct FeatureFlagsPayload: Codable, Sendable {
-    /// Whether the MCP sub-app is activated (plan §3.12).
     let aiIntegrationEnabled: Bool
 
     enum CodingKeys: String, CodingKey {
@@ -1461,9 +1415,7 @@ struct FrontMonthResponse: Codable, Sendable {
 }
 
 struct GapDetectionStats: Codable, Sendable {
-    /// ZMQ bridge gap detection stats
     let bridge: GapStats
-    /// Per-session REST client gap stats
     let restClients: [String: GapStats]?
 
     enum CodingKeys: String, CodingKey {
@@ -1473,15 +1425,10 @@ struct GapDetectionStats: Codable, Sendable {
 }
 
 struct GapStats: Codable, Sendable {
-    /// Total missing messages detected
     let gapsDetected: Int?
-    /// Producer session resets observed
     let sessionResets: Int?
-    /// Duplicate or reordered messages
     let duplicates: Int?
-    /// Subscriptions started mid-stream
     let midStreamJoins: Int?
-    /// Messages without provenance
     let rejectedUnstamped: Int?
 
     enum CodingKeys: String, CodingKey {
@@ -1531,15 +1478,10 @@ struct HealthCheckData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
-    /// Overall service health status
     let status: String
-    /// Application version
     let version: String
-    /// Connection statistics
     let connections: ConnectionStats
-    /// Topics availability
     let topics: HealthTopics
-    /// Gap detection statistics
     let gapDetection: GapDetectionStats
 
     enum CodingKeys: String, CodingKey {
@@ -1575,7 +1517,6 @@ struct HealthCheckResponse: Codable, Sendable {
 }
 
 struct HealthTopics: Codable, Sendable {
-    /// Number of currently active topics
     let active: Int
 }
 
@@ -1620,7 +1561,6 @@ struct InstrumentDetailListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [InstrumentDetailData]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -1641,7 +1581,6 @@ struct InstrumentListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [String]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -1763,7 +1702,6 @@ struct OperatorListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [OperatorInfo]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -1844,7 +1782,6 @@ struct OrderListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [OrderData]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -1941,7 +1878,6 @@ struct PositionCycleListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [PositionCycleData]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -1994,7 +1930,6 @@ struct PositionListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [PositionData]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -2009,9 +1944,7 @@ struct PositionListResponse: Codable, Sendable {
 }
 
 struct ProcessCategoryCount: Codable, Sendable {
-    /// Number of currently running processes
     let running: Int
-    /// Total number of configured processes
     let total: Int
 }
 
@@ -2021,9 +1954,7 @@ struct ProcessCreateData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
-    /// Operation status
     let status: String
-    /// Created process info
     let process: ProcessCreatedInfo
 
     enum CodingKeys: String, CodingKey {
@@ -2056,38 +1987,25 @@ struct ProcessCreateResponse: Codable, Sendable {
 }
 
 struct ProcessCreatedInfo: Codable, Sendable {
-    /// Unique process name
     let name: String
-    /// Template used for creation
     let template: String
 }
 
 struct ProcessRun: Codable, Sendable {
     let type: String?
     let sequenceId: Int
-    /// Unique run identifier
     let publicId: String
     let timestamp: Date
     let sessionId: String
-    /// Process name
     let processName: String
-    /// Run status
     let status: String
-    /// Process role
     let role: String
-    /// Process lifecycle
     let lifecycle: String
-    /// Run parameters
     let parameters: JsonObject?
-    /// Run result if completed
     let result: JsonObject?
-    /// Error message if failed
     let error: String?
-    /// Process tags
     let tags: [String]?
-    /// Start time in ISO format
     let startedAt: String
-    /// Completion time if finished
     let completedAt: String?
 
     enum CodingKeys: String, CodingKey {
@@ -2116,7 +2034,6 @@ struct ProcessRunsResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [ProcessRun]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -2136,21 +2053,13 @@ struct ProcessSchemaData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
-    /// Process identifier
     let name: String
-    /// Human-readable description
     let description: String
-    /// Full Python class path
     let classPath: String
-    /// Entry point method name
     let method: String
-    /// Default autostart setting
     let defaultEnabled: Bool
-    /// Default execution mode
     let defaultMode: String
-    /// Default parameters
     let defaultParameters: JsonObject?
-    /// Process lifecycle type
     let lifecycle: String
 
     enum CodingKeys: String, CodingKey {
@@ -2194,13 +2103,9 @@ struct ProcessStartData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
-    /// Operation status (success, already_running, error)
     let status: String
-    /// Process name
     let name: String
-    /// Public ID if started
     let processPublicId: String?
-    /// Additional message
     let message: String?
 
     enum CodingKeys: String, CodingKey {
@@ -2235,17 +2140,11 @@ struct ProcessStartResponse: Codable, Sendable {
 }
 
 struct ProcessStatus: Codable, Sendable {
-    /// Process status: not_running, running, stopped, completed, error
     let status: String
-    /// Process ID if running
     let pid: Int?
-    /// Start time in ISO format
     let startedAt: String?
-    /// Command that was executed
     let command: String?
-    /// Exit code if stopped
     let exitCode: Int?
-    /// Error message if failed
     let error: String?
 
     enum CodingKeys: String, CodingKey {
@@ -2264,11 +2163,8 @@ struct ProcessStopData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
-    /// Operation status (success, not_running, error)
     let status: String
-    /// Process name
     let name: String
-    /// Additional message
     let message: String?
 
     enum CodingKeys: String, CodingKey {
@@ -2307,13 +2203,9 @@ struct ProcessSummaryData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
-    /// Feed publisher process counts
     let feeds: ProcessCategoryCount
-    /// Strategy process counts
     let strategies: ProcessCategoryCount
-    /// Executor process counts
     let executors: ProcessCategoryCount
-    /// Broker process counts
     let brokers: ProcessCategoryCount
 
     enum CodingKeys: String, CodingKey {
@@ -2401,7 +2293,6 @@ struct RestRateData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
-    /// Per-exchange rolling REST call stats + utilization
     let exchanges: [String: RestRateExchangeStats]
 
     enum CodingKeys: String, CodingKey {
@@ -2415,15 +2306,10 @@ struct RestRateData: Codable, Sendable {
 }
 
 struct RestRateExchangeStats: Codable, Sendable {
-    /// Rolling 1s req/s rate
     let rps1S: Double
-    /// Rolling 10s req/s rate
     let rps10S: Double
-    /// Rolling 60s req/s rate
     let rps60S: Double
-    /// Published upstream limit in req/s
     let limitRps: Double?
-    /// rps_1s / limit_rps fraction, None when limit unknown
     let utilization: Double?
 
     enum CodingKeys: String, CodingKey {
@@ -2504,7 +2390,6 @@ struct ScopeGrantListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [ScopeGrantInfo]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -2543,7 +2428,6 @@ struct SettingCategoriesResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [String]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -2564,7 +2448,6 @@ struct SettingListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [SettingRead]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -2683,7 +2566,6 @@ struct SignalListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [SignalData]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -2704,7 +2586,6 @@ struct StrategyListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [StrategyProcess]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -2724,13 +2605,9 @@ struct StrategyProcess: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
-    /// Unique process name
     let name: String
-    /// Whether process is currently running
     let running: Bool
-    /// Whether process autostarts on boot
     let enabled: Bool
-    /// Execution mode (thread/process)
     let mode: String
 
     enum CodingKeys: String, CodingKey {
@@ -2747,25 +2624,15 @@ struct StrategyProcess: Codable, Sendable {
 }
 
 struct StrategyStatusPayload: Codable, Sendable {
-    /// Strategy name
     let strategyName: String
-    /// Current strategy status
     let status: String
-    /// Full raw status
     let details: JsonObject?
-    /// Signals generated count
     let signalsGenerated: Int?
-    /// Trades executed count
     let tradesExecuted: Int?
-    /// Last signal description
     let lastSignal: String?
-    /// Last signal timestamp
     let lastSignalTime: String?
-    /// Current PnL
     let pnl: Double?
-    /// Process ID
     let pid: Int?
-    /// Process uptime
     let uptime: String?
 
     enum CodingKeys: String, CodingKey {
@@ -2783,9 +2650,7 @@ struct StrategyStatusPayload: Codable, Sendable {
 }
 
 struct SubscriptionsStats: Codable, Sendable {
-    /// Subscriber count per topic
     let perTopic: [String: Int]
-    /// Topics subscribed per client
     let perClient: [String: [String]]
 
     enum CodingKeys: String, CodingKey {
@@ -2802,7 +2667,6 @@ struct SystemStatusData: Codable, Sendable {
     let sessionId: String
     let trader: ProcessStatus
     let backtests: [String: ProcessStatus]
-    /// List of active strategies from strategy_runner
     let strategies: [StrategyStatusPayload]?
 
     enum CodingKeys: String, CodingKey {
@@ -2836,27 +2700,16 @@ struct SystemStatusResponse: Codable, Sendable {
 }
 
 struct TopicMetricSnapshot: Codable, Sendable {
-    /// Current subscriber count
     let activeSubscribers: Int?
-    /// Total messages received
     let received: Int?
-    /// Messages forwarded to clients
     let forwarded: Int?
-    /// Messages dropped by throttling
     let throttled: Int?
-    /// Messages dropped by backpressure
     let dropped: Int?
-    /// Messages timed out during send
     let timeout: Int?
-    /// Errors encountered
     let errors: Int?
-    /// Messages with unparseable envelope
     let invalidMessages: Int?
-    /// Last message timestamp
     let lastMessageTs: Double?
-    /// Throttle interval ms
     let throttleMs: Int?
-    /// ZMQ subscription pattern
     let pattern: String?
 
     enum CodingKeys: String, CodingKey {
@@ -2981,7 +2834,6 @@ struct UnderlyingAssetListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [UnderlyingAssetData]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -3030,7 +2882,6 @@ struct UnderlyingInstrumentListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [UnderlyingInstrumentData]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -3051,7 +2902,6 @@ struct UserListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [UserProfile]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -3152,7 +3002,6 @@ struct WalletListResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: [WalletInfo]
-    /// Number of items in payload
     let count: Int
 
     enum CodingKeys: String, CodingKey {
@@ -3185,11 +3034,8 @@ struct WalletResponse: Codable, Sendable {
 }
 
 struct WebSocketStats: Codable, Sendable {
-    /// Number of active WebSocket connections
     let activeConnections: Int
-    /// Subscriber count per topic
     let topicSubscribers: [String: Int]
-    /// Total client count
     let clientCount: Int
 
     enum CodingKeys: String, CodingKey {
@@ -3200,9 +3046,7 @@ struct WebSocketStats: Codable, Sendable {
 }
 
 struct WsStatsConfig: Codable, Sendable {
-    /// ZMQ broker XPUB endpoint
     let brokerXpub: String
-    /// Heartbeat interval in milliseconds
     let heartbeatIntervalMs: Int
 
     enum CodingKeys: String, CodingKey {
@@ -3217,17 +3061,11 @@ struct WsStatsData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
-    /// WebSocket statistics
     let websocket: WebSocketStats
-    /// ZMQ bridge statistics
     let zmqBridge: ZmqBridgeStats
-    /// Connection statistics
     let connections: ConnectionStats
-    /// Topic message statistics
     let topics: [String: TopicMetricSnapshot]
-    /// Subscription details
     let subscriptions: SubscriptionsStats
-    /// Configuration details
     let config: WsStatsConfig
 
     enum CodingKeys: String, CodingKey {
@@ -3264,11 +3102,8 @@ struct WsStatsResponse: Codable, Sendable {
 }
 
 struct ZmqBridgeStats: Codable, Sendable {
-    /// Number of active ZMQ topics
     let activeTopics: Int
-    /// Number of subscriber tasks
     let subscriberTasks: Int
-    /// List of available topics
     let availableTopics: [String]
 
     enum CodingKeys: String, CodingKey {
@@ -3279,11 +3114,8 @@ struct ZmqBridgeStats: Codable, Sendable {
 }
 
 struct ZmqComponents: Codable, Sendable {
-    /// ZMQ context status
     let zmqContext: String
-    /// WebSocket manager status
     let websocketManager: String
-    /// Number of active WebSocket connections
     let activeConnections: Int
 
     enum CodingKeys: String, CodingKey {
@@ -3294,7 +3126,6 @@ struct ZmqComponents: Codable, Sendable {
 }
 
 struct ZmqConfig: Codable, Sendable {
-    /// List of available ZMQ topics
     let availableTopics: [String]
 
     enum CodingKeys: String, CodingKey {
@@ -3308,17 +3139,11 @@ struct ZmqHealthData: Codable, Sendable {
     let publicId: String
     let timestamp: Date
     let sessionId: String
-    /// Overall ZMQ bridge health status
     let status: String
-    /// Component status details
     let components: ZmqComponents
-    /// ZMQ configuration
     let config: ZmqConfig
-    /// Connection statistics
     let connections: ConnectionStats
-    /// Message statistics per topic
     let messageStats: [String: TopicMetricSnapshot]
-    /// Error messages if not healthy
     let errors: [String]?
 
     enum CodingKeys: String, CodingKey {
@@ -3571,11 +3396,8 @@ struct SettingUpdate: Codable, Sendable {
 }
 
 struct SettingUpdateBody: Codable, Sendable {
-    /// Setting value as string
     let value: String
-    /// Setting category
     let category: String?
-    /// Setting description
     let description: String?
 }
 
@@ -3619,10 +3441,8 @@ struct DelegateCreateRequest: Codable, Sendable {
 }
 
 struct DelegateCreateBody: Codable, Sendable {
-    /// Delegate label
     let label: String
     let caps: DelegateCapsBody?
-    /// Operator the delegate is bound to — must be in the caller's claim set. Null defers to the caller's primary operator.
     let operatorPublicId: String?
 
     enum CodingKeys: String, CodingKey {
@@ -3673,7 +3493,6 @@ struct DelegateDeactivateRequest: Codable, Sendable {
 }
 
 struct DelegateDeactivateBody: Codable, Sendable {
-    /// Optional audit reason
     let reason: String?
 }
 
@@ -3802,7 +3621,6 @@ struct CreateCredentialCommand: Codable, Sendable {
 struct CreateCredentialBody: Codable, Sendable {
     let exchange: String
     let credentialType: String
-    /// Plaintext credential fields, encrypted server-side
     let credentialPayload: [String: String]
     let label: String?
 
@@ -3833,7 +3651,6 @@ struct RotateCredentialCommand: Codable, Sendable {
 }
 
 struct RotateCredentialBody: Codable, Sendable {
-    /// New plaintext credential fields, encrypted server-side
     let credentialPayload: [String: String]
     let label: String?
 
@@ -3994,17 +3811,11 @@ struct ProcessCreateRequest: Codable, Sendable {
 }
 
 struct ProcessCreateBody: Codable, Sendable {
-    /// Unique process name
     let name: String
-    /// Registered process identifier used as template
     let template: String
-    /// Whether process should autostart on boot
     let enabled: Bool?
-    /// Execution mode override (thread/process)
     let mode: String?
-    /// Constructor parameters
     let parameters: JsonObject?
-    /// Optional note stored alongside configuration
     let note: String?
 }
 
@@ -4027,9 +3838,7 @@ struct ProcessStartRequest: Codable, Sendable {
 }
 
 struct ProcessStartBody: Codable, Sendable {
-    /// Execution mode (thread/process) override for this run
     let mode: String?
-    /// Constructor parameters override for this run
     let parameters: JsonObject?
 }
 

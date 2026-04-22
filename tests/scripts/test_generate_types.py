@@ -637,8 +637,8 @@ class TestGenerateSwiftStruct:
         assert "CodingKeys" in result
         assert 'case userId = "user_id"' in result
 
-    def test_includes_description(self) -> None:
-        """Includes description as doc comment."""
+    def test_omits_description_comments(self) -> None:
+        """Description metadata is not emitted as Swift doc comments."""
         schema = {
             "properties": {
                 "id": {"type": "integer", "description": "The user ID"},
@@ -646,7 +646,8 @@ class TestGenerateSwiftStruct:
         }
         lines = generate_swift_struct("User", schema, {})
         result = "\n".join(lines)
-        assert "/// The user ID" in result
+        assert "///" not in result
+        assert "let id: Int?" in result
 
     def test_no_coding_keys_when_camelcase_matches(self) -> None:
         """No CodingKeys when property names match camelCase."""
@@ -810,6 +811,52 @@ class TestGenerateSwiftTypes:
         result = generate_swift_types(tmp_path, schema_path, output_path)
 
         assert result == ({"Status"}, {"User"})
+
+    def test_generated_swift_file_omits_doc_comments(self, tmp_path: Path) -> None:
+        """Generated Swift files stay free of property doc comments."""
+        schema_path = tmp_path / "schema.json"
+        schema_path.write_text(
+            json.dumps(
+                {
+                    "definitions": {
+                        "User": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "integer", "description": "The user ID"},
+                            },
+                        },
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        output_path = tmp_path / "Types.swift"
+
+        generate_swift_types(tmp_path, schema_path, output_path)
+
+        content = output_path.read_text(encoding="utf-8")
+        assert "///" not in content
+
+    def test_writes_swift_output_as_utf8(self, tmp_path: Path) -> None:
+        """Swift output is always written with UTF-8 encoding."""
+        schema_path = tmp_path / "schema.json"
+        schema_path.write_text(
+            json.dumps(
+                {
+                    "definitions": {
+                        "Status": {"type": "string", "enum": ["zazolc_gesla", "zażółć_gęślą"]},
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        output_path = tmp_path / "Types.swift"
+
+        generate_swift_types(tmp_path, schema_path, output_path)
+
+        content = output_path.read_text(encoding="utf-8")
+        assert '"zażółć_gęślą"' in content
+        assert "zażółć_gęślą".encode() in output_path.read_bytes()
 
     def test_exclude_enums_skips_duplicates(self, tmp_path: Path) -> None:
         """Excludes enums already emitted in another file."""
