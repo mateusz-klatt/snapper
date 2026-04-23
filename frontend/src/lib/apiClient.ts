@@ -160,7 +160,7 @@ function stringifyErrorValue(value: unknown, fallbackMessage: string): string {
 function extractArrayDetail(detail: unknown[], fallbackMessage: string): ErrorPayload {
   const first = detail[0]
 
-  if (isRecord(first) && Object.prototype.hasOwnProperty.call(first, 'msg')) {
+  if (isRecord(first) && Object.hasOwn(first, 'msg')) {
     return {
       message: stringifyErrorValue(first.msg, fallbackMessage),
       details: detail,
@@ -210,11 +210,11 @@ function extractErrorPayload(data: unknown, fallbackMessage: string): ErrorPaylo
     return { message: fallbackMessage }
   }
 
-  if (Object.prototype.hasOwnProperty.call(data, 'detail')) {
+  if (Object.hasOwn(data, 'detail')) {
     return extractDetailPayload(data.detail, fallbackMessage)
   }
 
-  if (Object.prototype.hasOwnProperty.call(data, 'message')) {
+  if (Object.hasOwn(data, 'message')) {
     return { message: stringifyErrorValue(data.message, fallbackMessage) }
   }
 

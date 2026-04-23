@@ -1540,6 +1540,46 @@ async def test_dispose_repositories_no_engine_attr(monkeypatch: pytest.MonkeyPat
     assert repo_module._repository_cache == {}
 
 
+def test_collect_repositories_to_dispose_deduplicates_cached_and_live() -> None:
+    """Repository collection helper deduplicates shared cached/live instances."""
+    repo_module._repository_cache.clear()
+    repo_module._live_sqlalchemy_repositories.clear()
+
+    class _StubRepo:
+        pass
+
+    shared_repo = _StubRepo()
+    repo_module._repository_cache["shared"] = shared_repo
+    repo_module._live_sqlalchemy_repositories.add(shared_repo)
+
+    repos = repo_module._collect_repositories_to_dispose()
+
+    assert repos == [shared_repo]
+
+
+def test_collect_engines_to_dispose_deduplicates_live_and_repo_engines() -> None:
+    """Engine collection helper deduplicates engines seen via repo and live tracking."""
+    repo_module._repository_cache.clear()
+    repo_module._live_sqlalchemy_repositories.clear()
+    repo_module._live_sqlalchemy_engines.clear()
+
+    class _Engine:
+        def dispose(self) -> None:
+            return None
+
+    class _StubRepo:
+        def __init__(self, engine: object) -> None:
+            self.engine = engine
+
+    shared_engine = _Engine()
+    repo_module._repository_cache["shared"] = _StubRepo(shared_engine)
+    repo_module._live_sqlalchemy_engines.add(shared_engine)
+
+    engines = repo_module._collect_engines_to_dispose()
+
+    assert engines == [shared_engine]
+
+
 def test_get_repository_sqlite() -> None:
     """Test get_repository returns SQLAlchemyRepository for SQLite URL.
 

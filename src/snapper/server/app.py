@@ -146,6 +146,10 @@ from snapper.data.backtest_repository import BacktestRepository
 from snapper.data.repository import Repository
 from snapper.data.repository import dispose_repositories
 from snapper.data.repository import get_repository
+from snapper.data.repository_types import ContinuousCandleRow
+from snapper.data.repository_types import InstrumentContractRow
+from snapper.data.repository_types import InstrumentUnderlyingRow
+from snapper.data.repository_types import UnderlyingAssetRow
 from snapper.infrastructure.rest.tracker import get_rest_call_tracker
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
@@ -1537,474 +1541,444 @@ def _create_monitoring_endpoints_router(
     return router
 
 
-def _create_underlying_router() -> APIRouter:
-    """Create router for underlying asset discovery endpoints.
+def _resolve_underlying_query_time(as_of: datetime | None) -> datetime:
+    """Return the requested point-in-time or the current UTC instant."""
+    return as_of or datetime.now(UTC)
 
-    Returns:
-        APIRouter with underlyings list and instruments-per-underlying endpoints.
-    """
-    router = APIRouter()
 
-    @router.get("/underlyings", responses={500: {"description": "Internal server error"}})
-    async def get_underlyings(
-        request: Request,
-        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
-        _csrf: Annotated[None, Depends(validate_csrf_token)],
-        repo: Annotated[Repository, Depends(get_repository_dependency)],
-        as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
-    ) -> UnderlyingAssetListResponse:
-        """Return all underlying assets with instrument counts.
+def _normalize_utc(timestamp: datetime) -> datetime:
+    """Normalize a required datetime to UTC, assuming naive values are UTC."""
+    if timestamp.tzinfo:
+        return timestamp.astimezone(UTC)
+    return timestamp.replace(tzinfo=UTC)
 
-        Args:
-            request: FastAPI request (provides REST tracker for provenance).
-            _auth: Authenticated user with READ_MARKET_DATA permission.
-            _csrf: CSRF token validation.
-            repo: Database repository.
-            as_of: Optional point-in-time query timestamp.
 
-        Returns:
-            UnderlyingAssetListResponse wrapping underlying asset list.
-        """
-        try:
-            now = as_of or datetime.now(UTC)
-            assets = await repo.get_underlying_assets(as_of=now)
-            tracker: SequenceTracker = request.app.state.rest_tracker
-            items: list[UnderlyingAssetData] = [
-                UnderlyingAssetData(
-                    public_id=a["public_id"],
-                    session_id=a["session_id"],
-                    sequence_id=a["sequence_id"],
-                    timestamp=a["timestamp"],
-                    ticker=a["ticker"],
-                    name=a["name"],
-                    asset_class=a["asset_class"],
-                    sector=a["sector"],
-                    instrument_count=a["instrument_count"],
-                )
-                for a in assets
-            ]
-            sid = tracker.session_id
-            seq = tracker.next_sequence(_REST_DATA_STREAM)
-            ts = dt.datetime.now(dt.UTC)
-            pid = str(uuid7())
-            return UnderlyingAssetListResponse(
-                session_id=sid,
-                sequence_id=seq,
-                public_id=pid,
-                timestamp=ts,
+def _normalize_optional_utc(as_of: datetime | None) -> datetime:
+    """Normalize an optional datetime to UTC, defaulting missing values to now."""
+    if as_of is None:
+        return datetime.now(UTC)
+    return _normalize_utc(as_of)
+
+
+def _get_rest_data_response_metadata(
+    request: Request,
+) -> tuple[SequenceTracker, str, int, datetime, str]:
+    """Return tracker state for one REST data response envelope."""
+    tracker = cast(SequenceTracker, request.app.state.rest_tracker)
+    return (
+        tracker,
+        tracker.session_id,
+        tracker.next_sequence(_REST_DATA_STREAM),
+        dt.datetime.now(dt.UTC),
+        str(uuid7()),
+    )
+
+
+def _build_underlying_asset_items(assets: list[UnderlyingAssetRow]) -> list[UnderlyingAssetData]:
+    """Project underlying rows into API payload items."""
+    return [
+        UnderlyingAssetData(
+            public_id=asset["public_id"],
+            session_id=asset["session_id"],
+            sequence_id=asset["sequence_id"],
+            timestamp=asset["timestamp"],
+            ticker=asset["ticker"],
+            name=asset["name"],
+            asset_class=asset["asset_class"],
+            sector=asset["sector"],
+            instrument_count=asset["instrument_count"],
+        )
+        for asset in assets
+    ]
+
+
+def _build_underlying_instrument_items(
+    rows: list[InstrumentUnderlyingRow],
+) -> list[UnderlyingInstrumentData]:
+    """Project underlying-instrument mapping rows into API payload items."""
+    return [
+        UnderlyingInstrumentData(
+            public_id=row["public_id"],
+            session_id=row["session_id"],
+            sequence_id=row["sequence_id"],
+            timestamp=row["timestamp"],
+            instrument_public_id=row["instrument_public_id"],
+            native_symbol=row["native_symbol"],
+            exchange=row["exchange"],
+            asset_type=row["asset_type"],
+            relationship_type=row["relationship_type"],
+            contract_family=row["contract_family"],
+        )
+        for row in rows
+    ]
+
+
+def _build_contract_items(
+    rows: list[InstrumentContractRow],
+    tracker: SequenceTracker,
+    session_id: str,
+) -> list[ContractData]:
+    """Project contract rows into API payload items with fresh provenance."""
+    return [
+        ContractData(
+            public_id=str(uuid7()),
+            session_id=session_id,
+            sequence_id=tracker.next_sequence(_REST_DATA_STREAM),
+            timestamp=dt.datetime.now(dt.UTC),
+            instrument_public_id=row["instrument_public_id"],
+            native_symbol=row["native_symbol"],
+            exchange=row["exchange"],
+            expiry_at=row["expiry_at"],
+            instrument_kind=row["instrument_kind"],
+            relationship_type=row["relationship_type"],
+            contract_family=row["contract_family"],
+            is_front_month=row["is_front_month"],
+        )
+        for row in rows
+    ]
+
+
+def _build_continuous_candle_items(
+    candles: list[ContinuousCandleRow],
+    tracker: SequenceTracker,
+    session_id: str,
+) -> list[ContinuousCandleData]:
+    """Project continuous-candle rows into API payload items."""
+    return [
+        ContinuousCandleData(
+            public_id=str(uuid7()),
+            session_id=session_id,
+            sequence_id=tracker.next_sequence(_REST_DATA_STREAM),
+            timestamp=dt.datetime.now(dt.UTC),
+            open_at=candle["open_at"],
+            timeframe=candle["timeframe"],
+            open=candle["open"],
+            high=candle["high"],
+            low=candle["low"],
+            close=candle["close"],
+            volume=candle["volume"],
+            vwap=candle["vwap"],
+            trades=candle["trades"],
+            source_contract=candle["source_contract"],
+            adjustment_factor=candle["adjustment_factor"],
+        )
+        for candle in candles
+    ]
+
+
+async def _get_underlyings(
+    request: Request,
+    _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
+    as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
+) -> UnderlyingAssetListResponse:
+    """Return all underlying assets with instrument counts."""
+    try:
+        assets = await repo.get_underlying_assets(as_of=_resolve_underlying_query_time(as_of))
+        _tracker, session_id, sequence_id, timestamp, public_id = _get_rest_data_response_metadata(
+            request
+        )
+        items = _build_underlying_asset_items(assets)
+        return UnderlyingAssetListResponse(
+            session_id=session_id,
+            sequence_id=sequence_id,
+            public_id=public_id,
+            timestamp=timestamp,
+            payload=items,
+            count=len(items),
+        )
+    except Exception as exc:
+        logger.error(f"Failed to fetch underlyings: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to fetch underlyings") from exc
+
+
+async def _get_underlying_instruments(
+    request: Request,
+    ticker: str,
+    _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
+    as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
+    relationship_type: Annotated[
+        RelationshipTypeEnum | None, Query(description="Filter by relationship type")
+    ] = None,
+) -> UnderlyingInstrumentListResponse:
+    """Return instruments mapped to an underlying asset."""
+    try:
+        now = _resolve_underlying_query_time(as_of)
+        underlying = await repo.get_underlying_by_ticker(ticker, now)
+        if underlying is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Underlying not found: {ticker}",
+            )
+        rows = await repo.get_instruments_by_underlying(
+            underlying["public_id"],
+            now,
+            relationship_types=[relationship_type.value] if relationship_type else None,
+        )
+        _tracker, session_id, sequence_id, timestamp, public_id = _get_rest_data_response_metadata(
+            request
+        )
+        items = _build_underlying_instrument_items(rows)
+        return UnderlyingInstrumentListResponse(
+            session_id=session_id,
+            sequence_id=sequence_id,
+            public_id=public_id,
+            timestamp=timestamp,
+            payload=items,
+            count=len(items),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Failed to fetch instruments for {ticker}: {exc}")
+        raise HTTPException(
+            status_code=500, detail="Failed to fetch underlying instruments"
+        ) from exc
+
+
+async def _get_front_month(
+    request: Request,
+    ticker: str,
+    _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
+    as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
+    exchange: Annotated[str | None, Query(description="Filter by exchange")] = None,
+    contract_family: Annotated[
+        str | None, Query(description="Filter by product root (e.g. ES, MES)")
+    ] = None,
+) -> FrontMonthResponse:
+    """Return the front-month (nearest non-expired) futures contract."""
+    try:
+        now = _resolve_underlying_query_time(as_of)
+        underlying = await repo.get_underlying_by_ticker(ticker, now)
+        if underlying is None:
+            raise HTTPException(status_code=404, detail=f"Underlying not found: {ticker}")
+        row = await repo.get_front_month_instrument(
+            underlying["public_id"],
+            now,
+            exchange=exchange,
+            contract_family=contract_family,
+        )
+        if row is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No active futures contracts for {ticker}",
+            )
+        _tracker, session_id, sequence_id, timestamp, public_id = _get_rest_data_response_metadata(
+            request
+        )
+        item = FrontMonthData(
+            public_id=public_id,
+            session_id=session_id,
+            sequence_id=sequence_id,
+            timestamp=timestamp,
+            instrument_public_id=row["instrument_public_id"],
+            native_symbol=row["native_symbol"],
+            exchange=row["exchange"],
+            expiry_at=row["expiry_at"],
+            relationship_type=row["relationship_type"],
+            contract_family=row["contract_family"],
+        )
+        return FrontMonthResponse(
+            session_id=session_id,
+            sequence_id=sequence_id,
+            public_id=public_id,
+            timestamp=timestamp,
+            payload=item,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Failed to fetch front-month for {ticker}: {exc}")
+        raise HTTPException(
+            status_code=500, detail="Failed to fetch front-month instrument"
+        ) from exc
+
+
+async def _get_contracts(
+    request: Request,
+    ticker: str,
+    _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
+    as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
+    exchange: Annotated[str | None, Query(description="Filter by exchange")] = None,
+    contract_family: Annotated[
+        str | None, Query(description="Filter by product root (e.g. ES, MES)")
+    ] = None,
+    include_expired: Annotated[bool, Query(description="Include expired contracts")] = False,
+) -> ContractListResponse:
+    """Return all futures contracts for an underlying asset."""
+    try:
+        now = _resolve_underlying_query_time(as_of)
+        underlying = await repo.get_underlying_by_ticker(ticker, now)
+        if underlying is None:
+            raise HTTPException(status_code=404, detail=f"Underlying not found: {ticker}")
+        rows = await repo.get_contracts_for_underlying(
+            underlying["public_id"],
+            now,
+            exchange=exchange,
+            contract_family=contract_family,
+            include_expired=include_expired,
+        )
+        tracker, session_id, sequence_id, timestamp, public_id = _get_rest_data_response_metadata(
+            request
+        )
+        items = _build_contract_items(rows, tracker, session_id)
+        return ContractListResponse(
+            session_id=session_id,
+            sequence_id=sequence_id,
+            public_id=public_id,
+            timestamp=timestamp,
+            payload=items,
+            count=len(items),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Failed to fetch contracts for {ticker}: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to fetch contracts") from exc
+
+
+async def _get_continuous_series(
+    request: Request,
+    ticker: str,
+    _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
+    _csrf: Annotated[None, Depends(validate_csrf_token)],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
+    exchange: Annotated[str, Query(description="Exchange to source contracts from")],
+    contract_family: Annotated[str, Query(description="Product root (e.g. ES, GC)")],
+    timeframe: Annotated[str, Query(description="Candle timeframe (e.g. 1h, 1d)")],
+    start: Annotated[datetime, Query(description="Series start time (UTC)")],
+    end: Annotated[datetime, Query(description="Series end time (UTC)")],
+    method: Annotated[str, Query(description="Adjustment method")] = "panama",
+    rollover_days_before: Annotated[
+        int,
+        Query(ge=0, le=365, description="Days before expiry to roll (0-365)"),
+    ] = 0,
+    as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
+) -> ContinuousCandleListResponse | ContinuousSeriesPartialResponse:
+    """Build and return a continuous contract candle series."""
+    try:
+        if method not in ("unadjusted", "ratio", "panama"):
+            raise HTTPException(status_code=400, detail=f"Invalid method: {method}")
+        max_days = 3650
+        if (end - start).days > max_days:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Date range too large: max {max_days} days",
+            )
+        now = _normalize_optional_utc(as_of)
+        underlying = await repo.get_underlying_by_ticker(ticker, now)
+        if underlying is None:
+            raise HTTPException(status_code=404, detail=f"Underlying not found: {ticker}")
+        result = await ContinuousContractBuilder(repository=repo).build(
+            underlying_public_id=underlying["public_id"],
+            exchange=exchange,
+            contract_family=contract_family,
+            timeframe=timeframe,
+            start=_normalize_utc(start),
+            end=_normalize_utc(end),
+            method=method,
+            rollover_days_before=rollover_days_before,
+            as_of=now,
+        )
+        tracker, session_id, _sequence_id, _timestamp, _public_id = (
+            _get_rest_data_response_metadata(request)
+        )
+        items = _build_continuous_candle_items(result.candles, tracker, session_id)
+        _tracker, sequence_id, timestamp, public_id = None, None, None, None
+        if result.failed_roll is not None:
+            _tracker, session_id, sequence_id, timestamp, public_id = (
+                _get_rest_data_response_metadata(request)
+            )
+            return ContinuousSeriesPartialResponse(
+                session_id=session_id,
+                sequence_id=sequence_id,
+                public_id=public_id,
+                timestamp=timestamp,
                 payload=items,
                 count=len(items),
+                failed_roll=RollPointDetail(
+                    from_contract=result.failed_roll.from_contract,
+                    to_contract=result.failed_roll.to_contract,
+                    roll_at=result.failed_roll.roll_at.isoformat(),
+                ),
+                message=(
+                    f"Series truncated at roll {result.failed_roll.from_contract} "
+                    f"-> {result.failed_roll.to_contract}: gap too large"
+                ),
             )
-        except Exception as exc:
-            logger.error(f"Failed to fetch underlyings: {exc}")
-            raise HTTPException(status_code=500, detail="Failed to fetch underlyings") from exc
+        _tracker, session_id, sequence_id, timestamp, public_id = _get_rest_data_response_metadata(
+            request
+        )
+        return ContinuousCandleListResponse(
+            session_id=session_id,
+            sequence_id=sequence_id,
+            public_id=public_id,
+            timestamp=timestamp,
+            payload=items,
+            count=len(items),
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error(f"Failed to build continuous series for {ticker}: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to build continuous series") from exc
 
-    @router.get(
+
+def _create_underlying_router() -> APIRouter:
+    """Create router for underlying asset discovery endpoints."""
+    router = APIRouter()
+    router.add_api_route(
+        "/underlyings",
+        _get_underlyings,
+        methods=["GET"],
+        responses={500: {"description": "Internal server error"}},
+    )
+    router.add_api_route(
         "/underlyings/{ticker}/instruments",
+        _get_underlying_instruments,
+        methods=["GET"],
         responses={
             404: {"description": "Underlying not found"},
             500: {"description": "Internal server error"},
         },
     )
-    async def get_underlying_instruments(
-        request: Request,
-        ticker: str,
-        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
-        _csrf: Annotated[None, Depends(validate_csrf_token)],
-        repo: Annotated[Repository, Depends(get_repository_dependency)],
-        as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
-        relationship_type: Annotated[
-            RelationshipTypeEnum | None, Query(description="Filter by relationship type")
-        ] = None,
-    ) -> UnderlyingInstrumentListResponse:
-        """Return instruments mapped to an underlying asset.
-
-        Args:
-            request: FastAPI request (provides REST tracker for provenance).
-            ticker: Underlying asset ticker (e.g. 'SPX', 'GOLD').
-            _auth: Authenticated user with READ_MARKET_DATA permission.
-            _csrf: CSRF token validation.
-            repo: Database repository.
-            as_of: Optional point-in-time query timestamp.
-            relationship_type: Optional filter (exact/derivative/proxy).
-
-        Returns:
-            UnderlyingInstrumentListResponse wrapping instrument list.
-
-        Raises:
-            HTTPException: 404 if ticker not found.
-        """
-        try:
-            now = as_of or datetime.now(UTC)
-            underlying = await repo.get_underlying_by_ticker(ticker, now)
-            if underlying is None:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Underlying not found: {ticker}",
-                )
-            rel_filter = [relationship_type.value] if relationship_type else None
-            rows = await repo.get_instruments_by_underlying(
-                underlying["public_id"],
-                now,
-                relationship_types=rel_filter,
-            )
-            tracker: SequenceTracker = request.app.state.rest_tracker
-            items = [
-                UnderlyingInstrumentData(
-                    public_id=r["public_id"],
-                    session_id=r["session_id"],
-                    sequence_id=r["sequence_id"],
-                    timestamp=r["timestamp"],
-                    instrument_public_id=r["instrument_public_id"],
-                    native_symbol=r["native_symbol"],
-                    exchange=r["exchange"],
-                    asset_type=r["asset_type"],
-                    relationship_type=r["relationship_type"],
-                    contract_family=r["contract_family"],
-                )
-                for r in rows
-            ]
-            sid = tracker.session_id
-            seq = tracker.next_sequence(_REST_DATA_STREAM)
-            ts = dt.datetime.now(dt.UTC)
-            pid = str(uuid7())
-            return UnderlyingInstrumentListResponse(
-                session_id=sid,
-                sequence_id=seq,
-                public_id=pid,
-                timestamp=ts,
-                payload=items,
-                count=len(items),
-            )
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.error(f"Failed to fetch instruments for {ticker}: {exc}")
-            raise HTTPException(
-                status_code=500, detail="Failed to fetch underlying instruments"
-            ) from exc
-
-    @router.get(
+    router.add_api_route(
         "/underlyings/{ticker}/front-month",
+        _get_front_month,
+        methods=["GET"],
         responses={
             404: {"description": "No active futures contracts or underlying not found"},
             500: {"description": "Internal server error"},
         },
     )
-    async def get_front_month(
-        request: Request,
-        ticker: str,
-        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
-        _csrf: Annotated[None, Depends(validate_csrf_token)],
-        repo: Annotated[Repository, Depends(get_repository_dependency)],
-        as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
-        exchange: Annotated[str | None, Query(description="Filter by exchange")] = None,
-        contract_family: Annotated[
-            str | None, Query(description="Filter by product root (e.g. ES, MES)")
-        ] = None,
-    ) -> FrontMonthResponse:
-        """Return the front-month (nearest non-expired) futures contract.
-
-        Args:
-            request: FastAPI request (provides REST tracker for provenance).
-            ticker: Underlying asset ticker (e.g. 'SPX', 'GOLD').
-            _auth: Authenticated user with READ_MARKET_DATA permission.
-            _csrf: CSRF token validation.
-            repo: Database repository.
-            as_of: Optional point-in-time query timestamp.
-            exchange: Optional exchange filter.
-            contract_family: Optional futures product root filter.
-
-        Returns:
-            FrontMonthResponse wrapping the front-month instrument.
-
-        Raises:
-            HTTPException: 404 if ticker not found or no active futures.
-        """
-        try:
-            now = as_of or datetime.now(UTC)
-            underlying = await repo.get_underlying_by_ticker(ticker, now)
-            if underlying is None:
-                raise HTTPException(status_code=404, detail=f"Underlying not found: {ticker}")
-            row = await repo.get_front_month_instrument(
-                underlying["public_id"],
-                now,
-                exchange=exchange,
-                contract_family=contract_family,
-            )
-            if row is None:
-                raise HTTPException(
-                    status_code=404, detail=f"No active futures contracts for {ticker}"
-                )
-            tracker: SequenceTracker = request.app.state.rest_tracker
-            sid = tracker.session_id
-            seq = tracker.next_sequence(_REST_DATA_STREAM)
-            ts = dt.datetime.now(dt.UTC)
-            pid = str(uuid7())
-            item = FrontMonthData(
-                public_id=pid,
-                session_id=sid,
-                sequence_id=seq,
-                timestamp=ts,
-                instrument_public_id=row["instrument_public_id"],
-                native_symbol=row["native_symbol"],
-                exchange=row["exchange"],
-                expiry_at=row["expiry_at"],
-                relationship_type=row["relationship_type"],
-                contract_family=row["contract_family"],
-            )
-            return FrontMonthResponse(
-                session_id=sid,
-                sequence_id=seq,
-                public_id=pid,
-                timestamp=ts,
-                payload=item,
-            )
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.error(f"Failed to fetch front-month for {ticker}: {exc}")
-            raise HTTPException(
-                status_code=500, detail="Failed to fetch front-month instrument"
-            ) from exc
-
-    @router.get(
+    router.add_api_route(
         "/underlyings/{ticker}/contracts",
+        _get_contracts,
+        methods=["GET"],
         responses={
             404: {"description": "Underlying not found"},
             500: {"description": "Internal server error"},
         },
     )
-    async def get_contracts(
-        request: Request,
-        ticker: str,
-        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
-        _csrf: Annotated[None, Depends(validate_csrf_token)],
-        repo: Annotated[Repository, Depends(get_repository_dependency)],
-        as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
-        exchange: Annotated[str | None, Query(description="Filter by exchange")] = None,
-        contract_family: Annotated[
-            str | None, Query(description="Filter by product root (e.g. ES, MES)")
-        ] = None,
-        include_expired: Annotated[bool, Query(description="Include expired contracts")] = False,
-    ) -> ContractListResponse:
-        """Return all futures contracts for an underlying asset.
-
-        Args:
-            request: FastAPI request (provides REST tracker for provenance).
-            ticker: Underlying asset ticker (e.g. 'SPX', 'GOLD').
-            _auth: Authenticated user with READ_MARKET_DATA permission.
-            _csrf: CSRF token validation.
-            repo: Database repository.
-            as_of: Optional point-in-time query timestamp.
-            exchange: Optional exchange filter.
-            contract_family: Optional futures product root filter.
-            include_expired: Whether to include expired contracts.
-
-        Returns:
-            ContractListResponse wrapping the contracts list.
-
-        Raises:
-            HTTPException: 404 if ticker not found.
-        """
-        try:
-            now = as_of or datetime.now(UTC)
-            underlying = await repo.get_underlying_by_ticker(ticker, now)
-            if underlying is None:
-                raise HTTPException(status_code=404, detail=f"Underlying not found: {ticker}")
-            rows = await repo.get_contracts_for_underlying(
-                underlying["public_id"],
-                now,
-                exchange=exchange,
-                contract_family=contract_family,
-                include_expired=include_expired,
-            )
-            tracker: SequenceTracker = request.app.state.rest_tracker
-            sid = tracker.session_id
-            items = [
-                ContractData(
-                    public_id=str(uuid7()),
-                    session_id=sid,
-                    sequence_id=tracker.next_sequence(_REST_DATA_STREAM),
-                    timestamp=dt.datetime.now(dt.UTC),
-                    instrument_public_id=r["instrument_public_id"],
-                    native_symbol=r["native_symbol"],
-                    exchange=r["exchange"],
-                    expiry_at=r["expiry_at"],
-                    instrument_kind=r["instrument_kind"],
-                    relationship_type=r["relationship_type"],
-                    contract_family=r["contract_family"],
-                    is_front_month=r["is_front_month"],
-                )
-                for r in rows
-            ]
-            seq = tracker.next_sequence(_REST_DATA_STREAM)
-            ts = dt.datetime.now(dt.UTC)
-            pid = str(uuid7())
-            return ContractListResponse(
-                session_id=sid,
-                sequence_id=seq,
-                public_id=pid,
-                timestamp=ts,
-                payload=items,
-                count=len(items),
-            )
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.error(f"Failed to fetch contracts for {ticker}: {exc}")
-            raise HTTPException(status_code=500, detail="Failed to fetch contracts") from exc
-
-    @router.get(
+    router.add_api_route(
         "/underlyings/{ticker}/continuous",
+        _get_continuous_series,
+        methods=["GET"],
         responses={
             400: {"description": "Invalid parameters"},
             404: {"description": "Underlying not found"},
             500: {"description": "Internal server error"},
         },
     )
-    async def get_continuous_series(
-        request: Request,
-        ticker: str,
-        _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
-        _csrf: Annotated[None, Depends(validate_csrf_token)],
-        repo: Annotated[Repository, Depends(get_repository_dependency)],
-        exchange: Annotated[str, Query(description="Exchange to source contracts from")],
-        contract_family: Annotated[str, Query(description="Product root (e.g. ES, GC)")],
-        timeframe: Annotated[str, Query(description="Candle timeframe (e.g. 1h, 1d)")],
-        start: Annotated[datetime, Query(description="Series start time (UTC)")],
-        end: Annotated[datetime, Query(description="Series end time (UTC)")],
-        method: Annotated[str, Query(description="Adjustment method")] = "panama",
-        rollover_days_before: Annotated[
-            int,
-            Query(ge=0, le=365, description="Days before expiry to roll (0-365)"),
-        ] = 0,
-        as_of: Annotated[datetime | None, Query(description="Point-in-time query (UTC)")] = None,
-    ) -> ContinuousCandleListResponse | ContinuousSeriesPartialResponse:
-        """Build and return a continuous contract candle series.
-
-        Stitches historical candle data from multiple expired futures contracts
-        into a single continuous price series using the specified adjustment method.
-
-        Args:
-            request: FastAPI request (provides REST tracker for provenance).
-            ticker: Underlying asset ticker (e.g. 'SPX', 'GOLD').
-            _auth: Authenticated user with READ_MARKET_DATA permission.
-            _csrf: CSRF token validation.
-            repo: Database repository.
-            exchange: Exchange to source contracts from.
-            contract_family: Product root (e.g. 'ES', 'GC', 'CL').
-            timeframe: Candle timeframe (e.g. '1h', '1d').
-            start: Series start time (inclusive).
-            end: Series end time (inclusive).
-            method: Adjustment method: 'unadjusted', 'ratio', 'panama'.
-            rollover_days_before: Days before expiry to roll (0 = on expiry).
-            as_of: Optional point-in-time query timestamp.
-
-        Returns:
-            Full series response, or partial response if a roll gap was too large.
-
-        Raises:
-            HTTPException: 400 for invalid params, 404 if underlying not found.
-                Returns 200 with empty payload when the underlying exists but
-                has no contracts / no candles in the requested range.
-        """
-        try:
-            if method not in ("unadjusted", "ratio", "panama"):
-                raise HTTPException(status_code=400, detail=f"Invalid method: {method}")
-            max_days = 3650
-            if (end - start).days > max_days:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Date range too large: max {max_days} days",
-                )
-            utc_start = start.astimezone(UTC) if start.tzinfo else start.replace(tzinfo=UTC)
-            utc_end = end.astimezone(UTC) if end.tzinfo else end.replace(tzinfo=UTC)
-            if as_of is None:
-                now = datetime.now(UTC)
-            elif as_of.tzinfo:
-                now = as_of.astimezone(UTC)
-            else:
-                now = as_of.replace(tzinfo=UTC)
-            underlying = await repo.get_underlying_by_ticker(ticker, now)
-            if underlying is None:
-                raise HTTPException(status_code=404, detail=f"Underlying not found: {ticker}")
-            builder = ContinuousContractBuilder(repository=repo)
-            result = await builder.build(
-                underlying_public_id=underlying["public_id"],
-                exchange=exchange,
-                contract_family=contract_family,
-                timeframe=timeframe,
-                start=utc_start,
-                end=utc_end,
-                method=method,
-                rollover_days_before=rollover_days_before,
-                as_of=now,
-            )
-            tracker: SequenceTracker = request.app.state.rest_tracker
-            sid = tracker.session_id
-            items = [
-                ContinuousCandleData(
-                    public_id=str(uuid7()),
-                    session_id=sid,
-                    sequence_id=tracker.next_sequence(_REST_DATA_STREAM),
-                    timestamp=dt.datetime.now(dt.UTC),
-                    open_at=c["open_at"],
-                    timeframe=c["timeframe"],
-                    open=c["open"],
-                    high=c["high"],
-                    low=c["low"],
-                    close=c["close"],
-                    volume=c["volume"],
-                    vwap=c["vwap"],
-                    trades=c["trades"],
-                    source_contract=c["source_contract"],
-                    adjustment_factor=c["adjustment_factor"],
-                )
-                for c in result.candles
-            ]
-            if result.failed_roll is not None:
-                seq = tracker.next_sequence(_REST_DATA_STREAM)
-                ts = dt.datetime.now(dt.UTC)
-                pid = str(uuid7())
-                return ContinuousSeriesPartialResponse(
-                    session_id=sid,
-                    sequence_id=seq,
-                    public_id=pid,
-                    timestamp=ts,
-                    payload=items,
-                    count=len(items),
-                    failed_roll=RollPointDetail(
-                        from_contract=result.failed_roll.from_contract,
-                        to_contract=result.failed_roll.to_contract,
-                        roll_at=result.failed_roll.roll_at.isoformat(),
-                    ),
-                    message=(
-                        f"Series truncated at roll {result.failed_roll.from_contract} "
-                        f"-> {result.failed_roll.to_contract}: gap too large"
-                    ),
-                )
-            seq = tracker.next_sequence(_REST_DATA_STREAM)
-            ts = dt.datetime.now(dt.UTC)
-            pid = str(uuid7())
-            return ContinuousCandleListResponse(
-                session_id=sid,
-                sequence_id=seq,
-                public_id=pid,
-                timestamp=ts,
-                payload=items,
-                count=len(items),
-            )
-        except HTTPException:
-            raise
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except Exception as exc:
-            logger.error(f"Failed to build continuous series for {ticker}: {exc}")
-            raise HTTPException(
-                status_code=500, detail="Failed to build continuous series"
-            ) from exc
-
     return router
 
 

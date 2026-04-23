@@ -677,3 +677,78 @@ class TestFindCommonBarFallback:
         assert len(result.roll_points) == 1
         delta = 114.0 - 104.0
         assert result.candles[0]["close"] == pytest.approx(100.0 + delta)
+
+
+class TestResolveRollInfo:
+    """Tests for single-roll adjustment resolution helpers."""
+
+    def test_unadjusted_returns_zero_adjustment(self) -> None:
+        """Unadjusted roll resolution produces a zero adjustment and no failure."""
+        builder = ContinuousContractBuilder(repository=_mock_repo([], {}))
+        roll_info, failed = builder._resolve_roll_info(
+            old_sym="ESM6",
+            new_sym="ESU6",
+            roll_at=D3,
+            old_candles=[_candle(D2, 100.0)],
+            new_candles=[_candle(D3, 110.0)],
+            method="unadjusted",
+            timeframe="1d",
+        )
+
+        assert failed is None
+        assert roll_info is not None
+        assert roll_info.adjustment == 0.0
+
+    def test_returns_failed_roll_when_common_bar_missing(self) -> None:
+        """Roll resolution returns failed metadata when no overlap can be found."""
+        builder = ContinuousContractBuilder(repository=_mock_repo([], {}))
+        roll_info, failed = builder._resolve_roll_info(
+            old_sym="ESM6",
+            new_sym="ESU6",
+            roll_at=D3,
+            old_candles=[_candle(D1, 100.0)],
+            new_candles=[_candle(D8, 120.0)],
+            method="panama",
+            timeframe="1d",
+        )
+
+        assert roll_info is None
+        assert failed is not None
+        assert failed.from_contract == "ESM6"
+        assert failed.to_contract == "ESU6"
+
+    @pytest.mark.parametrize(
+        ("method", "old_close", "new_close", "expected"),
+        [
+            ("ratio", 100.0, 110.0, 1.1),
+            ("panama", 100.0, 110.0, 10.0),
+        ],
+    )
+    def test_compute_roll_adjustment_returns_expected_value(
+        self,
+        method: str,
+        old_close: float,
+        new_close: float,
+        expected: float,
+    ) -> None:
+        """Numeric roll adjustment helper returns the expected adjustment."""
+        result = ContinuousContractBuilder._compute_roll_adjustment(
+            method=method,
+            old_sym="ESM6",
+            new_sym="ESU6",
+            old_close=old_close,
+            new_close=new_close,
+        )
+
+        assert result == pytest.approx(expected)
+
+    def test_compute_roll_adjustment_rejects_non_positive_ratio(self) -> None:
+        """Ratio adjustment rejects non-positive roll prices."""
+        with pytest.raises(ValueError, match="Non-positive"):
+            ContinuousContractBuilder._compute_roll_adjustment(
+                method="ratio",
+                old_sym="ESM6",
+                new_sym="ESU6",
+                old_close=0.0,
+                new_close=110.0,
+            )

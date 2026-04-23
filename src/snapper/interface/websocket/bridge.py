@@ -177,6 +177,111 @@ class ZmqWebSocketBridgeService:
                 return config
         return None
 
+    def _ensure_client_topics(self, websocket: WebSocket) -> set[str]:
+        """Return the tracked topic set for a WebSocket client."""
+        if websocket not in self.client_subscriptions:
+            self.client_subscriptions[websocket] = set()
+        return self.client_subscriptions[websocket]
+
+    def _remove_client_if_empty(self, websocket: WebSocket) -> None:
+        """Remove client tracking once it has no subscriptions."""
+        if websocket in self.client_subscriptions and not self.client_subscriptions[websocket]:
+            del self.client_subscriptions[websocket]
+
+    @staticmethod
+    def _get_prefix_subscription_error(topic: str) -> str | None:
+        """Return validation detail for invalid prefix subscriptions."""
+        if not topic.endswith(".") or topic in REGISTRY_ROOTS:
+            return None
+        if topic.startswith("backtest."):
+            bt_valid, bt_err = _validate_backtest_prefix(topic)
+            if bt_valid:
+                return None
+            return f"Malformed backtest prefix rejected: {topic} ({bt_err})"
+        return f"Intermediate prefix rejected: {topic}"
+
+    def _default_topic_throttle_ms(self, topic: str, fallback: int = 100) -> int:
+        """Return configured throttle for a topic or a fallback value."""
+        topic_config = self.available_topics.get(topic)
+        if topic_config is None:
+            return fallback
+        return topic_config.throttle_ms
+
+    def _register_topic_subscription(
+        self,
+        websocket: WebSocket,
+        topic: str,
+        throttle_ms: int,
+        client_id: str = "",
+    ) -> bool:
+        """Track subscription state and return whether it is the first subscriber."""
+        client_topics = self._ensure_client_topics(websocket)
+        client_topics.add(topic)
+        subscriptions = self.topic_subscriptions.setdefault(topic, [])
+        metrics = self.topic_metrics.setdefault(topic, TopicMetricsModel())
+        subscriptions.append(
+            TopicSubscriptionModel(
+                websocket=websocket,
+                throttle_ms=throttle_ms,
+                client_id=client_id,
+            )
+        )
+        metrics.active_subscribers = len(subscriptions)
+        return len(subscriptions) == 1
+
+    def _is_client_subscription_topic_valid(self, topic: str) -> bool:
+        """Validate a multi-topic client subscription request."""
+        error_detail = self._get_prefix_subscription_error(topic)
+        if error_detail is None:
+            return True
+        logger.warning(error_detail)
+        return False
+
+    def _websocket_has_topic_subscription(self, websocket: WebSocket, topic: str) -> bool:
+        """Return whether a WebSocket is already subscribed to a topic."""
+        return any(sub.websocket == websocket for sub in self.topic_subscriptions.get(topic, []))
+
+    async def _reject_unknown_websocket_topic(self, websocket: WebSocket, topic: str) -> bool:
+        """Send invalid-topic feedback and record control-plane telemetry."""
+        available = list(self.available_topics)
+        error_msg = (
+            f"Topic '{topic}' does not match any known pattern. Available patterns: {available}"
+        )
+        logger.warning(error_msg)
+        try:
+            tracker = self.connection_manager.tracker
+            error_response = WSErrorResponse(
+                message=f"Invalid topic: {error_msg}",
+                session_id=tracker.session_id,
+                sequence_id=tracker.next_sequence(SERVER_CONTROL_SEQ),
+                public_id=str(uuid7()),
+                timestamp=datetime.now(UTC),
+            )
+            await websocket.send_text(error_response.model_dump_json())
+        except Exception as e:
+            logger.error(f"Failed to send error to client: {e}")
+        await self._record_bridge_control(
+            "zmq_subscribe",
+            "error",
+            detail=f"Invalid topic: {topic}",
+        )
+        return False
+
+    async def _can_subscribe_websocket_topic(self, websocket: WebSocket, topic: str) -> bool:
+        """Validate a single-topic WebSocket subscription request."""
+        error_detail = self._get_prefix_subscription_error(topic)
+        if error_detail is not None:
+            logger.warning(error_detail)
+            await self._record_bridge_control(
+                "zmq_subscribe",
+                "error",
+                detail=error_detail,
+            )
+            return False
+        if self._find_matching_pattern(topic) is not None:
+            return True
+        return await self._reject_unknown_websocket_topic(websocket, topic)
+
     async def subscribe_client(self, websocket: WebSocket, topics: list[str]) -> None:
         """Subscribe a WebSocket client to multiple topics.
 
@@ -186,38 +291,19 @@ class ZmqWebSocketBridgeService:
         """
         client_id = f"{id(websocket)}"
         logger.info(f"Client {client_id} subscribing to topics: {topics}")
-        if websocket not in self.client_subscriptions:
-            self.client_subscriptions[websocket] = set()
+        self._ensure_client_topics(websocket)
         for topic in topics:
-            if topic.endswith(".") and topic not in REGISTRY_ROOTS:
-                if topic.startswith("backtest."):
-                    bt_valid, _ = _validate_backtest_prefix(topic)
-                    if not bt_valid:
-                        logger.warning("Rejected malformed backtest prefix subscription: %s", topic)
-                        continue
-                else:
-                    logger.warning(
-                        "Rejected intermediate prefix subscription: %s (not a registry root)",
-                        topic,
-                    )
-                    continue
-            self.client_subscriptions[websocket].add(topic)
-            if topic not in self.topic_subscriptions:
-                self.topic_subscriptions[topic] = []
-                self.topic_metrics[topic] = TopicMetricsModel()
-            subscription = TopicSubscriptionModel(
+            if not self._is_client_subscription_topic_valid(topic):
+                continue
+            should_start = self._register_topic_subscription(
                 websocket=websocket,
-                throttle_ms=self.available_topics.get(
-                    topic, TopicConfigurationModel("", "", 100)
-                ).throttle_ms,
+                topic=topic,
+                throttle_ms=self._default_topic_throttle_ms(topic),
                 client_id=client_id,
             )
-            self.topic_subscriptions[topic].append(subscription)
-            self.topic_metrics[topic].active_subscribers = len(self.topic_subscriptions[topic])
-            if len(self.topic_subscriptions[topic]) == 1:
+            if should_start:
                 await self._start_zmq_subscription(topic)
-        if websocket in self.client_subscriptions and not self.client_subscriptions[websocket]:
-            del self.client_subscriptions[websocket]
+        self._remove_client_if_empty(websocket)
         logger.info(
             f"Client {client_id} subscribed. Active subscriptions: "
             f"{len(self.client_subscriptions.get(websocket, set()))}"
@@ -704,67 +790,12 @@ class ZmqWebSocketBridgeService:
         Returns:
             True if subscription successful, False otherwise.
         """
-        if topic.endswith(".") and topic not in REGISTRY_ROOTS:
-            if topic.startswith("backtest."):
-                bt_valid, bt_err = _validate_backtest_prefix(topic)
-                if not bt_valid:
-                    logger.warning("Rejected malformed backtest prefix: %s (%s)", topic, bt_err)
-                    await self._record_bridge_control(
-                        "zmq_subscribe",
-                        "error",
-                        detail=f"Malformed backtest prefix rejected: {topic} ({bt_err})",
-                    )
-                    return False
-            else:
-                logger.warning(
-                    "Rejected intermediate prefix subscription: %s (not a registry root)", topic
-                )
-                await self._record_bridge_control(
-                    "zmq_subscribe",
-                    "error",
-                    detail=f"Intermediate prefix rejected: {topic}",
-                )
-                return False
-        topic_config = self._find_matching_pattern(topic)
-        if not topic_config:
-            available = list(self.available_topics)
-            error_msg = (
-                f"Topic '{topic}' does not match any known pattern. Available patterns: {available}"
-            )
-            logger.warning(error_msg)
-            try:
-                tracker = self.connection_manager.tracker
-                error_response = WSErrorResponse(
-                    message=f"Invalid topic: {error_msg}",
-                    session_id=tracker.session_id,
-                    sequence_id=tracker.next_sequence(SERVER_CONTROL_SEQ),
-                    public_id=str(uuid7()),
-                    timestamp=datetime.now(UTC),
-                )
-                await websocket.send_text(error_response.model_dump_json())
-            except Exception as e:
-                logger.error(f"Failed to send error to client: {e}")
-            await self._record_bridge_control(
-                "zmq_subscribe",
-                "error",
-                detail=f"Invalid topic: {topic}",
-            )
+        if not await self._can_subscribe_websocket_topic(websocket, topic):
             return False
-        if topic in self.topic_subscriptions:
-            for sub in self.topic_subscriptions[topic]:
-                if sub.websocket == websocket:
-                    logger.debug(f"WebSocket already subscribed to topic: {topic}")
-                    return True
-        subscription = TopicSubscriptionModel(websocket=websocket, throttle_ms=throttle_ms)
-        if topic not in self.topic_subscriptions:
-            self.topic_subscriptions[topic] = []
-        self.topic_subscriptions[topic].append(subscription)
-        if websocket not in self.client_subscriptions:
-            self.client_subscriptions[websocket] = set()
-        self.client_subscriptions[websocket].add(topic)
-        if topic not in self.topic_metrics:
-            self.topic_metrics[topic] = TopicMetricsModel()
-        self.topic_metrics[topic].active_subscribers += 1
+        if self._websocket_has_topic_subscription(websocket, topic):
+            logger.debug(f"WebSocket already subscribed to topic: {topic}")
+            return True
+        self._register_topic_subscription(websocket, topic, throttle_ms)
         await self.start_zmq_subscriber(topic)
         logger.info(f"WebSocket subscribed to topic: {topic} (throttle: {throttle_ms}ms)")
         return True

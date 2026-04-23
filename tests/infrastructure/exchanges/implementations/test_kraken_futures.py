@@ -27,6 +27,8 @@ from snapper.infrastructure.exchanges.contracts import TradeUpdate
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
+from snapper.infrastructure.exchanges.implementations.kraken_futures import _build_ccxt_symbol_map
+from snapper.infrastructure.exchanges.implementations.kraken_futures import _collect_candle_updates
 from snapper.infrastructure.exchanges.implementations.kraken_futures import _enqueue_or_drop_oldest
 from snapper.infrastructure.exchanges.implementations.kraken_futures import _timeframe_to_seconds
 
@@ -1108,6 +1110,56 @@ class TestSubscribeCandles:
                 pass
         assert results == []
         assert call_count == 1
+
+
+class TestCandlePollingHelpers:
+    """Tests for candle polling helper functions."""
+
+    def test_build_ccxt_symbol_map_skips_unsupported(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Supported symbols are mapped while unsupported ones are skipped."""
+
+        def mock_native_to_ccxt(symbol: str) -> str:
+            if symbol == "BTC-USD-PERP":
+                return "BTC/USD:USD"
+            raise ValueError("unknown symbol")
+
+        monkeypatch.setattr(mod, "native_to_ccxt", mock_native_to_ccxt)
+
+        result = _build_ccxt_symbol_map(["BTC-USD-PERP", "UNKNOWN-SYM"])
+
+        assert result == {"BTC-USD-PERP": "BTC/USD:USD"}
+
+    def test_collect_candle_updates_keeps_same_timestamp_revision(self) -> None:
+        """Same-timestamp revisions are emitted while older candles are skipped."""
+        last_seen = {"BTC-USD-PERP": 1700000000.0}
+        candles = [
+            OhlcvSnapshot(
+                timestamp=1700000000.0,
+                open=50000.0,
+                high=52000.0,
+                low=49000.0,
+                close=51500.0,
+                volume=150.0,
+            ),
+            OhlcvSnapshot(
+                timestamp=1699996400.0,
+                open=49000.0,
+                high=50000.0,
+                low=48000.0,
+                close=49500.0,
+                volume=80.0,
+            ),
+        ]
+
+        updates = _collect_candle_updates("BTC-USD-PERP", candles, 3600, last_seen)
+
+        assert len(updates) == 1
+        assert updates[0].symbol == "BTC-USD-PERP"
+        assert updates[0].close == pytest.approx(51500.0)
+        assert last_seen["BTC-USD-PERP"] == pytest.approx(1700000000.0)
 
 
 class TestTimeframeToSeconds:

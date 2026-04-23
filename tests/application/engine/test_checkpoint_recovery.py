@@ -714,6 +714,35 @@ class TestCheckpointRecovery:
 
         assert "BTC-USD@kraken-live" in coord.engines
 
+    def test_resolve_checkpoint_wallet_public_id_returns_cached_public_id(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cached wallet_short values resolve to their public wallet id."""
+        coord = _make_coord(monkeypatch)
+        coord._wallet_short_to_id = {"01975a8b3c7d": "wallet-public-id"}
+
+        wallet_public_id = coord._resolve_checkpoint_wallet_public_id(
+            "kraken.BTC-USD.live.w01975a8b3c7d",
+            "01975a8b3c7d",
+        )
+
+        assert wallet_public_id == "wallet-public-id"
+
+    @pytest.mark.asyncio
+    async def test_load_checkpoint_delta_events_returns_none_for_non_sqlalchemy_repository(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Checkpoint delta replay returns None when repository is not SQLAlchemy-backed."""
+        coord = _make_coord(monkeypatch)
+        coord.repository = cast(SQLAlchemyRepository, object())
+
+        delta_events = await coord._load_checkpoint_delta_events(
+            _make_checkpoint(last_venue_event_id=10),
+            "kraken.BTC-USD.live",
+        )
+
+        assert delta_events is None
+
     @pytest.mark.asyncio
     async def test_engine_creation_failure_skips_shard(
         self, monkeypatch: pytest.MonkeyPatch

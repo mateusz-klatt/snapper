@@ -460,6 +460,85 @@ class TestBacktestRunnerProcess:
             assert result_row["turnover_ratio"] == 2.5
             assert result_row["extra_metrics"] == {}
 
+    @pytest.mark.asyncio
+    @patch("snapper.application.backtest.runner.get_repository")
+    @patch("snapper.application.backtest.runner.DirectDbEngine")
+    @patch("snapper.application.backtest.runner.BacktestConfig")
+    async def test_artifacts_persisted_with_cross_asset_blocked_fill_metrics(
+        self,
+        mock_config_cls: MagicMock,
+        mock_engine_cls: MagicMock,
+        mock_get_repo: MagicMock,
+    ) -> None:
+        """Positive blocked-fill counts are persisted into extra_metrics."""
+        run = _make_run_row()
+        mock_repo = MagicMock()
+        mock_repo.session_factory = MagicMock()
+        mock_get_repo.return_value = mock_repo
+
+        mock_config = MagicMock()
+        mock_config.strategy_class = "sma_cross"
+        mock_config.initial_balance = 10000.0
+        mock_config_cls.model_validate.return_value = mock_config
+
+        mock_engine = AsyncMock()
+        mock_portfolio = MagicMock()
+        mock_engine.run = AsyncMock(return_value=(mock_portfolio, {}))
+        mock_engine_cls.return_value = mock_engine
+
+        with patch(
+            "snapper.application.backtest.runner.BacktestRepository"
+        ) as mock_bt_repo_cls, patch(
+            "snapper.application.backtest.runner.ResultCollector"
+        ) as mock_collector_cls, patch(
+            "snapper.application.backtest.runner.compute_metrics"
+        ) as mock_compute:
+            mock_collector = MagicMock()
+            mock_collector.signals = []
+            mock_collector.trades = []
+            mock_collector.equity_points = []
+            mock_collector.cross_asset_blocked_fills = 3
+            mock_collector_cls.return_value = mock_collector
+
+            mock_metrics = MagicMock()
+            mock_metrics.total_trades = 0
+            mock_metrics.winning_trades = 0
+            mock_metrics.losing_trades = 0
+            mock_metrics.total_pnl = 0.0
+            mock_metrics.max_drawdown = 0.0
+            mock_metrics.sharpe_ratio = 0.0
+            mock_metrics.win_rate = 0.0
+            mock_metrics.profit_factor = 0.0
+            mock_metrics.final_equity = 10000.0
+            mock_metrics.max_equity = 10000.0
+            mock_metrics.sortino_ratio = 0.0
+            mock_metrics.cagr = 0.0
+            mock_metrics.calmar_ratio = 0.0
+            mock_metrics.expectancy = 0.0
+            mock_metrics.avg_trade_pnl = 0.0
+            mock_metrics.max_drawdown_duration_seconds = 0.0
+            mock_metrics.exposure_ratio = 0.0
+            mock_metrics.turnover_ratio = 0.0
+            mock_metrics.warnings = []
+            mock_compute.return_value = mock_metrics
+
+            mock_bt_repo = AsyncMock()
+            mock_bt_repo.get_run = AsyncMock(return_value=run)
+            mock_bt_repo.insert_event = AsyncMock(return_value="evt-1")
+            mock_bt_repo.update_run_status = AsyncMock(return_value=1)
+            mock_bt_repo.insert_signals_batch = AsyncMock()
+            mock_bt_repo.insert_trades_batch = AsyncMock()
+            mock_bt_repo.insert_equity_points_batch = AsyncMock()
+            mock_bt_repo.insert_result = AsyncMock(return_value="res-1")
+            mock_bt_repo_cls.return_value = mock_bt_repo
+
+            runner = BacktestRunnerProcess(run_public_id="run-1", db_url="sqlite://")
+            await runner.start()
+
+            mock_bt_repo.insert_result.assert_called_once()
+            result_row = mock_bt_repo.insert_result.call_args.args[0]
+            assert result_row["extra_metrics"] == {"cross_asset_blocked_fills": 3}
+
     def test_get_status_returns_run_id(self) -> None:
         """get_status() includes run_public_id."""
         runner = BacktestRunnerProcess(run_public_id="run-abc", db_url="sqlite://")

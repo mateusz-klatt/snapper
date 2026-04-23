@@ -8,6 +8,7 @@ from unittest.mock import ANY
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -17,9 +18,13 @@ from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.app import create_app
 from snapper.server.app import get_repository_dependency
 from snapper.server.dependencies import get_caps_enforcer_dependency
+from snapper.server.order_routes import CancelPlanContext
+from snapper.server.order_routes import OrderRouteContext
+from snapper.server.order_routes import _build_cancel_trade_command
 
 
 async def _noop_lifespan(_app: FastAPI) -> AsyncGenerator[None]:
@@ -385,6 +390,34 @@ class TestCreateOrder:
 
 class TestCancelOrder:
     """Tests for POST /api/orders/{id}/cancel."""
+
+    def test_build_cancel_trade_command_requires_child_order_metadata(self) -> None:
+        """Missing child-order metadata raises ValueError."""
+        route_context = OrderRouteContext(
+            tracker=SequenceTracker(),
+            now=_ts(),
+            bus_time=_ts(),
+            session_id="s1",
+        )
+        plan = _make_plan_row(status="active")
+        context = CancelPlanContext(
+            route_context=route_context,
+            plan=plan,
+            params=plan["params"],
+            child_client_order_id=None,
+            native_instrument=None,
+            exchange_order_id=None,
+        )
+        principal = AuthPrincipal(
+            username="test_user",
+            role=UserRole.ADMIN,
+            user_public_id="user-1",
+        )
+        with pytest.raises(
+            ValueError,
+            match="Cancel command requires child_client_order_id and native_instrument",
+        ):
+            _build_cancel_trade_command(context, principal)
 
     def test_cancel_active_plan(self) -> None:
         """Given active plan, When cancelling, Then cancel_requested."""

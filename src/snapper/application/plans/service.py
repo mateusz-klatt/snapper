@@ -529,52 +529,9 @@ class PlanExecutorService(RegisterableProcess):
             plan_public_id: Plan that emitted the commands.
             commands: List of command dicts from the evaluator.
         """
-        plan = self.plans.get(plan_public_id)
+        plan = await self._prepare_plan_for_dispatch(plan_public_id)
         if plan is None:
             return
-        missing_caps = await self._check_capabilities(
-            plan["plan_type"], plan["exchange"], plan["instrument_public_id"]
-        )
-        if missing_caps:
-            logger.error(
-                "Fire-time capability check failed for plan {}: missing {}",
-                plan_public_id,
-                missing_caps,
-            )
-            await self._transition_plan(
-                plan_public_id,
-                ExecutionPlanStatusEnum.FAILED,
-                f"Capability revoked: {missing_caps}",
-            )
-            return
-        cycle_pid = plan.get("position_cycle_public_id")
-        if isinstance(cycle_pid, str):
-            cycle_open = await self._is_cycle_open(cycle_pid)
-            if not cycle_open:
-                logger.info(
-                    "Cycle {} closed before dispatch for plan {}, cancelling",
-                    cycle_pid,
-                    plan_public_id,
-                )
-                await self._transition_plan(
-                    plan_public_id,
-                    ExecutionPlanStatusEnum.CANCELLED,
-                    "cycle_closed_externally",
-                )
-                await self._log_decision(
-                    plan_public_id=plan_public_id,
-                    decision_type="cycle_closed_externally",
-                    trigger_type="dispatch",
-                    reason=f"Cycle {cycle_pid} closed before command dispatch",
-                    importance="action",
-                    new_status=ExecutionPlanStatusEnum.CANCELLED,
-                )
-                return
-        if plan["status"] == ExecutionPlanStatusEnum.ARMED:
-            await self._transition_plan(plan_public_id, ExecutionPlanStatusEnum.ACTIVE)
-            plan = self.plans.get(plan_public_id)
-            if plan is None:
-                return
         now = datetime.now(UTC)
         session_id = self.tracker.session_id
         child_ids: list[str] = []
@@ -655,6 +612,78 @@ class PlanExecutorService(RegisterableProcess):
             params_mut["child_client_order_ids"] = merged_ids
             plan_mut["params"] = params_mut
             self.plans[plan_public_id] = cast(ExecutionPlanRow, plan_mut)
+
+    async def _prepare_plan_for_dispatch(
+        self,
+        plan_public_id: str,
+    ) -> ExecutionPlanRow | None:
+        """Validate dispatch preconditions and refresh plan state when needed."""
+        plan = self.plans.get(plan_public_id)
+        if plan is None:
+            return None
+        if await self._fail_dispatch_for_missing_capabilities(plan_public_id, plan):
+            return None
+        if await self._cancel_dispatch_for_closed_cycle(plan_public_id, plan):
+            return None
+        if plan["status"] == ExecutionPlanStatusEnum.ARMED:
+            await self._transition_plan(plan_public_id, ExecutionPlanStatusEnum.ACTIVE)
+            return self.plans.get(plan_public_id)
+        return plan
+
+    async def _fail_dispatch_for_missing_capabilities(
+        self,
+        plan_public_id: str,
+        plan: ExecutionPlanRow,
+    ) -> bool:
+        """Fail the plan when required capabilities are no longer available."""
+        missing_caps = await self._check_capabilities(
+            plan["plan_type"], plan["exchange"], plan["instrument_public_id"]
+        )
+        if not missing_caps:
+            return False
+        logger.error(
+            "Fire-time capability check failed for plan {}: missing {}",
+            plan_public_id,
+            missing_caps,
+        )
+        await self._transition_plan(
+            plan_public_id,
+            ExecutionPlanStatusEnum.FAILED,
+            f"Capability revoked: {missing_caps}",
+        )
+        return True
+
+    async def _cancel_dispatch_for_closed_cycle(
+        self,
+        plan_public_id: str,
+        plan: ExecutionPlanRow,
+    ) -> bool:
+        """Cancel the plan when its attached position cycle has already closed."""
+        cycle_pid = plan.get("position_cycle_public_id")
+        if not isinstance(cycle_pid, str):
+            return False
+        cycle_open = await self._is_cycle_open(cycle_pid)
+        if cycle_open:
+            return False
+        logger.info(
+            "Cycle {} closed before dispatch for plan {}, cancelling",
+            cycle_pid,
+            plan_public_id,
+        )
+        await self._transition_plan(
+            plan_public_id,
+            ExecutionPlanStatusEnum.CANCELLED,
+            "cycle_closed_externally",
+        )
+        await self._log_decision(
+            plan_public_id=plan_public_id,
+            decision_type="cycle_closed_externally",
+            trigger_type="dispatch",
+            reason=f"Cycle {cycle_pid} closed before command dispatch",
+            importance="action",
+            new_status=ExecutionPlanStatusEnum.CANCELLED,
+        )
+        return True
 
     async def _log_decision(
         self,
@@ -827,36 +856,14 @@ class PlanExecutorService(RegisterableProcess):
         logger.info("PlanExecutorService: starting listen loop")
         try:
             while self._running:
-                try:
-                    topic_bytes, msg_bytes = await self._subscriber.recv_multipart()
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    logger.error("PlanExecutorService: socket recv failed: {}", exc)
-                    await asyncio.sleep(0.1)
+                frame = await self._receive_message_frame()
+                if frame is None:
                     continue
-                topic = topic_bytes.decode() if isinstance(topic_bytes, bytes) else str(topic_bytes)
-                payload = msg_bytes.decode() if isinstance(msg_bytes, bytes) else str(msg_bytes)
-                try:
-                    msg = parse_message(payload)
-                except MessageParseError as exc:
-                    logger.debug("PlanExecutorService: cannot parse message on {}: {}", topic, exc)
+                topic, payload = frame
+                msg = self._parse_incoming_message(topic, payload)
+                if msg is None:
                     continue
-                try:
-                    if isinstance(msg, ExecutionData):
-                        await self._handle_execution(msg)
-                    elif isinstance(msg, OrderData):
-                        await self._handle_order_status(msg)
-                    elif isinstance(msg, TickData):
-                        await self._handle_tick(topic, msg)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    logger.error(
-                        "PlanExecutorService: handler failed for topic {}: {}",
-                        topic,
-                        exc,
-                    )
+                await self._dispatch_incoming_message(topic, msg)
         except asyncio.CancelledError:
             logger.info("PlanExecutorService: listen loop cancelled")
             raise
@@ -871,35 +878,67 @@ class PlanExecutorService(RegisterableProcess):
             logger.info("PlanExecutorService: checkpoint loop cancelled")
             raise
 
+    async def _receive_message_frame(self) -> tuple[str, str] | None:
+        """Receive and normalize one subscriber frame, retrying on socket failures."""
+        if self._subscriber is None:
+            return None
+        try:
+            topic_bytes, msg_bytes = await self._subscriber.recv_multipart()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("PlanExecutorService: socket recv failed: {}", exc)
+            await asyncio.sleep(0.1)
+            return None
+        topic = topic_bytes.decode() if isinstance(topic_bytes, bytes) else str(topic_bytes)
+        payload = msg_bytes.decode() if isinstance(msg_bytes, bytes) else str(msg_bytes)
+        return topic, payload
+
+    def _parse_incoming_message(
+        self,
+        topic: str,
+        payload: str,
+    ) -> ExecutionData | OrderData | TickData | None:
+        """Parse one inbound payload into a typed message object."""
+        try:
+            parsed = parse_message(payload)
+        except MessageParseError as exc:
+            logger.debug("PlanExecutorService: cannot parse message on {}: {}", topic, exc)
+            return None
+        if isinstance(parsed, (ExecutionData, OrderData, TickData)):
+            return parsed
+        return None
+
+    async def _dispatch_incoming_message(
+        self,
+        topic: str,
+        msg: ExecutionData | OrderData | TickData,
+    ) -> None:
+        """Route one parsed message to the appropriate plan handler."""
+        try:
+            if isinstance(msg, ExecutionData):
+                await self._handle_execution(msg)
+            elif isinstance(msg, OrderData):
+                await self._handle_order_status(msg)
+            elif isinstance(msg, TickData):
+                await self._handle_tick(topic, msg)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "PlanExecutorService: handler failed for topic {}: {}",
+                topic,
+                exc,
+            )
+
     async def _clock_loop(self) -> None:
         """1Hz clock dispatch to evaluators with drift compensation."""
         try:
             while self._running:
                 t0 = asyncio.get_event_loop().time()
                 now = datetime.now(UTC)
-                for public_id, plan in tuple(self.plans.items()):
-                    if plan["status"] in _TERMINAL_STATUSES:
-                        continue
-                    if plan["status"] == ExecutionPlanStatusEnum.PAUSED:
-                        continue
-                    evaluator = self.evaluators.get(public_id)
-                    if evaluator is None:
-                        continue
-                    try:
-                        commands = await evaluator.on_clock(plan, now)
-                    except Exception as exc:
-                        logger.error("on_clock failed for plan {}: {}", public_id, exc)
-                        continue
-                    if commands:
-                        try:
-                            async with self._get_plan_lock(public_id):
-                                await self._dispatch_commands(public_id, commands)
-                        except Exception as exc:
-                            logger.error("dispatch failed for plan {} on clock: {}", public_id, exc)
-                try:
-                    await self._sweep_cycle_closures()
-                except Exception as exc:
-                    logger.error("Cycle closure sweep failed: {}", exc)
+                await self._dispatch_clock_commands(now)
+                await self._sweep_cycle_closures_safely()
                 elapsed = asyncio.get_event_loop().time() - t0
                 await asyncio.sleep(max(0.0, 1.0 - elapsed))
         except asyncio.CancelledError:
@@ -917,66 +956,40 @@ class PlanExecutorService(RegisterableProcess):
         Args:
             execution: Incoming execution event.
         """
-        plan_public_id = self._client_order_id_index.get(execution.client_order_id)
-        if plan_public_id is None:
+        execution_target = self._resolve_execution_target(execution)
+        if execution_target is None:
             return
-        plan = self.plans.get(plan_public_id)
-        if plan is None:
-            return
-        if plan["status"] in _TERMINAL_STATUSES:
-            return
-        existing_filled = float(plan.get("filled_quantity", 0.0))
-        incoming_cumulative = float(execution.size)
-        if incoming_cumulative <= existing_filled + 1e-12:
-            return
-        evaluator = self.evaluators.get(plan_public_id)
-        commands: list[JsonObject] = []
-        if evaluator is not None:
-            try:
-                commands = await evaluator.on_execution(plan, execution)
-            except Exception as exc:
-                logger.error("on_execution failed for plan {}: {}", plan_public_id, exc)
-        if commands:
-            try:
-                async with self._get_plan_lock(plan_public_id):
-                    await self._dispatch_commands(plan_public_id, commands)
-            except Exception as exc:
-                logger.error("dispatch failed for plan {} on execution: {}", plan_public_id, exc)
-        if self.plans.get(plan_public_id) is None:
-            return
-        new_filled = incoming_cumulative
-        total = float(plan["total_quantity"])
-        qty_complete = new_filled + 1e-9 >= total
-        venue_filled = execution.status == FillStatusEnum.FILLED
-        is_complete = qty_complete or venue_filled
-        new_status = (
-            ExecutionPlanStatusEnum.COMPLETED if is_complete else ExecutionPlanStatusEnum.ACTIVE
+        plan_public_id, plan, incoming_cumulative = execution_target
+        commands = await self._run_execution_evaluator(plan_public_id, plan, execution)
+        await self._dispatch_commands_safely(
+            plan_public_id=plan_public_id,
+            commands=commands,
+            trigger="execution",
         )
-        now = datetime.now(UTC)
-        try:
-            await self.repository.update_execution_plan_status(
-                public_id=plan_public_id,
-                new_status=new_status,
-                bus_time=now,
-                session_id=self.tracker.session_id,
-                sequence_id=self.tracker.next_sequence("plan_fills"),
-                filled_quantity=new_filled,
-                completed_at=now if is_complete else None,
-                last_evaluated_at=now,
-            )
-        except Exception as exc:
-            logger.error(
-                "PlanExecutorService: failed to update plan {} on fill: {}",
-                plan_public_id,
-                exc,
-            )
+        refreshed_plan = self.plans.get(plan_public_id)
+        if refreshed_plan is None:
             return
-        plan_mut: dict[str, Any] = dict(plan)
-        plan_mut["filled_quantity"] = new_filled
-        plan_mut["status"] = new_status
-        if is_complete:
-            plan_mut["completed_at"] = now
-        self.plans[plan_public_id] = cast(ExecutionPlanRow, plan_mut)
+        new_filled, total, is_complete, new_status = self._classify_fill_update(
+            refreshed_plan,
+            incoming_cumulative,
+            execution.status,
+        )
+        now = await self._persist_fill_update(
+            plan_public_id=plan_public_id,
+            new_status=new_status,
+            new_filled=new_filled,
+            is_complete=is_complete,
+        )
+        if now is None:
+            return
+        self._apply_fill_update_locally(
+            plan_public_id=plan_public_id,
+            plan=refreshed_plan,
+            new_filled=new_filled,
+            new_status=new_status,
+            is_complete=is_complete,
+            completed_at=now,
+        )
         logger.info(
             "PlanExecutorService: plan {} filled {}/{} → {}",
             plan_public_id,
@@ -1061,28 +1074,196 @@ class PlanExecutorService(RegisterableProcess):
         now = datetime.now(UTC)
         for public_id in tuple(plan_ids):
             plan = self.plans.get(public_id)
-            if plan is None:
+            if not self._is_tick_dispatchable(plan):
                 continue
-            if plan["status"] in _TERMINAL_STATUSES:
+            active_plan = cast(ExecutionPlanRow, plan)
+            commands = await self._run_tick_evaluator(public_id, active_plan, tick)
+            if commands is None:
                 continue
-            if plan["status"] == ExecutionPlanStatusEnum.PAUSED:
-                continue
-            evaluator = self.evaluators.get(public_id)
-            if evaluator is None:
-                continue
-            commands: list[JsonObject] = []
-            try:
-                commands = await evaluator.on_tick(plan, tick)
-            except Exception as exc:
-                logger.error("on_tick failed for plan {}: {}", public_id, exc)
-                continue
-            if commands:
-                try:
-                    async with self._get_plan_lock(public_id):
-                        await self._dispatch_commands(public_id, commands)
-                except Exception as exc:
-                    logger.error("dispatch failed for plan {} on tick: {}", public_id, exc)
+            await self._dispatch_commands_safely(
+                plan_public_id=public_id,
+                commands=commands,
+                trigger="tick",
+            )
             self._last_tick_timestamps[public_id] = now
+
+    def _resolve_execution_target(
+        self,
+        execution: ExecutionData,
+    ) -> tuple[str, ExecutionPlanRow, float] | None:
+        """Return the active plan targeted by a cumulative execution update."""
+        plan_public_id = self._client_order_id_index.get(execution.client_order_id)
+        if plan_public_id is None:
+            return None
+        plan = self.plans.get(plan_public_id)
+        if plan is None:
+            return None
+        if plan["status"] in _TERMINAL_STATUSES:
+            return None
+        incoming_cumulative = float(execution.size)
+        existing_filled = float(plan.get("filled_quantity", 0.0))
+        if incoming_cumulative <= existing_filled + 1e-12:
+            return None
+        return plan_public_id, plan, incoming_cumulative
+
+    async def _run_execution_evaluator(
+        self,
+        plan_public_id: str,
+        plan: ExecutionPlanRow,
+        execution: ExecutionData,
+    ) -> list[JsonObject]:
+        """Run the plan evaluator for an execution event and swallow handler errors."""
+        evaluator = self.evaluators.get(plan_public_id)
+        if evaluator is None:
+            return []
+        try:
+            return await evaluator.on_execution(plan, execution)
+        except Exception as exc:
+            logger.error("on_execution failed for plan {}: {}", plan_public_id, exc)
+            return []
+
+    async def _dispatch_commands_safely(
+        self,
+        *,
+        plan_public_id: str,
+        commands: list[JsonObject],
+        trigger: str,
+    ) -> None:
+        """Dispatch evaluator-emitted commands without aborting caller flow."""
+        if not commands:
+            return
+        try:
+            async with self._get_plan_lock(plan_public_id):
+                await self._dispatch_commands(plan_public_id, commands)
+        except Exception as exc:
+            logger.error("dispatch failed for plan {} on {}: {}", plan_public_id, trigger, exc)
+
+    @staticmethod
+    def _classify_fill_update(
+        plan: ExecutionPlanRow,
+        incoming_cumulative: float,
+        execution_status: str,
+    ) -> tuple[float, float, bool, str]:
+        """Classify the next plan status implied by a cumulative fill update."""
+        new_filled = incoming_cumulative
+        total = float(plan["total_quantity"])
+        qty_complete = new_filled + 1e-9 >= total
+        venue_filled = execution_status == FillStatusEnum.FILLED
+        is_complete = qty_complete or venue_filled
+        new_status = (
+            ExecutionPlanStatusEnum.COMPLETED if is_complete else ExecutionPlanStatusEnum.ACTIVE
+        )
+        return new_filled, total, is_complete, new_status
+
+    async def _persist_fill_update(
+        self,
+        *,
+        plan_public_id: str,
+        new_status: str,
+        new_filled: float,
+        is_complete: bool,
+    ) -> datetime | None:
+        """Persist the fill-driven status transition and return the applied timestamp."""
+        now = datetime.now(UTC)
+        try:
+            await self.repository.update_execution_plan_status(
+                public_id=plan_public_id,
+                new_status=new_status,
+                bus_time=now,
+                session_id=self.tracker.session_id,
+                sequence_id=self.tracker.next_sequence("plan_fills"),
+                filled_quantity=new_filled,
+                completed_at=now if is_complete else None,
+                last_evaluated_at=now,
+            )
+        except Exception as exc:
+            logger.error(
+                "PlanExecutorService: failed to update plan {} on fill: {}",
+                plan_public_id,
+                exc,
+            )
+            return None
+        return now
+
+    def _apply_fill_update_locally(
+        self,
+        *,
+        plan_public_id: str,
+        plan: ExecutionPlanRow,
+        new_filled: float,
+        new_status: str,
+        is_complete: bool,
+        completed_at: datetime,
+    ) -> None:
+        """Mirror a persisted fill transition into the in-memory plan cache."""
+        plan_mut: dict[str, Any] = dict(plan)
+        plan_mut["filled_quantity"] = new_filled
+        plan_mut["status"] = new_status
+        if is_complete:
+            plan_mut["completed_at"] = completed_at
+        self.plans[plan_public_id] = cast(ExecutionPlanRow, plan_mut)
+
+    @staticmethod
+    def _is_tick_dispatchable(plan: ExecutionPlanRow | None) -> bool:
+        """Return whether a plan should receive on_tick evaluation."""
+        if plan is None:
+            return False
+        if plan["status"] in _TERMINAL_STATUSES:
+            return False
+        return plan["status"] != ExecutionPlanStatusEnum.PAUSED
+
+    async def _run_tick_evaluator(
+        self,
+        public_id: str,
+        plan: ExecutionPlanRow,
+        tick: TickData,
+    ) -> list[JsonObject] | None:
+        """Run the plan evaluator for a tick and swallow handler errors."""
+        evaluator = self.evaluators.get(public_id)
+        if evaluator is None:
+            return None
+        try:
+            return await evaluator.on_tick(plan, tick)
+        except Exception as exc:
+            logger.error("on_tick failed for plan {}: {}", public_id, exc)
+            return None
+
+    async def _dispatch_clock_commands(self, now: datetime) -> None:
+        """Run on_clock across runnable plans and dispatch emitted commands."""
+        for public_id, plan in tuple(self.plans.items()):
+            if not self._is_tick_dispatchable(plan):
+                continue
+            commands = await self._run_clock_evaluator(public_id, plan, now)
+            if commands is None:
+                continue
+            await self._dispatch_commands_safely(
+                plan_public_id=public_id,
+                commands=commands,
+                trigger="clock",
+            )
+
+    async def _run_clock_evaluator(
+        self,
+        public_id: str,
+        plan: ExecutionPlanRow,
+        now: datetime,
+    ) -> list[JsonObject] | None:
+        """Run the plan evaluator for a clock tick and swallow handler errors."""
+        evaluator = self.evaluators.get(public_id)
+        if evaluator is None:
+            return None
+        try:
+            return await evaluator.on_clock(plan, now)
+        except Exception as exc:
+            logger.error("on_clock failed for plan {}: {}", public_id, exc)
+            return None
+
+    async def _sweep_cycle_closures_safely(self) -> None:
+        """Run cycle-closure sweep without aborting the clock loop on failure."""
+        try:
+            await self._sweep_cycle_closures()
+        except Exception as exc:
+            logger.error("Cycle closure sweep failed: {}", exc)
 
     async def _write_checkpoints(self) -> None:
         """Persist evaluator state for all active plans."""

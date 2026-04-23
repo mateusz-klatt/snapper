@@ -1019,7 +1019,7 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        get: Operations["get_underlyings_api_underlyings_get"];
+        get: Operations["_get_underlyings_api_underlyings_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1035,7 +1035,7 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        get: Operations["get_underlying_instruments_api_underlyings__ticker__instruments_get"];
+        get: Operations["_get_underlying_instruments_api_underlyings__ticker__instruments_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1051,7 +1051,7 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        get: Operations["get_front_month_api_underlyings__ticker__front_month_get"];
+        get: Operations["_get_front_month_api_underlyings__ticker__front_month_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1067,7 +1067,7 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        get: Operations["get_contracts_api_underlyings__ticker__contracts_get"];
+        get: Operations["_get_contracts_api_underlyings__ticker__contracts_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1083,7 +1083,7 @@ export type Paths = {
             path?: never;
             cookie?: never;
         };
-        get: Operations["get_continuous_series_api_underlyings__ticker__continuous_get"];
+        get: Operations["_get_continuous_series_api_underlyings__ticker__continuous_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -5345,7 +5345,7 @@ export interface Operations {
             };
         };
     };
-    get_underlyings_api_underlyings_get: {
+    _get_underlyings_api_underlyings_get: {
         parameters: {
             query?: {
                 as_of?: string | null;
@@ -5380,7 +5380,7 @@ export interface Operations {
             };
         };
     };
-    get_underlying_instruments_api_underlyings__ticker__instruments_get: {
+    _get_underlying_instruments_api_underlyings__ticker__instruments_get: {
         parameters: {
             query?: {
                 as_of?: string | null;
@@ -5424,7 +5424,7 @@ export interface Operations {
             };
         };
     };
-    get_front_month_api_underlyings__ticker__front_month_get: {
+    _get_front_month_api_underlyings__ticker__front_month_get: {
         parameters: {
             query?: {
                 as_of?: string | null;
@@ -5469,7 +5469,7 @@ export interface Operations {
             };
         };
     };
-    get_contracts_api_underlyings__ticker__contracts_get: {
+    _get_contracts_api_underlyings__ticker__contracts_get: {
         parameters: {
             query?: {
                 as_of?: string | null;
@@ -5515,7 +5515,7 @@ export interface Operations {
             };
         };
     };
-    get_continuous_series_api_underlyings__ticker__continuous_get: {
+    _get_continuous_series_api_underlyings__ticker__continuous_get: {
         parameters: {
             query: {
                 exchange: string;

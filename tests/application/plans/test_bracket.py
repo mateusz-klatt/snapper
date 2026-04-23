@@ -6,6 +6,7 @@ from datetime import datetime
 import pytest
 
 from snapper.application.plans.bracket import BracketEvaluator
+from snapper.application.plans.bracket import _triggered_leg_for_price
 from snapper.core.json_types import JsonObject
 from snapper.data.repository_types import ExecutionPlanRow
 from snapper.messaging.schemas.data import ExecutionData
@@ -201,6 +202,31 @@ class TestBracketOnTick:
         assert cmd["quantity"] == 2.5
         assert cmd["price"] is None
         assert cmd["reduce_only"] is True
+
+
+class TestTriggeredLegForPrice:
+    """Tests for the extracted trigger-leg helper."""
+
+    @pytest.mark.parametrize(
+        ("side", "stop_loss", "take_profit", "last_price", "expected"),
+        [
+            ("buy", 48_000.0, 52_000.0, 47_999.0, "sl_hit"),
+            ("buy", 48_000.0, 52_000.0, 52_001.0, "tp_hit"),
+            ("sell", 52_000.0, 48_000.0, 52_001.0, "sl_hit"),
+            ("sell", 52_000.0, 48_000.0, 47_999.0, "tp_hit"),
+            ("buy", 48_000.0, 52_000.0, 50_000.0, None),
+        ],
+    )
+    def test_returns_expected_leg(
+        self,
+        side: str,
+        stop_loss: float | None,
+        take_profit: float | None,
+        last_price: float,
+        expected: str | None,
+    ) -> None:
+        """Helper returns the expected trigger result for each side/price case."""
+        assert _triggered_leg_for_price(side, stop_loss, take_profit, last_price) == expected
 
 
 class TestBracketOnExecution:

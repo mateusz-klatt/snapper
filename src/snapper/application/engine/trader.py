@@ -16,6 +16,7 @@ import contextlib
 import json
 import time
 from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -44,6 +45,7 @@ from snapper.application.trade.balance_service import BalanceService
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.outbox import OutboxDispatcher
 from snapper.application.trade.reconciler import ReconciliationLoop
+from snapper.application.trade.trade_service import ShardState
 from snapper.application.trade.trade_service import TradeService
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_bootstrap_settings
@@ -63,8 +65,11 @@ from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import get_repository
 from snapper.data.repository_types import AccrualLedgerInsertRow
 from snapper.data.repository_types import ExecutionRow
+from snapper.data.repository_types import OrderRow
 from snapper.data.repository_types import PositionCycleInsertRow
+from snapper.data.repository_types import PositionCycleRow
 from snapper.data.repository_types import TradeCommandRow
+from snapper.data.repository_types import TradeProjectionCheckpointRow
 from snapper.data.repository_types import VenueEventRow
 from snapper.infrastructure.symbols.functions import is_tradeable
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
@@ -151,6 +156,19 @@ _FUNDING_TYPE_TO_ACCRUAL_TYPE: dict[str, str] = {
     "spot_margin_rollover": "rollover",
     "perpetual_funding": "funding",
 }
+
+
+@dataclass(frozen=True)
+class SignalRoutingContext:
+    """Parsed routing data for one signal delivery."""
+
+    exchange: str
+    mode: str
+    strategy_tag: str | None
+    wallet_public_id: str
+    operator_public_id: str
+    engine_key: str
+    shard_key: str
 
 
 @register_process(
@@ -498,143 +516,215 @@ class TraderCoordinator(RegisterableProcess):
             return set()
 
         recovered: set[str] = set()
-        for cp in checkpoints:
-            shard_key = cp["shard_key"]
-            if self._ownership is not None and not self._ownership.owns(shard_key):
-                logger.debug(
-                    "ZMQTrader: skipping checkpoint for foreign shard {} (owner {}/{})",
-                    shard_key,
-                    self._ownership.instance_id,
-                    self._ownership.instance_count,
-                )
-                continue
-            parsed_shard = self._parse_shard_key(shard_key)
-            if parsed_shard is None:
-                logger.warning(f"ZMQTrader: Invalid shard_key format: {shard_key}, skipping")
-                continue
-            exchange_str, instrument, mode_str, wallet_short, strategy_tag = parsed_shard
-            wallet_public_id = (
-                self._wallet_short_to_id.get(wallet_short, "") if wallet_short else ""
-            )
-            if wallet_short and not wallet_public_id:
-                logger.warning(
-                    f"ZMQTrader: Checkpoint shard_key {shard_key} carries unknown "
-                    f"wallet_short '{wallet_short}' (wallet credential rotated, "
-                    f"deactivated, or wallet_credentials cache stale). Recovering "
-                    f"with empty wallet attribution; consider clearing this stale "
-                    f"checkpoint via the recovery tooling once the wallet status "
-                    f"is confirmed."
-                )
-
-            valid_exchanges = get_args(OrderExchange)
-            if exchange_str not in valid_exchanges:
-                logger.warning(f"ZMQTrader: Checkpoint exchange {exchange_str} not valid, skipping")
-                continue
-
-            watermark = cp["last_venue_event_id"]
-            if watermark is None:
-                logger.info(
-                    f"ZMQTrader: Checkpoint for {shard_key} has no watermark, "
-                    f"falling back to full replay"
-                )
-                continue
-            try:
-                delta_events = await self.repository.get_venue_events_after(
-                    shard_key=shard_key, after_id=watermark
-                )
-            except Exception as e:
-                logger.error(
-                    f"ZMQTrader: Failed delta replay for {shard_key}: {e}, "
-                    f"will fall back to full replay"
-                )
-                continue
-
-            seen_ids: OrderedDict[str, None] = OrderedDict.fromkeys(
-                json.loads(cp["seen_exec_ids"] or "[]")
-            )
-            open_cmd_ids: list[str] = json.loads(cp["open_command_ids"] or "[]")
-
-            self.trade_service.restore_from_checkpoint(
-                shard_key=shard_key,
-                position_qty=cp["position_qty"],
-                entry_price=cp["entry_price"],
-                cash=cp["cash"],
-                peak_equity=cp["peak_equity"],
-                realized_pnl=cp["realized_pnl"],
-                turnover=cp["turnover"],
-                last_venue_event_id=watermark,
-                open_command_ids=open_cmd_ids,
-                seen_exec_ids=seen_ids,
-                position_opened_at=cp.get("position_opened_at"),
-            )
-            for event in delta_events:
-                self.trade_service.apply_venue_event(event)
-            if delta_events:
-                logger.info(f"ZMQTrader: Replayed {len(delta_events)} delta events for {shard_key}")
-
-            checkpoint_at = cp.get("checkpoint_at")
-            if checkpoint_at is not None:
-                try:
-                    inst_pid = await self.repository.get_instrument_public_id_by_symbol(
-                        native_symbol=instrument, exchange=exchange_str, as_of=now
-                    )
-                    if inst_pid is not None:
-                        pending_accruals = await self.repository.get_accruals(
-                            instrument_public_id=inst_pid,
-                            mode=mode_str,
-                            range_start=checkpoint_at,
-                            range_end=now,
-                            wallet_public_id=wallet_public_id,
-                        )
-                        if pending_accruals:
-                            self.trade_service.replay_funding_accruals(shard_key, pending_accruals)
-                            logger.info(
-                                "ZMQTrader: Replayed {} accruals for {}",
-                                len(pending_accruals),
-                                shard_key,
-                            )
-                except Exception:
-                    logger.opt(exception=True).warning(
-                        "ZMQTrader: Accrual replay failed for {}", shard_key
-                    )
-
-            shard = self.trade_service._shards[shard_key]
-            self.balance_service.restore_from_checkpoint(
-                shard_key=shard_key,
-                cash=shard.cash,
-                position_qty=shard.position.position_qty,
-                entry_price=shard.position.entry_price,
-                peak_equity=shard.peak_equity,
-                realized_pnl=shard.position.realized_pnl,
-            )
-
-            engine = await self._create_engine_for_recovery(
-                instrument,
-                exchange_str,
-                strategy_tag=strategy_tag,
-                wallet_public_id=wallet_public_id,
-                operator_public_id=cp.get("operator_public_id") or "",
-            )
-            if engine is None:
-                continue
-            self._restore_engine_from_shard(engine, shard_key, instrument)
-
-            engine_key = self._build_engine_key(
-                instrument,
-                exchange_str,
-                strategy_tag if strategy_tag else mode_str,
-                wallet_public_id,
-            )
-            self.engines[engine_key] = engine
-            self.last_signal_time[engine_key] = time.time()
-            recovered.add(engine_key)
-            logger.info(
-                f"ZMQTrader: Recovered {engine_key} from checkpoint: "
-                f"pos={engine.position_qty:.6f}, "
-                f"entry={engine.entry_price}, "
-                f"cash={engine.portfolio.cash:.2f}"
-            )
+        for checkpoint in checkpoints:
+            engine_key = await self._recover_checkpoint_row(checkpoint, now)
+            if engine_key is not None:
+                recovered.add(engine_key)
         return recovered
+
+    async def _recover_checkpoint_row(
+        self,
+        checkpoint: TradeProjectionCheckpointRow,
+        now: datetime,
+    ) -> str | None:
+        """Recover one checkpoint-backed shard, or return ``None`` to full-replay it."""
+        shard_key = checkpoint["shard_key"]
+        if self._ownership is not None and not self._ownership.owns(shard_key):
+            logger.debug(
+                "ZMQTrader: skipping checkpoint for foreign shard {} (owner {}/{})",
+                shard_key,
+                self._ownership.instance_id,
+                self._ownership.instance_count,
+            )
+            return None
+        parsed_shard = self._parse_shard_key(shard_key)
+        if parsed_shard is None:
+            logger.warning(f"ZMQTrader: Invalid shard_key format: {shard_key}, skipping")
+            return None
+        exchange_str, instrument, mode_str, wallet_short, strategy_tag = parsed_shard
+        if exchange_str not in get_args(OrderExchange):
+            logger.warning(f"ZMQTrader: Checkpoint exchange {exchange_str} not valid, skipping")
+            return None
+        wallet_public_id = self._resolve_checkpoint_wallet_public_id(shard_key, wallet_short)
+        delta_events = await self._load_checkpoint_delta_events(checkpoint, shard_key)
+        if delta_events is None:
+            return None
+        self._restore_trade_service_from_checkpoint(checkpoint, shard_key, delta_events)
+        await self._replay_checkpoint_accruals(
+            checkpoint=checkpoint,
+            now=now,
+            instrument=instrument,
+            exchange_str=exchange_str,
+            mode_str=mode_str,
+            wallet_public_id=wallet_public_id,
+            shard_key=shard_key,
+        )
+        self._restore_balance_service_from_shard(shard_key)
+        engine = await self._create_engine_for_recovery(
+            instrument,
+            exchange_str,
+            strategy_tag=strategy_tag,
+            wallet_public_id=wallet_public_id,
+            operator_public_id=checkpoint.get("operator_public_id") or "",
+        )
+        if engine is None:
+            return None
+        self._restore_engine_from_shard(engine, shard_key, instrument)
+        engine_key = self._build_engine_key(
+            instrument,
+            exchange_str,
+            strategy_tag if strategy_tag else mode_str,
+            wallet_public_id,
+        )
+        self._register_recovered_engine(engine_key, engine)
+        logger.info(
+            f"ZMQTrader: Recovered {engine_key} from checkpoint: "
+            f"pos={engine.position_qty:.6f}, "
+            f"entry={engine.entry_price}, "
+            f"cash={engine.portfolio.cash:.2f}"
+        )
+        return engine_key
+
+    def _resolve_checkpoint_wallet_public_id(self, shard_key: str, wallet_short: str) -> str:
+        """Resolve checkpoint wallet attribution from the cached short-id map."""
+        if not wallet_short:
+            return ""
+        wallet_public_id = self._wallet_short_to_id.get(wallet_short, "")
+        if wallet_public_id:
+            return wallet_public_id
+        logger.warning(
+            f"ZMQTrader: Checkpoint shard_key {shard_key} carries unknown "
+            f"wallet_short '{wallet_short}' (wallet credential rotated, "
+            f"deactivated, or wallet_credentials cache stale). Recovering "
+            f"with empty wallet attribution; consider clearing this stale "
+            f"checkpoint via the recovery tooling once the wallet status "
+            f"is confirmed."
+        )
+        return ""
+
+    async def _load_checkpoint_delta_events(
+        self,
+        checkpoint: TradeProjectionCheckpointRow,
+        shard_key: str,
+    ) -> list[VenueEventRow] | None:
+        """Load post-checkpoint venue events, or ``None`` if full replay should take over."""
+        watermark = checkpoint["last_venue_event_id"]
+        if watermark is None:
+            logger.info(
+                f"ZMQTrader: Checkpoint for {shard_key} has no watermark, "
+                f"falling back to full replay"
+            )
+            return None
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return None
+        try:
+            return await self.repository.get_venue_events_after(
+                shard_key=shard_key,
+                after_id=watermark,
+            )
+        except Exception as e:
+            logger.error(
+                f"ZMQTrader: Failed delta replay for {shard_key}: {e}, "
+                f"will fall back to full replay"
+            )
+            return None
+
+    def _restore_trade_service_from_checkpoint(
+        self,
+        checkpoint: TradeProjectionCheckpointRow,
+        shard_key: str,
+        delta_events: list[VenueEventRow],
+    ) -> None:
+        """Restore TradeService state from one checkpoint plus delta venue events."""
+        seen_exec_ids_raw: list[object] = json.loads(checkpoint["seen_exec_ids"] or "[]")
+        open_command_ids_raw: list[object] = json.loads(checkpoint["open_command_ids"] or "[]")
+        seen_ids: OrderedDict[str, None] = OrderedDict.fromkeys(
+            exec_id for exec_id in seen_exec_ids_raw if isinstance(exec_id, str)
+        )
+        open_command_ids = [
+            command_public_id
+            for command_public_id in open_command_ids_raw
+            if isinstance(command_public_id, str)
+        ]
+        self.trade_service.restore_from_checkpoint(
+            shard_key=shard_key,
+            position_qty=checkpoint["position_qty"],
+            entry_price=checkpoint["entry_price"],
+            cash=checkpoint["cash"],
+            peak_equity=checkpoint["peak_equity"],
+            realized_pnl=checkpoint["realized_pnl"],
+            turnover=checkpoint["turnover"],
+            last_venue_event_id=checkpoint["last_venue_event_id"] or 0,
+            open_command_ids=open_command_ids,
+            seen_exec_ids=seen_ids,
+            position_opened_at=checkpoint.get("position_opened_at"),
+        )
+        for event in delta_events:
+            self.trade_service.apply_venue_event(event)
+        if delta_events:
+            logger.info(f"ZMQTrader: Replayed {len(delta_events)} delta events for {shard_key}")
+
+    async def _replay_checkpoint_accruals(
+        self,
+        *,
+        checkpoint: TradeProjectionCheckpointRow,
+        now: datetime,
+        instrument: str,
+        exchange_str: str,
+        mode_str: str,
+        wallet_public_id: str,
+        shard_key: str,
+    ) -> None:
+        """Replay persisted accruals between ``checkpoint_at`` and ``now``."""
+        checkpoint_at = checkpoint.get("checkpoint_at")
+        if checkpoint_at is None:
+            return
+        try:
+            instrument_public_id = await self.repository.get_instrument_public_id_by_symbol(
+                native_symbol=instrument,
+                exchange=exchange_str,
+                as_of=now,
+            )
+            if instrument_public_id is None:
+                return
+            pending_accruals = await self.repository.get_accruals(
+                instrument_public_id=instrument_public_id,
+                mode=mode_str,
+                range_start=checkpoint_at,
+                range_end=now,
+                wallet_public_id=wallet_public_id,
+            )
+            if not pending_accruals:
+                return
+            self.trade_service.replay_funding_accruals(shard_key, pending_accruals)
+            logger.info(
+                "ZMQTrader: Replayed {} accruals for {}",
+                len(pending_accruals),
+                shard_key,
+            )
+        except Exception:
+            logger.opt(exception=True).warning("ZMQTrader: Accrual replay failed for {}", shard_key)
+
+    def _restore_balance_service_from_shard(self, shard_key: str) -> None:
+        """Mirror the recovered TradeService shard into BalanceService."""
+        shard = self.trade_service._shards[shard_key]
+        self.balance_service.restore_from_checkpoint(
+            shard_key=shard_key,
+            cash=shard.cash,
+            position_qty=shard.position.position_qty,
+            entry_price=shard.position.entry_price,
+            peak_equity=shard.peak_equity,
+            realized_pnl=shard.position.realized_pnl,
+        )
+
+    def _register_recovered_engine(
+        self,
+        engine_key: str,
+        engine: TradingEngineService,
+    ) -> None:
+        """Register a recovered engine and refresh its liveness timestamp."""
+        self.engines[engine_key] = engine
+        self.last_signal_time[engine_key] = time.time()
 
     def _restore_engine_from_shard(
         self,
@@ -690,7 +780,6 @@ class TraderCoordinator(RegisterableProcess):
             All recovered execution rows.
         """
         skip_keys = checkpoint_recovered or set()
-        partitioned = self._ownership is not None and self._ownership.instance_count > 1
         try:
             executions = await self.repository.get_executions_for_recovery(as_of=now)
         except Exception as e:
@@ -699,71 +788,113 @@ class TraderCoordinator(RegisterableProcess):
         if not executions:
             logger.info("ZMQTrader: No executions to recover")
             return []
-        fills_by_key: dict[str, list[ExecutionRow]] = {}
-        wallet_for_key: dict[str, str] = {}
-        operator_for_key: dict[str, str] = {}
-        for exe in executions:
-            if partitioned and exe["exchange"] == ExchangeEnum.PAPER:
-                logger.debug(
-                    "ZMQTrader: skipping paper execution recovery under N>1 "
-                    "(strategy_tag unavailable): instrument={}",
-                    exe["instrument"],
-                )
-                continue
-            wallet_public_id = exe.get("wallet_public_id") or ""
-            recovery_shard_key = _compute_shard_key(
-                instrument=exe["instrument"],
-                exchange=cast(OrderExchange, exe["exchange"]),
-                mode=ExecutionModeEnum.LIVE,
-                wallet_public_id=wallet_public_id,
-                strategy_tag=None,
-            )
-            if self._ownership is not None and not self._ownership.owns(recovery_shard_key):
-                logger.debug(
-                    "ZMQTrader: skipping execution for foreign shard {} (owner {}/{})",
-                    recovery_shard_key,
-                    self._ownership.instance_id,
-                    self._ownership.instance_count,
-                )
-                continue
-            key = self._build_engine_key(
-                exe["instrument"], exe["exchange"], "live", wallet_public_id
-            )
-            fills_by_key.setdefault(key, []).append(exe)
-            wallet_for_key.setdefault(key, wallet_public_id)
-            operator_on_row = exe.get("operator_public_id") or ""
-            if operator_on_row and not operator_for_key.get(key):
-                operator_for_key[key] = operator_on_row
+        fills_by_key, wallet_for_key, operator_for_key = self._group_execution_recovery_rows(
+            executions
+        )
         for engine_key, fills in fills_by_key.items():
             if engine_key in skip_keys:
                 logger.debug(f"ZMQTrader: Skipping full replay for {engine_key} (checkpoint)")
                 continue
-            engine = await self._create_engine_for_recovery(
-                fills[0]["instrument"],
-                fills[0]["exchange"],
+            await self._recover_execution_group(
+                engine_key=engine_key,
+                fills=fills,
                 wallet_public_id=wallet_for_key.get(engine_key, ""),
                 operator_public_id=operator_for_key.get(engine_key, ""),
             )
-            if engine is None:
-                continue
-            shard_key = engine._shard_key
-            shard = self.trade_service._get_or_create_shard(shard_key)
-            start_id = shard.last_venue_event_id + 1
-            for offset, fill_row in enumerate(fills):
-                event = self._build_replay_venue_event(
-                    engine, fill_row, synthetic_id=start_id + offset
-                )
-                self.trade_service.apply_venue_event(event)
-            self._restore_engine_from_shard(engine, shard_key, engine.instrument)
-            self.engines[engine_key] = engine
-            self.last_signal_time[engine_key] = time.time()
-            logger.info(
-                f"ZMQTrader: Recovered {engine_key} via full-replay shadow: "
-                f"pos={engine.position_qty:.6f}, "
-                f"entry={engine.entry_price}, "
-                f"fills={len(fills)}"
-            )
         return executions
+
+    def _group_execution_recovery_rows(
+        self,
+        executions: list[ExecutionRow],
+    ) -> tuple[dict[str, list[ExecutionRow]], dict[str, str], dict[str, str]]:
+        """Group execution rows into engine recovery buckets."""
+        fills_by_key: dict[str, list[ExecutionRow]] = {}
+        wallet_for_key: dict[str, str] = {}
+        operator_for_key: dict[str, str] = {}
+        for execution in executions:
+            execution_group = self._classify_execution_recovery_row(execution)
+            if execution_group is None:
+                continue
+            engine_key, wallet_public_id, operator_public_id = execution_group
+            fills_by_key.setdefault(engine_key, []).append(execution)
+            wallet_for_key.setdefault(engine_key, wallet_public_id)
+            if operator_public_id and engine_key not in operator_for_key:
+                operator_for_key[engine_key] = operator_public_id
+        return fills_by_key, wallet_for_key, operator_for_key
+
+    def _classify_execution_recovery_row(
+        self,
+        execution: ExecutionRow,
+    ) -> tuple[str, str, str] | None:
+        """Return ``(engine_key, wallet_public_id, operator_public_id)`` for recovery."""
+        partitioned = self._ownership is not None and self._ownership.instance_count > 1
+        if partitioned and execution["exchange"] == ExchangeEnum.PAPER:
+            logger.debug(
+                "ZMQTrader: skipping paper execution recovery under N>1 "
+                "(strategy_tag unavailable): instrument={}",
+                execution["instrument"],
+            )
+            return None
+        wallet_public_id = execution.get("wallet_public_id") or ""
+        recovery_shard_key = _compute_shard_key(
+            instrument=execution["instrument"],
+            exchange=cast(OrderExchange, execution["exchange"]),
+            mode=ExecutionModeEnum.LIVE,
+            wallet_public_id=wallet_public_id,
+            strategy_tag=None,
+        )
+        if self._ownership is not None and not self._ownership.owns(recovery_shard_key):
+            logger.debug(
+                "ZMQTrader: skipping execution for foreign shard {} (owner {}/{})",
+                recovery_shard_key,
+                self._ownership.instance_id,
+                self._ownership.instance_count,
+            )
+            return None
+        engine_key = self._build_engine_key(
+            execution["instrument"],
+            execution["exchange"],
+            "live",
+            wallet_public_id,
+        )
+        operator_public_id = execution.get("operator_public_id") or ""
+        return engine_key, wallet_public_id, operator_public_id
+
+    async def _recover_execution_group(
+        self,
+        *,
+        engine_key: str,
+        fills: list[ExecutionRow],
+        wallet_public_id: str,
+        operator_public_id: str,
+    ) -> None:
+        """Replay one grouped execution bucket into TradeService and engine state."""
+        engine = await self._create_engine_for_recovery(
+            fills[0]["instrument"],
+            fills[0]["exchange"],
+            wallet_public_id=wallet_public_id,
+            operator_public_id=operator_public_id,
+        )
+        if engine is None:
+            return
+        shard_key = engine._shard_key
+        shard = self.trade_service._get_or_create_shard(shard_key)
+        start_id = shard.last_venue_event_id + 1
+        for offset, fill_row in enumerate(fills):
+            event = self._build_replay_venue_event(
+                engine,
+                fill_row,
+                synthetic_id=start_id + offset,
+            )
+            self.trade_service.apply_venue_event(event)
+        self._restore_engine_from_shard(engine, shard_key, engine.instrument)
+        self._register_recovered_engine(engine_key, engine)
+        logger.info(
+            f"ZMQTrader: Recovered {engine_key} via full-replay shadow: "
+            f"pos={engine.position_qty:.6f}, "
+            f"entry={engine.entry_price}, "
+            f"fills={len(fills)}"
+        )
 
     def _build_replay_venue_event(
         self,
@@ -826,98 +957,201 @@ class TraderCoordinator(RegisterableProcess):
 
     async def _recover_active_orders(self, now: datetime, executions: list[ExecutionRow]) -> None:
         """Process active orders across all exchanges."""
-        valid_exchanges = get_args(OrderExchange)
-        partitioned = self._ownership is not None and self._ownership.instance_count > 1
-        all_active: list[Any] = []
-        for exchange_str in valid_exchanges:
+        active_orders = await self._load_active_orders_for_recovery(now)
+        execution_fill_sizes = self._build_execution_fill_sizes(executions)
+        for db_order in active_orders:
+            await self._recover_active_order_row(db_order, execution_fill_sizes)
+
+    async def _load_active_orders_for_recovery(self, now: datetime) -> list[OrderRow]:
+        """Load active orders across all supported exchanges."""
+        active_orders: list[OrderRow] = []
+        for exchange_str in get_args(OrderExchange):
             try:
                 orders = await self.repository.get_active_orders_for_recovery(
-                    exchange=exchange_str, as_of=now
+                    exchange=exchange_str,
+                    as_of=now,
                 )
-                all_active.extend(orders)
+                active_orders.extend(orders)
             except Exception as e:
                 logger.error(f"ZMQTrader: Failed to query active orders for {exchange_str}: {e}")
-        for db_order in all_active:
-            instrument = db_order["instrument"]
-            exchange_str = db_order["exchange"]
-            if partitioned and exchange_str == ExchangeEnum.PAPER:
-                logger.debug(
-                    "ZMQTrader: skipping paper active-order recovery under N>1 "
-                    "(strategy_tag unavailable): instrument={}, order_public_id={}",
-                    instrument,
-                    db_order.get("order_public_id") or "<unknown>",
-                )
-                continue
-            order_wallet_public_id = db_order.get("wallet_public_id") or ""
-            order_operator_public_id = db_order.get("operator_public_id") or ""
-            if self._ownership is not None:
-                recovery_shard_key = _compute_shard_key(
-                    instrument=instrument,
-                    exchange=cast(OrderExchange, exchange_str),
-                    mode=ExecutionModeEnum.LIVE,
-                    wallet_public_id=order_wallet_public_id,
-                    strategy_tag=None,
-                )
-                if not self._ownership.owns(recovery_shard_key):
-                    logger.debug(
-                        "ZMQTrader: skipping active order for foreign shard {} (owner {}/{})",
-                        recovery_shard_key,
-                        self._ownership.instance_id,
-                        self._ownership.instance_count,
-                    )
-                    continue
-            key = self._build_engine_key(instrument, exchange_str, "live", order_wallet_public_id)
-            if key not in self.engines:
-                engine = await self._create_engine_for_recovery(
-                    instrument,
-                    exchange_str,
-                    wallet_public_id=order_wallet_public_id,
-                    operator_public_id=order_operator_public_id,
-                )
-                if engine is None:
-                    continue
-                self.engines[key] = engine
-                self.last_signal_time[key] = time.time()
-            engine = self.engines[key]
-            if not engine.operator_public_id and order_operator_public_id:
-                engine.operator_public_id = order_operator_public_id
-            elif (
-                engine.operator_public_id
-                and order_operator_public_id
-                and engine.operator_public_id != order_operator_public_id
-            ):
-                logger.warning(
-                    f"ZMQTrader: operator conflict on {key}: engine has "
-                    f"{engine.operator_public_id}, active order "
-                    f"{db_order.get('client_order_id')} has "
-                    f"{order_operator_public_id}; keeping existing engine "
-                    f"operator attribution. Investigate whether the two "
-                    f"orders belong to the same (wallet, instrument) but "
-                    f"different operators — this indicates a grant overlap "
-                    f"or a stale recovery row."
-                )
-            engine.order_in_flight = True
-            client_oid = db_order.get("client_order_id", "")
-            engine.pending_client_order_id = client_oid
-            engine._in_flight_since = time.monotonic()
-            self._order_shard_keys[client_oid] = engine._shard_key
-            db_filled = float(db_order.get("filled_size", 0.0))
-            exec_filled = sum(
-                e["size"] for e in executions if e.get("client_order_id") == client_oid
+        return active_orders
+
+    def _build_execution_fill_sizes(self, executions: list[ExecutionRow]) -> dict[str, float]:
+        """Sum replayed execution sizes by ``client_order_id``."""
+        fill_sizes: dict[str, float] = {}
+        for execution in executions:
+            client_order_id = execution["client_order_id"]
+            fill_sizes[client_order_id] = fill_sizes.get(client_order_id, 0.0) + execution["size"]
+        return fill_sizes
+
+    async def _recover_active_order_row(
+        self,
+        db_order: OrderRow,
+        execution_fill_sizes: dict[str, float],
+    ) -> None:
+        """Recover one active order row into engine state."""
+        active_order_group = self._classify_active_order_recovery_row(db_order)
+        if active_order_group is None:
+            return
+        engine_key, wallet_public_id, operator_public_id = active_order_group
+        engine = await self._get_or_create_active_order_engine(
+            engine_key=engine_key,
+            db_order=db_order,
+            wallet_public_id=wallet_public_id,
+            operator_public_id=operator_public_id,
+        )
+        if engine is None:
+            return
+        self._sync_active_order_operator(engine_key, engine, db_order, operator_public_id)
+        client_order_id = db_order["client_order_id"]
+        self._mark_order_in_flight(engine, client_order_id)
+        db_filled = float(db_order.get("filled_size", 0.0))
+        exec_filled = execution_fill_sizes.get(client_order_id, 0.0)
+        if db_filled > 0 and abs(db_filled - exec_filled) > 1e-9:
+            engine.read_only = True
+            logger.warning(
+                f"ZMQTrader: DEGRADED MODE for {engine_key} - fill gap detected: "
+                f"order filled_size={db_filled}, replayed executions={exec_filled}. "
+                f"Cost basis cannot be reconstructed. Manual resolution required."
             )
-            if db_filled > 0 and abs(db_filled - exec_filled) > 1e-9:
-                engine.read_only = True
-                logger.warning(
-                    f"ZMQTrader: DEGRADED MODE for {key} - fill gap detected: "
-                    f"order filled_size={db_filled}, replayed executions={exec_filled}. "
-                    f"Cost basis cannot be reconstructed. Manual resolution required."
-                )
-            else:
-                logger.info(
-                    f"ZMQTrader: Recovered in-flight order "
-                    f"{db_order.get('client_order_id')} for {key} "
-                    f"with fresh timeout window"
-                )
+            return
+        logger.info(
+            f"ZMQTrader: Recovered in-flight order "
+            f"{client_order_id} for {engine_key} "
+            f"with fresh timeout window"
+        )
+
+    def _classify_active_order_recovery_row(
+        self,
+        db_order: OrderRow,
+    ) -> tuple[str, str, str] | None:
+        """Return ``(engine_key, wallet_public_id, operator_public_id)`` for recovery."""
+        partitioned = self._ownership is not None and self._ownership.instance_count > 1
+        instrument = db_order["instrument"]
+        exchange_str = db_order["exchange"]
+        if partitioned and exchange_str == ExchangeEnum.PAPER:
+            logger.debug(
+                "ZMQTrader: skipping paper active-order recovery under N>1 "
+                "(strategy_tag unavailable): instrument={}, order_public_id={}",
+                instrument,
+                db_order.get("order_public_id") or "<unknown>",
+            )
+            return None
+        wallet_public_id = db_order.get("wallet_public_id") or ""
+        recovery_shard_key = _compute_shard_key(
+            instrument=instrument,
+            exchange=cast(OrderExchange, exchange_str),
+            mode=ExecutionModeEnum.LIVE,
+            wallet_public_id=wallet_public_id,
+            strategy_tag=None,
+        )
+        if self._ownership is not None and not self._ownership.owns(recovery_shard_key):
+            logger.debug(
+                "ZMQTrader: skipping active order for foreign shard {} (owner {}/{})",
+                recovery_shard_key,
+                self._ownership.instance_id,
+                self._ownership.instance_count,
+            )
+            return None
+        operator_public_id = db_order.get("operator_public_id") or ""
+        engine_key = self._build_engine_key(instrument, exchange_str, "live", wallet_public_id)
+        return engine_key, wallet_public_id, operator_public_id
+
+    async def _get_or_create_active_order_engine(
+        self,
+        *,
+        engine_key: str,
+        db_order: OrderRow,
+        wallet_public_id: str,
+        operator_public_id: str,
+    ) -> TradingEngineService | None:
+        """Reuse or create the engine that owns an active order row."""
+        engine = self.engines.get(engine_key)
+        if engine is not None:
+            return engine
+        engine = await self._create_engine_for_recovery(
+            db_order["instrument"],
+            db_order["exchange"],
+            wallet_public_id=wallet_public_id,
+            operator_public_id=operator_public_id,
+        )
+        if engine is None:
+            return None
+        self._register_recovered_engine(engine_key, engine)
+        return engine
+
+    def _sync_active_order_operator(
+        self,
+        engine_key: str,
+        engine: TradingEngineService,
+        db_order: OrderRow,
+        operator_public_id: str,
+    ) -> None:
+        """Backfill or validate operator attribution for a recovered active order."""
+        if not engine.operator_public_id and operator_public_id:
+            engine.operator_public_id = operator_public_id
+            return
+        if (
+            engine.operator_public_id
+            and operator_public_id
+            and engine.operator_public_id != operator_public_id
+        ):
+            logger.warning(
+                f"ZMQTrader: operator conflict on {engine_key}: engine has "
+                f"{engine.operator_public_id}, active order "
+                f"{db_order['client_order_id']} has "
+                f"{operator_public_id}; keeping existing engine "
+                f"operator attribution. Investigate whether the two "
+                f"orders belong to the same (wallet, instrument) but "
+                f"different operators — this indicates a grant overlap "
+                f"or a stale recovery row."
+            )
+
+    def _mark_order_in_flight(
+        self,
+        engine: TradingEngineService,
+        client_order_id: str,
+    ) -> None:
+        """Hydrate in-flight order state on a recovered engine."""
+        engine.order_in_flight = True
+        engine.pending_client_order_id = client_order_id
+        engine._in_flight_since = time.monotonic()
+        self._order_shard_keys[client_order_id] = engine._shard_key
+
+    def _build_position_cycle_insert_row(
+        self,
+        *,
+        engine: TradingEngineService,
+        instrument_public_id: str,
+        direction: str,
+        max_qty: float,
+        opened_at: datetime,
+        timestamp: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> PositionCycleInsertRow:
+        """Build a position-cycle insert payload from engine identity and fill state."""
+        return {
+            "instrument_public_id": instrument_public_id,
+            "exchange": str(engine.exchange),
+            "mode": str(engine.mode),
+            "shard_key": engine._shard_key,
+            "wallet_public_id": engine.wallet_public_id,
+            "operator_public_id": engine.operator_public_id or None,
+            "direction": direction,
+            "max_qty": max_qty,
+            "status": "open",
+            "opened_at": opened_at,
+            "opening_command_public_id": None,
+            "session_id": session_id,
+            "sequence_id": sequence_id,
+            "timestamp": timestamp,
+        }
+
+    @staticmethod
+    def _describe_position_cycle(position_qty: float) -> tuple[str, float]:
+        """Return the current direction label and absolute size."""
+        return ("long" if position_qty > 0 else "short", abs(position_qty))
 
     async def _reconcile_position_cycles(self) -> None:
         """Reconcile position_cycles rows against recovered engine state.
@@ -963,183 +1197,279 @@ class TraderCoordinator(RegisterableProcess):
         :meth:`_sync_position_cycle_on_fill` will retry the resolution.
         """
         for engine_key, engine in self.engines.items():
-            if not engine.wallet_public_id:
-                logger.warning(
-                    "ZMQTrader: position_cycle reconcile skipped "
-                    "(degraded identity) engine={} shard={}",
-                    engine_key,
-                    engine._shard_key,
-                )
-                continue
-            shard_key = engine._shard_key
-            position_qty = engine.position_qty
-            position_flat = abs(position_qty) < 1e-12
-            now = datetime.now(UTC)
-            existing = await self.repository.get_open_position_cycle(shard_key, as_of=now)
-            shard = self.trade_service._get_or_create_shard(shard_key)
-            if position_flat:
-                if existing is not None:
-                    await self.repository.close_position_cycle(
-                        cycle_public_id=existing["public_id"],
-                        closed_at=now,
-                        closing_command_public_id=None,
-                        bus_time=now,
-                        session_id=self._tracker.session_id,
-                        sequence_id=self._tracker.next_sequence(f"reconcile.{shard_key}"),
-                    )
-                    logger.info(
-                        "ZMQTrader: position_cycle reconcile closed stale cycle "
-                        "(recovered flat) engine={} shard={} cycle={}",
-                        engine_key,
-                        shard_key,
-                        existing["public_id"],
-                    )
-                    shard.active_cycle_public_id = None
-                    shard.active_cycle_max_qty = 0.0
-                continue
-            current_direction = "long" if position_qty > 0 else "short"
-            current_abs = abs(position_qty)
-            if existing is not None:
-                existing_direction = existing["direction"]
-                existing_max_qty = existing["max_qty"]
-                if existing_direction == current_direction:
-                    shard.active_cycle_public_id = existing["public_id"]
-                    shard.active_cycle_max_qty = existing_max_qty
-                    if current_abs > existing_max_qty:
-                        await self.repository.update_position_cycle_max_qty(
-                            cycle_public_id=existing["public_id"],
-                            new_max_qty=current_abs,
-                            bus_time=now,
-                            session_id=self._tracker.session_id,
-                            sequence_id=self._tracker.next_sequence(f"reconcile.{shard_key}"),
-                        )
-                        shard.active_cycle_max_qty = current_abs
-                        logger.info(
-                            "ZMQTrader: position_cycle reconcile bumped max_qty "
-                            "engine={} shard={} cycle={} old_max={} new_max={}",
-                            engine_key,
-                            shard_key,
-                            existing["public_id"],
-                            existing_max_qty,
-                            current_abs,
-                        )
-                    else:
-                        logger.info(
-                            "ZMQTrader: position_cycle reconcile hydrated cache "
-                            "engine={} shard={} cycle={}",
-                            engine_key,
-                            shard_key,
-                            existing["public_id"],
-                        )
-                    continue
-                inst_pid = await self.repository.get_instrument_public_id_by_symbol(
-                    native_symbol=engine.instrument,
-                    exchange=str(engine.exchange),
-                    as_of=now,
-                )
-                if inst_pid is None:
-                    await self.repository.close_position_cycle(
-                        cycle_public_id=existing["public_id"],
-                        closed_at=now,
-                        closing_command_public_id=None,
-                        bus_time=now,
-                        session_id=self._tracker.session_id,
-                        sequence_id=self._tracker.next_sequence(f"reconcile.{shard_key}"),
-                    )
-                    shard.active_cycle_public_id = None
-                    shard.active_cycle_max_qty = 0.0
-                    logger.warning(
-                        "ZMQTrader: position_cycle reconcile degraded flip to close-only "
-                        "(direction mismatch + unresolved instrument) "
-                        "engine={} shard={} db_direction={} current_direction={}",
-                        engine_key,
-                        shard_key,
-                        existing_direction,
-                        current_direction,
-                    )
-                    continue
-                operator_pid: str | None = engine.operator_public_id or None
-                opened_at = shard.position.position_opened_at or now
-                flip_row: PositionCycleInsertRow = {
-                    "instrument_public_id": inst_pid,
-                    "exchange": str(engine.exchange),
-                    "mode": str(engine.mode),
-                    "shard_key": shard_key,
-                    "wallet_public_id": engine.wallet_public_id,
-                    "operator_public_id": operator_pid,
-                    "direction": current_direction,
-                    "max_qty": current_abs,
-                    "status": "open",
-                    "opened_at": opened_at,
-                    "opening_command_public_id": None,
-                    "session_id": self._tracker.session_id,
-                    "sequence_id": self._tracker.next_sequence(f"reconcile.{shard_key}"),
-                    "timestamp": now,
-                }
-                _id, new_pid = await self.repository.flip_position_cycle(
-                    close_cycle_public_id=existing["public_id"],
-                    new_open_row=flip_row,
-                    bus_time=now,
-                    session_id=self._tracker.session_id,
-                    sequence_id=self._tracker.next_sequence(f"reconcile.{shard_key}"),
-                )
-                shard.active_cycle_public_id = new_pid
-                shard.active_cycle_max_qty = current_abs
-                logger.info(
-                    "ZMQTrader: position_cycle reconcile flipped stale cycle "
-                    "engine={} shard={} old={} new={} db_direction={} current_direction={}",
-                    engine_key,
-                    shard_key,
-                    existing["public_id"],
-                    new_pid,
-                    existing_direction,
-                    current_direction,
-                )
-                continue
-            inst_pid = await self.repository.get_instrument_public_id_by_symbol(
-                native_symbol=engine.instrument,
-                exchange=str(engine.exchange),
-                as_of=now,
+            await self._reconcile_position_cycle_for_engine(engine_key, engine)
+
+    async def _reconcile_position_cycle_for_engine(
+        self,
+        engine_key: str,
+        engine: TradingEngineService,
+    ) -> None:
+        """Reconcile the persisted cycle row for one recovered engine."""
+        if not engine.wallet_public_id:
+            logger.warning(
+                "ZMQTrader: position_cycle reconcile skipped "
+                "(degraded identity) engine={} shard={}",
+                engine_key,
+                engine._shard_key,
             )
-            if inst_pid is None:
-                logger.warning(
-                    "ZMQTrader: position_cycle reconcile skipped "
-                    "(unresolved instrument) engine={} shard={} symbol={}",
-                    engine_key,
-                    shard_key,
-                    engine.instrument,
-                )
-                continue
-            operator_pid = engine.operator_public_id or None
-            opened_at = shard.position.position_opened_at or now
-            bootstrap_row: PositionCycleInsertRow = {
-                "instrument_public_id": inst_pid,
-                "exchange": str(engine.exchange),
-                "mode": str(engine.mode),
-                "shard_key": shard_key,
-                "wallet_public_id": engine.wallet_public_id,
-                "operator_public_id": operator_pid,
-                "direction": current_direction,
-                "max_qty": current_abs,
-                "status": "open",
-                "opened_at": opened_at,
-                "opening_command_public_id": None,
-                "session_id": self._tracker.session_id,
-                "sequence_id": self._tracker.next_sequence(f"reconcile.{shard_key}"),
-                "timestamp": now,
-            }
-            _id, new_pid = await self.repository.insert_position_cycle(bootstrap_row)
-            shard.active_cycle_public_id = new_pid
-            shard.active_cycle_max_qty = current_abs
+            return
+        shard_key = engine._shard_key
+        now = datetime.now(UTC)
+        position_qty = engine.position_qty
+        existing = await self.repository.get_open_position_cycle(shard_key, as_of=now)
+        shard = self.trade_service._get_or_create_shard(shard_key)
+        if abs(position_qty) < 1e-12:
+            await self._reconcile_flat_position_cycle(
+                engine_key=engine_key,
+                shard_key=shard_key,
+                existing=existing,
+                shard=shard,
+                now=now,
+            )
+            return
+        current_direction, current_abs = self._describe_position_cycle(position_qty)
+        if existing is not None:
+            await self._reconcile_existing_position_cycle(
+                engine_key=engine_key,
+                engine=engine,
+                shard_key=shard_key,
+                existing=existing,
+                shard=shard,
+                current_direction=current_direction,
+                current_abs=current_abs,
+                now=now,
+            )
+            return
+        await self._bootstrap_reconciled_position_cycle(
+            engine_key=engine_key,
+            engine=engine,
+            shard_key=shard_key,
+            shard=shard,
+            current_direction=current_direction,
+            current_abs=current_abs,
+            now=now,
+        )
+
+    async def _reconcile_flat_position_cycle(
+        self,
+        *,
+        engine_key: str,
+        shard_key: str,
+        existing: PositionCycleRow | None,
+        shard: ShardState,
+        now: datetime,
+    ) -> None:
+        """Close any stale open cycle when recovery finds the shard flat."""
+        if existing is None:
+            return
+        await self.repository.close_position_cycle(
+            cycle_public_id=existing["public_id"],
+            closed_at=now,
+            closing_command_public_id=None,
+            bus_time=now,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence(f"reconcile.{shard_key}"),
+        )
+        logger.info(
+            "ZMQTrader: position_cycle reconcile closed stale cycle "
+            "(recovered flat) engine={} shard={} cycle={}",
+            engine_key,
+            shard_key,
+            existing["public_id"],
+        )
+        shard.active_cycle_public_id = None
+        shard.active_cycle_max_qty = 0.0
+
+    async def _reconcile_existing_position_cycle(
+        self,
+        *,
+        engine_key: str,
+        engine: TradingEngineService,
+        shard_key: str,
+        existing: PositionCycleRow,
+        shard: ShardState,
+        current_direction: str,
+        current_abs: float,
+        now: datetime,
+    ) -> None:
+        """Handle warm-restart hydration or direction-mismatch recovery."""
+        if existing["direction"] == current_direction:
+            await self._hydrate_reconciled_position_cycle(
+                engine_key=engine_key,
+                shard_key=shard_key,
+                existing=existing,
+                shard=shard,
+                current_abs=current_abs,
+                now=now,
+            )
+            return
+        await self._reconcile_direction_mismatch_cycle(
+            engine_key=engine_key,
+            engine=engine,
+            shard_key=shard_key,
+            existing=existing,
+            shard=shard,
+            current_direction=current_direction,
+            current_abs=current_abs,
+            now=now,
+        )
+
+    async def _hydrate_reconciled_position_cycle(
+        self,
+        *,
+        engine_key: str,
+        shard_key: str,
+        existing: PositionCycleRow,
+        shard: ShardState,
+        current_abs: float,
+        now: datetime,
+    ) -> None:
+        """Hydrate the shard cache from the existing open cycle row."""
+        shard.active_cycle_public_id = existing["public_id"]
+        shard.active_cycle_max_qty = existing["max_qty"]
+        if current_abs <= existing["max_qty"]:
             logger.info(
-                "ZMQTrader: position_cycle reconcile bootstrapped "
-                "engine={} shard={} cycle={} direction={} qty={}",
+                "ZMQTrader: position_cycle reconcile hydrated cache engine={} shard={} cycle={}",
                 engine_key,
                 shard_key,
-                new_pid,
-                current_direction,
-                current_abs,
+                existing["public_id"],
             )
+            return
+        await self.repository.update_position_cycle_max_qty(
+            cycle_public_id=existing["public_id"],
+            new_max_qty=current_abs,
+            bus_time=now,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence(f"reconcile.{shard_key}"),
+        )
+        shard.active_cycle_max_qty = current_abs
+        logger.info(
+            "ZMQTrader: position_cycle reconcile bumped max_qty "
+            "engine={} shard={} cycle={} old_max={} new_max={}",
+            engine_key,
+            shard_key,
+            existing["public_id"],
+            existing["max_qty"],
+            current_abs,
+        )
+
+    async def _reconcile_direction_mismatch_cycle(
+        self,
+        *,
+        engine_key: str,
+        engine: TradingEngineService,
+        shard_key: str,
+        existing: PositionCycleRow,
+        shard: ShardState,
+        current_direction: str,
+        current_abs: float,
+        now: datetime,
+    ) -> None:
+        """Flip the stale cycle, or degrade to close-only if identity cannot be resolved."""
+        instrument_public_id = await self.repository.get_instrument_public_id_by_symbol(
+            native_symbol=engine.instrument,
+            exchange=str(engine.exchange),
+            as_of=now,
+        )
+        if instrument_public_id is None:
+            await self.repository.close_position_cycle(
+                cycle_public_id=existing["public_id"],
+                closed_at=now,
+                closing_command_public_id=None,
+                bus_time=now,
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence(f"reconcile.{shard_key}"),
+            )
+            shard.active_cycle_public_id = None
+            shard.active_cycle_max_qty = 0.0
+            logger.warning(
+                "ZMQTrader: position_cycle reconcile degraded flip to close-only "
+                "(direction mismatch + unresolved instrument) "
+                "engine={} shard={} db_direction={} current_direction={}",
+                engine_key,
+                shard_key,
+                existing["direction"],
+                current_direction,
+            )
+            return
+        flip_row = self._build_position_cycle_insert_row(
+            engine=engine,
+            instrument_public_id=instrument_public_id,
+            direction=current_direction,
+            max_qty=current_abs,
+            opened_at=shard.position.position_opened_at or now,
+            timestamp=now,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence(f"reconcile.{shard_key}"),
+        )
+        _id, new_pid = await self.repository.flip_position_cycle(
+            close_cycle_public_id=existing["public_id"],
+            new_open_row=flip_row,
+            bus_time=now,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence(f"reconcile.{shard_key}"),
+        )
+        shard.active_cycle_public_id = new_pid
+        shard.active_cycle_max_qty = current_abs
+        logger.info(
+            "ZMQTrader: position_cycle reconcile flipped stale cycle "
+            "engine={} shard={} old={} new={} db_direction={} current_direction={}",
+            engine_key,
+            shard_key,
+            existing["public_id"],
+            new_pid,
+            existing["direction"],
+            current_direction,
+        )
+
+    async def _bootstrap_reconciled_position_cycle(
+        self,
+        *,
+        engine_key: str,
+        engine: TradingEngineService,
+        shard_key: str,
+        shard: ShardState,
+        current_direction: str,
+        current_abs: float,
+        now: datetime,
+    ) -> None:
+        """Insert a synthetic open cycle for a recovered non-flat shard."""
+        instrument_public_id = await self.repository.get_instrument_public_id_by_symbol(
+            native_symbol=engine.instrument,
+            exchange=str(engine.exchange),
+            as_of=now,
+        )
+        if instrument_public_id is None:
+            logger.warning(
+                "ZMQTrader: position_cycle reconcile skipped "
+                "(unresolved instrument) engine={} shard={} symbol={}",
+                engine_key,
+                shard_key,
+                engine.instrument,
+            )
+            return
+        bootstrap_row = self._build_position_cycle_insert_row(
+            engine=engine,
+            instrument_public_id=instrument_public_id,
+            direction=current_direction,
+            max_qty=current_abs,
+            opened_at=shard.position.position_opened_at or now,
+            timestamp=now,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence(f"reconcile.{shard_key}"),
+        )
+        _id, new_pid = await self.repository.insert_position_cycle(bootstrap_row)
+        shard.active_cycle_public_id = new_pid
+        shard.active_cycle_max_qty = current_abs
+        logger.info(
+            "ZMQTrader: position_cycle reconcile bootstrapped "
+            "engine={} shard={} cycle={} direction={} qty={}",
+            engine_key,
+            shard_key,
+            new_pid,
+            current_direction,
+            current_abs,
+        )
 
     async def _resolve_instrument_specs(
         self, instrument: str, exchange: str

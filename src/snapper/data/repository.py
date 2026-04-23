@@ -7458,38 +7458,58 @@ async def dispose_repositories() -> None:
     Should be called during application shutdown to properly close
     database connections and release resources.
     """
+    for engine in _collect_engines_to_dispose():
+        await _dispose_engine_safely(engine)
+    for connection in tuple(_live_aiosqlite_connections.values()):
+        await _close_aiosqlite_connection_safely(connection)
+    _live_aiosqlite_connections.clear()
+    _repository_cache.clear()
+
+
+def _collect_repositories_to_dispose() -> list[object]:
+    """Collect cached and still-live repository instances without duplicates."""
     repos_to_dispose: dict[int, object] = {
         id(cached_repo): cached_repo for cached_repo in _repository_cache.values()
     }
     for live_repo in _live_sqlalchemy_repositories:
         repos_to_dispose[id(live_repo)] = live_repo
+    return list(repos_to_dispose.values())
+
+
+def _collect_engines_to_dispose() -> list[object]:
+    """Collect repository engines and tracked live engines without duplicates."""
     engines_to_dispose: dict[int, object] = {}
-    for repo in repos_to_dispose.values():
+    for repo in _collect_repositories_to_dispose():
         engine = getattr(repo, "engine", None)
         if engine is not None:
             engines_to_dispose[id(engine)] = engine
     for live_engine in _live_sqlalchemy_engines:
         engines_to_dispose[id(live_engine)] = live_engine
-    for engine in engines_to_dispose.values():
-        disposable_engine = _resolve_disposable_engine(engine)
-        if disposable_engine is None:
-            logger.warning("Failed to dispose repository engine: engine has no callable dispose()")
-            continue
-        try:
-            dispose_result = disposable_engine.dispose()
-            if isawaitable(dispose_result):
-                await dispose_result
-        except Exception as e:
-            logger.warning(f"Failed to dispose repository engine: {e}")
-    for connection in tuple(_live_aiosqlite_connections.values()):
-        try:
-            close_result = connection.close()
-            if isawaitable(close_result):
-                await close_result
-        except Exception as e:
-            logger.warning(f"Failed to close tracked aiosqlite connection: {e}")
-    _live_aiosqlite_connections.clear()
-    _repository_cache.clear()
+    return list(engines_to_dispose.values())
+
+
+async def _dispose_engine_safely(engine: object) -> None:
+    """Dispose one engine-like object and log failures without raising."""
+    disposable_engine = _resolve_disposable_engine(engine)
+    if disposable_engine is None:
+        logger.warning("Failed to dispose repository engine: engine has no callable dispose()")
+        return
+    try:
+        dispose_result = disposable_engine.dispose()
+        if isawaitable(dispose_result):
+            await dispose_result
+    except Exception as exc:
+        logger.warning(f"Failed to dispose repository engine: {exc}")
+
+
+async def _close_aiosqlite_connection_safely(connection: _ClosableConnection) -> None:
+    """Close one tracked aiosqlite connection and log failures without raising."""
+    try:
+        close_result = connection.close()
+        if isawaitable(close_result):
+            await close_result
+    except Exception as exc:
+        logger.warning(f"Failed to close tracked aiosqlite connection: {exc}")
 
 
 class DatabaseRepository:

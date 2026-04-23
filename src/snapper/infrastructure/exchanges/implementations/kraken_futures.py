@@ -95,6 +95,54 @@ def _timeframe_to_seconds(timeframe: str) -> int:
         raise ValueError(f"Unsupported timeframe: {timeframe}. Supported: {supported}") from exc
 
 
+def _build_ccxt_symbol_map(symbols: list[str]) -> dict[str, str]:
+    """Map native symbols to CCXT aliases, skipping unsupported entries."""
+    ccxt_map: dict[str, str] = {}
+    for symbol in symbols:
+        try:
+            ccxt_map[symbol] = native_to_ccxt(symbol)
+        except ValueError:
+            logger.warning(f"No CCXT alias for {symbol}, skipping candle polling")
+    return ccxt_map
+
+
+def _build_candle_update(
+    native_symbol: str,
+    candle: OhlcvSnapshot,
+    interval_seconds: int,
+) -> CandleUpdate:
+    """Convert a polled OHLCV candle into a CandleUpdate."""
+    return CandleUpdate(
+        symbol=native_symbol,
+        open=candle.open,
+        high=candle.high,
+        low=candle.low,
+        close=candle.close,
+        vwap=0.0,
+        trades=0,
+        volume=candle.volume,
+        interval_begin=datetime.fromtimestamp(candle.timestamp, tz=UTC),
+        interval=interval_seconds,
+    )
+
+
+def _collect_candle_updates(
+    native_symbol: str,
+    candles: list[OhlcvSnapshot],
+    interval_seconds: int,
+    last_seen: dict[str, float],
+) -> list[CandleUpdate]:
+    """Build yielded candle updates and advance last-seen timestamps."""
+    updates: list[CandleUpdate] = []
+    last_seen_timestamp = last_seen.get(native_symbol, 0)
+    for candle in candles:
+        if candle.timestamp >= last_seen_timestamp:
+            last_seen[native_symbol] = candle.timestamp
+            last_seen_timestamp = candle.timestamp
+            updates.append(_build_candle_update(native_symbol, candle, interval_seconds))
+    return updates
+
+
 def _enqueue_or_drop_oldest(queue: asyncio.Queue[Any], item: Any, label: str) -> None:
     """Put item on queue, dropping the oldest if full.
 
@@ -980,12 +1028,7 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
         last_seen: dict[str, float] = {}
         poll_interval = 60.0
         interval_seconds = _timeframe_to_seconds(timeframe)
-        ccxt_map: dict[str, str] = {}
-        for sym in symbols:
-            try:
-                ccxt_map[sym] = native_to_ccxt(sym)
-            except ValueError:
-                logger.warning(f"No CCXT alias for {sym}, skipping candle polling")
+        ccxt_map = _build_ccxt_symbol_map(symbols)
         if not ccxt_map:
             logger.warning("No symbols with CCXT aliases for candle polling")
             return
@@ -1000,21 +1043,14 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
                         since=since_ms,
                         limit=5,
                     )
-                    for candle in candles:
-                        if candle.timestamp >= last_seen.get(native_sym, 0):
-                            last_seen[native_sym] = candle.timestamp
-                            yield CandleUpdate(
-                                symbol=native_sym,
-                                open=candle.open,
-                                high=candle.high,
-                                low=candle.low,
-                                close=candle.close,
-                                vwap=0.0,
-                                trades=0,
-                                volume=candle.volume,
-                                interval_begin=datetime.fromtimestamp(candle.timestamp, tz=UTC),
-                                interval=interval_seconds,
-                            )
+                    updates = _collect_candle_updates(
+                        native_sym,
+                        candles,
+                        interval_seconds,
+                        last_seen,
+                    )
+                    for update in updates:
+                        yield update
                 except Exception:
                     logger.exception(f"Failed to poll candles for {native_sym}")
             await asyncio.sleep(poll_interval)

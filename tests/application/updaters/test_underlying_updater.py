@@ -720,6 +720,13 @@ class TestUnderlyingUpdater:
 class TestBuildFallbackSpec:
     """Tests for _build_fallback_spec static method."""
 
+    def test_base_fallback_spec_returns_empty_input_for_missing_spec(self) -> None:
+        """Missing existing spec yields an empty fallback payload."""
+        result = UnderlyingUpdater._base_fallback_spec(None)
+        assert result.instrument_kind is None
+        assert result.expiry_at is None
+        assert result.tick_size is None
+
     def test_returns_none_when_nothing_to_apply(self) -> None:
         """Given match with no instrument_type or expiry_override, When building, Then None."""
         match = _MatchResult(
@@ -822,6 +829,44 @@ class TestBuildFallbackSpec:
         assert result.cost_decimals == 2
         assert result.status == "online"
         assert result.instrument_kind == "etf"
+
+    def test_base_fallback_spec_preserves_existing_fields(self) -> None:
+        """Base fallback payload copies the current persisted spec values."""
+        existing = InstrumentSpecRow(
+            instrument_public_id="inst-1",
+            tick_size=0.01,
+            lot_size=1.0,
+            min_order_size=0.5,
+            max_order_size=10.0,
+            cost_decimals=2,
+            qty_decimals=4,
+            margin_initial=0.2,
+            position_limit_long=10,
+            position_limit_short=8,
+            status="online",
+            expiry_at=datetime(2026, 6, 20, 16, 30, tzinfo=UTC),
+            instrument_kind="future",
+            funding_type=None,
+            funding_frequency_hours=None,
+            rollover_rate_long=None,
+            rollover_rate_short=None,
+            max_funding_rate=None,
+        )
+
+        result = UnderlyingUpdater._base_fallback_spec(existing)
+
+        assert result.tick_size == 0.01
+        assert result.lot_size == 1.0
+        assert result.min_order_size == 0.5
+        assert result.max_order_size == 10.0
+        assert result.cost_decimals == 2
+        assert result.qty_decimals == 4
+        assert result.margin_initial == 0.2
+        assert result.position_limit_long == 10
+        assert result.position_limit_short == 8
+        assert result.status == "online"
+        assert result.expiry_at == datetime(2026, 6, 20, 16, 30, tzinfo=UTC)
+        assert result.instrument_kind == "future"
 
 
 class TestYamlSpecFallbackIntegration:

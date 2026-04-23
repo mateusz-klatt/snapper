@@ -292,45 +292,95 @@ class ContinuousContractBuilder:
             new_sym = contracts[i + 1]["native_symbol"]
             old_candles = contract_candles.get(old_sym, [])
             new_candles = contract_candles.get(new_sym, [])
+            roll_info, failed = self._resolve_roll_info(
+                old_sym=old_sym,
+                new_sym=new_sym,
+                roll_at=roll_at,
+                old_candles=old_candles,
+                new_candles=new_candles,
+                method=method,
+                timeframe=timeframe,
+            )
+            if failed is not None:
+                return rolls, failed
+            assert roll_info is not None
+            rolls.append(roll_info)
+        return rolls, None
 
-            if method == "unadjusted":
-                adjustment = 0.0
-            else:
-                pair = self._find_common_bar(old_candles, new_candles, roll_at, timeframe)
-                if pair is None:
-                    failed = RollPointInfo(
-                        from_contract=old_sym,
-                        to_contract=new_sym,
-                        roll_at=roll_at,
-                        adjustment=None,
-                    )
-                    logger.error(
-                        f"Continuous: no common bar for roll {old_sym} -> {new_sym} "
-                        f"at {roll_at}, truncating series"
-                    )
-                    return rolls, failed
-
-                old_close, new_close = pair
-                if method == "ratio":
-                    if old_close <= 0 or new_close <= 0:
-                        msg = (
-                            f"Non-positive price at roll {old_sym}->{new_sym}: "
-                            f"old={old_close}, new={new_close}"
-                        )
-                        raise ValueError(msg)
-                    adjustment = new_close / old_close
-                else:
-                    adjustment = new_close - old_close
-
-            rolls.append(
+    def _resolve_roll_info(
+        self,
+        *,
+        old_sym: str,
+        new_sym: str,
+        roll_at: datetime,
+        old_candles: list[CandleRow],
+        new_candles: list[CandleRow],
+        method: str,
+        timeframe: str,
+    ) -> tuple[RollPointInfo | None, RollPointInfo | None]:
+        """Resolve the adjustment metadata for a single contract roll."""
+        if method == "unadjusted":
+            return (
                 RollPointInfo(
                     from_contract=old_sym,
                     to_contract=new_sym,
                     roll_at=roll_at,
-                    adjustment=adjustment,
-                )
+                    adjustment=0.0,
+                ),
+                None,
             )
-        return rolls, None
+
+        pair = self._find_common_bar(old_candles, new_candles, roll_at, timeframe)
+        if pair is None:
+            failed = RollPointInfo(
+                from_contract=old_sym,
+                to_contract=new_sym,
+                roll_at=roll_at,
+                adjustment=None,
+            )
+            logger.error(
+                f"Continuous: no common bar for roll {old_sym} -> {new_sym} "
+                f"at {roll_at}, truncating series"
+            )
+            return None, failed
+
+        old_close, new_close = pair
+        adjustment = self._compute_roll_adjustment(
+            method=method,
+            old_sym=old_sym,
+            new_sym=new_sym,
+            old_close=old_close,
+            new_close=new_close,
+        )
+        return (
+            RollPointInfo(
+                from_contract=old_sym,
+                to_contract=new_sym,
+                roll_at=roll_at,
+                adjustment=adjustment,
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _compute_roll_adjustment(
+        *,
+        method: str,
+        old_sym: str,
+        new_sym: str,
+        old_close: float,
+        new_close: float,
+    ) -> float:
+        """Compute the numeric adjustment value for a resolved roll pair."""
+        if method == "ratio":
+            if old_close <= 0 or new_close <= 0:
+                msg = (
+                    f"Non-positive price at roll {old_sym}->{new_sym}: "
+                    f"old={old_close}, new={new_close}"
+                )
+                raise ValueError(msg)
+            return new_close / old_close
+        return new_close - old_close
 
     @staticmethod
     def _stitch(

@@ -23,6 +23,48 @@ _REQUIRED_PARAMS = {"native_instrument"}
 _VALID_LEGS = {"sl_price", "tp_price"}
 
 
+def _triggered_leg_for_price(
+    side: str,
+    stop_loss: float | None,
+    take_profit: float | None,
+    last_price: float,
+) -> str | None:
+    """Return the triggered leg name for the latest tick price."""
+    if side == "buy":
+        if stop_loss is not None and stop_loss >= last_price:
+            return "sl_hit"
+        if take_profit is not None and take_profit <= last_price:
+            return "tp_hit"
+        return None
+    if stop_loss is not None and stop_loss <= last_price:
+        return "sl_hit"
+    if take_profit is not None and take_profit >= last_price:
+        return "tp_hit"
+    return None
+
+
+def _build_close_command(
+    plan: ExecutionPlanRow,
+    params: JsonObject,
+    side: str,
+    triggered_leg: str,
+) -> JsonObject:
+    """Build the reduce-only market close command for a triggered bracket."""
+    closing_side = "sell" if side == "buy" else "buy"
+    return {
+        "command_type": "create",
+        "instrument": str(params["native_instrument"]),
+        "side": closing_side,
+        "order_type": "market",
+        "quantity": plan["total_quantity"],
+        "price": None,
+        "reduce_only": True,
+        "leverage": params.get("leverage"),
+        "trigger_type": "tick",
+        "reason": triggered_leg,
+    }
+
+
 class BracketEvaluator(PlanEvaluator):
     """Evaluator for bracket plans (SL/TP on open position cycles).
 
@@ -54,38 +96,12 @@ class BracketEvaluator(PlanEvaluator):
         tp = params.get("tp_price")
         side = plan["side"]
 
-        triggered_leg: str | None = None
         sl_f = float(cast(Any, sl)) if sl is not None else None
         tp_f = float(cast(Any, tp)) if tp is not None else None
-        if side == "buy":
-            if sl_f is not None and sl_f >= last:
-                triggered_leg = "sl_hit"
-            elif tp_f is not None and tp_f <= last:
-                triggered_leg = "tp_hit"
-        else:
-            if sl_f is not None and sl_f <= last:
-                triggered_leg = "sl_hit"
-            elif tp_f is not None and tp_f >= last:
-                triggered_leg = "tp_hit"
-
+        triggered_leg = _triggered_leg_for_price(side, sl_f, tp_f, last)
         if triggered_leg is None:
             return []
-
-        closing_side = "sell" if side == "buy" else "buy"
-        return [
-            {
-                "command_type": "create",
-                "instrument": str(params["native_instrument"]),
-                "side": closing_side,
-                "order_type": "market",
-                "quantity": plan["total_quantity"],
-                "price": None,
-                "reduce_only": True,
-                "leverage": params.get("leverage"),
-                "trigger_type": "tick",
-                "reason": triggered_leg,
-            }
-        ]
+        return [_build_close_command(plan, params, side, triggered_leg)]
 
     async def on_execution(
         self, plan: ExecutionPlanRow, execution: ExecutionData

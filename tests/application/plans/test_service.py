@@ -975,6 +975,18 @@ class TestPlanExecutorService:
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
     @patch("snapper.application.plans.service.get_repository")
+    async def test_receive_message_frame_returns_none_without_subscriber(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """A missing subscriber yields no frame instead of raising."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        service._subscriber = None
+        assert await service._receive_message_frame() is None
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
     async def test_listen_loop_routes_execution_to_handler(
         self, mock_repo_fn: MagicMock, mock_settings: MagicMock
     ) -> None:
@@ -1071,6 +1083,40 @@ class TestPlanExecutorService:
         service._running = True
         await service._listen_loop()
         assert len(routed) == 1
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_dispatch_incoming_message_ignores_runtime_unsupported_type(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Runtime-unsupported parsed payloads are ignored by dispatch."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        service._handle_execution = AsyncMock()
+        service._handle_order_status = AsyncMock()
+        service._handle_tick = AsyncMock()
+        signal = SignalData(
+            public_id="s-1",
+            timestamp=datetime(2026, 4, 10, tzinfo=UTC),
+            session_id="s1",
+            sequence_id=1,
+            instrument="BTC-USD",
+            exchange="kraken",
+            side="buy",
+            strength=1.0,
+            reason="ignored",
+            price=50000.0,
+            strategy_name="noop",
+            fired_at=datetime(2026, 4, 10, tzinfo=UTC),
+        )
+        await service._dispatch_incoming_message(
+            "signals.kraken.BTC-USD.noop",
+            _cast(ExecutionData | OrderData | TickData, signal),
+        )
+        service._handle_execution.assert_not_awaited()
+        service._handle_order_status.assert_not_awaited()
+        service._handle_tick.assert_not_awaited()
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
@@ -2755,6 +2801,96 @@ class TestOnExecutionDispatchesCommands:
 
         service._dispatch_commands.assert_awaited_once()
         assert mock_repo.update_execution_plan_status.await_count >= 1
+
+
+class TestExecutionHelpers:
+    """Tests for extracted execution-routing helpers."""
+
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    def test_resolve_execution_target_rejects_duplicate_cumulative_fill(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Duplicate cumulative fills are filtered before evaluator dispatch."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        plan = _cast(ExecutionPlanRow, _make_plan_row(filled_quantity=1.0))
+        service._register_plan(plan, ManualOnceEvaluator())
+
+        target = service._resolve_execution_target(_make_execution(size=1.0))
+
+        assert target is None
+
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    def test_resolve_execution_target_returns_plan_for_new_fill(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """New cumulative fills return the active plan lookup tuple."""
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+        plan = _cast(ExecutionPlanRow, _make_plan_row(filled_quantity=0.25))
+        service._register_plan(plan, ManualOnceEvaluator())
+
+        target = service._resolve_execution_target(_make_execution(size=0.5))
+
+        assert target is not None
+        plan_public_id, resolved_plan, incoming_cumulative = target
+        assert plan_public_id == "plan-1"
+        assert resolved_plan["public_id"] == "plan-1"
+        assert incoming_cumulative == pytest.approx(0.5)
+
+    @pytest.mark.parametrize(
+        ("total_quantity", "incoming_cumulative", "execution_status", "expected_complete"),
+        [
+            (1.0, 0.5, "partial", False),
+            (1.0, 1.0, "partial", True),
+            (2.0, 0.5, "filled", True),
+        ],
+    )
+    def test_classify_fill_update_returns_expected_completion(
+        self,
+        total_quantity: float,
+        incoming_cumulative: float,
+        execution_status: str,
+        expected_complete: bool,
+    ) -> None:
+        """Fill classification handles partial, quantity-complete, and venue-complete paths."""
+        plan = _cast(ExecutionPlanRow, _make_plan_row(total_quantity=total_quantity))
+
+        new_filled, total, is_complete, new_status = PlanExecutorService._classify_fill_update(
+            plan,
+            incoming_cumulative,
+            execution_status,
+        )
+
+        assert new_filled == pytest.approx(incoming_cumulative)
+        assert total == pytest.approx(total_quantity)
+        assert is_complete is expected_complete
+        expected_status = "completed" if expected_complete else "active"
+        assert new_status == expected_status
+
+
+class TestTickHelpers:
+    """Tests for extracted tick-routing helpers."""
+
+    @pytest.mark.parametrize(
+        ("status", "expected"),
+        [
+            ("active", True),
+            ("paused", False),
+            ("completed", False),
+        ],
+    )
+    def test_is_tick_dispatchable_respects_plan_status(
+        self,
+        status: str,
+        expected: bool,
+    ) -> None:
+        """Tick dispatch helper filters paused and terminal plans."""
+        plan = _cast(ExecutionPlanRow, _make_plan_row(status=status))
+        assert PlanExecutorService._is_tick_dispatchable(plan) is expected
+        assert PlanExecutorService._is_tick_dispatchable(None) is False
 
 
 class TestTransitionPlan:

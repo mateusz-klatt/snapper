@@ -26,6 +26,9 @@ from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
+from snapper.infrastructure.exchanges.implementations.walutomat import _active_execution_status
+from snapper.infrastructure.exchanges.implementations.walutomat import _should_emit_active_execution
+from snapper.infrastructure.exchanges.implementations.walutomat import _snapshot_tracked_order
 from snapper.infrastructure.exchanges.implementations.walutomat import _TrackedOrder
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketPair
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketResponse
@@ -905,6 +908,61 @@ def _build_polling_client(
     client._running = True
     client._execution_idle_interval = 0.0
     return client
+
+
+def test_snapshot_tracked_order_copies_snapshot_fields() -> None:
+    """Tracked-order helper copies the execution polling fields from a snapshot.
+
+    Given: An exchange order snapshot with execution polling fields populated,
+    When: `_snapshot_tracked_order` converts it to internal tracked-order state,
+    Then: The tracked snapshot preserves the polling fields needed by diff detection.
+    """
+    order = _make_order_snapshot(
+        order_id="ord-2",
+        client_order_id="sub-2",
+        symbol="USD-PLN",
+        side=OrderSideEnum.SELL,
+        amount=40.0,
+        filled=12.5,
+        price=4.12,
+    )
+
+    tracked = _snapshot_tracked_order(order)
+
+    assert tracked.order_id == "ord-2"
+    assert tracked.cl_ord_id == "sub-2"
+    assert tracked.symbol == "USD-PLN"
+    assert tracked.side == OrderSideEnum.SELL
+    assert tracked.amount == pytest.approx(40.0)
+    assert tracked.filled == pytest.approx(12.5)
+    assert tracked.price == pytest.approx(4.12)
+
+
+def test_active_execution_helpers_detect_fill_progress() -> None:
+    """Active-execution helpers emit only for actual fill progress.
+
+    Given: A current order snapshot and an earlier tracked snapshot,
+    When: The execution helper predicates compare fill state and completion status,
+    Then: They emit only for real progress and classify terminal-vs-partial updates correctly.
+    """
+    order = _make_order_snapshot(filled=25.0)
+    previous = _TrackedOrder(
+        order_id="ord-1",
+        cl_ord_id="sub-1",
+        symbol="EUR-PLN",
+        side=OrderSideEnum.BUY,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
+        amount=100.0,
+        filled=10.0,
+        price=4.50,
+    )
+
+    assert _should_emit_active_execution(order, previous) is True
+    assert _should_emit_active_execution(_make_order_snapshot(filled=0.0), None) is False
+    assert _active_execution_status(_make_order_snapshot(filled=100.0)) == (
+        ExchangeOrderStatusEnum.FILLED
+    )
+    assert _active_execution_status(order) == ExchangeOrderStatusEnum.PARTIALLY_FILLED
 
 
 @pytest.mark.asyncio()

@@ -1042,6 +1042,35 @@ class TestSubscribeWebsocket:
         assert len(bridge.topic_subscriptions[topic]) == 2
         assert bridge.topic_metrics[topic].active_subscribers == 2
 
+    def test_get_prefix_subscription_error(self, bridge: ZmqWebSocketBridgeService) -> None:
+        """Verify prefix validation helper returns expected error details."""
+        assert bridge._get_prefix_subscription_error("market.") is None
+        assert (
+            bridge._get_prefix_subscription_error("signals.kraken.BTC-USD.")
+            == "Intermediate prefix rejected: signals.kraken.BTC-USD."
+        )
+        error_detail = bridge._get_prefix_subscription_error("backtest.not-a-uuid.")
+        assert error_detail is not None
+        assert "Malformed backtest prefix rejected" in error_detail
+
+    def test_register_topic_subscription_tracks_first_subscriber(
+        self, bridge: ZmqWebSocketBridgeService
+    ) -> None:
+        """Verify registration helper initializes and increments tracked state."""
+        topic = "market.kraken.BTC-USD.candles.1m"
+        ws1 = AsyncMock(spec=WebSocket)
+        ws2 = AsyncMock(spec=WebSocket)
+
+        first = bridge._register_topic_subscription(ws1, topic, 50, "client-1")
+        second = bridge._register_topic_subscription(ws2, topic, 50, "client-2")
+
+        assert first is True
+        assert second is False
+        assert bridge.client_subscriptions[ws1] == {topic}
+        assert bridge.client_subscriptions[ws2] == {topic}
+        assert len(bridge.topic_subscriptions[topic]) == 2
+        assert bridge.topic_metrics[topic].active_subscribers == 2
+
 
 class TestUnsubscribeWebsocket:
     """Tests for WebSocket unsubscription from ZMQ topics."""

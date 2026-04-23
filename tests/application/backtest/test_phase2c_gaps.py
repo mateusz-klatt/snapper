@@ -17,6 +17,7 @@ import json
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -26,6 +27,8 @@ from unittest.mock import patch
 import pytest
 from typer.testing import CliRunner
 
+from scripts.capture_phase2c_baseline import SCENARIOS as BASELINE_SCENARIOS
+from scripts.capture_phase2c_baseline import serialise_run
 from snapper.application.backtest.batch_processor import CandleEvent
 from snapper.application.backtest.batch_processor import process_time_batch
 from snapper.application.backtest.config import BacktestConfig
@@ -637,11 +640,6 @@ class TestPhase2cBaselineParity:
         Then: every serialised scenario matches the snapshot deep-dict
             equally — byte-identical for single-feed Phase 2c runs.
         """
-        from pathlib import Path
-
-        from scripts.capture_phase2c_baseline import SCENARIOS as BASELINE_SCENARIOS
-        from scripts.capture_phase2c_baseline import serialise_run
-
         fixture_path = (
             Path(__file__).resolve().parent / "fixtures" / "phase2c_baseline_snapshot.json"
         )

@@ -103,6 +103,37 @@ class _TrackedOrder:
     price: float
 
 
+def _snapshot_tracked_order(order: ExchangeOrderSnapshot) -> _TrackedOrder:
+    """Convert an order snapshot into the tracked polling state."""
+    return _TrackedOrder(
+        order_id=order.id,
+        cl_ord_id=order.client_order_id or "",
+        symbol=order.symbol,
+        side=order.side,
+        order_type=order.type,
+        amount=order.amount,
+        filled=order.filled,
+        price=order.price or 0.0,
+    )
+
+
+def _should_emit_active_execution(
+    order: ExchangeOrderSnapshot,
+    previous: _TrackedOrder | None,
+) -> bool:
+    """Return whether the current poll should emit an active-order fill update."""
+    if previous is None:
+        return order.filled > 0
+    return order.filled > previous.filled
+
+
+def _active_execution_status(order: ExchangeOrderSnapshot) -> ExchangeOrderStatusEnum:
+    """Derive active-order execution status from cumulative fill progress."""
+    if math.isclose(order.filled, order.amount):
+        return ExchangeOrderStatusEnum.FILLED
+    return ExchangeOrderStatusEnum.PARTIALLY_FILLED
+
+
 class WalutomatExchangeClient(ExchangeClientBase):
     """Walutomat FX exchange client with REST API support.
 
@@ -675,60 +706,20 @@ class WalutomatExchangeClient(ExchangeClientBase):
         while self._running:
             try:
                 orders = await self.get_orders()
-                current_ids: set[str] = set()
-
-                for order in orders:
-                    current_ids.add(order.id)
-                    prev = tracked.get(order.id)
-
-                    tracked[order.id] = _TrackedOrder(
-                        order_id=order.id,
-                        cl_ord_id=order.client_order_id or "",
-                        symbol=order.symbol,
-                        side=order.side,
-                        order_type=order.type,
-                        amount=order.amount,
-                        filled=order.filled,
-                        price=order.price or 0.0,
-                    )
-
-                    if first_poll:
-                        continue
-
-                    should_yield = (prev is not None and order.filled > prev.filled) or (
-                        prev is None and order.filled > 0
-                    )
-                    if should_yield:
-                        if math.isclose(order.filled, order.amount):
-                            order_status = ExchangeOrderStatusEnum.FILLED
-                        else:
-                            order_status = ExchangeOrderStatusEnum.PARTIALLY_FILLED
-                        yield ExecutionUpdate(
-                            order_id=order.id,
-                            exec_type="trade",
-                            symbol=order.symbol,
-                            side=order.side,
-                            order_type=order.type,
-                            order_status=order_status,
-                            timestamp=datetime.now(UTC),
-                            cum_qty=order.filled,
-                            cl_ord_id=order.client_order_id or "",
-                            order_qty=order.amount,
-                            limit_price=order.price,
-                            average_price=order.price,
-                            fees=self._build_fees(order),
-                        )
+                current_ids, updates = self._collect_active_execution_updates(
+                    orders,
+                    tracked,
+                    first_poll,
+                )
+                for update in updates:
+                    yield update
 
                 if not first_poll:
-                    disappeared = set(tracked.keys()) - current_ids
-                    for oid in disappeared:
-                        t = tracked[oid]
-                        resolved_terminal = False
-                        async for event in self._resolve_disappeared(oid, t):
-                            resolved_terminal = True
-                            yield event
-                        if resolved_terminal:
-                            tracked.pop(oid, None)
+                    async for event in self._emit_disappeared_execution_updates(
+                        tracked,
+                        current_ids,
+                    ):
+                        yield event
 
                 first_poll = False
 
@@ -736,15 +727,71 @@ class WalutomatExchangeClient(ExchangeClientBase):
                 first_poll = False
                 logger.exception("Walutomat execution poll failed")
 
-            if tracked:
-                await asyncio.sleep(self._execution_poll_interval)
-            else:
-                self._execution_wake.clear()
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(
-                        self._execution_wake.wait(),
-                        timeout=self._execution_idle_interval,
-                    )
+            await self._wait_for_execution_poll(tracked)
+
+    def _collect_active_execution_updates(
+        self,
+        orders: list[ExchangeOrderSnapshot],
+        tracked: dict[str, _TrackedOrder],
+        first_poll: bool,
+    ) -> tuple[set[str], list[ExecutionUpdate]]:
+        """Update tracked active orders and return any new fill events."""
+        current_ids: set[str] = set()
+        updates: list[ExecutionUpdate] = []
+        for order in orders:
+            current_ids.add(order.id)
+            previous = tracked.get(order.id)
+            tracked[order.id] = _snapshot_tracked_order(order)
+            if first_poll or not _should_emit_active_execution(order, previous):
+                continue
+            updates.append(self._build_active_execution_update(order))
+        return current_ids, updates
+
+    def _build_active_execution_update(self, order: ExchangeOrderSnapshot) -> ExecutionUpdate:
+        """Build an execution update for a fill detected on an active order."""
+        return ExecutionUpdate(
+            order_id=order.id,
+            exec_type="trade",
+            symbol=order.symbol,
+            side=order.side,
+            order_type=order.type,
+            order_status=_active_execution_status(order),
+            timestamp=datetime.now(UTC),
+            cum_qty=order.filled,
+            cl_ord_id=order.client_order_id or "",
+            order_qty=order.amount,
+            limit_price=order.price,
+            average_price=order.price,
+            fees=self._build_fees(order),
+        )
+
+    async def _emit_disappeared_execution_updates(
+        self,
+        tracked: dict[str, _TrackedOrder],
+        current_ids: set[str],
+    ) -> AsyncIterator[ExecutionUpdate]:
+        """Yield terminal events for orders missing from the active-order response."""
+        disappeared = set(tracked) - current_ids
+        for order_id in disappeared:
+            tracked_order = tracked[order_id]
+            resolved_terminal = False
+            async for event in self._resolve_disappeared(order_id, tracked_order):
+                resolved_terminal = True
+                yield event
+            if resolved_terminal:
+                tracked.pop(order_id, None)
+
+    async def _wait_for_execution_poll(self, tracked: dict[str, _TrackedOrder]) -> None:
+        """Wait until the next active or idle execution poll cycle."""
+        if tracked:
+            await asyncio.sleep(self._execution_poll_interval)
+            return
+        self._execution_wake.clear()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(
+                self._execution_wake.wait(),
+                timeout=self._execution_idle_interval,
+            )
 
     @staticmethod
     def _build_fees(snapshot: ExchangeOrderSnapshot) -> list[ExecutionFeeBreakdown] | None:

@@ -5,6 +5,7 @@ and upserts UnderlyingAsset + InstrumentUnderlyingMapping rows via SCD2.
 """
 
 import re
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
@@ -444,25 +445,37 @@ class UnderlyingUpdater:
         Returns:
             InstrumentSpecInput with fallbacks applied, or None if nothing to change.
         """
-        current_kind = existing["instrument_kind"] if existing else None
-        current_expiry = existing["expiry_at"] if existing else None
+        base_spec = UnderlyingUpdater._base_fallback_spec(existing)
+        current_kind = base_spec.instrument_kind
+        current_expiry = base_spec.expiry_at
         needs_kind = match.instrument_type is not None and current_kind is None
         needs_expiry = match.expiry_override is not None and current_expiry is None
         if not needs_kind and not needs_expiry:
             return None
-        return InstrumentSpecInput(
-            tick_size=existing["tick_size"] if existing else None,
-            lot_size=existing["lot_size"] if existing else None,
-            min_order_size=existing["min_order_size"] if existing else None,
-            max_order_size=existing["max_order_size"] if existing else None,
-            cost_decimals=existing["cost_decimals"] if existing else None,
-            qty_decimals=existing["qty_decimals"] if existing else None,
-            margin_initial=existing["margin_initial"] if existing else None,
-            position_limit_long=existing["position_limit_long"] if existing else None,
-            position_limit_short=existing["position_limit_short"] if existing else None,
-            status=existing["status"] if existing else None,
+        return replace(
+            base_spec,
             expiry_at=match.expiry_override if needs_expiry else current_expiry,
             instrument_kind=match.instrument_type if needs_kind else current_kind,
+        )
+
+    @staticmethod
+    def _base_fallback_spec(existing: InstrumentSpecRow | None) -> InstrumentSpecInput:
+        """Build the baseline spec payload from the existing instrument spec."""
+        if existing is None:
+            return InstrumentSpecInput()
+        return InstrumentSpecInput(
+            tick_size=existing["tick_size"],
+            lot_size=existing["lot_size"],
+            min_order_size=existing["min_order_size"],
+            max_order_size=existing["max_order_size"],
+            cost_decimals=existing["cost_decimals"],
+            qty_decimals=existing["qty_decimals"],
+            margin_initial=existing["margin_initial"],
+            position_limit_long=existing["position_limit_long"],
+            position_limit_short=existing["position_limit_short"],
+            status=existing["status"],
+            expiry_at=existing["expiry_at"],
+            instrument_kind=existing["instrument_kind"],
         )
 
     async def _cleanup_stale(
