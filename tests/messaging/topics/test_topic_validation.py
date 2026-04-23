@@ -2,6 +2,7 @@
 
 import json
 import time
+import typing
 from collections.abc import Iterator
 from datetime import UTC
 from datetime import datetime
@@ -3870,3 +3871,41 @@ class TestAlertsTopicValidation:
         valid, err = validate_subscription_pattern("alerts.")
 
         assert valid, err
+
+
+class TestAlertTypeParity:
+    """Parity between the three ``alert_type`` definition sites.
+
+    Closes Copilot BE-2 recommendation: the five alert_type strings
+    live in three places (``AlertType`` Literal, ``_ALERT_TYPES``
+    frozenset, ``DeviceAlertPrefBody.alert_type`` wire Literal). The
+    validator's frozenset is now *derived* from ``AlertType`` via
+    ``typing.get_args`` so those two are automatically in sync; the
+    wire schema's Literal is independent (it's imported by Pydantic
+    via a different module path and can't trivially share the same
+    Literal alias). This test asserts the parity at test time so any
+    drift fails CI rather than surfacing as a runtime topic rejection.
+    """
+
+    def test_alert_type_literal_matches_frozenset(self) -> None:
+        """``AlertType`` args and ``_ALERT_TYPES`` are the same set."""
+        from snapper.messaging.schemas.data import AlertType
+        from snapper.messaging.topics.validation import _ALERT_TYPES
+
+        assert frozenset(typing.get_args(AlertType)) == _ALERT_TYPES
+
+    def test_wire_schema_alert_type_matches_frozenset(self) -> None:
+        """``DeviceAlertPrefBody.alert_type`` Literal matches ``_ALERT_TYPES``.
+
+        Uses Pydantic ``model_fields`` introspection to pull the
+        annotation back out — this catches a drift where the iOS
+        Swift regen and the router would diverge from the bus-side
+        validator (subtle bug: a user could register a pref for an
+        alert type that's impossible to publish).
+        """
+        from snapper.api.schemas.devices import DeviceAlertPrefBody
+        from snapper.messaging.topics.validation import _ALERT_TYPES
+
+        annotation = DeviceAlertPrefBody.model_fields["alert_type"].annotation
+
+        assert frozenset(typing.get_args(annotation)) == _ALERT_TYPES

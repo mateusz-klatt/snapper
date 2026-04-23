@@ -65,6 +65,7 @@ from snapper.infrastructure.symbols.functions import get_available_exchanges
 from snapper.infrastructure.symbols.functions import get_available_symbols
 from snapper.infrastructure.symbols.functions import get_market_data_exchanges
 from snapper.infrastructure.symbols.functions import get_market_subscribe_exchanges
+from snapper.messaging.schemas.data import AlertType
 from snapper.messaging.schemas.data import BacktestProgressEvent
 
 __all__ = [
@@ -658,19 +659,15 @@ _ACCRUAL_TOPIC_FORMAT_MSG = (
 )
 
 
-_ALERT_TYPES: frozenset[str] = frozenset(
-    {
-        "order_fill_full",
-        "order_rejected",
-        "position_stop_loss_fired",
-        "margin_warning",
-        "critical_system_error",
-    }
-)
-"""Canonical alert_type names — mirrored by ``DeviceAlertPrefBody.alert_type``
-and ``RESOURCE_PERMISSIONS``-gated ``READ_NOTIFICATIONS`` surface. Any
-change here must also update the schema Literal and the iOS-side
-``AlertType`` enum in the generated Swift types."""
+_ALERT_TYPES: frozenset[str] = frozenset(typing.get_args(AlertType))
+"""Canonical alert_type names — derived from ``AlertType`` in
+``snapper.messaging.schemas.data`` via ``typing.get_args`` so the
+validator and the wire schema share a single source of truth
+(closes Copilot BE-2 recommendation on drift risk). Any addition to
+``AlertType`` flows here automatically; the matching entry in
+``DeviceAlertPrefBody.alert_type`` (``src/snapper/api/schemas/devices.py``)
+is still a separate Literal — the parity is asserted in the test
+suite rather than at import time."""
 
 
 _ALERT_TOPIC_FORMAT_MSG = "Alert topics must have 3 segments: alerts.{user_public_id}.{alert_type}"
