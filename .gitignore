@@ -31,6 +31,7 @@ Thumbs.db.idea
 *.pem
 *.p12
 *.pfx
+*.p8
 
 # Runtime data files (keep base files for Docker)
 data/*.db
