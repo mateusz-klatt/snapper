@@ -84,8 +84,7 @@ async def _create_repo_with_instrument(
 ) -> tuple[SQLAlchemyRepository, int, str]:
     """Create a repository with a single instrument ready for SCD2 tests.
 
-    Inline duplicate of the helper in ``tests/data/test_bitemporal.py`` per
-    plan §3.2 (local-helper option) — the helper has no public home in
+    Inline duplicate of the helper in ``tests/data/test_bitemporal.py``.2 (local-helper option) — the helper has no public home in
     ``tests/helpers/db.py`` today and the copy-paste matches the existing
     convention across the data test suite.
     """

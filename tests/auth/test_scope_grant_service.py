@@ -1,4 +1,4 @@
-"""Tests for Day 3g ``ScopeGrantService.revoke_grant`` orchestration.
+"""Tests for  ``ScopeGrantService.revoke_grant`` orchestration.
 
 The DB-state mutations (SCD2 close + advisory lock) are integration-
 tested in ``tests/data/test_scope_grants.py::TestRevokeScopeGrant``.

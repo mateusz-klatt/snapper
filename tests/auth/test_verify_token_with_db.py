@@ -1,4 +1,4 @@
-"""Tests for Day 3d-B DB-backed async verify_token + 30s LRU cache (plan §3.6.3).
+"""Tests for  DB-backed async verify_token + 30s LRU cache.
 
 Covers :meth:`TokenManager.verify_token_with_db`:
 
@@ -147,7 +147,7 @@ class TestVerifyTokenWithDB:
 class TestVerifyTokenWithReasonBranches:
     """Direct coverage of :meth:`TokenManager.verify_token_with_reason` reason paths.
 
-    Day 3d-D R1 + R2 follow-up (Copilot MINOR NEW FINDING):
+     R1 + R2 follow-up (Copilot MINOR NEW FINDING):
     ``verify_token_with_db`` now delegates to
     ``verify_token_with_reason``; the wrapper tests above only
     exercise the ``TokenClaims | None`` projection. These tests
@@ -285,7 +285,7 @@ class TestInvalidateUserCache:
     def test_evicts_matching_user_entries_only(self) -> None:
         """Entries whose user_public_id matches are dropped; others stay.
 
-        Simulates the Day 3c ``admin.user_deactivated`` dispatch: the
+        Simulates the ``admin.user_deactivated`` dispatch: the
         TokenManager subscribes to the bus (wired in 3d-C) and calls
         :meth:`invalidate_user_cache` on receipt. Unaffected users
         keep their cached verdicts.
@@ -323,7 +323,7 @@ class TestVerifyCachePrune:
     async def test_hard_cap_applies_when_all_entries_fresh(self) -> None:
         """Fresh-only burst → oldest entries hard-evicted to stay at cap.
 
-        Codex R1 MAJOR regression guard: a burst of unique tokens
+        Codex regression guard: a burst of unique tokens
         within TTL must not let the cache grow unbounded past
         ``VERIFY_CACHE_MAX_ENTRIES``. The stale pass would find
         nothing to evict; the hard-cap pass drops the oldest by
@@ -379,7 +379,7 @@ class TestVerifyCachePrune:
 
 
 class TestVerifyCacheGenerationRace:
-    """Day 5c review MAJOR closure — cache can't be repopulated with stale data.
+    """review MAJOR closure — cache can't be repopulated with stale data.
 
     Simulates the race codex-gpt-5.3 flagged: a concurrent
     ``invalidate_user_cache`` bump during a DB read must prevent
@@ -457,9 +457,9 @@ class TestVerifyCacheGenerationRace:
         Then: the cache is NOT written — the race guard needs a
             pre-DB-read sample keyed off the same identifier the
             admin-bus listener bumps, but a blank claim has no such
-            identifier before the await. Closes the Day 5d-C R2
+            identifier before the await. Closes the R2
             codex finding that sampling the row id post-await
-            cannot detect an invalidate-during-DB-read race. Phase A
+            cannot detect an invalidate-during-DB-read race.
             never issues blank-claim tokens; legacy tokens pay a
             perf penalty (always DB-backed) until they expire.
         """
@@ -547,7 +547,7 @@ class TestVerifyCacheGenerationRace:
 
 
 class TestBlacklistHardCap:
-    """Day 5c review MAJOR closure — JTI blacklist cannot leak unbounded.
+    """review MAJOR closure — JTI blacklist cannot leak unbounded.
 
     Covers :meth:`_enforce_blacklist_cap`: when a mass deactivation
     pushes the set past :data:`BLACKLIST_MAX_ENTRIES`, the oldest

@@ -3709,7 +3709,7 @@ class TestAccrualsTopicValidation:
 
 
 class TestBacktestTopicFamily:
-    """Phase 2c backtest topic validator coverage (plan §2.1)."""
+    """Phase 2c backtest topic validator coverage."""
 
     _WALLET = "01948f94-0001-7a00-8000-000000000001"
     _RUN = "01948f94-0001-7a00-8000-000000000002"

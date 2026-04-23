@@ -521,7 +521,7 @@ def _closed_grant_row(public_id: str) -> ScopeGrantRow:
 
 
 class TestRevokeScopeGrant:
-    """Behaviour of ``revoke_scope_grant`` POST handler (Day 3g)."""
+    """Behaviour of ``revoke_scope_grant`` POST handler."""
 
     @pytest.mark.asyncio
     async def test_successful_revoke_returns_closed_row(self) -> None:
@@ -603,7 +603,7 @@ class TestRevokeScopeGrant:
         """``require_permission(MANAGE_SCOPE_GRANTS)`` blocks every non-ADMIN role.
 
         The POST /api/scope-grants/{id}/revoke route is guarded by
-        ``require_permission(MANAGE_SCOPE_GRANTS)`` per plan §D11
+        ``require_permission(MANAGE_SCOPE_GRANTS)``
         (ADMIN-only at MVP). The permission is granted to ADMIN only in
         ``ROLE_PERMISSIONS``; VIEWER / OPERATOR / AI_DELEGATE all hit
         the 403 branch of the dependency. This pins that contract so a

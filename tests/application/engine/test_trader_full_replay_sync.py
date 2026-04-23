@@ -8,7 +8,7 @@ TradeService flat, producing a latent ``old_qty == 0`` hazard on the
 first live fill into a non-flat recovered shard.
 
 Follow-up (b) from ``project_position_cycles_followups.md``. Plan
-``plan_position_cycles_followup_b_full_replay.md`` v1.3.
+this project
 """
 
 from collections.abc import Iterable

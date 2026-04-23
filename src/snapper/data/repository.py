@@ -2305,8 +2305,8 @@ class Repository(ABC):
         ``instrument_underlying_mappings`` active at ``as_of``;
         instrument-scoped grants resolve directly.
 
-        Used by the Day 3f subscribe-time AI_DELEGATE wallet-scope
-        filter and by the Day 3f admin-bus mid-session revalidation path.
+        Used by the subscribe-time AI_DELEGATE wallet-scope filter
+        and by the admin-bus mid-session revalidation path.
         No caching — grants / mappings / symbol-exchange joins can all
         change between calls, so callers get an authoritative read.
 

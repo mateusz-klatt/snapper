@@ -129,7 +129,7 @@ to live order events (requires CREATE_ORDERS, i.e. OPERATOR+).
 
 The ``signals`` category is intentionally split from ``strategy``: an
 AI_DELEGATE (holding ``READ_SIGNALS`` but NOT ``START_STRATEGIES``)
-must be able to subscribe to ``signals.*`` for Day 3f-A wallet-scope
+must be able to subscribe to ``signals.*`` for wallet-scope
 filtered read access, without gaining the operator-level
 strategy-management surface that ``strategy.*`` carries.
 

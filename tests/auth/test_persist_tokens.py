@@ -1,4 +1,4 @@
-"""Tests for Day 3d-A ``user_active_tokens`` DB persistence (plan §3.6.2).
+"""Tests for  ``user_active_tokens`` DB persistence.
 
 Covers three new :class:`Repository` methods
 (``insert_user_active_tokens``, ``revoke_user_active_token_by_jti``,
@@ -7,7 +7,7 @@ Covers three new :class:`Repository` methods
 on every ``create_tokens()`` call.
 
 Together they populate + maintain the row-per-outstanding-JWT
-inventory that the Day 3d-B DB-backed ``verify_token`` reads against.
+inventory that the DB-backed ``verify_token`` reads against.
 The tests run against an in-memory aiosqlite DB so the join on
 ``users.is_active`` exercises real SQL.
 """
@@ -35,7 +35,7 @@ _BCRYPT_FAKE_DIGEST: str = "$2b$12$" + "x" * 53
 
 @pytest.fixture
 async def repo() -> SQLAlchemyRepository:
-    """Fresh in-memory repo with the Phase A schema applied."""
+    """Fresh in-memory repo with the schema applied."""
     r = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
     await r.create_all()
     return r

@@ -1,10 +1,10 @@
-"""Phase 4 Day 2 tests — :class:`TraderCoordinator` shard-ownership wiring.
+"""Phase 4  tests — :class:`TraderCoordinator` shard-ownership wiring.
 
 Covers:
     - :meth:`TraderCoordinator._build_ownership` validation contract.
     - :meth:`TraderCoordinator._on_signal` drops foreign shards (§3.1).
     - BOTH engine construction paths populate ``engine._ownership``
-      (signal at :2243 + recovery at :1055) — plan §3.6 v1.2 R2 fix.
+      (signal at :2243 + recovery at :1055) —.6 v1.2 R2 fix.
     - :meth:`TraderCoordinator._dispatch_order_event` CID guard
       matrix (§3.2 v1.2): empty CID under N>1 → drop, unknown CID
       under N>1 → drop, unknown CID under N=1 → fallthrough, foreign
@@ -12,7 +12,7 @@ Covers:
 
 Uses the ``settings=`` kwarg on
 :class:`TraderCoordinator.__init__` to inject per-coordinator
-ownership (matches the integration-fixture pattern from plan §4 Day 4).
+ownership (matches the integration-fixture pattern from ).
 """
 
 from datetime import UTC
@@ -93,7 +93,7 @@ class TestInitializeSettingsInjectedBranch:
     ) -> None:
         """With ``settings=`` kwarg, DB service upgrade is skipped.
 
-        The plan §4 Day 4 contract requires ``_initialize_settings`` to
+        The  contract requires ``_initialize_settings`` to
         take the injected-settings branch when ``self._injected_settings``
         is non-None: ``self.settings`` becomes the injected object, the
         DB-backed ``get_settings_with_service`` path is NOT taken, and
@@ -228,7 +228,7 @@ class TestOnSignalOwnershipFilter:
     ) -> None:
         """Halt check for a brand-new signal uses the same shard_key as engine creation.
 
-        Regression guard: Copilot R1 review of Day 2 flagged that
+        Regression guard: Copilot R1 review of  flagged that
         ``halt_key`` on the no-engine path previously used
         ``parsed.signal_type`` (i.e., the strategy tag for paper
         signals) instead of the canonical execution mode. For a paper

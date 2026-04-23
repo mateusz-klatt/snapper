@@ -1,6 +1,6 @@
-"""Coverage-oriented tests for Day 1d enforcer wiring branches.
+"""Coverage-oriented tests for  enforcer wiring branches.
 
-Exercises the code paths added by the Day 1d wiring that are not
+Exercises the code paths added by the wiring that are not
 covered by the existing engine/plan/REST route tests: the
 ``caps_enforcer is None`` fallback branches + the helper method
 signatures + the lazy-construction path in

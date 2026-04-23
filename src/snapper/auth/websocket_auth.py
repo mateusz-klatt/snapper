@@ -139,7 +139,7 @@ class WebSocketAuthManager:
     ) -> None:
         """Inject lifespan-managed dependencies for the scope-revoked handler.
 
-        Day 3f-B: the ``admin.scope_revoked`` dispatch branch needs
+        The ``admin.scope_revoked`` dispatch branch needs
         refs to the live connection manager (for subscription walks +
         ``unsubscribe_client``), the ZMQ bridge (for
         ``remove_subscription``), and a repository factory (for the
@@ -392,9 +392,9 @@ class WebSocketAuthManager:
     async def start_admin_listener(self, zmq_broker_xpub: str) -> None:
         """Open the admin-bus subscriber and start the dispatch task.
 
-        Subscribes to both ``admin.user_deactivated`` (Day 3c kill-switch
+        Subscribes to both ``admin.user_deactivated`` (kill-switch
         fanout from ``UserService.deactivate_user`` — sole publisher)
-        and ``admin.scope_revoked`` (Day 3f-B mid-session wallet-scope
+        and ``admin.scope_revoked`` (mid-session wallet-scope
         revalidation from ``ScopeGrantService.revoke_grant`` — sole
         publisher). The deactivation branch closes affected WebSockets
         with code 4003; the scope-revoked branch narrows affected
@@ -558,9 +558,9 @@ class WebSocketAuthManager:
     async def _handle_scope_revoked(self, data: ScopeRevokedData) -> None:
         """Mid-session revalidation for affected AI_DELEGATE connections.
 
-        Day 3f-B. Unlike ``_handle_user_deactivated`` (which closes the
-        entire WS — user is gone), this handler only narrows
-        subscriptions: for each AI_DELEGATE connection whose
+        Unlike ``_handle_user_deactivated`` (which closes the entire
+        WS — user is gone), this handler only narrows subscriptions:
+        for each AI_DELEGATE connection whose
         ``operator_public_ids`` contains the revoked grant's operator,
         recompute the delegate's allowed ``(exchange, symbol)`` pair set
         against the post-revocation DB snapshot, then walk the client's
@@ -569,7 +569,7 @@ class WebSocketAuthManager:
         unaffected subscriptions (market, system, backtest, accruals,
         paper signals) keep flowing.
 
-        Per plan §D6: the structured error prefix
+        The structured error prefix
         ``topic_outside_scope:`` rides on ``WSErrorResponse.message``
         for MCP / CLI / log consumption; browser UIs that don't parse
         the prefix see a generic toast + a silently-dropped

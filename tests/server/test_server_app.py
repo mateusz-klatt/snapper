@@ -55,9 +55,9 @@ def _make_token_listener_recorder(recorded: list[str]) -> MagicMock:
     """Build a TokenManager mock whose listener calls append to ``recorded``.
 
     Mirrors the ``mock_ws_auth`` helper in the lifespan-ordering test
-    so Day 3d-C's `TokenManager.start_admin_listener` /
+    so 's `TokenManager.start_admin_listener` /
     `stop_admin_listener` calls land in the same event sequence as
-    Day 3c's `WebSocketAuthManager` calls. Each call appends a
+    's `WebSocketAuthManager` calls. Each call appends a
     distinct prefix (`tm_*` vs `ws_*`) so the ordering assertion can
     pin the relative sequence of both listeners' lifecycle hooks.
     """
@@ -248,7 +248,7 @@ class TestLifespan:
     ) -> None:
         """Lifespan passes `settings.zmq_broker_xsub` to publisher (not xpub).
 
-        Day 3b R2 BLOCKER (Copilot gpt-5.4): the original lifespan
+          (Copilot gpt-5.4): the original lifespan
         passed `settings.zmq_broker_xpub` — wrong endpoint per the
         broker proxy contract (publishers connect to XSUB, not XPUB).
         This test pins the call argument so a future refactor that
@@ -313,9 +313,9 @@ class TestLifespan:
     ) -> None:
         """Pin the relative order of publisher injection vs listener start/stop.
 
-        Day 3c R1 MINOR (Codex+Copilot): the existing lifespan
+          (Codex+Copilot): the existing lifespan
         tests stub the helpers but don't assert call sequence. The
-        ordering is load-bearing per plan §3.6.1 — the WS subscriber
+        ordering is load-bearing.6.1 — the WS subscriber
         must come up after the publisher socket is injected (so any
         immediate publish event reaches a live subscriber) and the
         subscriber must shut down before the publisher socket so the
@@ -403,7 +403,7 @@ class TestLifespan:
     async def test_lifespan_injects_scope_grant_service_publisher(
         self,
     ) -> None:
-        """Day 3g: ScopeGrantService shares the UserService publisher socket.
+        """ScopeGrantService shares the UserService publisher socket.
 
         Plan §3 Commit 1 `app.py` lifespan wiring: after
         ``UserService.set_msg_publisher(user_publisher)`` the lifespan
@@ -474,9 +474,9 @@ class TestLifespan:
     async def test_lifespan_wires_ws_auth_manager_before_start_admin_listener(
         self,
     ) -> None:
-        """Day 3f-B: ``set_wiring`` MUST run BEFORE ``start_admin_listener``.
+        """``set_wiring`` MUST run BEFORE ``start_admin_listener``.
 
-        Ordering is load-bearing per plan §D6 — the admin subscriber
+        Ordering is load-bearing — the admin subscriber
         must never receive an ``admin.scope_revoked`` event before the
         revalidation path (connection_manager + zmq_bridge +
         repository_factory) is ready, otherwise the handler would
@@ -554,9 +554,9 @@ class TestLifespan:
     async def test_lifespan_finally_runs_when_startup_raises_after_partial_init(
         self,
     ) -> None:
-        """Day 3c R3 follow-up: shutdown hooks fire even when startup raises mid-init.
+        """R3 follow-up: shutdown hooks fire even when startup raises mid-init.
 
-        Codex R3 self-criticism: in the original Day 3b/3c shape,
+        Codex R3 self-criticism: in the original /3c shape,
         publisher build + listener start ran BEFORE the `try`
         block. If `discover_processes` (or anything else after the
         publisher socket was opened) raised, the `finally` block
@@ -645,7 +645,7 @@ class TestLifespan:
     async def test_lifespan_finally_tolerates_settings_service_init_failure(
         self,
     ) -> None:
-        """Day 3c R3 follow-up: finally runs even if settings_service init fails.
+        """R3 follow-up: finally runs even if settings_service init fails.
 
         Worst-case partial init: `_initialize_settings_service`
         itself raises (e.g. DB unreachable on boot). At that point
@@ -840,8 +840,7 @@ class TestCreateApp:
         When: create_app is called,
         Then: The only mount is the unconditional MCP sub-app; the
             ``/`` static mount is skipped per the ``os.path.exists``
-            False branch. ``/api/mcp`` is always mounted because the
-            plan §3.12 flag-off semantics are implemented inside the
+            False branch. ``/api/mcp`` is always mounted because the.12 flag-off semantics are implemented inside the
             sub-app, not at mount time.
         """
         with (
@@ -868,9 +867,9 @@ class TestCreateApp:
             assert _safe_get_caps_enforcer() is None
 
     def test_build_user_service_publisher_connects_to_broker_xsub(self) -> None:
-        """Day 3b helper connects PUB socket to broker's XSUB endpoint.
+        """Helper connects PUB socket to broker's XSUB endpoint.
 
-        Day 3b R2 review (Copilot gpt-5.4) BLOCKER finding: the
+         R2 review (Copilot gpt-5.4) BLOCKER finding: the
         original implementation connected the PUB socket to
         `zmq_broker_xpub` (subscriber-facing) which silently drops
         every message because publishers MUST connect to the
@@ -926,7 +925,7 @@ class TestCreateApp:
     ) -> None:
         """Disposal order MUST be singleton-clear → publisher.close → context.term.
 
-        Day 3b R1 MINOR (Copilot gpt-5.4): the in-flight
+          (Copilot gpt-5.4): the in-flight
         `deactivate_user` call MUST observe a None publisher BEFORE
         the socket is closed; the socket MUST be closed BEFORE the
         context terminates so libzmq sees a clean LINGER cycle. The

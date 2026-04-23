@@ -517,10 +517,10 @@ class ScopeRevokedData(StrictDataSchema[Literal["scope_revoked"]]):
     """Admin scope-revocation event for a wallet-operator scope grant.
 
     Published by ``ScopeGrantService.revoke_grant`` as the SOLE publisher
-    of the ``admin.scope_revoked`` bus topic (single-publisher rule,
-    Day 3g). Subscriber: ``WebSocketAuthManager`` closes or narrows
-    affected AI_DELEGATE subscriptions via mid-session revalidation
-    (Day 3f-B) without dropping the WS connection itself.
+    of the ``admin.scope_revoked`` bus topic (single-publisher rule).
+    Subscriber: ``WebSocketAuthManager`` closes or narrows affected
+    AI_DELEGATE subscriptions via mid-session revalidation without
+    dropping the WS connection itself.
 
     The payload carries the full scope identity (grant, operator,
     wallet, scope_kind, resource ids) so log readers and audit

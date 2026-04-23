@@ -1,6 +1,6 @@
-"""Phase 4 Day 3 tests — :class:`OutboxDispatcher` shard-ownership wiring.
+"""Phase 4  tests — :class:`OutboxDispatcher` shard-ownership wiring.
 
-Covers plan §3.3 v1.2 — `_fetch_owned_batch` pagination contract:
+Covers.3 v1.2 — `_fetch_owned_batch` pagination contract:
     - ownership=None → straight pass-through (pre-Phase-4 behavior).
     - ownership=N>1 → page through the backlog, filter in Python,
       stop at batch_size owned rows OR DB exhaustion OR max_scan_rows.
@@ -167,7 +167,7 @@ class TestOutboxOwnershipFilter:
 
         Regression guard against the v1.1 ``10 × batch_size`` cap —
         with 15 foreign rows in front of 5 owned rows, the scan must
-        reach the owned rows (plan §D4 bounded-scan contract).
+        reach the owned rows.
         """
         foreign_shard = "kraken.FOREIGN.live"
         owned_shard = "kraken.MINE.live"
@@ -185,7 +185,7 @@ class TestOutboxOwnershipFilter:
     async def test_default_bound_reaches_150_foreign_prefix(self) -> None:
         """150-row foreign prefix skipped at default ``max_scan_rows=1000``.
 
-        The default cap is the production value (plan §D4). 150 rows
+        The default cap is the production value. 150 rows
         is well under 1000, so owned rows at the tail are reached.
         """
         foreign_shard = "kraken.FOREIGN.live"

@@ -70,7 +70,7 @@ class TestExtraMetricsShape:
 
 
 class TestExtraMetricsRoundtrip:
-    """BacktestRepository JSON-column persistence roundtrip (R3.8 closure)."""
+    """BacktestRepository JSON-column persistence roundtrip."""
 
     @pytest.mark.asyncio
     async def test_extra_metrics_roundtrips_through_sqlalchemy_json(self, tmp_path: Path) -> None:

@@ -1,12 +1,12 @@
-"""Tests for Day 3f-B admin.scope_revoked listener on WebSocketAuthManager.
+"""Tests for  admin.scope_revoked listener on WebSocketAuthManager.
 
-Covers the mid-session revalidation half of plan §D6: for each
+Covers the mid-session revalidation half: for each
 AI_DELEGATE connection whose principal is on the affected operator,
 recompute the allowed ``(exchange, symbol)`` pair set and narrow the
 client's subscriptions to the still-covered topics. The WS stays
 open — only wallet-scoped out-of-scope topics are unsubscribed; every
 other category (market, system, backtest, paper signals) keeps
-flowing. Day 3f-A (subscribe-time filter) ships in Commit 2; this
+flowing.  (subscribe-time filter) ships in Commit 2; this
 test module owns the post-subscribe revalidation contract.
 
 The ZMQ socket layer is mocked; only the handler + fanout logic is
@@ -273,7 +273,7 @@ class TestHandleScopeRevoked:
     async def test_ws_send_text_failure_swallowed(self) -> None:
         """A broken WS client's error frame must not block the unsubscribe walk.
 
-        Per plan §D6 the handler is best-effort; a dead WS is cleaned up
+        Per the handler is best-effort; a dead WS is cleaned up
         elsewhere. The unsubscribe + bridge-removal happens regardless.
         """
         ws = MagicMock()

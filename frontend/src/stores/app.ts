@@ -74,7 +74,7 @@ export const useAppStore = create<AppStore>()(
       queryClient.invalidateQueries()
     },
     selectWalletAndRefresh: async (nextWalletId: string | null) => {
-      // Phase 2c wallet-picker sync (plan §2.5 R12 F2): mint a new
+      // Wallet-picker sync: mint a new
       // JWT with the chosen wallet claim BEFORE swapping the client
       // scope, so the next REST/WS call authorises against the new
       // wallet. Using useAuthStore.getState() (not useAuth() hook —

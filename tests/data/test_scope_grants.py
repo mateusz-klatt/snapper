@@ -8,8 +8,6 @@ enforces the instrument-exclusive rule (D2).
 These tests run against a real on-disk SQLite database (no mocks) so
 the partial unique indexes, advisory-lock no-op, and SCD2 close+insert
 flow are exercised end-to-end.
-
-Plan reference: ``proprietary/plans/plan_multi_tenant_foundation.md``
 Sections 3.6, 3.7, 14.6 D2/D3, 14.7.1, 14.7.2, 14.7.4, 14.7.8.
 """
 
@@ -1258,7 +1256,7 @@ class TestGetExchangeInstrumentsDetail:
 
 
 class TestRevokeScopeGrant:
-    """Tests for ``SQLAlchemyRepository.revoke_scope_grant`` (Day 3g)."""
+    """Tests for ``SQLAlchemyRepository.revoke_scope_grant``."""
 
     @pytest.mark.asyncio
     async def test_revoke_active_grant_closes_row(self, repo: SQLAlchemyRepository) -> None:
@@ -1460,7 +1458,7 @@ async def _seed_instrument_chain(repo: SQLAlchemyRepository, ids: dict[str, str]
     ``_seed_world`` only seeds ``InstrumentUnderlyingMapping`` (mapping
     instrument public_ids to an underlying) and does not create the
     actual ``Instrument`` or ``Symbol`` rows those ids point at. The
-    Day 3f wallet-pair projection JOINs against those tables, so the
+     wallet-pair projection JOINs against those tables, so the
     tests here extend the seed with the concrete rows.
 
     Maps:
@@ -1518,7 +1516,7 @@ async def _seed_instrument_chain(repo: SQLAlchemyRepository, ids: dict[str, str]
 
 
 class TestListScopeGrantInstrumentPairs:
-    """Tests for the Day 3f projection repository method."""
+    """Tests for the projection repository method."""
 
     @pytest.mark.asyncio
     async def test_empty_operator_list_returns_empty(self, repo: SQLAlchemyRepository) -> None:

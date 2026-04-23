@@ -1,4 +1,4 @@
-"""Tests for the Day 3a kill-switch primitive (plan §3.6.1).
+"""Tests for the kill-switch primitive.
 
 Covers :meth:`TokenManager.revoke_user_sessions` — the two-phase
 revocation that flips ``user_active_tokens.revoked_at`` in DB AND
@@ -25,7 +25,7 @@ from snapper.data.repository import SQLAlchemyRepository
 
 @pytest.fixture
 async def repo() -> SQLAlchemyRepository:
-    """Fresh in-memory repo with the AI Phase A schema applied."""
+    """Fresh in-memory repo with the schema applied."""
     r = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
     await r.create_all()
     return r

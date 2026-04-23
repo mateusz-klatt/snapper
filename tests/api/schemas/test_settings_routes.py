@@ -473,13 +473,13 @@ class TestSettingsRoutes:
 
 
 class TestPublicFeatureFlags:
-    """Tests for the public ``GET /settings/features`` endpoint (Day 4a)."""
+    """Tests for the public ``GET /settings/features`` endpoint."""
 
     @pytest.mark.asyncio
     async def test_returns_false_when_flag_absent(self) -> None:
         """Settings service default path → ``ai_integration_enabled=False``.
 
-        Plan §4 Day 4 item 1: when the ``ai_integration_enabled``
+        Plan §4  item 1: when the ``ai_integration_enabled``
         setting hasn't been flipped on, the endpoint surfaces
         ``False`` so the frontend hides the AI Integration
         navigation entry.

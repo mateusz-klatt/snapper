@@ -1,7 +1,7 @@
-"""Tests for the MCP per-principal rate limiter (plan §3.10).
+"""Tests for the MCP per-principal rate limiter.
 
-Covers :class:`PrincipalRateLimitMiddleware` — the Day 5d-B2
-closure of the Day 5c 3-model review's MAJOR finding that
+Covers :class:`PrincipalRateLimitMiddleware` — the
+closure of the 3-model review's MAJOR finding that
 ``build_mcp_app`` dropped the approved rate-limit surface. The
 suite exercises the sliding-window behaviour through a minimal
 Starlette app so the assertions do not depend on the heavier

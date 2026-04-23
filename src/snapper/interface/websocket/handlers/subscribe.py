@@ -124,13 +124,13 @@ async def _enforce_ai_delegate_wallet_scope(
 ) -> tuple[list[str], list[str]]:
     """Split wallet-scoped topics into (allowed, denied) for AI_DELEGATE.
 
-    Day 3f subscribe-time filter. Fast-paths any non-AI_DELEGATE
-    principal (role gate returns the topic set unchanged). For
-    AI_DELEGATE the filter:
+    Subscribe-time filter. Fast-paths any non-AI_DELEGATE principal
+    (role gate returns the topic set unchanged). For AI_DELEGATE
+    the filter:
 
     1. Computes the delegate's allowed ``(exchange, native_symbol)``
        pairs via ``repository.list_scope_grant_instrument_pairs`` (one
-       read per subscribe call per §D4 — no caching so scope changes
+       read per subscribe call — no caching so scope changes
        take effect immediately).
     2. Decomposes every topic with
        :func:`parse_wallet_scoped_topic`.
@@ -228,9 +228,9 @@ async def handle_subscribe(
     """Handle topic subscription request.
 
     Validates topic patterns, checks category-level RBAC, enforces the
-    backtest per-subscription wallet-scope rule, runs the Day 3f
-    AI_DELEGATE wallet-scope filter, and registers subscriptions with
-    both the connection manager and ZMQ bridge.
+    backtest per-subscription wallet-scope rule, runs the AI_DELEGATE
+    wallet-scope filter, and registers subscriptions with both the
+    connection manager and ZMQ bridge.
 
     Signature takes the full ``AuthPrincipal`` (not just the role) so
     backtest subscriptions can be constrained to the caller's
@@ -243,7 +243,7 @@ async def handle_subscribe(
         message: Subscription request with topic list.
         manager: WebSocket connection manager.
         principal: Authenticated caller — role + wallet scope.
-        repository: Repository for the Day 3f AI_DELEGATE wallet-scope
+        repository: Repository for the AI_DELEGATE wallet-scope
             filter. Required for AI_DELEGATE principals; optional for
             other roles (the filter fast-paths non-AI_DELEGATE calls).
     """

@@ -6688,14 +6688,14 @@ async def test_list_decisions_pagination(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_insert_decision_persists_source_surface(tmp_path: Path) -> None:
-    """Day 5c MINOR closure — source_surface is threaded from DTO to the row.
+    """MINOR closure — source_surface is threaded from DTO to the row.
 
     Given: an :class:`ExecutionPlanDecisionInsertRow` with
         ``source_surface='mcp'`` (the provenance value only an MCP
         caller would pick),
     When: the repository inserts the decision,
     Then: the persisted row carries ``source_surface='mcp'``
-        verbatim. Closes the Day 5c review MINOR that the DTO used
+        verbatim. Closes the review MINOR that the DTO used
         to lack the field and every caller fell to the column's
         ``server_default='strategy'``.
     """
@@ -7084,8 +7084,7 @@ async def test_get_undispatched_commands_stable_across_same_created_at(
 ) -> None:
     """OFFSET pagination is stable when multiple rows share ``created_at``.
 
-    Regression guard for the R1 review finding on Phase 4 Day 3:
-    plan-service dispatch inserts multiple commands under a single
+    Regression guard for the R1 review finding on Phase 4 plan-service dispatch inserts multiple commands under a single
     ``now`` tick, so ties on ``created_at`` are realistic. Without
     the ``id`` tie-breaker in ``ORDER BY``, paginating with OFFSET
     could skip or duplicate rows → double-dispatch. The fix adds

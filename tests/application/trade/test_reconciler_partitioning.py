@@ -1,4 +1,4 @@
-"""Phase 4 Day 3 tests — :class:`ReconciliationLoop` shard-ownership filter (§3.4)."""
+"""Phase 4  tests — :class:`ReconciliationLoop` shard-ownership filter (§3.4)."""
 
 from datetime import UTC
 from datetime import datetime

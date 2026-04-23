@@ -1,6 +1,6 @@
-"""Phase 4 Day 4 integration tests — N=2 partitioning end-to-end.
+"""Phase 4  integration tests — N=2 partitioning end-to-end.
 
-Covers plan §0 success criteria #5 + §8 acceptance #3, #4, #16:
+Covers success criteria #5 + §8 acceptance #3, #4, #16:
     1. ``test_two_coordinators_split_signals``: two coordinators,
        10 signals precomputed to split ~50/50 across instance_id 0/1,
        assert each instance's engines set is disjoint + the union
@@ -17,7 +17,7 @@ Covers plan §0 success criteria #5 + §8 acceptance #3, #4, #16:
 The scenarios use the ``two_coordinator_stack`` fixture from
 :mod:`tests.integration.conftest` for scenarios #1 and #2, and the
 ``@pytest.mark.real_settings`` escape for scenario #3 (narrow
-ownership-only pass, no broker pipeline — per plan §8 R8 narrowing).
+ownership-only pass, no broker pipeline — R8 narrowing).
 """
 
 import asyncio
@@ -192,7 +192,7 @@ def test_coordinator_ownership_from_bootstrap_env(
         path works without the test-only ``settings=`` kwarg
         injection that scenarios #1/#2 rely on.
 
-    Per plan §8 R8 scope narrowing: ownership-only, no signal
+    Per R8 scope narrowing: ownership-only, no signal
     pipeline (scenarios #1/#2 cover the pipeline via the injection
     path). The autouse session-scoped ``isolated_sqlite_db``
     fixture has already pointed ``DB_URL`` at an isolated copy by
@@ -231,7 +231,7 @@ async def _force_checkpoint(
     Circumvents the trade-runtime's async checkpoint emission policy
     so scenario #2's positive-recovery variant can assert deterministic
     state restoration after restart without fighting the 60s
-    checkpoint tick (plan §3.5).
+    checkpoint tick.
     """
     repo = get_repository(stack.base_mock.db_url)
     now = datetime.now(UTC)
@@ -323,19 +323,19 @@ class TestCoordinatorRestartOnlyRecoversOwned:
     ) -> None:
         """Restart does not recover foreign-shard state from the DB.
 
-        Phase A: publish signals for all test instruments. Wait until
+        Step 1: publish signals for all test instruments. Wait until
         the expected engines show up in both coordinators.
-        Phase B: stop trader_1 and start a fresh trader_1_new with
+        Step 2: stop trader_1 and start a fresh trader_1_new with
         the same settings (instance_id=1, instance_count=2).
 
-        Assertions (plan §0 #4 + §3.5 partitioned-recovery contract):
+        Assertions ( #4 + §3.5 partitioned-recovery contract):
 
             - trader_1_new MUST NOT recover any of trader_0's shards.
               This is the ownership-split invariant the §3.5 paper
               N>1 exclusion exists to protect.
             - Whatever engines trader_1_new does recover MUST carry
               ``_ownership`` with instance_id=1, instance_count=2 —
-              proves the recovery-path engine wiring (Day 2 §3.6
+              proves the recovery-path engine wiring ( §3.6
               v1.2).
             - trader_0 is untouched by the restart.
 

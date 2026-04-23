@@ -3345,7 +3345,7 @@ class StubUserService:
         return self.delete_user_success
 
     async def deactivate_user(self, user_public_id: str, reason: str | None) -> bool:
-        """Deactivate user via the Day 3b kill-switch flow."""
+        """Deactivate user via the kill-switch flow."""
         self.deactivated_users.append((user_public_id, reason))
         return self.deactivate_user_success
 
@@ -3664,7 +3664,7 @@ def test_refresh_token_replay_returns_401_no_mint(
     Then: 401 is returned, the old JTI is NOT re-blacklisted, and no
         new cookies are set. Protects against replay within the
         in-memory blacklist grace window (R1 REQUEST CHANGES fix
-        for Day 3d-A).
+        for ).
     """
 
     class _ReplayTokenManager(StubTokenManager):

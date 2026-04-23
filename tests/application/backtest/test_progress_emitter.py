@@ -1,4 +1,4 @@
-"""Tests for the Phase 2c ``BacktestProgressEmitter`` (plan §2.3 + §2.6).
+"""Tests for the Phase 2c ``BacktestProgressEmitter`` (.3 + §2.6).
 
 Covers:
 
@@ -105,7 +105,7 @@ class TestBacktestProgressDataMilestoneInvariant:
 
 
 class TestEmitterLifecycle:
-    """Emit-order invariants from plan §2.3."""
+    """Emit-order invariants from.3."""
 
     @pytest.mark.asyncio
     async def test_on_started_fires_once(self) -> None:

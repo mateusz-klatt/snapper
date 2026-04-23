@@ -1,4 +1,4 @@
-"""Tests for the vendor-neutrality scanner script (plan §3.11)."""
+"""Tests for the vendor-neutrality scanner script."""
 
 from pathlib import Path
 from pathlib import PureWindowsPath
@@ -67,7 +67,7 @@ class TestIterPythonFiles:
 
 
 class TestCheckFileShouldFail:
-    """Regression cases from plan §3.11 that must trip the scanner."""
+    """Regression cases from.11 that must trip the scanner."""
 
     def test_import_anthropic_flagged(self, tmp_path: Path) -> None:
         """Verify ``import anthropic`` is flagged.

@@ -1,4 +1,4 @@
-"""Phase A Day 1 — AI_DELEGATE role hierarchy + permission binding tests.
+"""AI_DELEGATE role hierarchy + permission binding tests.
 
 Covers the canonical §3.4 guarantees:
 

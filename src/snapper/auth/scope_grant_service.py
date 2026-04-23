@@ -1,15 +1,15 @@
 """ScopeGrantService — SOLE publisher of `admin.scope_revoked`.
 
-Day 3g of AI Integration Phase A. Mirrors `UserService` publisher shape:
-the service owns `revoke_grant()` which closes the grant via the
-repository and then emits a single `admin.scope_revoked` bus event so
-`WebSocketAuthManager` (Day 3f-B subscriber) can revalidate any
-AI_DELEGATE subscriptions live without waiting for a reconnect.
+Mirrors `UserService` publisher shape: the service owns
+`revoke_grant()` which closes the grant via the repository and then
+emits a single `admin.scope_revoked` bus event so `WebSocketAuthManager`
+(the subscriber) can revalidate any AI_DELEGATE subscriptions live
+without waiting for a reconnect.
 
-Stateless singleton (per plan §D10): repository reference, tracker
-ref, optional publisher ref. No coordinator-owned mutable state. The
-publisher ref is injected by the FastAPI lifespan once the shared
-ZMQ PUB socket is available; tests stub it with a fake implementing
+Stateless singleton: repository reference, tracker ref, optional
+publisher ref. No coordinator-owned mutable state. The publisher
+ref is injected by the FastAPI lifespan once the shared ZMQ PUB
+socket is available; tests stub it with a fake implementing
 `send(topic, payload)`.
 """
 

@@ -288,7 +288,7 @@ class TestZmqLoggerErrorBranches:
 
 
 class TestParseWalletScopedTopic:
-    """Tests for Day 3f :func:`parse_wallet_scoped_topic` helper."""
+    """Tests for  :func:`parse_wallet_scoped_topic` helper."""
 
     @pytest.mark.parametrize(
         ("topic", "expected"),

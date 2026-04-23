@@ -1,4 +1,4 @@
-"""Day 2b tests for the MCP sub-app factory + middleware stack.
+"""tests for the MCP sub-app factory + middleware stack.
 
 Verifies the three-layer composition from
 :func:`snapper.mcp.server.build_mcp_app`:
@@ -75,7 +75,7 @@ class TestFeatureFlagMiddleware:
             ``ai_integration_enabled`` flag returns ``False``,
         When: any POST reaches the mount point,
         Then: the response is HTTP 503 with
-            ``error_code="feature_disabled"`` — per plan §3.12
+            ``error_code="feature_disabled"`` —.12
             always-mounted-but-gated semantics.
         """
         svc = _make_settings_service(enabled=False)
@@ -145,7 +145,7 @@ class TestBearerAuthMiddleware:
         assert response.json()["error_code"] == "missing_bearer_token"
 
     def test_repository_getter_returns_none_yields_503(self) -> None:
-        """Lifespan-not-ready repo → 503 ``mcp_unavailable`` (plan §3.6.3).
+        """Lifespan-not-ready repo → 503 ``mcp_unavailable``.
 
         Given: the feature flag is on and a Bearer token is present
             but the repository_getter returns ``None`` (e.g., FastAPI
@@ -171,7 +171,7 @@ class TestBearerAuthMiddleware:
     def test_rejection_with_unexpected_none_reason_falls_back_to_invalid(self) -> None:
         """Defensive: ``None`` rejection_reason maps to ``invalid_bearer_token``.
 
-        Day 3d-D R2 (Copilot MINOR NEW FINDING): pin the defensive
+         R2 (Copilot MINOR NEW FINDING): pin the defensive
         default in ``_build_rejection_response`` so a future
         ``VerifyOutcome`` with a ``None`` reason (which should never
         happen in production but could emerge from a refactor bug)
@@ -196,10 +196,10 @@ class TestBearerAuthMiddleware:
         assert response.json()["error_code"] == "invalid_bearer_token"
 
     def test_deactivated_user_token_returns_401_user_deactivated(self) -> None:
-        """Deactivated user's token → 401 ``user_deactivated`` (plan §2 item 6).
+        """Deactivated user's token → 401 ``user_deactivated``.
 
         Given: the flag is on, the bearer token passes JWT signature
-            + expiry, but the Day 3d-B DB-backed verify rejects it
+            + expiry, but the DB-backed verify rejects it
             because ``users.is_active=False`` — ``verify_token_with_reason``
             returns a ``VerifyOutcome`` with
             ``rejection_reason=REJECTION_REASON_USER_DEACTIVATED``.
@@ -271,7 +271,7 @@ class TestBearerAuthMiddleware:
         When: a Bearer-bearing request reaches the downstream,
         Then: the echo handler sees the verified :class:`TokenClaims`
             on ``request.state`` — proving the middleware populates
-            the attribute per plan §3.2 tool-dispatch contract. The
+            the attribute.2 tool-dispatch contract. The
             downstream status is 200 (FastMCP is not invoked here;
             the echo stub replaces it).
         """

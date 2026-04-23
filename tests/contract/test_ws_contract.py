@@ -1,19 +1,19 @@
-"""Vendor-neutral WebSocket contract tests (plan §4 Day 5 item 2).
+"""Vendor-neutral WebSocket contract tests.
 
 Companion to ``tests/contract/test_mcp_contract.py``. The WS endpoint
 must stay callable by any standards-compliant WebSocket client
 (``websockets``, browser ``WebSocket``, ``wscat``, ...) using only:
 
     - the standard ``Authorization: Bearer <jwt>`` upgrade header
-      (plan §3.7 item 3 — MCP / CLI clients without cookie jars),
+      (.7 item 3 — MCP / CLI clients without cookie jars),
     - JSON frames over a plain WebSocket — no vendor envelope,
     - documented close codes (``4401`` auth, ``4003`` deactivation).
 
-Day 3f-A ships the subscribe-time AI_DELEGATE wallet-scope filter —
+ ships the subscribe-time AI_DELEGATE wallet-scope filter —
 the wire contract is that an AI_DELEGATE subscribing to a mix of
 in-scope and out-of-scope wallet-scoped topics gets a standard
 ``WSSubscriptionSuccessResponse`` with out-of-scope topics listed in
-``denied_topics`` (no vendor envelope, no hidden error code). Day 3f-B
+``denied_topics`` (no vendor envelope, no hidden error code).
 (mid-session revalidation via ``admin.scope_revoked``) lands in the
 next commit and is out of scope here. The suite pairs with
 ``make check-vendor-neutral`` so the wire contract and the source-text
@@ -141,7 +141,7 @@ class TestWsBearerTransportContract:
 
     @pytest.mark.asyncio
     async def test_bearer_preferred_over_cookie_when_both_present(self) -> None:
-        """Header takes precedence over cookie per plan §3.7 item 3.
+        """Header takes precedence over cookie.7 item 3.
 
         Given: both ``Authorization: Bearer …`` and ``access_token``
             cookie are present,
@@ -339,7 +339,7 @@ class TestWsSingletonStateIsolation:
 
 
 class TestWsAiDelegateWalletScopeContract:
-    """Day 3f-A: the subscribe-time wallet-scope filter wire contract.
+    """the subscribe-time wallet-scope filter wire contract.
 
     AI_DELEGATE subscribes to a mix of in-scope and out-of-scope
     wallet-scoped topics. The response MUST be a standard

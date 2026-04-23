@@ -24,5 +24,4 @@ it operates at the raw-ASGI layer below ``BaseHTTPMiddleware``.
 Output sanitization runs inside each individual tool handler via
 func:`~snapper.mcp.output_sanitizer.sanitize_output` rather than
 as a middleware layer.
-See ``proprietary/plans/plan_ai_integration_phase_a.md``.
 """

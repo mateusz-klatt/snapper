@@ -1,6 +1,6 @@
 """FastAPI dependency tests for :func:`get_caps_enforcer_dependency`.
 
-Covers the narrow surface added in Phase A Day 1d that
+Covers the narrow surface added in   that
 ``tests/application/trade/test_caps_enforcer.py`` cannot reach
 (FastAPI-layer singleton cache + reset hook + RuntimeError when
 the repo is not SQLAlchemyRepository).

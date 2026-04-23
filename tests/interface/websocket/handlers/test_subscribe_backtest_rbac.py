@@ -1,4 +1,4 @@
-"""Backtest WS subscribe RBAC matrix (plan §2.1.2).
+"""Backtest WS subscribe RBAC matrix.
 
 Authoritative prefix-RBAC table:
 

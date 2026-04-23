@@ -1,4 +1,4 @@
-"""Day 3f-B end-to-end admin.scope_revoked fanout integration test.
+"""end-to-end admin.scope_revoked fanout integration test.
 
 Exercises the full dispatch path that the admin-bus publisher is
 supposed to drive, but without booting a real broker or real

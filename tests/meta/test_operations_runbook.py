@@ -1,6 +1,6 @@
 r"""Phase 4 meta-audit — ``docs/operations.md`` runbook structure.
 
-Per plan §8 acceptance #17, the operations runbook must carry:
+Per acceptance #17, the operations runbook must carry:
 
     - systemd template unit (``snapper-trade-zmq@`` reference).
     - At least ONE non-systemd orchestrator recipe (exactly one of

@@ -1,10 +1,9 @@
-"""Unit tests for :class:`USDConverter` — Phase A Day 1c (§3.5.4).
+"""Unit tests for :class:`USDConverter`.
 
 Covers:
     - USD quote: happy path returns ``quantity × last_price``.
     - Non-USD quote: raises :class:`PriceUnavailableError` with
-      ``quote_currency_not_usd`` (Phase A one-hop only; cross-pair
-      deferred per 4-model consultation Q3).
+      ``quote_currency_not_usd``.
     - Missing instrument: ``instrument_not_found``.
     - Missing snapshot: ``snapshot_missing``.
     - Null last_price: ``last_price_null``.
@@ -135,8 +134,7 @@ async def test_non_usd_quote_raises_quote_currency_not_usd(
     Given: an EUR-quoted Symbol + Instrument + fresh snapshot,
     When: ``to_usd`` runs,
     Then: :class:`PriceUnavailableError` with
-        ``reason='quote_currency_not_usd'`` is raised (Phase A
-        one-hop only, cross-pair deferred).
+        ``reason='quote_currency_not_usd'`` is raised.
     """
     inst_id = "inst-btc-eur"
     await _seed_instrument(repo, instrument_public_id=inst_id, quote="EUR")

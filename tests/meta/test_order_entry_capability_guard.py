@@ -1,6 +1,6 @@
 """Meta-audit — every order-entry submit route must call ``require_tradable``.
 
-Wires the TradFi P3 Day 3 capability-guard contract from the AST side:
+Wires the TradFi P3  capability-guard contract from the AST side:
 each REST handler that inserts a trade command must first invoke
 ``snapper.server._capability_guard.require_tradable``. This prevents a
 future PR from adding a new submit route (or silently removing the

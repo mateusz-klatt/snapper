@@ -1,6 +1,6 @@
 """Observation-only backtest integration — TradFi (kraken_equities) symbols.
 
-Per plan_tradfi_market_data_p3.md v1.5 §2 Day 5 + §5 item 18: backtest
+Per plan_tradfi_market_data_p3.md v1.5 §2  + §5 item 18: backtest
 engines in this repo do NOT write to ``trade_commands`` / ``orders``
 — those are live-runtime surfaces. Backtest artifacts live on the
 in-memory ``ResultCollector`` (and, after the runner persists, on
@@ -15,8 +15,8 @@ run against a market-data-only instrument produces:
 - no crash when the source instrument is ``can_trade=False``.
 
 Cross-asset execution (observing TradFi, executing on a crypto
-instrument) was deferred under plan §5 item 18 and is now
-implemented in ``plan_cross_asset_backtest_engine.md`` v1.2 (SHIPPED
+instrument) was deferred under item 18 and is now
+implemented in this project (SHIPPED
 2026-04-23) — ``batch_processor.process_time_batch`` routes fills
 through ``signal.instrument`` + ``config.target_execution_exchange``
 via the extracted ``_resolve_target_fill_price`` helper. The end-to-end
@@ -186,7 +186,7 @@ class TestBacktestTradfiObservationOnly:
         only so the engine's internal ``StrategyConfig`` validation
         passes. The real code path that ensures cross-asset execution
         on a ``can_trade=False`` instrument would be rejected is the
-        REST capability guard (Day 3) + the plan §5 item 18 deferral
+        REST capability guard + the item 18 deferral
         that documents why a true cross-asset execution test requires
         engine changes.
         """

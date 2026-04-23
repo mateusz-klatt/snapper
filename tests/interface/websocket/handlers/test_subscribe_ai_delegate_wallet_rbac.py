@@ -1,6 +1,6 @@
-"""AI_DELEGATE subscribe-time wallet-scope RBAC matrix (plan §D2).
+"""AI_DELEGATE subscribe-time wallet-scope RBAC matrix.
 
-Authoritative truth table (plan §D2 v1.1):
+Authoritative truth table:
 
 =======================================================================  ========
 Topic                                                                    Verdict
@@ -212,7 +212,7 @@ class TestAIDelegateHandleSubscribeIntegration:
 
     @pytest.mark.asyncio
     async def test_filter_runs_once_per_subscribe_call(self) -> None:
-        """The pair-set projection is a single round-trip per plan §D4.
+        """The pair-set projection is a single round-trip.
 
         We assert ``list_scope_grant_instrument_pairs`` is awaited
         exactly once even when multiple wallet-scoped topics are

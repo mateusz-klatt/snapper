@@ -22,7 +22,6 @@ class UserRole(StrEnum):
       ordinal comparison — intentional: access beyond the narrow
       permission set MUST go through
       ``require_permission(specific_perm)``.
-      See ``plan_ai_integration_phase_a.md``
     VIEWER: Read-only access to market data and positions.
     OPERATOR: Can execute trades and manage strategies.
     ADMIN: Full system access including user management.

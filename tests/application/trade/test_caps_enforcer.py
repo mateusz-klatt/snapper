@@ -1,8 +1,8 @@
-"""Unit tests for :class:`TradingCapsEnforcer` — Phase A Day 1c (§3.5.2).
+"""Unit tests for :class:`TradingCapsEnforcer`.
 
 Covers:
     - ``guard()`` fails closed when ``submission.user_public_id``
-      is None (plan §3.4 canonical rule — prevents silent cap
+      is None (.4 canonical rule — prevents silent cap
       bypass from a REST handler that forgets to thread the user).
     - ``guard_service_principal()`` bypasses all caps AND releases
       no lock (strategy hot path).
@@ -348,8 +348,7 @@ async def test_notional_cap_skips_market_orders_without_price() -> None:
 
     Given: a prior row with ``price=None``,
     When: the notional cap evaluates,
-    Then: that row contributes 0 to the rolling sum (documented
-        Phase A limitation; enforcer emits a WARN log).
+    Then: that row contributes 0 to the rolling sum (documented enforcer emits a WARN log).
     """
     caps = _caps(max_daily_notional_usd=10_000.0)
     prior: list[UserRecentSubmitRow] = [

@@ -1,6 +1,6 @@
 """Shared fixtures for ``tests/server``.
 
-The order-entry capability guard introduced for TradFi P3 Day 3
+The order-entry capability guard introduced for TradFi P3
 (``snapper.server._capability_guard.require_tradable``) fails closed
 for instruments without a ``SymbolExchangeCapability(can_trade=True)``
 row. Existing route tests use placeholder instrument strings such as

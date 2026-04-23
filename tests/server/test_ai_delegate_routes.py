@@ -1,4 +1,4 @@
-"""Tests for AI delegate CRUD routes (plan §4 Day 4b).
+"""Tests for AI delegate CRUD routes.
 
 Exercises :class:`DelegateService` + the five ``/api/ai-delegates``
 routes against a real in-memory SQLite DB so the SCD2 + caps
@@ -63,7 +63,7 @@ def _fresh_manager() -> TokenManager:
 
 @pytest.fixture
 async def repo() -> SQLAlchemyRepository:
-    """In-memory aiosqlite repo with the Phase A schema applied."""
+    """In-memory aiosqlite repo with the schema applied."""
     r = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
     await r.create_all()
     return r
@@ -195,7 +195,7 @@ class TestCreateDelegate:
     async def test_delegate_tokens_pass_day3d_b_verify(self, repo: SQLAlchemyRepository) -> None:
         """The minted access token verifies against the inventory on next request.
 
-        Proves the Day 3d-B DB-backed verify path accepts
+        Proves the DB-backed verify path accepts
         freshly-minted delegate tokens — which is the core
         functional guarantee the atomic create flow must uphold
         (otherwise the delegate can't use the tokens at all).
@@ -211,11 +211,11 @@ class TestCreateDelegate:
 
 
 class TestDelegateOperatorBinding:
-    """Day 5c BLOCKER closure — delegates inherit a validated operator scope.
+    """BLOCKER closure — delegates inherit a validated operator scope.
 
     Regression coverage for the 3-model review's BLOCKER: before
     this fix, `create_delegate` minted JWTs with empty
-    `operator_public_ids`, which made the Day 5b MCP wallet-scope
+    `operator_public_ids`, which made the MCP wallet-scope
     gate reject every freshly-created delegate on its first
     `submit_manual_order`.
     """
@@ -793,7 +793,7 @@ class TestDelegateProliferationCap:
 
 
 class TestDelegateProliferationConcurrency:
-    """Day 5d-C R2 closure — proliferation cap survives concurrent creates.
+    """R2 closure — proliferation cap survives concurrent creates.
 
     Before the row-lock fix, two parallel ``POST /api/ai-delegates``
     calls from the same owner could both read the same pre-insert
@@ -1008,9 +1008,9 @@ class TestServiceEdgeCases:
 
 
 class TestAiDelegatesFeatureFlagGate:
-    """Day 5d-B1 closure — `/api/ai-delegates/*` shares the MCP feature flag.
+    """closure — `/api/ai-delegates/*` shares the MCP feature flag.
 
-    The Day 5c 3-model review flagged a MAJOR (2/2 consensus): plan
+    The  3-model review flagged a MAJOR (2/2 consensus): plan
     §3.12 requires the delegate management surface to refuse every
     request when ``ai_integration_enabled`` is off, parity with the
     ``/api/mcp`` sub-app's :class:`FeatureFlagMiddleware`. Without
@@ -1065,7 +1065,7 @@ class TestAiDelegatesFeatureFlagGate:
             ai_delegate_routes.require_ai_integration_enabled(request)
 
     def test_handler_returns_mcp_parity_envelope(self) -> None:
-        """Day 5c Rfollowup (gpt-5.4): envelope must match MCP 503 parity.
+        """Rfollowup (gpt-5.4): envelope must match MCP 503 parity.
 
         Given: an :class:`AiIntegrationDisabledError`,
         When: :func:`ai_integration_disabled_handler` translates it,
@@ -1093,7 +1093,7 @@ class TestRouteHandlers:
     async def test_create_route_converts_operator_binding_error_to_422(
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``DelegateOperatorBindingError`` → 422 HTTPException (Day 5c fix).
+        """``DelegateOperatorBindingError`` → 422 HTTPException.
 
         Given: the service raises ``DelegateOperatorBindingError``
             because the caller picked an operator outside their

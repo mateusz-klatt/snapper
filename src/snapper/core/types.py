@@ -212,8 +212,7 @@ class ExecutionPlanStatusEnum(StrEnum):
     in-flight child commands), ``paused`` (operator intervention)
     ``cancel_requested`` (cancel issued but children still racing)
     terminal states ``completed`` / ``cancelled`` / ``failed`` /
-    ``expired``. Mirrors the state machine documented in
-    ``proprietary/plans/plan_execution_plans.md``.
+    ``expired``.
     """
 
     ARMED = "armed"

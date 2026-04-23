@@ -1,13 +1,13 @@
-"""Tests for the Day 3c admin-bus listener on `WebSocketAuthManager`.
+"""Tests for the admin-bus listener on `WebSocketAuthManager`.
 
-Covers the kill-switch fanout half of plan §3.6.1: every authenticated
+Covers the kill-switch fanout half of.6.1: every authenticated
 WebSocket whose principal matches the deactivated user is closed with
-code 4003 on receipt of `admin.user_deactivated`. Day 3a planted the
-publisher's local-blacklist + DB inventory; Day 3b made
-`UserService.deactivate_user` the SOLE publisher; Day 3c connects the
+code 4003 on receipt of `admin.user_deactivated`.  planted the
+publisher's local-blacklist + DB inventory;  made
+`UserService.deactivate_user` the SOLE publisher;  connects the
 WebSocket layer to that publisher.
 
-Subscription wiring for `admin.scope_revoked` is deferred to Day 3f
+Subscription wiring for `admin.scope_revoked` is deferred to
 (re-validation needs the §3.8 wallet-scope algorithm).
 
 The ZMQ socket layer is mocked because (a) starting a real broker
@@ -72,7 +72,7 @@ class TestCloseUserConnections:
     async def test_disconnect_runs_before_ws_close_to_cancel_timers_first(self) -> None:
         """`disconnect()` (cancel timers) MUST run BEFORE `await ws.close()`.
 
-        Day 3b R2 review (Copilot gpt-5.4) MAJOR finding: with the
+         R2 review (Copilot gpt-5.4) MAJOR finding: with the
         original `await ws.close()` then `disconnect()` order, the
         event loop COULD process a pending `warn_task` /
         `hard_task` timer during the close yield, racing the kill
@@ -185,7 +185,7 @@ class TestCloseUserConnections:
     async def test_multibyte_reason_truncated_on_utf8_boundary(self) -> None:
         """Multi-byte (CJK / emoji) reason is truncated by ENCODED bytes, not chars.
 
-        Codex + Copilot R1 BLOCKER: previously used `reason[:120]`
+        Codex + Copilot : previously used `reason[:120]`
         which counts codepoints. A CJK or emoji-heavy reason could
         therefore push the encoded close frame above the 123-byte
         protocol limit and make `ws.close()` itself fail (then get
@@ -280,7 +280,7 @@ class TestAdminDispatchFrame:
         """Topics outside the subscribed set are silently dropped.
 
         Defensive — a misrouted frame from the broker (e.g.
-        admin.scope_revoked once Day 3f wires it but before the
+        admin.scope_revoked once  wires it but before the
         listener restarts) must not raise out of the dispatch loop.
         """
         manager = _make_manager()
@@ -353,7 +353,7 @@ class TestAdminRecvOneFrame:
     async def test_unicode_decode_error_returns_none_does_not_kill_loop(self) -> None:
         """Invalid UTF-8 in topic OR payload → ``None`` (loop continues).
 
-        Codex R1 MAJOR: previously the bytes→str decode happened
+        Codex : previously the bytes→str decode happened
         OUTSIDE the recv `try` block, so a `UnicodeDecodeError` could
         escape the helper and unwind `_admin_listen_loop`. Combined
         with the original `is_not_none` idempotency check on
@@ -435,7 +435,7 @@ class TestAdminListenerLifecycle:
     async def test_start_restarts_after_previous_task_finished(self) -> None:
         """A previous listener task that finished early is reaped + restarted.
 
-        Codex R1 MAJOR: original idempotency check was
+        Codex : original idempotency check was
         `is not None`, which kept stale `_admin_listen_task` /
         `_admin_subscriber` / `_admin_zmq_context` refs around AFTER
         the task crashed and exited. The fix treats `task.done()` as
@@ -464,7 +464,7 @@ class TestAdminListenerLifecycle:
     async def test_concurrent_start_stop_serialised_by_lock(self) -> None:
         """`asyncio.Lock` prevents overlapping start/stop from racing.
 
-        Codex R1 MAJOR: without serialisation, a `stop` clearing the
+        Codex : without serialisation, a `stop` clearing the
         task ref could let a concurrent `start` allocate a fresh
         socket which the in-progress `stop` would then close — losing
         the listener. The fix serialises both methods via
@@ -490,7 +490,7 @@ class TestAdminListenerLifecycle:
         """Subscriber/context close errors during shutdown are swallowed.
 
         Mirrors the `_shutdown_user_service_publisher` resilience
-        contract (Day 3b): a transient broker issue at shutdown must
+        contract: a transient broker issue at shutdown must
         not block the rest of the lifespan teardown sequence.
         """
         manager = _make_manager()

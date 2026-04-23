@@ -170,7 +170,7 @@ class USDConverter:
                 raise PriceUnavailableError(
                     "quote_currency_not_usd",
                     instrument_public_id,
-                    f"quote={quote} (Phase A: one-hop only)",
+                    f"quote={quote} (one-hop conversion only)",
                 )
             snap_q = await session.execute(
                 select(MarketSnapshot.last_price, MarketSnapshot.timestamp).where(

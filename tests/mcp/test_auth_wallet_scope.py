@@ -1,6 +1,6 @@
 """Tests for :func:`snapper.mcp.auth.validate_user_wallet_scope`.
 
-Per-request wallet-scope re-validation gate (plan §5 item 3). The
+Per-request wallet-scope re-validation gate. The
 helper is called on every MCP tool invocation that touches a
 specific wallet so a grant revoked after login immediately blocks
 the next tool call even with a still-valid JWT.
@@ -163,7 +163,7 @@ class TestValidateUserWalletScope:
 
 
 class TestEnsureOperatorInClaims:
-    """Coverage for the operator-binding re-validation helper (R1 BLOCKER)."""
+    """Coverage for the operator-binding re-validation helper."""
 
     def test_none_selection_is_admitted(self) -> None:
         """``operator_public_id=None`` → caller defers to primary; admit.

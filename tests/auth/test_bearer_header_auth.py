@@ -1,6 +1,6 @@
-"""Bearer-header auth coverage for REST + WebSocket (plan §3.7).
+"""Bearer-header auth coverage for REST + WebSocket.
 
-Exercises the Day 2 auth extensions added for MCP / CLI clients that
+Exercises the auth extensions added for MCP / CLI clients that
 have no cookie jar:
 
 - ``get_current_user`` consults the ``Authorization: Bearer <jwt>``
@@ -146,7 +146,7 @@ class TestGetCurrentUserBearer:
 
 
 class TestValidateCsrfTokenBearerSkip:
-    """Bearer-bearing requests bypass CSRF (plan §3.7 item 4)."""
+    """Bearer-bearing requests bypass CSRF."""
 
     def test_bearer_header_skips_csrf_validation(self) -> None:
         """Given a Bearer header, Then no CSRF checks run.
@@ -211,7 +211,7 @@ class TestExtractRefreshBearer:
 
 
 class TestWebSocketBearerAuth:
-    """WebSocket handshake Bearer header path (plan §3.7 item 3)."""
+    """WebSocket handshake Bearer header path."""
 
     def _make_ws(
         self,

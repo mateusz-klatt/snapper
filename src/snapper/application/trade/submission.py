@@ -11,7 +11,6 @@ time.
 The DTO is frozen so an insert pipeline can pass it by reference
 without worrying about mutations between cap check and actual
 insert.
-See ``plan_ai_integration_phase_a.md``.
 """
 
 from dataclasses import dataclass

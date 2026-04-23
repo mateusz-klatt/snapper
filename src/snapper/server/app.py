@@ -304,7 +304,7 @@ def _shutdown_user_service_publisher(app: FastAPI) -> None:
 
     Mirrors `SettingsService.shutdown` ordering: clear both singleton
     publisher references (UserService and ScopeGrantService share the
-    same socket per Day 3g wiring) so any in-flight
+    same socket by design) so any in-flight
     `deactivate_user` / `revoke_grant` call observes a None publisher
     (graceful degradation), then close the socket and terminate the
     context. ``contextlib.suppress(Exception)`` mirrors the

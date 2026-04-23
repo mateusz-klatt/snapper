@@ -133,13 +133,11 @@ class FeatureFlagsPayload(StrictBody):
         ai_integration_enabled: Whether the MCP sub-app is
             activated. When ``False``, the frontend hides the
             AI Integration navigation entry and the ``/api/mcp``
-            endpoint returns ``503 feature_disabled`` per plan
-             Always-mounted-but-gated semantics.
+            endpoint returns ``503 feature_disabled`` —
+            always-mounted-but-gated semantics.
     """
 
-    ai_integration_enabled: bool = Field(
-        ..., description="Whether the MCP sub-app is activated (plan §3.12)."
-    )
+    ai_integration_enabled: bool = Field(..., description="Whether the MCP sub-app is activated.")
 
 
 class FeatureFlagsResponse(PayloadResponse[Literal["feature_flags_response"], FeatureFlagsPayload]):

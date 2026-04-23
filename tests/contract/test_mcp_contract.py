@@ -1,4 +1,4 @@
-"""Vendor-neutral contract tests for the MCP endpoint (plan §4 Day 5 item 2).
+"""Vendor-neutral contract tests for the MCP endpoint.
 
 The MCP surface MUST stay callable by any MCP-compatible client, not
 just the Anthropic / OpenAI / Cursor wrappers we happen to ship first.
@@ -259,7 +259,7 @@ class TestMcpBearerAuthContract:
         """Deactivated owner → ``user_deactivated`` (distinct from invalid).
 
         Given: a verification outcome signalling the owner account is
-            deactivated (plan §3.6 kill switch),
+            deactivated,
         When: the client calls MCP,
         Then: the 401 body carries ``error_code='user_deactivated'`` —
             clients should re-login instead of auto-refreshing, the

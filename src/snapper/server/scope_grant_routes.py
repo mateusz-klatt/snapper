@@ -315,7 +315,7 @@ async def revoke_scope_grant(
 ) -> RevokeScopeGrantResponse:
     """Atomically close an active scope grant (SCD2 close in place).
 
-    Publishes ``admin.scope_revoked`` after commit so the Day 3f-B
+    Publishes ``admin.scope_revoked`` after commit so the admin-bus
     subscriber can narrow affected AI_DELEGATE subscriptions live
     without reconnect. The closed row has ``known_to`` stamped at the
     revoke timestamp; no new row is inserted.

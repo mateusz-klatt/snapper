@@ -1,4 +1,4 @@
-"""Day 2c tests for MCP tool handlers (plan §4 Day 2 item 7).
+"""tests for MCP tool handlers.
 
 Exercises the two MVP tools exported by
 :func:`snapper.mcp.tools.register_mcp_tools`:

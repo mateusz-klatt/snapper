@@ -1,9 +1,7 @@
-"""Repository-method coverage for Day 1c TradingCapsEnforcer accessors.
+"""Repository-method coverage for  TradingCapsEnforcer accessors.
 
 Exercises the four new concrete methods on
-:class:`SQLAlchemyRepository` added in Day 1c:
-
-    - :meth:`get_user_trading_caps`
+:class:`SQLAlchemyRepository` added in - :meth:`get_user_trading_caps`
     - :meth:`count_user_open_commands`
     - :meth:`get_user_recent_submits`
     - :meth:`count_user_rolling_cancels`
@@ -30,7 +28,7 @@ _NOW = datetime(2026, 4, 18, 12, 0, 0, tzinfo=UTC)
 
 @pytest.fixture
 async def repo() -> SQLAlchemyRepository:
-    """Fresh in-memory repo with the AI Phase A schema applied."""
+    """Fresh in-memory repo with the schema applied."""
     r = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
     await r.create_all()
     return r
@@ -150,7 +148,7 @@ async def test_count_user_open_commands_counts_non_terminal_submits(
 ) -> None:
     """Non-terminal submit-type rows (create/submit/replace) count; cancels excluded.
 
-    Given: a user with one dispatched ``create`` (REST/plan vocab),
+    Given: a user with one dispatched ``create`` (REST),
         one dispatched ``submit`` (strategy/engine vocab), one
         dispatched ``replace``, one terminal filled ``submit``, and
         one dispatched ``cancel``,
@@ -202,7 +200,7 @@ async def test_get_user_recent_submits_filters_to_window(
     """Submit-type rows (create/submit/replace) inside the window are returned.
 
     Given: a user with an in-window ``submit`` (strategy vocab),
-        an in-window ``create`` (REST/plan vocab), an out-of-window
+        an in-window ``create`` (REST), an out-of-window
         ``submit``, and an in-window ``submit`` with status=rejected,
     When: ``get_user_recent_submits`` runs with ``since=now-1h``,
     Then: the two in-window non-rejected rows are returned. The

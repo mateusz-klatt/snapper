@@ -144,7 +144,7 @@ class TestTargetAttribution:
         When: process_time_batch runs,
         Then: the fill is attributed to the source candle's exchange —
             simulate_market_fill invoked with ``exchange='kraken'``
-            (spy-captured). Closes the R1 gpt-5.4 MINOR: the prior
+            (spy-captured). Closes the : the prior
             assertion only checked the recorded instrument, so a
             venue-attribution regression could have slipped through.
         """
@@ -234,13 +234,13 @@ class TestTargetAttribution:
         Then:
             * the recorded signal's price == 42000.0 (target close from
               latest_closes, NOT signal.price, NOT event.row['close']) and
-              instrument == 'BTC-USD' (R3.4 MAJOR closure),
+              instrument == 'BTC-USD',
             * the trade row's signal_public_id == signal row's public_id
               (FK-style linkage preserved across the b4f2c9b helper
-              extraction — R1 gpt-5.4 MINOR),
+              extraction — ),
             * the trade sequence_id < signal sequence_id (trade-then-
               signal ordering maintained under _process_signal / _resolve_
-              target_fill_price — R1 gpt-5.4 MINOR).
+              target_fill_price — ).
         """
         signal = StrategySignal(
             instrument="BTC-USD",

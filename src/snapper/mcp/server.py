@@ -346,7 +346,7 @@ def build_mcp_app(
     """
     mcp_server = FastMCP(
         _MCP_SERVER_NAME,
-        instructions=f"Snapper MCP endpoint (v{_MCP_SERVER_VERSION}) — plan §3.2",
+        instructions=f"Snapper MCP endpoint (v{_MCP_SERVER_VERSION}).",
         stateless_http=True,
         streamable_http_path="/",
     )

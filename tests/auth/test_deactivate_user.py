@@ -1,4 +1,4 @@
-"""Tests for the Day 3b kill-switch flow (plan §3.6.1).
+"""Tests for the kill-switch flow.
 
 Covers :meth:`UserService.deactivate_user` — the SOLE publisher of
 ``admin.user_deactivated`` per the single-publisher rule. The method
@@ -8,7 +8,7 @@ publishes the bus event.
 
 The DB-state mutations (`close_and_insert` + token revocation) are
 already integration-tested in
-``tests/auth/test_revoke_user_sessions.py`` (Day 3a primitive). These
+``tests/auth/test_revoke_user_sessions.py``. These
 tests focus on the new orchestration contract: ordering, single-publisher
 invariant, payload schema, graceful degradation on missing/failing
 publisher.
@@ -133,7 +133,7 @@ def _patch_token_manager_lookup() -> Generator[MagicMock]:
 
 
 class TestDeactivateUserOrchestration:
-    """Coverage for the canonical kill-switch flow (plan §3.6.1)."""
+    """Coverage for the canonical kill-switch flow."""
 
     @pytest.mark.asyncio
     async def test_happy_path_publishes_bus_event_with_expected_payload(
@@ -317,7 +317,7 @@ class TestDeactivateUserOrchestration:
     ) -> None:
         """Token revocation failure rolls back uncommitted user mutation + skips publish.
 
-        Codex+Copilot R1 MAJOR: this is a load-bearing failure
+        Codex+Copilot : this is a load-bearing failure
         contract from §3.6.1 step 2 — if revoke raises, the SCD2
         close+insert (still uncommitted) MUST be discarded by the
         session's `__aexit__` rollback, the bus event MUST NOT fire
@@ -344,7 +344,7 @@ class TestDeactivateUserOrchestration:
     ) -> None:
         """Commit failure leaves tokens revoked + skips publish + propagates.
 
-        Codex+Copilot R1 MAJOR: §3.6.1 step 3 says if the user
+        Codex+Copilot : §3.6.1 step 3 says if the user
         commit fails AFTER token revocation already committed in its
         own subtransaction, the kill switch wins (tokens stay
         revoked, user row stays active) — the safer failure mode.
@@ -370,7 +370,7 @@ class TestDeactivateUserOrchestration:
 class TestDeactivateUserRaceLoss:
     """Race-loss safety verified against a real in-memory aiosqlite DB.
 
-    Codex R1 BLOCKER: original `deactivate_user` query filtered by
+    Codex : original `deactivate_user` query filtered by
     `where_active_now(User)` only — it did NOT filter by
     `User.is_active`. So if Admin B deactivated a user between Admin
     A's route lookup and Admin A's service call, the service would
@@ -479,8 +479,7 @@ class TestDeactivateUserRoute:
         Then: `UserService.deactivate_user` is awaited with the
             resolved `public_id` and the supplied `reason` — proving
             the username→public_id translation happens at the route
-            layer (so the service contract stays public_id-only per
-            plan §3.6.1).
+            layer (so the service contract stays public_id-only.6.1).
         """
         target_profile = UserProfile(
             session_id="t-sid",

@@ -1,13 +1,13 @@
 """Phase 4 meta-audit — ``insert_trade_command`` call-site ownership contract.
 
 Every ``insert_trade_command`` call in ``src/snapper/**`` must pass
-an explicit ``ownership=`` kwarg matching plan §1.8. This test is
+an explicit ``ownership=`` kwarg matching.8. This test is
 repo-wide + forward-compatible: a future PR that adds a new call
 site without updating §1.8 fails CI; a refactor that moves an
 existing call to a different file line does NOT fail (the matrix
 keys on ``(file, enclosing_function_name)``, not line numbers).
 
-Phase A note (plan §3.5 wiring): the 7 plan-§1.8 sites collapsed
+Note: the 7  sites collapsed
 to 6 canonical entries when the two plan-service sites
 (``_reemit_single_stranded_cancel`` + ``_dispatch_commands``) were
 refactored onto a single shared ``_emit_trade_command`` helper so
@@ -182,14 +182,14 @@ def test_insert_site_policy_matches_plan_section_1_8() -> None:
                     f"ownership={expected_policy!r} per §1.8, got "
                     f"{actual_policy!r}"
                 )
-    assert not violations, "per-site policy violations (plan §1.8):\n" + "\n".join(violations)
+    assert not violations, "per-site policy violations:\n" + "\n".join(violations)
 
 
 def test_insert_site_matrix_matches_plan_section_1_8() -> None:
     """Collected ``(file, function)`` set matches §1.8 canonical matrix.
 
     Given: the :data:`CANONICAL_SITES` set enumerating the 7
-        known insert sites per plan §1.8,
+        known insert sites.8,
     When: every ``insert_trade_command`` call in
         ``src/snapper/**`` is collected via AST walk,
     Then: the collected set equals the canonical set — adding a

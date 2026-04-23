@@ -2146,7 +2146,6 @@ class UserTradingCaps(TemporalMixin, Base):
           not change accounting.
         ``max_cancels_per_minute``: sliding 60-second count of
           the user's cancel commands.
-    See ``plan_ai_integration_phase_a.md`` + #4.
     """
 
     __tablename__ = "user_trading_caps"
@@ -2191,7 +2190,6 @@ class UserActiveToken(Base):
     ``token_hash`` is SHA-256 HEX of the full token so the DB-backed
     inventory can be checked per-request in ``verify_token()``
     without holding the raw JWT plaintext in storage.
-    See ``plan_ai_integration_phase_a.md``.
     """
 
     __tablename__ = "user_active_tokens"
