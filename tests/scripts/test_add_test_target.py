@@ -439,7 +439,7 @@ class TestAddBuildConfigurations:
         assert DEBUG_CONFIG_UUID in result
         assert RELEASE_CONFIG_UUID in result
         assert "ie.klatt.snapper.tests" in result
-        assert "IPHONEOS_DEPLOYMENT_TARGET = 26.0" in result
+        assert "IPHONEOS_DEPLOYMENT_TARGET = 26.4" in result
 
     def test_adds_release_at_end_if_no_dad(self) -> None:
         """Adds release config at section end if no DAD UUID found."""
