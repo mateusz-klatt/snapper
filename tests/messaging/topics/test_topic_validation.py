@@ -10,11 +10,14 @@ from typing import Any
 
 import pytest
 
+from snapper.api.schemas.devices import DeviceAlertPrefBody
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataTypeEnum
+from snapper.messaging.schemas.data import AlertType
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.topics import validation
 from snapper.messaging.topics.builders import market_topic
+from snapper.messaging.topics.validation import _ALERT_TYPES
 from snapper.messaging.topics.validation import BACKTEST_EVENTS
 from snapper.messaging.topics.validation import TopicValidationError
 from snapper.messaging.topics.validation import _is_valid_timeframe
@@ -3889,9 +3892,6 @@ class TestAlertTypeParity:
 
     def test_alert_type_literal_matches_frozenset(self) -> None:
         """``AlertType`` args and ``_ALERT_TYPES`` are the same set."""
-        from snapper.messaging.schemas.data import AlertType
-        from snapper.messaging.topics.validation import _ALERT_TYPES
-
         assert frozenset(typing.get_args(AlertType)) == _ALERT_TYPES
 
     def test_wire_schema_alert_type_matches_frozenset(self) -> None:
@@ -3903,9 +3903,6 @@ class TestAlertTypeParity:
         validator (subtle bug: a user could register a pref for an
         alert type that's impossible to publish).
         """
-        from snapper.api.schemas.devices import DeviceAlertPrefBody
-        from snapper.messaging.topics.validation import _ALERT_TYPES
-
         annotation = DeviceAlertPrefBody.model_fields["alert_type"].annotation
 
         assert frozenset(typing.get_args(annotation)) == _ALERT_TYPES

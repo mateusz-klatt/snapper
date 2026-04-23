@@ -20,8 +20,15 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select as _select
+from sqlalchemy import update as _update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import AlertDelivery
+from snapper.data.models import AlertEvent
+from snapper.data.models import DeviceAlertPref
 from snapper.data.models import NotificationDevice
 from snapper.data.models import Operator
 from snapper.data.models import User
@@ -154,7 +161,6 @@ class TestNotificationDeviceRepo:
 
         active = await repo.list_active_notification_devices_for_user("user-b")
         async with repo.session() as s:
-            from sqlalchemy import select as _select
 
             all_rows = (
                 (
@@ -386,7 +392,6 @@ class TestAlertEventRepo:
             )
         anchor = AlertListCursor(timestamp=_ts(2), public_id=public_ids[2])
         async with repo.session() as s:
-            from snapper.data.models import AlertEvent
 
             await s.execute(
                 AlertEvent.__table__.update()
@@ -803,9 +808,6 @@ class TestConcurrencyInvariants:
         )
 
         async with repo.session() as s:
-            from sqlalchemy import select as _select
-
-            from snapper.data.models import AlertDelivery
 
             rows = (
                 (
@@ -846,9 +848,6 @@ class TestConcurrencyInvariants:
                 timestamp=_ts(),
             )
         )
-        from sqlalchemy import update as _update
-
-        from snapper.data.models import AlertDelivery
 
         async with repo.session() as s:
             await s.execute(
@@ -868,7 +867,6 @@ class TestConcurrencyInvariants:
         )
 
         async with repo.session() as s:
-            from sqlalchemy import select as _select
 
             rows = (
                 (
@@ -918,9 +916,6 @@ class TestConcurrencyInvariants:
         )
 
         async with repo.session() as s:
-            from sqlalchemy import select as _select
-
-            from snapper.data.models import AlertDelivery
 
             rows = (
                 (
@@ -1174,10 +1169,6 @@ class TestConcurrencyInvariants:
             transition("apns-C", 4),
         )
 
-        from sqlalchemy import select as _select
-
-        from snapper.data.models import AlertDelivery
-
         async with repo.session() as s:
             rows = (
                 (
@@ -1219,10 +1210,6 @@ class TestConcurrencyInvariants:
             )
         )
 
-        from sqlalchemy.ext.asyncio import AsyncSession
-
-        from snapper.data.models import NotificationDevice
-
         original_execute = AsyncSession.execute
         sabotaged = {"count": 0}
 
@@ -1236,7 +1223,6 @@ class TestConcurrencyInvariants:
                 and "SET known_to" in stmt_text
             ):
                 sabotaged["count"] += 1
-                from sqlalchemy import update as _update
 
                 side_cm = repo.session()
                 side = await side_cm.__aenter__()
@@ -1301,8 +1287,6 @@ class TestConcurrencyInvariants:
             )
         )
 
-        from sqlalchemy.ext.asyncio import AsyncSession
-
         original_execute = AsyncSession.execute
 
         class _ZeroRowcountResult:
@@ -1354,9 +1338,6 @@ class TestConcurrencyInvariants:
             )
             await s.commit()
 
-        from sqlalchemy.exc import IntegrityError
-        from sqlalchemy.ext.asyncio import AsyncSession
-
         original_commit = AsyncSession.commit
         tripped = {"n": 0}
 
@@ -1405,10 +1386,6 @@ class TestConcurrencyInvariants:
             )
         )
 
-        from sqlalchemy.ext.asyncio import AsyncSession
-
-        from snapper.data.models import DeviceAlertPref
-
         original_execute = AsyncSession.execute
         sabotaged = {"count": 0}
 
@@ -1422,7 +1399,6 @@ class TestConcurrencyInvariants:
                 and "SET known_to" in stmt_text
             ):
                 sabotaged["count"] += 1
-                from sqlalchemy import update as _update
 
                 side_cm = repo.session()
                 side = await side_cm.__aenter__()
@@ -1478,8 +1454,6 @@ class TestConcurrencyInvariants:
             )
         )
 
-        from sqlalchemy.ext.asyncio import AsyncSession
-
         original_execute = AsyncSession.execute
 
         class _ZeroRowcountResult:
@@ -1515,9 +1489,6 @@ class TestConcurrencyInvariants:
         device_pid = await _seed_user_and_device(
             repo, user_public_id="u-pref-ie", device_token="pref-ie-token"
         )
-
-        from sqlalchemy.exc import IntegrityError
-        from sqlalchemy.ext.asyncio import AsyncSession
 
         original_commit = AsyncSession.commit
         tripped = {"n": 0}
@@ -1580,8 +1551,6 @@ class TestConcurrencyInvariants:
             )
         )
 
-        from sqlalchemy.ext.asyncio import AsyncSession
-
         original_execute = AsyncSession.execute
 
         class _ZeroRowcountResult:
@@ -1630,9 +1599,6 @@ class TestConcurrencyInvariants:
                 )
             )
             await s.commit()
-
-        from sqlalchemy.exc import IntegrityError
-        from sqlalchemy.ext.asyncio import AsyncSession
 
         original_commit = AsyncSession.commit
         tripped = {"n": 0}
