@@ -184,3 +184,118 @@ class TestRequiredCandleHistory:
         mock_strategy = MagicMock(spec=BaseStrategy)
         result = BaseStrategy.required_candle_history(mock_strategy)
         assert result == 0
+
+
+class TestTargetExecutionExchange:
+    """Tests for BacktestConfig.target_execution_exchange (BE-1 D6 carrier)."""
+
+    @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
+    def test_target_execution_exchange_defaults_to_none(self) -> None:
+        """Default config has target_execution_exchange=None (backward compat).
+
+        Given: a config constructed without the field,
+        When: BacktestConfig is built,
+        Then: target_execution_exchange is None so fills attribute to the
+            source candle's exchange (Phase 2c byte-identical path).
+        """
+        config = BacktestConfig(**_valid_config())
+        assert config.target_execution_exchange is None
+
+    @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
+    def test_target_execution_exchange_accepts_order_capable_venue(self) -> None:
+        """Target exchange accepts a value inside the OrderExchange Literal.
+
+        Given: target_execution_exchange='kraken',
+        When: the config is constructed,
+        Then: the field carries the string value (serialized from the
+            OrderExchange enum literal).
+        """
+        config = BacktestConfig(**_valid_config(target_execution_exchange="kraken"))
+        assert config.target_execution_exchange == "kraken"
+
+    @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
+    def test_target_execution_exchange_rejects_unknown_value(self) -> None:
+        """Unknown exchange strings are rejected by Pydantic Literal validation.
+
+        Given: target_execution_exchange='not_a_real_exchange',
+        When: BacktestConfig is built,
+        Then: Pydantic raises ValidationError because 'not_a_real_exchange'
+            is not a member of the OrderExchange Literal (paper/kraken/
+            kraken_futures/zonda/walutomat).
+        """
+        with pytest.raises(ValidationError):
+            BacktestConfig(**_valid_config(target_execution_exchange="not_a_real_exchange"))
+
+    @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
+    def test_target_execution_exchange_rejects_market_data_only_venue(self) -> None:
+        """Market-data-only venues (kraken_equities) are rejected.
+
+        Given: target_execution_exchange='kraken_equities',
+        When: BacktestConfig is built,
+        Then: Pydantic raises ValidationError — OrderExchange excludes
+            kraken_equities (which is feed-only, not order-capable).
+            Closes R3-Q1 design decision.
+        """
+        with pytest.raises(ValidationError):
+            BacktestConfig(**_valid_config(target_execution_exchange="kraken_equities"))
+
+
+class TestTargetExecutionExchangeFingerprint:
+    """Fingerprint stability vs. target_execution_exchange sensitivity."""
+
+    @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
+    def test_fingerprint_unaffected_by_none_target_exchange(self) -> None:
+        """Default-None target exchange does not change the fingerprint.
+
+        Given: two configs — one without field (default None), one with
+            target_execution_exchange=None explicitly,
+        When: fingerprints are computed,
+        Then: both produce the byte-identical hash, matching pre-v1.2
+            legacy runs (Phase 2c dedup cache remains valid).
+        """
+        c1 = BacktestConfig(**_valid_config())
+        c2 = BacktestConfig(**_valid_config(target_execution_exchange=None))
+        assert compute_fingerprint(c1) == compute_fingerprint(c2)
+
+    @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
+    def test_fingerprint_changes_when_target_exchange_set(self) -> None:
+        """An explicit target_execution_exchange produces a different fingerprint.
+
+        Given: a default config vs. a cross-asset config (target='kraken'),
+        When: fingerprints are computed,
+        Then: the two hashes differ — cross-asset runs are not deduplicated
+            against legacy single-venue runs.
+        """
+        c_default = BacktestConfig(**_valid_config())
+        c_cross = BacktestConfig(**_valid_config(target_execution_exchange="kraken"))
+        assert compute_fingerprint(c_default) != compute_fingerprint(c_cross)
+
+    @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
+    def test_fingerprint_pairing_unaffected_by_none_target_exchange(self) -> None:
+        """Pairing-mode fingerprint ignores default-None target exchange.
+
+        Given: two configs with None target exchange,
+        When: compute_fingerprint(..., for_pairing=True) is called,
+        Then: hashes match — auto-pair detection at backtest_routes.py:348
+            still groups legacy runs correctly. Closes R3.7.
+        """
+        c1 = BacktestConfig(**_valid_config())
+        c2 = BacktestConfig(**_valid_config(target_execution_exchange=None))
+        assert compute_fingerprint(c1, for_pairing=True) == compute_fingerprint(
+            c2, for_pairing=True
+        )
+
+    @patch.dict("snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES", MOCK_STRATEGIES)
+    def test_fingerprint_pairing_tracks_explicit_target_exchange(self) -> None:
+        """Pairing-mode fingerprint differs when target_execution_exchange is set.
+
+        Given: a default config vs. a cross-asset config,
+        When: compute_fingerprint(..., for_pairing=True) is called on each,
+        Then: hashes differ — cross-asset runs do not auto-pair against
+            single-venue baselines. Closes R3.7.
+        """
+        c_default = BacktestConfig(**_valid_config())
+        c_cross = BacktestConfig(**_valid_config(target_execution_exchange="kraken"))
+        assert compute_fingerprint(c_default, for_pairing=True) != compute_fingerprint(
+            c_cross, for_pairing=True
+        )

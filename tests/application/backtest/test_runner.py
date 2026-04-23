@@ -409,6 +409,7 @@ class TestBacktestRunnerProcess:
             mock_collector.signals = [{"signal": "data"}]
             mock_collector.trades = [{"trade": "data"}]
             mock_collector.equity_points = [{"eq": "data"}]
+            mock_collector.cross_asset_blocked_fills = 0
             mock_collector_cls.return_value = mock_collector
 
             mock_metrics = MagicMock()

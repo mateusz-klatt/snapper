@@ -88,6 +88,7 @@ def _make_config() -> BacktestConfig:
     config.commission_bps = 0.0
     config.strategy_params = {}
     config.strategy_class = "parity_stub"
+    config.target_execution_exchange = None
     return config
 
 

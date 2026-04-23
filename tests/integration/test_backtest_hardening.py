@@ -107,6 +107,7 @@ def _make_config(start_offset_hours: int = 0) -> BacktestConfig:
     config.commission_bps = 0.0
     config.strategy_params = {}
     config.strategy_class = "warmup_stub"
+    config.target_execution_exchange = None
     return config
 
 

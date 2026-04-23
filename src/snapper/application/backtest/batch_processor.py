@@ -129,35 +129,47 @@ async def process_time_batch(
 
     for signal, event in signals_and_events:
         sig_pid = str(uuid7())
-        fill = simulate_market_fill(
-            exchange=event.exchange,
-            instrument=event.instrument,
-            side=str(signal.side),
-            close_price=float(event.row["close"]),
-            fill_at=event.open_at,
-            portfolio=portfolio,
-            slippage_bps=config.slippage_bps,
-            commission_bps=config.commission_bps,
-            signal_strength=getattr(signal, "strength", None),
-            signal_reason=getattr(signal, "reason", None),
+        target_exchange = (
+            str(config.target_execution_exchange)
+            if config.target_execution_exchange is not None
+            else event.exchange
         )
-        if fill is not None:
-            collector.record_trade(
-                run_public_id=run_public_id,
-                fill=fill,
+        target_instrument = signal.instrument
+        target_close = latest_closes.get(target_instrument)
+        if target_close is None:
+            collector.increment_blocked_fill(reason="missing_target_close")
+            recorded_price = float(signal.price)
+        else:
+            fill = simulate_market_fill(
+                exchange=target_exchange,
+                instrument=target_instrument,
+                side=str(signal.side),
+                close_price=target_close,
+                fill_at=event.open_at,
                 portfolio=portfolio,
-                signal_public_id=sig_pid,
-                session_id=tracker.session_id,
-                sequence_id=tracker.next_sequence("bt"),
-                bus_time=snapshot_as_of,
+                slippage_bps=config.slippage_bps,
+                commission_bps=config.commission_bps,
+                signal_strength=getattr(signal, "strength", None),
+                signal_reason=getattr(signal, "reason", None),
             )
+            if fill is not None:
+                collector.record_trade(
+                    run_public_id=run_public_id,
+                    fill=fill,
+                    portfolio=portfolio,
+                    signal_public_id=sig_pid,
+                    session_id=tracker.session_id,
+                    sequence_id=tracker.next_sequence("bt"),
+                    bus_time=snapshot_as_of,
+                )
+            recorded_price = target_close
         collector.record_signal(
             run_public_id=run_public_id,
             public_id=sig_pid,
             signal_time=event.open_at,
             signal_type=str(signal.side),
-            instrument=event.instrument,
-            price=float(event.row["close"]),
+            instrument=target_instrument,
+            price=recorded_price,
             indicators=getattr(signal, "indicators", {}),
             session_id=tracker.session_id,
             sequence_id=tracker.next_sequence("bt"),

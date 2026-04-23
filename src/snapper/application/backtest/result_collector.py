@@ -5,6 +5,7 @@ On finalize(), computes aggregate metrics and persists all artifacts
 atomically via BacktestRepository.
 """
 
+import logging
 from datetime import datetime
 
 from snapper.application.backtest.fill_model import BacktestFill
@@ -12,6 +13,8 @@ from snapper.application.portfolio.models import PortfolioTracker
 from snapper.data.repository_types import BacktestEquityPointInsertRow
 from snapper.data.repository_types import BacktestSignalInsertRow
 from snapper.data.repository_types import BacktestTradeInsertRow
+
+logger = logging.getLogger(__name__)
 
 
 class ResultCollector:
@@ -28,6 +31,25 @@ class ResultCollector:
         self.trades: list[BacktestTradeInsertRow] = []
         self.equity_points: list[BacktestEquityPointInsertRow] = []
         self._last_equity_time: datetime | None = None
+        self.cross_asset_blocked_fills: int = 0
+
+    def increment_blocked_fill(self, *, reason: str) -> None:
+        """Record a cross-asset fill that was blocked by a missing target close.
+
+        Called by the batch processor when ``signal.instrument`` has no
+        corresponding latest-close price — typically during the warmup
+        overlap window before the target feed has primed. The signal
+        row is still persisted upstream; only the fill + trade are
+        skipped. The counter is surfaced through
+        ``BacktestResultInsertRow.extra_metrics`` on the runner side.
+
+        Args:
+            reason: Short structured tag describing the block cause
+                (currently only ``'missing_target_close'``) — logged
+                for debugging when runs show unexpected block counts.
+        """
+        self.cross_asset_blocked_fills += 1
+        logger.debug("cross_asset_blocked_fill", extra={"reason": reason})
 
     def record_signal(
         self,

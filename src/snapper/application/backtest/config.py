@@ -14,6 +14,7 @@ from pydantic import field_validator
 
 from snapper.api.schemas.base import StrictBody
 from snapper.core.json_types import JsonObject
+from snapper.core.types import OrderExchange
 from snapper.strategies.factory import StrategyFactory
 
 
@@ -47,6 +48,15 @@ class BacktestConfig(StrictBody):
         fill_model: Simulated fill model.
         slippage_bps: Slippage in basis points.
         commission_bps: Commission in basis points.
+        target_execution_exchange: Optional order-capable venue that
+            simulated fills are attributed to in cross-asset runs. When
+            ``None`` (default) fills are attributed to the source
+            candle's exchange, preserving Phase 2c byte-identicality.
+            When set, the batch_processor substitutes this venue +
+            ``signal.instrument`` at fill time so observe-one /
+            trade-another strategies (e.g. MNQU6-CME observation →
+            BTC-USD/kraken fill) record trades against the intended
+            target venue rather than the source feed.
     """
 
     strategy_class: str
@@ -63,6 +73,7 @@ class BacktestConfig(StrictBody):
     slippage_bps: float = 0.0
     commission_bps: float = 0.0
     cancel_poll_ms: int = 500
+    target_execution_exchange: OrderExchange | None = None
 
     @field_validator("cancel_poll_ms")
     @classmethod
@@ -217,6 +228,8 @@ def compute_fingerprint(
         "slippage_bps": config.slippage_bps,
         "commission_bps": config.commission_bps,
     }
+    if config.target_execution_exchange is not None:
+        payload["target_execution_exchange"] = str(config.target_execution_exchange)
     if not for_pairing:
         payload["execution_mode"] = config.execution_mode
         payload["snapshot_as_of"] = snapshot_as_of.isoformat() if snapshot_as_of else None

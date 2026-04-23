@@ -50,6 +50,7 @@ def _make_config(instruments: dict[str, list[str]] | None = None) -> BacktestCon
     config.instruments = instruments or {"kraken": ["BTC-USD"]}
     config.timeframe = "1h"
     config.end_date = NOW
+    config.target_execution_exchange = None
     return config
 
 

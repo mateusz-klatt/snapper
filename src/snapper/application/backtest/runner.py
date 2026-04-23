@@ -484,6 +484,9 @@ class BacktestRunnerProcess(RegisterableProcess):
             collector.trades,
             initial_balance=config.initial_balance,
         )
+        extra_metrics: dict[str, Any] = {}
+        if collector.cross_asset_blocked_fills > 0:
+            extra_metrics["cross_asset_blocked_fills"] = collector.cross_asset_blocked_fills
         result_row = BacktestResultInsertRow(
             run_public_id=run_public_id,
             total_trades=metrics.total_trades,
@@ -504,7 +507,7 @@ class BacktestRunnerProcess(RegisterableProcess):
             max_drawdown_duration_seconds=metrics.max_drawdown_duration_seconds,
             exposure_ratio=metrics.exposure_ratio,
             turnover_ratio=metrics.turnover_ratio,
-            extra_metrics={},
+            extra_metrics=extra_metrics,
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence(_BT_ARTIFACTS_STREAM),
             timestamp=now,

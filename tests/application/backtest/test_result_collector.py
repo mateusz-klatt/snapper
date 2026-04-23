@@ -131,3 +131,33 @@ class TestResultCollector:
         assert collector.signals == []
         assert collector.trades == []
         assert collector.equity_points == []
+
+
+class TestCrossAssetBlockedFills:
+    """Cross-asset missing-target-close counter (BE-1 D3)."""
+
+    def test_counter_initial_zero(self) -> None:
+        """Fresh collector has cross_asset_blocked_fills == 0.
+
+        Given: a newly constructed ResultCollector,
+        When: the cross_asset_blocked_fills attribute is read,
+        Then: the value is 0 — single-feed runs surface
+            ``extra_metrics == {}`` byte-identically with pre-v1.2.
+        """
+        collector = ResultCollector()
+        assert collector.cross_asset_blocked_fills == 0
+
+    def test_increment_blocked_fill_raises_counter(self) -> None:
+        """increment_blocked_fill bumps the counter by exactly one per call.
+
+        Given: a fresh collector,
+        When: increment_blocked_fill is called three times with the
+            reason='missing_target_close' tag,
+        Then: cross_asset_blocked_fills == 3. The debug log is
+            exercised by the reason kwarg path.
+        """
+        collector = ResultCollector()
+        collector.increment_blocked_fill(reason="missing_target_close")
+        collector.increment_blocked_fill(reason="missing_target_close")
+        collector.increment_blocked_fill(reason="missing_target_close")
+        assert collector.cross_asset_blocked_fills == 3

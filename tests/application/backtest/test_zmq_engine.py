@@ -29,6 +29,7 @@ def _make_config_with_instruments(instruments: dict[str, list[str]]) -> Backtest
     config.commission_bps = 0.0
     config.strategy_params = {}
     config.strategy_class = "macd"
+    config.target_execution_exchange = None
     return config
 
 

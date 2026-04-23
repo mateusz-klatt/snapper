@@ -77,6 +77,7 @@ def _make_config(instruments: dict[str, list[str]] | None = None) -> BacktestCon
     config.slippage_bps = 0.0
     config.commission_bps = 0.0
     config.strategy_params = {}
+    config.target_execution_exchange = None
     return config
 
 

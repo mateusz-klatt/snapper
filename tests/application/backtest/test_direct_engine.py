@@ -77,6 +77,7 @@ class TestIterSortedCandleChunks:
         config = MagicMock(spec=BacktestConfig)
         config.instruments = {"kraken": ["BTC-USD"]}
         config.timeframe = "1h"
+        config.target_execution_exchange = None
         config.end_date = END
 
         chunks = []
@@ -95,6 +96,7 @@ class TestIterSortedCandleChunks:
         config = MagicMock(spec=BacktestConfig)
         config.instruments = {"kraken": ["BTC-USD"]}
         config.timeframe = "1h"
+        config.target_execution_exchange = None
         config.end_date = END
 
         chunks = []
@@ -119,6 +121,7 @@ class TestIterSortedCandleChunks:
         config = MagicMock(spec=BacktestConfig)
         config.instruments = {"kraken": ["BTC-USD", "ETH-USD"]}
         config.timeframe = "1h"
+        config.target_execution_exchange = None
         config.end_date = END
 
         chunks = []
@@ -158,6 +161,7 @@ class TestDirectDbEngine:
             config.strategy_class = "test_strategy"
             config.instruments = {"kraken": ["BTC-USD"]}
             config.timeframe = "1h"
+            config.target_execution_exchange = None
             config.start_date = NOW
             config.end_date = END
             config.initial_balance = 10000.0
@@ -200,6 +204,7 @@ class TestDirectDbEngine:
             config.strategy_class = "test_strategy"
             config.instruments = {"kraken": ["BTC-USD"]}
             config.timeframe = "1h"
+            config.target_execution_exchange = None
             config.start_date = NOW
             config.end_date = END
             config.initial_balance = 10000.0
@@ -239,6 +244,7 @@ class TestDirectDbEngine:
             config.strategy_class = "test_strategy"
             config.instruments = {"kraken": ["BTC-USD"]}
             config.timeframe = "1h"
+            config.target_execution_exchange = None
             config.start_date = NOW
             config.end_date = END
             config.initial_balance = 10000.0
@@ -279,6 +285,7 @@ class TestDirectDbEngine:
             config.strategy_class = "test_strategy"
             config.instruments = {"kraken": ["BTC-USD"]}
             config.timeframe = "1h"
+            config.target_execution_exchange = None
             config.start_date = NOW
             config.end_date = END
             config.initial_balance = 10000.0
@@ -341,6 +348,7 @@ class TestDirectDbEngine:
             config.strategy_class = "test_strategy"
             config.instruments = {"kraken": ["BTC-USD"]}
             config.timeframe = "1h"
+            config.target_execution_exchange = None
             config.start_date = NOW
             config.end_date = END
             config.initial_balance = 10000.0
@@ -373,6 +381,7 @@ class TestDirectDbEngine:
 
         config = MagicMock(spec=BacktestConfig)
         config.timeframe = "1h"
+        config.target_execution_exchange = None
         config.start_date = NOW
         config.slippage_bps = 0.0
         config.commission_bps = 0.0
@@ -429,6 +438,7 @@ class TestDirectDbEngine:
             config.strategy_class = "test_strategy"
             config.instruments = {"kraken": ["BTC-USD"]}
             config.timeframe = "1h"
+            config.target_execution_exchange = None
             config.start_date = NOW
             config.end_date = END
             config.initial_balance = 10000.0
@@ -451,6 +461,7 @@ class TestCooperativeCancel:
         config.strategy_class = "test_strategy"
         config.instruments = {"kraken": ["BTC-USD"]}
         config.timeframe = "1h"
+        config.target_execution_exchange = None
         config.start_date = NOW
         config.end_date = END
         config.initial_balance = 10000.0

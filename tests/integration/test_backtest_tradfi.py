@@ -138,6 +138,7 @@ def _tradfi_config() -> BacktestConfig:
     config.commission_bps = 0.0
     config.strategy_params = {}
     config.strategy_class = "tradfi_observer"
+    config.target_execution_exchange = None
 
     return config
 
