@@ -143,6 +143,46 @@ export const CredentialSummarySchema = z
   })
   .strict()
 
+export const DeviceAlertPrefBodySchema = z
+  .object({
+    alert_type: z.enum([
+      'order_fill_full',
+      'order_rejected',
+      'position_stop_loss_fired',
+      'margin_warning',
+      'critical_system_error',
+    ]),
+    operator_public_id: z.string().nullable().optional(),
+    wallet_public_id: z.string().nullable().optional(),
+    enabled: z.boolean(),
+    min_priority: z.enum(['low', 'medium', 'high']),
+    quiet_hours_start_min: z.number().int().nullable().optional(),
+    quiet_hours_end_min: z.number().int().nullable().optional(),
+    mute_until: z.iso.datetime().nullable().optional(),
+    timezone: z.string().max(64),
+  })
+  .strict()
+
+export const DeviceAlertPrefInfoSchema = z
+  .object({
+    type: z.literal('device_alert_pref_info'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    device_public_id: z.string(),
+    alert_type: z.string(),
+    operator_public_id: z.string().nullable().optional(),
+    wallet_public_id: z.string().nullable().optional(),
+    enabled: z.boolean(),
+    min_priority: z.string(),
+    quiet_hours_start_min: z.number().int().nullable().optional(),
+    quiet_hours_end_min: z.number().int().nullable().optional(),
+    mute_until: z.iso.datetime().nullable().optional(),
+    timezone: z.string(),
+  })
+  .strict()
+
 export const EquityOverlayPointSchema = z
   .object({
     point_time: z.iso.datetime(),
@@ -310,6 +350,25 @@ export const MetricDiffRowSchema = z
   })
   .strict()
 
+export const NotificationDeviceInfoSchema = z
+  .object({
+    type: z.literal('notification_device_info'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    user_public_id: z.string(),
+    device_token: z.string(),
+    device_id: z.string(),
+    platform: z.string(),
+    env: z.string(),
+    app_version: z.string().nullable().optional(),
+    previews_mode: z.string(),
+    registered_at: z.iso.datetime(),
+    last_seen_at: z.iso.datetime().nullable().optional(),
+  })
+  .strict()
+
 export const OperatorInfoSchema = z
   .object({
     type: z.literal('operator_info'),
@@ -454,6 +513,16 @@ export const ProcessStopDataSchema = z
     status: z.enum(['success', 'not_running', 'error']),
     name: z.string(),
     message: z.string().nullable().optional(),
+  })
+  .strict()
+
+export const RegisterDeviceBodySchema = z
+  .object({
+    device_token: z.string().min(64).max(64),
+    device_id: z.string().min(1).max(64),
+    env: z.enum(['sandbox', 'prod']),
+    app_version: z.string().max(32).nullable().optional(),
+    previews_mode: z.enum(['private', 'public']),
   })
   .strict()
 
@@ -1005,6 +1074,28 @@ export const CredentialResponseSchema = z
   })
   .strict()
 
+export const UpdateDevicePrefCommandSchema = z
+  .object({
+    type: z.literal('update_device_pref_command'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: DeviceAlertPrefBodySchema,
+  })
+  .strict()
+
+export const DeviceAlertPrefResponseSchema = z
+  .object({
+    type: z.literal('device_alert_pref_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: DeviceAlertPrefInfoSchema,
+  })
+  .strict()
+
 export const ExecutionListResponseSchema = z
   .object({
     type: z.literal('execution_list'),
@@ -1070,6 +1161,29 @@ export const InstrumentDetailListResponseSchema = z
   .strict()
 
 export const JsonValueSchema = z.unknown()
+
+export const NotificationDeviceListResponseSchema = z
+  .object({
+    type: z.literal('notification_device_list_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: z.array(NotificationDeviceInfoSchema),
+    count: z.number().int(),
+  })
+  .strict()
+
+export const NotificationDeviceResponseSchema = z
+  .object({
+    type: z.literal('notification_device_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: NotificationDeviceInfoSchema,
+  })
+  .strict()
 
 export const OperatorListResponseSchema = z
   .object({
@@ -1175,6 +1289,17 @@ export const ProcessStopResponseSchema = z
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     payload: ProcessStopDataSchema,
+  })
+  .strict()
+
+export const RegisterDeviceCommandSchema = z
+  .object({
+    type: z.literal('register_device_command'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: RegisterDeviceBodySchema,
   })
   .strict()
 
@@ -1836,6 +1961,28 @@ export const HealthCheckResponseSchema = z
   })
   .strict()
 
+export const AlertEventInfoSchema = z
+  .object({
+    type: z.literal('alert_event_info'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    user_public_id: z.string(),
+    operator_public_id: z.string().nullable().optional(),
+    wallet_public_id: z.string().nullable().optional(),
+    alert_type: z.string(),
+    priority: z.string(),
+    is_safety_critical: z.boolean(),
+    title: z.string(),
+    body: z.string(),
+    payload: z.record(z.string(), z.any()).nullable().optional(),
+    dedup_key: z.string().nullable().optional(),
+    thread_key: z.string().nullable().optional(),
+    source_topic: z.string().nullable().optional(),
+  })
+  .strict()
+
 export const AvailableProcessSchema = z
   .object({
     type: z.literal('available_process'),
@@ -2046,6 +2193,30 @@ export const RefreshResponseSchema = z
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     payload: RefreshDataSchema,
+  })
+  .strict()
+
+export const AlertEventResponseSchema = z
+  .object({
+    type: z.literal('alert_event_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: AlertEventInfoSchema,
+  })
+  .strict()
+
+export const AlertHistoryResponseSchema = z
+  .object({
+    type: z.literal('alert_history_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: z.array(AlertEventInfoSchema),
+    count: z.number().int(),
+    next_cursor: z.string().nullable().optional(),
   })
   .strict()
 
@@ -2345,6 +2516,8 @@ export type ConnectionStats = z.infer<typeof ConnectionStatsSchema>
 export type ContinuousCandleData = z.infer<typeof ContinuousCandleDataSchema>
 export type ContractData = z.infer<typeof ContractDataSchema>
 export type CredentialSummary = z.infer<typeof CredentialSummarySchema>
+export type DeviceAlertPrefBody = z.infer<typeof DeviceAlertPrefBodySchema>
+export type DeviceAlertPrefInfo = z.infer<typeof DeviceAlertPrefInfoSchema>
 export type EquityOverlayPoint = z.infer<typeof EquityOverlayPointSchema>
 export type ExchangeListResponse = z.infer<typeof ExchangeListResponseSchema>
 export type ExecutionData = z.infer<typeof ExecutionDataSchema>
@@ -2358,6 +2531,7 @@ export type InstrumentListResponse = z.infer<typeof InstrumentListResponseSchema
 export type JsonPrimitive = z.infer<typeof JsonPrimitiveSchema>
 export type MessageResponse = z.infer<typeof MessageResponseSchema>
 export type MetricDiffRow = z.infer<typeof MetricDiffRowSchema>
+export type NotificationDeviceInfo = z.infer<typeof NotificationDeviceInfoSchema>
 export type OperatorInfo = z.infer<typeof OperatorInfoSchema>
 export type OrderData = z.infer<typeof OrderDataSchema>
 export type OrphanSweepResultData = z.infer<typeof OrphanSweepResultDataSchema>
@@ -2368,6 +2542,7 @@ export type ProcessCreatedInfo = z.infer<typeof ProcessCreatedInfoSchema>
 export type ProcessStartData = z.infer<typeof ProcessStartDataSchema>
 export type ProcessStatus = z.infer<typeof ProcessStatusSchema>
 export type ProcessStopData = z.infer<typeof ProcessStopDataSchema>
+export type RegisterDeviceBody = z.infer<typeof RegisterDeviceBodySchema>
 export type RelationshipTypeEnum = z.infer<typeof RelationshipTypeEnumSchema>
 export type RestRateExchangeStats = z.infer<typeof RestRateExchangeStatsSchema>
 export type RollPointDetail = z.infer<typeof RollPointDetailSchema>
@@ -2423,6 +2598,8 @@ export type ContinuousCandleListResponse = z.infer<typeof ContinuousCandleListRe
 export type ContractListResponse = z.infer<typeof ContractListResponseSchema>
 export type CredentialListResponse = z.infer<typeof CredentialListResponseSchema>
 export type CredentialResponse = z.infer<typeof CredentialResponseSchema>
+export type UpdateDevicePrefCommand = z.infer<typeof UpdateDevicePrefCommandSchema>
+export type DeviceAlertPrefResponse = z.infer<typeof DeviceAlertPrefResponseSchema>
 export type ExecutionListResponse = z.infer<typeof ExecutionListResponseSchema>
 export type ExecutionPlanResponse = z.infer<typeof ExecutionPlanResponseSchema>
 export type FeatureFlagsResponse = z.infer<typeof FeatureFlagsResponseSchema>
@@ -2430,6 +2607,8 @@ export type FrontMonthResponse = z.infer<typeof FrontMonthResponseSchema>
 export type GapDetectionStats = z.infer<typeof GapDetectionStatsSchema>
 export type InstrumentDetailListResponse = z.infer<typeof InstrumentDetailListResponseSchema>
 export type JsonValue = z.infer<typeof JsonValueSchema>
+export type NotificationDeviceListResponse = z.infer<typeof NotificationDeviceListResponseSchema>
+export type NotificationDeviceResponse = z.infer<typeof NotificationDeviceResponseSchema>
 export type OperatorListResponse = z.infer<typeof OperatorListResponseSchema>
 export type OrderListResponse = z.infer<typeof OrderListResponseSchema>
 export type OrphanSweepResponse = z.infer<typeof OrphanSweepResponseSchema>
@@ -2439,6 +2618,7 @@ export type ProcessSummaryData = z.infer<typeof ProcessSummaryDataSchema>
 export type ProcessCreateData = z.infer<typeof ProcessCreateDataSchema>
 export type ProcessStartResponse = z.infer<typeof ProcessStartResponseSchema>
 export type ProcessStopResponse = z.infer<typeof ProcessStopResponseSchema>
+export type RegisterDeviceCommand = z.infer<typeof RegisterDeviceCommandSchema>
 export type RestRateData = z.infer<typeof RestRateDataSchema>
 export type ContinuousSeriesPartialResponse = z.infer<typeof ContinuousSeriesPartialResponseSchema>
 export type HandoverScopeGrantResult = z.infer<typeof HandoverScopeGrantResultSchema>
@@ -2499,6 +2679,7 @@ export type UpdateUserRequest = z.infer<typeof UpdateUserRequestSchema>
 export type WsStatsResponse = z.infer<typeof WsStatsResponseSchema>
 export type ZmqHealthResponse = z.infer<typeof ZmqHealthResponseSchema>
 export type HealthCheckResponse = z.infer<typeof HealthCheckResponseSchema>
+export type AlertEventInfo = z.infer<typeof AlertEventInfoSchema>
 export type AvailableProcess = z.infer<typeof AvailableProcessSchema>
 export type BacktestResultInline = z.infer<typeof BacktestResultInlineSchema>
 export type BacktestRunData = z.infer<typeof BacktestRunDataSchema>
@@ -2512,6 +2693,8 @@ export type ProcessCreateBody = z.infer<typeof ProcessCreateBodySchema>
 export type ProcessStartBody = z.infer<typeof ProcessStartBodySchema>
 export type LoginResponse = z.infer<typeof LoginResponseSchema>
 export type RefreshResponse = z.infer<typeof RefreshResponseSchema>
+export type AlertEventResponse = z.infer<typeof AlertEventResponseSchema>
+export type AlertHistoryResponse = z.infer<typeof AlertHistoryResponseSchema>
 export type AvailableProcessesResponse = z.infer<typeof AvailableProcessesResponseSchema>
 export type BacktestRunDetailData = z.infer<typeof BacktestRunDetailDataSchema>
 export type BacktestComparisonDetailResponseData = z.infer<

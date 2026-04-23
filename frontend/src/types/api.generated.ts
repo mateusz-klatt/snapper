@@ -932,6 +932,86 @@ export type Paths = {
         patch?: never;
         trace?: never;
     };
+    "/api/devices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: Operations["list_devices_api_devices_get"];
+        put?: never;
+        post: Operations["register_device_api_devices_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{device_public_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: Operations["delete_device_api_devices__device_public_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/devices/{device_public_id}/prefs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch: Operations["update_device_pref_api_devices__device_public_id__prefs_patch"];
+        trace?: never;
+    };
+    "/api/alerts/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: Operations["list_alert_history_api_alerts_history_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/alerts/{alert_public_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: Operations["get_alert_event_api_alerts__alert_public_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/candles": {
         parameters: {
             query?: never;
@@ -1240,6 +1320,43 @@ export type Paths = {
 export type webhooks = Record<string, never>;
 export type Components = {
     schemas: {
+        AlertEventInfo: {
+            type: "alert_event_info";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            user_public_id: string;
+            operator_public_id?: string | null;
+            wallet_public_id?: string | null;
+            alert_type: string;
+            priority: string;
+            is_safety_critical: boolean;
+            title: string;
+            body: string;
+            payload?: Record<string, unknown> | null;
+            dedup_key?: string | null;
+            thread_key?: string | null;
+            source_topic?: string | null;
+        };
+        AlertEventResponse: {
+            type: "alert_event_response";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            payload: Components["schemas"]["AlertEventInfo"];
+        };
+        AlertHistoryResponse: {
+            type: "alert_history_response";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            payload: Components["schemas"]["AlertEventInfo"][];
+            count: number;
+            next_cursor?: string | null;
+        };
         AvailableProcess: {
             type: "available_process";
             sequence_id: number;
@@ -1673,6 +1790,42 @@ export type Components = {
             session_id: string;
             payload: Components["schemas"]["DelegateRead"];
         };
+        DeviceAlertPrefBody: {
+            alert_type: "order_fill_full" | "order_rejected" | "position_stop_loss_fired" | "margin_warning" | "critical_system_error";
+            operator_public_id?: string | null;
+            wallet_public_id?: string | null;
+            enabled: boolean;
+            min_priority: "low" | "medium" | "high";
+            quiet_hours_start_min?: number | null;
+            quiet_hours_end_min?: number | null;
+            mute_until?: string | null;
+            timezone: string;
+        };
+        DeviceAlertPrefInfo: {
+            type: "device_alert_pref_info";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            device_public_id: string;
+            alert_type: string;
+            operator_public_id?: string | null;
+            wallet_public_id?: string | null;
+            enabled: boolean;
+            min_priority: string;
+            quiet_hours_start_min?: number | null;
+            quiet_hours_end_min?: number | null;
+            mute_until?: string | null;
+            timezone: string;
+        };
+        DeviceAlertPrefResponse: {
+            type: "device_alert_pref_response";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            payload: Components["schemas"]["DeviceAlertPrefInfo"];
+        };
         EquityOverlayPoint: {
             point_time: string;
             equity_a?: number | null;
@@ -1913,6 +2066,39 @@ export type Components = {
             run_b?: number | null;
             delta?: number | null;
             pct?: number | null;
+        };
+        NotificationDeviceInfo: {
+            type: "notification_device_info";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            user_public_id: string;
+            device_token: string;
+            device_id: string;
+            platform: string;
+            env: string;
+            app_version?: string | null;
+            previews_mode: string;
+            registered_at: string;
+            last_seen_at?: string | null;
+        };
+        NotificationDeviceListResponse: {
+            type: "notification_device_list_response";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            payload: Components["schemas"]["NotificationDeviceInfo"][];
+            count: number;
+        };
+        NotificationDeviceResponse: {
+            type: "notification_device_response";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            payload: Components["schemas"]["NotificationDeviceInfo"];
         };
         OperatorInfo: {
             type: "operator_info";
@@ -2197,6 +2383,21 @@ export type Components = {
             timestamp: string;
             session_id: string;
             payload: Components["schemas"]["RefreshData"];
+        };
+        RegisterDeviceBody: {
+            device_token: string;
+            device_id: string;
+            env: "sandbox" | "prod";
+            app_version?: string | null;
+            previews_mode: "private" | "public";
+        };
+        RegisterDeviceCommand: {
+            type: "register_device_command";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            payload: Components["schemas"]["RegisterDeviceBody"];
         };
         RelationshipTypeEnum: "exact" | "derivative" | "proxy";
         RestRateData: {
@@ -2490,6 +2691,14 @@ export type Components = {
             session_id: string;
             payload: Components["schemas"]["UnderlyingInstrumentData"][];
             count: number;
+        };
+        UpdateDevicePrefCommand: {
+            type: "update_device_pref_command";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            payload: Components["schemas"]["DeviceAlertPrefBody"];
         };
         UserListResponse: {
             type: "user_list";
@@ -5144,6 +5353,177 @@ export interface Operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_devices_api_devices_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["NotificationDeviceListResponse"];
+                };
+            };
+        };
+    };
+    register_device_api_devices_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["RegisterDeviceCommand"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["NotificationDeviceResponse"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_device_api_devices__device_public_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                device_public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["MessageResponse"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_device_pref_api_devices__device_public_id__prefs_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                device_public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Components["schemas"]["UpdateDevicePrefCommand"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["DeviceAlertPrefResponse"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_alert_history_api_alerts_history_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                before?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["AlertHistoryResponse"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_alert_event_api_alerts__alert_public_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                alert_public_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["AlertEventResponse"];
+                };
             };
             422: {
                 headers: {

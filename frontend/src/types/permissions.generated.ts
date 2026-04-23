@@ -25,6 +25,8 @@ export const Permission = {
   IMPERSONATE_OPERATOR: 'impersonate:operator',
   READ_BACKTESTS: 'read:backtests',
   MANAGE_BACKTESTS: 'manage:backtests',
+  READ_NOTIFICATIONS: 'read:notifications',
+  MANAGE_NOTIFICATION_DEVICES: 'manage:notification_devices',
 } as const
 
 export type Permission = (typeof Permission)[keyof typeof Permission]
@@ -33,9 +35,9 @@ type UserRole = 'ai_delegate' | 'viewer' | 'operator' | 'admin'
 
 export const ROLE_PERMISSIONS: Record<UserRole, readonly Permission[]> = {
   ai_delegate: ['cancel:orders', 'create:orders', 'manage:positions', 'read:backtests', 'read:market_data', 'read:orders', 'read:positions', 'read:signals', 'read:strategies', 'read:system_status'],
-  viewer: ['read:backtests', 'read:market_data', 'read:orders', 'read:positions', 'read:strategies', 'read:system_status'],
-  operator: ['cancel:orders', 'create:orders', 'manage:backtests', 'manage:positions', 'manage:processes', 'read:backtests', 'read:market_data', 'read:orders', 'read:positions', 'read:signals', 'read:strategies', 'read:system_status', 'start:strategies', 'stop:strategies'],
-  admin: ['cancel:orders', 'configure:strategies', 'configure:system', 'create:orders', 'impersonate:operator', 'manage:backtests', 'manage:positions', 'manage:processes', 'manage:scope_grants', 'manage:users', 'manage:wallet_credentials', 'read:backtests', 'read:market_data', 'read:orders', 'read:positions', 'read:signals', 'read:strategies', 'read:system_status', 'read:wallet_credentials', 'start:strategies', 'stop:strategies'],
+  viewer: ['manage:notification_devices', 'read:backtests', 'read:market_data', 'read:notifications', 'read:orders', 'read:positions', 'read:strategies', 'read:system_status'],
+  operator: ['cancel:orders', 'create:orders', 'manage:backtests', 'manage:notification_devices', 'manage:positions', 'manage:processes', 'read:backtests', 'read:market_data', 'read:notifications', 'read:orders', 'read:positions', 'read:signals', 'read:strategies', 'read:system_status', 'start:strategies', 'stop:strategies'],
+  admin: ['cancel:orders', 'configure:strategies', 'configure:system', 'create:orders', 'impersonate:operator', 'manage:backtests', 'manage:notification_devices', 'manage:positions', 'manage:processes', 'manage:scope_grants', 'manage:users', 'manage:wallet_credentials', 'read:backtests', 'read:market_data', 'read:notifications', 'read:orders', 'read:positions', 'read:signals', 'read:strategies', 'read:system_status', 'read:wallet_credentials', 'start:strategies', 'stop:strategies'],
 } as const
 
 export const RESOURCE_ACCESS: Record<string, readonly UserRole[]> = {
@@ -51,4 +53,5 @@ export const RESOURCE_ACCESS: Record<string, readonly UserRole[]> = {
   'settings': ['admin'],
   'backtests': ['ai_delegate', 'viewer', 'operator', 'admin'],
   'ai-integration': ['operator', 'admin'],
+  'notifications': ['viewer', 'operator', 'admin'],
 } as const

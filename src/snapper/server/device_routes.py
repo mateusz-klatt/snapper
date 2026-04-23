@@ -1,0 +1,321 @@
+"""REST routes for iOS Push Foundation device management (BE-1c).
+
+Four endpoints, all gated by the authenticated principal and
+ownership-checked on ``user_public_id``:
+
+- ``POST /api/devices`` — register / refresh APNs device token.
+- ``GET /api/devices`` — list caller's own active devices.
+- ``DELETE /api/devices/{public_id}`` — soft-delete via SCD2 close.
+- ``PATCH /api/devices/{public_id}/prefs`` — per-(device, alert_type,
+  scope) preference upsert.
+
+All mutations use ``Repository.upsert_notification_device`` /
+``upsert_device_alert_pref`` / ``mark_notification_device_inactive``,
+which own the SCD2 close+insert semantics and idempotent retry on
+same-key contention (see ``src/snapper/data/repository.py`` for the
+atomic close + IntegrityError-retry pattern).
+"""
+
+import datetime as dt
+from datetime import datetime
+from typing import Annotated
+from uuid import uuid7
+
+from fastapi import APIRouter
+from fastapi import Depends
+from fastapi import HTTPException
+from fastapi import Request
+from fastapi import status
+
+from snapper.api.schemas.base import MessageResponse
+from snapper.api.schemas.devices import DeviceAlertPrefInfo
+from snapper.api.schemas.devices import DeviceAlertPrefResponse
+from snapper.api.schemas.devices import NotificationDeviceInfo
+from snapper.api.schemas.devices import NotificationDeviceListResponse
+from snapper.api.schemas.devices import NotificationDeviceResponse
+from snapper.api.schemas.devices import RegisterDeviceCommand
+from snapper.api.schemas.devices import UpdateDevicePrefCommand
+from snapper.auth.dependencies import require_authentication
+from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.data.repository import Repository
+from snapper.data.repository_types import DeviceAlertPrefRow
+from snapper.data.repository_types import DeviceAlertPrefUpsertRow
+from snapper.data.repository_types import NotificationDeviceRow
+from snapper.data.repository_types import NotificationDeviceUpsertRow
+from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.server.dependencies import get_repository_dependency
+
+router = APIRouter(prefix="/devices", tags=["devices"])
+
+_REST_STREAM = "rest.devices"
+
+
+def _next_provenance(request: Request) -> tuple[str, int, datetime, str]:
+    """Mint a fresh ``(session_id, sequence_id, timestamp, public_id)`` tuple.
+
+    Args:
+        request: FastAPI request — used to pull the
+            ``rest_tracker`` off app state.
+
+    Returns:
+        Tuple used by every SCD2 write from this router. Keeping the
+        helper local avoids scattering ``app.state.rest_tracker``
+        access across handlers.
+    """
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    sid = tracker.session_id
+    seq = tracker.next_sequence(_REST_STREAM)
+    ts = dt.datetime.now(dt.UTC)
+    pid = str(uuid7())
+    return sid, seq, ts, pid
+
+
+def _device_info_from_row(row: NotificationDeviceRow) -> NotificationDeviceInfo:
+    """Project a ``NotificationDeviceRow`` TypedDict into the wire schema."""
+    return NotificationDeviceInfo(
+        session_id=row["session_id"],
+        sequence_id=row["sequence_id"],
+        public_id=row["public_id"],
+        timestamp=row["timestamp"],
+        user_public_id=row["user_public_id"],
+        device_token=row["device_token"],
+        device_id=row["device_id"],
+        platform=row["platform"],
+        env=row["env"],
+        app_version=row.get("app_version"),
+        previews_mode=row["previews_mode"],
+        registered_at=row["registered_at"],
+        last_seen_at=row.get("last_seen_at"),
+    )
+
+
+def _device_alert_pref_info_from_row(row: DeviceAlertPrefRow) -> DeviceAlertPrefInfo:
+    """Project a ``DeviceAlertPrefRow`` TypedDict into the wire schema."""
+    return DeviceAlertPrefInfo(
+        session_id=row["session_id"],
+        sequence_id=row["sequence_id"],
+        public_id=row["public_id"],
+        timestamp=row["timestamp"],
+        device_public_id=row["device_public_id"],
+        alert_type=row["alert_type"],
+        operator_public_id=row.get("operator_public_id"),
+        wallet_public_id=row.get("wallet_public_id"),
+        enabled=row["enabled"],
+        min_priority=row["min_priority"],
+        quiet_hours_start_min=row.get("quiet_hours_start_min"),
+        quiet_hours_end_min=row.get("quiet_hours_end_min"),
+        mute_until=row.get("mute_until"),
+        timezone=row["timezone"],
+    )
+
+
+@router.post("", response_model=NotificationDeviceResponse)
+async def register_device(
+    request: Request,
+    command: RegisterDeviceCommand,
+    principal: Annotated[AuthPrincipal, Depends(require_authentication)],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
+) -> NotificationDeviceResponse:
+    """Register or refresh the caller's APNs device token.
+
+    Same-token re-registrations collapse onto the existing SCD2 row
+    via ``upsert_notification_device`` and return the stable
+    ``public_id`` reused across versions.
+
+    Args:
+        request: FastAPI request (provides REST tracker).
+        command: Typed request envelope with provenance + body.
+        principal: Authenticated caller.
+        repo: Repository dependency.
+
+    Returns:
+        ``NotificationDeviceResponse`` carrying the active row after
+        upsert.
+    """
+    body = command.payload
+    sid, seq, ts, _ = _next_provenance(request)
+    device_public_id = await repo.upsert_notification_device(
+        NotificationDeviceUpsertRow(
+            session_id=sid,
+            sequence_id=seq,
+            timestamp=ts,
+            user_public_id=principal.user_public_id,
+            device_token=body.device_token,
+            device_id=body.device_id,
+            env=body.env,
+            app_version=body.app_version,
+            previews_mode=body.previews_mode,
+            registered_at=ts,
+        )
+    )
+    devices = await repo.list_active_notification_devices_for_user(principal.user_public_id)
+    active = next((d for d in devices if d["public_id"] == device_public_id), None)
+    if active is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Device upsert succeeded but active row not found after commit.",
+        )
+    envelope_sid, envelope_seq, envelope_ts, envelope_pid = _next_provenance(request)
+    return NotificationDeviceResponse(
+        session_id=envelope_sid,
+        sequence_id=envelope_seq,
+        public_id=envelope_pid,
+        timestamp=envelope_ts,
+        payload=_device_info_from_row(active),
+    )
+
+
+@router.get("", response_model=NotificationDeviceListResponse)
+async def list_devices(
+    request: Request,
+    principal: Annotated[AuthPrincipal, Depends(require_authentication)],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
+) -> NotificationDeviceListResponse:
+    """List the caller's active devices, newest registered first.
+
+    Args:
+        request: FastAPI request (provides REST tracker).
+        principal: Authenticated caller.
+        repo: Repository dependency.
+
+    Returns:
+        ``NotificationDeviceListResponse`` with zero-or-more active
+        ``NotificationDeviceInfo`` rows scoped to the caller.
+    """
+    rows = await repo.list_active_notification_devices_for_user(principal.user_public_id)
+    items = [_device_info_from_row(r) for r in rows]
+    sid, seq, ts, pid = _next_provenance(request)
+    return NotificationDeviceListResponse(
+        session_id=sid,
+        sequence_id=seq,
+        public_id=pid,
+        timestamp=ts,
+        payload=items,
+        count=len(items),
+    )
+
+
+@router.delete("/{device_public_id}", response_model=MessageResponse)
+async def delete_device(
+    request: Request,
+    device_public_id: str,
+    principal: Annotated[AuthPrincipal, Depends(require_authentication)],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
+) -> MessageResponse:
+    """Soft-delete a device via SCD2 close (no new active row).
+
+    Ownership is enforced by loading the caller's active devices and
+    confirming the target ``public_id`` is among them. Marking a
+    nonexistent or not-owned device inactive returns 404 so callers
+    cannot probe foreign device ids.
+
+    Args:
+        request: FastAPI request (provides REST tracker).
+        device_public_id: Target device to soft-delete.
+        principal: Authenticated caller.
+        repo: Repository dependency.
+
+    Returns:
+        ``MessageResponse`` on success.
+
+    Raises:
+        HTTPException: 404 when the device does not belong to the
+            caller or is already inactive.
+    """
+    owned = await repo.list_active_notification_devices_for_user(principal.user_public_id)
+    if not any(d["public_id"] == device_public_id for d in owned):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Device {device_public_id} not found or not owned by caller.",
+        )
+    _, _, ts, _ = _next_provenance(request)
+    await repo.mark_notification_device_inactive(device_public_id, closed_at=ts)
+    envelope_sid, envelope_seq, envelope_ts, envelope_pid = _next_provenance(request)
+    return MessageResponse(
+        session_id=envelope_sid,
+        sequence_id=envelope_seq,
+        public_id=envelope_pid,
+        timestamp=envelope_ts,
+        payload=f"Device {device_public_id} deactivated.",
+    )
+
+
+@router.patch("/{device_public_id}/prefs", response_model=DeviceAlertPrefResponse)
+async def update_device_pref(
+    request: Request,
+    device_public_id: str,
+    command: UpdateDevicePrefCommand,
+    principal: Annotated[AuthPrincipal, Depends(require_authentication)],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
+) -> DeviceAlertPrefResponse:
+    """Upsert a per-(device, alert_type, scope) preference for the caller.
+
+    The composite scope key is
+    ``(device_public_id, alert_type, operator_public_id, wallet_public_id)``
+    — three null-permutations map to the three partial unique indexes
+    on ``device_alert_prefs`` and the upsert-retry machinery in the
+    repo collapses same-key races.
+
+    Args:
+        request: FastAPI request (provides REST tracker).
+        device_public_id: Target device (must be owned by caller).
+        command: Typed request envelope with provenance + pref body.
+        principal: Authenticated caller.
+        repo: Repository dependency.
+
+    Returns:
+        ``DeviceAlertPrefResponse`` with the now-active pref row.
+
+    Raises:
+        HTTPException: 404 when the device is not owned by caller.
+    """
+    owned = await repo.list_active_notification_devices_for_user(principal.user_public_id)
+    if not any(d["public_id"] == device_public_id for d in owned):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Device {device_public_id} not found or not owned by caller.",
+        )
+    body = command.payload
+    sid, seq, ts, _ = _next_provenance(request)
+    await repo.upsert_device_alert_pref(
+        DeviceAlertPrefUpsertRow(
+            session_id=sid,
+            sequence_id=seq,
+            timestamp=ts,
+            device_public_id=device_public_id,
+            alert_type=body.alert_type,
+            operator_public_id=body.operator_public_id,
+            wallet_public_id=body.wallet_public_id,
+            enabled=body.enabled,
+            min_priority=body.min_priority,
+            quiet_hours_start_min=body.quiet_hours_start_min,
+            quiet_hours_end_min=body.quiet_hours_end_min,
+            mute_until=body.mute_until,
+            timezone=body.timezone,
+        )
+    )
+    prefs = await repo.list_device_alert_prefs_for_user(principal.user_public_id)
+    active = next(
+        (
+            p
+            for p in prefs
+            if p["device_public_id"] == device_public_id
+            and p["alert_type"] == body.alert_type
+            and p.get("operator_public_id") == body.operator_public_id
+            and p.get("wallet_public_id") == body.wallet_public_id
+        ),
+        None,
+    )
+    if active is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Pref upsert succeeded but active row not found after commit.",
+        )
+    envelope_sid, envelope_seq, envelope_ts, envelope_pid = _next_provenance(request)
+    return DeviceAlertPrefResponse(
+        session_id=envelope_sid,
+        sequence_id=envelope_seq,
+        public_id=envelope_pid,
+        timestamp=envelope_ts,
+        payload=_device_alert_pref_info_from_row(active),
+    )

@@ -25,13 +25,15 @@ enum Permission: String, CaseIterable, Codable, Sendable {
     case impersonateOperator = "impersonate:operator"
     case readBacktests = "read:backtests"
     case manageBacktests = "manage:backtests"
+    case readNotifications = "read:notifications"
+    case manageNotificationDevices = "manage:notification_devices"
 }
 
 let rolePermissions: [UserRole: [Permission]] = [
     .aiDelegate: [.cancelOrders, .createOrders, .managePositions, .readBacktests, .readMarketData, .readOrders, .readPositions, .readSignals, .readStrategies, .readSystemStatus],
-    .viewer: [.readBacktests, .readMarketData, .readOrders, .readPositions, .readStrategies, .readSystemStatus],
-    .operatorRole: [.cancelOrders, .createOrders, .manageBacktests, .managePositions, .manageProcesses, .readBacktests, .readMarketData, .readOrders, .readPositions, .readSignals, .readStrategies, .readSystemStatus, .startStrategies, .stopStrategies],
-    .admin: [.cancelOrders, .configureStrategies, .configureSystem, .createOrders, .impersonateOperator, .manageBacktests, .managePositions, .manageProcesses, .manageScopeGrants, .manageUsers, .manageWalletCredentials, .readBacktests, .readMarketData, .readOrders, .readPositions, .readSignals, .readStrategies, .readSystemStatus, .readWalletCredentials, .startStrategies, .stopStrategies],
+    .viewer: [.manageNotificationDevices, .readBacktests, .readMarketData, .readNotifications, .readOrders, .readPositions, .readStrategies, .readSystemStatus],
+    .operatorRole: [.cancelOrders, .createOrders, .manageBacktests, .manageNotificationDevices, .managePositions, .manageProcesses, .readBacktests, .readMarketData, .readNotifications, .readOrders, .readPositions, .readSignals, .readStrategies, .readSystemStatus, .startStrategies, .stopStrategies],
+    .admin: [.cancelOrders, .configureStrategies, .configureSystem, .createOrders, .impersonateOperator, .manageBacktests, .manageNotificationDevices, .managePositions, .manageProcesses, .manageScopeGrants, .manageUsers, .manageWalletCredentials, .readBacktests, .readMarketData, .readNotifications, .readOrders, .readPositions, .readSignals, .readStrategies, .readSystemStatus, .readWalletCredentials, .startStrategies, .stopStrategies],
 ]
 
 let resourceAccess: [String: [UserRole]] = [
@@ -47,4 +49,5 @@ let resourceAccess: [String: [UserRole]] = [
     "settings": [.admin],
     "backtests": [.aiDelegate, .viewer, .operatorRole, .admin],
     "ai-integration": [.operatorRole, .admin],
+    "notifications": [.viewer, .operatorRole, .admin],
 ]

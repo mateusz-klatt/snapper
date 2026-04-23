@@ -45,6 +45,20 @@ enum ConfiguredProcessRole: String, Codable, Sendable {
     case backtest
 }
 
+enum DeviceAlertPrefBodyAlertType: String, Codable, Sendable {
+    case orderFillFull = "order_fill_full"
+    case orderRejected = "order_rejected"
+    case positionStopLossFired = "position_stop_loss_fired"
+    case marginWarning = "margin_warning"
+    case criticalSystemError = "critical_system_error"
+}
+
+enum DeviceAlertPrefBodyMinPriority: String, Codable, Sendable {
+    case low
+    case medium
+    case high
+}
+
 enum ExecutionDataExchange: String, Codable, Sendable {
     case paper
     case kraken
@@ -156,6 +170,16 @@ enum ProcessStopDataStatus: String, Codable, Sendable {
     case error
 }
 
+enum RegisterDeviceBodyEnv: String, Codable, Sendable {
+    case sandbox
+    case prod
+}
+
+enum RegisterDeviceBodyPreviewsMode: String, Codable, Sendable {
+    case privateValue = "private"
+    case publicValue = "public"
+}
+
 enum SignalDataExchange: String, Codable, Sendable {
     case paper
     case kraken
@@ -234,6 +258,86 @@ enum CreateOrderBodyOrderType: String, Codable, Sendable {
 enum CreateScopeGrantBodyScopeKind: String, Codable, Sendable {
     case underlying
     case instrument
+}
+
+struct AlertEventInfo: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let userPublicId: String
+    let operatorPublicId: String?
+    let walletPublicId: String?
+    let alertType: String
+    let priority: String
+    let isSafetyCritical: Bool
+    let title: String
+    let body: String
+    let payload: JsonObject?
+    let dedupKey: String?
+    let threadKey: String?
+    let sourceTopic: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case userPublicId = "user_public_id"
+        case operatorPublicId = "operator_public_id"
+        case walletPublicId = "wallet_public_id"
+        case alertType = "alert_type"
+        case priority
+        case isSafetyCritical = "is_safety_critical"
+        case title
+        case body
+        case payload
+        case dedupKey = "dedup_key"
+        case threadKey = "thread_key"
+        case sourceTopic = "source_topic"
+    }
+}
+
+struct AlertEventResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: AlertEventInfo
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct AlertHistoryResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: [AlertEventInfo]
+    let count: Int
+    let nextCursor: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+        case count
+        case nextCursor = "next_cursor"
+    }
 }
 
 struct AvailableProcess: Codable, Sendable {
@@ -1170,6 +1274,84 @@ struct DelegateResponse: Codable, Sendable {
     }
 }
 
+struct DeviceAlertPrefBody: Codable, Sendable {
+    let alertType: String
+    let operatorPublicId: String?
+    let walletPublicId: String?
+    let enabled: Bool?
+    let minPriority: String?
+    let quietHoursStartMin: Int?
+    let quietHoursEndMin: Int?
+    let muteUntil: Date?
+    let timezone: String?
+
+    enum CodingKeys: String, CodingKey {
+        case alertType = "alert_type"
+        case operatorPublicId = "operator_public_id"
+        case walletPublicId = "wallet_public_id"
+        case enabled
+        case minPriority = "min_priority"
+        case quietHoursStartMin = "quiet_hours_start_min"
+        case quietHoursEndMin = "quiet_hours_end_min"
+        case muteUntil = "mute_until"
+        case timezone
+    }
+}
+
+struct DeviceAlertPrefInfo: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let devicePublicId: String
+    let alertType: String
+    let operatorPublicId: String?
+    let walletPublicId: String?
+    let enabled: Bool
+    let minPriority: String
+    let quietHoursStartMin: Int?
+    let quietHoursEndMin: Int?
+    let muteUntil: Date?
+    let timezone: String
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case devicePublicId = "device_public_id"
+        case alertType = "alert_type"
+        case operatorPublicId = "operator_public_id"
+        case walletPublicId = "wallet_public_id"
+        case enabled
+        case minPriority = "min_priority"
+        case quietHoursStartMin = "quiet_hours_start_min"
+        case quietHoursEndMin = "quiet_hours_end_min"
+        case muteUntil = "mute_until"
+        case timezone
+    }
+}
+
+struct DeviceAlertPrefResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: DeviceAlertPrefInfo
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
 struct EquityOverlayPoint: Codable, Sendable {
     let pointTime: Date
     let equityA: Double?
@@ -1672,6 +1854,78 @@ struct MetricDiffRow: Codable, Sendable {
         case runB = "run_b"
         case delta
         case pct
+    }
+}
+
+struct NotificationDeviceInfo: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let userPublicId: String
+    let deviceToken: String
+    let deviceId: String
+    let platform: String
+    let env: String
+    let appVersion: String?
+    let previewsMode: String
+    let registeredAt: Date
+    let lastSeenAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case userPublicId = "user_public_id"
+        case deviceToken = "device_token"
+        case deviceId = "device_id"
+        case platform
+        case env
+        case appVersion = "app_version"
+        case previewsMode = "previews_mode"
+        case registeredAt = "registered_at"
+        case lastSeenAt = "last_seen_at"
+    }
+}
+
+struct NotificationDeviceListResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: [NotificationDeviceInfo]
+    let count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+        case count
+    }
+}
+
+struct NotificationDeviceResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: NotificationDeviceInfo
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
     }
 }
 
@@ -2276,6 +2530,40 @@ struct RefreshResponse: Codable, Sendable {
     let timestamp: Date
     let sessionId: String
     let payload: RefreshData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
+struct RegisterDeviceBody: Codable, Sendable {
+    let deviceToken: String
+    let deviceId: String
+    let env: String
+    let appVersion: String?
+    let previewsMode: String?
+
+    enum CodingKeys: String, CodingKey {
+        case deviceToken = "device_token"
+        case deviceId = "device_id"
+        case env
+        case appVersion = "app_version"
+        case previewsMode = "previews_mode"
+    }
+}
+
+struct RegisterDeviceCommand: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: RegisterDeviceBody
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -2910,6 +3198,24 @@ struct UnderlyingInstrumentListResponse: Codable, Sendable {
         case sessionId = "session_id"
         case payload
         case count
+    }
+}
+
+struct UpdateDevicePrefCommand: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: DeviceAlertPrefBody
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
     }
 }
 
