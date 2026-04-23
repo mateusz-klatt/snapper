@@ -7805,7 +7805,7 @@ class SQLAlchemyRepository(Repository):
         stable ``public_id``.
         """
         timestamp = row["timestamp"]
-        max_attempts = 5
+        max_attempts = 20
         last_error: Exception = RuntimeError("upsert_notification_device: retry budget exhausted.")
         for _attempt in range(max_attempts):
             async with self.session() as s:
@@ -7863,6 +7863,14 @@ class SQLAlchemyRepository(Repository):
                     await s.rollback()
                     last_error = exc
                     continue
+        logger.warning(
+            "upsert_notification_device: sustained contention exhausted"
+            " {max_attempts}-attempt retry budget on device_token={tok};"
+            " raising last_error={err}",
+            max_attempts=max_attempts,
+            tok=row["device_token"],
+            err=type(last_error).__name__,
+        )
         raise last_error
 
     async def list_active_notification_devices_for_user(
@@ -7927,7 +7935,7 @@ class SQLAlchemyRepository(Repository):
         operator_public_id = row.get("operator_public_id")
         wallet_public_id = row.get("wallet_public_id")
         timestamp = row["timestamp"]
-        max_attempts = 5
+        max_attempts = 20
         last_error: Exception = RuntimeError("upsert_device_alert_pref: retry budget exhausted.")
         for _attempt in range(max_attempts):
             async with self.session() as s:
@@ -8016,6 +8024,15 @@ class SQLAlchemyRepository(Repository):
                     await s.rollback()
                     last_error = exc
                     continue
+        logger.warning(
+            "upsert_device_alert_pref: sustained contention exhausted"
+            " {max_attempts}-attempt retry budget on"
+            " (device={dev}, alert_type={at}); raising last_error={err}",
+            max_attempts=max_attempts,
+            dev=row["device_public_id"],
+            at=row["alert_type"],
+            err=type(last_error).__name__,
+        )
         raise last_error
 
     async def list_user_alert_defaults(self, user_public_id: str) -> list[UserAlertDefaultRow]:
@@ -8037,7 +8054,7 @@ class SQLAlchemyRepository(Repository):
         ``upsert_notification_device`` (closes Copilot R2 new HIGH).
         """
         timestamp = row["timestamp"]
-        max_attempts = 5
+        max_attempts = 20
         last_error: Exception = RuntimeError("upsert_user_alert_default: retry budget exhausted.")
         for _attempt in range(max_attempts):
             async with self.session() as s:
@@ -8099,6 +8116,15 @@ class SQLAlchemyRepository(Repository):
                     await s.rollback()
                     last_error = exc
                     continue
+        logger.warning(
+            "upsert_user_alert_default: sustained contention exhausted"
+            " {max_attempts}-attempt retry budget on"
+            " (user={u}, alert_type={at}); raising last_error={err}",
+            max_attempts=max_attempts,
+            u=row["user_public_id"],
+            at=row["alert_type"],
+            err=type(last_error).__name__,
+        )
         raise last_error
 
     async def insert_alert_event(self, row: AlertEventInsertRow) -> str:
