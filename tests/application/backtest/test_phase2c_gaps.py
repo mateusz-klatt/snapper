@@ -377,7 +377,6 @@ class TestRunnerCancelEmitterBranch:
                 new=AsyncMock(return_value=10),
             ),
         ):
-
             mock_repo = MagicMock()
             mock_repo.session_factory = MagicMock()
             mock_repo.get_candles = AsyncMock(return_value=[])
@@ -611,3 +610,48 @@ class TestCreateBacktestConfigHashFallback:
             await create_backtest(request, command, principal, repo)
         args, kwargs = bt.create_run.call_args
         assert kwargs["row"]["config_hash"] is None
+
+
+class TestPhase2cBaselineParity:
+    """BE-3: cross-asset refactor must not drift any Phase 2c baseline scenario.
+
+    Re-runs the 4 deterministic batch_processor scenarios captured by
+    ``scripts.capture_phase2c_baseline.SCENARIOS`` and deep-dict-equal
+    compares the serialised outputs to the golden JSON at
+    ``tests/application/backtest/fixtures/phase2c_baseline_snapshot.json``.
+    Fails hard on any drift. The script's ``serialise_run`` helper is
+    re-imported (rather than re-implemented) so capture-time and
+    parity-check-time semantics are identical by construction.
+    """
+
+    @pytest.mark.asyncio
+    async def test_every_scenario_matches_golden_snapshot(self) -> None:
+        """Re-run SCENARIOS through the post-BE-1 engine — outputs equal the baseline.
+
+        Given: the 4 registered scenarios (single-feed BUY fill, no-signal
+            multi-timestamp, warmup-gated signal dropped, signal-emitted
+            fill-skipped) + the golden snapshot at master HEAD pre-BE-1,
+        When: each scenario runs against the current batch_processor
+            and the result is serialised via the same serialise_run
+            helper used to produce the snapshot,
+        Then: every serialised scenario matches the snapshot deep-dict
+            equally — byte-identical for single-feed Phase 2c runs.
+        """
+        from pathlib import Path
+
+        from scripts.capture_phase2c_baseline import SCENARIOS as BASELINE_SCENARIOS
+        from scripts.capture_phase2c_baseline import serialise_run
+
+        fixture_path = (
+            Path(__file__).resolve().parent / "fixtures" / "phase2c_baseline_snapshot.json"
+        )
+        golden = json.loads(fixture_path.read_text(encoding="utf-8"))
+        assert set(golden.keys()) == {
+            s.name for s in BASELINE_SCENARIOS
+        }, "golden snapshot scenario names drifted from SCENARIOS registry"
+        for scenario in BASELINE_SCENARIOS:
+            collector, portfolio = await scenario.run()
+            actual = serialise_run(collector, portfolio)
+            assert (
+                actual == golden[scenario.name]
+            ), f"Phase 2c parity drift in scenario '{scenario.name}'"

@@ -205,3 +205,94 @@ return `topic_denied`. The picker triggers a
 the chosen wallet claim before swapping the client scope, so REST
 and WS both authorise against the same wallet after the picker
 moves.
+
+## Cross-asset execution
+
+Cross-asset strategies observe market data on one venue / instrument
+and emit signals that execute on a *different* venue / instrument
+(for example `TradFiObserveCryptoExecute` observes MNQU6-CME candles
+on `kraken_equities` and emits BUY/SELL signals on `BTC-USD` / `kraken`).
+The backtest engine supports this through a single config field:
+
+```python
+BacktestConfig(
+    strategy_class="TradFiObserveCryptoExecute",
+    instruments={
+        "kraken_equities": ["<MNQU6-CME-public-id>"],
+        "kraken": ["<BTC-USD-public-id>"],
+    },
+    target_execution_exchange="kraken",
+    start_date=..., end_date=...,
+    wallet_public_id=...,
+    initial_balance=10_000.0,
+    strategy_params={"fast_period": 12, "slow_period": 26, "min_candles": 30},
+)
+```
+
+### Attribution semantics
+
+When `target_execution_exchange is not None`, the batch processor
+substitutes at simulated-fill time:
+
+- `target_exchange = str(config.target_execution_exchange)` — carries
+  the *venue label* only. It is NOT validated against the feed
+  populating `latest_closes[target_instrument]`; the caller is
+  responsible for configuring `instruments` so the target symbol's
+  feed matches the target venue.
+- `target_instrument = signal.instrument` — comes directly from the
+  strategy's `StrategySignal`, unchanged since pre-cross-asset.
+- `target_close = latest_closes[target_instrument]` — the *price* at
+  which the simulated fill executes. The source feed's close price is
+  no longer used on cross-asset runs.
+
+When `target_execution_exchange is None` (default), the fill is
+attributed to `event.exchange` + `event.instrument` — the source
+candle. This is the Phase 2c byte-identical path; every existing
+single-feed backtest keeps its exact fingerprint and result rows.
+
+### Missing-target-close policy
+
+If `signal.instrument` has no entry in `latest_closes` (typically
+during the warmup overlap window where the strategy fires before the
+target feed has primed), the engine:
+
+1. Skips `simulate_market_fill` + the trade row (no fill attempted).
+2. Increments `collector.cross_asset_blocked_fills` by one, logged at
+   DEBUG with `reason='missing_target_close'`.
+3. Still records the signal row with `price = float(signal.price)`
+   (source-close fallback) so downstream analytics see the strategy's
+   intent.
+
+At run end the counter surfaces through
+`BacktestResultInsertRow.extra_metrics["cross_asset_blocked_fills"]`
+*only when positive*. Single-feed runs keep `extra_metrics == {}`
+byte-identical with pre-cross-asset behaviour.
+
+### Scope limits
+
+Three explicit non-goals in the current implementation:
+
+- **Same-symbol multi-venue** — `Portfolio.positions` is keyed by
+  instrument only, so running BTC-USD on Kraken Spot + Kraken Futures
+  simultaneously in one backtest is NOT supported. Cross-asset
+  strategies in scope use distinct symbols across feeds.
+- **Multi-target cross-asset** — a single
+  `target_execution_exchange` per run means one strategy cannot emit
+  signals for different target venues inside the same backtest.
+- **Public REST create path** — `POST /api/backtests` + the
+  `BacktestCreateBody` schema persist a single
+  `instrument_public_id` / `exchange` pair. Cross-asset backtests
+  are invoked directly through `DirectDbEngine.run(...)` from Python
+  tests / scripts. Widening the REST surface is tracked as a
+  follow-up plan.
+
+### Fingerprint + pairing
+
+`compute_fingerprint` includes `target_execution_exchange` in the
+payload **only when non-None**, so legacy (default-None) runs keep
+their exact pre-cross-asset hash in both the default and
+`for_pairing=True` paths. This preserves Phase 2c dedup cache
+validity and the auto-pair UI grouping logic at
+`backtest_routes.py:348`. Explicit cross-asset runs (field set to a
+concrete venue like `"kraken"`) generate distinct fingerprints so
+they never collide with single-venue baselines.
