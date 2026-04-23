@@ -46,6 +46,7 @@ bcrypt = "^5.0.0"
 slowapi = "^0.1.9"
 PyYAML = ">=6.0.3"
 mcp = ">=1.27.0"
+aioapns = "^4.0"
 
 [tool.poetry.group.cloud.dependencies]
 asyncpg = "^0.31.0"

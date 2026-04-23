@@ -4193,3 +4193,116 @@ class TestBacktestRun:
             )
             assert result.exit_code == 1
             assert "failed" in result.output.lower()
+
+
+class TestNotifyCommand:
+    """``snapper notify`` — iOS Push Foundation sidecar CLI (BE-3a).
+
+    The command wires four external collaborators (bootstrap
+    settings, repository, SettingsService, ApnsClientPool) and
+    spawns the sidecar inside an ``asyncio.run``. We mock every
+    boundary so the test exercises the CLI plumbing without touching
+    a real DB, real ZMQ broker, or real APNs connection.
+    """
+
+    def test_notify_runs_until_sidecar_stops(
+        self, cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The notify command wires the sidecar and runs to completion."""
+        calls: list[str] = []
+
+        class DummySidecar:
+            def __init__(self, **_: Any) -> None:
+                calls.append("sidecar_init")
+
+            async def start(self) -> None:
+                calls.append("start")
+
+            async def stop(self) -> None:
+                calls.append("stop")
+
+        bootstrap = SimpleNamespace(
+            db_url="sqlite+aiosqlite:///:memory:",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
+            zmq_broker_xpub="tcp://127.0.0.1:7501",
+        )
+        apns_config = SimpleNamespace(
+            topic="ie.klatt.snapper",
+            environment="sandbox",
+        )
+
+        monkeypatch.setattr(app_module, "NotifySidecar", DummySidecar)
+        monkeypatch.setattr(app_module, "get_bootstrap_settings", lambda: bootstrap)
+        monkeypatch.setattr(app_module, "get_repository", lambda _url: MagicMock())
+        monkeypatch.setattr(
+            app_module,
+            "get_settings_service",
+            AsyncMock(return_value=MagicMock()),
+        )
+        monkeypatch.setattr(app_module, "load_apns_config", lambda _s: apns_config)
+        monkeypatch.setattr(app_module, "build_apns_client_pool", lambda _c: MagicMock())
+        monkeypatch.setattr(app_module, "ValidatedSubscriber", lambda _sock: MagicMock())
+        monkeypatch.setattr(app_module, "apply_hwm", lambda *a, **k: None)
+
+        fake_ctx = MagicMock()
+        fake_sock = MagicMock()
+        fake_sock.close = MagicMock()
+        fake_ctx.socket = MagicMock(return_value=fake_sock)
+        fake_ctx.term = MagicMock()
+        monkeypatch.setattr("zmq.asyncio.Context", lambda: fake_ctx)
+
+        result = cli_runner.invoke(app_module.app, ["notify"])
+
+        assert result.exit_code == 0
+        assert "start" in calls
+        assert "stop" in calls
+        assert fake_sock.close.called
+        assert fake_ctx.term.called
+
+    def test_notify_catches_keyboard_interrupt(
+        self, cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """KeyboardInterrupt during start() prints a stop message and exits 0."""
+
+        class InterruptingSidecar:
+            def __init__(self, **_: Any) -> None:
+                pass
+
+            async def start(self) -> None:
+                raise KeyboardInterrupt()
+
+            async def stop(self) -> None:
+                return None
+
+        bootstrap = SimpleNamespace(
+            db_url="sqlite+aiosqlite:///:memory:",
+            zmq_broker_xsub="tcp://127.0.0.1:7500",
+            zmq_broker_xpub="tcp://127.0.0.1:7501",
+        )
+        apns_config = SimpleNamespace(
+            topic="ie.klatt.snapper",
+            environment="sandbox",
+        )
+
+        monkeypatch.setattr(app_module, "NotifySidecar", InterruptingSidecar)
+        monkeypatch.setattr(app_module, "get_bootstrap_settings", lambda: bootstrap)
+        monkeypatch.setattr(app_module, "get_repository", lambda _url: MagicMock())
+        monkeypatch.setattr(
+            app_module,
+            "get_settings_service",
+            AsyncMock(return_value=MagicMock()),
+        )
+        monkeypatch.setattr(app_module, "load_apns_config", lambda _s: apns_config)
+        monkeypatch.setattr(app_module, "build_apns_client_pool", lambda _c: MagicMock())
+        monkeypatch.setattr(app_module, "ValidatedSubscriber", lambda _sock: MagicMock())
+        monkeypatch.setattr(app_module, "apply_hwm", lambda *a, **k: None)
+
+        fake_ctx = MagicMock()
+        fake_sock = MagicMock()
+        fake_ctx.socket = MagicMock(return_value=fake_sock)
+        monkeypatch.setattr("zmq.asyncio.Context", lambda: fake_ctx)
+
+        result = cli_runner.invoke(app_module.app, ["notify"])
+
+        assert result.exit_code == 0
+        assert "stopped by user" in result.output

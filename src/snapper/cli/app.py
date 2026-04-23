@@ -57,6 +57,8 @@ from typing import cast
 import sqlalchemy as sa
 import typer
 import uvicorn
+import zmq
+import zmq.asyncio
 from alembic import command
 from alembic.config import Config
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -71,7 +73,11 @@ from snapper.application.backtest.direct_engine import DirectDbEngine
 from snapper.application.backtest.metrics import compute_metrics
 from snapper.application.backtest.result_collector import ResultCollector
 from snapper.application.engine.trader import TraderCoordinator
+from snapper.application.notify.apns_client import build_apns_client_pool
+from snapper.application.notify.apns_config import load_apns_config
+from snapper.application.notify.sidecar import NotifySidecar
 from snapper.application.services.continuous_contract_builder import ContinuousContractBuilder
+from snapper.application.services.settings import get_settings_service
 from snapper.application.updaters.historical.aggregates import PolygonAggregatesBackfillService
 from snapper.application.updaters.historical.grouped import PolygonGroupedDailyBackfillService
 from snapper.application.updaters.historical.kraken_equities_aggregates import (
@@ -127,6 +133,9 @@ from snapper.messaging.executors.zonda import ZondaOrderExecutor
 from snapper.messaging.infrastructure.broker import ZmqBrokerThread
 from snapper.messaging.infrastructure.logger import ZmqMessageLogger
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.infrastructure.validated_socket import HWM_ORDER_FLOW
+from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
+from snapper.messaging.infrastructure.validated_socket import apply_hwm
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
 from snapper.server.app import create_app
 
@@ -1948,3 +1957,56 @@ def backtest_rerun(
         slippage_bps=original.get("slippage_bps", 0.0),
         commission_bps=original.get("commission_bps", 0.0),
     )
+
+
+@app.command()
+def notify() -> None:
+    """Run the iOS Push Foundation sidecar (ZMQ alerts -> APNs HTTP/2).
+
+    Long-running process per Plan 2 §D5. Subscribes to the
+    ``alerts.`` ZMQ prefix, fans out each received ``AlertEventData``
+    to the target user's active devices via the outbox-backed
+    ``NotifySidecar`` (§D5.5), and retries server/throttled failures
+    on its own 30-second scheduler. Configuration is read from the
+    ``apns_*`` settings seeded via ``proprietary/data/seed/{dev,prod}.toml``.
+
+    Run under systemd / K8s with ``Restart=always`` — the sidecar
+    exits only on unhandled errors or SIGINT, and the outbox drain
+    on the next start recovers any queued deliveries left behind.
+    """
+
+    async def _run() -> None:
+        bootstrap = get_bootstrap_settings()
+        repo = get_repository(bootstrap.db_url)
+        settings_svc = await get_settings_service(bootstrap.db_url, bootstrap.zmq_broker_xsub)
+        apns_config = load_apns_config(settings_svc)
+        apns_pool = build_apns_client_pool(apns_config)
+
+        zmq_ctx = zmq.asyncio.Context()
+        sub_sock = zmq_ctx.socket(zmq.SUB)
+        apply_hwm(sub_sock, rcvhwm=HWM_ORDER_FLOW)
+        broker_addr = bootstrap.zmq_broker_xpub
+        sub_sock.connect(broker_addr)
+        subscriber = ValidatedSubscriber(sub_sock)
+
+        sidecar = NotifySidecar(
+            subscriber=subscriber,
+            repo=repo,
+            apns=apns_pool,
+            apns_topic=apns_config.topic,
+            tracker=SequenceTracker(),
+        )
+        typer.echo(
+            f"snapper-notify: connected to {broker_addr}; topic={apns_config.topic}"
+            f"; env={apns_config.environment}"
+        )
+        try:
+            await sidecar.start()
+        except KeyboardInterrupt:
+            typer.echo("snapper-notify: stopped by user")
+        finally:
+            await sidecar.stop()
+            sub_sock.close()
+            zmq_ctx.term()
+
+    asyncio.run(_run())
