@@ -2207,57 +2207,80 @@ class UserActiveToken(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
 
 
-class NotificationDevice(Base):
-    """Non-temporal inventory of iOS devices registered for APNs push.
+class NotificationDevice(TemporalMixin, Base):
+    """Temporal (SCD2) inventory of iOS devices registered for APNs push.
 
-    Soft-delete via ``is_active`` flag instead of SCD2 versioning: devices
-    come and go frequently (app reinstalls, token rotations, logout) and
-    carry no historical-query needs — current-state is the only state of
-    interest. ``device_token`` is the APNs binary token hex-encoded;
-    it may be up to 200 chars for future token formats. ``env`` tracks
-    sandbox vs production APNs environment scope the token was issued
-    for (one token is valid for exactly one environment per Apple).
-    ``previews_mode`` gates whether iOS shows payload body on lock
-    screen without unlocking ("private" by default — body hidden).
+    Per project invariant (``feedback_bitemporal_all_tables``): every
+    table must carry ``TemporalMixin`` (``timestamp`` + ``known_to``).
+    Device lifecycle is versioned via SCD2 — deactivation = close
+    (known_to := now), token refresh = close + insert new version,
+    reads use ``known_to == KNOWN_TO_MAX`` predicate (via the partial
+    active indexes below). ``device_token`` is the APNs binary token
+    hex-encoded; ``env`` tracks sandbox vs production APNs scope
+    (one token is valid for exactly one env per Apple);
+    ``previews_mode`` gates iOS lock-screen payload visibility
+    (``private`` by default).
     """
 
     __tablename__ = "notification_devices"
-    __table_args__ = (Index("ix_notification_devices_user_active", "user_public_id", "is_active"),)
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id, unique=True)
-    user_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False, index=True)
-    device_token: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    __table_args__ = (
+        Index(
+            "ix_notification_devices_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "uq_notification_devices_token_active",
+            "device_token",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_notification_devices_user_active",
+            "user_public_id",
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+    )
+    user_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    device_token: Mapped[str] = mapped_column(String(200), nullable=False)
     device_id: Mapped[str] = mapped_column(String(64), nullable=False)
     platform: Mapped[str] = mapped_column(String(10), nullable=False, server_default="ios")
     env: Mapped[str] = mapped_column(String(10), nullable=False)
     app_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    is_active: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=True, server_default="1"
-    )
     previews_mode: Mapped[str] = mapped_column(String(10), nullable=False, server_default="private")
     registered_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
     last_seen_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
 
 
-class DeviceAlertPref(Base):
-    """Non-temporal per-(device, alert_type, scope) preferences.
+class DeviceAlertPref(TemporalMixin, Base):
+    """Temporal (SCD2) per-(device, alert_type, scope) preferences.
 
     Scope layers (narrowest first, §D7 routing precedence):
     wallet (operator NOT NULL + wallet NOT NULL) →
     operator (operator NOT NULL + wallet NULL) →
-    device-global (operator NULL + wallet NULL). The three partial unique
-    indexes below encode uniqueness per scope depth — SQL NULLs are not
-    deduped by regular UniqueConstraint, so partial indexes on explicit
-    NULL/NOT-NULL predicates are required. The CHECK constraint
-    ``ck_device_alert_valid_scope`` rejects the nonsensical
-    (operator NULL + wallet NOT NULL) combination — you cannot scope
-    a preference to a wallet without also knowing its operator context.
-    ``quiet_hours_*`` are local minute-of-day offsets in the device's
-    local timezone (interpreted with ``timezone`` column).
+    device-global (operator NULL + wallet NULL). Three partial unique
+    indexes gated on ``known_to = KNOWN_TO_MAX`` encode uniqueness per
+    scope depth among ACTIVE rows only (historical closed rows do not
+    block re-insertion of a changed preference at the same scope).
+    The CHECK constraint ``ck_device_alert_valid_scope`` rejects the
+    nonsensical (operator NULL + wallet NOT NULL) combination.
+    Preference updates close the active row and insert a new version
+    (SCD2) so audit replay can reconstruct historical routing verdicts.
     """
 
     __tablename__ = "device_alert_prefs"
     __table_args__ = (
+        Index(
+            "ix_device_alert_prefs_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
         Index(
             "uq_device_alert_wallet_scope",
             "device_public_id",
@@ -2265,8 +2288,12 @@ class DeviceAlertPref(Base):
             "operator_public_id",
             "wallet_public_id",
             unique=True,
-            sqlite_where=text("operator_public_id IS NOT NULL AND wallet_public_id IS NOT NULL"),
+            sqlite_where=text(
+                "known_to = '9999-12-31 23:59:59.000000' AND "
+                "operator_public_id IS NOT NULL AND wallet_public_id IS NOT NULL"
+            ),
             postgresql_where=text(
+                "known_to = '9999-12-31T23:59:59+00:00' AND "
                 "operator_public_id IS NOT NULL AND wallet_public_id IS NOT NULL"
             ),
         ),
@@ -2276,25 +2303,42 @@ class DeviceAlertPref(Base):
             "alert_type",
             "operator_public_id",
             unique=True,
-            sqlite_where=text("operator_public_id IS NOT NULL AND wallet_public_id IS NULL"),
-            postgresql_where=text("operator_public_id IS NOT NULL AND wallet_public_id IS NULL"),
+            sqlite_where=text(
+                "known_to = '9999-12-31 23:59:59.000000' AND "
+                "operator_public_id IS NOT NULL AND wallet_public_id IS NULL"
+            ),
+            postgresql_where=text(
+                "known_to = '9999-12-31T23:59:59+00:00' AND "
+                "operator_public_id IS NOT NULL AND wallet_public_id IS NULL"
+            ),
         ),
         Index(
             "uq_device_alert_device_scope",
             "device_public_id",
             "alert_type",
             unique=True,
-            sqlite_where=text("operator_public_id IS NULL AND wallet_public_id IS NULL"),
-            postgresql_where=text("operator_public_id IS NULL AND wallet_public_id IS NULL"),
+            sqlite_where=text(
+                "known_to = '9999-12-31 23:59:59.000000' AND "
+                "operator_public_id IS NULL AND wallet_public_id IS NULL"
+            ),
+            postgresql_where=text(
+                "known_to = '9999-12-31T23:59:59+00:00' AND "
+                "operator_public_id IS NULL AND wallet_public_id IS NULL"
+            ),
         ),
-        Index("ix_device_alert_prefs_lookup", "device_public_id", "alert_type"),
+        Index(
+            "ix_device_alert_prefs_lookup",
+            "device_public_id",
+            "alert_type",
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
         CheckConstraint(
             "NOT (wallet_public_id IS NOT NULL AND operator_public_id IS NULL)",
             name="ck_device_alert_valid_scope",
         ),
     )
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    device_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False, index=True)
+    device_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
     alert_type: Mapped[str] = mapped_column(String(50), nullable=False)
     operator_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
     wallet_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
@@ -2304,31 +2348,42 @@ class DeviceAlertPref(Base):
     quiet_hours_end_min: Mapped[int | None] = mapped_column(Integer, nullable=True)
     mute_until: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     timezone: Mapped[str] = mapped_column(String(64), nullable=False, server_default="UTC")
-    updated_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
 
 
-class UserAlertDefault(Base):
-    """Non-temporal user-level fallback preference per alert type.
+class UserAlertDefault(TemporalMixin, Base):
+    """Temporal (SCD2) user-level fallback preference per alert type.
 
-    Last step in the §D7 routing precedence chain: if no device-scoped
-    (wallet / operator / device-global) row matches for a given
-    (device, alert_type) combo, routing falls back to the per-user
-    default. Scope here is always the whole user — no wallet/operator
-    dimension — because user defaults are the universal baseline, not a
-    scoped override. Uniqueness constraint enforces one default row per
-    (user, alert_type) pair.
+    Last step in the §D7 routing precedence chain: when no
+    device-scoped (wallet / operator / device-global) row matches
+    for a given (device, alert_type) combo, routing falls back to
+    the per-user default. Unique among ACTIVE rows per
+    (user_public_id, alert_type) — enforced via a partial unique
+    index gated on ``known_to = KNOWN_TO_MAX``.
+    Updates close the active row and insert a new version.
     """
 
     __tablename__ = "user_alert_defaults"
     __table_args__ = (
-        UniqueConstraint("user_public_id", "alert_type", name="uq_user_alert_default"),
+        Index(
+            "ix_user_alert_defaults_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "uq_user_alert_default_active",
+            "user_public_id",
+            "alert_type",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
     )
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
     alert_type: Mapped[str] = mapped_column(String(50), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
     min_priority: Mapped[str] = mapped_column(String(10), nullable=False, server_default="medium")
-    updated_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
 
 
 class AlertEvent(TemporalMixin, Base):
@@ -2388,40 +2443,78 @@ class AlertEvent(TemporalMixin, Base):
     source_topic: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
 
-class AlertDelivery(Base):
-    """Non-temporal append-only audit of APNs delivery attempts.
+class AlertDelivery(TemporalMixin, Base):
+    """Temporal (SCD2) audit of APNs delivery attempts.
 
-    One row per ``(alert_event, device)`` attempt; status transitions
-    in-place (``queued`` → ``sent`` / ``failed`` / ``unregistered`` /
-    ``cancelled_scope``). Retry schedule is tracked via
-    ``attempt_count`` + ``next_attempt_at``; the sidecar's
-    ``_process_retry_queue`` polls ``list_deliveries_ready_for_retry``
-    using the ``ix_alert_deliveries_next_attempt`` partial index
-    (WHERE status='queued'). Crash-safety invariant per plan §D5.5:
-    ``attempt_count`` increments BEFORE the APNs HTTP call, so on
-    sidecar restart mid-flight a row with ``attempt_count=N`` and
-    ``status='queued'`` is retriable at most once redundantly
-    (bounded ≤1 duplicate send per crash).
+    Per project invariant, even append-only audit tables carry
+    ``TemporalMixin`` — status transitions are SCD2 versioned (close
+    old row + insert new version with updated ``status`` /
+    ``attempt_count`` / ``apns_id`` / etc.) so the full lifecycle
+    of every delivery is queryable with ``as_of``. Active-row lookups
+    (queue drain, retry) use ``known_to == KNOWN_TO_MAX`` via the
+    partial active indexes below. Crash-safety invariant per plan
+    §D5.5: ``attempt_count`` increments BEFORE the APNs HTTP call,
+    so on sidecar restart mid-flight a row with ``attempt_count=N``
+    and ``status='queued'`` is retriable at most once redundantly
+    (bounded ≤1 duplicate send per crash). Scope columns
+    (``user_public_id`` / ``operator_public_id`` / ``wallet_public_id``)
+    are denormalised from the source ``alert_event`` at queue time so
+    scope-based cancel passes do NOT depend on the current active
+    SCD2 version of the event (closes Copilot R1 correctness finding).
     """
 
     __tablename__ = "alert_deliveries"
     __table_args__ = (
-        Index("ix_alert_deliveries_status_created", "status", "created_at"),
+        Index(
+            "ix_alert_deliveries_public_id",
+            "public_id",
+            unique=True,
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_alert_deliveries_alert_event_public_id",
+            "alert_event_public_id",
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_alert_deliveries_device_public_id",
+            "device_public_id",
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+        ),
+        Index(
+            "ix_alert_deliveries_status_queued",
+            "created_at",
+            sqlite_where=text("known_to = '9999-12-31 23:59:59.000000' AND status = 'queued'"),
+            postgresql_where=text("known_to = '9999-12-31T23:59:59+00:00' AND status = 'queued'"),
+        ),
         Index(
             "ix_alert_deliveries_next_attempt",
             "next_attempt_at",
-            sqlite_where=text("status = 'queued'"),
-            postgresql_where=text("status = 'queued'"),
+            sqlite_where=text("known_to = '9999-12-31 23:59:59.000000' AND status = 'queued'"),
+            postgresql_where=text("known_to = '9999-12-31T23:59:59+00:00' AND status = 'queued'"),
+        ),
+        Index(
+            "ix_alert_deliveries_scope_status",
+            "user_public_id",
+            "operator_public_id",
+            "wallet_public_id",
+            "status",
+            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
+            postgresql_where=_KNOWN_TO_ACTIVE_PG,
         ),
         CheckConstraint(
             "status IN ('queued', 'sent', 'failed', 'unregistered', 'cancelled_scope')",
             name="ck_alert_delivery_status",
         ),
     )
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    public_id: Mapped[str] = mapped_column(UUIDColumn(), default=_public_id, unique=True)
-    alert_event_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False, index=True)
-    device_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False, index=True)
+    alert_event_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    device_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    user_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    operator_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
+    wallet_public_id: Mapped[str | None] = mapped_column(UUIDColumn(), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     last_attempt_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)

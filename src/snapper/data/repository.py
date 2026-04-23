@@ -2637,19 +2637,16 @@ class Repository(ABC):
 
     @abstractmethod
     async def upsert_notification_device(self, row: NotificationDeviceUpsertRow) -> str:
-        """Insert a new iOS device registration or refresh an existing one.
+        """Register or refresh an iOS device via SCD2 close-and-insert.
 
-        Idempotent on ``device_token`` (one APNs token maps to at most one
-        active row). On re-registration (same user, same device_token)
-        the existing row is updated in place: ``device_id``, ``platform``,
-        ``env``, ``app_version``, ``previews_mode``, ``last_seen_at`` are
-        refreshed; ``is_active`` is forced to True (re-activating a
-        previously soft-deleted row). On first registration a fresh
-        ``public_id`` is generated if absent from ``row``.
+        Idempotent on ``device_token``: when an active row already
+        exists it is SCD2-closed (``known_to := row.timestamp``) and
+        a new active version is inserted, reusing the stable
+        ``public_id`` across versions. Caller provides ``session_id``,
+        ``sequence_id``, and ``timestamp`` (bus time).
 
         Returns:
-            The row's ``public_id`` — the opaque handle iOS reuses for
-            subsequent PATCH/DELETE on /api/devices/{public_id}.
+            The row's stable ``public_id``.
         """
         ...
 
@@ -2657,21 +2654,14 @@ class Repository(ABC):
     async def list_active_notification_devices_for_user(
         self, user_public_id: str
     ) -> list[NotificationDeviceRow]:
-        """Return active devices owned by ``user_public_id``.
-
-        Ordered by ``registered_at`` DESC (most-recent first).
-        Skips soft-deleted rows (``is_active = False``).
-        """
+        """Active (``known_to == KNOWN_TO_MAX``) devices owned by user."""
         ...
 
     @abstractmethod
-    async def mark_notification_device_inactive(self, public_id: str) -> None:
-        """Soft-delete a device registration.
+    async def mark_notification_device_inactive(self, public_id: str, closed_at: datetime) -> None:
+        """SCD2 close of the active row — no new version inserted.
 
-        Sets ``is_active = False`` on the row matching ``public_id``.
-        No-op if ``public_id`` does not match a row (idempotent). Used
-        by DELETE /api/devices/{public_id} and by the sidecar's APNs
-        410-Unregistered handler.
+        Idempotent: no-op when ``public_id`` has no active row.
         """
         ...
 
@@ -2679,61 +2669,40 @@ class Repository(ABC):
     async def list_device_alert_prefs_for_user(
         self, user_public_id: str
     ) -> list[DeviceAlertPrefRow]:
-        """Return all device-scoped alert preferences for ``user_public_id``.
-
-        Joins ``device_alert_prefs`` to ``notification_devices`` on
-        ``device_public_id`` to filter to rows owned by the user. Order
-        is implementation-defined; routing consumers apply §D7
-        narrowest-wins precedence client-side.
-        """
+        """Active prefs for the user's currently active devices."""
         ...
 
     @abstractmethod
     async def upsert_device_alert_pref(self, row: DeviceAlertPrefUpsertRow) -> None:
-        """Insert or update a per-(device, alert_type, scope) preference.
+        """SCD2 close + insert on (device, alert_type, scope_tuple).
 
-        Uniqueness is enforced by the three partial unique indexes on
-        ``device_alert_prefs`` (wallet / operator / device-global scope
-        depths) — each (device, alert_type, scope_tuple) has at most
-        one row. On conflict this method UPDATEs the existing row's
-        mutable fields; otherwise INSERTs a new row. The scope is
-        inferred from which of ``operator_public_id`` /
-        ``wallet_public_id`` are provided in the row (both → wallet;
-        operator only → operator; neither → device-global).
+        Scope is inferred from which of ``operator_public_id`` /
+        ``wallet_public_id`` are populated in the row. Merges
+        optional fields with the prior active row if present.
         """
         ...
 
     @abstractmethod
     async def list_user_alert_defaults(self, user_public_id: str) -> list[UserAlertDefaultRow]:
-        """Return user-level default alert preferences for ``user_public_id``.
-
-        Consulted last in the §D7 routing precedence chain when no
-        device-scoped override matches.
-        """
+        """Active user-level fallback prefs per alert type."""
         ...
 
     @abstractmethod
     async def upsert_user_alert_default(self, row: UserAlertDefaultUpsertRow) -> None:
-        """Insert or update a user-level alert preference default.
-
-        Uniqueness is enforced by ``UNIQUE (user_public_id, alert_type)``;
-        on conflict the existing row is updated in place.
-        """
+        """SCD2 close + insert on (user, alert_type) default pref."""
         ...
 
     @abstractmethod
     async def insert_alert_event(self, row: AlertEventInsertRow) -> str:
         """Insert a temporal (SCD2) alert_events row.
 
-        Auto-fills ``public_id`` (uuid7) if absent and ``known_to``
-        (``KNOWN_TO_MAX``) if absent. Caller provides ``session_id``,
-        ``sequence_id``, ``timestamp`` (bus time of the originating
-        event). ``dedup_key`` (if present) is the rule engine's hint
-        for duplicate-suppression — the DB does NOT enforce uniqueness
-        on dedup_key; dedup is a rule-engine concern (see §D6).
+        Auto-fills ``public_id`` (uuid7) and ``known_to``
+        (``KNOWN_TO_MAX``) if absent. Required: ``session_id``,
+        ``sequence_id``, ``timestamp``, ``user_public_id``,
+        ``alert_type``, ``priority``, ``title``, ``body``.
 
         Returns:
-            The row's ``public_id`` (fresh uuid7 or the one passed in).
+            The row's ``public_id``.
         """
         ...
 
@@ -2744,102 +2713,95 @@ class Repository(ABC):
         limit: int,
         before: str | None,
     ) -> list[AlertEventRow]:
-        """Return alert history for iOS Alerts tab.
+        """Active alert_events for iOS Alerts tab with composite pagination.
 
-        Currently-active SCD2 rows only (``known_to = KNOWN_TO_MAX``),
-        ordered by ``timestamp`` DESC. ``before`` is a cursor
-        (``AlertEvent.public_id``) for keyset pagination: when present,
-        only rows with ``timestamp`` strictly less than the cursor row's
-        ``timestamp`` are returned.
+        ``before`` is an ``AlertEvent.public_id`` cursor; resolves to
+        ``(timestamp, public_id)`` in the user's active set and returns
+        rows strictly earlier, ordered
+        ``(timestamp DESC, public_id DESC)``. Unknown cursor returns
+        an empty list.
         """
         ...
 
     @abstractmethod
     async def get_alert_event_by_public_id(self, public_id: str) -> AlertEventRow | None:
-        """Return the currently-active alert_event row for ``public_id``.
-
-        Returns None when the row does not exist or has been
-        SCD2-closed (``known_to != KNOWN_TO_MAX``). Used by
-        GET /api/alerts/{public_id} deep-link handler.
-        """
+        """Active alert_event by public_id; None when missing or SCD2-closed."""
         ...
 
     @abstractmethod
     async def insert_alert_delivery(self, row: AlertDeliveryInsertRow) -> str:
-        """Insert a new alert_deliveries row (append-only audit).
+        """SCD2 insert of a new alert_delivery row.
 
-        Auto-fills ``public_id`` if absent. Caller provides
-        ``alert_event_public_id``, ``device_public_id``, ``status``
-        (usually ``queued``), and ``created_at``.
-
-        Returns:
-            The row's ``public_id``.
+        Scope columns (user/operator/wallet) MUST be denormalised from
+        the source alert_event at queue time and provided in the row —
+        they are what the scope-cancel path filters on (§D8).
         """
         ...
 
     @abstractmethod
     async def list_queued_deliveries_all(self) -> list[AlertDeliveryRow]:
-        """Return every row with ``status = 'queued'`` (no time filter).
-
-        Used by the sidecar's startup-drain path: after a restart the
-        sidecar MUST process every queued row regardless of age, to
-        avoid silently losing alerts that were queued just before the
-        crash. Ordered by ``created_at`` ASC (oldest first).
-        """
+        """Every active ``status='queued'`` delivery row (no time filter)."""
         ...
 
     @abstractmethod
     async def list_deliveries_ready_for_retry(self, now: datetime) -> list[AlertDeliveryRow]:
-        """Return queued rows eligible for a retry attempt right now.
+        """Active queued deliveries with ``next_attempt_at`` NULL or <= ``now``."""
+        ...
 
-        Filter: ``status = 'queued' AND (next_attempt_at IS NULL OR
-        next_attempt_at <= now)``. Leverages the
-        ``ix_alert_deliveries_next_attempt`` partial index. Ordered by
-        ``next_attempt_at`` ASC NULLS FIRST (retry the never-attempted
-        or overdue rows first).
+    @abstractmethod
+    async def mark_delivery_sent(
+        self,
+        public_id: str,
+        apns_id: str,
+        *,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> None:
+        """SCD2 transition queued -> sent (guarded on current status=queued).
+
+        Closes the active row and inserts a new version with
+        ``status='sent'`` + ``apns_id``. No-op when the current
+        active row is not queued (optimistic concurrency guard).
         """
         ...
 
     @abstractmethod
-    async def mark_delivery_sent(self, public_id: str, apns_id: str) -> None:
-        """Transition a queued delivery to ``status = 'sent'``.
-
-        Stores the APNs-returned ``apns-id`` header in ``apns_id`` for
-        idempotency tracking and future reconciliation.
-        """
+    async def mark_delivery_failed(
+        self,
+        public_id: str,
+        error_reason: str,
+        *,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> None:
+        """SCD2 transition queued -> failed (terminal, give-up after N retries)."""
         ...
 
     @abstractmethod
-    async def mark_delivery_failed(self, public_id: str, error_reason: str) -> None:
-        """Transition a queued delivery to ``status = 'failed'`` (give-up).
-
-        Used after exhausting the configured retry budget (N≥3 in §D5.5).
-        ``error_reason`` is the last APNs-reported error (e.g.
-        ``PayloadTooLarge``, ``BadMessageId``).
-        """
+    async def mark_delivery_unregistered(
+        self,
+        public_id: str,
+        *,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> None:
+        """SCD2 transition queued -> unregistered (APNs 410)."""
         ...
 
     @abstractmethod
-    async def mark_delivery_unregistered(self, public_id: str) -> None:
-        """Transition a queued delivery to ``status = 'unregistered'``.
-
-        Called when APNs returns ``410 Unregistered`` for the target
-        device token. The caller is also expected to soft-delete the
-        source ``notification_devices`` row via
-        ``mark_notification_device_inactive``.
-        """
-        ...
-
-    @abstractmethod
-    async def mark_delivery_cancelled(self, public_id: str, reason: str) -> None:
-        """Transition a queued delivery to ``status = 'cancelled_scope'``.
-
-        Called by the scope-revalidation path when a pending delivery's
-        (user, operator, wallet) scope grant is revoked or expired
-        before the APNs send goes out (§D8). ``reason`` carries a
-        short human-readable descriptor for audit
-        (e.g. ``scope_revoked``).
-        """
+    async def mark_delivery_cancelled(
+        self,
+        public_id: str,
+        reason: str,
+        *,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> None:
+        """SCD2 transition queued -> cancelled_scope."""
         ...
 
     @abstractmethod
@@ -2849,16 +2811,17 @@ class Repository(ABC):
         attempt_count: int,
         next_attempt_at: datetime | None,
         error_reason: str | None,
+        *,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
     ) -> None:
-        """Bump attempt_count + schedule the next retry of a queued row.
+        """SCD2 close + insert, status remains queued, bumps attempt_count.
 
-        Called BEFORE the APNs HTTP call (crash-safety invariant in
-        §D5.5) — if the sidecar dies between this update and the APNs
-        response, the row is still ``status = 'queued'`` with an
-        incremented attempt_count, retriable on restart with bounded
-        ≤1 duplicate send per crash. ``next_attempt_at=None`` means
-        "process immediately"; a future datetime defers retry per the
-        exponential-backoff schedule.
+        Called BEFORE the APNs HTTP call (crash-safety §D5.5) so a
+        mid-flight sidecar restart leaves a row with incremented
+        attempt_count that is still retriable — bounded ≤1 duplicate
+        send per crash.
         """
         ...
 
@@ -2866,14 +2829,7 @@ class Repository(ABC):
     async def list_users_with_operator_membership(
         self, operator_public_id: str, as_of: datetime
     ) -> list[str]:
-        """Return user_public_id values for users with an active membership in ``operator_public_id``.
-
-        Reads the temporal ``user_operator_memberships`` table
-        (SCD2 via TemporalMixin) at ``as_of``. Used by the sidecar's
-        ``admin.scope_revoked`` fanout: find every user whose alerts
-        might be affected by an operator's scope change, then filter
-        deliveries accordingly.
-        """
+        """User public_ids with active membership in ``operator_public_id`` at ``as_of``."""
         ...
 
     @abstractmethod
@@ -2884,13 +2840,7 @@ class Repository(ABC):
         wallet_public_id: str,
         as_of: datetime,
     ) -> bool:
-        """Return True iff a scope grant linking the three parties is active at ``as_of``.
-
-        Thin wrapper over the existing ``wallet_operator_scope_grants``
-        temporal query. Consulted at APNs-send time (not queue time) to
-        re-validate that the alert's target scope has not been revoked
-        since the delivery was queued (§D8 safety-critical path).
-        """
+        """True iff a matching grant AND active user membership exist at ``as_of``."""
         ...
 
     @abstractmethod
@@ -2899,13 +2849,17 @@ class Repository(ABC):
         user_public_id: str,
         operator_public_id: str,
         wallet_public_id: str,
+        *,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
     ) -> int:
-        """Bulk-cancel queued deliveries whose alert_event's scope matches the (user, operator, wallet) triple.
+        """Bulk-cancel queued deliveries by scope columns on the delivery row.
 
-        Called in response to ``admin.scope_revoked`` topic frames by
-        the sidecar. Sets ``status = 'cancelled_scope'`` on every
-        matching queued row; in-flight rows (already sent or failed)
-        are not touched.
+        Filters on the denormalised ``user_public_id`` /
+        ``operator_public_id`` / ``wallet_public_id`` columns on
+        ``alert_deliveries`` — does NOT join ``alert_events`` — so
+        SCD2 corrections on the source event cannot cause misses.
 
         Returns:
             Count of rows transitioned to ``cancelled_scope``.
@@ -7724,16 +7678,19 @@ class SQLAlchemyRepository(Repository):
 
     @staticmethod
     def _notification_device_row_from(model: NotificationDevice) -> NotificationDeviceRow:
-        """Map an ORM ``NotificationDevice`` instance to its TypedDict row shape."""
+        """Map ORM ``NotificationDevice`` (SCD2) to its TypedDict row shape."""
         return NotificationDeviceRow(
             public_id=model.public_id,
+            session_id=model.session_id,
+            sequence_id=model.sequence_id,
+            timestamp=model.timestamp,
+            known_to=model.known_to,
             user_public_id=model.user_public_id,
             device_token=model.device_token,
             device_id=model.device_id,
             platform=model.platform,
             env=model.env,
             app_version=model.app_version,
-            is_active=model.is_active,
             previews_mode=model.previews_mode,
             registered_at=model.registered_at,
             last_seen_at=model.last_seen_at,
@@ -7741,8 +7698,13 @@ class SQLAlchemyRepository(Repository):
 
     @staticmethod
     def _device_alert_pref_row_from(model: DeviceAlertPref) -> DeviceAlertPrefRow:
-        """Map ORM ``DeviceAlertPref`` to its TypedDict read-row shape."""
+        """Map ORM ``DeviceAlertPref`` (SCD2) to its TypedDict row shape."""
         return DeviceAlertPrefRow(
+            public_id=model.public_id,
+            session_id=model.session_id,
+            sequence_id=model.sequence_id,
+            timestamp=model.timestamp,
+            known_to=model.known_to,
             device_public_id=model.device_public_id,
             alert_type=model.alert_type,
             operator_public_id=model.operator_public_id,
@@ -7753,18 +7715,21 @@ class SQLAlchemyRepository(Repository):
             quiet_hours_end_min=model.quiet_hours_end_min,
             mute_until=model.mute_until,
             timezone=model.timezone,
-            updated_at=model.updated_at,
         )
 
     @staticmethod
     def _user_alert_default_row_from(model: UserAlertDefault) -> UserAlertDefaultRow:
-        """Map ORM ``UserAlertDefault`` to its TypedDict read-row shape."""
+        """Map ORM ``UserAlertDefault`` (SCD2) to its TypedDict row shape."""
         return UserAlertDefaultRow(
+            public_id=model.public_id,
+            session_id=model.session_id,
+            sequence_id=model.sequence_id,
+            timestamp=model.timestamp,
+            known_to=model.known_to,
             user_public_id=model.user_public_id,
             alert_type=model.alert_type,
             enabled=model.enabled,
             min_priority=model.min_priority,
-            updated_at=model.updated_at,
         )
 
     @staticmethod
@@ -7792,11 +7757,18 @@ class SQLAlchemyRepository(Repository):
 
     @staticmethod
     def _alert_delivery_row_from(model: AlertDelivery) -> AlertDeliveryRow:
-        """Map ORM ``AlertDelivery`` to its TypedDict read-row shape."""
+        """Map ORM ``AlertDelivery`` (SCD2) to its TypedDict read-row shape."""
         return AlertDeliveryRow(
             public_id=model.public_id,
+            session_id=model.session_id,
+            sequence_id=model.sequence_id,
+            timestamp=model.timestamp,
+            known_to=model.known_to,
             alert_event_public_id=model.alert_event_public_id,
             device_public_id=model.device_public_id,
+            user_public_id=model.user_public_id,
+            operator_public_id=model.operator_public_id,
+            wallet_public_id=model.wallet_public_id,
             status=model.status,
             attempt_count=model.attempt_count,
             last_attempt_at=model.last_attempt_at,
@@ -7807,44 +7779,49 @@ class SQLAlchemyRepository(Repository):
         )
 
     async def upsert_notification_device(self, row: NotificationDeviceUpsertRow) -> str:
-        """Insert or refresh a NotificationDevice keyed on device_token."""
-        device_token = row["device_token"]
+        """Register or refresh a device via SCD2 close-and-insert.
+
+        Finds any active row (``known_to == KNOWN_TO_MAX``) keyed on
+        ``device_token``; closes it (``known_to := row.timestamp``);
+        inserts a new active version with the supplied fields.
+        Returns the stable ``public_id`` (reused across versions).
+        """
+        timestamp = row["timestamp"]
         async with self.session() as s:
-            existing_result = await s.execute(
-                select(NotificationDevice).where(NotificationDevice.device_token == device_token)
-            )
-            existing = existing_result.scalar_one_or_none()
-            if existing is None:
-                public_id = row.get("public_id") or str(uuid7())
-                device = NotificationDevice(
-                    public_id=public_id,
-                    user_public_id=row["user_public_id"],
-                    device_token=device_token,
-                    device_id=row["device_id"],
-                    platform=row.get("platform", "ios"),
-                    env=row["env"],
-                    app_version=row.get("app_version"),
-                    is_active=row.get("is_active", True),
-                    previews_mode=row.get("previews_mode", "private"),
-                    registered_at=row["registered_at"],
-                    last_seen_at=row.get("last_seen_at"),
+            existing = (
+                await s.execute(
+                    select(NotificationDevice).where(
+                        NotificationDevice.device_token == row["device_token"],
+                        NotificationDevice.known_to == KNOWN_TO_MAX,
+                    )
                 )
-                s.add(device)
-                await s.commit()
-                return public_id
-            existing.user_public_id = row["user_public_id"]
-            existing.device_id = row["device_id"]
-            existing.platform = row.get("platform", existing.platform)
-            existing.env = row["env"]
-            if "app_version" in row:
-                existing.app_version = row["app_version"]
-            existing.is_active = True
-            existing.previews_mode = row.get("previews_mode", existing.previews_mode)
-            existing.registered_at = row["registered_at"]
-            if "last_seen_at" in row:
-                existing.last_seen_at = row["last_seen_at"]
+            ).scalar_one_or_none()
+            public_id = (
+                cast(str, existing.public_id)
+                if existing is not None
+                else (row.get("public_id") or str(uuid7()))
+            )
+            if existing is not None:
+                existing.known_to = timestamp
+            device = NotificationDevice(
+                public_id=public_id,
+                session_id=row["session_id"],
+                sequence_id=row["sequence_id"],
+                timestamp=timestamp,
+                known_to=row.get("known_to", KNOWN_TO_MAX),
+                user_public_id=row["user_public_id"],
+                device_token=row["device_token"],
+                device_id=row["device_id"],
+                platform=row.get("platform", "ios"),
+                env=row["env"],
+                app_version=row.get("app_version"),
+                previews_mode=row.get("previews_mode", "private"),
+                registered_at=row["registered_at"],
+                last_seen_at=row.get("last_seen_at"),
+            )
+            s.add(device)
             await s.commit()
-            return cast(str, existing.public_id)
+            return public_id
 
     async def list_active_notification_devices_for_user(
         self, user_public_id: str
@@ -7855,28 +7832,32 @@ class SQLAlchemyRepository(Repository):
                 select(NotificationDevice)
                 .where(
                     NotificationDevice.user_public_id == user_public_id,
-                    NotificationDevice.is_active.is_(True),
+                    NotificationDevice.known_to == KNOWN_TO_MAX,
                 )
                 .order_by(NotificationDevice.registered_at.desc())
             )
             return [self._notification_device_row_from(row) for row in result.scalars().all()]
 
-    async def mark_notification_device_inactive(self, public_id: str) -> None:
-        """Soft-delete: set ``is_active = False`` on the matching row (idempotent)."""
+    async def mark_notification_device_inactive(self, public_id: str, closed_at: datetime) -> None:
+        """SCD2 close of a device row — no new version inserted (idempotent)."""
         async with self.session() as s:
-            result = await s.execute(
-                select(NotificationDevice).where(NotificationDevice.public_id == public_id)
-            )
-            device = result.scalar_one_or_none()
-            if device is None:
+            existing = (
+                await s.execute(
+                    select(NotificationDevice).where(
+                        NotificationDevice.public_id == public_id,
+                        NotificationDevice.known_to == KNOWN_TO_MAX,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is None:
                 return
-            device.is_active = False
+            existing.known_to = closed_at
             await s.commit()
 
     async def list_device_alert_prefs_for_user(
         self, user_public_id: str
     ) -> list[DeviceAlertPrefRow]:
-        """Per-device alert prefs for all the user's devices (join on device_public_id)."""
+        """Active per-device prefs for user's active devices."""
         async with self.session() as s:
             result = await s.execute(
                 select(DeviceAlertPref)
@@ -7884,23 +7865,24 @@ class SQLAlchemyRepository(Repository):
                     NotificationDevice,
                     NotificationDevice.public_id == DeviceAlertPref.device_public_id,
                 )
-                .where(NotificationDevice.user_public_id == user_public_id)
+                .where(
+                    NotificationDevice.user_public_id == user_public_id,
+                    NotificationDevice.known_to == KNOWN_TO_MAX,
+                    DeviceAlertPref.known_to == KNOWN_TO_MAX,
+                )
             )
-            return [self._device_alert_pref_row_from(row) for row in result.scalars().all()]
+            return [self._device_alert_pref_row_from(r) for r in result.scalars().all()]
 
     async def upsert_device_alert_pref(self, row: DeviceAlertPrefUpsertRow) -> None:
-        """Insert or update a (device, alert_type, scope) preference.
-
-        Matches the one of three partial unique indexes that applies at
-        this scope depth. SQL NULL does not equal NULL, so the match
-        predicate uses ``is None`` for absent scope columns.
-        """
+        """SCD2 close + insert on (device, alert_type, scope_tuple)."""
         operator_public_id = row.get("operator_public_id")
         wallet_public_id = row.get("wallet_public_id")
+        timestamp = row["timestamp"]
         async with self.session() as s:
             stmt = select(DeviceAlertPref).where(
                 DeviceAlertPref.device_public_id == row["device_public_id"],
                 DeviceAlertPref.alert_type == row["alert_type"],
+                DeviceAlertPref.known_to == KNOWN_TO_MAX,
             )
             if operator_public_id is None:
                 stmt = stmt.where(DeviceAlertPref.operator_public_id.is_(None))
@@ -7911,86 +7893,120 @@ class SQLAlchemyRepository(Repository):
             else:
                 stmt = stmt.where(DeviceAlertPref.wallet_public_id == wallet_public_id)
             existing = (await s.execute(stmt)).scalar_one_or_none()
-            if existing is None:
-                pref = DeviceAlertPref(
-                    device_public_id=row["device_public_id"],
-                    alert_type=row["alert_type"],
-                    operator_public_id=operator_public_id,
-                    wallet_public_id=wallet_public_id,
-                    enabled=row.get("enabled", True),
-                    min_priority=row.get("min_priority", "medium"),
-                    quiet_hours_start_min=row.get("quiet_hours_start_min"),
-                    quiet_hours_end_min=row.get("quiet_hours_end_min"),
-                    mute_until=row.get("mute_until"),
-                    timezone=row.get("timezone", "UTC"),
-                    updated_at=row["updated_at"],
-                )
-                s.add(pref)
-                await s.commit()
-                return
-            if "enabled" in row:
-                existing.enabled = row["enabled"]
-            if "min_priority" in row:
-                existing.min_priority = row["min_priority"]
-            if "quiet_hours_start_min" in row:
-                existing.quiet_hours_start_min = row["quiet_hours_start_min"]
-            if "quiet_hours_end_min" in row:
-                existing.quiet_hours_end_min = row["quiet_hours_end_min"]
-            if "mute_until" in row:
-                existing.mute_until = row["mute_until"]
-            if "timezone" in row:
-                existing.timezone = row["timezone"]
-            existing.updated_at = row["updated_at"]
+            public_id = (
+                cast(str, existing.public_id)
+                if existing is not None
+                else (row.get("public_id") or str(uuid7()))
+            )
+            merged_enabled = row.get(
+                "enabled",
+                existing.enabled if existing is not None else True,
+            )
+            merged_min_priority = row.get(
+                "min_priority",
+                existing.min_priority if existing is not None else "medium",
+            )
+            merged_timezone = row.get(
+                "timezone",
+                existing.timezone if existing is not None else "UTC",
+            )
+            merged_quiet_start = row.get(
+                "quiet_hours_start_min",
+                existing.quiet_hours_start_min if existing is not None else None,
+            )
+            merged_quiet_end = row.get(
+                "quiet_hours_end_min",
+                existing.quiet_hours_end_min if existing is not None else None,
+            )
+            merged_mute_until = row.get(
+                "mute_until",
+                existing.mute_until if existing is not None else None,
+            )
+            if existing is not None:
+                existing.known_to = timestamp
+            pref = DeviceAlertPref(
+                public_id=public_id,
+                session_id=row["session_id"],
+                sequence_id=row["sequence_id"],
+                timestamp=timestamp,
+                known_to=row.get("known_to", KNOWN_TO_MAX),
+                device_public_id=row["device_public_id"],
+                alert_type=row["alert_type"],
+                operator_public_id=operator_public_id,
+                wallet_public_id=wallet_public_id,
+                enabled=merged_enabled,
+                min_priority=merged_min_priority,
+                quiet_hours_start_min=merged_quiet_start,
+                quiet_hours_end_min=merged_quiet_end,
+                mute_until=merged_mute_until,
+                timezone=merged_timezone,
+            )
+            s.add(pref)
             await s.commit()
 
     async def list_user_alert_defaults(self, user_public_id: str) -> list[UserAlertDefaultRow]:
-        """User-level fallback prefs per alert_type."""
+        """Active user-level fallback prefs."""
         async with self.session() as s:
             result = await s.execute(
-                select(UserAlertDefault).where(UserAlertDefault.user_public_id == user_public_id)
+                select(UserAlertDefault).where(
+                    UserAlertDefault.user_public_id == user_public_id,
+                    UserAlertDefault.known_to == KNOWN_TO_MAX,
+                )
             )
-            return [self._user_alert_default_row_from(row) for row in result.scalars().all()]
+            return [self._user_alert_default_row_from(r) for r in result.scalars().all()]
 
     async def upsert_user_alert_default(self, row: UserAlertDefaultUpsertRow) -> None:
-        """Insert or update a per-(user, alert_type) default preference."""
+        """SCD2 close + insert on (user, alert_type) default."""
+        timestamp = row["timestamp"]
         async with self.session() as s:
             existing = (
                 await s.execute(
                     select(UserAlertDefault).where(
                         UserAlertDefault.user_public_id == row["user_public_id"],
                         UserAlertDefault.alert_type == row["alert_type"],
+                        UserAlertDefault.known_to == KNOWN_TO_MAX,
                     )
                 )
             ).scalar_one_or_none()
-            if existing is None:
-                default = UserAlertDefault(
-                    user_public_id=row["user_public_id"],
-                    alert_type=row["alert_type"],
-                    enabled=row.get("enabled", True),
-                    min_priority=row.get("min_priority", "medium"),
-                    updated_at=row["updated_at"],
-                )
-                s.add(default)
-                await s.commit()
-                return
-            if "enabled" in row:
-                existing.enabled = row["enabled"]
-            if "min_priority" in row:
-                existing.min_priority = row["min_priority"]
-            existing.updated_at = row["updated_at"]
+            public_id = (
+                cast(str, existing.public_id)
+                if existing is not None
+                else (row.get("public_id") or str(uuid7()))
+            )
+            merged_enabled = row.get(
+                "enabled",
+                existing.enabled if existing is not None else True,
+            )
+            merged_min_priority = row.get(
+                "min_priority",
+                existing.min_priority if existing is not None else "medium",
+            )
+            if existing is not None:
+                existing.known_to = timestamp
+            default = UserAlertDefault(
+                public_id=public_id,
+                session_id=row["session_id"],
+                sequence_id=row["sequence_id"],
+                timestamp=timestamp,
+                known_to=row.get("known_to", KNOWN_TO_MAX),
+                user_public_id=row["user_public_id"],
+                alert_type=row["alert_type"],
+                enabled=merged_enabled,
+                min_priority=merged_min_priority,
+            )
+            s.add(default)
             await s.commit()
 
     async def insert_alert_event(self, row: AlertEventInsertRow) -> str:
         """Insert a temporal (SCD2) alert_events row."""
         public_id = row.get("public_id") or str(uuid7())
-        known_to = row.get("known_to", KNOWN_TO_MAX)
         async with self.session() as s:
             event_row = AlertEvent(
                 public_id=public_id,
                 session_id=row["session_id"],
                 sequence_id=row["sequence_id"],
                 timestamp=row["timestamp"],
-                known_to=known_to,
+                known_to=row.get("known_to", KNOWN_TO_MAX),
                 user_public_id=row["user_public_id"],
                 operator_public_id=row.get("operator_public_id"),
                 wallet_public_id=row.get("wallet_public_id"),
@@ -8014,7 +8030,14 @@ class SQLAlchemyRepository(Repository):
         limit: int,
         before: str | None,
     ) -> list[AlertEventRow]:
-        """Active alert_events rows for iOS Alerts tab, newest-first, paginated."""
+        """Active alert_events rows, newest-first, with composite keyset pagination.
+
+        ``before`` is an ``AlertEvent.public_id``; if present we resolve
+        it to ``(timestamp, public_id)`` in the user's active set and
+        return only strictly-earlier rows ordered by
+        ``(timestamp DESC, public_id DESC)``. Unknown ``before`` returns
+        an empty list (closes Copilot R1 MAJOR).
+        """
         async with self.session() as s:
             stmt = select(AlertEvent).where(
                 AlertEvent.user_public_id == user_public_id,
@@ -8023,20 +8046,33 @@ class SQLAlchemyRepository(Repository):
             if before is not None:
                 cursor = (
                     await s.execute(
-                        select(AlertEvent.timestamp).where(
+                        select(AlertEvent.timestamp, AlertEvent.public_id).where(
                             AlertEvent.public_id == before,
+                            AlertEvent.user_public_id == user_public_id,
                             AlertEvent.known_to == KNOWN_TO_MAX,
                         )
                     )
-                ).scalar_one_or_none()
-                if cursor is not None:
-                    stmt = stmt.where(AlertEvent.timestamp < cursor)
-            stmt = stmt.order_by(AlertEvent.timestamp.desc()).limit(limit)
+                ).first()
+                if cursor is None:
+                    return []
+                cursor_ts, cursor_pid = cursor
+                stmt = stmt.where(
+                    or_(
+                        AlertEvent.timestamp < cursor_ts,
+                        and_(
+                            AlertEvent.timestamp == cursor_ts,
+                            AlertEvent.public_id < cursor_pid,
+                        ),
+                    )
+                )
+            stmt = stmt.order_by(AlertEvent.timestamp.desc(), AlertEvent.public_id.desc()).limit(
+                limit
+            )
             result = await s.execute(stmt)
             return [self._alert_event_row_from(row) for row in result.scalars().all()]
 
     async def get_alert_event_by_public_id(self, public_id: str) -> AlertEventRow | None:
-        """Active alert_event by public_id, or None if missing or SCD2-closed."""
+        """Active alert_event by public_id, None if missing or SCD2-closed."""
         async with self.session() as s:
             result = await s.execute(
                 select(AlertEvent).where(
@@ -8050,13 +8086,26 @@ class SQLAlchemyRepository(Repository):
             return self._alert_event_row_from(event_row)
 
     async def insert_alert_delivery(self, row: AlertDeliveryInsertRow) -> str:
-        """Append-only insert of a new delivery attempt row."""
+        """Insert a new SCD2 active version of an alert_delivery row.
+
+        Scope columns (user/operator/wallet) MUST be set by the caller
+        (denormalised from the source alert_event at queue time) — the
+        repo does NOT rehydrate them from ``alert_events`` to avoid
+        depending on the current SCD2 state of that table.
+        """
         public_id = row.get("public_id") or str(uuid7())
         async with self.session() as s:
             delivery = AlertDelivery(
                 public_id=public_id,
+                session_id=row["session_id"],
+                sequence_id=row["sequence_id"],
+                timestamp=row["timestamp"],
+                known_to=row.get("known_to", KNOWN_TO_MAX),
                 alert_event_public_id=row["alert_event_public_id"],
                 device_public_id=row["device_public_id"],
+                user_public_id=row["user_public_id"],
+                operator_public_id=row.get("operator_public_id"),
+                wallet_public_id=row.get("wallet_public_id"),
                 status=row["status"],
                 attempt_count=row.get("attempt_count", 0),
                 last_attempt_at=row.get("last_attempt_at"),
@@ -8070,22 +8119,26 @@ class SQLAlchemyRepository(Repository):
             return public_id
 
     async def list_queued_deliveries_all(self) -> list[AlertDeliveryRow]:
-        """Every ``status='queued'`` delivery row (no time filter)."""
-        async with self.session() as s:
-            result = await s.execute(
-                select(AlertDelivery)
-                .where(AlertDelivery.status == "queued")
-                .order_by(AlertDelivery.created_at.asc())
-            )
-            return [self._alert_delivery_row_from(row) for row in result.scalars().all()]
-
-    async def list_deliveries_ready_for_retry(self, now: datetime) -> list[AlertDeliveryRow]:
-        """Queued rows with ``next_attempt_at`` NULL or <= now."""
+        """Every active row with ``status='queued'`` (no time filter)."""
         async with self.session() as s:
             result = await s.execute(
                 select(AlertDelivery)
                 .where(
                     AlertDelivery.status == "queued",
+                    AlertDelivery.known_to == KNOWN_TO_MAX,
+                )
+                .order_by(AlertDelivery.created_at.asc())
+            )
+            return [self._alert_delivery_row_from(r) for r in result.scalars().all()]
+
+    async def list_deliveries_ready_for_retry(self, now: datetime) -> list[AlertDeliveryRow]:
+        """Active queued rows with ``next_attempt_at`` NULL or <= ``now``."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(AlertDelivery)
+                .where(
+                    AlertDelivery.status == "queued",
+                    AlertDelivery.known_to == KNOWN_TO_MAX,
                     or_(
                         AlertDelivery.next_attempt_at.is_(None),
                         AlertDelivery.next_attempt_at <= now,
@@ -8093,61 +8146,152 @@ class SQLAlchemyRepository(Repository):
                 )
                 .order_by(AlertDelivery.next_attempt_at.asc().nullsfirst())
             )
-            return [self._alert_delivery_row_from(row) for row in result.scalars().all()]
+            return [self._alert_delivery_row_from(r) for r in result.scalars().all()]
 
-    async def mark_delivery_sent(self, public_id: str, apns_id: str) -> None:
-        """Transition a delivery to ``status='sent'`` (stores APNs id)."""
-        async with self.session() as s:
-            result = await s.execute(
-                select(AlertDelivery).where(AlertDelivery.public_id == public_id)
-            )
-            delivery = result.scalar_one_or_none()
-            if delivery is None:
-                return
-            delivery.status = "sent"
-            delivery.apns_id = apns_id
-            delivery.last_attempt_at = datetime.now(UTC)
-            await s.commit()
+    async def _scd2_transition_delivery(
+        self,
+        public_id: str,
+        new_status: str,
+        *,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
+        apns_id: str | None = None,
+        error_reason: str | None = None,
+        attempt_count_override: int | None = None,
+        next_attempt_at_override: datetime | None = None,
+        last_attempt_at_override: datetime | None = None,
+        require_queued: bool = False,
+    ) -> bool:
+        """Close the active ``alert_deliveries`` row and insert a new version.
 
-    async def mark_delivery_failed(self, public_id: str, error_reason: str) -> None:
-        """Transition a delivery to ``status='failed'`` (give-up)."""
+        Returns True when a transition happened, False when the active
+        row was missing or (with ``require_queued``) not currently
+        queued. ``require_queued`` gives callers optimistic-concurrency
+        protection against a racing terminal-state writer.
+        """
         async with self.session() as s:
-            result = await s.execute(
-                select(AlertDelivery).where(AlertDelivery.public_id == public_id)
+            existing = (
+                await s.execute(
+                    select(AlertDelivery).where(
+                        AlertDelivery.public_id == public_id,
+                        AlertDelivery.known_to == KNOWN_TO_MAX,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                return False
+            if require_queued and existing.status != "queued":
+                return False
+            existing.known_to = transition_at
+            new_version = AlertDelivery(
+                public_id=public_id,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=transition_at,
+                known_to=KNOWN_TO_MAX,
+                alert_event_public_id=existing.alert_event_public_id,
+                device_public_id=existing.device_public_id,
+                user_public_id=existing.user_public_id,
+                operator_public_id=existing.operator_public_id,
+                wallet_public_id=existing.wallet_public_id,
+                status=new_status,
+                attempt_count=(
+                    attempt_count_override
+                    if attempt_count_override is not None
+                    else existing.attempt_count
+                ),
+                last_attempt_at=(
+                    last_attempt_at_override
+                    if last_attempt_at_override is not None
+                    else transition_at
+                ),
+                next_attempt_at=next_attempt_at_override,
+                apns_id=apns_id if apns_id is not None else existing.apns_id,
+                error_reason=error_reason if error_reason is not None else existing.error_reason,
+                created_at=existing.created_at,
             )
-            delivery = result.scalar_one_or_none()
-            if delivery is None:
-                return
-            delivery.status = "failed"
-            delivery.error_reason = error_reason
-            delivery.last_attempt_at = datetime.now(UTC)
+            s.add(new_version)
             await s.commit()
+            return True
 
-    async def mark_delivery_unregistered(self, public_id: str) -> None:
-        """Transition a delivery to ``status='unregistered'`` (APNs 410)."""
-        async with self.session() as s:
-            result = await s.execute(
-                select(AlertDelivery).where(AlertDelivery.public_id == public_id)
-            )
-            delivery = result.scalar_one_or_none()
-            if delivery is None:
-                return
-            delivery.status = "unregistered"
-            delivery.last_attempt_at = datetime.now(UTC)
-            await s.commit()
+    async def mark_delivery_sent(
+        self,
+        public_id: str,
+        apns_id: str,
+        *,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> None:
+        """SCD2 transition queued -> sent (optimistic guard on queued)."""
+        await self._scd2_transition_delivery(
+            public_id,
+            "sent",
+            transition_at=transition_at,
+            session_id=session_id,
+            sequence_id=sequence_id,
+            apns_id=apns_id,
+            require_queued=True,
+        )
 
-    async def mark_delivery_cancelled(self, public_id: str, reason: str) -> None:
-        """Transition a delivery to ``status='cancelled_scope'`` with reason."""
-        async with self.session() as s:
-            result = await s.execute(
-                select(AlertDelivery).where(AlertDelivery.public_id == public_id)
-            )
-            delivery = result.scalar_one_or_none()
-            if delivery is None:
-                return
-            delivery.status = "cancelled_scope"
-            delivery.error_reason = reason
-            await s.commit()
+    async def mark_delivery_failed(
+        self,
+        public_id: str,
+        error_reason: str,
+        *,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> None:
+        """SCD2 transition queued -> failed (terminal, give-up)."""
+        await self._scd2_transition_delivery(
+            public_id,
+            "failed",
+            transition_at=transition_at,
+            session_id=session_id,
+            sequence_id=sequence_id,
+            error_reason=error_reason,
+            require_queued=True,
+        )
+
+    async def mark_delivery_unregistered(
+        self,
+        public_id: str,
+        *,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> None:
+        """SCD2 transition queued -> unregistered (APNs 410)."""
+        await self._scd2_transition_delivery(
+            public_id,
+            "unregistered",
+            transition_at=transition_at,
+            session_id=session_id,
+            sequence_id=sequence_id,
+            require_queued=True,
+        )
+
+    async def mark_delivery_cancelled(
+        self,
+        public_id: str,
+        reason: str,
+        *,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> None:
+        """SCD2 transition queued -> cancelled_scope."""
+        await self._scd2_transition_delivery(
+            public_id,
+            "cancelled_scope",
+            transition_at=transition_at,
+            session_id=session_id,
+            sequence_id=sequence_id,
+            error_reason=reason,
+            require_queued=True,
+        )
 
     async def update_delivery_retry_schedule(
         self,
@@ -8155,20 +8299,27 @@ class SQLAlchemyRepository(Repository):
         attempt_count: int,
         next_attempt_at: datetime | None,
         error_reason: str | None,
+        *,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
     ) -> None:
-        """Bump attempt_count + schedule next retry (BEFORE APNs call per §D5.5)."""
-        async with self.session() as s:
-            result = await s.execute(
-                select(AlertDelivery).where(AlertDelivery.public_id == public_id)
-            )
-            delivery = result.scalar_one_or_none()
-            if delivery is None:
-                return
-            delivery.attempt_count = attempt_count
-            delivery.next_attempt_at = next_attempt_at
-            delivery.error_reason = error_reason
-            delivery.last_attempt_at = datetime.now(UTC)
-            await s.commit()
+        """Bump attempt_count + reschedule next retry via SCD2 close+insert.
+
+        Called BEFORE the APNs HTTP call (crash-safety §D5.5). Status
+        stays ``queued`` across versions.
+        """
+        await self._scd2_transition_delivery(
+            public_id,
+            "queued",
+            transition_at=transition_at,
+            session_id=session_id,
+            sequence_id=sequence_id,
+            error_reason=error_reason,
+            attempt_count_override=attempt_count,
+            next_attempt_at_override=next_attempt_at,
+            require_queued=True,
+        )
 
     async def list_users_with_operator_membership(
         self, operator_public_id: str, as_of: datetime
@@ -8192,12 +8343,7 @@ class SQLAlchemyRepository(Repository):
         wallet_public_id: str,
         as_of: datetime,
     ) -> bool:
-        """Return True iff a matching wallet/operator scope grant is active at as_of.
-
-        The grant only encodes (operator, wallet); user membership in the
-        operator is verified separately via an active
-        ``user_operator_memberships`` row.
-        """
+        """True iff the (user, operator, wallet) scope is active at ``as_of``."""
         async with self.session() as s:
             grant_exists = (
                 await s.execute(
@@ -8230,29 +8376,55 @@ class SQLAlchemyRepository(Repository):
         user_public_id: str,
         operator_public_id: str,
         wallet_public_id: str,
+        *,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
     ) -> int:
-        """Bulk-cancel queued deliveries for alerts scoped to (user, operator, wallet)."""
+        """Bulk-cancel queued deliveries by scope columns on the delivery row.
+
+        Filters on the denormalised scope columns on ``alert_deliveries``
+        itself — does NOT join ``alert_events`` — so SCD2 corrections
+        on the source event cannot cause misses (closes Copilot R1
+        MAJOR on SCD2-join correctness). Each matching active row is
+        SCD2-closed and a new version with ``status='cancelled_scope'``
+        is inserted.
+        """
         async with self.session() as s:
             result = await s.execute(
-                select(AlertDelivery)
-                .join(
-                    AlertEvent,
-                    AlertEvent.public_id == AlertDelivery.alert_event_public_id,
-                )
-                .where(
+                select(AlertDelivery).where(
                     AlertDelivery.status == "queued",
-                    AlertEvent.user_public_id == user_public_id,
-                    AlertEvent.operator_public_id == operator_public_id,
-                    AlertEvent.wallet_public_id == wallet_public_id,
-                    AlertEvent.known_to == KNOWN_TO_MAX,
+                    AlertDelivery.known_to == KNOWN_TO_MAX,
+                    AlertDelivery.user_public_id == user_public_id,
+                    AlertDelivery.operator_public_id == operator_public_id,
+                    AlertDelivery.wallet_public_id == wallet_public_id,
                 )
             )
-            deliveries = list(result.scalars().all())
-            for delivery in deliveries:
-                delivery.status = "cancelled_scope"
-                delivery.error_reason = "scope_revoked"
+            rows = list(result.scalars().all())
+            for existing in rows:
+                existing.known_to = transition_at
+                new_version = AlertDelivery(
+                    public_id=existing.public_id,
+                    session_id=session_id,
+                    sequence_id=sequence_id,
+                    timestamp=transition_at,
+                    known_to=KNOWN_TO_MAX,
+                    alert_event_public_id=existing.alert_event_public_id,
+                    device_public_id=existing.device_public_id,
+                    user_public_id=existing.user_public_id,
+                    operator_public_id=existing.operator_public_id,
+                    wallet_public_id=existing.wallet_public_id,
+                    status="cancelled_scope",
+                    attempt_count=existing.attempt_count,
+                    last_attempt_at=existing.last_attempt_at,
+                    next_attempt_at=None,
+                    apns_id=existing.apns_id,
+                    error_reason="scope_revoked",
+                    created_at=existing.created_at,
+                )
+                s.add(new_version)
             await s.commit()
-            return len(deliveries)
+            return len(rows)
 
 
 _repository_cache: dict[str, Repository] = {}

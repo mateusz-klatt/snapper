@@ -1447,55 +1447,70 @@ class InstrumentDetailRow(TypedDict):
 
 
 class NotificationDeviceUpsertRow(TypedDict, total=False):
-    """Row dict for Repository.upsert_notification_device.
+    """Row dict for Repository.upsert_notification_device (SCD2).
 
-    Required on insert: user_public_id, device_token, device_id, env,
-    registered_at. Optional: public_id (auto-generated if absent),
-    platform (defaults "ios"), app_version, is_active (defaults True),
-    previews_mode (defaults "private"), last_seen_at.
+    Required: user_public_id, device_token, device_id, env,
+    registered_at, session_id, sequence_id, timestamp. Optional:
+    public_id (auto-generated if absent), platform (defaults "ios"),
+    app_version, previews_mode (defaults "private"), last_seen_at,
+    known_to (defaults to KNOWN_TO_MAX on insert).
     """
 
     public_id: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+    known_to: datetime
     user_public_id: str
     device_token: str
     device_id: str
     platform: str
     env: str
     app_version: str | None
-    is_active: bool
     previews_mode: str
     registered_at: datetime
     last_seen_at: datetime | None
 
 
 class NotificationDeviceRow(TypedDict):
-    """Row dict returned by Repository.list_active_notification_devices_for_user."""
+    """Row dict returned by Repository.list_active_notification_devices_for_user.
+
+    Always an active SCD2 row (``known_to = KNOWN_TO_MAX``).
+    """
 
     public_id: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+    known_to: datetime
     user_public_id: str
     device_token: str
     device_id: str
     platform: str
     env: str
     app_version: str | None
-    is_active: bool
     previews_mode: str
     registered_at: datetime
     last_seen_at: datetime | None
 
 
 class DeviceAlertPrefUpsertRow(TypedDict, total=False):
-    """Row dict for Repository.upsert_device_alert_pref (write).
+    """Row dict for Repository.upsert_device_alert_pref (SCD2 write).
 
-    Required on insert: device_public_id, alert_type, updated_at.
-    Optional keys default per the ORM column defaults: enabled (True),
-    min_priority ("medium"), timezone ("UTC"); scope columns
-    (operator_public_id, wallet_public_id) are NULL for the
-    device-global scope; operator_public_id set + wallet_public_id NULL
-    for the operator scope; both set for the wallet scope (§D7 routing
-    precedence).
+    Required: device_public_id, alert_type, session_id, sequence_id,
+    timestamp. Optional keys default per ORM column defaults
+    (enabled True, min_priority "medium", timezone "UTC"); scope
+    columns are NULL for the device-global scope, operator_public_id
+    set with wallet NULL for operator scope, both set for wallet scope
+    (§D7 routing precedence). On an update the existing active row is
+    closed (known_to := now) and a new version is inserted.
     """
 
+    public_id: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+    known_to: datetime
     device_public_id: str
     alert_type: str
     operator_public_id: str | None
@@ -1506,17 +1521,20 @@ class DeviceAlertPrefUpsertRow(TypedDict, total=False):
     quiet_hours_end_min: int | None
     mute_until: datetime | None
     timezone: str
-    updated_at: datetime
 
 
 class DeviceAlertPrefRow(TypedDict):
     """Row dict returned by Repository.list_device_alert_prefs_for_user.
 
-    All fields are always present on reads; scope columns carry explicit
-    None rather than being absent. Mirrors the on-disk
-    ``device_alert_prefs`` row.
+    Always an active SCD2 row; all fields present (scope columns carry
+    explicit None when absent).
     """
 
+    public_id: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+    known_to: datetime
     device_public_id: str
     alert_type: str
     operator_public_id: str | None
@@ -1527,36 +1545,43 @@ class DeviceAlertPrefRow(TypedDict):
     quiet_hours_end_min: int | None
     mute_until: datetime | None
     timezone: str
-    updated_at: datetime
 
 
 class UserAlertDefaultUpsertRow(TypedDict, total=False):
-    """Row dict for Repository.upsert_user_alert_default (write).
+    """Row dict for Repository.upsert_user_alert_default (SCD2 write).
 
-    Required: user_public_id, alert_type, updated_at. Optional keys
-    default per ORM column defaults (enabled=True, min_priority="medium").
+    Required: user_public_id, alert_type, session_id, sequence_id,
+    timestamp. Optional keys default per ORM column defaults.
     """
 
+    public_id: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+    known_to: datetime
     user_public_id: str
     alert_type: str
     enabled: bool
     min_priority: str
-    updated_at: datetime
 
 
 class UserAlertDefaultRow(TypedDict):
     """Row dict returned by Repository.list_user_alert_defaults.
 
-    All fields always present on reads. Fallback per-(user, alert_type)
+    Always an active SCD2 row. Fallback per-(user, alert_type)
     preference consulted when no device-scoped override matches
     (§D7 step 4).
     """
 
+    public_id: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+    known_to: datetime
     user_public_id: str
     alert_type: str
     enabled: bool
     min_priority: str
-    updated_at: datetime
 
 
 class AlertEventInsertRow(TypedDict, total=False):
@@ -1616,17 +1641,28 @@ class AlertEventRow(TypedDict):
 
 
 class AlertDeliveryInsertRow(TypedDict, total=False):
-    """Row dict for Repository.insert_alert_delivery.
+    """Row dict for Repository.insert_alert_delivery (SCD2 insert).
 
-    Required: alert_event_public_id, device_public_id, status,
-    created_at. Optional: public_id (auto-generated if absent),
-    attempt_count (defaults 0), last_attempt_at, next_attempt_at
-    (NULL = eligible for immediate retry), apns_id, error_reason.
+    Required: alert_event_public_id, device_public_id, user_public_id,
+    status, created_at, session_id, sequence_id, timestamp. Optional:
+    public_id (auto-generated if absent), operator_public_id,
+    wallet_public_id (denormalised from the source alert_event at
+    queue time for scope-based cancel queries — closes Copilot R1
+    finding on SCD2-join correctness), attempt_count (defaults 0),
+    last_attempt_at, next_attempt_at (NULL = immediate retry),
+    apns_id, error_reason, known_to (defaults KNOWN_TO_MAX on insert).
     """
 
     public_id: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+    known_to: datetime
     alert_event_public_id: str
     device_public_id: str
+    user_public_id: str
+    operator_public_id: str | None
+    wallet_public_id: str | None
     status: str
     attempt_count: int
     last_attempt_at: datetime | None
@@ -1639,14 +1675,21 @@ class AlertDeliveryInsertRow(TypedDict, total=False):
 class AlertDeliveryRow(TypedDict):
     """Row dict for list_queued_deliveries_all and related delivery reads.
 
-    Mirrors the on-disk ``alert_deliveries`` row; consumed by sidecar
-    retry loop via ``list_deliveries_ready_for_retry`` and by drain-
-    on-startup via ``list_queued_deliveries_all``.
+    Always an active SCD2 row. Consumed by sidecar retry loop via
+    ``list_deliveries_ready_for_retry`` and by drain-on-startup via
+    ``list_queued_deliveries_all``.
     """
 
     public_id: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+    known_to: datetime
     alert_event_public_id: str
     device_public_id: str
+    user_public_id: str
+    operator_public_id: str | None
+    wallet_public_id: str | None
     status: str
     attempt_count: int
     last_attempt_at: datetime | None
