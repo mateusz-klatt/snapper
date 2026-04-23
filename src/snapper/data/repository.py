@@ -129,6 +129,7 @@ from snapper.data.repository_types import AlertDeliveryInsertRow
 from snapper.data.repository_types import AlertDeliveryRow
 from snapper.data.repository_types import AlertEventInsertRow
 from snapper.data.repository_types import AlertEventRow
+from snapper.data.repository_types import AlertListCursor
 from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import CheckpointUpsertRow
@@ -2711,15 +2712,17 @@ class Repository(ABC):
         self,
         user_public_id: str,
         limit: int,
-        before: str | None,
+        before: AlertListCursor | None,
     ) -> list[AlertEventRow]:
         """Active alert_events for iOS Alerts tab with composite pagination.
 
-        ``before`` is an ``AlertEvent.public_id`` cursor; resolves to
-        ``(timestamp, public_id)`` in the user's active set and returns
-        rows strictly earlier, ordered
-        ``(timestamp DESC, public_id DESC)``. Unknown cursor returns
-        an empty list.
+        ``before`` is an opaque ``AlertListCursor`` carrying the anchor
+        row's ``(timestamp, public_id)`` — the repo applies the keyset
+        predicate directly from those values, never re-derives them
+        from the current active row, so pagination is stable even if
+        AlertEvent rows are SCD2-revised between fetches (closes
+        Copilot R2 MAJOR-1). Rows are returned strictly earlier than
+        the cursor, ordered ``(timestamp DESC, public_id DESC)``.
         """
         ...
 
@@ -7781,47 +7784,86 @@ class SQLAlchemyRepository(Repository):
     async def upsert_notification_device(self, row: NotificationDeviceUpsertRow) -> str:
         """Register or refresh a device via SCD2 close-and-insert.
 
-        Finds any active row (``known_to == KNOWN_TO_MAX``) keyed on
-        ``device_token``; closes it (``known_to := row.timestamp``);
-        inserts a new active version with the supplied fields.
-        Returns the stable ``public_id`` (reused across versions).
+        Two concurrent callers on the same ``device_token`` converge
+        idempotently (closes Copilot R2 new HIGH). Two race paths are
+        handled, both via the one-retry outer loop:
+          - **IntegrityError on INSERT** (competitor committed a new
+            active row between our SELECT and our COMMIT — partial
+            unique on ``(device_token) WHERE known_to=MAX`` or on
+            ``(public_id) WHERE known_to=MAX``).
+          - **rowcount=0 on close UPDATE** (competitor closed the
+            exact active row we SELECT'd before our UPDATE took the
+            write lock). Detecting this early — rather than blundering
+            into an INSERT that will collide on ``(public_id) WHERE
+            known_to=MAX`` — keeps retries bounded under multi-way
+            contention, because it short-circuits before the INSERT
+            accidentally touches the competitor's brand-new active
+            successor (which would waste an attempt).
+
+        On retry, the new session SELECTs the winner's active row and
+        close+inserts a new active version keyed on the winner's
+        stable ``public_id``.
         """
         timestamp = row["timestamp"]
-        async with self.session() as s:
-            existing = (
-                await s.execute(
-                    select(NotificationDevice).where(
-                        NotificationDevice.device_token == row["device_token"],
-                        NotificationDevice.known_to == KNOWN_TO_MAX,
+        max_attempts = 5
+        last_error: Exception = RuntimeError("upsert_notification_device: retry budget exhausted.")
+        for _attempt in range(max_attempts):
+            async with self.session() as s:
+                existing = (
+                    await s.execute(
+                        select(NotificationDevice).where(
+                            NotificationDevice.device_token == row["device_token"],
+                            NotificationDevice.known_to == KNOWN_TO_MAX,
+                        )
                     )
+                ).scalar_one_or_none()
+                public_id = (
+                    existing.public_id
+                    if existing is not None
+                    else (row.get("public_id") or str(uuid7()))
                 )
-            ).scalar_one_or_none()
-            public_id = (
-                cast(str, existing.public_id)
-                if existing is not None
-                else (row.get("public_id") or str(uuid7()))
-            )
-            if existing is not None:
-                existing.known_to = timestamp
-            device = NotificationDevice(
-                public_id=public_id,
-                session_id=row["session_id"],
-                sequence_id=row["sequence_id"],
-                timestamp=timestamp,
-                known_to=row.get("known_to", KNOWN_TO_MAX),
-                user_public_id=row["user_public_id"],
-                device_token=row["device_token"],
-                device_id=row["device_id"],
-                platform=row.get("platform", "ios"),
-                env=row["env"],
-                app_version=row.get("app_version"),
-                previews_mode=row.get("previews_mode", "private"),
-                registered_at=row["registered_at"],
-                last_seen_at=row.get("last_seen_at"),
-            )
-            s.add(device)
-            await s.commit()
-            return public_id
+                if existing is not None:
+                    close_result = await s.execute(
+                        update(NotificationDevice)
+                        .where(
+                            NotificationDevice.id == existing.id,
+                            NotificationDevice.known_to == KNOWN_TO_MAX,
+                        )
+                        .values(known_to=timestamp)
+                        .execution_options(synchronize_session=False)
+                    )
+                    if int(cast(Any, close_result).rowcount or 0) == 0:
+                        await s.rollback()
+                        last_error = RuntimeError(
+                            "upsert_notification_device close-race: active row"
+                            " closed by competitor between SELECT and UPDATE."
+                        )
+                        continue
+                device = NotificationDevice(
+                    public_id=public_id,
+                    session_id=row["session_id"],
+                    sequence_id=row["sequence_id"],
+                    timestamp=timestamp,
+                    known_to=row.get("known_to", KNOWN_TO_MAX),
+                    user_public_id=row["user_public_id"],
+                    device_token=row["device_token"],
+                    device_id=row["device_id"],
+                    platform=row.get("platform", "ios"),
+                    env=row["env"],
+                    app_version=row.get("app_version"),
+                    previews_mode=row.get("previews_mode", "private"),
+                    registered_at=row["registered_at"],
+                    last_seen_at=row.get("last_seen_at"),
+                )
+                s.add(device)
+                try:
+                    await s.commit()
+                    return public_id
+                except IntegrityError as exc:
+                    await s.rollback()
+                    last_error = exc
+                    continue
+        raise last_error
 
     async def list_active_notification_devices_for_user(
         self, user_public_id: str
@@ -7874,75 +7916,107 @@ class SQLAlchemyRepository(Repository):
             return [self._device_alert_pref_row_from(r) for r in result.scalars().all()]
 
     async def upsert_device_alert_pref(self, row: DeviceAlertPrefUpsertRow) -> None:
-        """SCD2 close + insert on (device, alert_type, scope_tuple)."""
+        """Atomic SCD2 close + insert on (device, alert_type, scope_tuple).
+
+        Concurrent same-scope upserts converge idempotently via the
+        same atomic-close + IntegrityError-retry pattern as
+        ``upsert_notification_device``; the partial unique indexes
+        ``uq_device_alert_{device,operator,wallet}_scope`` bound one
+        active row per scope permutation (closes Copilot R2 new HIGH).
+        """
         operator_public_id = row.get("operator_public_id")
         wallet_public_id = row.get("wallet_public_id")
         timestamp = row["timestamp"]
-        async with self.session() as s:
-            stmt = select(DeviceAlertPref).where(
-                DeviceAlertPref.device_public_id == row["device_public_id"],
-                DeviceAlertPref.alert_type == row["alert_type"],
-                DeviceAlertPref.known_to == KNOWN_TO_MAX,
-            )
-            if operator_public_id is None:
-                stmt = stmt.where(DeviceAlertPref.operator_public_id.is_(None))
-            else:
-                stmt = stmt.where(DeviceAlertPref.operator_public_id == operator_public_id)
-            if wallet_public_id is None:
-                stmt = stmt.where(DeviceAlertPref.wallet_public_id.is_(None))
-            else:
-                stmt = stmt.where(DeviceAlertPref.wallet_public_id == wallet_public_id)
-            existing = (await s.execute(stmt)).scalar_one_or_none()
-            public_id = (
-                cast(str, existing.public_id)
-                if existing is not None
-                else (row.get("public_id") or str(uuid7()))
-            )
-            merged_enabled = row.get(
-                "enabled",
-                existing.enabled if existing is not None else True,
-            )
-            merged_min_priority = row.get(
-                "min_priority",
-                existing.min_priority if existing is not None else "medium",
-            )
-            merged_timezone = row.get(
-                "timezone",
-                existing.timezone if existing is not None else "UTC",
-            )
-            merged_quiet_start = row.get(
-                "quiet_hours_start_min",
-                existing.quiet_hours_start_min if existing is not None else None,
-            )
-            merged_quiet_end = row.get(
-                "quiet_hours_end_min",
-                existing.quiet_hours_end_min if existing is not None else None,
-            )
-            merged_mute_until = row.get(
-                "mute_until",
-                existing.mute_until if existing is not None else None,
-            )
-            if existing is not None:
-                existing.known_to = timestamp
-            pref = DeviceAlertPref(
-                public_id=public_id,
-                session_id=row["session_id"],
-                sequence_id=row["sequence_id"],
-                timestamp=timestamp,
-                known_to=row.get("known_to", KNOWN_TO_MAX),
-                device_public_id=row["device_public_id"],
-                alert_type=row["alert_type"],
-                operator_public_id=operator_public_id,
-                wallet_public_id=wallet_public_id,
-                enabled=merged_enabled,
-                min_priority=merged_min_priority,
-                quiet_hours_start_min=merged_quiet_start,
-                quiet_hours_end_min=merged_quiet_end,
-                mute_until=merged_mute_until,
-                timezone=merged_timezone,
-            )
-            s.add(pref)
-            await s.commit()
+        max_attempts = 5
+        last_error: Exception = RuntimeError("upsert_device_alert_pref: retry budget exhausted.")
+        for _attempt in range(max_attempts):
+            async with self.session() as s:
+                stmt = select(DeviceAlertPref).where(
+                    DeviceAlertPref.device_public_id == row["device_public_id"],
+                    DeviceAlertPref.alert_type == row["alert_type"],
+                    DeviceAlertPref.known_to == KNOWN_TO_MAX,
+                )
+                if operator_public_id is None:
+                    stmt = stmt.where(DeviceAlertPref.operator_public_id.is_(None))
+                else:
+                    stmt = stmt.where(DeviceAlertPref.operator_public_id == operator_public_id)
+                if wallet_public_id is None:
+                    stmt = stmt.where(DeviceAlertPref.wallet_public_id.is_(None))
+                else:
+                    stmt = stmt.where(DeviceAlertPref.wallet_public_id == wallet_public_id)
+                existing = (await s.execute(stmt)).scalar_one_or_none()
+                public_id = (
+                    existing.public_id
+                    if existing is not None
+                    else (row.get("public_id") or str(uuid7()))
+                )
+                merged_enabled = row.get(
+                    "enabled",
+                    existing.enabled if existing is not None else True,
+                )
+                merged_min_priority = row.get(
+                    "min_priority",
+                    existing.min_priority if existing is not None else "medium",
+                )
+                merged_timezone = row.get(
+                    "timezone",
+                    existing.timezone if existing is not None else "UTC",
+                )
+                merged_quiet_start = row.get(
+                    "quiet_hours_start_min",
+                    existing.quiet_hours_start_min if existing is not None else None,
+                )
+                merged_quiet_end = row.get(
+                    "quiet_hours_end_min",
+                    existing.quiet_hours_end_min if existing is not None else None,
+                )
+                merged_mute_until = row.get(
+                    "mute_until",
+                    existing.mute_until if existing is not None else None,
+                )
+                if existing is not None:
+                    close_result = await s.execute(
+                        update(DeviceAlertPref)
+                        .where(
+                            DeviceAlertPref.id == existing.id,
+                            DeviceAlertPref.known_to == KNOWN_TO_MAX,
+                        )
+                        .values(known_to=timestamp)
+                        .execution_options(synchronize_session=False)
+                    )
+                    if int(cast(Any, close_result).rowcount or 0) == 0:
+                        await s.rollback()
+                        last_error = RuntimeError(
+                            "upsert_device_alert_pref close-race: active row"
+                            " closed by competitor between SELECT and UPDATE."
+                        )
+                        continue
+                pref = DeviceAlertPref(
+                    public_id=public_id,
+                    session_id=row["session_id"],
+                    sequence_id=row["sequence_id"],
+                    timestamp=timestamp,
+                    known_to=row.get("known_to", KNOWN_TO_MAX),
+                    device_public_id=row["device_public_id"],
+                    alert_type=row["alert_type"],
+                    operator_public_id=operator_public_id,
+                    wallet_public_id=wallet_public_id,
+                    enabled=merged_enabled,
+                    min_priority=merged_min_priority,
+                    quiet_hours_start_min=merged_quiet_start,
+                    quiet_hours_end_min=merged_quiet_end,
+                    mute_until=merged_mute_until,
+                    timezone=merged_timezone,
+                )
+                s.add(pref)
+                try:
+                    await s.commit()
+                    return
+                except IntegrityError as exc:
+                    await s.rollback()
+                    last_error = exc
+                    continue
+        raise last_error
 
     async def list_user_alert_defaults(self, user_public_id: str) -> list[UserAlertDefaultRow]:
         """Active user-level fallback prefs."""
@@ -7956,46 +8030,76 @@ class SQLAlchemyRepository(Repository):
             return [self._user_alert_default_row_from(r) for r in result.scalars().all()]
 
     async def upsert_user_alert_default(self, row: UserAlertDefaultUpsertRow) -> None:
-        """SCD2 close + insert on (user, alert_type) default."""
+        """Atomic SCD2 close + insert on (user, alert_type) default.
+
+        Concurrent same-key upserts converge idempotently via the same
+        atomic-close + IntegrityError-retry pattern as
+        ``upsert_notification_device`` (closes Copilot R2 new HIGH).
+        """
         timestamp = row["timestamp"]
-        async with self.session() as s:
-            existing = (
-                await s.execute(
-                    select(UserAlertDefault).where(
-                        UserAlertDefault.user_public_id == row["user_public_id"],
-                        UserAlertDefault.alert_type == row["alert_type"],
-                        UserAlertDefault.known_to == KNOWN_TO_MAX,
+        max_attempts = 5
+        last_error: Exception = RuntimeError("upsert_user_alert_default: retry budget exhausted.")
+        for _attempt in range(max_attempts):
+            async with self.session() as s:
+                existing = (
+                    await s.execute(
+                        select(UserAlertDefault).where(
+                            UserAlertDefault.user_public_id == row["user_public_id"],
+                            UserAlertDefault.alert_type == row["alert_type"],
+                            UserAlertDefault.known_to == KNOWN_TO_MAX,
+                        )
                     )
+                ).scalar_one_or_none()
+                public_id = (
+                    existing.public_id
+                    if existing is not None
+                    else (row.get("public_id") or str(uuid7()))
                 )
-            ).scalar_one_or_none()
-            public_id = (
-                cast(str, existing.public_id)
-                if existing is not None
-                else (row.get("public_id") or str(uuid7()))
-            )
-            merged_enabled = row.get(
-                "enabled",
-                existing.enabled if existing is not None else True,
-            )
-            merged_min_priority = row.get(
-                "min_priority",
-                existing.min_priority if existing is not None else "medium",
-            )
-            if existing is not None:
-                existing.known_to = timestamp
-            default = UserAlertDefault(
-                public_id=public_id,
-                session_id=row["session_id"],
-                sequence_id=row["sequence_id"],
-                timestamp=timestamp,
-                known_to=row.get("known_to", KNOWN_TO_MAX),
-                user_public_id=row["user_public_id"],
-                alert_type=row["alert_type"],
-                enabled=merged_enabled,
-                min_priority=merged_min_priority,
-            )
-            s.add(default)
-            await s.commit()
+                merged_enabled = row.get(
+                    "enabled",
+                    existing.enabled if existing is not None else True,
+                )
+                merged_min_priority = row.get(
+                    "min_priority",
+                    existing.min_priority if existing is not None else "medium",
+                )
+                if existing is not None:
+                    close_result = await s.execute(
+                        update(UserAlertDefault)
+                        .where(
+                            UserAlertDefault.id == existing.id,
+                            UserAlertDefault.known_to == KNOWN_TO_MAX,
+                        )
+                        .values(known_to=timestamp)
+                        .execution_options(synchronize_session=False)
+                    )
+                    if int(cast(Any, close_result).rowcount or 0) == 0:
+                        await s.rollback()
+                        last_error = RuntimeError(
+                            "upsert_user_alert_default close-race: active row"
+                            " closed by competitor between SELECT and UPDATE."
+                        )
+                        continue
+                default = UserAlertDefault(
+                    public_id=public_id,
+                    session_id=row["session_id"],
+                    sequence_id=row["sequence_id"],
+                    timestamp=timestamp,
+                    known_to=row.get("known_to", KNOWN_TO_MAX),
+                    user_public_id=row["user_public_id"],
+                    alert_type=row["alert_type"],
+                    enabled=merged_enabled,
+                    min_priority=merged_min_priority,
+                )
+                s.add(default)
+                try:
+                    await s.commit()
+                    return
+                except IntegrityError as exc:
+                    await s.rollback()
+                    last_error = exc
+                    continue
+        raise last_error
 
     async def insert_alert_event(self, row: AlertEventInsertRow) -> str:
         """Insert a temporal (SCD2) alert_events row."""
@@ -8028,15 +8132,16 @@ class SQLAlchemyRepository(Repository):
         self,
         user_public_id: str,
         limit: int,
-        before: str | None,
+        before: AlertListCursor | None,
     ) -> list[AlertEventRow]:
-        """Active alert_events rows, newest-first, with composite keyset pagination.
+        """Active alert_events rows, newest-first, composite keyset paginated.
 
-        ``before`` is an ``AlertEvent.public_id``; if present we resolve
-        it to ``(timestamp, public_id)`` in the user's active set and
-        return only strictly-earlier rows ordered by
-        ``(timestamp DESC, public_id DESC)``. Unknown ``before`` returns
-        an empty list (closes Copilot R1 MAJOR).
+        When ``before`` is provided, applies the keyset predicate
+        directly from the cursor's ``(timestamp, public_id)`` — no
+        re-derivation from the current active row, so paging stays
+        stable even if the anchor alert_event is later SCD2-revised
+        (closes Copilot R2 MAJOR-1). Order:
+        ``(timestamp DESC, public_id DESC)``.
         """
         async with self.session() as s:
             stmt = select(AlertEvent).where(
@@ -8044,18 +8149,8 @@ class SQLAlchemyRepository(Repository):
                 AlertEvent.known_to == KNOWN_TO_MAX,
             )
             if before is not None:
-                cursor = (
-                    await s.execute(
-                        select(AlertEvent.timestamp, AlertEvent.public_id).where(
-                            AlertEvent.public_id == before,
-                            AlertEvent.user_public_id == user_public_id,
-                            AlertEvent.known_to == KNOWN_TO_MAX,
-                        )
-                    )
-                ).first()
-                if cursor is None:
-                    return []
-                cursor_ts, cursor_pid = cursor
+                cursor_ts = before["timestamp"]
+                cursor_pid = before["public_id"]
                 stmt = stmt.where(
                     or_(
                         AlertEvent.timestamp < cursor_ts,
@@ -8161,14 +8256,28 @@ class SQLAlchemyRepository(Repository):
         attempt_count_override: int | None = None,
         next_attempt_at_override: datetime | None = None,
         last_attempt_at_override: datetime | None = None,
-        require_queued: bool = False,
     ) -> bool:
         """Close the active ``alert_deliveries`` row and insert a new version.
 
-        Returns True when a transition happened, False when the active
-        row was missing or (with ``require_queued``) not currently
-        queued. ``require_queued`` gives callers optimistic-concurrency
-        protection against a racing terminal-state writer.
+        Only the ``queued`` active row may transition — every caller
+        wants this guard (``mark_delivery_*``, ``cancel_*``,
+        ``update_delivery_retry_schedule``), so the predicate is
+        enforced unconditionally. Returns True when a transition
+        happened, False when either:
+          - no active row exists for ``public_id``;
+          - the active row is no longer ``status='queued'`` (e.g. a
+            previous ``mark_delivery_sent`` already ran — sequential
+            idempotency);
+          - another worker raced us to close this exact active row
+            (conditional UPDATE rowcount==0 — concurrent idempotency,
+            closes Copilot R2 MAJOR-3).
+
+        The close step is an atomic ``UPDATE ... WHERE id=:id AND
+        known_to=MAX AND status='queued'`` — two concurrent workers
+        both observing the queued row both attempt the UPDATE, but
+        only one matches the post-lock predicate. The loser returns
+        False without inserting a successor row, so the active-
+        ``public_id`` partial unique index is never stressed.
         """
         async with self.session() as s:
             existing = (
@@ -8181,9 +8290,21 @@ class SQLAlchemyRepository(Repository):
             ).scalar_one_or_none()
             if existing is None:
                 return False
-            if require_queued and existing.status != "queued":
+            if existing.status != "queued":
                 return False
-            existing.known_to = transition_at
+            close_result = await s.execute(
+                update(AlertDelivery)
+                .where(
+                    AlertDelivery.id == existing.id,
+                    AlertDelivery.known_to == KNOWN_TO_MAX,
+                    AlertDelivery.status == "queued",
+                )
+                .values(known_to=transition_at)
+                .execution_options(synchronize_session=False)
+            )
+            if int(cast(Any, close_result).rowcount or 0) == 0:
+                await s.rollback()
+                return False
             new_version = AlertDelivery(
                 public_id=public_id,
                 session_id=session_id,
@@ -8232,7 +8353,6 @@ class SQLAlchemyRepository(Repository):
             session_id=session_id,
             sequence_id=sequence_id,
             apns_id=apns_id,
-            require_queued=True,
         )
 
     async def mark_delivery_failed(
@@ -8252,7 +8372,6 @@ class SQLAlchemyRepository(Repository):
             session_id=session_id,
             sequence_id=sequence_id,
             error_reason=error_reason,
-            require_queued=True,
         )
 
     async def mark_delivery_unregistered(
@@ -8270,7 +8389,6 @@ class SQLAlchemyRepository(Repository):
             transition_at=transition_at,
             session_id=session_id,
             sequence_id=sequence_id,
-            require_queued=True,
         )
 
     async def mark_delivery_cancelled(
@@ -8290,7 +8408,6 @@ class SQLAlchemyRepository(Repository):
             session_id=session_id,
             sequence_id=sequence_id,
             error_reason=reason,
-            require_queued=True,
         )
 
     async def update_delivery_retry_schedule(
@@ -8318,7 +8435,6 @@ class SQLAlchemyRepository(Repository):
             error_reason=error_reason,
             attempt_count_override=attempt_count,
             next_attempt_at_override=next_attempt_at,
-            require_queued=True,
         )
 
     async def list_users_with_operator_membership(
@@ -8334,7 +8450,7 @@ class SQLAlchemyRepository(Repository):
                 )
                 .distinct()
             )
-            return [cast(str, uid) for uid in result.scalars().all()]
+            return list(result.scalars().all())
 
     async def is_scope_grant_active(
         self,

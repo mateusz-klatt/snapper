@@ -12,6 +12,7 @@ Each test uses a fresh on-disk SQLite database via the ``repo`` fixture
 (tmp_path-scoped, engine disposed after yield). AAA layout.
 """
 
+import asyncio
 from collections.abc import AsyncGenerator
 from datetime import UTC
 from datetime import datetime
@@ -30,6 +31,7 @@ from snapper.data.models import WalletOperatorScopeGrant
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import AlertDeliveryInsertRow
 from snapper.data.repository_types import AlertEventInsertRow
+from snapper.data.repository_types import AlertListCursor
 from snapper.data.repository_types import DeviceAlertPrefUpsertRow
 from snapper.data.repository_types import NotificationDeviceUpsertRow
 from snapper.data.repository_types import UserAlertDefaultUpsertRow
@@ -320,7 +322,7 @@ class TestAlertEventRepo:
     async def test_list_recent_alerts_composite_cursor_pagination(
         self, repo: SQLAlchemyRepository
     ) -> None:
-        """The ``before`` cursor returns only strictly-earlier rows; unknown -> []."""
+        """Opaque ``AlertListCursor`` returns strictly-earlier rows; unknown -> []."""
         public_ids: list[str] = []
         for idx in range(5):
             public_ids.append(
@@ -340,15 +342,67 @@ class TestAlertEventRepo:
 
         full = await repo.list_recent_alerts_for_user("user-h", limit=10, before=None)
         after_latest = await repo.list_recent_alerts_for_user(
-            "user-h", limit=10, before=public_ids[4]
+            "user-h",
+            limit=10,
+            before=AlertListCursor(timestamp=_ts(4), public_id=public_ids[4]),
         )
         unknown = await repo.list_recent_alerts_for_user(
-            "user-h", limit=10, before="nonexistent-cursor"
+            "user-h",
+            limit=10,
+            before=AlertListCursor(timestamp=_ts(999), public_id="nonexistent-cursor"),
         )
 
         assert [r["public_id"] for r in full] == list(reversed(public_ids))
         assert [r["public_id"] for r in after_latest] == list(reversed(public_ids[:4]))
-        assert unknown == []
+        assert [r["public_id"] for r in unknown] == list(reversed(public_ids))
+
+    @pytest.mark.asyncio
+    async def test_list_recent_alerts_cursor_stable_after_anchor_revision(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Keyset cursor stays correct even if the anchor is SCD2-revised.
+
+        Before R3 the cursor was just ``public_id`` and the repo re-read
+        the anchor's current ``(timestamp, public_id)`` — a mid-session
+        revision that moved the anchor's timestamp would silently shift
+        pagination. With the opaque cursor, we filter on the snapshotted
+        pair directly, so paging is immune to anchor churn.
+        """
+        public_ids: list[str] = []
+        for idx in range(3):
+            public_ids.append(
+                await repo.insert_alert_event(
+                    AlertEventInsertRow(
+                        session_id="s1",
+                        sequence_id=idx,
+                        timestamp=_ts(idx),
+                        user_public_id="user-stable",
+                        alert_type="order_fill_full",
+                        priority="medium",
+                        title=f"Alert {idx}",
+                        body="body",
+                    )
+                )
+            )
+        anchor = AlertListCursor(timestamp=_ts(2), public_id=public_ids[2])
+        async with repo.session() as s:
+            from snapper.data.models import AlertEvent
+
+            await s.execute(
+                AlertEvent.__table__.update()
+                .where(AlertEvent.public_id == public_ids[2])
+                .where(AlertEvent.known_to == KNOWN_TO_MAX)
+                .values(timestamp=_ts(-100))
+            )
+            await s.commit()
+
+        page = await repo.list_recent_alerts_for_user("user-stable", limit=10, before=anchor)
+
+        assert [r["public_id"] for r in page] == [
+            public_ids[1],
+            public_ids[0],
+            public_ids[2],
+        ]
 
     @pytest.mark.asyncio
     async def test_get_alert_event_returns_none_for_unknown_public_id(
@@ -614,3 +668,1042 @@ class TestScopeHelpers:
 
         assert without_membership is False
         assert with_membership is True
+
+    @pytest.mark.asyncio
+    async def test_is_scope_grant_active_false_when_grant_missing(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """No grant at all -> False (early exit branch)."""
+        result = await repo.is_scope_grant_active(
+            user_public_id="unknown-user",
+            operator_public_id="unknown-op",
+            wallet_public_id="unknown-wallet",
+            as_of=_ts(),
+        )
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_list_users_with_operator_membership_returns_distinct_user_ids(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Distinct active memberships under an operator produce their user public_ids."""
+        now = _ts()
+        async with repo.session() as s:
+            s.add_all(
+                [
+                    User(
+                        public_id="user-mem-a",
+                        username="mem_a",
+                        email="mem_a@example.test",
+                        password_hash="x",
+                        role="viewer",
+                        created_at=now,
+                        session_id="t",
+                        sequence_id=1,
+                        timestamp=now,
+                        known_to=KNOWN_TO_MAX,
+                    ),
+                    User(
+                        public_id="user-mem-b",
+                        username="mem_b",
+                        email="mem_b@example.test",
+                        password_hash="x",
+                        role="viewer",
+                        created_at=now,
+                        session_id="t",
+                        sequence_id=2,
+                        timestamp=now,
+                        known_to=KNOWN_TO_MAX,
+                    ),
+                    Operator(
+                        public_id="op-mem",
+                        label="Op Mem",
+                        description=None,
+                        session_id="t",
+                        sequence_id=3,
+                        timestamp=now,
+                        known_to=KNOWN_TO_MAX,
+                    ),
+                    UserOperatorMembership(
+                        user_public_id="user-mem-a",
+                        operator_public_id="op-mem",
+                        session_id="t",
+                        sequence_id=4,
+                        timestamp=now,
+                        known_to=KNOWN_TO_MAX,
+                    ),
+                    UserOperatorMembership(
+                        user_public_id="user-mem-b",
+                        operator_public_id="op-mem",
+                        session_id="t",
+                        sequence_id=5,
+                        timestamp=now,
+                        known_to=KNOWN_TO_MAX,
+                    ),
+                ]
+            )
+            await s.commit()
+
+        users = await repo.list_users_with_operator_membership("op-mem", as_of=now)
+
+        assert set(users) == {"user-mem-a", "user-mem-b"}
+
+
+class TestConcurrencyInvariants:
+    """Close Copilot R2 findings: atomic close + idempotent upsert convergence.
+
+    We cannot easily drive true concurrent commits against a single
+    SQLite file (writes serialise), but we can drive the "lost-race"
+    branches by simulating their pre-conditions (an already-closed
+    active row for the transition path; a winner row already committed
+    for the upsert path). That is enough to prove the atomic-close
+    predicate and IntegrityError recovery code is entered and behaves
+    correctly.
+    """
+
+    @pytest.mark.asyncio
+    async def test_mark_delivery_sent_idempotent_when_already_sent(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Retry after a successful send is a no-op (no spurious successor row).
+
+        Before R3 a racing timeout+retry could both pass the
+        ``require_queued`` guard in Python and both emit close+insert;
+        the second would collide on the active-``public_id`` partial
+        unique index and leak an IntegrityError. Now the second call
+        short-circuits on ``existing.status == new_status``.
+        """
+        public_id = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                alert_event_public_id="evt-1",
+                device_public_id="dev-1",
+                user_public_id="user-concurrency-1",
+                status="queued",
+                created_at=_ts(),
+                session_id="s1",
+                sequence_id=1,
+                timestamp=_ts(),
+            )
+        )
+        await repo.mark_delivery_sent(
+            public_id,
+            apns_id="apns-a",
+            transition_at=_ts(1),
+            session_id="s1",
+            sequence_id=2,
+        )
+
+        await repo.mark_delivery_sent(
+            public_id,
+            apns_id="apns-b",
+            transition_at=_ts(2),
+            session_id="s1",
+            sequence_id=3,
+        )
+
+        async with repo.session() as s:
+            from sqlalchemy import select as _select
+
+            from snapper.data.models import AlertDelivery
+
+            rows = (
+                (
+                    await s.execute(
+                        _select(AlertDelivery).where(AlertDelivery.public_id == public_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert len(rows) == 2
+        active = [r for r in rows if r.known_to == KNOWN_TO_MAX]
+        assert len(active) == 1
+        assert active[0].status == "sent"
+        assert active[0].apns_id == "apns-a"
+
+    @pytest.mark.asyncio
+    async def test_mark_delivery_sent_noop_when_row_preclosed(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Lost-race branch: atomic close predicate returns rowcount==0.
+
+        We simulate the loser's view by closing the active row via a
+        raw UPDATE before the second ``mark_delivery_sent`` fires. The
+        second call must see no active row and return False without
+        inserting a successor (otherwise it would create a
+        dangling-status row and/or collide with the partial-unique).
+        """
+        public_id = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                alert_event_public_id="evt-1",
+                device_public_id="dev-1",
+                user_public_id="user-concurrency-2",
+                status="queued",
+                created_at=_ts(),
+                session_id="s1",
+                sequence_id=1,
+                timestamp=_ts(),
+            )
+        )
+        from sqlalchemy import update as _update
+
+        from snapper.data.models import AlertDelivery
+
+        async with repo.session() as s:
+            await s.execute(
+                _update(AlertDelivery)
+                .where(AlertDelivery.public_id == public_id)
+                .where(AlertDelivery.known_to == KNOWN_TO_MAX)
+                .values(known_to=_ts(1))
+            )
+            await s.commit()
+
+        await repo.mark_delivery_sent(
+            public_id,
+            apns_id="apns-late",
+            transition_at=_ts(2),
+            session_id="s1",
+            sequence_id=2,
+        )
+
+        async with repo.session() as s:
+            from sqlalchemy import select as _select
+
+            rows = (
+                (
+                    await s.execute(
+                        _select(AlertDelivery).where(AlertDelivery.public_id == public_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert len(rows) == 1
+        assert rows[0].status == "queued"
+        assert rows[0].known_to != KNOWN_TO_MAX
+
+    @pytest.mark.asyncio
+    async def test_update_delivery_retry_schedule_emits_successor_with_same_status(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Pure schedule-bump (queued->queued) still emits a successor row.
+
+        The same-status short-circuit in ``_scd2_transition_delivery``
+        must not fire when any ``*_override`` is provided — otherwise
+        ``update_delivery_retry_schedule`` becomes a no-op and the
+        retry counter never advances.
+        """
+        public_id = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                alert_event_public_id="evt-1",
+                device_public_id="dev-1",
+                user_public_id="user-sched",
+                status="queued",
+                created_at=_ts(),
+                session_id="s1",
+                sequence_id=1,
+                timestamp=_ts(),
+            )
+        )
+
+        await repo.update_delivery_retry_schedule(
+            public_id,
+            attempt_count=2,
+            next_attempt_at=_ts(30),
+            error_reason="transient",
+            transition_at=_ts(1),
+            session_id="s1",
+            sequence_id=2,
+        )
+
+        async with repo.session() as s:
+            from sqlalchemy import select as _select
+
+            from snapper.data.models import AlertDelivery
+
+            rows = (
+                (
+                    await s.execute(
+                        _select(AlertDelivery).where(AlertDelivery.public_id == public_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert len(rows) == 2
+        active = [r for r in rows if r.known_to == KNOWN_TO_MAX][0]
+        assert active.status == "queued"
+        assert active.attempt_count == 2
+        assert active.next_attempt_at == _ts(30)
+        assert active.error_reason == "transient"
+
+    @pytest.mark.asyncio
+    async def test_upsert_notification_device_converges_on_competitor_winner(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Upsert races converge idempotently on the winner's public_id.
+
+        We pre-insert a "winner" row directly (simulating a competing
+        transaction that got there first) and then call the public
+        upsert. The retry loop must rollback its initial insert
+        attempt, re-read the winner's active row, close it, and
+        insert a new active version keyed on the winner's stable
+        ``public_id`` — never leaking IntegrityError to the caller.
+        """
+        async with repo.session() as s:
+            s.add(
+                User(
+                    public_id="user-race",
+                    username="u_race",
+                    email="race@example.test",
+                    password_hash="x",
+                    role="viewer",
+                    created_at=_ts(),
+                    session_id="t",
+                    sequence_id=1,
+                    timestamp=_ts(),
+                    known_to=KNOWN_TO_MAX,
+                )
+            )
+            s.add(
+                NotificationDevice(
+                    public_id="winner-pid",
+                    session_id="t",
+                    sequence_id=2,
+                    timestamp=_ts(),
+                    known_to=KNOWN_TO_MAX,
+                    user_public_id="user-race",
+                    device_token="shared-token",
+                    device_id="dev-race-winner",
+                    platform="ios",
+                    env="sandbox",
+                    app_version=None,
+                    previews_mode="private",
+                    registered_at=_ts(),
+                    last_seen_at=None,
+                )
+            )
+            await s.commit()
+
+        returned_pid = await repo.upsert_notification_device(
+            NotificationDeviceUpsertRow(
+                public_id="loser-pid",
+                session_id="s-caller",
+                sequence_id=1,
+                timestamp=_ts(1),
+                user_public_id="user-race",
+                device_token="shared-token",
+                device_id="dev-race-caller",
+                env="sandbox",
+                registered_at=_ts(1),
+            )
+        )
+
+        assert returned_pid == "winner-pid"
+        devices = await repo.list_active_notification_devices_for_user("user-race")
+        assert len(devices) == 1
+        assert devices[0]["public_id"] == "winner-pid"
+        assert devices[0]["device_id"] == "dev-race-caller"
+
+    @pytest.mark.asyncio
+    async def test_upsert_notification_device_concurrent_same_token_recovery(
+        self,
+        repo: SQLAlchemyRepository,
+    ) -> None:
+        """Two concurrent same-token upserts converge via IntegrityError retry.
+
+        Both tasks SELECT no active row simultaneously, generate
+        distinct candidate ``public_id``s, and race their INSERTs.
+        The partial unique index on ``(device_token) WHERE
+        known_to=MAX`` rejects the loser; the retry loop then
+        re-reads the winner and close+inserts a new active version
+        keyed on the winner's ``public_id``. Both tasks return the
+        same ``public_id`` — idempotent from the caller's view.
+        """
+        async with repo.session() as s:
+            s.add(
+                User(
+                    public_id="user-concurrent",
+                    username="u_concurrent",
+                    email="concurrent@example.test",
+                    password_hash="x",
+                    role="viewer",
+                    created_at=_ts(),
+                    session_id="t",
+                    sequence_id=1,
+                    timestamp=_ts(),
+                    known_to=KNOWN_TO_MAX,
+                )
+            )
+            await s.commit()
+
+        async def do_upsert(seq: int) -> str:
+            return await repo.upsert_notification_device(
+                NotificationDeviceUpsertRow(
+                    session_id="s-conc",
+                    sequence_id=seq,
+                    timestamp=_ts(seq),
+                    user_public_id="user-concurrent",
+                    device_token="concurrent-token",
+                    device_id=f"dev-{seq}",
+                    env="sandbox",
+                    registered_at=_ts(seq),
+                )
+            )
+
+        results = await asyncio.gather(
+            do_upsert(1),
+            do_upsert(2),
+            do_upsert(3),
+            do_upsert(4),
+            do_upsert(5),
+        )
+
+        assert len(set(results)) == 1
+        devices = await repo.list_active_notification_devices_for_user("user-concurrent")
+        assert len(devices) == 1
+
+    @pytest.mark.asyncio
+    async def test_upsert_device_alert_pref_concurrent_same_scope_recovery(
+        self,
+        repo: SQLAlchemyRepository,
+    ) -> None:
+        """Concurrent same-scope pref upserts converge via IntegrityError retry."""
+        device_pid = await _seed_user_and_device(
+            repo, user_public_id="user-pref-conc", device_token="t-pref-conc"
+        )
+
+        async def do_upsert(seq: int) -> None:
+            await repo.upsert_device_alert_pref(
+                DeviceAlertPrefUpsertRow(
+                    session_id="s-conc",
+                    sequence_id=seq,
+                    timestamp=_ts(seq),
+                    device_public_id=device_pid,
+                    alert_type="order_fill_full",
+                )
+            )
+
+        await asyncio.gather(do_upsert(1), do_upsert(2), do_upsert(3), do_upsert(4))
+
+        prefs = await repo.list_device_alert_prefs_for_user("user-pref-conc")
+        assert len(prefs) == 1
+        assert prefs[0]["alert_type"] == "order_fill_full"
+
+    @pytest.mark.asyncio
+    async def test_upsert_user_alert_default_concurrent_same_key_recovery(
+        self,
+        repo: SQLAlchemyRepository,
+    ) -> None:
+        """Concurrent same-(user, alert_type) upserts converge via retry."""
+        async with repo.session() as s:
+            s.add(
+                User(
+                    public_id="user-def-conc",
+                    username="u_def_conc",
+                    email="defconc@example.test",
+                    password_hash="x",
+                    role="viewer",
+                    created_at=_ts(),
+                    session_id="t",
+                    sequence_id=1,
+                    timestamp=_ts(),
+                    known_to=KNOWN_TO_MAX,
+                )
+            )
+            await s.commit()
+
+        async def do_upsert(seq: int) -> None:
+            await repo.upsert_user_alert_default(
+                UserAlertDefaultUpsertRow(
+                    session_id="s-conc",
+                    sequence_id=seq,
+                    timestamp=_ts(seq),
+                    user_public_id="user-def-conc",
+                    alert_type="order_fill_full",
+                )
+            )
+
+        await asyncio.gather(do_upsert(1), do_upsert(2), do_upsert(3), do_upsert(4))
+
+        defaults = await repo.list_user_alert_defaults("user-def-conc")
+        assert len(defaults) == 1
+        assert defaults[0]["alert_type"] == "order_fill_full"
+
+    @pytest.mark.asyncio
+    async def test_mark_delivery_sent_concurrent_only_one_wins(
+        self,
+        repo: SQLAlchemyRepository,
+    ) -> None:
+        """Concurrent ``mark_delivery_sent`` — the atomic close guarantees one winner.
+
+        Two tasks observe the queued delivery, both try to
+        ``close+insert``. The loser's conditional UPDATE (``WHERE
+        id=:id AND known_to=MAX AND status='queued'``) returns
+        ``rowcount=0`` once the winner commits its close, so the
+        loser rolls back and returns False — no spurious successor
+        row, no IntegrityError leaks to the caller (closes Copilot
+        R2 MAJOR-3).
+        """
+        public_id = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                alert_event_public_id="evt-conc",
+                device_public_id="dev-conc",
+                user_public_id="user-delivery-conc",
+                status="queued",
+                created_at=_ts(),
+                session_id="s1",
+                sequence_id=1,
+                timestamp=_ts(),
+            )
+        )
+
+        async def transition(apns_id: str, seq: int) -> None:
+            await repo.mark_delivery_sent(
+                public_id,
+                apns_id=apns_id,
+                transition_at=_ts(seq),
+                session_id="s-conc",
+                sequence_id=seq,
+            )
+
+        await asyncio.gather(
+            transition("apns-A", 2),
+            transition("apns-B", 3),
+            transition("apns-C", 4),
+        )
+
+        from sqlalchemy import select as _select
+
+        from snapper.data.models import AlertDelivery
+
+        async with repo.session() as s:
+            rows = (
+                (
+                    await s.execute(
+                        _select(AlertDelivery).where(AlertDelivery.public_id == public_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        active = [r for r in rows if r.known_to == KNOWN_TO_MAX]
+        assert len(active) == 1
+        assert active[0].status == "sent"
+
+    @pytest.mark.asyncio
+    async def test_upsert_notification_device_close_race_branch(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Deterministically exercise the ``rowcount=0`` close-race branch.
+
+        We install a session-``execute`` interceptor that, exactly once,
+        pre-closes the active row via a side-session immediately before
+        the method's own UPDATE fires. The method's UPDATE then sees
+        ``known_to != MAX`` (we changed it) and returns rowcount=0,
+        sending the loop through the ``last_error = close-race``
+        continue branch. The second attempt takes the clean path and
+        converges.
+        """
+        seed_pid = await repo.upsert_notification_device(
+            NotificationDeviceUpsertRow(
+                user_public_id="user-close-race",
+                device_token="close-race-token",
+                device_id="dev-seed",
+                env="sandbox",
+                registered_at=_ts(),
+                session_id="s-seed",
+                sequence_id=1,
+                timestamp=_ts(),
+            )
+        )
+
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        from snapper.data.models import NotificationDevice
+
+        original_execute = AsyncSession.execute
+        sabotaged = {"count": 0}
+
+        async def patched_execute(  # type: ignore[no-untyped-def]
+            self_session, statement, *args, **kwargs
+        ):
+            stmt_text = str(statement)
+            if (
+                sabotaged["count"] == 0
+                and "UPDATE notification_devices" in stmt_text
+                and "SET known_to" in stmt_text
+            ):
+                sabotaged["count"] += 1
+                from sqlalchemy import update as _update
+
+                side_cm = repo.session()
+                side = await side_cm.__aenter__()
+                try:
+                    await original_execute(
+                        side,
+                        _update(NotificationDevice)
+                        .where(
+                            NotificationDevice.public_id == seed_pid,
+                            NotificationDevice.known_to == KNOWN_TO_MAX,
+                        )
+                        .values(known_to=_ts(99)),
+                    )
+                    await side.commit()
+                finally:
+                    await side_cm.__aexit__(None, None, None)
+            return await original_execute(self_session, statement, *args, **kwargs)
+
+        monkeypatch.setattr(AsyncSession, "execute", patched_execute)
+
+        await repo.upsert_notification_device(
+            NotificationDeviceUpsertRow(
+                user_public_id="user-close-race",
+                device_token="close-race-token",
+                device_id="dev-second",
+                env="sandbox",
+                registered_at=_ts(2),
+                session_id="s-second",
+                sequence_id=2,
+                timestamp=_ts(2),
+            )
+        )
+
+        assert sabotaged["count"] == 1
+        devices = await repo.list_active_notification_devices_for_user("user-close-race")
+        assert len(devices) == 1
+        assert devices[0]["device_id"] == "dev-second"
+
+    @pytest.mark.asyncio
+    async def test_upsert_notification_device_exhausts_retries_and_raises(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Retry budget exhausted -> the last close-race error propagates.
+
+        We intercept every close UPDATE on ``notification_devices`` and
+        return a synthetic ``rowcount=0`` result without actually
+        closing anything, so each attempt's SELECT still finds the
+        original active row and each UPDATE reports a lost close race.
+        After ``max_attempts`` iterations the loop exits and raises
+        the last recorded close-race ``RuntimeError``.
+        """
+        await repo.upsert_notification_device(
+            NotificationDeviceUpsertRow(
+                user_public_id="u-exhaust",
+                device_token="exhaust-token",
+                device_id="dev-seed",
+                env="sandbox",
+                registered_at=_ts(),
+                session_id="s-seed",
+                sequence_id=1,
+                timestamp=_ts(),
+            )
+        )
+
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        original_execute = AsyncSession.execute
+
+        class _ZeroRowcountResult:
+            rowcount = 0
+
+        async def patched_execute(  # type: ignore[no-untyped-def]
+            self_session, statement, *args, **kwargs
+        ):
+            stmt_text = str(statement)
+            if "UPDATE notification_devices" in stmt_text and "SET known_to" in stmt_text:
+                return _ZeroRowcountResult()
+            return await original_execute(self_session, statement, *args, **kwargs)
+
+        monkeypatch.setattr(AsyncSession, "execute", patched_execute)
+
+        with pytest.raises(RuntimeError, match="close-race"):
+            await repo.upsert_notification_device(
+                NotificationDeviceUpsertRow(
+                    user_public_id="u-exhaust",
+                    device_token="exhaust-token",
+                    device_id="dev-never",
+                    env="sandbox",
+                    registered_at=_ts(2),
+                    session_id="s-never",
+                    sequence_id=2,
+                    timestamp=_ts(2),
+                )
+            )
+
+    @pytest.mark.asyncio
+    async def test_upsert_notification_device_integrityerror_retry(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """IntegrityError on first commit -> rollback + retry -> success."""
+        async with repo.session() as s:
+            s.add(
+                User(
+                    public_id="u-nd-ie",
+                    username="u_nd_ie",
+                    email="nd_ie@example.test",
+                    password_hash="x",
+                    role="viewer",
+                    created_at=_ts(),
+                    session_id="t",
+                    sequence_id=1,
+                    timestamp=_ts(),
+                    known_to=KNOWN_TO_MAX,
+                )
+            )
+            await s.commit()
+
+        from sqlalchemy.exc import IntegrityError
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        original_commit = AsyncSession.commit
+        tripped = {"n": 0}
+
+        async def patched_commit(self_session):  # type: ignore[no-untyped-def]
+            if tripped["n"] == 0:
+                tripped["n"] += 1
+                await self_session.rollback()
+                raise IntegrityError("synthetic", params=None, orig=Exception("partial-unique"))
+            return await original_commit(self_session)
+
+        monkeypatch.setattr(AsyncSession, "commit", patched_commit)
+
+        pid = await repo.upsert_notification_device(
+            NotificationDeviceUpsertRow(
+                user_public_id="u-nd-ie",
+                device_token="nd-ie-token",
+                device_id="dev-ie",
+                env="sandbox",
+                registered_at=_ts(),
+                session_id="s-ie",
+                sequence_id=1,
+                timestamp=_ts(),
+            )
+        )
+
+        assert tripped["n"] == 1
+        devices = await repo.list_active_notification_devices_for_user("u-nd-ie")
+        assert len(devices) == 1
+        assert devices[0]["public_id"] == pid
+
+    @pytest.mark.asyncio
+    async def test_upsert_device_alert_pref_close_race_branch(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Close-race branch in ``upsert_device_alert_pref`` fires deterministically."""
+        device_pid = await _seed_user_and_device(
+            repo, user_public_id="u-pref-race", device_token="pref-race-token"
+        )
+        await repo.upsert_device_alert_pref(
+            DeviceAlertPrefUpsertRow(
+                session_id="s-seed",
+                sequence_id=1,
+                timestamp=_ts(),
+                device_public_id=device_pid,
+                alert_type="order_fill_full",
+            )
+        )
+
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        from snapper.data.models import DeviceAlertPref
+
+        original_execute = AsyncSession.execute
+        sabotaged = {"count": 0}
+
+        async def patched_execute(  # type: ignore[no-untyped-def]
+            self_session, statement, *args, **kwargs
+        ):
+            stmt_text = str(statement)
+            if (
+                sabotaged["count"] == 0
+                and "UPDATE device_alert_prefs" in stmt_text
+                and "SET known_to" in stmt_text
+            ):
+                sabotaged["count"] += 1
+                from sqlalchemy import update as _update
+
+                side_cm = repo.session()
+                side = await side_cm.__aenter__()
+                try:
+                    await original_execute(
+                        side,
+                        _update(DeviceAlertPref)
+                        .where(
+                            DeviceAlertPref.device_public_id == device_pid,
+                            DeviceAlertPref.alert_type == "order_fill_full",
+                            DeviceAlertPref.known_to == KNOWN_TO_MAX,
+                        )
+                        .values(known_to=_ts(99)),
+                    )
+                    await side.commit()
+                finally:
+                    await side_cm.__aexit__(None, None, None)
+            return await original_execute(self_session, statement, *args, **kwargs)
+
+        monkeypatch.setattr(AsyncSession, "execute", patched_execute)
+
+        await repo.upsert_device_alert_pref(
+            DeviceAlertPrefUpsertRow(
+                session_id="s-second",
+                sequence_id=2,
+                timestamp=_ts(2),
+                device_public_id=device_pid,
+                alert_type="order_fill_full",
+                enabled=False,
+            )
+        )
+
+        assert sabotaged["count"] == 1
+        prefs = await repo.list_device_alert_prefs_for_user("u-pref-race")
+        assert len(prefs) == 1
+        assert prefs[0]["enabled"] is False
+
+    @pytest.mark.asyncio
+    async def test_upsert_device_alert_pref_exhausts_retries_and_raises(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Close-race exhaust path in ``upsert_device_alert_pref``."""
+        device_pid = await _seed_user_and_device(
+            repo, user_public_id="u-pref-exhaust", device_token="pref-exhaust-token"
+        )
+        await repo.upsert_device_alert_pref(
+            DeviceAlertPrefUpsertRow(
+                session_id="s-seed",
+                sequence_id=1,
+                timestamp=_ts(),
+                device_public_id=device_pid,
+                alert_type="order_fill_full",
+            )
+        )
+
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        original_execute = AsyncSession.execute
+
+        class _ZeroRowcountResult:
+            rowcount = 0
+
+        async def patched_execute(  # type: ignore[no-untyped-def]
+            self_session, statement, *args, **kwargs
+        ):
+            stmt_text = str(statement)
+            if "UPDATE device_alert_prefs" in stmt_text and "SET known_to" in stmt_text:
+                return _ZeroRowcountResult()
+            return await original_execute(self_session, statement, *args, **kwargs)
+
+        monkeypatch.setattr(AsyncSession, "execute", patched_execute)
+
+        with pytest.raises(RuntimeError, match="close-race"):
+            await repo.upsert_device_alert_pref(
+                DeviceAlertPrefUpsertRow(
+                    session_id="s-never",
+                    sequence_id=2,
+                    timestamp=_ts(2),
+                    device_public_id=device_pid,
+                    alert_type="order_fill_full",
+                    enabled=False,
+                )
+            )
+
+    @pytest.mark.asyncio
+    async def test_upsert_device_alert_pref_integrityerror_retry(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Integrity-error on commit -> rollback + retry -> successful commit."""
+        device_pid = await _seed_user_and_device(
+            repo, user_public_id="u-pref-ie", device_token="pref-ie-token"
+        )
+
+        from sqlalchemy.exc import IntegrityError
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        original_commit = AsyncSession.commit
+        tripped = {"n": 0}
+
+        async def patched_commit(self_session):  # type: ignore[no-untyped-def]
+            if tripped["n"] == 0:
+                tripped["n"] += 1
+                await self_session.rollback()
+                raise IntegrityError("synthetic", params=None, orig=Exception("partial-unique"))
+            return await original_commit(self_session)
+
+        monkeypatch.setattr(AsyncSession, "commit", patched_commit)
+
+        await repo.upsert_device_alert_pref(
+            DeviceAlertPrefUpsertRow(
+                session_id="s-ie",
+                sequence_id=1,
+                timestamp=_ts(),
+                device_public_id=device_pid,
+                alert_type="order_fill_full",
+            )
+        )
+
+        assert tripped["n"] == 1
+        prefs = await repo.list_device_alert_prefs_for_user("u-pref-ie")
+        assert len(prefs) == 1
+
+    @pytest.mark.asyncio
+    async def test_upsert_user_alert_default_close_race_exhausts(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Close-race init + final raise in ``upsert_user_alert_default``.
+
+        Same synthetic-``rowcount=0`` sabotage as the
+        ``notification_devices`` exhaust test.
+        """
+        async with repo.session() as s:
+            s.add(
+                User(
+                    public_id="u-def-exhaust",
+                    username="u_def_exhaust",
+                    email="def_exhaust@example.test",
+                    password_hash="x",
+                    role="viewer",
+                    created_at=_ts(),
+                    session_id="t",
+                    sequence_id=1,
+                    timestamp=_ts(),
+                    known_to=KNOWN_TO_MAX,
+                )
+            )
+            await s.commit()
+        await repo.upsert_user_alert_default(
+            UserAlertDefaultUpsertRow(
+                session_id="s-seed",
+                sequence_id=1,
+                timestamp=_ts(),
+                user_public_id="u-def-exhaust",
+                alert_type="order_fill_full",
+            )
+        )
+
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        original_execute = AsyncSession.execute
+
+        class _ZeroRowcountResult:
+            rowcount = 0
+
+        async def patched_execute(  # type: ignore[no-untyped-def]
+            self_session, statement, *args, **kwargs
+        ):
+            stmt_text = str(statement)
+            if "UPDATE user_alert_defaults" in stmt_text and "SET known_to" in stmt_text:
+                return _ZeroRowcountResult()
+            return await original_execute(self_session, statement, *args, **kwargs)
+
+        monkeypatch.setattr(AsyncSession, "execute", patched_execute)
+
+        with pytest.raises(RuntimeError, match="close-race"):
+            await repo.upsert_user_alert_default(
+                UserAlertDefaultUpsertRow(
+                    session_id="s-never",
+                    sequence_id=2,
+                    timestamp=_ts(2),
+                    user_public_id="u-def-exhaust",
+                    alert_type="order_fill_full",
+                    enabled=False,
+                )
+            )
+
+    @pytest.mark.asyncio
+    async def test_upsert_user_alert_default_integrityerror_retry(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Integrity-error on commit -> rollback + retry -> successful commit."""
+        async with repo.session() as s:
+            s.add(
+                User(
+                    public_id="u-def-ie",
+                    username="u_def_ie",
+                    email="def_ie@example.test",
+                    password_hash="x",
+                    role="viewer",
+                    created_at=_ts(),
+                    session_id="t",
+                    sequence_id=1,
+                    timestamp=_ts(),
+                    known_to=KNOWN_TO_MAX,
+                )
+            )
+            await s.commit()
+
+        from sqlalchemy.exc import IntegrityError
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        original_commit = AsyncSession.commit
+        tripped = {"n": 0}
+
+        async def patched_commit(self_session):  # type: ignore[no-untyped-def]
+            if tripped["n"] == 0:
+                tripped["n"] += 1
+                await self_session.rollback()
+                raise IntegrityError("synthetic", params=None, orig=Exception("partial-unique"))
+            return await original_commit(self_session)
+
+        monkeypatch.setattr(AsyncSession, "commit", patched_commit)
+
+        await repo.upsert_user_alert_default(
+            UserAlertDefaultUpsertRow(
+                session_id="s-ie",
+                sequence_id=1,
+                timestamp=_ts(),
+                user_public_id="u-def-ie",
+                alert_type="order_fill_full",
+            )
+        )
+
+        assert tripped["n"] == 1
+        defaults = await repo.list_user_alert_defaults("u-def-ie")
+        assert len(defaults) == 1
+
+    @pytest.mark.asyncio
+    async def test_mark_delivery_failed_unregistered_cancelled_transitions(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Every terminal ``mark_delivery_*`` transitions queued -> {target}."""
+
+        async def fresh_delivery(suffix: str) -> str:
+            return await repo.insert_alert_delivery(
+                AlertDeliveryInsertRow(
+                    alert_event_public_id=f"evt-{suffix}",
+                    device_public_id=f"dev-{suffix}",
+                    user_public_id=f"u-{suffix}",
+                    status="queued",
+                    created_at=_ts(),
+                    session_id="s1",
+                    sequence_id=1,
+                    timestamp=_ts(),
+                )
+            )
+
+        failed_pid = await fresh_delivery("fail")
+        unreg_pid = await fresh_delivery("unreg")
+        cancel_pid = await fresh_delivery("cancel")
+
+        await repo.mark_delivery_failed(
+            failed_pid,
+            error_reason="5xx-maxed",
+            transition_at=_ts(1),
+            session_id="s1",
+            sequence_id=2,
+        )
+        await repo.mark_delivery_unregistered(
+            unreg_pid,
+            transition_at=_ts(1),
+            session_id="s1",
+            sequence_id=3,
+        )
+        await repo.mark_delivery_cancelled(
+            cancel_pid,
+            reason="grant-revoked",
+            transition_at=_ts(1),
+            session_id="s1",
+            sequence_id=4,
+        )
+
+        queued_after = await repo.list_queued_deliveries_all()
+        assert queued_after == []
