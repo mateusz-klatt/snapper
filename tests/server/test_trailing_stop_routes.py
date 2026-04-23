@@ -21,6 +21,7 @@ from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.app import create_app
 from snapper.server.app import get_repository_dependency
 from snapper.server.dependencies import get_caps_enforcer_dependency
+from snapper.server.trailing_stop_routes import _coerce_float_param
 
 
 async def _noop_lifespan(_app: FastAPI) -> AsyncGenerator[None]:
@@ -158,6 +159,15 @@ def _create_client(mock_repo: Any) -> TestClient:
     app.dependency_overrides[require_authentication] = skip_auth
     app.dependency_overrides[get_repository_dependency] = lambda: mock_repo
     return TestClient(app)
+
+
+class TestCoerceFloatParam:
+    """Unit tests for trailing-stop JSON param coercion."""
+
+    def test_returns_zero_for_non_scalar_json_value(self) -> None:
+        """Given a non-scalar JSON value, Then coercion falls back to 0.0."""
+        params: dict[str, Any] = {"trailing_pct": {"unexpected": "shape"}}
+        assert _coerce_float_param(params, "trailing_pct") == 0.0
 
 
 class TestCreateTrailingStop:
