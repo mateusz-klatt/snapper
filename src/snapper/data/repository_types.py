@@ -1444,3 +1444,174 @@ class InstrumentDetailRow(TypedDict):
     instrument_resolved: bool
     instrument_kind: str | None
     expiry_at: datetime | None
+
+
+class NotificationDeviceUpsertRow(TypedDict, total=False):
+    """Row dict for Repository.upsert_notification_device.
+
+    Required on insert: user_public_id, device_token, device_id, env,
+    registered_at. Optional: public_id (auto-generated if absent),
+    platform (defaults "ios"), app_version, is_active (defaults True),
+    previews_mode (defaults "private"), last_seen_at.
+    """
+
+    public_id: str
+    user_public_id: str
+    device_token: str
+    device_id: str
+    platform: str
+    env: str
+    app_version: str | None
+    is_active: bool
+    previews_mode: str
+    registered_at: datetime
+    last_seen_at: datetime | None
+
+
+class NotificationDeviceRow(TypedDict):
+    """Row dict returned by Repository.list_active_notification_devices_for_user."""
+
+    public_id: str
+    user_public_id: str
+    device_token: str
+    device_id: str
+    platform: str
+    env: str
+    app_version: str | None
+    is_active: bool
+    previews_mode: str
+    registered_at: datetime
+    last_seen_at: datetime | None
+
+
+class DeviceAlertPrefRow(TypedDict, total=False):
+    """Row dict for upsert_device_alert_pref and list_device_alert_prefs_for_user.
+
+    The two scope columns (``operator_public_id``, ``wallet_public_id``)
+    are both NULL for the device-global scope; ``operator_public_id`` is
+    set and ``wallet_public_id`` NULL for the operator scope; both are
+    set for the wallet scope. See §D7 routing precedence.
+    """
+
+    device_public_id: str
+    alert_type: str
+    operator_public_id: str | None
+    wallet_public_id: str | None
+    enabled: bool
+    min_priority: str
+    quiet_hours_start_min: int | None
+    quiet_hours_end_min: int | None
+    mute_until: datetime | None
+    timezone: str
+    updated_at: datetime
+
+
+class UserAlertDefaultRow(TypedDict, total=False):
+    """Row dict for upsert_user_alert_default and list_user_alert_defaults.
+
+    Fallback per-(user, alert_type) preference consulted when no
+    device-scoped override matches (§D7 step 4).
+    """
+
+    user_public_id: str
+    alert_type: str
+    enabled: bool
+    min_priority: str
+    updated_at: datetime
+
+
+class AlertEventInsertRow(TypedDict, total=False):
+    """Row dict for Repository.insert_alert_event (temporal/SCD2).
+
+    Required: user_public_id, alert_type, priority, title, body,
+    session_id, sequence_id, timestamp. Optional: public_id
+    (auto-generated if absent), operator_public_id, wallet_public_id,
+    is_safety_critical (defaults False), payload, dedup_key,
+    thread_key, source_topic, known_to (defaults KNOWN_TO_MAX at
+    insert time).
+    """
+
+    public_id: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+    known_to: datetime
+    user_public_id: str
+    operator_public_id: str | None
+    wallet_public_id: str | None
+    alert_type: str
+    priority: str
+    is_safety_critical: bool
+    title: str
+    body: str
+    payload: JsonObject | None
+    dedup_key: str | None
+    thread_key: str | None
+    source_topic: str | None
+
+
+class AlertEventRow(TypedDict):
+    """Row dict for get_alert_event_by_public_id and list_recent_alerts_for_user.
+
+    Always reflects the currently-active SCD2 version
+    (``known_to = KNOWN_TO_MAX``).
+    """
+
+    public_id: str
+    session_id: str
+    sequence_id: int
+    timestamp: datetime
+    known_to: datetime
+    user_public_id: str
+    operator_public_id: str | None
+    wallet_public_id: str | None
+    alert_type: str
+    priority: str
+    is_safety_critical: bool
+    title: str
+    body: str
+    payload: JsonObject | None
+    dedup_key: str | None
+    thread_key: str | None
+    source_topic: str | None
+
+
+class AlertDeliveryInsertRow(TypedDict, total=False):
+    """Row dict for Repository.insert_alert_delivery.
+
+    Required: alert_event_public_id, device_public_id, status,
+    created_at. Optional: public_id (auto-generated if absent),
+    attempt_count (defaults 0), last_attempt_at, next_attempt_at
+    (NULL = eligible for immediate retry), apns_id, error_reason.
+    """
+
+    public_id: str
+    alert_event_public_id: str
+    device_public_id: str
+    status: str
+    attempt_count: int
+    last_attempt_at: datetime | None
+    next_attempt_at: datetime | None
+    apns_id: str | None
+    error_reason: str | None
+    created_at: datetime
+
+
+class AlertDeliveryRow(TypedDict):
+    """Row dict for list_queued_deliveries_all and related delivery reads.
+
+    Mirrors the on-disk ``alert_deliveries`` row; consumed by sidecar
+    retry loop via ``list_deliveries_ready_for_retry`` and by drain-
+    on-startup via ``list_queued_deliveries_all``.
+    """
+
+    public_id: str
+    alert_event_public_id: str
+    device_public_id: str
+    status: str
+    attempt_count: int
+    last_attempt_at: datetime | None
+    next_attempt_at: datetime | None
+    apns_id: str | None
+    error_reason: str | None
+    created_at: datetime

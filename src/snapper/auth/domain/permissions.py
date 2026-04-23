@@ -45,6 +45,8 @@ class Permission(StrEnum):
     IMPERSONATE_OPERATOR = "impersonate:operator"
     READ_BACKTESTS = "read:backtests"
     MANAGE_BACKTESTS = "manage:backtests"
+    READ_NOTIFICATIONS = "read:notifications"
+    MANAGE_NOTIFICATION_DEVICES = "manage:notification_devices"
 
 
 RESOURCE_PERMISSIONS: dict[str, Permission | None] = {
@@ -60,6 +62,7 @@ RESOURCE_PERMISSIONS: dict[str, Permission | None] = {
     "settings": Permission.CONFIGURE_SYSTEM,
     "backtests": Permission.READ_BACKTESTS,
     "ai-integration": Permission.MANAGE_PROCESSES,
+    "notifications": Permission.READ_NOTIFICATIONS,
 }
 
 
@@ -83,6 +86,8 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.READ_STRATEGIES,
         Permission.READ_SYSTEM_STATUS,
         Permission.READ_BACKTESTS,
+        Permission.READ_NOTIFICATIONS,
+        Permission.MANAGE_NOTIFICATION_DEVICES,
     },
     UserRole.OPERATOR: {
         Permission.READ_MARKET_DATA,
@@ -99,6 +104,8 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.MANAGE_PROCESSES,
         Permission.READ_BACKTESTS,
         Permission.MANAGE_BACKTESTS,
+        Permission.READ_NOTIFICATIONS,
+        Permission.MANAGE_NOTIFICATION_DEVICES,
     },
     UserRole.ADMIN: set(Permission),
 }

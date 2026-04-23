@@ -2295,6 +2295,188 @@ def upgrade() -> None:
             },
         )
 
+    op.create_table(
+        "notification_devices",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("user_public_id", sa.String(36), nullable=False),
+        sa.Column("device_token", sa.String(200), nullable=False),
+        sa.Column("device_id", sa.String(64), nullable=False),
+        sa.Column("platform", sa.String(10), server_default="ios", nullable=False),
+        sa.Column("env", sa.String(10), nullable=False),
+        sa.Column("app_version", sa.String(20), nullable=True),
+        sa.Column("is_active", sa.Boolean(), server_default="1", nullable=False),
+        sa.Column("previews_mode", sa.String(10), server_default="private", nullable=False),
+        sa.Column("registered_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=True),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("public_id", name="uq_notification_devices_public_id"),
+        sa.UniqueConstraint("device_token", name="uq_notification_devices_device_token"),
+    )
+    op.create_index(
+        "ix_notification_devices_user_public_id",
+        "notification_devices",
+        ["user_public_id"],
+    )
+    op.create_index(
+        "ix_notification_devices_user_active",
+        "notification_devices",
+        ["user_public_id", "is_active"],
+    )
+    op.create_table(
+        "device_alert_prefs",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("device_public_id", sa.String(36), nullable=False),
+        sa.Column("alert_type", sa.String(50), nullable=False),
+        sa.Column("operator_public_id", sa.String(36), nullable=True),
+        sa.Column("wallet_public_id", sa.String(36), nullable=True),
+        sa.Column("enabled", sa.Boolean(), server_default="1", nullable=False),
+        sa.Column("min_priority", sa.String(10), server_default="medium", nullable=False),
+        sa.Column("quiet_hours_start_min", sa.Integer(), nullable=True),
+        sa.Column("quiet_hours_end_min", sa.Integer(), nullable=True),
+        sa.Column("mute_until", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("timezone", sa.String(64), server_default="UTC", nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(
+            "NOT (wallet_public_id IS NOT NULL AND operator_public_id IS NULL)",
+            name="ck_device_alert_valid_scope",
+        ),
+    )
+    op.create_index(
+        "ix_device_alert_prefs_device_public_id",
+        "device_alert_prefs",
+        ["device_public_id"],
+    )
+    op.create_index(
+        "ix_device_alert_prefs_lookup",
+        "device_alert_prefs",
+        ["device_public_id", "alert_type"],
+    )
+    op.create_index(
+        "uq_device_alert_wallet_scope",
+        "device_alert_prefs",
+        ["device_public_id", "alert_type", "operator_public_id", "wallet_public_id"],
+        unique=True,
+        sqlite_where=text("operator_public_id IS NOT NULL AND wallet_public_id IS NOT NULL"),
+        postgresql_where=text("operator_public_id IS NOT NULL AND wallet_public_id IS NOT NULL"),
+    )
+    op.create_index(
+        "uq_device_alert_operator_scope",
+        "device_alert_prefs",
+        ["device_public_id", "alert_type", "operator_public_id"],
+        unique=True,
+        sqlite_where=text("operator_public_id IS NOT NULL AND wallet_public_id IS NULL"),
+        postgresql_where=text("operator_public_id IS NOT NULL AND wallet_public_id IS NULL"),
+    )
+    op.create_index(
+        "uq_device_alert_device_scope",
+        "device_alert_prefs",
+        ["device_public_id", "alert_type"],
+        unique=True,
+        sqlite_where=text("operator_public_id IS NULL AND wallet_public_id IS NULL"),
+        postgresql_where=text("operator_public_id IS NULL AND wallet_public_id IS NULL"),
+    )
+    op.create_table(
+        "user_alert_defaults",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("user_public_id", sa.String(36), nullable=False),
+        sa.Column("alert_type", sa.String(50), nullable=False),
+        sa.Column("enabled", sa.Boolean(), server_default="1", nullable=False),
+        sa.Column("min_priority", sa.String(10), server_default="medium", nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("user_public_id", "alert_type", name="uq_user_alert_default"),
+    )
+    op.create_table(
+        "alert_events",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("session_id", sa.String(36), nullable=False),
+        sa.Column("sequence_id", sa.Integer(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("known_to", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("user_public_id", sa.String(36), nullable=False),
+        sa.Column("operator_public_id", sa.String(36), nullable=True),
+        sa.Column("wallet_public_id", sa.String(36), nullable=True),
+        sa.Column("alert_type", sa.String(50), nullable=False),
+        sa.Column("priority", sa.String(10), nullable=False),
+        sa.Column("is_safety_critical", sa.Boolean(), server_default="0", nullable=False),
+        sa.Column("title", sa.String(200), nullable=False),
+        sa.Column("body", sa.String(500), nullable=False),
+        sa.Column("payload", sa.JSON(), nullable=True),
+        sa.Column("dedup_key", sa.String(200), nullable=True),
+        sa.Column("thread_key", sa.String(100), nullable=True),
+        sa.Column("source_topic", sa.String(200), nullable=True),
+        sa.PrimaryKeyConstraint("id"),
+        sa.CheckConstraint(_CK_SESSION_ID, name="ck_alert_events_session_id"),
+        sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_alert_events_sequence_id"),
+    )
+    op.create_index(
+        "ix_alert_events_public_id_active",
+        "alert_events",
+        ["public_id"],
+        unique=True,
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_alert_events_user_type_time",
+        "alert_events",
+        ["user_public_id", "alert_type", "timestamp"],
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_index(
+        "ix_alert_events_dedup",
+        "alert_events",
+        ["user_public_id", "dedup_key", "timestamp"],
+        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
+        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+    )
+    op.create_table(
+        "alert_deliveries",
+        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("public_id", sa.String(36), nullable=False),
+        sa.Column("alert_event_public_id", sa.String(36), nullable=False),
+        sa.Column("device_public_id", sa.String(36), nullable=False),
+        sa.Column("status", sa.String(20), nullable=False),
+        sa.Column("attempt_count", sa.Integer(), server_default="0", nullable=False),
+        sa.Column("last_attempt_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("next_attempt_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("apns_id", sa.String(64), nullable=True),
+        sa.Column("error_reason", sa.String(200), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("public_id", name="uq_alert_deliveries_public_id"),
+        sa.CheckConstraint(
+            "status IN ('queued', 'sent', 'failed', 'unregistered', 'cancelled_scope')",
+            name="ck_alert_delivery_status",
+        ),
+    )
+    op.create_index(
+        "ix_alert_deliveries_alert_event_public_id",
+        "alert_deliveries",
+        ["alert_event_public_id"],
+    )
+    op.create_index(
+        "ix_alert_deliveries_device_public_id",
+        "alert_deliveries",
+        ["device_public_id"],
+    )
+    op.create_index(
+        "ix_alert_deliveries_status_created",
+        "alert_deliveries",
+        ["status", "created_at"],
+    )
+    op.create_index(
+        "ix_alert_deliveries_next_attempt",
+        "alert_deliveries",
+        ["next_attempt_at"],
+        sqlite_where=text("status = 'queued'"),
+        postgresql_where=text("status = 'queued'"),
+    )
+
 
 def downgrade() -> None:
     """Drop all tables in reverse order of creation."""
@@ -2307,6 +2489,18 @@ def downgrade() -> None:
         op.execute(text("DROP INDEX IF EXISTS uq_ep_active_bracket_per_cycle"))
         op.execute(text("DROP INDEX IF EXISTS ix_ep_public_id"))
         op.execute(text("DROP INDEX IF EXISTS uq_ep_idempotency_key"))
+        op.execute(text("DROP INDEX IF EXISTS ix_alert_events_public_id_active"))
+        op.execute(text("DROP INDEX IF EXISTS ix_alert_events_user_type_time"))
+        op.execute(text("DROP INDEX IF EXISTS ix_alert_events_dedup"))
+        op.execute(text("DROP INDEX IF EXISTS ix_alert_deliveries_next_attempt"))
+        op.execute(text("DROP INDEX IF EXISTS uq_device_alert_wallet_scope"))
+        op.execute(text("DROP INDEX IF EXISTS uq_device_alert_operator_scope"))
+        op.execute(text("DROP INDEX IF EXISTS uq_device_alert_device_scope"))
+    op.drop_table("alert_deliveries")
+    op.drop_table("alert_events")
+    op.drop_table("user_alert_defaults")
+    op.drop_table("device_alert_prefs")
+    op.drop_table("notification_devices")
     op.drop_table("position_cycles")
     op.drop_table("execution_plan_decisions")
     op.drop_table("execution_plan_checkpoints")
