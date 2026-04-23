@@ -42,6 +42,7 @@ from snapper.application.backtest.batch_processor import process_time_batch
 from snapper.application.backtest.config import BacktestConfig
 from snapper.application.backtest.result_collector import ResultCollector
 from snapper.application.portfolio.models import PortfolioTracker
+from snapper.core.types import TradeSideEnum
 from snapper.data.repository_types import CandleRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.strategies.base import BaseStrategy
@@ -66,18 +67,22 @@ _FIXTURE_PATH = (
 
 def _candle_row(open_at: datetime, close: float, seq: int) -> CandleRow:
     """Build a minimal deterministic candle row."""
-    return CandleRow(
-        public_id=f"candle-{seq}",
-        timestamp=_BASE_NOW,
-        session_id="seed-session",
-        sequence_id=seq,
-        open_at=open_at,
-        open=close,
-        high=close,
-        low=close,
-        close=close,
-        volume=1.0,
-    )
+    row: CandleRow = {
+        "public_id": f"candle-{seq}",
+        "timestamp": _BASE_NOW,
+        "session_id": "seed-session",
+        "sequence_id": seq,
+        "open_at": open_at,
+        "timeframe": "1h",
+        "open": close,
+        "high": close,
+        "low": close,
+        "close": close,
+        "volume": 1.0,
+        "vwap": None,
+        "trades": None,
+    }
+    return row
 
 
 def _make_config(
@@ -105,11 +110,7 @@ def _make_config(
 def _make_strategy(signal: StrategySignal | None) -> MagicMock:
     """Stub strategy returning a fixed signal (or None) on every candle."""
     strategy = MagicMock(spec=BaseStrategy)
-
-    async def _handle(_instrument: str, _payload: str) -> StrategySignal | None:
-        return signal
-
-    strategy._handle_candle_data = AsyncMock(side_effect=_handle)
+    strategy._handle_candle_data = AsyncMock(return_value=signal)
     return strategy
 
 
@@ -119,7 +120,7 @@ async def _scenario_single_feed_buy_filled() -> tuple[ResultCollector, Portfolio
     strategy = _make_strategy(
         StrategySignal(
             instrument="BTC-USD",
-            side="buy",
+            side=TradeSideEnum.BUY,
             strength=1.0,
             reason="s1_buy",
             price=100.0,
@@ -188,7 +189,7 @@ async def _scenario_warmup_gated_signal_dropped() -> tuple[ResultCollector, Port
     strategy = _make_strategy(
         StrategySignal(
             instrument="BTC-USD",
-            side="buy",
+            side=TradeSideEnum.BUY,
             strength=1.0,
             reason="s3_warmup",
             price=100.0,
@@ -226,7 +227,7 @@ async def _scenario_signal_emitted_fill_skipped() -> tuple[ResultCollector, Port
     strategy = _make_strategy(
         StrategySignal(
             instrument="BTC-USD",
-            side="sell",
+            side=TradeSideEnum.SELL,
             strength=1.0,
             reason="s4_close_without_position",
             price=100.0,
