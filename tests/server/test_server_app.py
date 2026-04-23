@@ -172,6 +172,77 @@ class TestLifespan:
         mock_manager.cleanup.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_lifespan_propagates_unexpected_runtime_error_from_mcp_sub_app(
+        self,
+    ) -> None:
+        """Lifespan re-raises RuntimeErrors from the MCP sub-app that are NOT the known re-entry error.
+
+        Background: the MCP sub-app lifespan entry catches
+        ``RuntimeError("... can only be called once ...")`` which is
+        FastMCP's signature for a re-entered session manager (observed
+        in module-scoped test fixtures that spawn nested ``TestClient``
+        instances on the same app). Any OTHER RuntimeError signals a
+        real failure and must propagate so operators see it.
+
+        Given: the MCP sub-app's ``lifespan_context`` raises
+            ``RuntimeError("unexpected downstream error")`` at startup,
+        When: the parent lifespan enters,
+        Then: the exception propagates (not swallowed by the
+            nested-re-entry guard).
+        """
+
+        class _FailingLifespanCtx:
+            async def __aenter__(self) -> None:
+                raise RuntimeError("unexpected downstream error")
+
+            async def __aexit__(self, *_: object) -> None:
+                return None
+
+        mock_app = MagicMock()
+        mock_manager = MagicMock()
+        mock_manager.cleanup = AsyncMock()
+        mock_zmq_bridge = MagicMock()
+        mock_zmq_bridge.start = AsyncMock()
+        mock_zmq_bridge.stop = AsyncMock()
+        mock_manager.zmq_bridge = mock_zmq_bridge
+        mock_app.state.manager = mock_manager
+        mock_app.state.mcp_sub_app.router.lifespan_context = MagicMock(
+            return_value=_FailingLifespanCtx(),
+        )
+        with (
+            patch("snapper.server.app.discover_processes"),
+            patch("snapper.server.app.ProcessLauncherService") as mock_factory_cls,
+            patch("snapper.server.app.get_settings_service") as mock_get_settings_service,
+            patch(
+                "snapper.server.app._build_user_service_publisher",
+                return_value=(MagicMock(), MagicMock()),
+            ),
+            patch("snapper.server.app._shutdown_user_service_publisher"),
+            patch(
+                "snapper.server.app.get_ws_auth_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                ),
+            ),
+            patch(
+                "snapper.server.app.get_token_manager",
+                return_value=MagicMock(
+                    start_admin_listener=AsyncMock(),
+                    stop_admin_listener=AsyncMock(),
+                ),
+            ),
+        ):
+            mock_settings_service = MagicMock()
+            mock_settings_service.shutdown = AsyncMock()
+            mock_get_settings_service.return_value = mock_settings_service
+            mock_factory = _build_mock_process_factory(started_processes={})
+            mock_factory_cls.return_value = mock_factory
+            with pytest.raises(RuntimeError, match="unexpected downstream error"):
+                async with lifespan(mock_app):
+                    pass
+
+    @pytest.mark.asyncio
     async def test_lifespan_passes_xsub_endpoint_to_user_service_publisher(
         self,
     ) -> None:

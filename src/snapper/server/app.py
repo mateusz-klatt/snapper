@@ -501,7 +501,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         app.state.zmq_bridge_task = asyncio.create_task(manager_ref.zmq_bridge.start())
         logger.info("Application startup complete")
         await _warn_on_tradfi_near_expiry(settings)
-        yield
+        mcp_sub_app = app.state.mcp_sub_app
+        try:
+            async with mcp_sub_app.router.lifespan_context(mcp_sub_app):
+                logger.info("MCP sub-app session manager started")
+                yield
+        except RuntimeError as exc:
+            if "can only be called once" not in str(exc):
+                raise
+            logger.warning(
+                "MCP sub-app session manager already running — nested lifespan enter (test fixture reuse)"
+            )
+            yield
     except asyncio.CancelledError:
         logger.info("Application lifespan cancelled by shutdown signal")
         raise
@@ -616,14 +627,13 @@ def create_app() -> FastAPI:
     app.include_router(create_api_router(manager), prefix=API_PREFIX)
     app.include_router(create_authenticated_websocket_router(manager), prefix=API_PREFIX)
 
-    app.mount(
-        "/api/mcp",
-        build_mcp_app(
-            settings_service_getter=lambda: getattr(app.state, "settings_service", None),
-            repository_getter=get_repository_dependency,
-            caps_enforcer_getter=_safe_get_caps_enforcer,
-        ),
+    mcp_sub_app = build_mcp_app(
+        settings_service_getter=lambda: getattr(app.state, "settings_service", None),
+        repository_getter=get_repository_dependency,
+        caps_enforcer_getter=_safe_get_caps_enforcer,
     )
+    app.state.mcp_sub_app = mcp_sub_app
+    app.mount("/api/mcp", mcp_sub_app)
 
     patch_openapi(app)
 

@@ -348,6 +348,7 @@ def build_mcp_app(
         _MCP_SERVER_NAME,
         instructions=f"Snapper MCP endpoint (v{_MCP_SERVER_VERSION}) — plan §3.2",
         stateless_http=True,
+        streamable_http_path="/",
     )
     register_mcp_tools(
         mcp_server,
