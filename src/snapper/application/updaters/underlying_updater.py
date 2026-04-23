@@ -5,7 +5,6 @@ and upserts UnderlyingAsset + InstrumentUnderlyingMapping rows via SCD2.
 """
 
 import re
-from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
@@ -478,12 +477,25 @@ class UnderlyingUpdater:
         needs_expiry = match.expiry_override is not None and current_expiry is None
         if not needs_kind and not needs_expiry:
             return None
-        updated_spec: InstrumentSpecInput = replace(
-            base_spec,
+        return InstrumentSpecInput(
+            tick_size=base_spec.tick_size,
+            lot_size=base_spec.lot_size,
+            min_order_size=base_spec.min_order_size,
+            max_order_size=base_spec.max_order_size,
+            cost_decimals=base_spec.cost_decimals,
+            qty_decimals=base_spec.qty_decimals,
+            margin_initial=base_spec.margin_initial,
+            position_limit_long=base_spec.position_limit_long,
+            position_limit_short=base_spec.position_limit_short,
+            status=base_spec.status,
             expiry_at=match.expiry_override if needs_expiry else current_expiry,
             instrument_kind=match.instrument_type if needs_kind else current_kind,
+            funding_type=base_spec.funding_type,
+            funding_frequency_hours=base_spec.funding_frequency_hours,
+            rollover_rate_long=base_spec.rollover_rate_long,
+            rollover_rate_short=base_spec.rollover_rate_short,
+            max_funding_rate=base_spec.max_funding_rate,
         )
-        return updated_spec
 
     @staticmethod
     def _base_fallback_spec(existing: InstrumentSpecRow | None) -> InstrumentSpecInput:
