@@ -138,3 +138,23 @@ class TestTopicUtilities:
         results = get_topics_by_category("accruals")
         assert len(results) == 1
         assert results[0].pattern == "accruals."
+
+    def test_alerts_registry_entry_exists(self) -> None:
+        """Verify alerts entry exists in TOPIC_REGISTRY (BE-2 iOS Push Plan §D4).
+
+        Given: TOPIC_REGISTRY,
+        When: Filtering for alerts pattern,
+        Then: One entry with throttle_ms=500 and category=notifications.
+        """
+        alerts = [s for s in TOPIC_REGISTRY if s.pattern == "alerts."]
+
+        assert len(alerts) == 1
+        assert alerts[0].category == "notifications"
+        assert alerts[0].throttle_ms == 500
+
+    def test_alerts_category_query(self) -> None:
+        """Verify get_topics_by_category finds the alerts entry."""
+        results = get_topics_by_category("notifications")
+
+        assert len(results) == 1
+        assert results[0].pattern == "alerts."

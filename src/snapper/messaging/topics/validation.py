@@ -74,6 +74,7 @@ __all__ = [
     "BACKTEST_EVENTS",
     "_validate_backtest_prefix",
     "_validate_backtest_topic",
+    "_validate_alerts_topic",
 ]
 
 
@@ -113,6 +114,7 @@ def _get_topic_prefix_validators() -> list[tuple[str, Callable[[str], tuple[bool
         ("admin.", _validate_admin_topic),
         ("accruals.", _validate_accruals_topic),
         ("backtest.", _validate_backtest_topic),
+        ("alerts.", _validate_alerts_topic),
     ]
 
 
@@ -656,6 +658,24 @@ _ACCRUAL_TOPIC_FORMAT_MSG = (
 )
 
 
+_ALERT_TYPES: frozenset[str] = frozenset(
+    {
+        "order_fill_full",
+        "order_rejected",
+        "position_stop_loss_fired",
+        "margin_warning",
+        "critical_system_error",
+    }
+)
+"""Canonical alert_type names — mirrored by ``DeviceAlertPrefBody.alert_type``
+and ``RESOURCE_PERMISSIONS``-gated ``READ_NOTIFICATIONS`` surface. Any
+change here must also update the schema Literal and the iOS-side
+``AlertType`` enum in the generated Swift types."""
+
+
+_ALERT_TOPIC_FORMAT_MSG = "Alert topics must have 3 segments: alerts.{user_public_id}.{alert_type}"
+
+
 def _validate_accruals_topic(topic: str) -> tuple[bool, str]:
     """Validate accrual ledger topic structure.
 
@@ -685,6 +705,38 @@ def _validate_accruals_topic(topic: str) -> tuple[bool, str]:
             False,
             f"Invalid accrual_type '{accrual_type}'. Must be one of: "
             f"{', '.join(sorted(_ACCRUAL_TYPES))}",
+        )
+    return True, ""
+
+
+def _validate_alerts_topic(topic: str) -> tuple[bool, str]:
+    """Validate an iOS Push Foundation alert topic.
+
+    Expected shape: ``alerts.{user_public_id}.{alert_type}`` where
+    ``user_public_id`` is a UUID7 string and ``alert_type`` is one of
+    the enumerated Plan 2 §D4 alert types (mirrored in
+    ``DeviceAlertPrefBody`` and the ``AlertEventData`` dataclass).
+
+    Args:
+        topic: Topic string starting with ``alerts.``.
+
+    Returns:
+        Tuple of (is_valid, error_message). Empty error_message when
+        valid; dense diagnostic string when not.
+    """
+    segments = topic.split(".")
+    if topic.endswith(".") or len(segments) != 3:
+        return False, _ALERT_TOPIC_FORMAT_MSG
+    if segments[0] != "alerts":
+        return False, f"Expected 'alerts' category, got '{segments[0]}'"
+    _, user_public_id, alert_type = segments
+    if not is_uuid7(user_public_id):
+        return False, f"alerts.* segment 2 must be UUID7, got '{user_public_id}'"
+    if alert_type not in _ALERT_TYPES:
+        return (
+            False,
+            f"Invalid alert_type '{alert_type}'. Must be one of: "
+            f"{', '.join(sorted(_ALERT_TYPES))}",
         )
     return True, ""
 
@@ -802,6 +854,7 @@ def _validate_prefix_pattern(pattern: str) -> tuple[bool, str]:
         "admin",
         "accruals",
         "backtest",
+        "alerts",
     }
     if category not in valid_categories:
         return False, f"Unknown topic category: {category}"

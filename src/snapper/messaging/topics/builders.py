@@ -270,6 +270,26 @@ def accrual_topic(
     return f"accruals.{exchange_str}.{instrument}.{accrual_type}"
 
 
+def alerts_topic(user_public_id: str, alert_type: str) -> str:
+    """Build an iOS Push Foundation alert topic string.
+
+    Args:
+        user_public_id: Recipient user UUID7.
+        alert_type: One of the enumerated ``AlertType`` values (see
+            ``snapper.messaging.schemas.data.AlertType``).
+
+    Returns:
+        Formatted topic string
+        ``alerts.{user_public_id}.{alert_type}`` — validated by
+        ``_validate_alerts_topic`` before publish.
+
+    Examples:
+        >>> alerts_topic("019dbb34-f439-77bd-afa8-ee5321d60307", "order_fill_full")
+        'alerts.019dbb34-f439-77bd-afa8-ee5321d60307.order_fill_full'
+    """
+    return f"alerts.{user_public_id}.{alert_type}"
+
+
 def order_commands_prefix(exchange: OrderExchange) -> str:
     """Build subscription prefix for all order commands for an exchange.
 
@@ -556,6 +576,7 @@ def topic_for_message(data: StrictDataSchema[Any]) -> str:
             or if required fields are missing (e.g. paper signal
             without strategy_name).
     """
+    from snapper.messaging.schemas.data import AlertEventData
     from snapper.messaging.schemas.data import CandleData
     from snapper.messaging.schemas.data import ExecutionData
     from snapper.messaging.schemas.data import HeartbeatData
@@ -609,5 +630,7 @@ def topic_for_message(data: StrictDataSchema[Any]) -> str:
             return "system.replay.start"
         case ReplayEndData():
             return "system.replay.end"
+        case AlertEventData():
+            return alerts_topic(data.user_public_id, data.alert_type)
         case _:
             raise ValueError(f"No topic derivation for {type(data).__name__}")

@@ -13,6 +13,7 @@ from typing import Any
 
 from snapper.api.schemas.base import PartialBody
 from snapper.api.schemas.base import StrictDataSchema
+from snapper.messaging.schemas.data import AlertEventData
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import HeartbeatData
@@ -81,6 +82,7 @@ MESSAGE_TYPE_MAP: dict[str, type[StrictDataSchema[Any]]] = {
     "symbol_alias_update": SymbolAliasUpdateData,
     "replay_start": ReplayStartData,
     "replay_end": ReplayEndData,
+    "alert_event": AlertEventData,
 }
 """Mapping from message type string to Data class for deserialization."""
 

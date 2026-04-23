@@ -6,6 +6,7 @@ from datetime import datetime
 import pytest
 
 from snapper.api.schemas.base import StrictDataSchema
+from snapper.messaging.schemas.data import AlertEventData
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import HeartbeatData
@@ -410,6 +411,28 @@ class TestTopicForMessage:
         )
         with pytest.raises(ValueError, match="No topic derivation"):
             topic_for_message(data)
+
+    def test_alert_event_data_routes_to_alerts_topic(self) -> None:
+        """AlertEventData maps to ``alerts.{user_public_id}.{alert_type}``.
+
+        Given: An AlertEventData with user_public_id + alert_type,
+        When: Deriving topic,
+        Then: Returns ``alerts.<uuid7>.<alert_type>``.
+        """
+        data = AlertEventData(
+            session_id="s1",
+            sequence_id=1,
+            public_id="test-envelope-pid",
+            timestamp=datetime(2026, 4, 23, 12, tzinfo=UTC),
+            user_public_id="019dbb34-f439-77bd-afa8-ee5321d60307",
+            alert_type="order_fill_full",
+            title="Filled",
+            body="BTC-USD 0.1 filled",
+        )
+
+        topic = topic_for_message(data)
+
+        assert topic == "alerts.019dbb34-f439-77bd-afa8-ee5321d60307.order_fill_full"
 
 
 class TestHeartbeatTopicFromComponent:

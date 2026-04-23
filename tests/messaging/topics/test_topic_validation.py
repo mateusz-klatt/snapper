@@ -19,6 +19,7 @@ from snapper.messaging.topics.validation import TopicValidationError
 from snapper.messaging.topics.validation import _is_valid_timeframe
 from snapper.messaging.topics.validation import _validate_accruals_topic
 from snapper.messaging.topics.validation import _validate_admin_topic
+from snapper.messaging.topics.validation import _validate_alerts_topic
 from snapper.messaging.topics.validation import _validate_backtest_prefix
 from snapper.messaging.topics.validation import _validate_backtest_topic
 from snapper.messaging.topics.validation import _validate_candle_timeframe
@@ -3782,3 +3783,90 @@ class TestBacktestTopicFamily:
         ):
             valid, _ = validate_subscription_pattern(pattern)
             assert valid, f"subscription dispatcher rejected {pattern}"
+
+
+class TestAlertsTopicValidation:
+    """Tests for ``_validate_alerts_topic`` (iOS Push Foundation §D4)."""
+
+    _USER = "019dbb34-f439-77bd-afa8-ee5321d60307"
+
+    def test_valid_order_fill_full(self) -> None:
+        """Happy path: valid UUID7 user + known alert_type."""
+        valid, err = _validate_alerts_topic(f"alerts.{self._USER}.order_fill_full")
+
+        assert valid
+        assert err == ""
+
+    def test_valid_all_enumerated_alert_types(self) -> None:
+        """Every enumerated alert_type is accepted."""
+        for alert_type in (
+            "order_fill_full",
+            "order_rejected",
+            "position_stop_loss_fired",
+            "margin_warning",
+            "critical_system_error",
+        ):
+            valid, err = _validate_alerts_topic(f"alerts.{self._USER}.{alert_type}")
+
+            assert valid, f"{alert_type} rejected: {err}"
+
+    def test_wrong_segment_count_rejected(self) -> None:
+        """Any segment count != 3 is rejected with a format message."""
+        for bad in (
+            f"alerts.{self._USER}",
+            f"alerts.{self._USER}.order_fill_full.extra",
+            "alerts.",
+        ):
+            valid, err = _validate_alerts_topic(bad)
+
+            assert not valid, f"{bad!r} should be invalid"
+            assert "3 segments" in err
+
+    def test_trailing_dot_rejected(self) -> None:
+        """A trailing dot is always a format violation."""
+        valid, err = _validate_alerts_topic(f"alerts.{self._USER}.order_fill_full.")
+
+        assert not valid
+        assert "3 segments" in err
+
+    def test_wrong_category_rejected(self) -> None:
+        """Non-``alerts`` first segment is rejected (defense in depth)."""
+        valid, err = _validate_alerts_topic(f"market.{self._USER}.order_fill_full")
+
+        assert not valid
+        assert "alerts" in err.lower()
+
+    def test_non_uuid7_user_rejected(self) -> None:
+        """Segment 2 must be a UUID7 — arbitrary strings are rejected."""
+        valid, err = _validate_alerts_topic("alerts.not-a-uuid.order_fill_full")
+
+        assert not valid
+        assert "UUID7" in err
+
+    def test_uuid_v4_rejected(self) -> None:
+        """Non-v7 UUIDs are rejected — the project uses UUID7 exclusively."""
+        v4 = "12345678-1234-4abc-8def-123456789abc"
+
+        valid, err = _validate_alerts_topic(f"alerts.{v4}.order_fill_full")
+
+        assert not valid
+        assert "UUID7" in err
+
+    def test_unknown_alert_type_rejected(self) -> None:
+        """alert_type outside the enumerated set is rejected."""
+        valid, err = _validate_alerts_topic(f"alerts.{self._USER}.unknown_alert")
+
+        assert not valid
+        assert "alert_type" in err.lower()
+
+    def test_via_validate_topic(self) -> None:
+        """Dispatcher ``validate_topic`` routes alert topics correctly."""
+        valid, err = validate_topic(f"alerts.{self._USER}.margin_warning")
+
+        assert valid, err
+
+    def test_subscribe_to_prefix_accepted(self) -> None:
+        """``alerts.`` prefix subscription is accepted by the dispatcher."""
+        valid, err = validate_subscription_pattern("alerts.")
+
+        assert valid, err

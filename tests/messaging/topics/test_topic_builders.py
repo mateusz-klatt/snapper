@@ -6,6 +6,7 @@ from snapper.messaging.topics.builders import ParsedOrderTopic
 from snapper.messaging.topics.builders import ParsedSignalTopic
 from snapper.messaging.topics.builders import accrual_topic
 from snapper.messaging.topics.builders import admin_topic
+from snapper.messaging.topics.builders import alerts_topic
 from snapper.messaging.topics.builders import heartbeat_topic
 from snapper.messaging.topics.builders import is_order_topic
 from snapper.messaging.topics.builders import market_topic
@@ -755,3 +756,21 @@ class TestAccrualTopicBuilder:
         """Verify borrow accrual topic format."""
         result = accrual_topic("kraken", "ETH-USD", "borrow")
         assert result == "accruals.kraken.ETH-USD.borrow"
+
+
+class TestAlertsTopicBuilder:
+    """Tests for ``alerts_topic`` builder (iOS Push Foundation §D4)."""
+
+    _USER = "019dbb34-f439-77bd-afa8-ee5321d60307"
+
+    def test_order_fill_topic_shape(self) -> None:
+        """Order-fill alert topic builds to ``alerts.{uuid}.order_fill_full``."""
+        result = alerts_topic(self._USER, "order_fill_full")
+
+        assert result == f"alerts.{self._USER}.order_fill_full"
+
+    def test_critical_system_error_topic_shape(self) -> None:
+        """Critical-system alert topic uses the same 3-segment shape."""
+        result = alerts_topic(self._USER, "critical_system_error")
+
+        assert result == f"alerts.{self._USER}.critical_system_error"

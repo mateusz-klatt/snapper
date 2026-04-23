@@ -1018,3 +1018,88 @@ class BacktestProgressData(StrictDataSchema[Literal["backtest_progress"]]):
         if self.event != "milestone" and self.milestone is not None:
             raise ValueError("milestone field must be None when event != 'milestone'")
         return self
+
+
+AlertType = Literal[
+    "order_fill_full",
+    "order_rejected",
+    "position_stop_loss_fired",
+    "margin_warning",
+    "critical_system_error",
+]
+"""Canonical alert type enumeration for iOS Push Foundation Plan 2 §D4.
+
+Mirrored by:
+- ``DeviceAlertPrefBody.alert_type`` (wire schema Literal)
+- ``_ALERT_TYPES`` in ``snapper.messaging.topics.validation`` (topic validator)
+- the iOS-side ``AlertType`` enum in generated Swift types
+
+Any change to this list MUST update all three sites together — the
+topic validator will reject any alerts.*.<unknown_type> at publish
+time and ``make check-all`` will fail.
+"""
+
+
+AlertPriority = Literal["low", "medium", "high"]
+"""Delivery priority tier. Maps to APNs ``apns-priority`` headers:
+
+- ``low``  -> 5 (throttleable)
+- ``medium`` -> 5 (throttleable, default)
+- ``high`` -> 10 (immediate)
+
+``is_safety_critical=True`` alerts bypass user-pref gating regardless
+of priority (§D4).
+"""
+
+
+class AlertEventData(StrictDataSchema[Literal["alert_event"]]):
+    """ZMQ bus payload published on ``alerts.{user_public_id}.{alert_type}``.
+
+    The sidecar (``snapper notify``, BE-3a) subscribes to the
+    ``alerts.`` prefix via ``ValidatedSubscriber.subscribe("alerts.")``
+    and dispatches into the APNs outbox per Plan 2 §D5. Producers are
+    domain services (trader / portfolio / system health) that call
+    ``build_alert_event()`` to mint a valid payload with topic string
+    + provenance stamped from a ``SequenceTracker``.
+
+    Scope fields (``operator_public_id`` / ``wallet_public_id``) are
+    denormalised at emit time from the source event so the delivery
+    outbox row gets a race-free view of the scope (closes Copilot R2
+    MAJOR-2 on SCD2-join scope races).
+
+    Attributes:
+        type: Payload discriminator (always ``alert_event``).
+        user_public_id: Recipient user UUID7 — must equal the topic's
+            segment-2 value (cross-checked by the sidecar).
+        operator_public_id: Optional operator scope of the event.
+        wallet_public_id: Optional wallet scope of the event.
+        alert_type: One of the enumerated ``AlertType`` values.
+        priority: Delivery priority (``low`` / ``medium`` / ``high``).
+        is_safety_critical: When True, delivery bypasses user prefs
+            (critical system / margin warnings).
+        title: Short notification title (APNs ``aps.alert.title``).
+        body: Localised body (APNs ``aps.alert.body``).
+        payload: Optional structured context for the iOS client's
+            notification-expand renderer.
+        dedup_key: Optional idempotency key — sidecar collapses
+            duplicates sharing the same key within a window.
+        thread_key: Optional APNs ``aps.thread-id`` for iOS
+            notification grouping.
+        source_topic: Informational — the ZMQ topic the alert was
+            published on; mirrored into the ``alert_events`` row for
+            downstream diagnostics.
+    """
+
+    type: Literal["alert_event"] = "alert_event"
+    user_public_id: str
+    operator_public_id: str | None = None
+    wallet_public_id: str | None = None
+    alert_type: AlertType
+    priority: AlertPriority = "medium"
+    is_safety_critical: bool = False
+    title: str = Field(min_length=1, max_length=160)
+    body: str = Field(min_length=1, max_length=512)
+    payload: JsonObject | None = None
+    dedup_key: str | None = Field(default=None, max_length=128)
+    thread_key: str | None = Field(default=None, max_length=64)
+    source_topic: str | None = None

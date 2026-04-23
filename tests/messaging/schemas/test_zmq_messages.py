@@ -5,7 +5,9 @@ from datetime import UTC
 from datetime import datetime
 
 import pytest
+from pydantic import ValidationError
 
+from snapper.messaging.schemas.data import AlertEventData
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import FundingAccrualData
@@ -730,3 +732,83 @@ class TestFundingAccrualData:
         )
         assert msg.accrual_type == "funding"
         assert msg.amount == pytest.approx(-5.0)
+
+
+class TestAlertEventDataSchema:
+    """BE-2 iOS Push Foundation: ``AlertEventData`` dataclass + parse dispatch."""
+
+    def _minimal(self) -> AlertEventData:
+        """Return a fully-valid minimal ``AlertEventData`` fixture."""
+        return AlertEventData(
+            session_id="s1",
+            sequence_id=7,
+            public_id="envelope-pid",
+            timestamp=datetime(2026, 4, 23, 12, tzinfo=UTC),
+            user_public_id="019dbb34-f439-77bd-afa8-ee5321d60307",
+            alert_type="order_fill_full",
+            title="Filled",
+            body="BTC-USD 0.1 filled",
+        )
+
+    def test_roundtrip_through_parse_message(self) -> None:
+        """Serialize + deserialize through ``parse_message`` preserves fields."""
+        original = self._minimal()
+
+        parsed = parse_message(original.to_json())
+
+        assert isinstance(parsed, AlertEventData)
+        assert parsed.alert_type == "order_fill_full"
+        assert parsed.title == "Filled"
+        assert parsed.priority == "medium"
+        assert parsed.is_safety_critical is False
+
+    def test_critical_overrides_bypass_prefs_semantics(self) -> None:
+        """``is_safety_critical=True`` + ``high`` priority both round-trip."""
+        critical = AlertEventData(
+            session_id="s1",
+            sequence_id=7,
+            public_id="envelope-pid",
+            timestamp=datetime(2026, 4, 23, 12, tzinfo=UTC),
+            user_public_id="019dbb34-f439-77bd-afa8-ee5321d60307",
+            alert_type="critical_system_error",
+            priority="high",
+            is_safety_critical=True,
+            title="Bus down",
+            body="ZMQ bridge unreachable",
+        )
+
+        parsed = parse_message(critical.to_json())
+
+        assert isinstance(parsed, AlertEventData)
+        assert parsed.priority == "high"
+        assert parsed.is_safety_critical is True
+
+    def test_title_min_length_enforced(self) -> None:
+        """Empty title is rejected by Pydantic (min_length=1)."""
+        with pytest.raises(ValidationError) as exc:
+            AlertEventData(
+                session_id="s1",
+                sequence_id=7,
+                public_id="envelope-pid",
+                timestamp=datetime(2026, 4, 23, 12, tzinfo=UTC),
+                user_public_id="019dbb34-f439-77bd-afa8-ee5321d60307",
+                alert_type="order_fill_full",
+                title="",
+                body="body",
+            )
+
+        assert "title" in str(exc.value).lower()
+
+    def test_unknown_alert_type_rejected(self) -> None:
+        """Literal enforcement blocks unknown ``alert_type``."""
+        with pytest.raises(ValidationError):
+            AlertEventData(
+                session_id="s1",
+                sequence_id=7,
+                public_id="envelope-pid",
+                timestamp=datetime(2026, 4, 23, 12, tzinfo=UTC),
+                user_public_id="019dbb34-f439-77bd-afa8-ee5321d60307",
+                alert_type="not_a_real_alert",
+                title="Filled",
+                body="body",
+            )
