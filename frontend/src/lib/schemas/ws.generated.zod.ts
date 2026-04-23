@@ -15,6 +15,8 @@ export const WsMessageBaseSchema = z
   })
   .strict()
 
+export const JsonPrimitiveSchema = z.unknown()
+
 export const BacktestProgressDataSchema = z
   .object({
     type: z.literal('backtest_progress'),
@@ -192,8 +194,6 @@ export const FundingAccrualDataSchema = z
     position_quantity: z.number(),
   })
   .strict()
-
-export const JsonPrimitiveSchema = z.unknown()
 
 export const InstrumentCapabilityDataSchema = z
   .object({
@@ -768,6 +768,34 @@ export const WSAuthCompleteResponseSchema = z
   .strict()
 
 export const JsonObjectSchema = z.record(z.string(), z.any())
+
+export const AlertEventDataSchema = z
+  .object({
+    type: z.literal('alert_event'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    user_public_id: z.string(),
+    operator_public_id: z.string().nullable(),
+    wallet_public_id: z.string().nullable(),
+    alert_type: z.enum([
+      'order_fill_full',
+      'order_rejected',
+      'position_stop_loss_fired',
+      'margin_warning',
+      'critical_system_error',
+    ]),
+    priority: z.enum(['low', 'medium', 'high']),
+    is_safety_critical: z.boolean(),
+    title: z.string().min(1).max(160),
+    body: z.string().min(1).max(512),
+    payload: z.record(z.string(), z.any()).nullable(),
+    dedup_key: z.string().max(128).nullable(),
+    thread_key: z.string().max(64).nullable(),
+    source_topic: z.string().nullable(),
+  })
+  .strict()
 
 export const HeartbeatDataSchema = z
   .object({

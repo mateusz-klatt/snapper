@@ -3,6 +3,20 @@
 
 import Foundation
 
+enum AlertEventDataAlertType: String, Codable, Sendable {
+    case orderFillFull = "order_fill_full"
+    case orderRejected = "order_rejected"
+    case positionStopLossFired = "position_stop_loss_fired"
+    case marginWarning = "margin_warning"
+    case criticalSystemError = "critical_system_error"
+}
+
+enum AlertEventDataPriority: String, Codable, Sendable {
+    case low
+    case medium
+    case high
+}
+
 enum BacktestProgressDataEvent: String, Codable, Sendable {
     case started
     case progress
@@ -153,6 +167,46 @@ struct WsMessageBase: Codable, Sendable {
         case publicId = "public_id"
         case timestamp
         case sessionId = "session_id"
+    }
+}
+
+struct AlertEventData: Codable, Sendable {
+    let type: String
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let userPublicId: String
+    let operatorPublicId: String?
+    let walletPublicId: String?
+    let alertType: String
+    let priority: String?
+    let isSafetyCritical: Bool?
+    let title: String
+    let body: String
+    let payload: JsonObject?
+    let dedupKey: String?
+    let threadKey: String?
+    let sourceTopic: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case userPublicId = "user_public_id"
+        case operatorPublicId = "operator_public_id"
+        case walletPublicId = "wallet_public_id"
+        case alertType = "alert_type"
+        case priority
+        case isSafetyCritical = "is_safety_critical"
+        case title
+        case body
+        case payload
+        case dedupKey = "dedup_key"
+        case threadKey = "thread_key"
+        case sourceTopic = "source_topic"
     }
 }
 

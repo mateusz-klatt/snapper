@@ -20,6 +20,29 @@ type TradeSide = 'buy' | 'sell'
 type Mode = 'live' | 'paper'
 
 /**
+ * Canonical AlertEvent entity.
+ * From WebSocket AlertEventData.
+ */
+export interface AlertEvent {
+  sequenceId: number
+  publicId: string
+  timestamp: Date
+  sessionId: string
+  userPublicId: string
+  operatorPublicId?: string | null
+  walletPublicId?: string | null
+  alertType: 'order_fill_full' | 'order_rejected' | 'position_stop_loss_fired' | 'margin_warning' | 'critical_system_error'
+  priority?: 'low' | 'medium' | 'high'
+  isSafetyCritical?: boolean
+  title: string
+  body: string
+  payload?: Record<string, unknown> | null
+  dedupKey?: string | null
+  threadKey?: string | null
+  sourceTopic?: string | null
+}
+
+/**
  * Canonical BacktestProgress entity.
  * From WebSocket BacktestProgressData.
  */
