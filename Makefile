@@ -149,7 +149,7 @@ IOS_ARCHIVE_PATH ?= $(IOS_DIR)/build/$(IOS_SCHEME).xcarchive
 IOS_EXPORT_OPTIONS ?= $(IOS_DIR)/ExportOptions.plist
 IOS_EXPORT_PATH ?= $(IOS_DIR)/build/export
 IOS_PROJECT := $(IOS_DIR)/Snapper.xcodeproj
-IOS_SIMULATOR_DESTINATION ?= platform=iOS Simulator,name=iPhone 17 Pro,OS=26.2
+IOS_SIMULATOR_DESTINATION ?= platform=iOS Simulator,name=iPhone 17 Pro,OS=26.4.1
 PNPM := @cd $(UI_DIR) && pnpm
 PRETTIER := $(PNPM) exec prettier --write
 PYTEST_PARALLEL := -n $(shell $(PYTHON) -c "import os,math; print(math.ceil(os.cpu_count()/2))")

@@ -2,7 +2,7 @@ name: Snapper
 options:
   bundleIdPrefix: ie.klatt
   deploymentTarget:
-    iOS: "26.0"
+    iOS: "26.4"
   xcodeVersion: "2620"
 
 settings:
@@ -39,6 +39,7 @@ targets:
       INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.finance"
       ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
       CODE_SIGN_STYLE: Automatic
+      CODE_SIGN_ENTITLEMENTS: Snapper/Snapper.entitlements
       TARGETED_DEVICE_FAMILY: "1"
       DEFINES_MODULE: YES
       ENABLE_MODULE_VERIFIER: YES
