@@ -1,0 +1,99 @@
+{
+  "multi_timestamp_no_signals": {
+    "equity_points": [
+      {
+        "cash": 10000.0,
+        "drawdown": 0.0,
+        "equity": 10000.0,
+        "position_value": 0.0
+      },
+      {
+        "cash": 10000.0,
+        "drawdown": 0.0,
+        "equity": 10000.0,
+        "position_value": 0.0
+      }
+    ],
+    "portfolio": {
+      "cash": 10000.0,
+      "positions": {},
+      "turnover": 0.0
+    },
+    "signals": [],
+    "trades": []
+  },
+  "signal_emitted_fill_skipped": {
+    "equity_points": [
+      {
+        "cash": 10000.0,
+        "drawdown": 0.0,
+        "equity": 10000.0,
+        "position_value": 0.0
+      }
+    ],
+    "portfolio": {
+      "cash": 10000.0,
+      "positions": {},
+      "turnover": 0.0
+    },
+    "signals": [
+      {
+        "indicators": {},
+        "instrument": "BTC-USD",
+        "price": 100.0,
+        "signal_type": "sell"
+      }
+    ],
+    "trades": []
+  },
+  "single_feed_buy_filled": {
+    "equity_points": [
+      {
+        "cash": 1e-06,
+        "drawdown": 0.0,
+        "equity": 10000.000001,
+        "position_value": 10000.0
+      }
+    ],
+    "portfolio": {
+      "cash": 1e-06,
+      "positions": {
+        "BTC-USD": {
+          "average_price": 100.0,
+          "quantity": 100.0,
+          "realized_pnl": 0.0
+        }
+      },
+      "turnover": 10000.0
+    },
+    "signals": [
+      {
+        "indicators": {},
+        "instrument": "BTC-USD",
+        "price": 100.0,
+        "signal_type": "buy"
+      }
+    ],
+    "trades": [
+      {
+        "fee": 0.0,
+        "instrument": "BTC-USD",
+        "pnl": null,
+        "position_after": 100.0,
+        "price": 100.0,
+        "quantity": 100.0,
+        "side": "buy"
+      }
+    ]
+  },
+  "warmup_gated_signal_dropped": {
+    "equity_points": [],
+    "portfolio": {
+      "cash": 10000.0,
+      "positions": {},
+      "turnover": 0.0
+    },
+    "signals": [],
+    "trades": []
+  }
+}
