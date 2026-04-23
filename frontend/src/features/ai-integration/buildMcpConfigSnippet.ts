@@ -6,7 +6,7 @@ export function buildMcpConfigSnippet(payload: DelegateCreatedPayload, origin: s
       mcpServers: {
         snapper: {
           command: 'npx',
-          args: ['-y', 'snapper-mcp'],
+          args: ['-y', '@mateusz-klatt/snapper-mcp'],
           env: {
             SNAPPER_BASE_URL: `${origin}/api/mcp`,
             SNAPPER_ACCESS_TOKEN: payload.access_token,
