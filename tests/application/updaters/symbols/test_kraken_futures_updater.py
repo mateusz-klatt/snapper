@@ -11,6 +11,7 @@ from snapper.application.updaters.symbols.kraken_futures import _build_native_sy
 from snapper.application.updaters.symbols.kraken_futures import _classify_asset_type
 from snapper.application.updaters.symbols.kraken_futures import _extract_expiry
 from snapper.application.updaters.symbols.kraken_futures import _normalize_currency
+from snapper.application.updaters.symbols.kraken_futures import _parse_expiry_datetime
 from snapper.config.app import AppSettings
 from snapper.core.types import AliasChannelEnum
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
@@ -203,6 +204,16 @@ class TestExtractExpiry:
         """
         schema = _make_schema(lastTradingTime="not-a-date")
         assert _extract_expiry(schema) is None
+
+
+class TestParseExpiryDatetime:
+    """Tests for _parse_expiry_datetime helper."""
+
+    def test_invalid_date_returns_none(self) -> None:
+        """Invalid ISO timestamps are ignored when parsing expiry datetimes."""
+        schema = _make_schema(lastTradingTime="not-a-date")
+
+        assert _parse_expiry_datetime(schema) is None
 
 
 class TestClassifyAssetType:

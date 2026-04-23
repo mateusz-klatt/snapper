@@ -162,7 +162,7 @@ _FUNDING_TYPE_TO_ACCRUAL_TYPE: dict[str, str] = {
 class SignalRoutingContext:
     """Parsed routing data for one signal delivery."""
 
-    exchange: str
+    exchange: OrderExchange
     mode: str
     strategy_tag: str | None
     wallet_public_id: str
@@ -1649,9 +1649,23 @@ class TraderCoordinator(RegisterableProcess):
         Returns:
             Matching engine or None if no engine found.
         """
+        exact_match = self._find_engine_by_pending_client_order_id(fill.client_order_id)
+        if exact_match is not None:
+            return exact_match
+        return self._find_engine_by_fill_scope(fill)
+
+    def _find_engine_by_pending_client_order_id(
+        self,
+        client_order_id: str,
+    ) -> TradingEngineService | None:
+        """Find the engine owning the in-flight client_order_id."""
         for engine in self.engines.values():
-            if engine.pending_client_order_id == fill.client_order_id:
+            if engine.pending_client_order_id == client_order_id:
                 return engine
+        return None
+
+    def _find_engine_by_fill_scope(self, fill: ExecutionData) -> TradingEngineService | None:
+        """Match a fill by wallet-aware or legacy instrument scope."""
         if fill.wallet_public_id:
             for engine in self.engines.values():
                 if (
@@ -1660,10 +1674,10 @@ class TraderCoordinator(RegisterableProcess):
                     and engine.wallet_public_id == fill.wallet_public_id
                 ):
                     return engine
-        else:
-            for engine in self.engines.values():
-                if engine.instrument == fill.instrument and engine.exchange == fill.exchange:
-                    return engine
+            return None
+        for engine in self.engines.values():
+            if engine.instrument == fill.instrument and engine.exchange == fill.exchange:
+                return engine
         return None
 
     async def _handle_execution_fill(self, topic: str, fill: ExecutionData) -> None:
@@ -1932,178 +1946,264 @@ class TraderCoordinator(RegisterableProcess):
             return
         shard = self.trade_service._get_or_create_shard(shard_key)
         now = datetime.now(UTC)
-        operator_pid: str | None = engine.operator_public_id or None
-        exchange_str = str(engine.exchange)
-        mode_str = str(engine.mode)
-
         if transition == "open":
-            existing = await self.repository.get_open_position_cycle(shard_key, as_of=now)
-            if existing is not None:
-                shard.active_cycle_public_id = existing["public_id"]
-                shard.active_cycle_max_qty = existing["max_qty"]
-                return
-            inst_pid = await self.repository.get_instrument_public_id_by_symbol(
-                native_symbol=engine.instrument,
-                exchange=exchange_str,
-                as_of=now,
+            await self._sync_open_position_cycle(
+                engine=engine,
+                shard=shard,
+                new_qty=new_qty,
+                fill=fill,
+                now=now,
             )
-            if inst_pid is None:
-                logger.warning(
-                    "ZMQTrader: position_cycle open skipped "
-                    "(unresolved instrument) shard={} symbol={}",
-                    shard_key,
-                    engine.instrument,
-                )
-                return
-            open_row: PositionCycleInsertRow = {
-                "instrument_public_id": inst_pid,
-                "exchange": exchange_str,
-                "mode": mode_str,
-                "shard_key": shard_key,
-                "wallet_public_id": engine.wallet_public_id,
-                "operator_public_id": operator_pid,
-                "direction": "long" if new_qty > 0 else "short",
-                "max_qty": abs(new_qty),
-                "status": "open",
-                "opened_at": fill.executed_at,
-                "opening_command_public_id": None,
-                "session_id": fill.session_id,
-                "sequence_id": fill.sequence_id,
-                "timestamp": now,
-            }
-            _id, new_pid = await self.repository.insert_position_cycle(open_row)
-            shard.active_cycle_public_id = new_pid
-            shard.active_cycle_max_qty = abs(new_qty)
             return
         if transition == "close":
-            cycle_id = shard.active_cycle_public_id
-            if cycle_id is None:
-                fallback = await self.repository.get_open_position_cycle(shard_key, as_of=now)
-                if fallback is not None:
-                    cycle_id = fallback["public_id"]
-                    logger.warning(
-                        "ZMQTrader: position_cycle close recovered via DB fallback "
-                        "(cache miss) shard={} cycle={}",
-                        shard_key,
-                        cycle_id,
-                    )
-            if cycle_id is None:
-                logger.warning(
-                    "ZMQTrader: position_cycle close skipped "
-                    "(no open cycle in cache or DB) shard={}",
-                    shard_key,
-                )
-                return
-            await self.repository.close_position_cycle(
-                cycle_public_id=cycle_id,
-                closed_at=fill.executed_at,
-                closing_command_public_id=None,
-                bus_time=now,
-                session_id=fill.session_id,
-                sequence_id=fill.sequence_id,
+            await self._sync_close_position_cycle(
+                shard_key=shard_key,
+                shard=shard,
+                fill=fill,
+                now=now,
             )
-            shard.active_cycle_public_id = None
-            shard.active_cycle_max_qty = 0.0
             return
         if transition == "flip":
-            cycle_id = shard.active_cycle_public_id
-            if cycle_id is None:
-                fallback = await self.repository.get_open_position_cycle(shard_key, as_of=now)
-                if fallback is not None:
-                    cycle_id = fallback["public_id"]
-                    logger.warning(
-                        "ZMQTrader: position_cycle flip recovered via DB fallback "
-                        "(cache miss) shard={} cycle={}",
-                        shard_key,
-                        cycle_id,
-                    )
-            if cycle_id is None:
-                logger.warning(
-                    "ZMQTrader: position_cycle flip skipped "
-                    "(no open cycle in cache or DB) shard={}",
-                    shard_key,
-                )
-                return
-            inst_pid = await self.repository.get_instrument_public_id_by_symbol(
-                native_symbol=engine.instrument,
-                exchange=exchange_str,
-                as_of=now,
+            await self._sync_flip_position_cycle(
+                engine=engine,
+                shard_key=shard_key,
+                shard=shard,
+                new_qty=new_qty,
+                fill=fill,
+                now=now,
             )
-            if inst_pid is None:
-                logger.warning(
-                    "ZMQTrader: position_cycle flip degraded to close-only "
-                    "(unresolved instrument) shard={} symbol={} closing cycle={}",
-                    shard_key,
-                    engine.instrument,
-                    cycle_id,
-                )
-                await self.repository.close_position_cycle(
-                    cycle_public_id=cycle_id,
-                    closed_at=fill.executed_at,
-                    closing_command_public_id=None,
-                    bus_time=now,
-                    session_id=fill.session_id,
-                    sequence_id=fill.sequence_id,
-                )
-                shard.active_cycle_public_id = None
-                shard.active_cycle_max_qty = 0.0
-                return
-            new_open_row: PositionCycleInsertRow = {
-                "instrument_public_id": inst_pid,
-                "exchange": exchange_str,
-                "mode": mode_str,
-                "shard_key": shard_key,
-                "wallet_public_id": engine.wallet_public_id,
-                "operator_public_id": operator_pid,
-                "direction": "long" if new_qty > 0 else "short",
-                "max_qty": abs(new_qty),
-                "status": "open",
-                "opened_at": fill.executed_at,
-                "opening_command_public_id": None,
-                "session_id": fill.session_id,
-                "sequence_id": fill.sequence_id,
-                "timestamp": now,
-            }
-            _id, new_pid = await self.repository.flip_position_cycle(
-                close_cycle_public_id=cycle_id,
-                new_open_row=new_open_row,
-                bus_time=now,
-                session_id=fill.session_id,
-                sequence_id=fill.sequence_id,
-            )
-            shard.active_cycle_public_id = new_pid
-            shard.active_cycle_max_qty = abs(new_qty)
             return
-        cycle_id = shard.active_cycle_public_id
-        if cycle_id is None:
-            fallback = await self.repository.get_open_position_cycle(shard_key, as_of=now)
-            if fallback is not None:
-                cycle_id = fallback["public_id"]
-                shard.active_cycle_public_id = cycle_id
-                shard.active_cycle_max_qty = fallback["max_qty"]
-                logger.warning(
-                    "ZMQTrader: position_cycle scale_up recovered via DB fallback "
-                    "(cache miss) shard={} cycle={}",
-                    shard_key,
-                    cycle_id,
-                )
-        if cycle_id is None:
+        await self._sync_scale_up_position_cycle(
+            shard_key=shard_key,
+            shard=shard,
+            new_qty=new_qty,
+            fill=fill,
+            now=now,
+        )
+
+    async def _sync_open_position_cycle(
+        self,
+        *,
+        engine: TradingEngineService,
+        shard: ShardState,
+        new_qty: float,
+        fill: ExecutionData,
+        now: datetime,
+    ) -> None:
+        """Insert or hydrate the open cycle after a flat-to-position transition."""
+        shard_key = engine._shard_key
+        existing = await self.repository.get_open_position_cycle(shard_key, as_of=now)
+        if existing is not None:
+            shard.active_cycle_public_id = existing["public_id"]
+            shard.active_cycle_max_qty = existing["max_qty"]
+            return
+        instrument_public_id = await self._lookup_position_cycle_instrument_public_id(
+            engine=engine,
+            now=now,
+        )
+        if instrument_public_id is None:
             logger.warning(
-                "ZMQTrader: position_cycle scale_up skipped "
-                "(no open cycle in cache or DB) shard={}",
+                "ZMQTrader: position_cycle open skipped "
+                "(unresolved instrument) shard={} symbol={}",
+                shard_key,
+                engine.instrument,
+            )
+            return
+        direction, max_qty = self._describe_position_cycle(new_qty)
+        open_row = self._build_position_cycle_insert_row(
+            engine=engine,
+            instrument_public_id=instrument_public_id,
+            direction=direction,
+            max_qty=max_qty,
+            opened_at=fill.executed_at,
+            timestamp=now,
+            session_id=fill.session_id,
+            sequence_id=fill.sequence_id,
+        )
+        _id, new_pid = await self.repository.insert_position_cycle(open_row)
+        shard.active_cycle_public_id = new_pid
+        shard.active_cycle_max_qty = max_qty
+
+    async def _sync_close_position_cycle(
+        self,
+        *,
+        shard_key: str,
+        shard: ShardState,
+        fill: ExecutionData,
+        now: datetime,
+    ) -> None:
+        """Close the active cycle and clear the in-memory cache."""
+        cycle_id = await self._resolve_active_cycle_public_id(
+            shard_key=shard_key,
+            shard=shard,
+            now=now,
+            transition="close",
+        )
+        if cycle_id is None:
+            return
+        await self._close_position_cycle_and_clear_cache(
+            shard=shard,
+            cycle_public_id=cycle_id,
+            fill=fill,
+            now=now,
+        )
+
+    async def _sync_flip_position_cycle(
+        self,
+        *,
+        engine: TradingEngineService,
+        shard_key: str,
+        shard: ShardState,
+        new_qty: float,
+        fill: ExecutionData,
+        now: datetime,
+    ) -> None:
+        """Flip the active cycle or degrade to close-only when identity is unresolved."""
+        cycle_id = await self._resolve_active_cycle_public_id(
+            shard_key=shard_key,
+            shard=shard,
+            now=now,
+            transition="flip",
+        )
+        if cycle_id is None:
+            return
+        instrument_public_id = await self._lookup_position_cycle_instrument_public_id(
+            engine=engine,
+            now=now,
+        )
+        if instrument_public_id is None:
+            logger.warning(
+                "ZMQTrader: position_cycle flip degraded to close-only "
+                "(unresolved instrument) shard={} symbol={} closing cycle={}",
+                shard_key,
+                engine.instrument,
+                cycle_id,
+            )
+            await self._close_position_cycle_and_clear_cache(
+                shard=shard,
+                cycle_public_id=cycle_id,
+                fill=fill,
+                now=now,
+            )
+            return
+        direction, max_qty = self._describe_position_cycle(new_qty)
+        new_open_row = self._build_position_cycle_insert_row(
+            engine=engine,
+            instrument_public_id=instrument_public_id,
+            direction=direction,
+            max_qty=max_qty,
+            opened_at=fill.executed_at,
+            timestamp=now,
+            session_id=fill.session_id,
+            sequence_id=fill.sequence_id,
+        )
+        _id, new_pid = await self.repository.flip_position_cycle(
+            close_cycle_public_id=cycle_id,
+            new_open_row=new_open_row,
+            bus_time=now,
+            session_id=fill.session_id,
+            sequence_id=fill.sequence_id,
+        )
+        shard.active_cycle_public_id = new_pid
+        shard.active_cycle_max_qty = max_qty
+
+    async def _sync_scale_up_position_cycle(
+        self,
+        *,
+        shard_key: str,
+        shard: ShardState,
+        new_qty: float,
+        fill: ExecutionData,
+        now: datetime,
+    ) -> None:
+        """Persist max_qty growth for an already-open cycle."""
+        cycle_id = await self._resolve_active_cycle_public_id(
+            shard_key=shard_key,
+            shard=shard,
+            now=now,
+            transition="scale_up",
+            hydrate_cache=True,
+        )
+        if cycle_id is None:
+            return
+        _direction, new_max = self._describe_position_cycle(new_qty)
+        if new_max <= shard.active_cycle_max_qty:
+            return
+        await self.repository.update_position_cycle_max_qty(
+            cycle_public_id=cycle_id,
+            new_max_qty=new_max,
+            bus_time=now,
+            session_id=fill.session_id,
+            sequence_id=fill.sequence_id,
+        )
+        shard.active_cycle_max_qty = new_max
+
+    async def _lookup_position_cycle_instrument_public_id(
+        self,
+        *,
+        engine: TradingEngineService,
+        now: datetime,
+    ) -> str | None:
+        """Resolve the instrument_public_id used by position_cycle writes."""
+        return await self.repository.get_instrument_public_id_by_symbol(
+            native_symbol=engine.instrument,
+            exchange=str(engine.exchange),
+            as_of=now,
+        )
+
+    async def _resolve_active_cycle_public_id(
+        self,
+        *,
+        shard_key: str,
+        shard: ShardState,
+        now: datetime,
+        transition: str,
+        hydrate_cache: bool = False,
+    ) -> str | None:
+        """Resolve the active cycle id from cache first, then from the DB."""
+        cycle_id = shard.active_cycle_public_id
+        if cycle_id is not None:
+            return cycle_id
+        fallback = await self.repository.get_open_position_cycle(shard_key, as_of=now)
+        if fallback is None:
+            logger.warning(
+                "ZMQTrader: position_cycle {} skipped (no open cycle in cache or DB) shard={}",
+                transition,
                 shard_key,
             )
-            return
-        new_max = abs(new_qty)
-        if new_max > shard.active_cycle_max_qty:
-            await self.repository.update_position_cycle_max_qty(
-                cycle_public_id=cycle_id,
-                new_max_qty=new_max,
-                bus_time=now,
-                session_id=fill.session_id,
-                sequence_id=fill.sequence_id,
-            )
-            shard.active_cycle_max_qty = new_max
+            return None
+        cycle_id = fallback["public_id"]
+        if hydrate_cache:
+            shard.active_cycle_public_id = cycle_id
+            shard.active_cycle_max_qty = fallback["max_qty"]
+        logger.warning(
+            "ZMQTrader: position_cycle {} recovered via DB fallback "
+            "(cache miss) shard={} cycle={}",
+            transition,
+            shard_key,
+            cycle_id,
+        )
+        return cycle_id
+
+    async def _close_position_cycle_and_clear_cache(
+        self,
+        *,
+        shard: ShardState,
+        cycle_public_id: str,
+        fill: ExecutionData,
+        now: datetime,
+    ) -> None:
+        """Close the active cycle row and clear the shard cache."""
+        await self.repository.close_position_cycle(
+            cycle_public_id=cycle_public_id,
+            closed_at=fill.executed_at,
+            closing_command_public_id=None,
+            bus_time=now,
+            session_id=fill.session_id,
+            sequence_id=fill.sequence_id,
+        )
+        shard.active_cycle_public_id = None
+        shard.active_cycle_max_qty = 0.0
 
     def _sync_status_to_trade_service(self, order_status: OrderData, parsed: Any) -> None:
         """Shadow-write order status to TradeService.
@@ -2712,106 +2812,153 @@ class TraderCoordinator(RegisterableProcess):
             signal: Validated signal envelope with instrument, side,
                 strength, and price information.
         """
-        parsed = parse_signal_topic(self._current_topic)
-        if parsed is None:
-            logger.warning(f"ZMQTrader: Invalid signal topic format: {self._current_topic}")
+        context = self._build_signal_routing_context(signal)
+        if context is None:
             return
-        exchange_str = parsed.exchange
-        mode = parsed.signal_type
-        valid_exchanges = get_args(OrderExchange)
-        if exchange_str not in valid_exchanges:
-            logger.warning(f"ZMQTrader: Unknown exchange '{exchange_str}' in topic")
+        if self._should_drop_signal_for_foreign_shard(context.shard_key):
             return
-        exchange = cast(OrderExchange, exchange_str)
-        instrument = signal.instrument
-        if not is_tradeable(instrument, exchange):
-            logger.warning(
-                f"ZMQTrader: instrument {instrument} not tradeable on {exchange}, "
-                f"dropping signal"
-            )
-            return
-        side = signal.side
-        strength = signal.strength
-        price = signal.price
-        strategy_name = signal.strategy_name or "unknown"
-        if not price or price <= 0:
-            logger.warning(f"ZMQTrader: Invalid signal (missing or invalid price): {signal}")
-            return
-        wallet_public_id = signal.wallet_public_id or ""
-        operator_public_id = signal.operator_public_id or ""
-        engine_key = self._build_engine_key(instrument, exchange, mode, wallet_public_id)
-        strategy_tag = parsed.signal_type if exchange == ExchangeEnum.PAPER else None
-        execution_mode = (
-            ExecutionModeEnum.PAPER if exchange == ExchangeEnum.PAPER else ExecutionModeEnum.LIVE
-        )
-        shard_key = _compute_shard_key(
-            instrument=instrument,
-            exchange=exchange,
-            mode=execution_mode,
-            wallet_public_id=wallet_public_id,
-            strategy_tag=strategy_tag,
-        )
-        if self._ownership is not None and not self._ownership.owns(shard_key):
-            logger.debug(
-                "ZMQTrader: dropping signal for foreign shard {} (owner {}/{})",
-                shard_key,
-                self._ownership.instance_id,
-                self._ownership.instance_count,
-            )
-            return
-        halt_key = self.engines[engine_key]._shard_key if engine_key in self.engines else shard_key
+        halt_key = self._resolve_signal_halt_key(context)
         if self.trade_service.is_halted(halt_key):
             logger.warning(f"ZMQTrader: shard {halt_key} is halted, dropping signal")
             return
         assert (
             self.execution_publisher is not None
         ), "execution_publisher not initialized - _setup_external_execution must be called first"
-        if engine_key not in self.engines:
-            logger.info(f"ZMQTrader: Creating new engine for {engine_key}")
-            await self._ensure_instrument(instrument, exchange=exchange)
-            risk = RiskEvaluator(
-                RiskConfigModel(
-                    r_per_trade=self.settings.risk_r_per_trade,
-                    max_leverage=self.settings.risk_max_leverage,
-                    max_drawdown=self.settings.risk_max_drawdown,
-                )
-            )
-            specs_map = await self._resolve_instrument_specs(instrument, exchange)
-            assert self.msg_publisher is not None, "MessagePublisher not initialized"
-
-            repo_for_engine = (
-                self.repository if isinstance(self.repository, SQLAlchemyRepository) else None
-            )
-            self.engines[engine_key] = TradingEngineService(
-                instrument,
-                execution_socket=self.msg_publisher,
-                risk=risk,
-                cfg=EngineConfigModel(),
-                instrument_specs=specs_map,
-                exchange=exchange,
-                repository=repo_for_engine,
-                outbox=self.outbox,
-                strategy_tag=strategy_tag,
-                wallet_public_id=wallet_public_id,
-                operator_public_id=operator_public_id,
-                ownership=self._ownership,
-                caps_enforcer=self._caps_enforcer,
-            )
-            self.last_signal_time[engine_key] = 0.0
-        self.last_signal_time[engine_key] = time.time()
-        desired_units = strength if side == TradeSideEnum.BUY else -strength
+        engine = await self._get_or_create_signal_engine(signal, context)
+        self.last_signal_time[context.engine_key] = time.time()
+        price = cast(float, signal.price)
+        desired_units = signal.strength if signal.side == TradeSideEnum.BUY else -signal.strength
+        strategy_name = signal.strategy_name or "unknown"
         logger.info(
             f"ZMQTrader: Processing signal from {strategy_name} - "
-            f"{engine_key} {side} (strength={strength:.2f}, price={price:.2f}, "
+            f"{context.engine_key} {signal.side} "
+            f"(strength={signal.strength:.2f}, price={price:.2f}, "
             f"desired_units={desired_units:.4f})"
         )
         signaled_at = signal.fired_at.timestamp()
-        engine = self.engines[engine_key]
         prev_oid = engine.pending_client_order_id
         await engine.execute_desired_units(desired_units, price, signaled_at=signaled_at)
         new_oid = engine.pending_client_order_id
         if new_oid and new_oid != prev_oid:
             self._order_shard_keys[new_oid] = engine._shard_key
+
+    def _build_signal_routing_context(self, signal: SignalData) -> SignalRoutingContext | None:
+        """Parse and validate the routing identity for one signal."""
+        parsed = parse_signal_topic(self._current_topic)
+        if parsed is None:
+            logger.warning(f"ZMQTrader: Invalid signal topic format: {self._current_topic}")
+            return None
+        exchange = self._validate_signal_exchange(parsed.exchange)
+        if exchange is None:
+            return None
+        if not self._validate_signal_payload(signal, exchange):
+            return None
+        wallet_public_id = signal.wallet_public_id or ""
+        strategy_tag = parsed.signal_type if exchange == ExchangeEnum.PAPER else None
+        execution_mode = (
+            ExecutionModeEnum.PAPER if exchange == ExchangeEnum.PAPER else ExecutionModeEnum.LIVE
+        )
+        return SignalRoutingContext(
+            exchange=exchange,
+            mode=parsed.signal_type,
+            strategy_tag=strategy_tag,
+            wallet_public_id=wallet_public_id,
+            operator_public_id=signal.operator_public_id or "",
+            engine_key=self._build_engine_key(
+                signal.instrument,
+                exchange,
+                parsed.signal_type,
+                wallet_public_id,
+            ),
+            shard_key=_compute_shard_key(
+                instrument=signal.instrument,
+                exchange=exchange,
+                mode=execution_mode,
+                wallet_public_id=wallet_public_id,
+                strategy_tag=strategy_tag,
+            ),
+        )
+
+    def _validate_signal_exchange(self, exchange_str: str) -> OrderExchange | None:
+        """Validate the exchange segment from the current signal topic."""
+        if exchange_str in get_args(OrderExchange):
+            return cast(OrderExchange, exchange_str)
+        logger.warning(f"ZMQTrader: Unknown exchange '{exchange_str}' in topic")
+        return None
+
+    def _validate_signal_payload(self, signal: SignalData, exchange: OrderExchange) -> bool:
+        """Validate tradeability and price before routing a signal."""
+        instrument = signal.instrument
+        if not is_tradeable(instrument, exchange):
+            logger.warning(
+                f"ZMQTrader: instrument {instrument} not tradeable on {exchange}, "
+                f"dropping signal"
+            )
+            return False
+        if not signal.price or signal.price <= 0:
+            logger.warning(f"ZMQTrader: Invalid signal (missing or invalid price): {signal}")
+            return False
+        return True
+
+    def _should_drop_signal_for_foreign_shard(self, shard_key: str) -> bool:
+        """Return whether the current coordinator does not own the routed shard."""
+        if self._ownership is None or self._ownership.owns(shard_key):
+            return False
+        logger.debug(
+            "ZMQTrader: dropping signal for foreign shard {} (owner {}/{})",
+            shard_key,
+            self._ownership.instance_id,
+            self._ownership.instance_count,
+        )
+        return True
+
+    def _resolve_signal_halt_key(self, context: SignalRoutingContext) -> str:
+        """Resolve the shard key used by the halt guard."""
+        if context.engine_key in self.engines:
+            return self.engines[context.engine_key]._shard_key
+        return context.shard_key
+
+    async def _get_or_create_signal_engine(
+        self,
+        signal: SignalData,
+        context: SignalRoutingContext,
+    ) -> TradingEngineService:
+        """Fetch the routed engine or create it with the current settings."""
+        existing = self.engines.get(context.engine_key)
+        if existing is not None:
+            return existing
+        logger.info(f"ZMQTrader: Creating new engine for {context.engine_key}")
+        await self._ensure_instrument(signal.instrument, exchange=context.exchange)
+        risk = RiskEvaluator(
+            RiskConfigModel(
+                r_per_trade=self.settings.risk_r_per_trade,
+                max_leverage=self.settings.risk_max_leverage,
+                max_drawdown=self.settings.risk_max_drawdown,
+            )
+        )
+        specs_map = await self._resolve_instrument_specs(signal.instrument, context.exchange)
+        assert self.msg_publisher is not None, "MessagePublisher not initialized"
+        repo_for_engine = (
+            self.repository if isinstance(self.repository, SQLAlchemyRepository) else None
+        )
+        engine = TradingEngineService(
+            signal.instrument,
+            execution_socket=self.msg_publisher,
+            risk=risk,
+            cfg=EngineConfigModel(),
+            instrument_specs=specs_map,
+            exchange=context.exchange,
+            repository=repo_for_engine,
+            outbox=self.outbox,
+            strategy_tag=context.strategy_tag,
+            wallet_public_id=context.wallet_public_id,
+            operator_public_id=context.operator_public_id,
+            ownership=self._ownership,
+            caps_enforcer=self._caps_enforcer,
+        )
+        self.engines[context.engine_key] = engine
+        self.last_signal_time[context.engine_key] = 0.0
+        return engine
 
     async def _signal_health_monitor(self) -> None:
         """Monitor signal health and warn on signal gaps.

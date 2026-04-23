@@ -752,3 +752,17 @@ class TestResolveRollInfo:
                 old_close=0.0,
                 new_close=110.0,
             )
+
+
+class TestAdjustOptionalPrice:
+    """Tests for optional price adjustment helper."""
+
+    def test_returns_none_for_missing_value(self) -> None:
+        """Missing optional price values stay unset after adjustment."""
+        result = ContinuousContractBuilder._adjust_optional_price(
+            value=None,
+            cum_factor=1.1,
+            method="ratio",
+        )
+
+        assert result is None

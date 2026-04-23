@@ -125,97 +125,17 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
                 processed_symbol_public_ids: set[str] = set()
                 now = datetime.now(UTC)
                 for raw_instrument in symbols:
-                    try:
-                        schema = KrakenFuturesInstrumentSchema.model_validate(raw_instrument)
-                    except Exception as exc:
-                        logger.warning(
-                            f"Skipping invalid instrument: {raw_instrument.get('symbol', '?')}: {exc}"
-                        )
+                    schema = self._validate_instrument_schema(raw_instrument)
+                    if schema is None:
                         skipped_count += 1
                         continue
 
-                    native = _build_native_symbol(schema)
-                    if native is None:
-                        logger.debug(f"Skipping unmappable instrument: {schema.symbol}")
+                    symbol_public_id = self._persist_instrument_schema(session, schema, now)
+                    if symbol_public_id is None:
                         skipped_count += 1
                         continue
 
-                    base = _normalize_currency(schema.base or "")
-                    quote = _normalize_currency(schema.quote or "")
-                    asset_type = _classify_asset_type(schema)
-
-                    symbol_public_id = self._upsert_symbol(
-                        session,
-                        native,
-                        base,
-                        quote,
-                        asset_type,
-                        now,
-                        session_id=self._tracker.session_id,
-                        sequence_id=self._tracker.next_sequence("symbols"),
-                    )
                     processed_symbol_public_ids.add(symbol_public_id)
-
-                    self._upsert_alias(
-                        session,
-                        symbol_public_id,
-                        ExchangeEnum.KRAKEN_FUTURES,
-                        AliasChannelEnum.WS,
-                        schema.symbol,
-                        now,
-                        self._tracker.session_id,
-                        self._tracker.next_sequence("aliases"),
-                    )
-
-                    ccxt_symbol = _build_ccxt_symbol(schema)
-                    if ccxt_symbol:
-                        self._upsert_alias(
-                            session,
-                            symbol_public_id,
-                            ExchangeEnum.KRAKEN_FUTURES,
-                            AliasChannelEnum.CCXT,
-                            ccxt_symbol,
-                            now,
-                            self._tracker.session_id,
-                            self._tracker.next_sequence("aliases"),
-                        )
-
-                    self._upsert_capability(
-                        session,
-                        symbol_public_id,
-                        ExchangeEnum.KRAKEN_FUTURES,
-                        True,
-                        False,
-                        "kraken_futures_updater",
-                        None,
-                        now,
-                        self._tracker.session_id,
-                        self._tracker.next_sequence(_SEQ_KEY_CAPABILITIES),
-                    )
-
-                    instrument_public_id = self._ensure_instrument_identity(
-                        session,
-                        symbol_public_id,
-                        ExchangeEnum.KRAKEN_FUTURES,
-                        now,
-                        session_id=self._tracker.session_id,
-                        sequence_id=self._tracker.next_sequence("instruments"),
-                    )
-
-                    expiry_dt = _parse_expiry_datetime(schema)
-                    kind = "perpetual" if not schema.last_trading_time else "future"
-                    self._revise_instrument_spec(
-                        session,
-                        instrument_public_id,
-                        now,
-                        session_id=self._tracker.session_id,
-                        sequence_id=self._tracker.next_sequence("specs"),
-                        expiry_at=expiry_dt,
-                        instrument_kind=kind,
-                        funding_type="perpetual_funding" if kind == "perpetual" else None,
-                        funding_frequency_hours=1 if kind == "perpetual" else None,
-                        max_funding_rate=0.0025 if kind == "perpetual" else None,
-                    )
                     created_count += 1
 
                 deactivated = self._reconcile_capabilities(
@@ -236,6 +156,147 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
         except Exception as e:
             logger.error(f"Error updating Kraken Futures database: {e}")
             raise
+
+    def _validate_instrument_schema(
+        self,
+        raw_instrument: dict[str, Any],
+    ) -> KrakenFuturesInstrumentSchema | None:
+        """Validate one raw Kraken Futures instrument payload."""
+        try:
+            return KrakenFuturesInstrumentSchema.model_validate(raw_instrument)
+        except Exception as exc:
+            logger.warning(
+                f"Skipping invalid instrument: {raw_instrument.get('symbol', '?')}: {exc}"
+            )
+            return None
+
+    def _persist_instrument_schema(
+        self,
+        session: Any,
+        schema: KrakenFuturesInstrumentSchema,
+        now: datetime,
+    ) -> str | None:
+        """Persist one validated instrument and return its symbol public ID."""
+        symbol_metadata = self._resolve_symbol_metadata(schema)
+        if symbol_metadata is None:
+            logger.debug(f"Skipping unmappable instrument: {schema.symbol}")
+            return None
+
+        native, base, quote, asset_type = symbol_metadata
+        symbol_public_id = self._upsert_symbol(
+            session,
+            native,
+            base,
+            quote,
+            asset_type,
+            now,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence("symbols"),
+        )
+        self._upsert_symbol_aliases(session, symbol_public_id, schema, now)
+        self._upsert_capability(
+            session,
+            symbol_public_id,
+            ExchangeEnum.KRAKEN_FUTURES,
+            True,
+            False,
+            "kraken_futures_updater",
+            None,
+            now,
+            self._tracker.session_id,
+            self._tracker.next_sequence(_SEQ_KEY_CAPABILITIES),
+        )
+        instrument_public_id = self._ensure_instrument_identity(
+            session,
+            symbol_public_id,
+            ExchangeEnum.KRAKEN_FUTURES,
+            now,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence("instruments"),
+        )
+        self._revise_schema_instrument_spec(session, instrument_public_id, schema, now)
+        return symbol_public_id
+
+    @staticmethod
+    def _resolve_symbol_metadata(
+        schema: KrakenFuturesInstrumentSchema,
+    ) -> tuple[str, str, str, AssetTypeEnum] | None:
+        """Resolve the native symbol and normalized identity fields."""
+        native = _build_native_symbol(schema)
+        if native is None:
+            return None
+        return (
+            native,
+            _normalize_currency(schema.base or ""),
+            _normalize_currency(schema.quote or ""),
+            _classify_asset_type(schema),
+        )
+
+    def _upsert_symbol_aliases(
+        self,
+        session: Any,
+        symbol_public_id: str,
+        schema: KrakenFuturesInstrumentSchema,
+        now: datetime,
+    ) -> None:
+        """Persist the WS alias and optional CCXT alias for one symbol."""
+        self._upsert_alias(
+            session,
+            symbol_public_id,
+            ExchangeEnum.KRAKEN_FUTURES,
+            AliasChannelEnum.WS,
+            schema.symbol,
+            now,
+            self._tracker.session_id,
+            self._tracker.next_sequence("aliases"),
+        )
+        ccxt_symbol = _build_ccxt_symbol(schema)
+        if ccxt_symbol is None:
+            return
+        self._upsert_alias(
+            session,
+            symbol_public_id,
+            ExchangeEnum.KRAKEN_FUTURES,
+            AliasChannelEnum.CCXT,
+            ccxt_symbol,
+            now,
+            self._tracker.session_id,
+            self._tracker.next_sequence("aliases"),
+        )
+
+    def _revise_schema_instrument_spec(
+        self,
+        session: Any,
+        instrument_public_id: str,
+        schema: KrakenFuturesInstrumentSchema,
+        now: datetime,
+    ) -> None:
+        """Persist instrument spec fields derived from the Kraken catalog."""
+        expiry_at, kind, funding_type, funding_frequency_hours, max_funding_rate = (
+            self._instrument_spec_fields(schema)
+        )
+        self._revise_instrument_spec(
+            session,
+            instrument_public_id,
+            now,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence("specs"),
+            expiry_at=expiry_at,
+            instrument_kind=kind,
+            funding_type=funding_type,
+            funding_frequency_hours=funding_frequency_hours,
+            max_funding_rate=max_funding_rate,
+        )
+
+    @staticmethod
+    def _instrument_spec_fields(
+        schema: KrakenFuturesInstrumentSchema,
+    ) -> tuple[datetime | None, str, str | None, int | None, float | None]:
+        """Build the instrument spec fields derived from exchange metadata."""
+        expiry_at = _parse_expiry_datetime(schema)
+        if schema.last_trading_time:
+            return expiry_at, "future", None, None, None
+        return expiry_at, "perpetual", "perpetual_funding", 1, 0.0025
 
 
 def _parse_expiry_datetime(schema: KrakenFuturesInstrumentSchema) -> datetime | None:

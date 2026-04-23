@@ -360,46 +360,72 @@ class UnderlyingUpdater:
         per_underlying: dict[str, list[PatternRule]] = {}
 
         for defn in config.underlyings:
-            matching_rules: list[PatternRule] = []
-            for rule in defn.patterns:
-                if rule.exchange.value != inst.exchange:
-                    continue
-                if rule_matches(rule, inst.native_symbol):
-                    matching_rules.append(rule)
+            matching_rules = self._matching_rules_for_definition(defn, inst)
             if matching_rules:
                 per_underlying[defn.ticker] = matching_rules
 
         results: list[_MatchResult] = []
         has_intra_conflict = False
         for ticker, rules in per_underlying.items():
-            first = rules[0]
-            conflict = False
-            for r in rules[1:]:
-                if (
-                    r.relationship_type != first.relationship_type
-                    or r.contract_family != first.contract_family
-                    or r.instrument_type != first.instrument_type
-                    or r.expiry_override != first.expiry_override
-                ):
-                    logger.error(
-                        f"Intra-underlying conflict for {inst.native_symbol} "
-                        f"({inst.exchange}) in {ticker}: rules disagree on metadata"
-                    )
-                    conflict = True
-                    has_intra_conflict = True
-                    break
-            if not conflict:
-                results.append(
-                    _MatchResult(
-                        underlying_ticker=ticker,
-                        relationship_type=first.relationship_type.value,
-                        contract_family=first.contract_family,
-                        instrument_type=first.instrument_type,
-                        expiry_override=first.expiry_override,
-                    )
-                )
+            match = self._build_underlying_match(ticker, rules, inst)
+            if match is None:
+                has_intra_conflict = True
+                continue
+            results.append(match)
 
         return results, has_intra_conflict
+
+    @staticmethod
+    def _matching_rules_for_definition(
+        defn: UnderlyingDefinition,
+        inst: _InstrumentInfo,
+    ) -> list[PatternRule]:
+        """Collect the rules from one underlying that match an instrument."""
+        return [
+            rule
+            for rule in defn.patterns
+            if rule.exchange.value == inst.exchange and rule_matches(rule, inst.native_symbol)
+        ]
+
+    @staticmethod
+    def _build_underlying_match(
+        ticker: str,
+        rules: list[PatternRule],
+        inst: _InstrumentInfo,
+    ) -> _MatchResult | None:
+        """Build the resolved match for one underlying or report a conflict."""
+        first = rules[0]
+        if UnderlyingUpdater._has_conflicting_rule_metadata(first, rules[1:]):
+            logger.error(
+                f"Intra-underlying conflict for {inst.native_symbol} "
+                f"({inst.exchange}) in {ticker}: rules disagree on metadata"
+            )
+            return None
+        return _MatchResult(
+            underlying_ticker=ticker,
+            relationship_type=first.relationship_type.value,
+            contract_family=first.contract_family,
+            instrument_type=first.instrument_type,
+            expiry_override=first.expiry_override,
+        )
+
+    @staticmethod
+    def _has_conflicting_rule_metadata(
+        first: PatternRule,
+        rules: list[PatternRule],
+    ) -> bool:
+        """Detect whether multiple matching rules disagree on persisted metadata."""
+        return any(UnderlyingUpdater._rule_metadata_differs(first, rule) for rule in rules)
+
+    @staticmethod
+    def _rule_metadata_differs(first: PatternRule, rule: PatternRule) -> bool:
+        """Compare the persisted metadata carried by two matching rules."""
+        return (
+            rule.relationship_type != first.relationship_type
+            or rule.contract_family != first.contract_family
+            or rule.instrument_type != first.instrument_type
+            or rule.expiry_override != first.expiry_override
+        )
 
     async def _apply_yaml_spec_fallbacks(
         self,
@@ -452,11 +478,12 @@ class UnderlyingUpdater:
         needs_expiry = match.expiry_override is not None and current_expiry is None
         if not needs_kind and not needs_expiry:
             return None
-        return replace(
+        updated_spec: InstrumentSpecInput = replace(
             base_spec,
             expiry_at=match.expiry_override if needs_expiry else current_expiry,
             instrument_kind=match.instrument_type if needs_kind else current_kind,
         )
+        return updated_spec
 
     @staticmethod
     def _base_fallback_spec(existing: InstrumentSpecRow | None) -> InstrumentSpecInput:

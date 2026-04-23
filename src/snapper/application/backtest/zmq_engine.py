@@ -25,6 +25,8 @@ allocated so misconfigured runs do not consume ephemeral ports.
 """
 
 import asyncio
+from collections.abc import Awaitable
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 from typing import cast
@@ -48,6 +50,76 @@ from snapper.strategies.factory import StrategyFactory
 from snapper.strategies.models import StrategyConfig
 
 _BROKER_SUB_TIMEOUT_S: float = 5.0
+
+
+def _strategy_task(strategy: object | None, attr_name: str) -> asyncio.Task[None] | None:
+    """Fetch one optional cleanup task from the strategy-like object."""
+    if strategy is None:
+        return None
+    return cast(asyncio.Task[None] | None, getattr(strategy, attr_name, None))
+
+
+def _cleanup_tasks(
+    publisher_task: asyncio.Task[None] | None,
+    strategy: object | None,
+) -> set[asyncio.Task[None]]:
+    """Collect every task that should be cancelled before teardown."""
+    return {
+        task
+        for task in (
+            publisher_task,
+            _strategy_task(strategy, "_listen_task"),
+            _strategy_task(strategy, "_heartbeat_task"),
+        )
+        if task is not None
+    }
+
+
+def _cancel_cleanup_tasks(tasks: set[asyncio.Task[None]]) -> None:
+    """Cancel each still-running cleanup task."""
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+
+
+def _log_cleanup_wait_results(
+    done: set[asyncio.Task[None]],
+    pending: set[asyncio.Task[None]],
+) -> None:
+    """Emit diagnostics for leaked tasks and already-surfaced exceptions."""
+    for task in pending:
+        logger.error(
+            "cleanup: task {!r} did not terminate within 2s after cancel — leak",
+            task.get_name(),
+        )
+    for task in done:
+        if not task.cancelled() and task.exception() is not None:
+            logger.debug(
+                "cleanup: task {!r} finished with exception (already surfaced)",
+                task.get_name(),
+            )
+
+
+async def _wait_for_cleanup_tasks(tasks: set[asyncio.Task[None]]) -> None:
+    """Wait up to two seconds for cancelled tasks, then log the outcome."""
+    if not tasks:
+        return
+    done, pending = await asyncio.wait(tasks, timeout=2.0)
+    _log_cleanup_wait_results(done=done, pending=pending)
+
+
+async def _stop_cleanup_target(
+    stop_call: Callable[[], Awaitable[object]],
+    timeout_message: str,
+    exception_message: str,
+) -> None:
+    """Run one stop coroutine under the shared teardown timeout policy."""
+    try:
+        await asyncio.wait_for(stop_call(), timeout=5.0)
+    except TimeoutError:
+        logger.error(timeout_message)
+    except Exception:
+        logger.exception(exception_message)
 
 
 class ZmqReplayEngine:
@@ -253,47 +325,20 @@ class ZmqReplayEngine:
         investigate; ``cancel()`` already fired so they are detached but
         will eventually finish.
         """
-        listen_task: asyncio.Task[None] | None = None
-        heartbeat_task: asyncio.Task[None] | None = None
+        tasks = _cleanup_tasks(publisher_task, strategy)
+        _cancel_cleanup_tasks(tasks)
+        await _wait_for_cleanup_tasks(tasks)
         if strategy is not None:
-            listen_task = getattr(strategy, "_listen_task", None)
-            heartbeat_task = getattr(strategy, "_heartbeat_task", None)
-        awaitable: set[asyncio.Task[Any]] = {
-            t for t in (publisher_task, listen_task, heartbeat_task) if t is not None
-        }
-        for t in awaitable:
-            if not t.done():
-                t.cancel()
-        if awaitable:
-            done, pending = await asyncio.wait(awaitable, timeout=2.0)
-            for t in pending:
-                logger.error(
-                    "cleanup: task {!r} did not terminate within 2s after cancel — leak",
-                    t.get_name(),
-                )
-            for t in done:
-                if not t.cancelled() and t.exception() is not None:
-                    logger.debug(
-                        "cleanup: task {!r} finished with exception (already surfaced)",
-                        t.get_name(),
-                    )
-        if strategy is not None:
-            try:
-                await asyncio.wait_for(strategy.stop(), timeout=5.0)
-            except TimeoutError:
-                logger.error(
-                    "cleanup: strategy.stop() exceeded 5s — proceeding to broker.stop "
-                    "to avoid leaking the per-run broker"
-                )
-            except Exception:
-                logger.exception("cleanup: strategy.stop() raised — continuing teardown")
+            await _stop_cleanup_target(
+                strategy.stop,
+                "cleanup: strategy.stop() exceeded 5s — proceeding to broker.stop "
+                "to avoid leaking the per-run broker",
+                "cleanup: strategy.stop() raised — continuing teardown",
+            )
         if broker is not None:
-            try:
-                await asyncio.wait_for(broker.stop(), timeout=5.0)
-            except TimeoutError:
-                logger.error(
-                    "cleanup: broker.stop() exceeded 5s — ports may stay bound until "
-                    "the worker process exits"
-                )
-            except Exception:
-                logger.exception("cleanup: broker.stop() raised — continuing teardown")
+            await _stop_cleanup_target(
+                broker.stop,
+                "cleanup: broker.stop() exceeded 5s — ports may stay bound until "
+                "the worker process exits",
+                "cleanup: broker.stop() raised — continuing teardown",
+            )

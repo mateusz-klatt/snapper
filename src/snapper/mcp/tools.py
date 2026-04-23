@@ -24,6 +24,7 @@ list_plans, get_status) are / scope.
 
 import datetime as dt
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from decimal import Decimal
@@ -53,6 +54,29 @@ _MCP_TOOL_STREAM = "rest.mcp"
 
 _PG_UNIQUE_VIOLATION_SQLSTATE = "23505"
 _SQLITE_CONSTRAINT_UNIQUE_EXTCODE = 2067
+
+
+@dataclass(frozen=True)
+class _PreparedManualOrder:
+    """Precomputed context for the MCP manual-order tool."""
+
+    repo: Repository
+    enforcer: TradingCapsEnforcer
+    submission: TradeCommandSubmission
+    plan_row: ExecutionPlanInsertRow
+    exchange: str
+    instrument: str
+    side: str
+    order_type: str
+    quantity: float
+    price: float | None
+    created_at: datetime
+    bus_time: dt.datetime
+    wallet_public_id: str
+    operator_public_id: str | None
+    user_public_id: str
+    shard_key: str
+    client_order_id: str
 
 
 def _is_unique_constraint_violation(exc: IntegrityError) -> bool:
@@ -121,6 +145,197 @@ def _require_permission(claims: TokenClaims, permission: Permission) -> None:
         )
 
 
+def _get_repository_or_raise(repository_getter: Callable[[], Repository | None]) -> Repository:
+    """Return the initialized repository singleton or raise a stable error."""
+    repo = repository_getter()
+    if repo is None:
+        raise RuntimeError(
+            "Repository not yet initialized; MCP tool dispatched before lifespan startup."
+        )
+    return repo
+
+
+def _get_write_dependencies(
+    repository_getter: Callable[[], Repository | None],
+    caps_enforcer_getter: Callable[[], TradingCapsEnforcer | None],
+) -> tuple[Repository, TradingCapsEnforcer]:
+    """Return initialized write-path dependencies or raise a stable error."""
+    repo = repository_getter()
+    enforcer = caps_enforcer_getter()
+    if repo is None or enforcer is None:
+        raise RuntimeError(
+            "Repository or caps enforcer not initialized; MCP tool dispatched "
+            "before lifespan startup."
+        )
+    return repo, enforcer
+
+
+async def _prepare_manual_order(
+    *,
+    repository_getter: Callable[[], Repository | None],
+    caps_enforcer_getter: Callable[[], TradingCapsEnforcer | None],
+    claims_getter: Callable[[], TokenClaims],
+    exchange: str,
+    instrument: str,
+    instrument_public_id: str,
+    side: str,
+    order_type: str,
+    quantity: float,
+    wallet_public_id: str,
+    idempotency_key: str,
+    price: float | None,
+    operator_public_id: str | None,
+) -> _PreparedManualOrder:
+    """Validate access and precompute immutable rows for manual-order dispatch."""
+    claims = claims_getter()
+    _require_permission(claims, Permission.CREATE_ORDERS)
+    repo, enforcer = _get_write_dependencies(repository_getter, caps_enforcer_getter)
+    created_at = datetime.now(UTC)
+    ensure_operator_in_claims(claims, operator_public_id)
+    await validate_user_wallet_scope(claims, wallet_public_id, repo, as_of=created_at)
+    bus_time = dt.datetime.now(dt.UTC)
+    shard_key = f"{exchange}.{instrument}.live"
+    client_order_id = str(uuid7())
+    resolved_operator_public_id = operator_public_id or claims.primary_operator_public_id
+    user_public_id = claims.user_public_id or claims.username
+    submission = TradeCommandSubmission(
+        user_public_id=claims.user_public_id,
+        operator_public_id=resolved_operator_public_id,
+        wallet_public_id=wallet_public_id,
+        instrument_public_id=instrument_public_id,
+        command_type="create",
+        side=side,
+        order_type=order_type,
+        quantity=Decimal(str(quantity)),
+        price=Decimal(str(price)) if price is not None else None,
+        source_surface=_MCP_SOURCE_SURFACE,
+        idempotency_key=idempotency_key,
+    )
+    plan_row: ExecutionPlanInsertRow = {
+        "plan_type": "manual_once",
+        "created_by_user_id": user_public_id,
+        "created_via": "api",
+        "instrument_public_id": instrument_public_id,
+        "exchange": exchange,
+        "mode": "live",
+        "shard_key": shard_key,
+        "wallet_public_id": wallet_public_id,
+        "operator_public_id": resolved_operator_public_id,
+        "total_quantity": quantity,
+        "side": side,
+        "params": {
+            "order_type": order_type,
+            "side": side,
+            "child_client_order_id": client_order_id,
+            "native_instrument": instrument,
+            "venue_order_type": order_type,
+            **({"price": price} if price is not None else {}),
+        },
+        "status": "pending",
+        "created_at": created_at,
+        "idempotency_key": idempotency_key,
+        "session_id": _MCP_TOOL_STREAM,
+        "sequence_id": 1,
+        "timestamp": bus_time,
+    }
+    return _PreparedManualOrder(
+        repo=repo,
+        enforcer=enforcer,
+        submission=submission,
+        plan_row=plan_row,
+        exchange=exchange,
+        instrument=instrument,
+        side=side,
+        order_type=order_type,
+        quantity=quantity,
+        price=price,
+        created_at=created_at,
+        bus_time=bus_time,
+        wallet_public_id=wallet_public_id,
+        operator_public_id=resolved_operator_public_id,
+        user_public_id=user_public_id,
+        shard_key=shard_key,
+        client_order_id=client_order_id,
+    )
+
+
+async def _insert_execution_plan_or_raise_conflict(
+    repo: Repository,
+    plan_row: ExecutionPlanInsertRow,
+) -> str:
+    """Insert a plan row and map idempotency conflicts to HTTP 409."""
+    try:
+        _plan_id, plan_public_id = await repo.insert_execution_plan(plan_row)
+    except IntegrityError as exc:
+        if _is_unique_constraint_violation(exc):
+            raise HTTPException(status_code=409, detail="Idempotency key already used") from exc
+        raise
+    return plan_public_id
+
+
+def _build_manual_order_command_row(
+    prepared: _PreparedManualOrder,
+    plan_public_id: str,
+) -> TradeCommandInsertRow:
+    """Build the trade-command row after the plan public ID is known."""
+    return {
+        "command_type": "create",
+        "shard_key": prepared.shard_key,
+        "exchange": prepared.exchange,
+        "instrument": prepared.instrument,
+        "mode": "live",
+        "strategy_id": "manual",
+        "client_order_id": prepared.client_order_id,
+        "venue_client_id": prepared.client_order_id,
+        "side": prepared.side,
+        "order_type": prepared.order_type,
+        "quantity": prepared.quantity,
+        "price": prepared.price,
+        "leverage": None,
+        "reduce_only": False,
+        "status": TradeCommandStatusEnum.CREATED,
+        "created_at": prepared.created_at,
+        "correlation_id": plan_public_id,
+        "session_id": _MCP_TOOL_STREAM,
+        "sequence_id": 2,
+        "timestamp": prepared.bus_time,
+        "wallet_public_id": prepared.wallet_public_id,
+        "operator_public_id": prepared.operator_public_id,
+        "user_public_id": prepared.user_public_id,
+        "plan_public_id": plan_public_id,
+        "source_surface": _MCP_SOURCE_SURFACE,
+    }
+
+
+async def _compensate_failed_plan_insert(
+    repo: Repository,
+    plan_public_id: str,
+    bus_time: dt.datetime,
+    exc: Exception,
+) -> None:
+    """Best-effort compensation when command persistence fails after plan insert."""
+    logger.error(
+        "MCP submit_manual_order command-insert failed for plan {}: {}",
+        plan_public_id,
+        exc,
+    )
+    try:
+        await repo.update_execution_plan_status(
+            public_id=plan_public_id,
+            new_status="failed",
+            bus_time=bus_time,
+            session_id=_MCP_TOOL_STREAM,
+            sequence_id=3,
+            last_error=f"MCP TradeCommand insert failed: {exc}",
+        )
+    except Exception as comp_exc:
+        logger.error(
+            "MCP plan compensation to failed also failed for plan {}: {}",
+            plan_public_id,
+            comp_exc,
+        )
+
+
 def register_mcp_tools(
     mcp_server: FastMCP,
     *,
@@ -171,11 +386,7 @@ def register_mcp_tools(
         """
         claims = claims_getter()
         _require_permission(claims, Permission.READ_MARKET_DATA)
-        repo = repository_getter()
-        if repo is None:
-            raise RuntimeError(
-                "Repository not yet initialized; MCP tool dispatched before lifespan startup."
-            )
+        repo = _get_repository_or_raise(repository_getter)
         rows = await repo.get_exchange_instruments(exchange, as_of=datetime.now(UTC))
         sanitized: dict[str, Any] = sanitize_output(
             {"exchange": exchange, "instruments": sorted(rows)}
@@ -233,126 +444,39 @@ def register_mcp_tools(
                 MCP client as a tool error. Same error_code /
                 cap_type / attempted / limit shape as REST 422.
         """
-        claims = claims_getter()
-        _require_permission(claims, Permission.CREATE_ORDERS)
-        repo = repository_getter()
-        enforcer = caps_enforcer_getter()
-        if repo is None or enforcer is None:
-            raise RuntimeError(
-                "Repository or caps enforcer not initialized; MCP tool dispatched "
-                "before lifespan startup."
-            )
-        now = datetime.now(UTC)
-        ensure_operator_in_claims(claims, operator_public_id)
-        await validate_user_wallet_scope(claims, wallet_public_id, repo, as_of=now)
-        ts = dt.datetime.now(dt.UTC)
-        shard_key = f"{exchange}.{instrument}.live"
-        plan_public_id: str | None = None
-        client_order_id = str(uuid7())
-        submission = TradeCommandSubmission(
-            user_public_id=claims.user_public_id,
-            operator_public_id=operator_public_id or claims.primary_operator_public_id,
-            wallet_public_id=wallet_public_id,
+        prepared = await _prepare_manual_order(
+            repository_getter=repository_getter,
+            caps_enforcer_getter=caps_enforcer_getter,
+            claims_getter=claims_getter,
+            exchange=exchange,
+            instrument=instrument,
             instrument_public_id=instrument_public_id,
-            command_type="create",
             side=side,
             order_type=order_type,
-            quantity=Decimal(str(quantity)),
-            price=Decimal(str(price)) if price is not None else None,
-            source_surface=_MCP_SOURCE_SURFACE,
+            quantity=quantity,
+            wallet_public_id=wallet_public_id,
             idempotency_key=idempotency_key,
+            price=price,
+            operator_public_id=operator_public_id,
         )
-        async with enforcer.guard(submission):
-            plan_row: ExecutionPlanInsertRow = {
-                "plan_type": "manual_once",
-                "created_by_user_id": claims.user_public_id or claims.username,
-                "created_via": "api",
-                "instrument_public_id": instrument_public_id,
-                "exchange": exchange,
-                "mode": "live",
-                "shard_key": shard_key,
-                "wallet_public_id": wallet_public_id,
-                "operator_public_id": operator_public_id or claims.primary_operator_public_id,
-                "total_quantity": quantity,
-                "side": side,
-                "params": {
-                    "order_type": order_type,
-                    "side": side,
-                    "child_client_order_id": client_order_id,
-                    "native_instrument": instrument,
-                    "venue_order_type": order_type,
-                    **({"price": price} if price is not None else {}),
-                },
-                "status": "pending",
-                "created_at": now,
-                "idempotency_key": idempotency_key,
-                "session_id": _MCP_TOOL_STREAM,
-                "sequence_id": 1,
-                "timestamp": ts,
-            }
+        async with prepared.enforcer.guard(prepared.submission):
+            plan_public_id = await _insert_execution_plan_or_raise_conflict(
+                prepared.repo,
+                prepared.plan_row,
+            )
+            cmd_row = _build_manual_order_command_row(prepared, plan_public_id)
             try:
-                _plan_id, plan_public_id = await repo.insert_execution_plan(plan_row)
-            except IntegrityError as exc:
-                if _is_unique_constraint_violation(exc):
-                    raise HTTPException(
-                        status_code=409,
-                        detail="Idempotency key already used",
-                    ) from exc
-                raise
-            cmd_row: TradeCommandInsertRow = {
-                "command_type": "create",
-                "shard_key": shard_key,
-                "exchange": exchange,
-                "instrument": instrument,
-                "mode": "live",
-                "strategy_id": "manual",
-                "client_order_id": client_order_id,
-                "venue_client_id": client_order_id,
-                "side": side,
-                "order_type": order_type,
-                "quantity": quantity,
-                "price": price,
-                "leverage": None,
-                "reduce_only": False,
-                "status": TradeCommandStatusEnum.CREATED,
-                "created_at": now,
-                "correlation_id": plan_public_id,
-                "session_id": _MCP_TOOL_STREAM,
-                "sequence_id": 2,
-                "timestamp": ts,
-                "wallet_public_id": wallet_public_id,
-                "operator_public_id": operator_public_id or claims.primary_operator_public_id,
-                "user_public_id": claims.user_public_id or claims.username,
-                "plan_public_id": plan_public_id,
-                "source_surface": _MCP_SOURCE_SURFACE,
-            }
-            try:
-                _cmd_id, command_public_id = await repo.insert_trade_command(
+                _cmd_id, command_public_id = await prepared.repo.insert_trade_command(
                     cmd_row, ownership=None
                 )
             except Exception as exc:
-                logger.error(
-                    "MCP submit_manual_order command-insert failed for plan {}: {}",
+                await _compensate_failed_plan_insert(
+                    prepared.repo,
                     plan_public_id,
+                    prepared.bus_time,
                     exc,
                 )
-                try:
-                    await repo.update_execution_plan_status(
-                        public_id=plan_public_id,
-                        new_status="failed",
-                        bus_time=ts,
-                        session_id=_MCP_TOOL_STREAM,
-                        sequence_id=3,
-                        last_error=f"MCP TradeCommand insert failed: {exc}",
-                    )
-                except Exception as comp_exc:
-                    logger.error(
-                        "MCP plan compensation to failed also failed for plan {}: {}",
-                        plan_public_id,
-                        comp_exc,
-                    )
                 raise
-        assert plan_public_id is not None
         assert command_public_id is not None
         sanitized: dict[str, Any] = sanitize_output(
             {

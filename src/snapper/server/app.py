@@ -200,6 +200,8 @@ from snapper.server.wallet_routes import router as wallet_router
 from snapper.utils.logging import set_log_context
 
 API_PREFIX = "/api"
+_INTERNAL_SERVER_ERROR_DESCRIPTION = "Internal server error"
+_UNDERLYING_NOT_FOUND_DESCRIPTION = "Underlying not found"
 
 
 def handle_rate_limit_exceeded(request: Request, exc: Exception) -> Response:
@@ -743,7 +745,7 @@ def _create_candles_signals_router() -> APIRouter:
     @router.get(
         "/candles",
         response_model=None,
-        responses={500: {"description": "Internal server error"}},
+        responses={500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION}},
     )
     async def get_candles(
         request: Request,
@@ -823,7 +825,7 @@ def _create_candles_signals_router() -> APIRouter:
             logger.error(f"Failed to fetch candles for {instrument}: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch candle data") from exc
 
-    @router.get("/signals", responses={500: {"description": "Internal server error"}})
+    @router.get("/signals", responses={500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION}})
     async def get_signals(
         request: Request,
         _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
@@ -903,7 +905,10 @@ def _create_exchange_router() -> APIRouter:
     """
     router = APIRouter()
 
-    @router.get("/exchanges", responses={500: {"description": "Internal server error"}})
+    @router.get(
+        "/exchanges",
+        responses={500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION}},
+    )
     async def get_exchanges(
         request: Request,
         _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_MARKET_DATA))],
@@ -945,7 +950,7 @@ def _create_exchange_router() -> APIRouter:
 
     @router.get(
         "/exchanges/{exchange}/instruments",
-        responses={500: {"description": "Internal server error"}},
+        responses={500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION}},
     )
     async def get_exchange_instruments(
         request: Request,
@@ -990,7 +995,7 @@ def _create_exchange_router() -> APIRouter:
 
     @router.get(
         "/exchanges/{exchange}/instruments/detail",
-        responses={500: {"description": "Internal server error"}},
+        responses={500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION}},
     )
     async def get_exchange_instruments_detail(
         request: Request,
@@ -1067,7 +1072,7 @@ def _create_orders_executions_router() -> APIRouter:
     """
     router = APIRouter()
 
-    @router.get("/orders", responses={500: {"description": "Internal server error"}})
+    @router.get("/orders", responses={500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION}})
     async def get_orders(
         request: Request,
         _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_ORDERS))],
@@ -1132,7 +1137,10 @@ def _create_orders_executions_router() -> APIRouter:
             logger.error(f"Failed to fetch orders: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch orders") from exc
 
-    @router.get("/executions", responses={500: {"description": "Internal server error"}})
+    @router.get(
+        "/executions",
+        responses={500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION}},
+    )
     async def get_executions(
         request: Request,
         _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_ORDERS))],
@@ -1195,7 +1203,10 @@ def _create_orders_executions_router() -> APIRouter:
             logger.error(f"Failed to fetch executions: {exc}")
             raise HTTPException(status_code=500, detail="Failed to fetch executions") from exc
 
-    @router.get("/positions", responses={500: {"description": "Internal server error"}})
+    @router.get(
+        "/positions",
+        responses={500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION}},
+    )
     async def get_positions(
         request: Request,
         _auth: Annotated[AuthPrincipal, Depends(require_permission(Permission.READ_POSITIONS))],
@@ -1940,15 +1951,15 @@ def _create_underlying_router() -> APIRouter:
         "/underlyings",
         _get_underlyings,
         methods=["GET"],
-        responses={500: {"description": "Internal server error"}},
+        responses={500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION}},
     )
     router.add_api_route(
         "/underlyings/{ticker}/instruments",
         _get_underlying_instruments,
         methods=["GET"],
         responses={
-            404: {"description": "Underlying not found"},
-            500: {"description": "Internal server error"},
+            404: {"description": _UNDERLYING_NOT_FOUND_DESCRIPTION},
+            500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION},
         },
     )
     router.add_api_route(
@@ -1957,7 +1968,7 @@ def _create_underlying_router() -> APIRouter:
         methods=["GET"],
         responses={
             404: {"description": "No active futures contracts or underlying not found"},
-            500: {"description": "Internal server error"},
+            500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION},
         },
     )
     router.add_api_route(
@@ -1965,8 +1976,8 @@ def _create_underlying_router() -> APIRouter:
         _get_contracts,
         methods=["GET"],
         responses={
-            404: {"description": "Underlying not found"},
-            500: {"description": "Internal server error"},
+            404: {"description": _UNDERLYING_NOT_FOUND_DESCRIPTION},
+            500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION},
         },
     )
     router.add_api_route(
@@ -1975,8 +1986,8 @@ def _create_underlying_router() -> APIRouter:
         methods=["GET"],
         responses={
             400: {"description": "Invalid parameters"},
-            404: {"description": "Underlying not found"},
-            500: {"description": "Internal server error"},
+            404: {"description": _UNDERLYING_NOT_FOUND_DESCRIPTION},
+            500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION},
         },
     )
     return router
@@ -1993,7 +2004,7 @@ def _create_capabilities_router() -> APIRouter:
     @router.get(
         "/instrument-capabilities",
         response_model=None,
-        responses={500: {"description": "Internal server error"}},
+        responses={500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION}},
     )
     async def get_instrument_capabilities(
         request: Request,
@@ -2052,7 +2063,7 @@ def _create_capabilities_router() -> APIRouter:
     @router.get(
         "/venue-fee-schedules",
         response_model=None,
-        responses={500: {"description": "Internal server error"}},
+        responses={500: {"description": _INTERNAL_SERVER_ERROR_DESCRIPTION}},
     )
     async def get_venue_fee_schedules(
         request: Request,

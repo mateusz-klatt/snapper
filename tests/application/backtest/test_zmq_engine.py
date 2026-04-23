@@ -179,6 +179,148 @@ class TestZmqReplayEngineLifecycle:
             await engine.run("run-1", config, ResultCollector())
 
     @pytest.mark.timeout(10)
+    async def test_run_flushes_pending_batch_before_return(self) -> None:
+        """A residual pending batch is flushed through process_time_batch on success."""
+        engine = ZmqReplayEngine(AsyncMock(), NOW)
+        config = _make_config_with_instruments({"kraken": ["BTC-USD"]})
+        collector = ResultCollector()
+
+        broker = AsyncMock()
+        broker.wait_for_subscription = AsyncMock()
+        endpoints = MagicMock(xsub="tcp://xsub", xpub="tcp://xpub")
+
+        strategy = MagicMock()
+        strategy.start = AsyncMock()
+        strategy.stop = AsyncMock()
+
+        async def listen_done() -> None:
+            await asyncio.sleep(0)
+
+        async def publisher_done() -> None:
+            await asyncio.sleep(0)
+
+        listen_task = asyncio.create_task(listen_done())
+        strategy._listen_task = listen_task
+
+        publisher = MagicMock()
+        publisher.start = publisher_done
+
+        captured_state: dict[str, object] = {}
+
+        def build_strategy(**kwargs: object) -> MagicMock:
+            state = kwargs["state"]
+            assert hasattr(state, "pending_batch")
+            state.pending_batch = [MagicMock()]
+            captured_state["state"] = state
+            return strategy
+
+        async def fake_wait(
+            tasks: set[asyncio.Task[Any]],
+            return_when: object,
+        ) -> tuple[set[asyncio.Task[Any]], set[asyncio.Task[Any]]]:
+            del return_when
+            await asyncio.gather(*tasks)
+            return tasks, set()
+
+        with (
+            patch(
+                "snapper.application.backtest.zmq_engine.allocate_replay_endpoints",
+                AsyncMock(return_value=(broker, endpoints)),
+            ),
+            patch.dict(
+                "snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES",
+                {"macd": MagicMock()},
+            ),
+            patch(
+                "snapper.application.backtest.zmq_engine.make_backtest_replay_strategy",
+                side_effect=build_strategy,
+            ),
+            patch(
+                "snapper.application.backtest.zmq_engine.ReplayPublisher",
+                return_value=publisher,
+            ),
+            patch("snapper.application.backtest.zmq_engine.asyncio.wait", side_effect=fake_wait),
+            patch(
+                "snapper.application.backtest.zmq_engine.process_time_batch",
+                AsyncMock(),
+            ) as mock_process_time_batch,
+            patch.object(ZmqReplayEngine, "_cleanup", AsyncMock()),
+        ):
+            portfolio, latest_closes = await engine.run("run-1", config, collector)
+
+        assert portfolio.cash == pytest.approx(config.initial_balance)
+        assert latest_closes == {}
+        mock_process_time_batch.assert_awaited_once()
+        assert "state" in captured_state
+        state = captured_state["state"]
+        assert hasattr(state, "pending_batch")
+        assert state.pending_batch == []
+
+    @pytest.mark.timeout(10)
+    async def test_run_skips_flush_when_pending_batch_is_empty(self) -> None:
+        """A clean replay completion returns directly when no pending batch remains."""
+        engine = ZmqReplayEngine(AsyncMock(), NOW)
+        config = _make_config_with_instruments({"kraken": ["BTC-USD"]})
+
+        broker = AsyncMock()
+        broker.wait_for_subscription = AsyncMock()
+        endpoints = MagicMock(xsub="tcp://xsub", xpub="tcp://xpub")
+
+        strategy = MagicMock()
+        strategy.start = AsyncMock()
+        strategy.stop = AsyncMock()
+
+        async def listen_done() -> None:
+            await asyncio.sleep(0)
+
+        async def publisher_done() -> None:
+            await asyncio.sleep(0)
+
+        listen_task = asyncio.create_task(listen_done())
+        strategy._listen_task = listen_task
+
+        publisher = MagicMock()
+        publisher.start = publisher_done
+
+        async def fake_wait(
+            tasks: set[asyncio.Task[Any]],
+            return_when: object,
+        ) -> tuple[set[asyncio.Task[Any]], set[asyncio.Task[Any]]]:
+            del return_when
+            await asyncio.gather(*tasks)
+            return tasks, set()
+
+        with (
+            patch(
+                "snapper.application.backtest.zmq_engine.allocate_replay_endpoints",
+                AsyncMock(return_value=(broker, endpoints)),
+            ),
+            patch.dict(
+                "snapper.strategies.factory.StrategyFactory.STRATEGY_CLASSES",
+                {"macd": MagicMock()},
+            ),
+            patch(
+                "snapper.application.backtest.zmq_engine.make_backtest_replay_strategy",
+                return_value=strategy,
+            ),
+            patch(
+                "snapper.application.backtest.zmq_engine.ReplayPublisher",
+                return_value=publisher,
+            ),
+            patch("snapper.application.backtest.zmq_engine.asyncio.wait", side_effect=fake_wait),
+            patch(
+                "snapper.application.backtest.zmq_engine.process_time_batch",
+                AsyncMock(),
+            ) as mock_process_time_batch,
+            patch.object(ZmqReplayEngine, "_cleanup", AsyncMock()),
+        ):
+            portfolio, latest_closes = await engine.run("run-1", config, ResultCollector())
+
+        assert portfolio.cash == pytest.approx(config.initial_balance)
+        assert latest_closes == {}
+        mock_process_time_batch.assert_not_awaited()
+
+    @pytest.mark.timeout(10)
     async def test_cleanup_logs_pending_task_and_stop_timeouts(self) -> None:
         """Cleanup handles leaks plus stop timeouts without re-raising."""
         pending_task = MagicMock(spec=asyncio.Task)
@@ -207,6 +349,28 @@ class TestZmqReplayEngineLifecycle:
             await ZmqReplayEngine._cleanup(None, strategy, broker)
 
         pending_task.cancel.assert_called_once()
+
+    @pytest.mark.timeout(10)
+    async def test_cleanup_skips_debug_log_for_cancelled_done_task(self) -> None:
+        """Cancelled done tasks are ignored by the already-surfaced exception branch."""
+        done_task = MagicMock(spec=asyncio.Task)
+        done_task.done.return_value = True
+        done_task.cancelled.return_value = True
+        done_task.get_name.return_value = "cancelled-done"
+
+        strategy = MagicMock()
+        strategy._listen_task = done_task
+        strategy._heartbeat_task = None
+        strategy.stop = AsyncMock()
+
+        broker = MagicMock()
+        broker.stop = AsyncMock()
+
+        with patch(
+            "snapper.application.backtest.zmq_engine.asyncio.wait",
+            AsyncMock(return_value=({done_task}, set())),
+        ):
+            await ZmqReplayEngine._cleanup(None, strategy, broker)
 
     @pytest.mark.timeout(10)
     async def test_cleanup_logs_stop_exceptions(self) -> None:

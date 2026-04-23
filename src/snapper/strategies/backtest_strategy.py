@@ -26,17 +26,17 @@ Four overrides relative to ``BaseStrategy``
    bumps ``drain.on_processed`` inside the market guard, and on exception
    sets ``self._running = False`` before re-raising so the base class's
    stop-side invariant survives.
-The factory captures ``state``, ``drain``, ``local_xsub``, ``local_xpub``
-and ``live_xsub`` as closure variables on the class definition. Python
-captures these by reference at definition time and resolves them at call
-time — safe because the factory is single-shot (returns one class, caller
-constructs one instance).
+The factory attaches ``state``, ``drain``, ``local_xsub``, and
+``local_xpub`` via private instance attributes after construction, so the
+module-level override functions stay stateless and the public factory
+contract remains unchanged.
 """
 
 import asyncio
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import datetime
+from typing import cast
 
 import zmq
 import zmq.asyncio
@@ -58,6 +58,11 @@ from snapper.messaging.publishers.replay_publisher import WARMUP_PUBLIC_ID
 from snapper.messaging.schemas.data import CandleData
 from snapper.strategies.base import BaseStrategy
 from snapper.strategies.models import StrategyConfig
+
+_REPLAY_STATE_ATTR = "_backtest_replay_state"
+_REPLAY_DRAIN_ATTR = "_backtest_replay_drain"
+_REPLAY_LOCAL_XSUB_ATTR = "_backtest_replay_local_xsub"
+_REPLAY_LOCAL_XPUB_ATTR = "_backtest_replay_local_xpub"
 
 
 @dataclass
@@ -112,6 +117,140 @@ def _candle_data_to_event(data: CandleData) -> CandleEvent:
     )
 
 
+def _replay_state(strategy: BaseStrategy) -> BacktestReplayState:
+    """Read the attached replay state from one factory-built strategy."""
+    return cast(BacktestReplayState, getattr(strategy, _REPLAY_STATE_ATTR))
+
+
+def _replay_drain(strategy: BaseStrategy) -> DrainCoordinator:
+    """Read the attached drain coordinator from one factory-built strategy."""
+    return cast(DrainCoordinator, getattr(strategy, _REPLAY_DRAIN_ATTR))
+
+
+def _replay_local_xsub(strategy: BaseStrategy) -> str:
+    """Read the attached local XSUB endpoint for the replay publisher."""
+    return cast(str, getattr(strategy, _REPLAY_LOCAL_XSUB_ATTR))
+
+
+def _replay_local_xpub(strategy: BaseStrategy) -> str:
+    """Read the attached local XPUB endpoint for the replay subscriber."""
+    return cast(str, getattr(strategy, _REPLAY_LOCAL_XPUB_ATTR))
+
+
+def _attach_replay_runtime(
+    strategy: BaseStrategy,
+    state: BacktestReplayState,
+    drain: DrainCoordinator,
+    local_xsub: str,
+    local_xpub: str,
+) -> BaseStrategy:
+    """Attach per-run replay state to the freshly built strategy."""
+    setattr(strategy, _REPLAY_STATE_ATTR, state)
+    setattr(strategy, _REPLAY_DRAIN_ATTR, drain)
+    setattr(strategy, _REPLAY_LOCAL_XSUB_ATTR, local_xsub)
+    setattr(strategy, _REPLAY_LOCAL_XPUB_ATTR, local_xpub)
+    return strategy
+
+
+async def _start_replay_strategy(self: BaseStrategy) -> None:
+    """Stateless replay start — no heartbeat, no system subs, no sleeps."""
+    self._running = True
+    if not self.zmq_context:
+        self.zmq_context = zmq.asyncio.Context()
+    _replay_subscribe(self)
+    await _setup_replay_publisher(self)
+    self._listen_task = asyncio.create_task(_listen_replay_loop(self))
+
+
+def _replay_subscribe(self: BaseStrategy) -> None:
+    """Subscribe SUB only to market topics. No sleep, no system subs."""
+    assert self.zmq_context is not None
+    raw_sub = self.zmq_context.socket(zmq.SUB)
+    raw_sub.connect(_replay_local_xpub(self))
+    self.subscriber = ValidatedSubscriber(raw_sub)
+    for topic in self.inputs:
+        if not topic.startswith("market."):
+            continue
+        self.subscriber.subscribe(topic)
+
+
+async def _setup_replay_publisher(self: BaseStrategy) -> None:
+    """Connect publisher to the local replay broker, never the live bus."""
+    assert self.zmq_context is not None
+    raw_pub = self.zmq_context.socket(zmq.PUB)
+    raw_pub.connect(_replay_local_xsub(self))
+    self.publisher = ValidatedPublisher(raw_pub)
+    await asyncio.sleep(0)
+
+
+def _acknowledge_warmup_topic(state: BacktestReplayState, topic_str: str) -> None:
+    """Record one warmup ACK and set subscriber_ready after the full topic set."""
+    state.acked_topics.add(topic_str)
+    if state.acked_topics >= state.expected_topics:
+        state.subscriber_ready.set()
+
+
+async def _flush_pending_batch_if_needed(
+    self: BaseStrategy,
+    state: BacktestReplayState,
+    event: CandleEvent,
+) -> None:
+    """Flush the buffered batch when a new ``open_at`` boundary arrives."""
+    if state.pending_batch and state.pending_batch[0].open_at != event.open_at:
+        await process_time_batch(
+            batch=state.pending_batch,
+            run_public_id=state.run_public_id,
+            config=state.config,
+            strategy=self,
+            portfolio=state.portfolio,
+            latest_closes=state.latest_closes,
+            collector=state.collector,
+            tracker=state.tracker,
+            snapshot_as_of=state.snapshot_as_of,
+            emitter=state.emitter,
+        )
+        state.pending_batch = []
+
+
+async def _probe_replay_cancel(state: BacktestReplayState) -> None:
+    """Run the shared cancellation probe only when configured for the replay run."""
+    if state.cancel_probe is not None:
+        await state.cancel_probe.check()
+
+
+async def _process_warmup_or_buffer(
+    self: BaseStrategy, topic_str: str, payload_bytes: bytes
+) -> None:
+    """Single message handling: warmup ACK or real candle batching."""
+    state = _replay_state(self)
+    data = CandleData.model_validate_json(payload_bytes.decode())
+    if data.public_id == WARMUP_PUBLIC_ID:
+        _acknowledge_warmup_topic(state, topic_str)
+        return
+    event = _candle_data_to_event(data)
+    await _flush_pending_batch_if_needed(self, state, event)
+    state.pending_batch.append(event)
+    _replay_drain(self).on_processed()
+    await _probe_replay_cancel(state)
+
+
+async def _listen_replay_loop(self: BaseStrategy) -> None:
+    """Echo-ack detection + per-time-batch flush + cleanup re-raise."""
+    assert self.subscriber is not None
+    try:
+        while self._running:
+            topic_str, payload_bytes = await self.subscriber.recv_multipart()
+            if not topic_str.startswith("market."):
+                continue
+            await _process_warmup_or_buffer(self, topic_str, payload_bytes)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        self._running = False
+        logger.exception("backtest replay strategy listen loop failed")
+        raise
+
+
 def make_backtest_replay_strategy(
     inner_class: type[BaseStrategy],
     inner_config: StrategyConfig,
@@ -141,90 +280,15 @@ def make_backtest_replay_strategy(
     Returns:
         A ready-to-``start`` strategy instance.
     """
-
-    async def _start_override(self: BaseStrategy) -> None:
-        """Stateless replay start — no heartbeat, no system subs, no sleeps."""
-        self._running = True
-        if not self.zmq_context:
-            self.zmq_context = zmq.asyncio.Context()
-        _replay_subscribe(self)
-        await _setup_publisher_override(self)
-        self._listen_task = asyncio.create_task(_listen_loop_override(self))
-
-    def _replay_subscribe(self: BaseStrategy) -> None:
-        """Subscribe SUB only to market topics. No sleep, no system subs."""
-        assert self.zmq_context is not None
-        raw_sub = self.zmq_context.socket(zmq.SUB)
-        raw_sub.connect(local_xpub)
-        self.subscriber = ValidatedSubscriber(raw_sub)
-        for topic in self.inputs:
-            if not topic.startswith("market."):
-                continue
-            self.subscriber.subscribe(topic)
-
-    async def _setup_publisher_override(self: BaseStrategy) -> None:
-        """Connect publisher to the local replay broker, never the live bus."""
-        assert self.zmq_context is not None
-        raw_pub = self.zmq_context.socket(zmq.PUB)
-        raw_pub.connect(local_xsub)
-        self.publisher = ValidatedPublisher(raw_pub)
-        await asyncio.sleep(0)
-
-    async def _process_warmup_or_buffer(
-        self: BaseStrategy, topic_str: str, payload_bytes: bytes
-    ) -> None:
-        """Single message handling: warmup ACK or real candle batching."""
-        data = CandleData.model_validate_json(payload_bytes.decode())
-        if data.public_id == WARMUP_PUBLIC_ID:
-            state.acked_topics.add(topic_str)
-            if state.acked_topics >= state.expected_topics:
-                state.subscriber_ready.set()
-            return
-        event = _candle_data_to_event(data)
-        if state.pending_batch and state.pending_batch[0].open_at != event.open_at:
-            await process_time_batch(
-                batch=state.pending_batch,
-                run_public_id=state.run_public_id,
-                config=state.config,
-                strategy=self,
-                portfolio=state.portfolio,
-                latest_closes=state.latest_closes,
-                collector=state.collector,
-                tracker=state.tracker,
-                snapshot_as_of=state.snapshot_as_of,
-                emitter=state.emitter,
-            )
-            state.pending_batch = []
-        state.pending_batch.append(event)
-        drain.on_processed()
-        if state.cancel_probe is not None:
-            await state.cancel_probe.check()
-
-    async def _listen_loop_override(self: BaseStrategy) -> None:
-        """Echo-ack detection + per-time-batch flush + cleanup re-raise."""
-        assert self.subscriber is not None
-        try:
-            while self._running:
-                topic_str, payload_bytes = await self.subscriber.recv_multipart()
-                if not topic_str.startswith("market."):
-                    continue
-                await _process_warmup_or_buffer(self, topic_str, payload_bytes)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            self._running = False
-            logger.exception("backtest replay strategy listen loop failed")
-            raise
-
     overrides: dict[str, object] = {
-        "start": _start_override,
+        "start": _start_replay_strategy,
         "_replay_subscribe": _replay_subscribe,
-        "_setup_publisher": _setup_publisher_override,
-        "_listen_loop": _listen_loop_override,
+        "_setup_publisher": _setup_replay_publisher,
+        "_listen_loop": _listen_replay_loop,
         "__doc__": "Replay-shimmed strategy with 4 backtest overrides.",
     }
     mixin_cls = type("_BacktestReplayMixin", (inner_class,), overrides)
     instance = mixin_cls(inner_config)
     if not isinstance(instance, BaseStrategy):
         raise TypeError(f"factory produced non-BaseStrategy instance: {type(instance).__name__}")
-    return instance
+    return _attach_replay_runtime(instance, state, drain, local_xsub, local_xpub)

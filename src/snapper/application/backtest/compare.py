@@ -10,6 +10,7 @@ from collections import Counter
 from collections import defaultdict
 from datetime import datetime
 from typing import Any
+from typing import Literal
 from typing import cast
 
 from snapper.application.backtest.metrics import PROMOTED_METRIC_NAMES
@@ -38,6 +39,9 @@ _EXPLICIT_METRIC_NAMES: tuple[str, ...] = (
     "exposure_ratio",
     "turnover_ratio",
 )
+
+_TradeBucketKey = tuple[str, datetime, str, int, int]
+_TradeLeg = Literal["a", "b"]
 
 
 def _promoted_lookup(result: BacktestResultRow | None, name: str) -> float | None:
@@ -170,6 +174,97 @@ def _q(x: float) -> int:
     return round(x * 1e8)
 
 
+def _trade_bucket_key(trade: BacktestTradeRow) -> _TradeBucketKey:
+    """Return the deterministic bucket key used for multiset matching."""
+    return (
+        trade["instrument"],
+        trade["executed_at"],
+        trade["side"],
+        _q(trade["quantity"]),
+        _q(trade["price"]),
+    )
+
+
+def _empty_trade_bucket() -> dict[_TradeLeg, list[BacktestTradeRow]]:
+    """Create one empty A/B bucket for grouped trade diffing."""
+    return {"a": [], "b": []}
+
+
+def _append_trade_leg(
+    buckets: dict[_TradeBucketKey, dict[_TradeLeg, list[BacktestTradeRow]]],
+    leg_name: _TradeLeg,
+    trades: list[BacktestTradeRow],
+) -> None:
+    """Append one leg of trades into the shared multiset buckets."""
+    for trade in trades:
+        buckets[_trade_bucket_key(trade)][leg_name].append(trade)
+
+
+def _trade_pnl_value(raw_pnl: int | float | None) -> float | None:
+    """Normalize an optional trade PnL to float-or-None."""
+    if raw_pnl is None:
+        return None
+    return float(raw_pnl)
+
+
+def _common_trade_diff_row(
+    key: _TradeBucketKey,
+    trade_a: BacktestTradeRow,
+    trade_b: BacktestTradeRow,
+) -> dict[str, object]:
+    """Build the diff row for one matched A/B trade pair."""
+    pnl_a = _trade_pnl_value(trade_a.get("pnl"))
+    pnl_b = _trade_pnl_value(trade_b.get("pnl"))
+    pnl_delta = None if pnl_a is None or pnl_b is None else pnl_b - pnl_a
+    return {
+        "instrument": key[0],
+        "executed_at": key[1],
+        "side": key[2],
+        "quantity": float(trade_a["quantity"]),
+        "price": float(trade_a["price"]),
+        "leg": "common",
+        "pnl_a": pnl_a,
+        "pnl_b": pnl_b,
+        "pnl_delta": pnl_delta,
+    }
+
+
+def _surplus_trade_diff_row(
+    leg_name: _TradeLeg,
+    trade: BacktestTradeRow,
+) -> dict[str, object]:
+    """Build the diff row for one surplus trade on leg A or B."""
+    pnl_val = _trade_pnl_value(trade.get("pnl"))
+    return {
+        "instrument": trade["instrument"],
+        "executed_at": trade["executed_at"],
+        "side": trade["side"],
+        "quantity": float(trade["quantity"]),
+        "price": float(trade["price"]),
+        "leg": leg_name,
+        "pnl_a": pnl_val if leg_name == "a" else None,
+        "pnl_b": pnl_val if leg_name == "b" else None,
+        "pnl_delta": None,
+    }
+
+
+def _bucket_trade_rows(
+    key: _TradeBucketKey,
+    sides: dict[_TradeLeg, list[BacktestTradeRow]],
+) -> list[dict[str, object]]:
+    """Expand one grouped multiset bucket into common and surplus rows."""
+    a_list = sorted(sides["a"], key=lambda trade: trade["public_id"])
+    b_list = sorted(sides["b"], key=lambda trade: trade["public_id"])
+    common_count = min(len(a_list), len(b_list))
+    common_rows = [
+        _common_trade_diff_row(key, trade_a, trade_b)
+        for trade_a, trade_b in zip(a_list, b_list, strict=False)
+    ]
+    surplus_rows = [_surplus_trade_diff_row("a", trade) for trade in a_list[common_count:]]
+    surplus_rows.extend(_surplus_trade_diff_row("b", trade) for trade in b_list[common_count:])
+    return common_rows + surplus_rows
+
+
 def compute_trades_diff(
     trades_a: list[BacktestTradeRow], trades_b: list[BacktestTradeRow]
 ) -> list[dict[str, Any]]:
@@ -188,66 +283,14 @@ def compute_trades_diff(
         List of diff entries — ``leg="common"`` with ``pnl_delta`` or
         ``leg="a"|"b"`` singletons.
     """
-    buckets: dict[tuple[str, datetime, str, int, int], dict[str, list[BacktestTradeRow]]] = (
-        defaultdict(lambda: {"a": [], "b": []})
+    buckets: dict[_TradeBucketKey, dict[_TradeLeg, list[BacktestTradeRow]]] = defaultdict(
+        _empty_trade_bucket
     )
-    for trade in trades_a:
-        key = (
-            trade["instrument"],
-            trade["executed_at"],
-            trade["side"],
-            _q(trade["quantity"]),
-            _q(trade["price"]),
-        )
-        buckets[key]["a"].append(trade)
-    for trade in trades_b:
-        key = (
-            trade["instrument"],
-            trade["executed_at"],
-            trade["side"],
-            _q(trade["quantity"]),
-            _q(trade["price"]),
-        )
-        buckets[key]["b"].append(trade)
+    _append_trade_leg(buckets, "a", trades_a)
+    _append_trade_leg(buckets, "b", trades_b)
     out: list[dict[str, Any]] = []
     for key, sides in buckets.items():
-        a_list = sorted(sides["a"], key=lambda t: t["public_id"])
-        b_list = sorted(sides["b"], key=lambda t: t["public_id"])
-        common_count = min(len(a_list), len(b_list))
-        for i in range(common_count):
-            pnl_a = a_list[i].get("pnl")
-            pnl_b = b_list[i].get("pnl")
-            pnl_delta = None if pnl_a is None or pnl_b is None else float(pnl_b) - float(pnl_a)
-            out.append(
-                {
-                    "instrument": key[0],
-                    "executed_at": key[1],
-                    "side": key[2],
-                    "quantity": float(a_list[i]["quantity"]),
-                    "price": float(a_list[i]["price"]),
-                    "leg": "common",
-                    "pnl_a": float(pnl_a) if pnl_a is not None else None,
-                    "pnl_b": float(pnl_b) if pnl_b is not None else None,
-                    "pnl_delta": pnl_delta,
-                }
-            )
-        for leg_name, surplus in (("a", a_list[common_count:]), ("b", b_list[common_count:])):
-            for trade in surplus:
-                raw_pnl = trade.get("pnl")
-                pnl_val = float(raw_pnl) if raw_pnl is not None else None
-                out.append(
-                    {
-                        "instrument": trade["instrument"],
-                        "executed_at": trade["executed_at"],
-                        "side": trade["side"],
-                        "quantity": float(trade["quantity"]),
-                        "price": float(trade["price"]),
-                        "leg": leg_name,
-                        "pnl_a": pnl_val if leg_name == "a" else None,
-                        "pnl_b": pnl_val if leg_name == "b" else None,
-                        "pnl_delta": None,
-                    }
-                )
+        out.extend(_bucket_trade_rows(key, sides))
     return out
 
 

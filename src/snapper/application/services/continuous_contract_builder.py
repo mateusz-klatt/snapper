@@ -412,68 +412,191 @@ class ContinuousContractBuilder:
             sym = contract["native_symbol"]
             candles = contract_candles.get(sym, [])
             is_anchor = bar_idx == n - 1
-
-            start_bound = roll_timestamps[bar_idx - 1] if bar_idx > 0 else None
-            end_bound = roll_timestamps[bar_idx] if bar_idx < n - 1 else None
-            if is_anchor and truncate_at is not None:
-                end_bound = truncate_at
-
-            if method == "ratio":
-                cum_factor = 1.0
-                for ri in roll_infos[bar_idx:]:
-                    cum_factor *= ri.adjustment or 1.0
-            elif method == "panama":
-                cum_factor = sum((ri.adjustment or 0.0) for ri in roll_infos[bar_idx:])
-            else:
-                cum_factor = 0.0
-
-            for candle in candles:
-                t = candle["open_at"]
-                if start_bound is not None and t < start_bound:
-                    continue
-                if end_bound is not None and t >= end_bound:
-                    continue
-
-                if is_anchor or method == "unadjusted":
-                    adj_open = candle["open"]
-                    adj_high = candle["high"]
-                    adj_low = candle["low"]
-                    adj_close = candle["close"]
-                    adj_vwap = candle["vwap"]
-                    adj_factor = None
-                elif method == "ratio":
-                    adj_open = candle["open"] * cum_factor
-                    adj_high = candle["high"] * cum_factor
-                    adj_low = candle["low"] * cum_factor
-                    adj_close = candle["close"] * cum_factor
-                    adj_vwap = candle["vwap"] * cum_factor if candle["vwap"] is not None else None
-                    adj_factor = cum_factor
-                else:
-                    adj_open = candle["open"] + cum_factor
-                    adj_high = candle["high"] + cum_factor
-                    adj_low = candle["low"] + cum_factor
-                    adj_close = candle["close"] + cum_factor
-                    adj_vwap = candle["vwap"] + cum_factor if candle["vwap"] is not None else None
-                    adj_factor = cum_factor
-
-                result.append(
-                    {
-                        "open_at": t,
-                        "timeframe": candle["timeframe"],
-                        "open": adj_open,
-                        "high": adj_high,
-                        "low": adj_low,
-                        "close": adj_close,
-                        "volume": candle["volume"],
-                        "vwap": adj_vwap,
-                        "trades": candle["trades"],
-                        "source_contract": sym,
-                        "adjustment_factor": adj_factor,
-                    }
+            start_bound, end_bound = ContinuousContractBuilder._resolve_stitch_bounds(
+                bar_idx,
+                n,
+                roll_timestamps,
+                is_anchor,
+                truncate_at,
+            )
+            cum_factor = ContinuousContractBuilder._cumulative_adjustment(
+                method,
+                roll_infos,
+                bar_idx,
+            )
+            result.extend(
+                ContinuousContractBuilder._stitch_contract_candles(
+                    candles,
+                    sym,
+                    method,
+                    cum_factor,
+                    is_anchor,
+                    start_bound,
+                    end_bound,
                 )
+            )
 
         result.sort(key=lambda c: c["open_at"])
         return result
+
+    @staticmethod
+    def _resolve_stitch_bounds(
+        bar_idx: int,
+        contract_count: int,
+        roll_timestamps: list[datetime],
+        is_anchor: bool,
+        truncate_at: datetime | None,
+    ) -> tuple[datetime | None, datetime | None]:
+        """Resolve the candle window assigned to a single contract."""
+        start_bound = roll_timestamps[bar_idx - 1] if bar_idx > 0 else None
+        end_bound = roll_timestamps[bar_idx] if bar_idx < contract_count - 1 else None
+        if is_anchor and truncate_at is not None:
+            end_bound = truncate_at
+        return start_bound, end_bound
+
+    @staticmethod
+    def _cumulative_adjustment(
+        method: str,
+        roll_infos: list[RollPointInfo],
+        bar_idx: int,
+    ) -> float:
+        """Compute the cumulative adjustment applied to one contract segment."""
+        if method == "ratio":
+            cum_factor = 1.0
+            for roll_info in roll_infos[bar_idx:]:
+                cum_factor *= roll_info.adjustment or 1.0
+            return cum_factor
+        if method == "panama":
+            return sum((roll_info.adjustment or 0.0) for roll_info in roll_infos[bar_idx:])
+        return 0.0
+
+    @staticmethod
+    def _stitch_contract_candles(
+        candles: list[CandleRow],
+        source_contract: str,
+        method: str,
+        cum_factor: float,
+        is_anchor: bool,
+        start_bound: datetime | None,
+        end_bound: datetime | None,
+    ) -> list[ContinuousCandleRow]:
+        """Transform one contract's candles into continuous-series rows."""
+        result: list[ContinuousCandleRow] = []
+        for candle in candles:
+            if not ContinuousContractBuilder._candle_within_bounds(
+                candle["open_at"],
+                start_bound,
+                end_bound,
+            ):
+                continue
+            result.append(
+                ContinuousContractBuilder._build_stitched_candle(
+                    candle,
+                    source_contract,
+                    method,
+                    cum_factor,
+                    is_anchor,
+                )
+            )
+        return result
+
+    @staticmethod
+    def _candle_within_bounds(
+        open_at: datetime,
+        start_bound: datetime | None,
+        end_bound: datetime | None,
+    ) -> bool:
+        """Check whether a candle belongs to the active contract window."""
+        return (start_bound is None or open_at >= start_bound) and (
+            end_bound is None or open_at < end_bound
+        )
+
+    @staticmethod
+    def _build_stitched_candle(
+        candle: CandleRow,
+        source_contract: str,
+        method: str,
+        cum_factor: float,
+        is_anchor: bool,
+    ) -> ContinuousCandleRow:
+        """Build one continuous candle row from a raw contract candle."""
+        adj_open, adj_high, adj_low, adj_close, adj_vwap, adj_factor = (
+            ContinuousContractBuilder._adjust_candle_prices(
+                candle,
+                method,
+                cum_factor,
+                is_anchor,
+            )
+        )
+        return {
+            "open_at": candle["open_at"],
+            "timeframe": candle["timeframe"],
+            "open": adj_open,
+            "high": adj_high,
+            "low": adj_low,
+            "close": adj_close,
+            "volume": candle["volume"],
+            "vwap": adj_vwap,
+            "trades": candle["trades"],
+            "source_contract": source_contract,
+            "adjustment_factor": adj_factor,
+        }
+
+    @staticmethod
+    def _adjust_candle_prices(
+        candle: CandleRow,
+        method: str,
+        cum_factor: float,
+        is_anchor: bool,
+    ) -> tuple[float, float, float, float, float | None, float | None]:
+        """Adjust OHLCV price fields for one stitched candle."""
+        if is_anchor or method == "unadjusted":
+            return (
+                candle["open"],
+                candle["high"],
+                candle["low"],
+                candle["close"],
+                candle["vwap"],
+                None,
+            )
+        if method == "ratio":
+            return (
+                candle["open"] * cum_factor,
+                candle["high"] * cum_factor,
+                candle["low"] * cum_factor,
+                candle["close"] * cum_factor,
+                ContinuousContractBuilder._adjust_optional_price(
+                    candle["vwap"],
+                    cum_factor,
+                    method,
+                ),
+                cum_factor,
+            )
+        return (
+            candle["open"] + cum_factor,
+            candle["high"] + cum_factor,
+            candle["low"] + cum_factor,
+            candle["close"] + cum_factor,
+            ContinuousContractBuilder._adjust_optional_price(
+                candle["vwap"],
+                cum_factor,
+                method,
+            ),
+            cum_factor,
+        )
+
+    @staticmethod
+    def _adjust_optional_price(
+        value: float | None,
+        cum_factor: float,
+        method: str,
+    ) -> float | None:
+        """Adjust an optional price-like field using the selected method."""
+        if value is None:
+            return None
+        if method == "ratio":
+            return value * cum_factor
+        return value + cum_factor
 
 
 def _timeframe_to_seconds(timeframe: str) -> float:
