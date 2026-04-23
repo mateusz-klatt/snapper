@@ -357,8 +357,12 @@ async def _run_all_scenarios() -> dict[str, Any]:
     return out
 
 
-def main() -> None:
-    """Execute all scenarios and write the golden snapshot JSON."""
+def main() -> int:
+    """Execute all scenarios and write the golden snapshot JSON.
+
+    Returns:
+        Process exit code (always 0 on success; exceptions propagate).
+    """
     snapshot = asyncio.run(_run_all_scenarios())
     _FIXTURE_PATH.parent.mkdir(parents=True, exist_ok=True)
     _FIXTURE_PATH.write_text(
@@ -366,7 +370,8 @@ def main() -> None:
         encoding="utf-8",
     )
     print(f"wrote {_FIXTURE_PATH} ({len(SCENARIOS)} scenarios)")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
