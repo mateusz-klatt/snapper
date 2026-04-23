@@ -1484,13 +1484,16 @@ class NotificationDeviceRow(TypedDict):
     last_seen_at: datetime | None
 
 
-class DeviceAlertPrefRow(TypedDict, total=False):
-    """Row dict for upsert_device_alert_pref and list_device_alert_prefs_for_user.
+class DeviceAlertPrefUpsertRow(TypedDict, total=False):
+    """Row dict for Repository.upsert_device_alert_pref (write).
 
-    The two scope columns (``operator_public_id``, ``wallet_public_id``)
-    are both NULL for the device-global scope; ``operator_public_id`` is
-    set and ``wallet_public_id`` NULL for the operator scope; both are
-    set for the wallet scope. See §D7 routing precedence.
+    Required on insert: device_public_id, alert_type, updated_at.
+    Optional keys default per the ORM column defaults: enabled (True),
+    min_priority ("medium"), timezone ("UTC"); scope columns
+    (operator_public_id, wallet_public_id) are NULL for the
+    device-global scope; operator_public_id set + wallet_public_id NULL
+    for the operator scope; both set for the wallet scope (§D7 routing
+    precedence).
     """
 
     device_public_id: str
@@ -1506,11 +1509,47 @@ class DeviceAlertPrefRow(TypedDict, total=False):
     updated_at: datetime
 
 
-class UserAlertDefaultRow(TypedDict, total=False):
-    """Row dict for upsert_user_alert_default and list_user_alert_defaults.
+class DeviceAlertPrefRow(TypedDict):
+    """Row dict returned by Repository.list_device_alert_prefs_for_user.
 
-    Fallback per-(user, alert_type) preference consulted when no
-    device-scoped override matches (§D7 step 4).
+    All fields are always present on reads; scope columns carry explicit
+    None rather than being absent. Mirrors the on-disk
+    ``device_alert_prefs`` row.
+    """
+
+    device_public_id: str
+    alert_type: str
+    operator_public_id: str | None
+    wallet_public_id: str | None
+    enabled: bool
+    min_priority: str
+    quiet_hours_start_min: int | None
+    quiet_hours_end_min: int | None
+    mute_until: datetime | None
+    timezone: str
+    updated_at: datetime
+
+
+class UserAlertDefaultUpsertRow(TypedDict, total=False):
+    """Row dict for Repository.upsert_user_alert_default (write).
+
+    Required: user_public_id, alert_type, updated_at. Optional keys
+    default per ORM column defaults (enabled=True, min_priority="medium").
+    """
+
+    user_public_id: str
+    alert_type: str
+    enabled: bool
+    min_priority: str
+    updated_at: datetime
+
+
+class UserAlertDefaultRow(TypedDict):
+    """Row dict returned by Repository.list_user_alert_defaults.
+
+    All fields always present on reads. Fallback per-(user, alert_type)
+    preference consulted when no device-scoped override matches
+    (§D7 step 4).
     """
 
     user_public_id: str
