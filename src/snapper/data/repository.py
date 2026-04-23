@@ -57,6 +57,7 @@ from sqlalchemy import distinct
 from sqlalchemy import event
 from sqlalchemy import func
 from sqlalchemy import insert
+from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import text
 from sqlalchemy import update
@@ -82,8 +83,11 @@ from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.archive_symbols import resolve_archive_symbols
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import AccrualLedger
+from snapper.data.models import AlertDelivery
+from snapper.data.models import AlertEvent
 from snapper.data.models import Base
 from snapper.data.models import Candle
+from snapper.data.models import DeviceAlertPref
 from snapper.data.models import Execution
 from snapper.data.models import ExecutionPlan
 from snapper.data.models import ExecutionPlanCheckpoint
@@ -94,6 +98,7 @@ from snapper.data.models import InstrumentOrderCapability
 from snapper.data.models import InstrumentSpec
 from snapper.data.models import InstrumentUnderlyingMapping
 from snapper.data.models import MarketSnapshot
+from snapper.data.models import NotificationDevice
 from snapper.data.models import Operator
 from snapper.data.models import Order
 from snapper.data.models import Position
@@ -110,6 +115,7 @@ from snapper.data.models import TradeProjectionCheckpoint
 from snapper.data.models import UnderlyingAsset
 from snapper.data.models import User
 from snapper.data.models import UserActiveToken
+from snapper.data.models import UserAlertDefault
 from snapper.data.models import UserOperatorMembership
 from snapper.data.models import UserTradingCaps
 from snapper.data.models import VenueEvent
@@ -119,10 +125,16 @@ from snapper.data.models import WalletCredential
 from snapper.data.models import WalletOperatorScopeGrant
 from snapper.data.repository_types import AccrualLedgerInsertRow
 from snapper.data.repository_types import AccrualLedgerRow
+from snapper.data.repository_types import AlertDeliveryInsertRow
+from snapper.data.repository_types import AlertDeliveryRow
+from snapper.data.repository_types import AlertEventInsertRow
+from snapper.data.repository_types import AlertEventRow
 from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import CheckpointUpsertRow
 from snapper.data.repository_types import CreateScopeGrantRequest
+from snapper.data.repository_types import DeviceAlertPrefRow
+from snapper.data.repository_types import DeviceAlertPrefUpsertRow
 from snapper.data.repository_types import ExecutionInsertRow
 from snapper.data.repository_types import ExecutionPlanCheckpointRow
 from snapper.data.repository_types import ExecutionPlanDecisionInsertRow
@@ -140,6 +152,8 @@ from snapper.data.repository_types import InstrumentSpecRow
 from snapper.data.repository_types import InstrumentUnderlyingRow
 from snapper.data.repository_types import MarketSnapshotRow
 from snapper.data.repository_types import MarketSnapshotUpsertRow
+from snapper.data.repository_types import NotificationDeviceRow
+from snapper.data.repository_types import NotificationDeviceUpsertRow
 from snapper.data.repository_types import OperatorRow
 from snapper.data.repository_types import OrderInsertRow
 from snapper.data.repository_types import OrderRow
@@ -159,6 +173,8 @@ from snapper.data.repository_types import TradeUpsertRow
 from snapper.data.repository_types import UnderlyingAssetRow
 from snapper.data.repository_types import UserActiveTokenInsertRow
 from snapper.data.repository_types import UserActiveTokenVerificationRow
+from snapper.data.repository_types import UserAlertDefaultRow
+from snapper.data.repository_types import UserAlertDefaultUpsertRow
 from snapper.data.repository_types import UserOperatorMembershipRow
 from snapper.data.repository_types import UserRecentSubmitRow
 from snapper.data.repository_types import UserTradingCapsRow
@@ -2616,6 +2632,283 @@ class Repository(ABC):
             List of active credential rows. Empty list when no
             credentials are seeded yet (e.g. fresh DB before
             ``seed_default_multi_tenant`` runs).
+        """
+        ...
+
+    @abstractmethod
+    async def upsert_notification_device(self, row: NotificationDeviceUpsertRow) -> str:
+        """Insert a new iOS device registration or refresh an existing one.
+
+        Idempotent on ``device_token`` (one APNs token maps to at most one
+        active row). On re-registration (same user, same device_token)
+        the existing row is updated in place: ``device_id``, ``platform``,
+        ``env``, ``app_version``, ``previews_mode``, ``last_seen_at`` are
+        refreshed; ``is_active`` is forced to True (re-activating a
+        previously soft-deleted row). On first registration a fresh
+        ``public_id`` is generated if absent from ``row``.
+
+        Returns:
+            The row's ``public_id`` — the opaque handle iOS reuses for
+            subsequent PATCH/DELETE on /api/devices/{public_id}.
+        """
+        ...
+
+    @abstractmethod
+    async def list_active_notification_devices_for_user(
+        self, user_public_id: str
+    ) -> list[NotificationDeviceRow]:
+        """Return active devices owned by ``user_public_id``.
+
+        Ordered by ``registered_at`` DESC (most-recent first).
+        Skips soft-deleted rows (``is_active = False``).
+        """
+        ...
+
+    @abstractmethod
+    async def mark_notification_device_inactive(self, public_id: str) -> None:
+        """Soft-delete a device registration.
+
+        Sets ``is_active = False`` on the row matching ``public_id``.
+        No-op if ``public_id`` does not match a row (idempotent). Used
+        by DELETE /api/devices/{public_id} and by the sidecar's APNs
+        410-Unregistered handler.
+        """
+        ...
+
+    @abstractmethod
+    async def list_device_alert_prefs_for_user(
+        self, user_public_id: str
+    ) -> list[DeviceAlertPrefRow]:
+        """Return all device-scoped alert preferences for ``user_public_id``.
+
+        Joins ``device_alert_prefs`` to ``notification_devices`` on
+        ``device_public_id`` to filter to rows owned by the user. Order
+        is implementation-defined; routing consumers apply §D7
+        narrowest-wins precedence client-side.
+        """
+        ...
+
+    @abstractmethod
+    async def upsert_device_alert_pref(self, row: DeviceAlertPrefUpsertRow) -> None:
+        """Insert or update a per-(device, alert_type, scope) preference.
+
+        Uniqueness is enforced by the three partial unique indexes on
+        ``device_alert_prefs`` (wallet / operator / device-global scope
+        depths) — each (device, alert_type, scope_tuple) has at most
+        one row. On conflict this method UPDATEs the existing row's
+        mutable fields; otherwise INSERTs a new row. The scope is
+        inferred from which of ``operator_public_id`` /
+        ``wallet_public_id`` are provided in the row (both → wallet;
+        operator only → operator; neither → device-global).
+        """
+        ...
+
+    @abstractmethod
+    async def list_user_alert_defaults(self, user_public_id: str) -> list[UserAlertDefaultRow]:
+        """Return user-level default alert preferences for ``user_public_id``.
+
+        Consulted last in the §D7 routing precedence chain when no
+        device-scoped override matches.
+        """
+        ...
+
+    @abstractmethod
+    async def upsert_user_alert_default(self, row: UserAlertDefaultUpsertRow) -> None:
+        """Insert or update a user-level alert preference default.
+
+        Uniqueness is enforced by ``UNIQUE (user_public_id, alert_type)``;
+        on conflict the existing row is updated in place.
+        """
+        ...
+
+    @abstractmethod
+    async def insert_alert_event(self, row: AlertEventInsertRow) -> str:
+        """Insert a temporal (SCD2) alert_events row.
+
+        Auto-fills ``public_id`` (uuid7) if absent and ``known_to``
+        (``KNOWN_TO_MAX``) if absent. Caller provides ``session_id``,
+        ``sequence_id``, ``timestamp`` (bus time of the originating
+        event). ``dedup_key`` (if present) is the rule engine's hint
+        for duplicate-suppression — the DB does NOT enforce uniqueness
+        on dedup_key; dedup is a rule-engine concern (see §D6).
+
+        Returns:
+            The row's ``public_id`` (fresh uuid7 or the one passed in).
+        """
+        ...
+
+    @abstractmethod
+    async def list_recent_alerts_for_user(
+        self,
+        user_public_id: str,
+        limit: int,
+        before: str | None,
+    ) -> list[AlertEventRow]:
+        """Return alert history for iOS Alerts tab.
+
+        Currently-active SCD2 rows only (``known_to = KNOWN_TO_MAX``),
+        ordered by ``timestamp`` DESC. ``before`` is a cursor
+        (``AlertEvent.public_id``) for keyset pagination: when present,
+        only rows with ``timestamp`` strictly less than the cursor row's
+        ``timestamp`` are returned.
+        """
+        ...
+
+    @abstractmethod
+    async def get_alert_event_by_public_id(self, public_id: str) -> AlertEventRow | None:
+        """Return the currently-active alert_event row for ``public_id``.
+
+        Returns None when the row does not exist or has been
+        SCD2-closed (``known_to != KNOWN_TO_MAX``). Used by
+        GET /api/alerts/{public_id} deep-link handler.
+        """
+        ...
+
+    @abstractmethod
+    async def insert_alert_delivery(self, row: AlertDeliveryInsertRow) -> str:
+        """Insert a new alert_deliveries row (append-only audit).
+
+        Auto-fills ``public_id`` if absent. Caller provides
+        ``alert_event_public_id``, ``device_public_id``, ``status``
+        (usually ``queued``), and ``created_at``.
+
+        Returns:
+            The row's ``public_id``.
+        """
+        ...
+
+    @abstractmethod
+    async def list_queued_deliveries_all(self) -> list[AlertDeliveryRow]:
+        """Return every row with ``status = 'queued'`` (no time filter).
+
+        Used by the sidecar's startup-drain path: after a restart the
+        sidecar MUST process every queued row regardless of age, to
+        avoid silently losing alerts that were queued just before the
+        crash. Ordered by ``created_at`` ASC (oldest first).
+        """
+        ...
+
+    @abstractmethod
+    async def list_deliveries_ready_for_retry(self, now: datetime) -> list[AlertDeliveryRow]:
+        """Return queued rows eligible for a retry attempt right now.
+
+        Filter: ``status = 'queued' AND (next_attempt_at IS NULL OR
+        next_attempt_at <= now)``. Leverages the
+        ``ix_alert_deliveries_next_attempt`` partial index. Ordered by
+        ``next_attempt_at`` ASC NULLS FIRST (retry the never-attempted
+        or overdue rows first).
+        """
+        ...
+
+    @abstractmethod
+    async def mark_delivery_sent(self, public_id: str, apns_id: str) -> None:
+        """Transition a queued delivery to ``status = 'sent'``.
+
+        Stores the APNs-returned ``apns-id`` header in ``apns_id`` for
+        idempotency tracking and future reconciliation.
+        """
+        ...
+
+    @abstractmethod
+    async def mark_delivery_failed(self, public_id: str, error_reason: str) -> None:
+        """Transition a queued delivery to ``status = 'failed'`` (give-up).
+
+        Used after exhausting the configured retry budget (N≥3 in §D5.5).
+        ``error_reason`` is the last APNs-reported error (e.g.
+        ``PayloadTooLarge``, ``BadMessageId``).
+        """
+        ...
+
+    @abstractmethod
+    async def mark_delivery_unregistered(self, public_id: str) -> None:
+        """Transition a queued delivery to ``status = 'unregistered'``.
+
+        Called when APNs returns ``410 Unregistered`` for the target
+        device token. The caller is also expected to soft-delete the
+        source ``notification_devices`` row via
+        ``mark_notification_device_inactive``.
+        """
+        ...
+
+    @abstractmethod
+    async def mark_delivery_cancelled(self, public_id: str, reason: str) -> None:
+        """Transition a queued delivery to ``status = 'cancelled_scope'``.
+
+        Called by the scope-revalidation path when a pending delivery's
+        (user, operator, wallet) scope grant is revoked or expired
+        before the APNs send goes out (§D8). ``reason`` carries a
+        short human-readable descriptor for audit
+        (e.g. ``scope_revoked``).
+        """
+        ...
+
+    @abstractmethod
+    async def update_delivery_retry_schedule(
+        self,
+        public_id: str,
+        attempt_count: int,
+        next_attempt_at: datetime | None,
+        error_reason: str | None,
+    ) -> None:
+        """Bump attempt_count + schedule the next retry of a queued row.
+
+        Called BEFORE the APNs HTTP call (crash-safety invariant in
+        §D5.5) — if the sidecar dies between this update and the APNs
+        response, the row is still ``status = 'queued'`` with an
+        incremented attempt_count, retriable on restart with bounded
+        ≤1 duplicate send per crash. ``next_attempt_at=None`` means
+        "process immediately"; a future datetime defers retry per the
+        exponential-backoff schedule.
+        """
+        ...
+
+    @abstractmethod
+    async def list_users_with_operator_membership(
+        self, operator_public_id: str, as_of: datetime
+    ) -> list[str]:
+        """Return user_public_id values for users with an active membership in ``operator_public_id``.
+
+        Reads the temporal ``user_operator_memberships`` table
+        (SCD2 via TemporalMixin) at ``as_of``. Used by the sidecar's
+        ``admin.scope_revoked`` fanout: find every user whose alerts
+        might be affected by an operator's scope change, then filter
+        deliveries accordingly.
+        """
+        ...
+
+    @abstractmethod
+    async def is_scope_grant_active(
+        self,
+        user_public_id: str,
+        operator_public_id: str,
+        wallet_public_id: str,
+        as_of: datetime,
+    ) -> bool:
+        """Return True iff a scope grant linking the three parties is active at ``as_of``.
+
+        Thin wrapper over the existing ``wallet_operator_scope_grants``
+        temporal query. Consulted at APNs-send time (not queue time) to
+        re-validate that the alert's target scope has not been revoked
+        since the delivery was queued (§D8 safety-critical path).
+        """
+        ...
+
+    @abstractmethod
+    async def cancel_pending_deliveries_for_scope(
+        self,
+        user_public_id: str,
+        operator_public_id: str,
+        wallet_public_id: str,
+    ) -> int:
+        """Bulk-cancel queued deliveries whose alert_event's scope matches the (user, operator, wallet) triple.
+
+        Called in response to ``admin.scope_revoked`` topic frames by
+        the sidecar. Sets ``status = 'cancelled_scope'`` on every
+        matching queued row; in-flight rows (already sent or failed)
+        are not touched.
+
+        Returns:
+            Count of rows transitioned to ``cancelled_scope``.
         """
         ...
 
@@ -7428,6 +7721,538 @@ class SQLAlchemyRepository(Repository):
                 .order_by(WalletCredential.exchange)
             )
             return [self._credential_row_from(row) for row in result.scalars().all()]
+
+    @staticmethod
+    def _notification_device_row_from(model: NotificationDevice) -> NotificationDeviceRow:
+        """Map an ORM ``NotificationDevice`` instance to its TypedDict row shape."""
+        return NotificationDeviceRow(
+            public_id=model.public_id,
+            user_public_id=model.user_public_id,
+            device_token=model.device_token,
+            device_id=model.device_id,
+            platform=model.platform,
+            env=model.env,
+            app_version=model.app_version,
+            is_active=model.is_active,
+            previews_mode=model.previews_mode,
+            registered_at=model.registered_at,
+            last_seen_at=model.last_seen_at,
+        )
+
+    @staticmethod
+    def _device_alert_pref_row_from(model: DeviceAlertPref) -> DeviceAlertPrefRow:
+        """Map ORM ``DeviceAlertPref`` to its TypedDict read-row shape."""
+        return DeviceAlertPrefRow(
+            device_public_id=model.device_public_id,
+            alert_type=model.alert_type,
+            operator_public_id=model.operator_public_id,
+            wallet_public_id=model.wallet_public_id,
+            enabled=model.enabled,
+            min_priority=model.min_priority,
+            quiet_hours_start_min=model.quiet_hours_start_min,
+            quiet_hours_end_min=model.quiet_hours_end_min,
+            mute_until=model.mute_until,
+            timezone=model.timezone,
+            updated_at=model.updated_at,
+        )
+
+    @staticmethod
+    def _user_alert_default_row_from(model: UserAlertDefault) -> UserAlertDefaultRow:
+        """Map ORM ``UserAlertDefault`` to its TypedDict read-row shape."""
+        return UserAlertDefaultRow(
+            user_public_id=model.user_public_id,
+            alert_type=model.alert_type,
+            enabled=model.enabled,
+            min_priority=model.min_priority,
+            updated_at=model.updated_at,
+        )
+
+    @staticmethod
+    def _alert_event_row_from(model: AlertEvent) -> AlertEventRow:
+        """Map ORM ``AlertEvent`` (SCD2) to its TypedDict read-row shape."""
+        return AlertEventRow(
+            public_id=model.public_id,
+            session_id=model.session_id,
+            sequence_id=model.sequence_id,
+            timestamp=model.timestamp,
+            known_to=model.known_to,
+            user_public_id=model.user_public_id,
+            operator_public_id=model.operator_public_id,
+            wallet_public_id=model.wallet_public_id,
+            alert_type=model.alert_type,
+            priority=model.priority,
+            is_safety_critical=model.is_safety_critical,
+            title=model.title,
+            body=model.body,
+            payload=model.payload,
+            dedup_key=model.dedup_key,
+            thread_key=model.thread_key,
+            source_topic=model.source_topic,
+        )
+
+    @staticmethod
+    def _alert_delivery_row_from(model: AlertDelivery) -> AlertDeliveryRow:
+        """Map ORM ``AlertDelivery`` to its TypedDict read-row shape."""
+        return AlertDeliveryRow(
+            public_id=model.public_id,
+            alert_event_public_id=model.alert_event_public_id,
+            device_public_id=model.device_public_id,
+            status=model.status,
+            attempt_count=model.attempt_count,
+            last_attempt_at=model.last_attempt_at,
+            next_attempt_at=model.next_attempt_at,
+            apns_id=model.apns_id,
+            error_reason=model.error_reason,
+            created_at=model.created_at,
+        )
+
+    async def upsert_notification_device(self, row: NotificationDeviceUpsertRow) -> str:
+        """Insert or refresh a NotificationDevice keyed on device_token."""
+        device_token = row["device_token"]
+        async with self.session() as s:
+            existing_result = await s.execute(
+                select(NotificationDevice).where(NotificationDevice.device_token == device_token)
+            )
+            existing = existing_result.scalar_one_or_none()
+            if existing is None:
+                public_id = row.get("public_id") or str(uuid7())
+                device = NotificationDevice(
+                    public_id=public_id,
+                    user_public_id=row["user_public_id"],
+                    device_token=device_token,
+                    device_id=row["device_id"],
+                    platform=row.get("platform", "ios"),
+                    env=row["env"],
+                    app_version=row.get("app_version"),
+                    is_active=row.get("is_active", True),
+                    previews_mode=row.get("previews_mode", "private"),
+                    registered_at=row["registered_at"],
+                    last_seen_at=row.get("last_seen_at"),
+                )
+                s.add(device)
+                await s.commit()
+                return public_id
+            existing.user_public_id = row["user_public_id"]
+            existing.device_id = row["device_id"]
+            existing.platform = row.get("platform", existing.platform)
+            existing.env = row["env"]
+            if "app_version" in row:
+                existing.app_version = row["app_version"]
+            existing.is_active = True
+            existing.previews_mode = row.get("previews_mode", existing.previews_mode)
+            existing.registered_at = row["registered_at"]
+            if "last_seen_at" in row:
+                existing.last_seen_at = row["last_seen_at"]
+            await s.commit()
+            return cast(str, existing.public_id)
+
+    async def list_active_notification_devices_for_user(
+        self, user_public_id: str
+    ) -> list[NotificationDeviceRow]:
+        """Active iOS devices owned by ``user_public_id``, newest-first."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(NotificationDevice)
+                .where(
+                    NotificationDevice.user_public_id == user_public_id,
+                    NotificationDevice.is_active.is_(True),
+                )
+                .order_by(NotificationDevice.registered_at.desc())
+            )
+            return [self._notification_device_row_from(row) for row in result.scalars().all()]
+
+    async def mark_notification_device_inactive(self, public_id: str) -> None:
+        """Soft-delete: set ``is_active = False`` on the matching row (idempotent)."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(NotificationDevice).where(NotificationDevice.public_id == public_id)
+            )
+            device = result.scalar_one_or_none()
+            if device is None:
+                return
+            device.is_active = False
+            await s.commit()
+
+    async def list_device_alert_prefs_for_user(
+        self, user_public_id: str
+    ) -> list[DeviceAlertPrefRow]:
+        """Per-device alert prefs for all the user's devices (join on device_public_id)."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(DeviceAlertPref)
+                .join(
+                    NotificationDevice,
+                    NotificationDevice.public_id == DeviceAlertPref.device_public_id,
+                )
+                .where(NotificationDevice.user_public_id == user_public_id)
+            )
+            return [self._device_alert_pref_row_from(row) for row in result.scalars().all()]
+
+    async def upsert_device_alert_pref(self, row: DeviceAlertPrefUpsertRow) -> None:
+        """Insert or update a (device, alert_type, scope) preference.
+
+        Matches the one of three partial unique indexes that applies at
+        this scope depth. SQL NULL does not equal NULL, so the match
+        predicate uses ``is None`` for absent scope columns.
+        """
+        operator_public_id = row.get("operator_public_id")
+        wallet_public_id = row.get("wallet_public_id")
+        async with self.session() as s:
+            stmt = select(DeviceAlertPref).where(
+                DeviceAlertPref.device_public_id == row["device_public_id"],
+                DeviceAlertPref.alert_type == row["alert_type"],
+            )
+            if operator_public_id is None:
+                stmt = stmt.where(DeviceAlertPref.operator_public_id.is_(None))
+            else:
+                stmt = stmt.where(DeviceAlertPref.operator_public_id == operator_public_id)
+            if wallet_public_id is None:
+                stmt = stmt.where(DeviceAlertPref.wallet_public_id.is_(None))
+            else:
+                stmt = stmt.where(DeviceAlertPref.wallet_public_id == wallet_public_id)
+            existing = (await s.execute(stmt)).scalar_one_or_none()
+            if existing is None:
+                pref = DeviceAlertPref(
+                    device_public_id=row["device_public_id"],
+                    alert_type=row["alert_type"],
+                    operator_public_id=operator_public_id,
+                    wallet_public_id=wallet_public_id,
+                    enabled=row.get("enabled", True),
+                    min_priority=row.get("min_priority", "medium"),
+                    quiet_hours_start_min=row.get("quiet_hours_start_min"),
+                    quiet_hours_end_min=row.get("quiet_hours_end_min"),
+                    mute_until=row.get("mute_until"),
+                    timezone=row.get("timezone", "UTC"),
+                    updated_at=row["updated_at"],
+                )
+                s.add(pref)
+                await s.commit()
+                return
+            if "enabled" in row:
+                existing.enabled = row["enabled"]
+            if "min_priority" in row:
+                existing.min_priority = row["min_priority"]
+            if "quiet_hours_start_min" in row:
+                existing.quiet_hours_start_min = row["quiet_hours_start_min"]
+            if "quiet_hours_end_min" in row:
+                existing.quiet_hours_end_min = row["quiet_hours_end_min"]
+            if "mute_until" in row:
+                existing.mute_until = row["mute_until"]
+            if "timezone" in row:
+                existing.timezone = row["timezone"]
+            existing.updated_at = row["updated_at"]
+            await s.commit()
+
+    async def list_user_alert_defaults(self, user_public_id: str) -> list[UserAlertDefaultRow]:
+        """User-level fallback prefs per alert_type."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(UserAlertDefault).where(UserAlertDefault.user_public_id == user_public_id)
+            )
+            return [self._user_alert_default_row_from(row) for row in result.scalars().all()]
+
+    async def upsert_user_alert_default(self, row: UserAlertDefaultUpsertRow) -> None:
+        """Insert or update a per-(user, alert_type) default preference."""
+        async with self.session() as s:
+            existing = (
+                await s.execute(
+                    select(UserAlertDefault).where(
+                        UserAlertDefault.user_public_id == row["user_public_id"],
+                        UserAlertDefault.alert_type == row["alert_type"],
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                default = UserAlertDefault(
+                    user_public_id=row["user_public_id"],
+                    alert_type=row["alert_type"],
+                    enabled=row.get("enabled", True),
+                    min_priority=row.get("min_priority", "medium"),
+                    updated_at=row["updated_at"],
+                )
+                s.add(default)
+                await s.commit()
+                return
+            if "enabled" in row:
+                existing.enabled = row["enabled"]
+            if "min_priority" in row:
+                existing.min_priority = row["min_priority"]
+            existing.updated_at = row["updated_at"]
+            await s.commit()
+
+    async def insert_alert_event(self, row: AlertEventInsertRow) -> str:
+        """Insert a temporal (SCD2) alert_events row."""
+        public_id = row.get("public_id") or str(uuid7())
+        known_to = row.get("known_to", KNOWN_TO_MAX)
+        async with self.session() as s:
+            event_row = AlertEvent(
+                public_id=public_id,
+                session_id=row["session_id"],
+                sequence_id=row["sequence_id"],
+                timestamp=row["timestamp"],
+                known_to=known_to,
+                user_public_id=row["user_public_id"],
+                operator_public_id=row.get("operator_public_id"),
+                wallet_public_id=row.get("wallet_public_id"),
+                alert_type=row["alert_type"],
+                priority=row["priority"],
+                is_safety_critical=row.get("is_safety_critical", False),
+                title=row["title"],
+                body=row["body"],
+                payload=row.get("payload"),
+                dedup_key=row.get("dedup_key"),
+                thread_key=row.get("thread_key"),
+                source_topic=row.get("source_topic"),
+            )
+            s.add(event_row)
+            await s.commit()
+            return public_id
+
+    async def list_recent_alerts_for_user(
+        self,
+        user_public_id: str,
+        limit: int,
+        before: str | None,
+    ) -> list[AlertEventRow]:
+        """Active alert_events rows for iOS Alerts tab, newest-first, paginated."""
+        async with self.session() as s:
+            stmt = select(AlertEvent).where(
+                AlertEvent.user_public_id == user_public_id,
+                AlertEvent.known_to == KNOWN_TO_MAX,
+            )
+            if before is not None:
+                cursor = (
+                    await s.execute(
+                        select(AlertEvent.timestamp).where(
+                            AlertEvent.public_id == before,
+                            AlertEvent.known_to == KNOWN_TO_MAX,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if cursor is not None:
+                    stmt = stmt.where(AlertEvent.timestamp < cursor)
+            stmt = stmt.order_by(AlertEvent.timestamp.desc()).limit(limit)
+            result = await s.execute(stmt)
+            return [self._alert_event_row_from(row) for row in result.scalars().all()]
+
+    async def get_alert_event_by_public_id(self, public_id: str) -> AlertEventRow | None:
+        """Active alert_event by public_id, or None if missing or SCD2-closed."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(AlertEvent).where(
+                    AlertEvent.public_id == public_id,
+                    AlertEvent.known_to == KNOWN_TO_MAX,
+                )
+            )
+            event_row = result.scalar_one_or_none()
+            if event_row is None:
+                return None
+            return self._alert_event_row_from(event_row)
+
+    async def insert_alert_delivery(self, row: AlertDeliveryInsertRow) -> str:
+        """Append-only insert of a new delivery attempt row."""
+        public_id = row.get("public_id") or str(uuid7())
+        async with self.session() as s:
+            delivery = AlertDelivery(
+                public_id=public_id,
+                alert_event_public_id=row["alert_event_public_id"],
+                device_public_id=row["device_public_id"],
+                status=row["status"],
+                attempt_count=row.get("attempt_count", 0),
+                last_attempt_at=row.get("last_attempt_at"),
+                next_attempt_at=row.get("next_attempt_at"),
+                apns_id=row.get("apns_id"),
+                error_reason=row.get("error_reason"),
+                created_at=row["created_at"],
+            )
+            s.add(delivery)
+            await s.commit()
+            return public_id
+
+    async def list_queued_deliveries_all(self) -> list[AlertDeliveryRow]:
+        """Every ``status='queued'`` delivery row (no time filter)."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(AlertDelivery)
+                .where(AlertDelivery.status == "queued")
+                .order_by(AlertDelivery.created_at.asc())
+            )
+            return [self._alert_delivery_row_from(row) for row in result.scalars().all()]
+
+    async def list_deliveries_ready_for_retry(self, now: datetime) -> list[AlertDeliveryRow]:
+        """Queued rows with ``next_attempt_at`` NULL or <= now."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(AlertDelivery)
+                .where(
+                    AlertDelivery.status == "queued",
+                    or_(
+                        AlertDelivery.next_attempt_at.is_(None),
+                        AlertDelivery.next_attempt_at <= now,
+                    ),
+                )
+                .order_by(AlertDelivery.next_attempt_at.asc().nullsfirst())
+            )
+            return [self._alert_delivery_row_from(row) for row in result.scalars().all()]
+
+    async def mark_delivery_sent(self, public_id: str, apns_id: str) -> None:
+        """Transition a delivery to ``status='sent'`` (stores APNs id)."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(AlertDelivery).where(AlertDelivery.public_id == public_id)
+            )
+            delivery = result.scalar_one_or_none()
+            if delivery is None:
+                return
+            delivery.status = "sent"
+            delivery.apns_id = apns_id
+            delivery.last_attempt_at = datetime.now(UTC)
+            await s.commit()
+
+    async def mark_delivery_failed(self, public_id: str, error_reason: str) -> None:
+        """Transition a delivery to ``status='failed'`` (give-up)."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(AlertDelivery).where(AlertDelivery.public_id == public_id)
+            )
+            delivery = result.scalar_one_or_none()
+            if delivery is None:
+                return
+            delivery.status = "failed"
+            delivery.error_reason = error_reason
+            delivery.last_attempt_at = datetime.now(UTC)
+            await s.commit()
+
+    async def mark_delivery_unregistered(self, public_id: str) -> None:
+        """Transition a delivery to ``status='unregistered'`` (APNs 410)."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(AlertDelivery).where(AlertDelivery.public_id == public_id)
+            )
+            delivery = result.scalar_one_or_none()
+            if delivery is None:
+                return
+            delivery.status = "unregistered"
+            delivery.last_attempt_at = datetime.now(UTC)
+            await s.commit()
+
+    async def mark_delivery_cancelled(self, public_id: str, reason: str) -> None:
+        """Transition a delivery to ``status='cancelled_scope'`` with reason."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(AlertDelivery).where(AlertDelivery.public_id == public_id)
+            )
+            delivery = result.scalar_one_or_none()
+            if delivery is None:
+                return
+            delivery.status = "cancelled_scope"
+            delivery.error_reason = reason
+            await s.commit()
+
+    async def update_delivery_retry_schedule(
+        self,
+        public_id: str,
+        attempt_count: int,
+        next_attempt_at: datetime | None,
+        error_reason: str | None,
+    ) -> None:
+        """Bump attempt_count + schedule next retry (BEFORE APNs call per §D5.5)."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(AlertDelivery).where(AlertDelivery.public_id == public_id)
+            )
+            delivery = result.scalar_one_or_none()
+            if delivery is None:
+                return
+            delivery.attempt_count = attempt_count
+            delivery.next_attempt_at = next_attempt_at
+            delivery.error_reason = error_reason
+            delivery.last_attempt_at = datetime.now(UTC)
+            await s.commit()
+
+    async def list_users_with_operator_membership(
+        self, operator_public_id: str, as_of: datetime
+    ) -> list[str]:
+        """User public_ids with an active membership in ``operator_public_id``."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(UserOperatorMembership.user_public_id)
+                .where(
+                    UserOperatorMembership.operator_public_id == operator_public_id,
+                    *where_active(UserOperatorMembership, as_of),
+                )
+                .distinct()
+            )
+            return [cast(str, uid) for uid in result.scalars().all()]
+
+    async def is_scope_grant_active(
+        self,
+        user_public_id: str,
+        operator_public_id: str,
+        wallet_public_id: str,
+        as_of: datetime,
+    ) -> bool:
+        """Return True iff a matching wallet/operator scope grant is active at as_of.
+
+        The grant only encodes (operator, wallet); user membership in the
+        operator is verified separately via an active
+        ``user_operator_memberships`` row.
+        """
+        async with self.session() as s:
+            grant_exists = (
+                await s.execute(
+                    select(WalletOperatorScopeGrant.id)
+                    .where(
+                        WalletOperatorScopeGrant.operator_public_id == operator_public_id,
+                        WalletOperatorScopeGrant.wallet_public_id == wallet_public_id,
+                        *where_active(WalletOperatorScopeGrant, as_of),
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if grant_exists is None:
+                return False
+            membership_exists = (
+                await s.execute(
+                    select(UserOperatorMembership.id)
+                    .where(
+                        UserOperatorMembership.user_public_id == user_public_id,
+                        UserOperatorMembership.operator_public_id == operator_public_id,
+                        *where_active(UserOperatorMembership, as_of),
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            return membership_exists is not None
+
+    async def cancel_pending_deliveries_for_scope(
+        self,
+        user_public_id: str,
+        operator_public_id: str,
+        wallet_public_id: str,
+    ) -> int:
+        """Bulk-cancel queued deliveries for alerts scoped to (user, operator, wallet)."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(AlertDelivery)
+                .join(
+                    AlertEvent,
+                    AlertEvent.public_id == AlertDelivery.alert_event_public_id,
+                )
+                .where(
+                    AlertDelivery.status == "queued",
+                    AlertEvent.user_public_id == user_public_id,
+                    AlertEvent.operator_public_id == operator_public_id,
+                    AlertEvent.wallet_public_id == wallet_public_id,
+                    AlertEvent.known_to == KNOWN_TO_MAX,
+                )
+            )
+            deliveries = list(result.scalars().all())
+            for delivery in deliveries:
+                delivery.status = "cancelled_scope"
+                delivery.error_reason = "scope_revoked"
+            await s.commit()
+            return len(deliveries)
 
 
 _repository_cache: dict[str, Repository] = {}
