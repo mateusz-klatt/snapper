@@ -48,7 +48,7 @@ describe('buildMcpConfigSnippet', () => {
     expect(parsed.mcpServers.snapper.env.SNAPPER_ACCESS_TOKEN).toBe('token-access')
     expect(parsed.mcpServers.snapper.env.SNAPPER_REFRESH_TOKEN).toBe('token-refresh')
     expect(parsed.mcpServers.snapper.command).toBe('npx')
-    expect(parsed.mcpServers.snapper.args).toEqual(['-y', '@snapper/mcp-client'])
+    expect(parsed.mcpServers.snapper.args).toEqual(['-y', 'snapper-mcp'])
   })
 })
 
