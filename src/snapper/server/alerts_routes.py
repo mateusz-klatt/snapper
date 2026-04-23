@@ -32,6 +32,7 @@ from fastapi import HTTPException
 from fastapi import Query
 from fastapi import Request
 from fastapi import status
+from loguru import logger
 
 from snapper.api.schemas.alerts import AlertEventInfo
 from snapper.api.schemas.alerts import AlertEventResponse
@@ -85,13 +86,23 @@ def _decode_cursor(token: str | None) -> AlertListCursor | None:
         raw = base64.urlsafe_b64decode((token + padding).encode("ascii")).decode("ascii")
         obj = json.loads(raw)
         if not isinstance(obj, dict):
+            logger.debug(
+                "alert cursor rejected — JSON root is not an object (got {kind})",
+                kind=type(obj).__name__,
+            )
             return None
         ts_raw = obj.get("t")
         pid_raw = obj.get("p")
         if not isinstance(ts_raw, str) or not isinstance(pid_raw, str):
+            logger.debug("alert cursor rejected — missing or wrong-type t/p fields")
             return None
         ts = datetime.fromisoformat(ts_raw)
-    except (binascii.Error, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+    except (binascii.Error, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        logger.debug(
+            "alert cursor rejected — decode failed ({kind}: {err})",
+            kind=type(exc).__name__,
+            err=str(exc)[:80],
+        )
         return None
     return AlertListCursor(timestamp=ts, public_id=pid_raw)
 
@@ -126,7 +137,7 @@ async def list_alert_history(
     principal: Annotated[AuthPrincipal, Depends(require_authentication)],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
     limit: Annotated[int, Query(ge=1, le=_MAX_LIMIT)] = _DEFAULT_LIMIT,
-    before: Annotated[str | None, Query(max_length=512)] = None,
+    before: Annotated[str | None, Query(max_length=160)] = None,
 ) -> AlertHistoryResponse:
     """Return a keyset-paginated page of the caller's active alert_events.
 

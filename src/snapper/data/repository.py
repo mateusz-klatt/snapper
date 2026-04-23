@@ -2674,12 +2674,17 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    async def upsert_device_alert_pref(self, row: DeviceAlertPrefUpsertRow) -> None:
+    async def upsert_device_alert_pref(self, row: DeviceAlertPrefUpsertRow) -> str:
         """SCD2 close + insert on (device, alert_type, scope_tuple).
 
         Scope is inferred from which of ``operator_public_id`` /
         ``wallet_public_id`` are populated in the row. Merges
         optional fields with the prior active row if present.
+        Returns the stable ``public_id`` (preserved across SCD2
+        versions) so the caller can synthesize a response without an
+        extra read that races against other writers on the same scope
+        tuple (closes Copilot BE-1c recommendation on post-upsert
+        race).
         """
         ...
 
@@ -7923,7 +7928,7 @@ class SQLAlchemyRepository(Repository):
             )
             return [self._device_alert_pref_row_from(r) for r in result.scalars().all()]
 
-    async def upsert_device_alert_pref(self, row: DeviceAlertPrefUpsertRow) -> None:
+    async def upsert_device_alert_pref(self, row: DeviceAlertPrefUpsertRow) -> str:
         """Atomic SCD2 close + insert on (device, alert_type, scope_tuple).
 
         Concurrent same-scope upserts converge idempotently via the
@@ -7931,6 +7936,10 @@ class SQLAlchemyRepository(Repository):
         ``upsert_notification_device``; the partial unique indexes
         ``uq_device_alert_{device,operator,wallet}_scope`` bound one
         active row per scope permutation (closes Copilot R2 new HIGH).
+        Returns the stable ``public_id`` preserved across versions —
+        callers use it to synthesize the response without a second
+        read that would race against other writers on the same scope
+        (closes Copilot BE-1c recommendation).
         """
         operator_public_id = row.get("operator_public_id")
         wallet_public_id = row.get("wallet_public_id")
@@ -8019,7 +8028,7 @@ class SQLAlchemyRepository(Repository):
                 s.add(pref)
                 try:
                     await s.commit()
-                    return
+                    return public_id
                 except IntegrityError as exc:
                     await s.rollback()
                     last_error = exc

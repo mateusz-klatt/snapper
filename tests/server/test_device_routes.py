@@ -133,13 +133,20 @@ class TestRegisterDevice:
     """Behaviour of ``POST /api/devices``."""
 
     @pytest.mark.asyncio
-    async def test_register_returns_active_row_after_upsert(self) -> None:
-        """Happy path: upsert returns a public_id that maps to an active row."""
+    async def test_register_synthesizes_response_from_input_and_returned_public_id(
+        self,
+    ) -> None:
+        """Response is synthesized from body + returned public_id — no post-upsert re-read.
+
+        Closes Copilot BE-1c recommendation: the previous
+        ``list_active_*`` re-read after the upsert could race against
+        a concurrent DELETE and 500 on a legitimately-successful
+        write. Synthesizing the response from what we just wrote
+        eliminates the race — the caller gets exactly the values they
+        sent, plus the stable ``public_id`` the upsert returned.
+        """
         repo = AsyncMock()
         repo.upsert_notification_device = AsyncMock(return_value="dev-pub-1")
-        repo.list_active_notification_devices_for_user = AsyncMock(
-            return_value=[_device_row("dev-pub-1")]
-        )
 
         response = await register_device(
             request=_make_request(),
@@ -150,32 +157,10 @@ class TestRegisterDevice:
 
         assert response.payload.public_id == "dev-pub-1"
         assert response.payload.user_public_id == "user-alpha"
+        assert response.payload.device_token == "a" * 64
+        assert response.payload.platform == "ios"
         repo.upsert_notification_device.assert_awaited_once()
-        repo.list_active_notification_devices_for_user.assert_awaited_once_with("user-alpha")
-
-    @pytest.mark.asyncio
-    async def test_register_500_when_active_row_missing_after_upsert(self) -> None:
-        """Defensive: an unexpected missing active row raises 500.
-
-        This branch protects against a logic error downstream — the
-        upsert returned a public_id but the subsequent active-list
-        call didn't contain it, meaning the row was closed by a
-        concurrent writer in the tiny window between the two reads.
-        We fail loud rather than invent data.
-        """
-        repo = AsyncMock()
-        repo.upsert_notification_device = AsyncMock(return_value="dev-missing")
-        repo.list_active_notification_devices_for_user = AsyncMock(return_value=[])
-
-        with pytest.raises(HTTPException) as exc:
-            await register_device(
-                request=_make_request(),
-                command=_register_command(),
-                principal=_principal(),
-                repo=repo,
-            )
-
-        assert exc.value.status_code == 500
+        repo.list_active_notification_devices_for_user.assert_not_awaited()
 
 
 class TestListDevices:
@@ -278,23 +263,20 @@ class TestUpdateDevicePref:
         )
 
     @pytest.mark.asyncio
-    async def test_updates_owned_device_pref(self) -> None:
-        """Pref upsert on an owned device returns the now-active pref row."""
+    async def test_updates_owned_device_pref_synthesized_from_body(self) -> None:
+        """Pref response is synthesized from body + returned public_id.
+
+        No post-upsert re-read is performed; the route trusts the
+        repo-returned ``public_id`` and reconstructs the response
+        from the validated body (which Pydantic has already populated
+        with defaults). Eliminates the post-upsert race that could
+        surface as a 500 (closes Copilot BE-1c recommendation).
+        """
         repo = AsyncMock()
         repo.list_active_notification_devices_for_user = AsyncMock(
             return_value=[_device_row("dev-own")]
         )
-        repo.upsert_device_alert_pref = AsyncMock()
-        repo.list_device_alert_prefs_for_user = AsyncMock(
-            return_value=[
-                _pref_row(
-                    public_id="pref-1",
-                    device_public_id="dev-own",
-                    alert_type="order_fill_full",
-                    enabled=False,
-                )
-            ]
-        )
+        repo.upsert_device_alert_pref = AsyncMock(return_value="pref-pid-1")
 
         response = await update_device_pref(
             request=_make_request(),
@@ -304,9 +286,11 @@ class TestUpdateDevicePref:
             repo=repo,
         )
 
+        assert response.payload.public_id == "pref-pid-1"
         assert response.payload.enabled is False
         assert response.payload.alert_type == "order_fill_full"
         repo.upsert_device_alert_pref.assert_awaited_once()
+        repo.list_device_alert_prefs_for_user.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_returns_404_when_device_not_owned(self) -> None:
@@ -330,57 +314,13 @@ class TestUpdateDevicePref:
         repo.upsert_device_alert_pref.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_500_when_pref_not_found_after_upsert(self) -> None:
-        """Defensive: missing successor row after upsert raises 500."""
+    async def test_scope_narrow_fields_flow_to_response(self) -> None:
+        """Operator-narrowed scope is reflected in the synthesized response."""
         repo = AsyncMock()
         repo.list_active_notification_devices_for_user = AsyncMock(
             return_value=[_device_row("dev-own")]
         )
-        repo.upsert_device_alert_pref = AsyncMock()
-        repo.list_device_alert_prefs_for_user = AsyncMock(return_value=[])
-
-        with pytest.raises(HTTPException) as exc:
-            await update_device_pref(
-                request=_make_request(),
-                device_public_id="dev-own",
-                command=self._pref_command(),
-                principal=_principal(),
-                repo=repo,
-            )
-
-        assert exc.value.status_code == 500
-
-    @pytest.mark.asyncio
-    async def test_scope_keyed_lookup_narrows_to_matching_pref(self) -> None:
-        """Scope-narrow lookup finds only the (device, alert, scope) match.
-
-        The route's post-upsert re-read may see multiple prefs for
-        the same device — the code must pick the one matching the
-        incoming scope tuple, not the first by chance.
-        """
-        repo = AsyncMock()
-        repo.list_active_notification_devices_for_user = AsyncMock(
-            return_value=[_device_row("dev-own")]
-        )
-        repo.upsert_device_alert_pref = AsyncMock()
-        repo.list_device_alert_prefs_for_user = AsyncMock(
-            return_value=[
-                _pref_row(
-                    public_id="pref-global",
-                    device_public_id="dev-own",
-                    operator_public_id=None,
-                    wallet_public_id=None,
-                    enabled=True,
-                ),
-                _pref_row(
-                    public_id="pref-op",
-                    device_public_id="dev-own",
-                    operator_public_id="op-1",
-                    wallet_public_id=None,
-                    enabled=False,
-                ),
-            ]
-        )
+        repo.upsert_device_alert_pref = AsyncMock(return_value="pref-op")
 
         response = await update_device_pref(
             request=_make_request(),
@@ -392,3 +332,4 @@ class TestUpdateDevicePref:
 
         assert response.payload.public_id == "pref-op"
         assert response.payload.operator_public_id == "op-1"
+        assert response.payload.wallet_public_id is None

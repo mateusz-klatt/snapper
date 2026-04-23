@@ -38,7 +38,6 @@ from snapper.api.schemas.devices import UpdateDevicePrefCommand
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import Repository
-from snapper.data.repository_types import DeviceAlertPrefRow
 from snapper.data.repository_types import DeviceAlertPrefUpsertRow
 from snapper.data.repository_types import NotificationDeviceRow
 from snapper.data.repository_types import NotificationDeviceUpsertRow
@@ -89,26 +88,6 @@ def _device_info_from_row(row: NotificationDeviceRow) -> NotificationDeviceInfo:
     )
 
 
-def _device_alert_pref_info_from_row(row: DeviceAlertPrefRow) -> DeviceAlertPrefInfo:
-    """Project a ``DeviceAlertPrefRow`` TypedDict into the wire schema."""
-    return DeviceAlertPrefInfo(
-        session_id=row["session_id"],
-        sequence_id=row["sequence_id"],
-        public_id=row["public_id"],
-        timestamp=row["timestamp"],
-        device_public_id=row["device_public_id"],
-        alert_type=row["alert_type"],
-        operator_public_id=row.get("operator_public_id"),
-        wallet_public_id=row.get("wallet_public_id"),
-        enabled=row["enabled"],
-        min_priority=row["min_priority"],
-        quiet_hours_start_min=row.get("quiet_hours_start_min"),
-        quiet_hours_end_min=row.get("quiet_hours_end_min"),
-        mute_until=row.get("mute_until"),
-        timezone=row["timezone"],
-    )
-
-
 @router.post("", response_model=NotificationDeviceResponse)
 async def register_device(
     request: Request,
@@ -148,20 +127,27 @@ async def register_device(
             registered_at=ts,
         )
     )
-    devices = await repo.list_active_notification_devices_for_user(principal.user_public_id)
-    active = next((d for d in devices if d["public_id"] == device_public_id), None)
-    if active is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Device upsert succeeded but active row not found after commit.",
-        )
     envelope_sid, envelope_seq, envelope_ts, envelope_pid = _next_provenance(request)
     return NotificationDeviceResponse(
         session_id=envelope_sid,
         sequence_id=envelope_seq,
         public_id=envelope_pid,
         timestamp=envelope_ts,
-        payload=_device_info_from_row(active),
+        payload=NotificationDeviceInfo(
+            session_id=sid,
+            sequence_id=seq,
+            public_id=device_public_id,
+            timestamp=ts,
+            user_public_id=principal.user_public_id,
+            device_token=body.device_token,
+            device_id=body.device_id,
+            platform="ios",
+            env=body.env,
+            app_version=body.app_version,
+            previews_mode=body.previews_mode,
+            registered_at=ts,
+            last_seen_at=None,
+        ),
     )
 
 
@@ -277,7 +263,7 @@ async def update_device_pref(
         )
     body = command.payload
     sid, seq, ts, _ = _next_provenance(request)
-    await repo.upsert_device_alert_pref(
+    pref_public_id = await repo.upsert_device_alert_pref(
         DeviceAlertPrefUpsertRow(
             session_id=sid,
             sequence_id=seq,
@@ -294,28 +280,26 @@ async def update_device_pref(
             timezone=body.timezone,
         )
     )
-    prefs = await repo.list_device_alert_prefs_for_user(principal.user_public_id)
-    active = next(
-        (
-            p
-            for p in prefs
-            if p["device_public_id"] == device_public_id
-            and p["alert_type"] == body.alert_type
-            and p.get("operator_public_id") == body.operator_public_id
-            and p.get("wallet_public_id") == body.wallet_public_id
-        ),
-        None,
-    )
-    if active is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Pref upsert succeeded but active row not found after commit.",
-        )
     envelope_sid, envelope_seq, envelope_ts, envelope_pid = _next_provenance(request)
     return DeviceAlertPrefResponse(
         session_id=envelope_sid,
         sequence_id=envelope_seq,
         public_id=envelope_pid,
         timestamp=envelope_ts,
-        payload=_device_alert_pref_info_from_row(active),
+        payload=DeviceAlertPrefInfo(
+            session_id=sid,
+            sequence_id=seq,
+            public_id=pref_public_id,
+            timestamp=ts,
+            device_public_id=device_public_id,
+            alert_type=body.alert_type,
+            operator_public_id=body.operator_public_id,
+            wallet_public_id=body.wallet_public_id,
+            enabled=body.enabled,
+            min_priority=body.min_priority,
+            quiet_hours_start_min=body.quiet_hours_start_min,
+            quiet_hours_end_min=body.quiet_hours_end_min,
+            mute_until=body.mute_until,
+            timezone=body.timezone,
+        ),
     )
