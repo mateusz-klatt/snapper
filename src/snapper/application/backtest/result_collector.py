@@ -49,7 +49,7 @@ class ResultCollector:
                 for debugging when runs show unexpected block counts.
         """
         self.cross_asset_blocked_fills += 1
-        logger.debug("cross_asset_blocked_fill", extra={"reason": reason})
+        logger.debug("cross_asset_blocked_fill reason=%s", reason)
 
     def record_signal(
         self,

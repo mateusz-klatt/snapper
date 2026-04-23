@@ -15,10 +15,15 @@ run against a market-data-only instrument produces:
 - no crash when the source instrument is ``can_trade=False``.
 
 Cross-asset execution (observing TradFi, executing on a crypto
-instrument) is out of P3 scope — plan §5 item 18 deferral — because
-``batch_processor.py:133..168`` records signals + simulates fills on
-``event.instrument``, not ``signal.instrument``. That follow-up
-requires engine changes documented in the plan.
+instrument) was deferred under plan §5 item 18 and is now
+implemented in ``plan_cross_asset_backtest_engine.md`` v1.2 (SHIPPED
+2026-04-23) — ``batch_processor.process_time_batch`` routes fills
+through ``signal.instrument`` + ``config.target_execution_exchange``
+via the extracted ``_resolve_target_fill_price`` helper. The end-to-end
+acceptance for cross-asset behaviour lives in
+``tests/application/backtest/test_cross_asset_reference_strategy.py``;
+this test keeps its observation-only scope (TradFi feed + strategy
+that deliberately never emits).
 
 The test reuses the zmq-parity-test fixture pattern:
 

@@ -13,11 +13,14 @@ from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import pytest
 
+import snapper.application.backtest.batch_processor as batch_processor_module
 from snapper.application.backtest.batch_processor import CandleEvent
 from snapper.application.backtest.batch_processor import process_time_batch
+from snapper.application.backtest.batch_processor import simulate_market_fill
 from snapper.application.backtest.config import BacktestConfig
 from snapper.application.backtest.result_collector import ResultCollector
 from snapper.application.portfolio.models import PortfolioTracker
@@ -139,8 +142,11 @@ class TestTargetAttribution:
         Given: a single-feed event (BTC-USD/kraken), BUY signal on BTC-USD,
             and target_execution_exchange=None,
         When: process_time_batch runs,
-        Then: the fill is attributed to the source candle's exchange
-            (Phase 2c byte-identical path, §1.4 byte-identicality trace).
+        Then: the fill is attributed to the source candle's exchange —
+            simulate_market_fill invoked with ``exchange='kraken'``
+            (spy-captured). Closes the R1 gpt-5.4 MINOR: the prior
+            assertion only checked the recorded instrument, so a
+            venue-attribution regression could have slipped through.
         """
         signal = StrategySignal(
             instrument="BTC-USD",
@@ -152,19 +158,29 @@ class TestTargetAttribution:
         collector = ResultCollector()
         portfolio = PortfolioTracker(cash=10_000.0)
         latest_closes: dict[str, float] = {}
-        await process_time_batch(
-            batch=[_event(source_exchange="kraken", source_instrument="BTC-USD")],
-            run_public_id="run-1",
-            config=_config(target_execution_exchange=None),
-            strategy=_strategy(signal),
-            portfolio=portfolio,
-            latest_closes=latest_closes,
-            collector=collector,
-            tracker=SequenceTracker(),
-            snapshot_as_of=_BUS_TIME,
-        )
+        fill_calls: list[dict[str, Any]] = []
+
+        def _capture(*args: object, **kwargs: object) -> object:
+            fill_calls.append(dict(kwargs))
+            return simulate_market_fill(*args, **kwargs)
+
+        with patch.object(batch_processor_module, "simulate_market_fill", side_effect=_capture):
+            await process_time_batch(
+                batch=[_event(source_exchange="kraken", source_instrument="BTC-USD")],
+                run_public_id="run-1",
+                config=_config(target_execution_exchange=None),
+                strategy=_strategy(signal),
+                portfolio=portfolio,
+                latest_closes=latest_closes,
+                collector=collector,
+                tracker=SequenceTracker(),
+                snapshot_as_of=_BUS_TIME,
+            )
         assert len(collector.trades) == 1
         assert collector.trades[0]["instrument"] == "BTC-USD"
+        assert len(fill_calls) == 1
+        assert fill_calls[0]["exchange"] == "kraken"
+        assert fill_calls[0]["instrument"] == "BTC-USD"
 
     @pytest.mark.asyncio
     async def test_missing_target_close_blocks_fill_but_records_signal(self) -> None:
@@ -172,7 +188,8 @@ class TestTargetAttribution:
 
         Given: a BUY signal on BTC-USD with an empty latest_closes map,
         When: process_time_batch runs,
-        Then: simulate_market_fill is never reached (no trade recorded),
+        Then: simulate_market_fill is never invoked (assert_not_called
+            pins the short-circuit contract per R1 Codex MINOR),
             cross_asset_blocked_fills == 1, a signal row is persisted
             with signal.price as the recorded price (source-close fallback),
             and the recorded instrument is the target (BTC-USD), not
@@ -187,17 +204,19 @@ class TestTargetAttribution:
         )
         collector = ResultCollector()
         portfolio = PortfolioTracker(cash=10_000.0)
-        await process_time_batch(
-            batch=[_event()],
-            run_public_id="run-1",
-            config=_config(target_execution_exchange="kraken"),
-            strategy=_strategy(signal),
-            portfolio=portfolio,
-            latest_closes={},
-            collector=collector,
-            tracker=SequenceTracker(),
-            snapshot_as_of=_BUS_TIME,
-        )
+        with patch.object(batch_processor_module, "simulate_market_fill") as mock_fill:
+            await process_time_batch(
+                batch=[_event()],
+                run_public_id="run-1",
+                config=_config(target_execution_exchange="kraken"),
+                strategy=_strategy(signal),
+                portfolio=portfolio,
+                latest_closes={},
+                collector=collector,
+                tracker=SequenceTracker(),
+                snapshot_as_of=_BUS_TIME,
+            )
+        mock_fill.assert_not_called()
         assert collector.trades == []
         assert collector.cross_asset_blocked_fills == 1
         assert len(collector.signals) == 1
@@ -212,9 +231,16 @@ class TestTargetAttribution:
         Given: latest_closes[BTC-USD]=42000.0, strategy emits BUY/BTC-USD
             with signal.price=95000.0 (source-feed close), target_execution_exchange=kraken,
         When: process_time_batch runs,
-        Then: the recorded signal's price == 42000.0 (target close from
-            latest_closes, NOT signal.price, NOT event.row['close']) and
-            instrument == 'BTC-USD'. Closes R3.4 MAJOR.
+        Then:
+            * the recorded signal's price == 42000.0 (target close from
+              latest_closes, NOT signal.price, NOT event.row['close']) and
+              instrument == 'BTC-USD' (R3.4 MAJOR closure),
+            * the trade row's signal_public_id == signal row's public_id
+              (FK-style linkage preserved across the b4f2c9b helper
+              extraction — R1 gpt-5.4 MINOR),
+            * the trade sequence_id < signal sequence_id (trade-then-
+              signal ordering maintained under _process_signal / _resolve_
+              target_fill_price — R1 gpt-5.4 MINOR).
         """
         signal = StrategySignal(
             instrument="BTC-USD",
@@ -238,8 +264,13 @@ class TestTargetAttribution:
             snapshot_as_of=_BUS_TIME,
         )
         assert len(collector.signals) == 1
-        assert collector.signals[0]["instrument"] == "BTC-USD"
-        assert collector.signals[0]["price"] == 42_000.0
+        assert len(collector.trades) == 1
+        sig_row = collector.signals[0]
+        trade_row = collector.trades[0]
+        assert sig_row["instrument"] == "BTC-USD"
+        assert sig_row["price"] == pytest.approx(42_000.0)
+        assert trade_row["signal_public_id"] == sig_row["public_id"]
+        assert trade_row["sequence_id"] < sig_row["sequence_id"]
 
     @pytest.mark.asyncio
     async def test_single_feed_byte_identical_preserves_source_attribution(

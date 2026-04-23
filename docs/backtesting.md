@@ -161,7 +161,10 @@ Every new run persists a `config_hash` via
 10 pairing-stable fields
 (`strategy_class`, `instruments`, `start_date`, `end_date`,
 `initial_balance`, `strategy_params`, `timeframe`, `fill_model`,
-`slippage_bps`, `commission_bps`). `execution_mode`,
+`slippage_bps`, `commission_bps`), plus
+`target_execution_exchange` when it is set on the config
+(see §"Cross-asset execution" → "Fingerprint + pairing" below —
+legacy default-`None` runs keep their exact pre-v1.2 hash). `execution_mode`,
 `snapshot_as_of`, `warmup_bars`, and `buffer_size` are explicitly
 excluded so Direct-DB and ZMQ replay runs on the same config share
 a hash.
@@ -246,9 +249,13 @@ substitutes at simulated-fill time:
   no longer used on cross-asset runs.
 
 When `target_execution_exchange is None` (default), the fill is
-attributed to `event.exchange` + `event.instrument` — the source
-candle. This is the Phase 2c byte-identical path; every existing
-single-feed backtest keeps its exact fingerprint and result rows.
+attributed to `event.exchange` + `signal.instrument`. In legacy
+single-feed strategies `signal.instrument == event.instrument` by
+convention (verified across every in-tree emitter at `rsi.py`,
+`macd.py`, `cointegration.py`), so the recorded exchange /
+instrument / price are byte-identical with the pre-v1.2 path —
+every existing single-feed backtest keeps its exact fingerprint
+and result rows.
 
 ### Missing-target-close policy
 
