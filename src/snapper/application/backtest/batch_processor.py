@@ -74,6 +74,107 @@ def candle_row_to_data(event: CandleEvent, timeframe: str) -> CandleData:
     )
 
 
+def _resolve_target_fill_price(
+    signal: Any,
+    event: CandleEvent,
+    config: BacktestConfig,
+    portfolio: PortfolioTracker,
+    latest_closes: dict[str, float],
+    collector: ResultCollector,
+    sig_pid: str,
+    tracker: SequenceTracker,
+    snapshot_as_of: datetime,
+    run_public_id: str,
+) -> float:
+    """Execute the cross-asset attribution branch + return the recorded price.
+
+    Happy path (``latest_closes[signal.instrument]`` present): simulate the
+    fill on the target venue and return ``target_close`` for use as the
+    recorded signal price. Missing-close path: increment the blocked-fill
+    counter and return ``signal.price`` as the source-close fallback.
+    Extracted from ``process_time_batch`` to keep the outer function's
+    cognitive complexity under the Sonar S3776 threshold.
+    """
+    target_exchange = (
+        str(config.target_execution_exchange)
+        if config.target_execution_exchange is not None
+        else event.exchange
+    )
+    target_instrument = signal.instrument
+    target_close = latest_closes.get(target_instrument)
+    if target_close is None:
+        collector.increment_blocked_fill(reason="missing_target_close")
+        return float(signal.price)
+    fill = simulate_market_fill(
+        exchange=target_exchange,
+        instrument=target_instrument,
+        side=str(signal.side),
+        close_price=target_close,
+        fill_at=event.open_at,
+        portfolio=portfolio,
+        slippage_bps=config.slippage_bps,
+        commission_bps=config.commission_bps,
+        signal_strength=getattr(signal, "strength", None),
+        signal_reason=getattr(signal, "reason", None),
+    )
+    if fill is not None:
+        collector.record_trade(
+            run_public_id=run_public_id,
+            fill=fill,
+            portfolio=portfolio,
+            signal_public_id=sig_pid,
+            session_id=tracker.session_id,
+            sequence_id=tracker.next_sequence("bt"),
+            bus_time=snapshot_as_of,
+        )
+    return target_close
+
+
+def _process_signal(
+    signal: Any,
+    event: CandleEvent,
+    run_public_id: str,
+    config: BacktestConfig,
+    portfolio: PortfolioTracker,
+    latest_closes: dict[str, float],
+    collector: ResultCollector,
+    tracker: SequenceTracker,
+    snapshot_as_of: datetime,
+) -> None:
+    """Resolve target attribution, simulate the fill, record signal + trade.
+
+    Extracted from ``process_time_batch`` to keep the outer function's
+    cognitive complexity under the Sonar S3776 threshold. The per-signal
+    control flow carries the cross-asset attribution branch (D6) +
+    missing-target-close fallback (D3) + always-emit signal contract.
+    """
+    sig_pid = str(uuid7())
+    recorded_price = _resolve_target_fill_price(
+        signal=signal,
+        event=event,
+        config=config,
+        portfolio=portfolio,
+        latest_closes=latest_closes,
+        collector=collector,
+        sig_pid=sig_pid,
+        tracker=tracker,
+        snapshot_as_of=snapshot_as_of,
+        run_public_id=run_public_id,
+    )
+    collector.record_signal(
+        run_public_id=run_public_id,
+        public_id=sig_pid,
+        signal_time=event.open_at,
+        signal_type=str(signal.side),
+        instrument=signal.instrument,
+        price=recorded_price,
+        indicators=getattr(signal, "indicators", {}),
+        session_id=tracker.session_id,
+        sequence_id=tracker.next_sequence("bt"),
+        bus_time=snapshot_as_of,
+    )
+
+
 async def process_time_batch(
     batch: list[CandleEvent],
     run_public_id: str,
@@ -128,52 +229,16 @@ async def process_time_batch(
         return
 
     for signal, event in signals_and_events:
-        sig_pid = str(uuid7())
-        target_exchange = (
-            str(config.target_execution_exchange)
-            if config.target_execution_exchange is not None
-            else event.exchange
-        )
-        target_instrument = signal.instrument
-        target_close = latest_closes.get(target_instrument)
-        if target_close is None:
-            collector.increment_blocked_fill(reason="missing_target_close")
-            recorded_price = float(signal.price)
-        else:
-            fill = simulate_market_fill(
-                exchange=target_exchange,
-                instrument=target_instrument,
-                side=str(signal.side),
-                close_price=target_close,
-                fill_at=event.open_at,
-                portfolio=portfolio,
-                slippage_bps=config.slippage_bps,
-                commission_bps=config.commission_bps,
-                signal_strength=getattr(signal, "strength", None),
-                signal_reason=getattr(signal, "reason", None),
-            )
-            if fill is not None:
-                collector.record_trade(
-                    run_public_id=run_public_id,
-                    fill=fill,
-                    portfolio=portfolio,
-                    signal_public_id=sig_pid,
-                    session_id=tracker.session_id,
-                    sequence_id=tracker.next_sequence("bt"),
-                    bus_time=snapshot_as_of,
-                )
-            recorded_price = target_close
-        collector.record_signal(
+        _process_signal(
+            signal=signal,
+            event=event,
             run_public_id=run_public_id,
-            public_id=sig_pid,
-            signal_time=event.open_at,
-            signal_type=str(signal.side),
-            instrument=target_instrument,
-            price=recorded_price,
-            indicators=getattr(signal, "indicators", {}),
-            session_id=tracker.session_id,
-            sequence_id=tracker.next_sequence("bt"),
-            bus_time=snapshot_as_of,
+            config=config,
+            portfolio=portfolio,
+            latest_closes=latest_closes,
+            collector=collector,
+            tracker=tracker,
+            snapshot_as_of=snapshot_as_of,
         )
 
     collector.maybe_record_equity(
