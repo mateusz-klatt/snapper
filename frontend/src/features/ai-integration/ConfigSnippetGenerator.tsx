@@ -49,6 +49,14 @@ export function ConfigSnippetGenerator({
           value={snippet}
           className='w-full font-mono text-xs p-3 rounded-lg border border-dark-600 bg-dark-700 text-muted-100'
         />
+        {payload.token_kind === 'long_lived' && (
+          <p className='mt-2 text-xs text-muted-600'>
+            This is a long-lived PAT — a single access token with ~10-year expiry and no refresh
+            token. To rotate it, deactivate this delegate and create a new one.{' '}
+            <code>SNAPPER_REFRESH_TOKEN</code> is intentionally omitted from the env block above
+            (requires <code>@mateusz-klatt/snapper-mcp</code> v0.2.0 or newer).
+          </p>
+        )}
       </div>
 
       <div className='flex items-center justify-between'>

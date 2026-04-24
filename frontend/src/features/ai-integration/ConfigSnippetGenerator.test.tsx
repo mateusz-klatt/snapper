@@ -27,22 +27,24 @@ const payload: DelegateCreatedPayload = {
   token_kind: 'rotating',
 }
 
+interface ParsedSnippet {
+  mcpServers: {
+    snapper: {
+      command: string
+      args: string[]
+      env: {
+        SNAPPER_BASE_URL: string
+        SNAPPER_ACCESS_TOKEN: string
+        SNAPPER_REFRESH_TOKEN?: string
+      }
+    }
+  }
+}
+
 describe('buildMcpConfigSnippet', () => {
   it('builds JSON snippet with SNAPPER_BASE_URL derived from origin + /api/mcp', () => {
     const snippet = buildMcpConfigSnippet(payload, 'https://trader.snapper.dev')
-    const parsed = JSON.parse(snippet) as {
-      mcpServers: {
-        snapper: {
-          command: string
-          args: string[]
-          env: {
-            SNAPPER_BASE_URL: string
-            SNAPPER_ACCESS_TOKEN: string
-            SNAPPER_REFRESH_TOKEN: string
-          }
-        }
-      }
-    }
+    const parsed = JSON.parse(snippet) as ParsedSnippet
 
     expect(parsed.mcpServers.snapper.env.SNAPPER_BASE_URL).toBe(
       'https://trader.snapper.dev/api/mcp'
@@ -51,6 +53,34 @@ describe('buildMcpConfigSnippet', () => {
     expect(parsed.mcpServers.snapper.env.SNAPPER_REFRESH_TOKEN).toBe('token-refresh')
     expect(parsed.mcpServers.snapper.command).toBe('npx')
     expect(parsed.mcpServers.snapper.args).toEqual(['-y', '@mateusz-klatt/snapper-mcp'])
+  })
+
+  it('rotating payload: snippet is strict JSON and env carries SNAPPER_REFRESH_TOKEN', () => {
+    const snippet = buildMcpConfigSnippet(payload, 'https://trader.snapper.dev')
+    const parsed = JSON.parse(snippet) as ParsedSnippet
+
+    expect(parsed.mcpServers.snapper.env.SNAPPER_REFRESH_TOKEN).toBe('token-refresh')
+  })
+
+  it('long-lived PAT payload: snippet is strict JSON and env OMITS SNAPPER_REFRESH_TOKEN', () => {
+    const patPayload: DelegateCreatedPayload = {
+      ...payload,
+      delegate: { ...payload.delegate, token_kind: 'long_lived' },
+      refresh_token: null,
+      token_kind: 'long_lived',
+    }
+    const snippet = buildMcpConfigSnippet(patPayload, 'https://trader.snapper.dev')
+    const parsed = JSON.parse(snippet) as ParsedSnippet
+
+    expect('SNAPPER_REFRESH_TOKEN' in parsed.mcpServers.snapper.env).toBe(false)
+    expect(parsed.mcpServers.snapper.env.SNAPPER_ACCESS_TOKEN).toBe('token-access')
+  })
+
+  it('rotating payload with unexpectedly-null refresh_token still produces strict JSON (defensive)', () => {
+    const weird: DelegateCreatedPayload = { ...payload, refresh_token: null }
+    const snippet = buildMcpConfigSnippet(weird, 'https://trader.snapper.dev')
+
+    expect(() => JSON.parse(snippet)).not.toThrow()
   })
 })
 
@@ -88,6 +118,28 @@ describe('ConfigSnippetGenerator', () => {
 
     render(<ConfigSnippetGenerator payload={payload} />)
     expect(clipboardWrite).not.toHaveBeenCalled()
+  })
+
+  it('renders a PAT regeneration note OUTSIDE the textarea for long-lived payloads', () => {
+    const patPayload: DelegateCreatedPayload = {
+      ...payload,
+      delegate: { ...payload.delegate, token_kind: 'long_lived' },
+      refresh_token: null,
+      token_kind: 'long_lived',
+    }
+
+    render(<ConfigSnippetGenerator payload={patPayload} />)
+    const textarea = screen.getByLabelText(/\.mcp-config\.json/) as HTMLTextAreaElement
+
+    expect(() => JSON.parse(textarea.value)).not.toThrow()
+    expect(textarea.value).not.toMatch(/long-lived PAT/i)
+    expect(screen.getByText(/long-lived PAT/i)).toBeInTheDocument()
+    expect(screen.getByText(/SNAPPER_REFRESH_TOKEN/)).toBeInTheDocument()
+  })
+
+  it('does NOT render the PAT note for rotating payloads', () => {
+    render(<ConfigSnippetGenerator payload={payload} />)
+    expect(screen.queryByText(/long-lived PAT/i)).not.toBeInTheDocument()
   })
 
   it('reverts Copied label back to Copy to clipboard after 2s', async () => {

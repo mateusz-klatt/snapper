@@ -112,7 +112,17 @@ export function DelegateDetailView({
       </div>
 
       <section>
-        <h1 className='text-2xl font-bold'>{delegate.label}</h1>
+        <div className='flex items-center gap-2'>
+          <h1 className='text-2xl font-bold'>{delegate.label}</h1>
+          {delegate.token_kind === 'long_lived' && (
+            <span
+              className='px-2 py-0.5 rounded text-xs font-semibold bg-warn-100 text-warn-800 border border-warn-300'
+              title='Long-lived PAT — single access token, ~10-year expiry, no refresh rotation. Revoke by deactivating this delegate.'
+            >
+              PAT
+            </span>
+          )}
+        </div>
         <p className='text-sm text-muted-500 font-mono'>{delegate.username}</p>
       </section>
 

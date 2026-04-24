@@ -168,6 +168,7 @@ describe('AIIntegration — end-to-end create flow', () => {
         max_cancels_per_minute: null,
       },
       operator_public_id: null,
+      long_lived: false,
     })
 
     await waitFor(() => {
