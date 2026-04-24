@@ -45,6 +45,16 @@ enum ConfiguredProcessRole: String, Codable, Sendable {
     case backtest
 }
 
+enum DelegateCreatedPayloadTokenKind: String, Codable, Sendable {
+    case rotating
+    case longLived = "long_lived"
+}
+
+enum DelegateReadTokenKind: String, Codable, Sendable {
+    case rotating
+    case longLived = "long_lived"
+}
+
 enum DeviceAlertPrefBodyAlertType: String, Codable, Sendable {
     case orderFillFull = "order_fill_full"
     case orderRejected = "order_rejected"
@@ -1187,14 +1197,16 @@ struct DelegateCapsBody: Codable, Sendable {
 struct DelegateCreatedPayload: Codable, Sendable {
     let delegate: DelegateRead
     let accessToken: String
-    let refreshToken: String
+    let refreshToken: String?
     let expiresIn: Int
+    let tokenKind: String
 
     enum CodingKeys: String, CodingKey {
         case delegate
         case accessToken = "access_token"
         case refreshToken = "refresh_token"
         case expiresIn = "expires_in"
+        case tokenKind = "token_kind"
     }
 }
 
@@ -1244,6 +1256,7 @@ struct DelegateRead: Codable, Sendable {
     let createdAt: Date
     let isActive: Bool
     let caps: DelegateCapsBody
+    let tokenKind: String
 
     enum CodingKeys: String, CodingKey {
         case publicId = "public_id"
@@ -1253,6 +1266,7 @@ struct DelegateRead: Codable, Sendable {
         case createdAt = "created_at"
         case isActive = "is_active"
         case caps
+        case tokenKind = "token_kind"
     }
 }
 
@@ -3812,11 +3826,13 @@ struct DelegateCreateBody: Codable, Sendable {
     let label: String
     let caps: DelegateCapsBody?
     let operatorPublicId: String?
+    let longLived: Bool?
 
     enum CodingKeys: String, CodingKey {
         case label
         case caps
         case operatorPublicId = "operator_public_id"
+        case longLived = "long_lived"
     }
 }
 
