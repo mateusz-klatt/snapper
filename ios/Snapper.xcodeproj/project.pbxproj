@@ -7,10 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		04B289B56A7CF00DCB1E1249 /* AlertRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DB4E91D02D599DD1D40D952 /* AlertRow.swift */; };
 		09218B2634404709C960AFBA /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 442D4323A9B7C8B7A02A5B08 /* APIClient.swift */; };
 		0EDEF3790D6B1C22EF3699E4 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4646B48A09BA542FF6ABECD /* AppDelegate.swift */; };
 		13E8D50DB0D86D78A2BF31DB /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F7849605786039354D6A6590 /* Assets.xcassets */; };
 		1C42056D6B73DB2475D007F4 /* APITypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = C90AC0DDC55DFC58EF4590D7 /* APITypes.swift */; };
+		375D6E54819C76EB85DF2E97 /* AlertsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F12F4A22AA39A55870A72C7B /* AlertsView.swift */; };
 		3847E72F3248A41EA8DCD9F2 /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A50EF856475775A1EEA07E0 /* MainTabView.swift */; };
 		398C326321946F6554E4F5C3 /* Protocols.swift in Sources */ = {isa = PBXBuildFile; fileRef = D203FD7280A91512EE623EE1 /* Protocols.swift */; };
 		3A812C6207ED5A34EA4890E4 /* NavigationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DC7293CDEE72AC8C8C5341C /* NavigationCoordinator.swift */; };
@@ -47,6 +49,7 @@
 
 /* Begin PBXFileReference section */
 		039FE3D502C2D2EB294EB4AA /* Permissions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Permissions.swift; sourceTree = "<group>"; };
+		0DB4E91D02D599DD1D40D952 /* AlertRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlertRow.swift; sourceTree = "<group>"; };
 		10C33334091D91D43D43B1C3 /* Environment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Environment.swift; sourceTree = "<group>"; };
 		1499AF1C8B116093A1A9426D /* WebSocketManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSocketManager.swift; sourceTree = "<group>"; };
 		1FC42AFF6C9070E52403CC6A /* WSMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WSMessages.swift; sourceTree = "<group>"; };
@@ -73,6 +76,7 @@
 		D203FD7280A91512EE623EE1 /* Protocols.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Protocols.swift; sourceTree = "<group>"; };
 		E4646B48A09BA542FF6ABECD /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		E6605FA90A650CA70270A857 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		F12F4A22AA39A55870A72C7B /* AlertsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlertsView.swift; sourceTree = "<group>"; };
 		F4EDEB8970703709AC631633 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
 		F7849605786039354D6A6590 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		FB34EE347C68EC93D009F7F4 /* SnapperApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapperApp.swift; sourceTree = "<group>"; };
@@ -142,11 +146,13 @@
 		5AF90A18310B1DC6CC4939E4 /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				F12F4A22AA39A55870A72C7B /* AlertsView.swift */,
 				F4EDEB8970703709AC631633 /* DashboardView.swift */,
 				A9948BCE1220922C26E1E5D5 /* LoginView.swift */,
 				5A50EF856475775A1EEA07E0 /* MainTabView.swift */,
 				E6605FA90A650CA70270A857 /* SettingsView.swift */,
 				569FFBB46A52B74686A202D0 /* TradingView.swift */,
+				BEE4C7FE45A0551944CE9006 /* Components */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -175,6 +181,14 @@
 				CBD86CFF38B0F7B91294A78D /* Snapper */,
 				39B66CEE8EC32FBF47CADDFD /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		BEE4C7FE45A0551944CE9006 /* Components */ = {
+			isa = PBXGroup;
+			children = (
+				0DB4E91D02D599DD1D40D952 /* AlertRow.swift */,
+			);
+			path = Components;
 			sourceTree = "<group>";
 		};
 		CBD86CFF38B0F7B91294A78D /* Snapper */ = {
@@ -305,6 +319,8 @@
 			files = (
 				09218B2634404709C960AFBA /* APIClient.swift in Sources */,
 				1C42056D6B73DB2475D007F4 /* APITypes.swift in Sources */,
+				04B289B56A7CF00DCB1E1249 /* AlertRow.swift in Sources */,
+				375D6E54819C76EB85DF2E97 /* AlertsView.swift in Sources */,
 				B0B776140121A53C950E09F7 /* AnyCodable.swift in Sources */,
 				0EDEF3790D6B1C22EF3699E4 /* AppDelegate.swift in Sources */,
 				8DB5E916777E3B48A477E414 /* AuthService.swift in Sources */,
