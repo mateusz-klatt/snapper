@@ -94,9 +94,9 @@ async def get_public_feature_flags(
     """
     settings_service = getattr(request.app.state, "settings_service", None)
     ai_integration_enabled = bool(
-        settings_service.get_setting(_AI_INTEGRATION_FLAG_KEY, default=False)
+        settings_service.get_setting(_AI_INTEGRATION_FLAG_KEY, default=True)
         if settings_service is not None
-        else False
+        else True
     )
     tracker: SequenceTracker = request.app.state.rest_tracker
     sid = tracker.session_id

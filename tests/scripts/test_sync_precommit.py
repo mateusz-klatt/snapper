@@ -9,6 +9,16 @@ from scripts.sync_precommit import load_versions
 from scripts.sync_precommit import main
 from scripts.sync_precommit import update_config
 
+_CONFIG_PATH = Path(".pre-commit-config.yaml")
+
+
+def _write_local_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str) -> Path:
+    """Write the config in the current working directory used by the synchronizer."""
+    monkeypatch.chdir(tmp_path)
+    config = tmp_path / _CONFIG_PATH
+    config.write_text(content, encoding="utf-8")
+    return config
+
 
 class TestExtractVersion:
     """Test suite for ExtractVersion functionality."""
@@ -164,156 +174,199 @@ isort = "^5.13.0"
 class TestUpdateConfig:
     """Test suite for UpdateConfig functionality."""
 
-    def test_updates_ruff_revision(self, tmp_path: Path) -> None:
+    def test_updates_ruff_revision(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify updates ruff revision.
 
         Given: A pre-commit config with ruff-pre-commit repo at v0.0.1,
         When: update_config is called with ruff version v0.5.0,
         Then: The config file is updated to rev: v0.5.0.
         """
-        config = tmp_path / ".pre-commit-config.yaml"
-        config.write_text("""repos:
+        config = _write_local_config(
+            tmp_path,
+            monkeypatch,
+            """repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.0.1
     hooks:
       - id: ruff
-""")
+""",
+        )
 
-        update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, config)
+        update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, _CONFIG_PATH)
 
         content = config.read_text()
         assert "rev: v0.5.0" in content
 
-    def test_updates_black_revision(self, tmp_path: Path) -> None:
+    def test_updates_black_revision(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify updates black revision.
 
         Given: A pre-commit config with psf/black repo at rev 23.0.0,
         When: update_config is called with black version 24.0.0,
         Then: The config file is updated to rev: 24.0.0.
         """
-        config = tmp_path / ".pre-commit-config.yaml"
-        config.write_text("""repos:
+        config = _write_local_config(
+            tmp_path,
+            monkeypatch,
+            """repos:
   - repo: https://github.com/psf/black
     rev: 23.0.0
     hooks:
       - id: black
-""")
+""",
+        )
 
-        update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, config)
+        update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, _CONFIG_PATH)
 
         content = config.read_text()
         assert "rev: 24.0.0" in content
 
-    def test_updates_isort_revision(self, tmp_path: Path) -> None:
+    def test_updates_isort_revision(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify updates isort revision.
 
         Given: A pre-commit config with pycqa/isort repo at rev 5.12.0,
         When: update_config is called with isort version 5.13.0,
         Then: The config file is updated to rev: 5.13.0.
         """
-        config = tmp_path / ".pre-commit-config.yaml"
-        config.write_text("""repos:
+        config = _write_local_config(
+            tmp_path,
+            monkeypatch,
+            """repos:
   - repo: https://github.com/pycqa/isort
     rev: 5.12.0
     hooks:
       - id: isort
-""")
+""",
+        )
 
-        update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, config)
+        update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, _CONFIG_PATH)
 
         content = config.read_text()
         assert "rev: 5.13.0" in content
 
-    def test_preserves_indentation(self, tmp_path: Path) -> None:
+    def test_preserves_indentation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify preserves indentation.
 
         Given: A pre-commit config with 4-space indented rev line,
         When: update_config updates the ruff revision,
         Then: The indentation "    rev: v0.5.0" is preserved.
         """
-        config = tmp_path / ".pre-commit-config.yaml"
-        config.write_text("""repos:
+        config = _write_local_config(
+            tmp_path,
+            monkeypatch,
+            """repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.0.1
     hooks:
       - id: ruff
-""")
+""",
+        )
 
-        update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, config)
+        update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, _CONFIG_PATH)
 
         content = config.read_text()
         assert "    rev: v0.5.0" in content
 
-    def test_ignores_unknown_repos(self, tmp_path: Path) -> None:
+    def test_ignores_unknown_repos(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify ignores unknown repos.
 
         Given: A pre-commit config with pre-commit-hooks repo (not in mapping),
         When: update_config is called with version mappings,
         Then: The unknown repo's rev v4.0.0 remains unchanged.
         """
-        config = tmp_path / ".pre-commit-config.yaml"
-        config.write_text("""repos:
+        config = _write_local_config(
+            tmp_path,
+            monkeypatch,
+            """repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.0.0
     hooks:
       - id: trailing-whitespace
-""")
+""",
+        )
 
-        update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, config)
+        update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, _CONFIG_PATH)
 
         content = config.read_text()
         assert "rev: v4.0.0" in content
 
-    def test_raises_for_missing_config(self, tmp_path: Path) -> None:
+    def test_raises_for_missing_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Verify raises for missing config.
 
         Given: A path to a non-existent .pre-commit-config.yaml file,
         When: update_config is called with this path,
         Then: Raises FileNotFoundError with config file not found message.
         """
-        config = tmp_path / ".pre-commit-config.yaml"
+        monkeypatch.chdir(tmp_path)
 
         with pytest.raises(FileNotFoundError, match=".pre-commit-config.yaml not found"):
-            update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, config)
+            update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, _CONFIG_PATH)
 
-    def test_raises_for_path_traversal(self, tmp_path: Path) -> None:
+    def test_raises_for_path_traversal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Verify raises for path with traversal components.
 
         Given: A config path containing '..' components,
         When: update_config is called with this path,
         Then: Raises ValueError indicating path traversal.
         """
-        config = tmp_path / ".." / ".pre-commit-config.yaml"
+        monkeypatch.chdir(tmp_path)
+        config = Path("..") / ".pre-commit-config.yaml"
 
         with pytest.raises(ValueError, match="must not contain"):
             update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, config)
 
-    def test_raises_for_wrong_filename(self, tmp_path: Path) -> None:
+    def test_raises_for_nested_config_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify raises for config outside current directory root.
+
+        Given: A config path in a nested directory under the current working directory,
+        When: update_config is called with this path,
+        Then: Raises ValueError indicating the config must stay in the current directory.
+        """
+        monkeypatch.chdir(tmp_path)
+        config = Path("nested") / ".pre-commit-config.yaml"
+
+        with pytest.raises(ValueError, match="must stay in current working directory"):
+            update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, config)
+
+    def test_raises_for_wrong_filename(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Verify raises for wrong target filename.
 
         Given: A config path that does not target .pre-commit-config.yaml,
         When: update_config is called with this path,
         Then: Raises ValueError indicating wrong filename.
         """
-        config = tmp_path / "other.yaml"
+        monkeypatch.chdir(tmp_path)
+        config = Path("other.yaml")
 
         with pytest.raises(ValueError, match="must target .pre-commit-config.yaml"):
             update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, config)
 
-    def test_handles_repo_without_dash(self, tmp_path: Path) -> None:
+    def test_handles_repo_without_dash(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Verify handles repo without dash.
 
         Given: A pre-commit config with malformed YAML (repo without list dash),
         When: update_config is called with version mappings,
         Then: Still updates the rev to v0.5.0 via regex pattern matching.
         """
-        config = tmp_path / ".pre-commit-config.yaml"
-        config.write_text("""repos:
+        config = _write_local_config(
+            tmp_path,
+            monkeypatch,
+            """repos:
   repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.0.1
-""")
+""",
+        )
 
-        update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, config)
+        update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, _CONFIG_PATH)
 
         content = config.read_text()
         assert "rev: v0.5.0" in content
@@ -343,8 +396,9 @@ isort = "^5.13.0"
     hooks:
       - id: ruff
 """)
-        monkeypatch.setattr("scripts.sync_precommit.DEFAULT_PYPROJECT_PATH", pyproject)
-        monkeypatch.setattr("scripts.sync_precommit.DEFAULT_CONFIG_PATH", config)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("scripts.sync_precommit.DEFAULT_PYPROJECT_PATH", Path("pyproject.toml"))
+        monkeypatch.setattr("scripts.sync_precommit.DEFAULT_CONFIG_PATH", _CONFIG_PATH)
 
         result = main()
 
@@ -365,8 +419,9 @@ isort = "^5.13.0"
         pyproject.write_text("invalid toml [[[")
         config = tmp_path / ".pre-commit-config.yaml"
         config.write_text("repos: []")
-        monkeypatch.setattr("scripts.sync_precommit.DEFAULT_PYPROJECT_PATH", pyproject)
-        monkeypatch.setattr("scripts.sync_precommit.DEFAULT_CONFIG_PATH", config)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("scripts.sync_precommit.DEFAULT_PYPROJECT_PATH", Path("pyproject.toml"))
+        monkeypatch.setattr("scripts.sync_precommit.DEFAULT_CONFIG_PATH", _CONFIG_PATH)
 
         result = main()
 

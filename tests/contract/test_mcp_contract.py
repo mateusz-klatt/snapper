@@ -154,16 +154,17 @@ class TestMcpFeatureFlagContract:
         body = response.json()
         assert body["error_code"] == "feature_disabled"
 
-    def test_settings_not_ready_returns_503_feature_disabled(self) -> None:
-        """Pre-lifespan settings service → HTTP 503 with the same code.
+    def test_settings_not_ready_passes_through_default_on(self) -> None:
+        """Pre-lifespan settings service → pass-through (default-on).
 
         Given: the settings service resolver returns ``None`` (lifespan
             has not initialized the singleton yet),
         When: an MCP request arrives,
-        Then: the endpoint treats the unresolved state as flag-off for
-            safety and emits the same ``feature_disabled`` code — the
-            wire contract is identical regardless of WHICH side of the
-            startup race the caller lands on.
+        Then: the feature-flag middleware treats the unresolved state
+            as the default-on flag and passes the request through to
+            the downstream handler. The wire contract surfaces
+            ``feature_disabled`` only when the flag is EXPLICITLY
+            set to ``false``.
         """
 
         def _echo(_request: Request) -> JSONResponse:
@@ -179,8 +180,8 @@ class TestMcpFeatureFlagContract:
             json=_JSONRPC_INITIALIZE,
         )
 
-        assert response.status_code == 503
-        assert response.json()["error_code"] == "feature_disabled"
+        assert response.status_code == 200
+        assert response.json() == {"ok": True}
 
 
 class TestMcpBearerAuthContract:

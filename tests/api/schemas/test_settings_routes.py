@@ -476,14 +476,28 @@ class TestPublicFeatureFlags:
     """Tests for the public ``GET /settings/features`` endpoint."""
 
     @pytest.mark.asyncio
-    async def test_returns_false_when_flag_absent(self) -> None:
-        """Settings service default path → ``ai_integration_enabled=False``.
+    async def test_default_on_when_flag_absent(self) -> None:
+        """Settings service default path → ``ai_integration_enabled=True``.
 
-        Plan §4  item 1: when the ``ai_integration_enabled``
-        setting hasn't been flipped on, the endpoint surfaces
-        ``False`` so the frontend hides the AI Integration
-        navigation entry.
+        The ``ai_integration_enabled`` flag defaults to on so a fresh
+        install exposes the AI Integration navigation entry without
+        any manual DB flip. Flipping the setting to ``false``
+        remains the way to hide the feature.
         """
+        mock_request = MagicMock()
+        mock_request.app.state.rest_tracker = SequenceTracker()
+        mock_settings_service = MagicMock()
+        mock_settings_service.get_setting.side_effect = lambda key, default=None: default
+        mock_request.app.state.settings_service = mock_settings_service
+        response = await get_public_feature_flags(request=mock_request)
+        assert response.payload.ai_integration_enabled is True
+        mock_settings_service.get_setting.assert_called_once_with(
+            "ai_integration_enabled", default=True
+        )
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_flag_explicitly_disabled(self) -> None:
+        """Operator flipped the flag to False → endpoint surfaces False."""
         mock_request = MagicMock()
         mock_request.app.state.rest_tracker = SequenceTracker()
         mock_settings_service = MagicMock()
@@ -491,9 +505,6 @@ class TestPublicFeatureFlags:
         mock_request.app.state.settings_service = mock_settings_service
         response = await get_public_feature_flags(request=mock_request)
         assert response.payload.ai_integration_enabled is False
-        mock_settings_service.get_setting.assert_called_once_with(
-            "ai_integration_enabled", default=False
-        )
 
     @pytest.mark.asyncio
     async def test_returns_true_when_flag_enabled(self) -> None:
@@ -523,16 +534,17 @@ class TestPublicFeatureFlags:
         assert response.type == "feature_flags_response"
 
     @pytest.mark.asyncio
-    async def test_returns_false_when_settings_service_missing(self) -> None:
-        """Lifespan-not-ready (state.settings_service absent) → False.
+    async def test_returns_true_when_settings_service_missing(self) -> None:
+        """Lifespan-not-ready (state.settings_service absent) → True.
 
         The endpoint must not raise when the FastAPI lifespan hasn't
         finished wiring ``app.state.settings_service``; callers that
-        hit the route during startup see the safe default rather
-        than an unhandled 500.
+        hit the route during startup see the default-on state so
+        the frontend can render the AI Integration nav entry
+        optimistically.
         """
         mock_request = MagicMock()
         mock_request.app.state = MagicMock(spec=["rest_tracker"])
         mock_request.app.state.rest_tracker = SequenceTracker()
         response = await get_public_feature_flags(request=mock_request)
-        assert response.payload.ai_integration_enabled is False
+        assert response.payload.ai_integration_enabled is True

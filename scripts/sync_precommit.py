@@ -78,7 +78,10 @@ def _resolve_config(config_path: Path) -> Path:
     """
     if ".." in config_path.parts:
         raise ValueError(f"Config path must not contain '..' components: {config_path}")
-    resolved = config_path.resolve()
+    root = Path.cwd().resolve()
+    resolved = (root / config_path).resolve()
+    if resolved.parent != root:
+        raise ValueError(f"Config path must stay in current working directory: {config_path}")
     if resolved.name != PRECOMMIT_CONFIG_FILENAME:
         raise ValueError(f"Config path must target {PRECOMMIT_CONFIG_FILENAME}: {config_path}")
     if not resolved.exists():

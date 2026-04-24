@@ -3,9 +3,12 @@
 Constructs the Starlette sub-app mounted under ``/api/mcp``. The
 sub-app is ALWAYS mounted; the :class:`FeatureFlagMiddleware`
 returns HTTP 503 with ``{"error_code": "feature_disabled"}`` when
-the ``ai_integration_enabled`` DB setting is ``False`` (default).
-This lets operators flip the flag at runtime without restarting
-the API server.
+the ``ai_integration_enabled`` DB setting is explicitly ``False``.
+The flag defaults to ``True`` — both when the key is absent and
+before the settings service has finished initialising — so the
+MCP endpoint is reachable on a fresh install without manual setup.
+Operators flip the flag at runtime to disable it without
+restarting the API server.
 The bearer-header auth extension shipped in
 (:func:`snapper.auth.dependencies.get_current_user`) provides the
 transport; this module's auth middleware translates its absence /
@@ -105,8 +108,10 @@ class FeatureFlagMiddleware(BaseHTTPMiddleware):
             app: Downstream ASGI app this middleware wraps.
             settings_service_getter: Zero-arg callable returning the
                 initialized :class:`SettingsService`, or ``None`` if
-                the service hasn't been initialized yet (misconfigured
-                lifespan — treated as flag-off for safety).
+                the service hasn't been initialized yet. The flag
+                defaults to on, so a missing service is treated as
+                pass-through; real misconfiguration surfaces at the
+                downstream handlers which themselves need the service.
         """
         super().__init__(app)
         self._settings_service_getter = settings_service_getter
@@ -124,18 +129,8 @@ class FeatureFlagMiddleware(BaseHTTPMiddleware):
         """
         settings_service = self._settings_service_getter()
         if settings_service is None:
-            return JSONResponse(
-                status_code=503,
-                content={
-                    "error_code": "feature_disabled",
-                    "detail": (
-                        "Settings service not yet initialized. MCP "
-                        "endpoint is unavailable until the API "
-                        "lifespan completes startup."
-                    ),
-                },
-            )
-        enabled = settings_service.get_setting(_FEATURE_FLAG_KEY, default=False)
+            return await call_next(request)
+        enabled = settings_service.get_setting(_FEATURE_FLAG_KEY, default=True)
         if not enabled:
             return JSONResponse(
                 status_code=503,

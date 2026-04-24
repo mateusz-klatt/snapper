@@ -4,8 +4,8 @@ Verifies the three-layer composition from
 :func:`snapper.mcp.server.build_mcp_app`:
 
 1. :class:`FeatureFlagMiddleware` — 503 when ``ai_integration_enabled``
-   is False (default) or when the settings service hasn't initialized
-   yet; pass-through when True.
+   is explicitly set to False; pass-through when True (default) or when
+   the settings service hasn't initialized yet.
 2. :class:`BearerAuthMiddleware` — 401 on missing / malformed /
    unverifiable Bearer; populates ``request.state.token_claims`` on
    success.
@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock
 from unittest.mock import Mock
 from unittest.mock import patch
 
+import pytest
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -39,6 +40,7 @@ from snapper.auth.tokens import VerifyOutcome
 from snapper.mcp.server import BearerAuthMiddleware
 from snapper.mcp.server import FeatureFlagMiddleware
 from snapper.mcp.server import build_mcp_app
+from snapper.mcp.server import get_current_claims
 
 _TEST_TOKEN_PLACEHOLDER = "dummy.value.used.by.tests.only"
 
@@ -86,21 +88,42 @@ class TestFeatureFlagMiddleware:
         body = response.json()
         assert body["error_code"] == "feature_disabled"
 
-    def test_settings_service_missing_returns_503(self) -> None:
-        """Lifespan-not-ready → 503, not an unhandled 500.
+    def test_settings_service_missing_passes_through_to_auth(self) -> None:
+        """Lifespan-not-ready → default-on, next middleware handles it.
 
         Given: MCP sub-app whose getter returns ``None`` (FastAPI
             lifespan hasn't finished initializing settings_service),
         When: a request arrives,
-        Then: HTTP 503 is returned with
-            ``error_code="feature_disabled"`` rather than raising an
-            AttributeError.
+        Then: the feature-flag middleware treats the absence as
+            default-on and passes through; the downstream bearer
+            middleware rejects the missing Authorization header with
+            401 ``missing_bearer_token``. No unhandled 500.
         """
         app = build_mcp_app(settings_service_getter=lambda: None, repository_getter=lambda: Mock())
         client = TestClient(app)
         response = client.post("/mcp", json={})
-        assert response.status_code == 503
-        assert response.json()["error_code"] == "feature_disabled"
+        assert response.status_code == 401
+        assert response.json()["error_code"] == "missing_bearer_token"
+
+    def test_flag_absent_defaults_to_on(self) -> None:
+        """Key missing from settings → default-on, request passes through.
+
+        Given: MCP sub-app with a settings service whose
+            ``get_setting`` returns the provided ``default`` (True)
+            because the key is absent from the DB,
+        When: a request arrives,
+        Then: the feature-flag middleware admits it and the
+            downstream bearer middleware handles the missing
+            Authorization header with 401.
+        """
+        svc = Mock(spec=SettingsService)
+        svc.get_setting.side_effect = lambda key, default=None: default
+        app = build_mcp_app(settings_service_getter=lambda: svc, repository_getter=lambda: Mock())
+        client = TestClient(app)
+        response = client.post("/mcp", json={})
+        assert response.status_code == 401
+        assert response.json()["error_code"] == "missing_bearer_token"
+        svc.get_setting.assert_called_with("ai_integration_enabled", default=True)
 
 
 class TestBearerAuthMiddleware:
@@ -308,6 +331,22 @@ class TestBearerAuthMiddleware:
             )
         assert response.status_code == 200
         assert response.json()["seen"] == "ai-delegate-1"
+
+
+class TestMCPContext:
+    """Context access used by FastMCP tool handlers."""
+
+    def test_get_current_claims_raises_when_context_unset(self) -> None:
+        """Missing ContextVar state → explicit middleware wiring error.
+
+        Given: no :class:`BearerAuthMiddleware` has authenticated the
+            current call and populated ``TOKEN_CLAIMS_CTX``,
+        When: a tool handler tries to read the current claims,
+        Then: :class:`RuntimeError` is raised with a message that
+            points at middleware-chain misconfiguration.
+        """
+        with pytest.raises(RuntimeError, match="without an authenticated token_claims"):
+            get_current_claims()
 
 
 class TestMCPAppComposition:

@@ -7117,9 +7117,10 @@ async def test_get_undispatched_commands_stable_across_same_created_at(
                 "timestamp": tied_now,
             }
         )
-    page1 = await r.get_undispatched_commands(as_of=datetime.now(UTC), limit=2, offset=0)
-    page2 = await r.get_undispatched_commands(as_of=datetime.now(UTC), limit=2, offset=2)
-    page3 = await r.get_undispatched_commands(as_of=datetime.now(UTC), limit=2, offset=4)
+    as_of = tied_now + timedelta(seconds=1)
+    page1 = await r.get_undispatched_commands(as_of=as_of, limit=2, offset=0)
+    page2 = await r.get_undispatched_commands(as_of=as_of, limit=2, offset=2)
+    page3 = await r.get_undispatched_commands(as_of=as_of, limit=2, offset=4)
     all_ids = [row["public_id"] for row in page1 + page2 + page3]
     assert len(all_ids) == 6
     assert len(set(all_ids)) == 6, "pages must not duplicate any row"

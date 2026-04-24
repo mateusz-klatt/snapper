@@ -96,18 +96,19 @@ def require_ai_integration_enabled(request: Request) -> None:
             effect without a restart.
 
     Raises:
-        AiIntegrationDisabledError: when the flag is off or the
-            settings service has not been initialised yet
-            (fail-closed during startup). Translated to a 503
-            JSONResponse with the MCP-compatible
+        AiIntegrationDisabledError: when the flag is explicitly set
+            to ``false`` in the settings table. The flag defaults to
+            ``true`` — both when the key is absent from the DB and
+            when the settings service has not finished initialising.
+            Translated to a 503 JSONResponse with the MCP-compatible
             ``{"error_code": "feature_disabled"}`` envelope by the
             app-level exception handler.
     """
     settings_service = getattr(request.app.state, "settings_service", None)
     enabled = bool(
-        settings_service.get_setting(_AI_INTEGRATION_FLAG_KEY, default=False)
+        settings_service.get_setting(_AI_INTEGRATION_FLAG_KEY, default=True)
         if settings_service is not None
-        else False
+        else True
     )
     if enabled:
         return

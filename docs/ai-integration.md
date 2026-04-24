@@ -10,7 +10,7 @@ for Claude Desktop, Phase C adds a first-class Claude Code channel.
 
 This doc covers:
 
-1. [Enabling the feature](#enabling-the-feature)
+1. [Feature flag](#feature-flag)
 2. [Creating an AI delegate](#creating-an-ai-delegate)
 3. [Client configuration examples](#client-configuration-examples)
 4. [Available tools](#available-tools)
@@ -22,29 +22,32 @@ This doc covers:
 
 ---
 
-## Enabling the feature
+## Feature flag
 
-The `/api/mcp` sub-app is always mounted but gated behind a database
-setting.
+The `/api/mcp` sub-app is always mounted and gated by the
+`ai_integration_enabled` database setting.
 
-1. Flip the `ai_integration_enabled` setting to `true`. Via the
-    Settings UI (operator+) or directly:
+1. The flag **defaults to `true`** — a fresh install exposes the MCP
+    endpoint and the AI Integration navigation entry with no manual
+    setup. Operators who need to disable the feature flip the
+    setting to `false` via the Settings UI (operator+) or directly:
 
     ```bash
     curl -X POST http://localhost:8000/api/settings/ai_integration_enabled/set \
       -H "Authorization: Bearer <operator-jwt>" \
       -H "Content-Type: application/json" \
-      -d '{"session_id":"cli","sequence_id":1,"public_id":"$(uuidgen)","timestamp":"2026-04-20T00:00:00Z","payload":{"value":"true","category":"system"}}'
+      -d '{"session_id":"cli","sequence_id":1,"public_id":"$(uuidgen)","timestamp":"2026-04-20T00:00:00Z","payload":{"value":"false","category":"system"}}'
     ```
 
 2. The frontend reads `GET /api/settings/features` on mount (no auth
-    required) and surfaces the "AI Integration" navigation entry when
-    the flag is on. The MCP endpoint returns `503
-    feature_disabled` when the flag is off.
+    required) and surfaces the "AI Integration" navigation entry
+    whenever the flag is on. The MCP endpoint returns
+    `503 feature_disabled` only when the flag is explicitly set to
+    `false`.
 
-3. When the flag is on, the MCP endpoint requires every request to
-    carry a valid `Authorization: Bearer <jwt>` header. Anonymous
-    requests receive `401 missing_bearer_token`.
+3. Whether the flag is on or off, the MCP endpoint requires every
+    request to carry a valid `Authorization: Bearer <jwt>` header.
+    Anonymous requests receive `401 missing_bearer_token`.
 
 ---
 

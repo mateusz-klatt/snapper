@@ -1049,20 +1049,35 @@ class TestAiDelegatesFeatureFlagGate:
         request.app.state.settings_service = settings_service
         ai_delegate_routes.require_ai_integration_enabled(request)
 
-    def test_settings_service_missing_treated_as_flag_off(self) -> None:
-        """Pre-lifespan startup (no settings service) → fail-closed.
+    def test_settings_service_missing_defaults_to_on(self) -> None:
+        """Pre-lifespan startup (no settings service) → default-on.
 
         Given: ``app.state.settings_service`` is absent (lifespan
             has not populated the singleton yet),
         When: the dependency runs,
-        Then: it raises :class:`AiIntegrationDisabledError` just
-            like a deliberate off state — matches the MCP
-            middleware's fail-closed startup behaviour.
+        Then: it returns ``None`` because the flag defaults to
+            enabled — matches the MCP middleware's default-on
+            startup behaviour.
         """
         request = _Magic()
         request.app.state = _Magic(spec=["rest_tracker"])
-        with pytest.raises(ai_delegate_routes.AiIntegrationDisabledError):
-            ai_delegate_routes.require_ai_integration_enabled(request)
+        ai_delegate_routes.require_ai_integration_enabled(request)
+
+    def test_flag_absent_defaults_to_on(self) -> None:
+        """Settings service returns the ``default`` kwarg → default-on.
+
+        Given: ``get_setting`` is called with
+            ``default=True`` and the key is absent from the DB so
+            the default is returned,
+        When: the dependency runs,
+        Then: it returns ``None`` and the downstream route runs.
+        """
+        settings_service = _Magic()
+        settings_service.get_setting.side_effect = lambda key, default=None: default
+        request = _Magic()
+        request.app.state.settings_service = settings_service
+        ai_delegate_routes.require_ai_integration_enabled(request)
+        settings_service.get_setting.assert_called_with("ai_integration_enabled", default=True)
 
     def test_handler_returns_mcp_parity_envelope(self) -> None:
         """Rfollowup (gpt-5.4): envelope must match MCP 503 parity.

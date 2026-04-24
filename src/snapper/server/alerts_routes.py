@@ -19,7 +19,6 @@ a cursor round-trip is lossless but never fatal.
 """
 
 import base64
-import binascii
 import datetime as dt
 import json
 from datetime import datetime
@@ -97,7 +96,7 @@ def _decode_cursor(token: str | None) -> AlertListCursor | None:
             logger.debug("alert cursor rejected — missing or wrong-type t/p fields")
             return None
         ts = datetime.fromisoformat(ts_raw)
-    except (binascii.Error, ValueError) as exc:
+    except ValueError as exc:
         logger.debug(
             "alert cursor rejected — decode failed ({kind}: {err})",
             kind=type(exc).__name__,
