@@ -2937,13 +2937,18 @@ class Repository(ABC):
         transition_at: datetime,
         session_id: str,
         sequence_id: int,
-    ) -> None:
+    ) -> bool:
         """SCD2 close + insert, status remains queued, bumps attempt_count.
 
         Called BEFORE the APNs HTTP call (crash-safety §D5.5) so a
         mid-flight sidecar restart leaves a row with incremented
         attempt_count that is still retriable — bounded ≤1 duplicate
         send per crash.
+
+        Returns:
+            True on successful transition; False when the active row
+            is no longer ``queued`` (BE-3c R1 race guard — a scope-
+            revoke cancel raced the retry-loop bump).
         """
         ...
 
@@ -8791,13 +8796,20 @@ class SQLAlchemyRepository(Repository):
         transition_at: datetime,
         session_id: str,
         sequence_id: int,
-    ) -> None:
+    ) -> bool:
         """Bump attempt_count + reschedule next retry via SCD2 close+insert.
 
         Called BEFORE the APNs HTTP call (crash-safety §D5.5). Status
         stays ``queued`` across versions.
+
+        Returns:
+            True when the active queued row was transitioned; False
+            when the row is no longer queued (e.g. cancelled mid-send
+            by an admin.scope_revoked handler racing the retry loop —
+            BE-3c R1 race guard). Callers use the False branch to
+            short-circuit the APNs send.
         """
-        await self._scd2_transition_delivery(
+        return await self._scd2_transition_delivery(
             public_id,
             "queued",
             transition_at=transition_at,
@@ -8875,43 +8887,31 @@ class SQLAlchemyRepository(Repository):
         on the source event cannot cause misses (closes Copilot R1
         MAJOR on SCD2-join correctness). Each matching active row is
         SCD2-closed and a new version with ``status='cancelled_scope'``
-        is inserted.
+        is inserted via the per-row atomic close+insert helper so a
+        concurrent retry-loop transition on the same row is a race
+        the caller can win / lose safely (BE-3c R1 race-safety fix).
         """
         async with self.session() as s:
-            result = await s.execute(
-                select(AlertDelivery).where(
-                    AlertDelivery.status == "queued",
-                    AlertDelivery.known_to == KNOWN_TO_MAX,
-                    AlertDelivery.user_public_id == user_public_id,
-                    AlertDelivery.operator_public_id == operator_public_id,
-                    AlertDelivery.wallet_public_id == wallet_public_id,
-                )
+            rows = await self._select_queued_deliveries_by_scope(
+                s,
+                user_public_id=user_public_id,
+                operator_public_id=operator_public_id,
+                wallet_public_id=wallet_public_id,
             )
-            rows = list(result.scalars().all())
+            transitioned = 0
             for existing in rows:
-                existing.known_to = transition_at
-                new_version = AlertDelivery(
-                    public_id=existing.public_id,
+                if await self._atomic_transition_queued_delivery(
+                    s,
+                    existing=existing,
+                    new_status="cancelled_scope",
+                    error_reason="scope_revoked",
+                    transition_at=transition_at,
                     session_id=session_id,
                     sequence_id=sequence_id,
-                    timestamp=transition_at,
-                    known_to=KNOWN_TO_MAX,
-                    alert_event_public_id=existing.alert_event_public_id,
-                    device_public_id=existing.device_public_id,
-                    user_public_id=existing.user_public_id,
-                    operator_public_id=existing.operator_public_id,
-                    wallet_public_id=existing.wallet_public_id,
-                    status="cancelled_scope",
-                    attempt_count=existing.attempt_count,
-                    last_attempt_at=existing.last_attempt_at,
-                    next_attempt_at=None,
-                    apns_id=existing.apns_id,
-                    error_reason="scope_revoked",
-                    created_at=existing.created_at,
-                )
-                s.add(new_version)
+                ):
+                    transitioned += 1
             await s.commit()
-            return len(rows)
+            return transitioned
 
     async def cancel_pending_deliveries_for_user(
         self,
@@ -8922,40 +8922,124 @@ class SQLAlchemyRepository(Repository):
         sequence_id: int,
         error_reason: str = "user_deactivated",
     ) -> int:
-        """Bulk-cancel every queued delivery for one user (admin kill-switch)."""
+        """Bulk-cancel every queued delivery for one user (admin kill-switch).
+
+        Same per-row atomic close+insert pattern as
+        ``cancel_pending_deliveries_for_scope`` — a concurrent retry
+        loop transition on the same row is safely skipped when our
+        close UPDATE affects zero rows (the competitor already closed
+        it). Without this guard, inserting a ``cancelled_scope``
+        successor for a row the competitor just transitioned to
+        ``sent`` / ``failed`` would collide on the partial unique
+        index ``(public_id, known_to=KNOWN_TO_MAX)`` and raise
+        ``IntegrityError`` out of the admin-topic dispatcher — which
+        in turn would kill the sidecar's receive loop (BE-3c R1 race-
+        safety fix from `gpt-5.3-codex` final review).
+        """
         async with self.session() as s:
-            result = await s.execute(
-                select(AlertDelivery).where(
-                    AlertDelivery.status == "queued",
-                    AlertDelivery.known_to == KNOWN_TO_MAX,
-                    AlertDelivery.user_public_id == user_public_id,
-                )
-            )
-            rows = list(result.scalars().all())
+            rows = await self._select_queued_deliveries_by_user(s, user_public_id)
+            transitioned = 0
             for existing in rows:
-                existing.known_to = transition_at
-                new_version = AlertDelivery(
-                    public_id=existing.public_id,
+                if await self._atomic_transition_queued_delivery(
+                    s,
+                    existing=existing,
+                    new_status="cancelled_scope",
+                    error_reason=error_reason,
+                    transition_at=transition_at,
                     session_id=session_id,
                     sequence_id=sequence_id,
-                    timestamp=transition_at,
-                    known_to=KNOWN_TO_MAX,
-                    alert_event_public_id=existing.alert_event_public_id,
-                    device_public_id=existing.device_public_id,
-                    user_public_id=existing.user_public_id,
-                    operator_public_id=existing.operator_public_id,
-                    wallet_public_id=existing.wallet_public_id,
-                    status="cancelled_scope",
-                    attempt_count=existing.attempt_count,
-                    last_attempt_at=existing.last_attempt_at,
-                    next_attempt_at=None,
-                    apns_id=existing.apns_id,
-                    error_reason=error_reason,
-                    created_at=existing.created_at,
-                )
-                s.add(new_version)
+                ):
+                    transitioned += 1
             await s.commit()
-            return len(rows)
+            return transitioned
+
+    @staticmethod
+    async def _select_queued_deliveries_by_scope(
+        s: AsyncSession,
+        *,
+        user_public_id: str,
+        operator_public_id: str,
+        wallet_public_id: str,
+    ) -> list[AlertDelivery]:
+        """Snapshot active queued deliveries matching the scope triple."""
+        result = await s.execute(
+            select(AlertDelivery).where(
+                AlertDelivery.status == "queued",
+                AlertDelivery.known_to == KNOWN_TO_MAX,
+                AlertDelivery.user_public_id == user_public_id,
+                AlertDelivery.operator_public_id == operator_public_id,
+                AlertDelivery.wallet_public_id == wallet_public_id,
+            )
+        )
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def _select_queued_deliveries_by_user(
+        s: AsyncSession, user_public_id: str
+    ) -> list[AlertDelivery]:
+        """Snapshot active queued deliveries for the whole user."""
+        result = await s.execute(
+            select(AlertDelivery).where(
+                AlertDelivery.status == "queued",
+                AlertDelivery.known_to == KNOWN_TO_MAX,
+                AlertDelivery.user_public_id == user_public_id,
+            )
+        )
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def _atomic_transition_queued_delivery(
+        s: AsyncSession,
+        *,
+        existing: AlertDelivery,
+        new_status: str,
+        error_reason: str,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> bool:
+        """Atomically close one queued delivery + insert its terminal successor.
+
+        The close is a guarded UPDATE on ``(id, known_to=KNOWN_TO_MAX,
+        status='queued')`` — ``rowcount == 0`` means a competing
+        transition (retry-loop or parallel admin handler) closed the
+        row first, so we skip the successor insert and return False
+        without contending for the partial-unique
+        ``(public_id, known_to=KNOWN_TO_MAX)`` index.
+        """
+        close_result = await s.execute(
+            update(AlertDelivery)
+            .where(
+                AlertDelivery.id == existing.id,
+                AlertDelivery.known_to == KNOWN_TO_MAX,
+                AlertDelivery.status == "queued",
+            )
+            .values(known_to=transition_at)
+            .execution_options(synchronize_session=False)
+        )
+        if int(cast(Any, close_result).rowcount or 0) == 0:
+            return False
+        successor = AlertDelivery(
+            public_id=existing.public_id,
+            session_id=session_id,
+            sequence_id=sequence_id,
+            timestamp=transition_at,
+            known_to=KNOWN_TO_MAX,
+            alert_event_public_id=existing.alert_event_public_id,
+            device_public_id=existing.device_public_id,
+            user_public_id=existing.user_public_id,
+            operator_public_id=existing.operator_public_id,
+            wallet_public_id=existing.wallet_public_id,
+            status=new_status,
+            attempt_count=existing.attempt_count,
+            last_attempt_at=existing.last_attempt_at,
+            next_attempt_at=None,
+            apns_id=existing.apns_id,
+            error_reason=error_reason,
+            created_at=existing.created_at,
+        )
+        s.add(successor)
+        return True
 
     async def count_deliveries_by_status(self) -> dict[str, int]:
         """Aggregate counts of active ``alert_deliveries`` rows per ``status``."""

@@ -25,6 +25,7 @@ from sqlalchemy import update as _update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from snapper.data import repository as repository_module
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import AlertDelivery
 from snapper.data.models import AlertEvent
@@ -768,6 +769,252 @@ class TestCancelDeliveriesForUser:
         assert cancelled == 0
         still_queued = await repo.list_queued_deliveries_all()
         assert len(still_queued) == 1
+
+
+class TestBulkCancelRaceSafety:
+    """BE-3c R1: bulk cancel helpers are race-safe against concurrent transitions."""
+
+    @pytest.mark.asyncio
+    async def test_scope_cancel_skips_row_already_transitioned(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """A row transitioned to ``sent`` mid-cancel is skipped silently.
+
+        Closes ``gpt-5.3-codex`` final-review Critical #1: a naive
+        close+insert on a row the retry loop already transitioned to
+        ``sent`` collided on the partial-unique
+        ``(public_id, known_to=MAX)`` index and raised
+        ``IntegrityError``. The R1 pattern does an atomic close
+        ``UPDATE ... WHERE status='queued' AND known_to=MAX`` and
+        only inserts the ``cancelled_scope`` successor when the
+        rowcount is 1. A winner that already transitioned the row
+        leaves our close with rowcount==0 → skip, no exception.
+        """
+        user = "u-race"
+        device_pid = await _seed_user_and_device(repo, user_public_id=user)
+        delivery_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                alert_event_public_id="evt-race",
+                device_public_id=device_pid,
+                user_public_id=user,
+                operator_public_id="op-race",
+                wallet_public_id="wal-race",
+                status="queued",
+                created_at=_ts(),
+                session_id="s",
+                sequence_id=1,
+                timestamp=_ts(),
+            )
+        )
+        await repo.mark_delivery_sent(
+            delivery_pid,
+            apns_id="apns-early",
+            transition_at=_ts(1),
+            session_id="s-retry",
+            sequence_id=2,
+        )
+
+        cancelled = await repo.cancel_pending_deliveries_for_scope(
+            user_public_id=user,
+            operator_public_id="op-race",
+            wallet_public_id="wal-race",
+            transition_at=_ts(2),
+            session_id="s-admin",
+            sequence_id=3,
+        )
+
+        assert cancelled == 0
+        async with repo.session() as s:
+            all_rows = list(
+                (
+                    await s.execute(
+                        _select(AlertDelivery).where(AlertDelivery.public_id == delivery_pid)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        active_statuses = {r.status for r in all_rows if r.known_to == KNOWN_TO_MAX}
+        assert active_statuses == {"sent"}
+
+    @pytest.mark.asyncio
+    async def test_user_cancel_skips_row_already_transitioned(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """``cancel_pending_deliveries_for_user`` inherits the same guard."""
+        user = "u-race-2"
+        device_pid = await _seed_user_and_device(repo, user_public_id=user)
+        delivery_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                alert_event_public_id="evt-race-2",
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                created_at=_ts(),
+                session_id="s",
+                sequence_id=1,
+                timestamp=_ts(),
+            )
+        )
+        await repo.mark_delivery_failed(
+            delivery_pid,
+            error_reason="concurrent failure",
+            transition_at=_ts(1),
+            session_id="s-retry",
+            sequence_id=2,
+        )
+
+        cancelled = await repo.cancel_pending_deliveries_for_user(
+            user,
+            transition_at=_ts(2),
+            session_id="s-admin",
+            sequence_id=3,
+        )
+
+        assert cancelled == 0
+
+    @pytest.mark.asyncio
+    async def test_bulk_cancel_handles_mid_session_close_race(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Between SELECT and per-row atomic UPDATE, a competitor can close.
+
+        This test mimics a strict concurrency race that ``_scd2_transition_delivery``
+        already handles: the SELECT snapshots an active queued row,
+        but by the time the per-row atomic close UPDATE runs, a
+        competitor has already closed it. The rowcount==0 branch must
+        skip the successor insert so the partial-unique
+        ``(public_id, known_to=MAX)`` index is not stressed. We
+        reproduce the race by closing the row via a raw SQL UPDATE
+        after the ORM has cached its ``AlertDelivery`` instance, then
+        invoking the bulk helper.
+        """
+        user = "u-race-3"
+        device_pid = await _seed_user_and_device(repo, user_public_id=user)
+        delivery_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                alert_event_public_id="evt-race-3",
+                device_public_id=device_pid,
+                user_public_id=user,
+                operator_public_id="op-3",
+                wallet_public_id="wal-3",
+                status="queued",
+                created_at=_ts(),
+                session_id="s",
+                sequence_id=1,
+                timestamp=_ts(),
+            )
+        )
+
+        async def _race_close_between_select_and_update(
+            s: AsyncSession,
+            *,
+            user_public_id: str,
+            operator_public_id: str,
+            wallet_public_id: str,
+        ) -> list[AlertDelivery]:
+            rows = (
+                (
+                    await s.execute(
+                        _select(AlertDelivery).where(
+                            AlertDelivery.status == "queued",
+                            AlertDelivery.known_to == KNOWN_TO_MAX,
+                            AlertDelivery.user_public_id == user_public_id,
+                            AlertDelivery.operator_public_id == operator_public_id,
+                            AlertDelivery.wallet_public_id == wallet_public_id,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            async with repo.session() as competitor:
+                await competitor.execute(
+                    _update(AlertDelivery)
+                    .where(
+                        AlertDelivery.public_id == delivery_pid,
+                        AlertDelivery.known_to == KNOWN_TO_MAX,
+                    )
+                    .values(known_to=_ts(1))
+                )
+                await competitor.commit()
+            return list(rows)
+
+        monkeypatch.setattr(
+            repository_module.SQLAlchemyRepository,
+            "_select_queued_deliveries_by_scope",
+            staticmethod(_race_close_between_select_and_update),
+        )
+        cancelled = await repo.cancel_pending_deliveries_for_scope(
+            user_public_id=user,
+            operator_public_id="op-3",
+            wallet_public_id="wal-3",
+            transition_at=_ts(2),
+            session_id="s-admin",
+            sequence_id=3,
+        )
+
+        assert cancelled == 0
+
+    @pytest.mark.asyncio
+    async def test_user_bulk_cancel_handles_mid_session_close_race(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``cancel_pending_deliveries_for_user`` honours the same race guard."""
+        user = "u-race-4"
+        device_pid = await _seed_user_and_device(repo, user_public_id=user)
+        delivery_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                alert_event_public_id="evt-race-4",
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                created_at=_ts(),
+                session_id="s",
+                sequence_id=1,
+                timestamp=_ts(),
+            )
+        )
+
+        async def _race_close(s: AsyncSession, user_public_id: str) -> list[AlertDelivery]:
+            rows = (
+                (
+                    await s.execute(
+                        _select(AlertDelivery).where(
+                            AlertDelivery.status == "queued",
+                            AlertDelivery.known_to == KNOWN_TO_MAX,
+                            AlertDelivery.user_public_id == user_public_id,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            async with repo.session() as competitor:
+                await competitor.execute(
+                    _update(AlertDelivery)
+                    .where(
+                        AlertDelivery.public_id == delivery_pid,
+                        AlertDelivery.known_to == KNOWN_TO_MAX,
+                    )
+                    .values(known_to=_ts(1))
+                )
+                await competitor.commit()
+            return list(rows)
+
+        monkeypatch.setattr(
+            repository_module.SQLAlchemyRepository,
+            "_select_queued_deliveries_by_user",
+            staticmethod(_race_close),
+        )
+        cancelled = await repo.cancel_pending_deliveries_for_user(
+            user,
+            transition_at=_ts(2),
+            session_id="s-admin",
+            sequence_id=3,
+        )
+
+        assert cancelled == 0
 
 
 class TestCountDeliveriesByStatus:

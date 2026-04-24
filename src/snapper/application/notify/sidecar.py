@@ -201,10 +201,22 @@ class NotifySidecar(RegisterableProcess):
                 handling it).
         """
         if topic == "admin.scope_revoked":
-            await self._scope_revalidator.handle_scope_revoked(payload, self._repo, now)
+            try:
+                await self._scope_revalidator.handle_scope_revoked(payload, self._repo, now)
+            except Exception as exc:
+                logger.warning(
+                    "sidecar: admin.scope_revoked handler raised: {err}",
+                    err=exc,
+                )
             return
         if topic == "admin.user_deactivated":
-            await self._scope_revalidator.handle_user_deactivated(payload, self._repo, now)
+            try:
+                await self._scope_revalidator.handle_user_deactivated(payload, self._repo, now)
+            except Exception as exc:
+                logger.warning(
+                    "sidecar: admin.user_deactivated handler raised: {err}",
+                    err=exc,
+                )
             return
         matching = self._registry.get_longest_match(topic)
         if not matching:
@@ -354,6 +366,13 @@ class NotifySidecar(RegisterableProcess):
             )
             return
         current_attempt = await self._bump_attempt(delivery_public_id, now)
+        if current_attempt is None:
+            logger.info(
+                "sidecar: delivery {pid} no longer queued at bump time —"
+                " concurrent cancel / terminal transition wins",
+                pid=delivery_public_id,
+            )
+            return
         payload = _build_apns_payload(event)
         try:
             result = await self._apns.send(
@@ -379,20 +398,25 @@ class NotifySidecar(RegisterableProcess):
             return
         await self._apply_result(delivery_public_id, current_attempt, result, device, now)
 
-    async def _bump_attempt(self, delivery_public_id: str, now: datetime) -> int:
+    async def _bump_attempt(self, delivery_public_id: str, now: datetime) -> int | None:
         """Increment ``attempt_count`` via SCD2 close+insert.
 
         Reads the active row to learn the current attempt_count, then
         delegates to ``update_delivery_retry_schedule`` which emits a
-        successor SCD2 row with the incremented counter (§D5.5).
-        The new attempt number is returned — the caller uses it to
-        decide whether to give up after the APNs response.
+        successor SCD2 row with the incremented counter (§D5.5). The
+        new attempt number is returned when the transition succeeded;
+        ``None`` when the row is no longer queued (a concurrent admin
+        handler cancelled it between our ``should_skip_send`` check
+        and this call — BE-3c R1 race guard, ``gpt-5.3-codex`` final
+        review). Callers treating ``None`` as "abort this attempt"
+        keep the sidecar from emitting a send for a row that was
+        just cancelled.
         """
         sid = self._tracker.session_id
         seq = self._tracker.next_sequence(_ZMQ_STREAM)
         row = await self._load_delivery(delivery_public_id)
         next_attempt = (row["attempt_count"] if row is not None else 0) + 1
-        await self._repo.update_delivery_retry_schedule(
+        transitioned = await self._repo.update_delivery_retry_schedule(
             delivery_public_id,
             attempt_count=next_attempt,
             next_attempt_at=None,
@@ -401,6 +425,8 @@ class NotifySidecar(RegisterableProcess):
             session_id=sid,
             sequence_id=seq,
         )
+        if not transitioned:
+            return None
         return next_attempt
 
     async def _apply_result(

@@ -450,9 +450,80 @@ class TestScopeRevalidationDispatch:
 
         sidecar._scope_revalidator.handle_user_deactivated.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_scope_revoked_handler_exception_does_not_kill_loop(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """BE-3c R1: an exception from the scope-revoked handler is caught + logged.
+
+        Closes ``gpt-5.3-codex`` final-review Critical #1: a DB race
+        in bulk cancel (e.g. IntegrityError on a partial-unique index)
+        previously bubbled out of the admin-topic handler and killed
+        the sidecar's receive loop. ``_dispatch`` now wraps both
+        admin handlers in try/except so a single event-handling
+        failure is a logged warning, not a process death.
+        """
+        sidecar, _ = _make_sidecar(repo)
+        sidecar._scope_revalidator = MagicMock()
+        sidecar._scope_revalidator.handle_scope_revoked = AsyncMock(
+            side_effect=RuntimeError("db race boom")
+        )
+
+        await sidecar._dispatch("admin.scope_revoked", b"{}", _ts())
+
+    @pytest.mark.asyncio
+    async def test_user_deactivated_handler_exception_does_not_kill_loop(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Same exception-isolation guard applies to ``admin.user_deactivated``."""
+        sidecar, _ = _make_sidecar(repo)
+        sidecar._scope_revalidator = MagicMock()
+        sidecar._scope_revalidator.handle_user_deactivated = AsyncMock(
+            side_effect=RuntimeError("db race boom")
+        )
+
+        await sidecar._dispatch("admin.user_deactivated", b"{}", _ts())
+
 
 class TestScopePreSendSkip:
     """BE-3c: ``should_skip_send`` gates the APNs call in ``_attempt_once``."""
+
+    @pytest.mark.asyncio
+    async def test_attempt_aborts_when_bump_loses_to_concurrent_cancel(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """BE-3c R1: ``_bump_attempt`` returning None aborts the APNs call.
+
+        Closes ``gpt-5.3-codex`` final-review Critical #2: between the
+        ``should_skip_send`` check and the attempt-count bump, an
+        admin handler can cancel the queued delivery. The attempt-count
+        bump then sees the row is no longer queued and returns None.
+        Without the guard in ``_attempt_once``, the sidecar would still
+        call ``_apns.send`` for an already-cancelled delivery.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        await repo.mark_delivery_cancelled(
+            delivery_pid,
+            reason="scope_revoked",
+            transition_at=_ts(1),
+            session_id="admin",
+            sequence_id=1,
+        )
+        sidecar, apns = _make_sidecar(repo)
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
+
+        await sidecar._attempt_once(delivery_pid, device, event, _ts(2))
+
+        apns.send.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_skips_when_revalidator_returns_true(self, repo: SQLAlchemyRepository) -> None:
