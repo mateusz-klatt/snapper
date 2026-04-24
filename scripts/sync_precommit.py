@@ -63,27 +63,33 @@ def load_versions(pyproject_path: Path = DEFAULT_PYPROJECT_PATH) -> dict[str, st
     }
 
 
-def _resolve_config(config_path: Path) -> Path:
-    """Resolve and validate the config file path.
+def _validate_config_path(config_path: Path) -> None:
+    """Validate that callers request the root pre-commit config file.
 
     Args:
         config_path: Path to the .pre-commit-config.yaml file.
+
+    Raises:
+        ValueError: If path contains traversal or targets wrong filename.
+    """
+    if ".." in config_path.parts:
+        raise ValueError(f"Config path must not contain '..' components: {config_path}")
+    if config_path.is_absolute() or len(config_path.parts) != 1:
+        raise ValueError(f"Config path must stay in current working directory: {config_path}")
+    if config_path.name != PRECOMMIT_CONFIG_FILENAME:
+        raise ValueError(f"Config path must target {PRECOMMIT_CONFIG_FILENAME}: {config_path}")
+
+
+def _precommit_config_path() -> Path:
+    """Return the fixed config file path in the current working directory.
 
     Returns:
         The resolved absolute path.
 
     Raises:
         FileNotFoundError: If config file does not exist.
-        ValueError: If path contains traversal or targets wrong filename.
     """
-    if ".." in config_path.parts:
-        raise ValueError(f"Config path must not contain '..' components: {config_path}")
-    root = Path.cwd().resolve()
-    resolved = (root / config_path).resolve()
-    if resolved.parent != root:
-        raise ValueError(f"Config path must stay in current working directory: {config_path}")
-    if resolved.name != PRECOMMIT_CONFIG_FILENAME:
-        raise ValueError(f"Config path must target {PRECOMMIT_CONFIG_FILENAME}: {config_path}")
+    resolved = Path.cwd().resolve() / PRECOMMIT_CONFIG_FILENAME
     if not resolved.exists():
         raise FileNotFoundError(f"{PRECOMMIT_CONFIG_FILENAME} not found")
     return resolved
@@ -102,7 +108,8 @@ def _read_config(config_path: Path) -> tuple[Path, list[str]]:
         FileNotFoundError: If config file does not exist.
         ValueError: If path contains traversal or targets wrong filename.
     """
-    resolved = _resolve_config(config_path)
+    _validate_config_path(config_path)
+    resolved = _precommit_config_path()
     return resolved, resolved.read_text(encoding="utf-8").splitlines()
 
 
@@ -117,8 +124,8 @@ def _write_config(config_path: Path, content: str) -> None:
         FileNotFoundError: If config file does not exist.
         ValueError: If path contains traversal or targets wrong filename.
     """
-    resolved = _resolve_config(config_path)
-    resolved.write_text(content, encoding="utf-8")
+    _validate_config_path(config_path)
+    _precommit_config_path().write_text(content, encoding="utf-8")
 
 
 def update_config(

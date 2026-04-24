@@ -333,6 +333,21 @@ class TestUpdateConfig:
         with pytest.raises(ValueError, match="must stay in current working directory"):
             update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, config)
 
+    def test_raises_for_absolute_config_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify raises for absolute config path.
+
+        Given: An absolute path to a .pre-commit-config.yaml file,
+        When: update_config is called with this path,
+        Then: Raises ValueError indicating the config must stay in the current directory.
+        """
+        monkeypatch.chdir(tmp_path)
+        config = tmp_path / ".pre-commit-config.yaml"
+
+        with pytest.raises(ValueError, match="must stay in current working directory"):
+            update_config({"ruff": "v0.5.0", "black": "24.0.0", "isort": "5.13.0"}, config)
+
     def test_raises_for_wrong_filename(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
