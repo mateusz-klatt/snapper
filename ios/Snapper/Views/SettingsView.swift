@@ -1,10 +1,14 @@
 import SwiftUI
+import UIKit
+import UserNotifications
 
 struct SettingsView: View {
     @EnvironmentObject var authService: AuthService
     @EnvironmentObject var webSocketManager: WebSocketManager
+    @EnvironmentObject var notificationService: NotificationService
 
     @State private var showingLogoutAlert = false
+    @State private var registeredDevicePublicId: String?
 
     var body: some View {
         NavigationView {
@@ -53,6 +57,46 @@ struct SettingsView: View {
                     }
                 }
 
+                Section("Notifications") {
+                    HStack {
+                        Text("Permission")
+                        Spacer()
+                        notificationStatusView
+                    }
+
+                    if notificationService.authorizationStatus == .notDetermined {
+                        Button("Enable push notifications") {
+                            Task {
+                                await notificationService.requestAuthorization()
+                            }
+                        }
+                    } else if notificationService.authorizationStatus == .denied {
+                        Button("Open Settings") {
+                            if let url = URL(string: UIApplication.openSettingsURLString) {
+                                UIApplication.shared.open(url)
+                            }
+                        }
+                    }
+
+                    if let pid = registeredDevicePublicId {
+                        HStack {
+                            Text("Device")
+                            Spacer()
+                            Text(String(pid.prefix(12)) + "…")
+                                .font(.caption.monospaced())
+                                .foregroundColor(.secondary)
+                        }
+                    } else {
+                        HStack {
+                            Text("Device")
+                            Spacer()
+                            Text("Not registered")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+
                 Section("App Information") {
                     HStack {
                         Text("Version")
@@ -82,6 +126,10 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .scrollContentBackground(.hidden)
             .background(Color.bgBase)
+            .task {
+                await notificationService.refreshAuthorizationStatus()
+                registeredDevicePublicId = await DeviceRegistrationService.shared().currentDevicePublicId()
+            }
         }
         .alert("Logout", isPresented: $showingLogoutAlert) {
             Button("Cancel", role: .cancel) { /* Dismiss alert with no action */ }
@@ -90,6 +138,47 @@ struct SettingsView: View {
             }
         } message: {
             Text("Are you sure you want to logout?")
+        }
+    }
+
+    private var notificationStatusView: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(notificationStatusColor)
+                .frame(width: 8, height: 8)
+            Text(notificationStatusText)
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private var notificationStatusColor: Color {
+        switch notificationService.authorizationStatus {
+        case .authorized, .provisional, .ephemeral:
+            return .brandGreen
+        case .notDetermined:
+            return .orange
+        case .denied:
+            return .brandRed
+        @unknown default:
+            return .gray
+        }
+    }
+
+    private var notificationStatusText: String {
+        switch notificationService.authorizationStatus {
+        case .authorized:
+            return "Enabled"
+        case .provisional:
+            return "Quiet"
+        case .ephemeral:
+            return "Ephemeral"
+        case .notDetermined:
+            return "Not set"
+        case .denied:
+            return "Disabled"
+        @unknown default:
+            return "Unknown"
         }
     }
 
@@ -155,5 +244,6 @@ struct SettingsView_Previews: PreviewProvider {
         SettingsView()
             .environmentObject(AuthService.shared)
             .environmentObject(WebSocketManager.shared)
+            .environmentObject(NotificationService.shared)
     }
 }
