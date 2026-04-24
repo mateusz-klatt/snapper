@@ -188,6 +188,7 @@ from snapper.server.dependencies import get_repository_dependency
 from snapper.server.device_routes import router as device_router
 from snapper.server.execution_plan_routes import router as execution_plan_router
 from snapper.server.json_body import patch_openapi
+from snapper.server.metrics_routes import router as metrics_router
 from snapper.server.operator_routes import router as operator_router
 from snapper.server.order_routes import router as order_router
 from snapper.server.position_cycle_routes import router as position_cycle_router
@@ -623,6 +624,7 @@ def create_app() -> FastAPI:
     app.include_router(trailing_stop_router, prefix=API_PREFIX)
     app.include_router(backtest_router, prefix=API_PREFIX)
     app.include_router(device_router, prefix=API_PREFIX)
+    app.include_router(metrics_router, prefix=API_PREFIX)
     app.include_router(alerts_router, prefix=API_PREFIX)
     app.include_router(create_api_router(manager), prefix=API_PREFIX)
     app.include_router(create_authenticated_websocket_router(manager), prefix=API_PREFIX)

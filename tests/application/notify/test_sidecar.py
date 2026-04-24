@@ -425,7 +425,59 @@ class TestDispatchFlow:
         apns.send.assert_not_awaited()
 
 
-class TestApnsErrorSemantics:
+class TestScopeRevalidationDispatch:
+    """BE-3c: admin.scope_revoked + admin.user_deactivated routing."""
+
+    @pytest.mark.asyncio
+    async def test_scope_revoked_routed_to_revalidator(self, repo: SQLAlchemyRepository) -> None:
+        """Frames on ``admin.scope_revoked`` bypass rules and hit the revalidator."""
+        sidecar, _ = _make_sidecar(repo)
+        sidecar._scope_revalidator = MagicMock()
+        sidecar._scope_revalidator.handle_scope_revoked = AsyncMock()
+
+        await sidecar._dispatch("admin.scope_revoked", b"{}", _ts())
+
+        sidecar._scope_revalidator.handle_scope_revoked.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_user_deactivated_routed_to_revalidator(self, repo: SQLAlchemyRepository) -> None:
+        """Frames on ``admin.user_deactivated`` hit the kill-switch handler."""
+        sidecar, _ = _make_sidecar(repo)
+        sidecar._scope_revalidator = MagicMock()
+        sidecar._scope_revalidator.handle_user_deactivated = AsyncMock()
+
+        await sidecar._dispatch("admin.user_deactivated", b"{}", _ts())
+
+        sidecar._scope_revalidator.handle_user_deactivated.assert_awaited_once()
+
+
+class TestScopePreSendSkip:
+    """BE-3c: ``should_skip_send`` gates the APNs call in ``_attempt_once``."""
+
+    @pytest.mark.asyncio
+    async def test_skips_when_revalidator_returns_true(self, repo: SQLAlchemyRepository) -> None:
+        """Cancel transition fires without calling APNs when scope is stale."""
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        sidecar, apns = _make_sidecar(repo)
+        sidecar._scope_revalidator = MagicMock()
+        sidecar._scope_revalidator.should_skip_send = AsyncMock(return_value=True)
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
+
+        await sidecar._attempt_once(delivery_pid, device, event, _ts())
+
+        apns.send.assert_not_awaited()
+        queued = await repo.list_queued_deliveries_all()
+        assert queued == []
+
     """APNs response → terminal / retry routing. Tests seed deliveries directly."""
 
     @pytest.mark.asyncio
@@ -738,7 +790,12 @@ class TestSidecarStart:
         await asyncio.wait_for(task, timeout=2.0)
 
         subscribed_prefixes = {c.args[0] for c in sidecar._subscriber.subscribe.call_args_list}
-        assert subscribed_prefixes == {"a.b.", "x.y."}
+        assert subscribed_prefixes == {
+            "a.b.",
+            "x.y.",
+            "admin.scope_revoked",
+            "admin.user_deactivated",
+        }
 
     @pytest.mark.asyncio
     async def test_start_cancels_running_retry_task_on_exit(

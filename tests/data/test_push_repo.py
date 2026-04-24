@@ -704,6 +704,126 @@ class TestListUsersWithPermission:
         assert result == []
 
 
+class TestCancelDeliveriesForUser:
+    """BE-3c: ``cancel_pending_deliveries_for_user`` admin kill-switch helper."""
+
+    @pytest.mark.asyncio
+    async def test_cancels_every_queued_delivery_for_user(self, repo: SQLAlchemyRepository) -> None:
+        """All queued rows with matching user_public_id transition to cancelled_scope."""
+        device_pid = await _seed_user_and_device(repo, user_public_id="u-kill")
+        for idx in range(2):
+            await repo.insert_alert_delivery(
+                AlertDeliveryInsertRow(
+                    alert_event_public_id=f"evt-{idx}",
+                    device_public_id=device_pid,
+                    user_public_id="u-kill",
+                    status="queued",
+                    created_at=_ts(),
+                    session_id="s",
+                    sequence_id=idx + 1,
+                    timestamp=_ts(),
+                )
+            )
+
+        cancelled = await repo.cancel_pending_deliveries_for_user(
+            "u-kill",
+            transition_at=_ts(5),
+            session_id="s-admin",
+            sequence_id=99,
+        )
+
+        assert cancelled == 2
+        still_queued = await repo.list_queued_deliveries_all()
+        assert still_queued == []
+
+    @pytest.mark.asyncio
+    async def test_ignores_other_users(self, repo: SQLAlchemyRepository) -> None:
+        """Deliveries for a different user are untouched."""
+        await _seed_user_and_device(
+            repo, user_public_id="u-keep", device_token="keep-tok", sequence_id=1
+        )
+        await _seed_user_and_device(
+            repo, user_public_id="u-kill", device_token="kill-tok", sequence_id=2
+        )
+        await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                alert_event_public_id="evt-keep",
+                device_public_id="any",
+                user_public_id="u-keep",
+                status="queued",
+                created_at=_ts(),
+                session_id="s",
+                sequence_id=1,
+                timestamp=_ts(),
+            )
+        )
+
+        cancelled = await repo.cancel_pending_deliveries_for_user(
+            "u-kill",
+            transition_at=_ts(5),
+            session_id="s-admin",
+            sequence_id=1,
+        )
+
+        assert cancelled == 0
+        still_queued = await repo.list_queued_deliveries_all()
+        assert len(still_queued) == 1
+
+
+class TestCountDeliveriesByStatus:
+    """BE-3c: status aggregation for ``GET /api/metrics/notifications``."""
+
+    @pytest.mark.asyncio
+    async def test_counts_only_active_scd2_rows_per_status(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Each terminal status gets its own count; closed SCD2 versions excluded."""
+        device_pid = await _seed_user_and_device(repo, user_public_id="u-m")
+        sent_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                alert_event_public_id="evt-s",
+                device_public_id=device_pid,
+                user_public_id="u-m",
+                status="queued",
+                created_at=_ts(),
+                session_id="s",
+                sequence_id=1,
+                timestamp=_ts(),
+            )
+        )
+        queued_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                alert_event_public_id="evt-q",
+                device_public_id=device_pid,
+                user_public_id="u-m",
+                status="queued",
+                created_at=_ts(),
+                session_id="s",
+                sequence_id=2,
+                timestamp=_ts(),
+            )
+        )
+        await repo.mark_delivery_sent(
+            sent_pid,
+            apns_id="apns-1",
+            transition_at=_ts(1),
+            session_id="s",
+            sequence_id=3,
+        )
+
+        counts = await repo.count_deliveries_by_status()
+
+        assert counts.get("sent") == 1
+        assert counts.get("queued") == 1
+        assert queued_pid
+
+    @pytest.mark.asyncio
+    async def test_empty_outbox_returns_empty_dict(self, repo: SQLAlchemyRepository) -> None:
+        """No rows → empty dict (callers must ``.get(..., 0)`` for zero-default)."""
+        counts = await repo.count_deliveries_by_status()
+        assert counts == {}
+
+
 class TestScopeHelpers:
     """Behaviour of the three scope-cascade helpers."""
 

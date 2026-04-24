@@ -1929,6 +1929,50 @@ struct NotificationDeviceResponse: Codable, Sendable {
     }
 }
 
+struct NotificationMetricsData: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let deliverySuccessTotal: Int
+    let deliveryFailedTotal: Int
+    let delivery410UnregisteredTotal: Int
+    let deliveryCancelledScopeTotal: Int
+    let outboxQueuedDepth: Int
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case deliverySuccessTotal = "delivery_success_total"
+        case deliveryFailedTotal = "delivery_failed_total"
+        case delivery410UnregisteredTotal = "delivery_410_unregistered_total"
+        case deliveryCancelledScopeTotal = "delivery_cancelled_scope_total"
+        case outboxQueuedDepth = "outbox_queued_depth"
+    }
+}
+
+struct NotificationMetricsResponse: Codable, Sendable {
+    let type: String?
+    let sequenceId: Int
+    let publicId: String
+    let timestamp: Date
+    let sessionId: String
+    let payload: NotificationMetricsData
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case sequenceId = "sequence_id"
+        case publicId = "public_id"
+        case timestamp
+        case sessionId = "session_id"
+        case payload
+    }
+}
+
 struct OperatorInfo: Codable, Sendable {
     let type: String?
     let sequenceId: Int

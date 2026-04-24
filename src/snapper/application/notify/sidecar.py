@@ -45,6 +45,7 @@ from snapper.application.notify.apns_client import ApnsSendResult
 from snapper.application.notify.routing import route_alert_to_devices
 from snapper.application.notify.rules.base import RuleRegistry
 from snapper.application.notify.rules.registry_factory import load_default_registry
+from snapper.application.notify.scope_revalidation import ScopeRevalidator
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.core.json_types import JsonObject
 from snapper.data.repository import Repository
@@ -111,6 +112,7 @@ class NotifySidecar(RegisterableProcess):
         apns_topic: str,
         tracker: SequenceTracker,
         registry: RuleRegistry | None = None,
+        scope_revalidator: ScopeRevalidator | None = None,
     ) -> None:
         """Wire the sidecar with its collaborators + rule registry.
 
@@ -128,6 +130,10 @@ class NotifySidecar(RegisterableProcess):
             registry: Alert rule registry — defaults to
                 ``load_default_registry()`` (the 4 P0 rules per §D6).
                 Injected for tests that want a narrower rule set.
+            scope_revalidator: Scope-revocation helper — defaults to
+                a fresh ``ScopeRevalidator`` seeded with the shared
+                ``SequenceTracker`` so provenance on cancel writes is
+                consistent with the rest of the sidecar's SCD2 writes.
         """
         self._subscriber = subscriber
         self._repo = repo
@@ -137,6 +143,7 @@ class NotifySidecar(RegisterableProcess):
         self._stop_event = asyncio.Event()
         self._retry_task: asyncio.Task[None] | None = None
         self._registry = registry or load_default_registry()
+        self._scope_revalidator = scope_revalidator or ScopeRevalidator(tracker=tracker)
 
     async def start(self) -> None:
         """Run the sidecar main loop until ``stop()`` is signalled.
@@ -151,6 +158,8 @@ class NotifySidecar(RegisterableProcess):
         """
         for prefix in self._registry.all_subscribe_prefixes():
             self._subscriber.subscribe(prefix)
+        self._subscriber.subscribe("admin.scope_revoked")
+        self._subscriber.subscribe("admin.user_deactivated")
         await self._drain_outbox(datetime.now(UTC))
         self._retry_task = asyncio.create_task(self._process_retry_queue_loop())
         try:
@@ -191,6 +200,12 @@ class NotifySidecar(RegisterableProcess):
                 frame, reused for every SCD2 write performed while
                 handling it).
         """
+        if topic == "admin.scope_revoked":
+            await self._scope_revalidator.handle_scope_revoked(payload, self._repo, now)
+            return
+        if topic == "admin.user_deactivated":
+            await self._scope_revalidator.handle_user_deactivated(payload, self._repo, now)
+            return
         matching = self._registry.get_longest_match(topic)
         if not matching:
             return
@@ -308,10 +323,36 @@ class NotifySidecar(RegisterableProcess):
     ) -> None:
         """Run exactly one APNs send attempt on a queued delivery row.
 
-        Bumps ``attempt_count`` first (attempt-number-before-attempt
-        per §D5.5), builds the APNs payload, calls through the pool,
-        and maps the result to the SCD2 terminal / retry schedule.
+        Before the APNs call, ``ScopeRevalidator.should_skip_send``
+        decides whether the event's scope is still active (safety-
+        critical always re-checks; non-critical uses the TTL-gated
+        stale-scope cache). Scope-stale deliveries transition to
+        ``cancelled_scope`` in the outbox and this attempt ends
+        without an APNs round-trip.
+
+        Otherwise, bumps ``attempt_count`` first (attempt-number-before-
+        attempt per §D5.5), builds the APNs payload, calls through the
+        pool, and maps the result to the SCD2 terminal / retry schedule.
         """
+        if await self._scope_revalidator.should_skip_send(event, self._repo, now):
+            sid = self._tracker.session_id
+            seq = self._tracker.next_sequence(_ZMQ_STREAM)
+            await self._repo.mark_delivery_cancelled(
+                delivery_public_id,
+                reason="scope_revoked",
+                transition_at=now,
+                session_id=sid,
+                sequence_id=seq,
+            )
+            logger.info(
+                "sidecar: scope revoked mid-send — cancelled delivery={pid}"
+                " user={user} operator={op} wallet={wal}",
+                pid=delivery_public_id,
+                user=event["user_public_id"],
+                op=event.get("operator_public_id"),
+                wal=event.get("wallet_public_id"),
+            )
+            return
         current_attempt = await self._bump_attempt(delivery_public_id, now)
         payload = _build_apns_payload(event)
         try:

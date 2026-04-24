@@ -980,6 +980,22 @@ export type Paths = {
         patch: Operations["update_device_pref_api_devices__device_public_id__prefs_patch"];
         trace?: never;
     };
+    "/api/metrics/notifications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: Operations["get_notification_metrics_api_metrics_notifications_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/alerts/history": {
         parameters: {
             query?: never;
@@ -2099,6 +2115,26 @@ export type Components = {
             timestamp: string;
             session_id: string;
             payload: Components["schemas"]["NotificationDeviceInfo"];
+        };
+        NotificationMetricsData: {
+            type: "notification_metrics";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            delivery_success_total: number;
+            delivery_failed_total: number;
+            delivery_410_unregistered_total: number;
+            delivery_cancelled_scope_total: number;
+            outbox_queued_depth: number;
+        };
+        NotificationMetricsResponse: {
+            type: "notification_metrics_response";
+            sequence_id: number;
+            public_id: string;
+            timestamp: string;
+            session_id: string;
+            payload: Components["schemas"]["NotificationMetricsData"];
         };
         OperatorInfo: {
             type: "operator_info";
@@ -5472,6 +5508,25 @@ export interface Operations {
                 };
                 content: {
                     "application/json": Components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_notification_metrics_api_metrics_notifications_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Components["schemas"]["NotificationMetricsResponse"];
                 };
             };
         };

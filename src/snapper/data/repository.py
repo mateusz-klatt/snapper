@@ -2988,6 +2988,40 @@ class Repository(ABC):
         """
         ...
 
+    @abstractmethod
+    async def cancel_pending_deliveries_for_user(
+        self,
+        user_public_id: str,
+        *,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
+        error_reason: str = "user_deactivated",
+    ) -> int:
+        """Bulk-cancel every queued delivery for a user (admin kill-switch).
+
+        Used by the notify sidecar's ``admin.user_deactivated``
+        subscriber. The ``error_reason`` column is stamped with the
+        transition cause so audit replay can distinguish this from
+        a scope-revoke cancellation.
+
+        Returns:
+            Count of rows transitioned to ``cancelled_scope``.
+        """
+        ...
+
+    @abstractmethod
+    async def count_deliveries_by_status(self) -> dict[str, int]:
+        """Aggregate counts of ``alert_deliveries`` rows per ``status``.
+
+        Covers the BE-3c ``GET /api/metrics/notifications`` endpoint —
+        returns a dict keyed by ``status`` (``queued`` / ``sent`` /
+        ``failed`` / ``unregistered`` / ``cancelled_scope``). Status
+        values absent from the DB are also absent from the returned
+        dict; callers use ``.get(status, 0)`` for a zero-default.
+        """
+        ...
+
 
 def _register_sqlite_fk_pragma(engine: Any) -> None:
     """Register PRAGMA foreign_keys=ON for every new SQLite connection.
@@ -8878,6 +8912,60 @@ class SQLAlchemyRepository(Repository):
                 s.add(new_version)
             await s.commit()
             return len(rows)
+
+    async def cancel_pending_deliveries_for_user(
+        self,
+        user_public_id: str,
+        *,
+        transition_at: datetime,
+        session_id: str,
+        sequence_id: int,
+        error_reason: str = "user_deactivated",
+    ) -> int:
+        """Bulk-cancel every queued delivery for one user (admin kill-switch)."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(AlertDelivery).where(
+                    AlertDelivery.status == "queued",
+                    AlertDelivery.known_to == KNOWN_TO_MAX,
+                    AlertDelivery.user_public_id == user_public_id,
+                )
+            )
+            rows = list(result.scalars().all())
+            for existing in rows:
+                existing.known_to = transition_at
+                new_version = AlertDelivery(
+                    public_id=existing.public_id,
+                    session_id=session_id,
+                    sequence_id=sequence_id,
+                    timestamp=transition_at,
+                    known_to=KNOWN_TO_MAX,
+                    alert_event_public_id=existing.alert_event_public_id,
+                    device_public_id=existing.device_public_id,
+                    user_public_id=existing.user_public_id,
+                    operator_public_id=existing.operator_public_id,
+                    wallet_public_id=existing.wallet_public_id,
+                    status="cancelled_scope",
+                    attempt_count=existing.attempt_count,
+                    last_attempt_at=existing.last_attempt_at,
+                    next_attempt_at=None,
+                    apns_id=existing.apns_id,
+                    error_reason=error_reason,
+                    created_at=existing.created_at,
+                )
+                s.add(new_version)
+            await s.commit()
+            return len(rows)
+
+    async def count_deliveries_by_status(self) -> dict[str, int]:
+        """Aggregate counts of active ``alert_deliveries`` rows per ``status``."""
+        async with self.session() as s:
+            result = await s.execute(
+                select(AlertDelivery.status, func.count())
+                .where(AlertDelivery.known_to == KNOWN_TO_MAX)
+                .group_by(AlertDelivery.status)
+            )
+            return {status: int(count) for status, count in result.all()}
 
 
 _repository_cache: dict[str, Repository] = {}

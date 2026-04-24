@@ -369,6 +369,21 @@ export const NotificationDeviceInfoSchema = z
   })
   .strict()
 
+export const NotificationMetricsDataSchema = z
+  .object({
+    type: z.literal('notification_metrics'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    delivery_success_total: z.number().int(),
+    delivery_failed_total: z.number().int(),
+    delivery_410_unregistered_total: z.number().int(),
+    delivery_cancelled_scope_total: z.number().int(),
+    outbox_queued_depth: z.number().int(),
+  })
+  .strict()
+
 export const OperatorInfoSchema = z
   .object({
     type: z.literal('operator_info'),
@@ -1182,6 +1197,17 @@ export const NotificationDeviceResponseSchema = z
     timestamp: z.iso.datetime(),
     session_id: z.string(),
     payload: NotificationDeviceInfoSchema,
+  })
+  .strict()
+
+export const NotificationMetricsResponseSchema = z
+  .object({
+    type: z.literal('notification_metrics_response'),
+    sequence_id: z.number().int(),
+    public_id: z.string(),
+    timestamp: z.iso.datetime(),
+    session_id: z.string(),
+    payload: NotificationMetricsDataSchema,
   })
   .strict()
 
@@ -2532,6 +2558,7 @@ export type JsonPrimitive = z.infer<typeof JsonPrimitiveSchema>
 export type MessageResponse = z.infer<typeof MessageResponseSchema>
 export type MetricDiffRow = z.infer<typeof MetricDiffRowSchema>
 export type NotificationDeviceInfo = z.infer<typeof NotificationDeviceInfoSchema>
+export type NotificationMetricsData = z.infer<typeof NotificationMetricsDataSchema>
 export type OperatorInfo = z.infer<typeof OperatorInfoSchema>
 export type OrderData = z.infer<typeof OrderDataSchema>
 export type OrphanSweepResultData = z.infer<typeof OrphanSweepResultDataSchema>
@@ -2609,6 +2636,7 @@ export type InstrumentDetailListResponse = z.infer<typeof InstrumentDetailListRe
 export type JsonValue = z.infer<typeof JsonValueSchema>
 export type NotificationDeviceListResponse = z.infer<typeof NotificationDeviceListResponseSchema>
 export type NotificationDeviceResponse = z.infer<typeof NotificationDeviceResponseSchema>
+export type NotificationMetricsResponse = z.infer<typeof NotificationMetricsResponseSchema>
 export type OperatorListResponse = z.infer<typeof OperatorListResponseSchema>
 export type OrderListResponse = z.infer<typeof OrderListResponseSchema>
 export type OrphanSweepResponse = z.infer<typeof OrphanSweepResponseSchema>
