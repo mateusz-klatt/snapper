@@ -10,7 +10,7 @@ ownership-checked on ``user_public_id``:
   scope) preference upsert.
 
 All mutations use ``Repository.upsert_notification_device`` /
-``upsert_device_alert_pref`` / ``mark_notification_device_inactive``,
+``upsert_device_alert_pref`` / ``deactivate_notification_device_scd2``,
 which own the SCD2 close+insert semantics and idempotent retry on
 same-key contention (see ``src/snapper/data/repository.py`` for the
 atomic close + IntegrityError-retry pattern).
@@ -188,12 +188,14 @@ async def delete_device(
     principal: Annotated[AuthPrincipal, Depends(require_authentication)],
     repo: Annotated[Repository, Depends(get_repository_dependency)],
 ) -> MessageResponse:
-    """Soft-delete a device via SCD2 close (no new active row).
+    """Soft-delete a device via SCD2 close + tombstone successor.
 
     Ownership is enforced by loading the caller's active devices and
     confirming the target ``public_id`` is among them. Marking a
     nonexistent or not-owned device inactive returns 404 so callers
-    cannot probe foreign device ids.
+    cannot probe foreign device ids. The tombstone successor row
+    carries ``token_status = 'user_unregistered'`` so an ``as_of``
+    query after the close sees an inactive row instead of a gap.
 
     Args:
         request: FastAPI request (provides REST tracker).
@@ -214,8 +216,14 @@ async def delete_device(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Device {device_public_id} not found or not owned by caller.",
         )
-    _, _, ts, _ = _next_provenance(request)
-    await repo.mark_notification_device_inactive(device_public_id, closed_at=ts)
+    sid, seq, ts, _ = _next_provenance(request)
+    await repo.deactivate_notification_device_scd2(
+        device_public_id,
+        reason="user_unregistered",
+        timestamp=ts,
+        session_id=sid,
+        sequence_id=seq,
+    )
     envelope_sid, envelope_seq, envelope_ts, envelope_pid = _next_provenance(request)
     return MessageResponse(
         session_id=envelope_sid,

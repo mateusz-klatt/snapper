@@ -2690,10 +2690,38 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    async def mark_notification_device_inactive(self, public_id: str, closed_at: datetime) -> None:
-        """SCD2 close of the active row — no new version inserted.
+    async def deactivate_notification_device_scd2(
+        self,
+        public_id: str,
+        *,
+        reason: str,
+        timestamp: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> bool:
+        """SCD2 close + insert a tombstone successor row.
 
-        Idempotent: no-op when ``public_id`` has no active row.
+        Closes the active row (``known_to := timestamp``) and inserts
+        a new row with the same ``public_id`` and device metadata but
+        ``token_status = reason`` (``"unregistered"`` for APNs 410,
+        ``"user_unregistered"`` for explicit user deregistration from
+        the app). The successor keeps ``known_to = KNOWN_TO_MAX`` so
+        ``as_of`` queries after the close see a visible inactive
+        device row instead of a gap (BE-3a R1 invariant INV-9).
+
+        Idempotent: returns ``False`` when no active row exists for
+        ``public_id`` (deactivation already ran); returns ``True`` on
+        a successful close + insert.
+
+        Args:
+            public_id: The device's stable public identifier.
+            reason: New ``token_status`` value for the successor —
+                one of the ``ck_notification_devices_token_status``
+                permitted values (except ``"active"``).
+            timestamp: Transition time — used for both the closed
+                row's ``known_to`` and the successor's ``timestamp``.
+            session_id: Provenance for the successor row.
+            sequence_id: Provenance for the successor row.
         """
         ...
 
@@ -7733,6 +7761,7 @@ class SQLAlchemyRepository(Repository):
             previews_mode=model.previews_mode,
             registered_at=model.registered_at,
             last_seen_at=model.last_seen_at,
+            token_status=model.token_status,
         )
 
     @staticmethod
@@ -7850,6 +7879,7 @@ class SQLAlchemyRepository(Repository):
                         select(NotificationDevice).where(
                             NotificationDevice.device_token == row["device_token"],
                             NotificationDevice.known_to == KNOWN_TO_MAX,
+                            NotificationDevice.token_status == "active",
                         )
                     )
                 ).scalar_one_or_none()
@@ -7890,6 +7920,7 @@ class SQLAlchemyRepository(Repository):
                     previews_mode=row.get("previews_mode", "private"),
                     registered_at=row["registered_at"],
                     last_seen_at=row.get("last_seen_at"),
+                    token_status=row.get("token_status", "active"),
                 )
                 s.add(device)
                 try:
@@ -7912,33 +7943,72 @@ class SQLAlchemyRepository(Repository):
     async def list_active_notification_devices_for_user(
         self, user_public_id: str
     ) -> list[NotificationDeviceRow]:
-        """Active iOS devices owned by ``user_public_id``, newest-first."""
+        """Active iOS devices owned by ``user_public_id``, newest-first.
+
+        Tombstone successor rows
+        (``token_status IN ('unregistered', 'user_unregistered')``)
+        are excluded: APNs must not receive sends for a token that has
+        already been 410-rejected or voluntarily unregistered. The
+        partial indexes on ``notification_devices`` already gate on
+        this predicate; the explicit ``token_status = 'active'`` in
+        the WHERE clause makes the intent readable from the call site.
+        """
         async with self.session() as s:
             result = await s.execute(
                 select(NotificationDevice)
                 .where(
                     NotificationDevice.user_public_id == user_public_id,
                     NotificationDevice.known_to == KNOWN_TO_MAX,
+                    NotificationDevice.token_status == "active",
                 )
                 .order_by(NotificationDevice.registered_at.desc())
             )
             return [self._notification_device_row_from(row) for row in result.scalars().all()]
 
-    async def mark_notification_device_inactive(self, public_id: str, closed_at: datetime) -> None:
-        """SCD2 close of a device row — no new version inserted (idempotent)."""
+    async def deactivate_notification_device_scd2(
+        self,
+        public_id: str,
+        *,
+        reason: str,
+        timestamp: datetime,
+        session_id: str,
+        sequence_id: int,
+    ) -> bool:
+        """Close active row + insert tombstone successor (BE-3a R1 INV-9)."""
         async with self.session() as s:
             existing = (
                 await s.execute(
                     select(NotificationDevice).where(
                         NotificationDevice.public_id == public_id,
                         NotificationDevice.known_to == KNOWN_TO_MAX,
+                        NotificationDevice.token_status == "active",
                     )
                 )
             ).scalar_one_or_none()
             if existing is None:
-                return
-            existing.known_to = closed_at
+                return False
+            existing.known_to = timestamp
+            await s.flush()
+            successor = NotificationDevice(
+                public_id=existing.public_id,
+                session_id=session_id,
+                sequence_id=sequence_id,
+                timestamp=timestamp,
+                known_to=KNOWN_TO_MAX,
+                user_public_id=existing.user_public_id,
+                device_token=existing.device_token,
+                device_id=existing.device_id,
+                platform=existing.platform,
+                env=existing.env,
+                app_version=existing.app_version,
+                previews_mode=existing.previews_mode,
+                registered_at=existing.registered_at,
+                last_seen_at=existing.last_seen_at,
+                token_status=reason,
+            )
+            s.add(successor)
             await s.commit()
+            return True
 
     async def list_device_alert_prefs_for_user(
         self, user_public_id: str

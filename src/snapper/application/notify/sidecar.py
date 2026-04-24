@@ -36,7 +36,6 @@ import contextlib
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
-from typing import Any
 from typing import cast
 from uuid import uuid7
 
@@ -55,6 +54,8 @@ from snapper.data.repository_types import NotificationDeviceRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.schemas.data import AlertEventData
+from snapper.messaging.schemas.data import AlertPriority
+from snapper.messaging.schemas.data import AlertType
 from snapper.messaging.schemas.messages import MessageParseError
 from snapper.messaging.schemas.messages import parse_message
 
@@ -141,9 +142,13 @@ class NotifySidecar(RegisterableProcess):
         Subscribes to the ``alerts.`` prefix, drains the outbox
         (crash recovery), spawns the background retry loop, and
         consumes the receive loop until ``_stop_event`` is set.
+        Each entry boundary mints one ``now`` timestamp (per
+        ``feedback_timestamp_discipline.md``) which is threaded
+        through every helper and repository call — so one logical
+        sidecar operation writes at most one distinct timestamp.
         """
         self._subscriber.subscribe("alerts.")
-        await self._drain_outbox()
+        await self._drain_outbox(datetime.now(UTC))
         self._retry_task = asyncio.create_task(self._process_retry_queue_loop())
         try:
             while not self._stop_event.is_set():
@@ -157,7 +162,7 @@ class NotifySidecar(RegisterableProcess):
                 if recv_task not in done:
                     break
                 topic, payload = recv_task.result()
-                await self._handle(topic, payload)
+                await self._handle(topic, payload, datetime.now(UTC))
         finally:
             if self._retry_task is not None and not self._retry_task.done():
                 self._retry_task.cancel()
@@ -166,12 +171,15 @@ class NotifySidecar(RegisterableProcess):
         """Signal the main loop + retry loop to exit on the next tick."""
         self._stop_event.set()
 
-    async def _handle(self, topic: str, payload: bytes) -> None:
+    async def _handle(self, topic: str, payload: bytes, now: datetime) -> None:
         """Parse one ``alerts.*`` bus message and route it into the outbox.
 
         Args:
             topic: ZMQ topic string (``alerts.{user}.{type}``).
             payload: Raw JSON bytes.
+            now: Entry-boundary timestamp — one ``now`` per received
+                bus message, reused for every SCD2 write performed
+                while handling it.
         """
         try:
             data = parse_message(payload.decode("utf-8"))
@@ -198,15 +206,16 @@ class NotifySidecar(RegisterableProcess):
                 pid=data.user_public_id,
             )
             return
-        await self._persist_and_fanout(data)
+        await self._persist_and_fanout(data, now)
 
-    async def _persist_and_fanout(self, data: AlertEventData) -> None:
+    async def _persist_and_fanout(self, data: AlertEventData, now: datetime) -> None:
         """Insert the alert_event row + fan out to the user's devices.
 
         Args:
             data: Parsed bus payload.
+            now: Entry-boundary timestamp (threaded from ``_handle``).
         """
-        event_public_id = await self._insert_alert_event(data)
+        event_public_id = await self._insert_alert_event(data, now)
         devices = await self._repo.list_active_notification_devices_for_user(data.user_public_id)
         if not devices:
             logger.info(
@@ -217,12 +226,11 @@ class NotifySidecar(RegisterableProcess):
             )
             return
         for device in devices:
-            delivery_pid = await self._insert_delivery(data, event_public_id, device)
-            await self._attempt_once(delivery_pid, device, data)
+            delivery_pid = await self._insert_delivery(data, event_public_id, device, now)
+            await self._attempt_once(delivery_pid, device, data, now)
 
-    async def _insert_alert_event(self, data: AlertEventData) -> str:
+    async def _insert_alert_event(self, data: AlertEventData, now: datetime) -> str:
         """Write the SCD2 ``alert_events`` row and return its public_id."""
-        ts = datetime.now(UTC)
         sid = self._tracker.session_id
         seq = self._tracker.next_sequence(_ZMQ_STREAM)
         return await self._repo.insert_alert_event(
@@ -230,7 +238,7 @@ class NotifySidecar(RegisterableProcess):
                 public_id=str(uuid7()),
                 session_id=sid,
                 sequence_id=seq,
-                timestamp=ts,
+                timestamp=now,
                 user_public_id=data.user_public_id,
                 operator_public_id=data.operator_public_id,
                 wallet_public_id=data.wallet_public_id,
@@ -251,9 +259,9 @@ class NotifySidecar(RegisterableProcess):
         data: AlertEventData,
         event_public_id: str,
         device: NotificationDeviceRow,
+        now: datetime,
     ) -> str:
         """Insert one queued ``alert_deliveries`` row with denormalised scope."""
-        ts = datetime.now(UTC)
         sid = self._tracker.session_id
         seq = self._tracker.next_sequence(_ZMQ_STREAM)
         return await self._repo.insert_alert_delivery(
@@ -261,7 +269,7 @@ class NotifySidecar(RegisterableProcess):
                 public_id=str(uuid7()),
                 session_id=sid,
                 sequence_id=seq,
-                timestamp=ts,
+                timestamp=now,
                 alert_event_public_id=event_public_id,
                 device_public_id=device["public_id"],
                 user_public_id=data.user_public_id,
@@ -273,7 +281,7 @@ class NotifySidecar(RegisterableProcess):
                 next_attempt_at=None,
                 apns_id=None,
                 error_reason=None,
-                created_at=ts,
+                created_at=now,
             )
         )
 
@@ -282,6 +290,7 @@ class NotifySidecar(RegisterableProcess):
         delivery_public_id: str,
         device: NotificationDeviceRow,
         data: AlertEventData,
+        now: datetime,
     ) -> None:
         """Run exactly one APNs send attempt on a queued delivery row.
 
@@ -289,7 +298,7 @@ class NotifySidecar(RegisterableProcess):
         per §D5.5), builds the APNs payload, calls through the pool,
         and maps the result to the SCD2 terminal / retry schedule.
         """
-        current_attempt = await self._bump_attempt(delivery_public_id)
+        current_attempt = await self._bump_attempt(delivery_public_id, now)
         payload = _build_apns_payload(data)
         try:
             result = await self._apns.send(
@@ -310,12 +319,12 @@ class NotifySidecar(RegisterableProcess):
                 err=exc,
             )
             await self._schedule_retry_or_fail(
-                delivery_public_id, current_attempt, f"exception: {exc}"
+                delivery_public_id, current_attempt, f"exception: {exc}", now
             )
             return
-        await self._apply_result(delivery_public_id, current_attempt, result, device)
+        await self._apply_result(delivery_public_id, current_attempt, result, device, now)
 
-    async def _bump_attempt(self, delivery_public_id: str) -> int:
+    async def _bump_attempt(self, delivery_public_id: str, now: datetime) -> int:
         """Increment ``attempt_count`` via SCD2 close+insert.
 
         Reads the active row to learn the current attempt_count, then
@@ -324,7 +333,6 @@ class NotifySidecar(RegisterableProcess):
         The new attempt number is returned — the caller uses it to
         decide whether to give up after the APNs response.
         """
-        ts = datetime.now(UTC)
         sid = self._tracker.session_id
         seq = self._tracker.next_sequence(_ZMQ_STREAM)
         row = await self._load_delivery(delivery_public_id)
@@ -334,7 +342,7 @@ class NotifySidecar(RegisterableProcess):
             attempt_count=next_attempt,
             next_attempt_at=None,
             error_reason=None,
-            transition_at=ts,
+            transition_at=now,
             session_id=sid,
             sequence_id=seq,
         )
@@ -346,16 +354,16 @@ class NotifySidecar(RegisterableProcess):
         attempt_number: int,
         result: ApnsSendResult,
         device: NotificationDeviceRow,
+        now: datetime,
     ) -> None:
         """Route an APNs result to the correct SCD2 terminal / retry transition."""
-        ts = datetime.now(UTC)
         sid = self._tracker.session_id
         seq = self._tracker.next_sequence(_ZMQ_STREAM)
         if result.status == "success":
             await self._repo.mark_delivery_sent(
                 delivery_public_id,
                 apns_id=result.apns_id,
-                transition_at=ts,
+                transition_at=now,
                 session_id=sid,
                 sequence_id=seq,
             )
@@ -363,16 +371,25 @@ class NotifySidecar(RegisterableProcess):
         if result.status == "unregistered":
             await self._repo.mark_delivery_unregistered(
                 delivery_public_id,
-                transition_at=ts,
+                transition_at=now,
                 session_id=sid,
                 sequence_id=seq,
             )
-            await self._repo.mark_notification_device_inactive(device["public_id"], closed_at=ts)
+            device_sid = self._tracker.session_id
+            device_seq = self._tracker.next_sequence(_ZMQ_STREAM)
+            await self._repo.deactivate_notification_device_scd2(
+                device["public_id"],
+                reason="unregistered",
+                timestamp=now,
+                session_id=device_sid,
+                sequence_id=device_seq,
+            )
             return
         await self._schedule_retry_or_fail(
             delivery_public_id,
             attempt_number,
             result.description or result.status,
+            now,
         )
 
     async def _schedule_retry_or_fail(
@@ -380,33 +397,43 @@ class NotifySidecar(RegisterableProcess):
         delivery_public_id: str,
         attempt_number: int,
         error_reason: str,
+        now: datetime,
     ) -> None:
         """Either give up (attempt >= 3) or schedule the next retry.
 
         Throttled responses use a conservative 60s delay (aioapns 4.0
         does not expose Retry-After); all other server/network errors
-        use the exponential backoff from §D5.5.
+        use the exponential backoff from §D5.5. Retry exhaustion
+        emits a ``logger.warning`` before the terminal ``failed``
+        transition so ops alerting has a single log record to pivot
+        on (BE-3a R1 invariant INV-10).
         """
-        ts = datetime.now(UTC)
         sid = self._tracker.session_id
         seq = self._tracker.next_sequence(_ZMQ_STREAM)
         if attempt_number >= _RETRY_GIVE_UP_AFTER_ATTEMPTS:
+            logger.warning(
+                "sidecar: alert delivery failed after retries"
+                " — delivery_public_id={pid}, attempts={n}, error_reason={err}",
+                pid=delivery_public_id,
+                n=attempt_number,
+                err=error_reason,
+            )
             await self._repo.mark_delivery_failed(
                 delivery_public_id,
                 error_reason=error_reason,
-                transition_at=ts,
+                transition_at=now,
                 session_id=sid,
                 sequence_id=seq,
             )
             return
         backoff_s = _backoff_seconds(attempt_number)
-        next_attempt_at = ts + timedelta(seconds=backoff_s)
+        next_attempt_at = now + timedelta(seconds=backoff_s)
         await self._repo.update_delivery_retry_schedule(
             delivery_public_id,
             attempt_count=attempt_number,
             next_attempt_at=next_attempt_at,
             error_reason=error_reason,
-            transition_at=ts,
+            transition_at=now,
             session_id=sid,
             sequence_id=seq,
         )
@@ -423,7 +450,7 @@ class NotifySidecar(RegisterableProcess):
                 return row
         return None
 
-    async def _drain_outbox(self) -> None:
+    async def _drain_outbox(self, now: datetime) -> None:
         """Process every ``status='queued'`` row on startup (crash recovery).
 
         Ordered ``last_attempt_at ASC NULLS FIRST`` (per §D5.5 — never-
@@ -439,9 +466,9 @@ class NotifySidecar(RegisterableProcess):
             )
         )
         for row in queued:
-            await self._attempt_on_queued_row(row)
+            await self._attempt_on_queued_row(row, now)
 
-    async def _attempt_on_queued_row(self, row: AlertDeliveryRow) -> None:
+    async def _attempt_on_queued_row(self, row: AlertDeliveryRow, now: datetime) -> None:
         """Load the source alert_event + device for one queued row and send."""
         event = await self._repo.get_alert_event_by_public_id(row["alert_event_public_id"])
         if event is None:
@@ -450,7 +477,7 @@ class NotifySidecar(RegisterableProcess):
                 pid=row["public_id"],
                 evt=row["alert_event_public_id"],
             )
-            await self._mark_failed(row["public_id"], "alert_event missing")
+            await self._mark_failed(row["public_id"], "alert_event missing", now)
             return
         devices = await self._repo.list_active_notification_devices_for_user(row["user_public_id"])
         device = next((d for d in devices if d["public_id"] == row["device_public_id"]), None)
@@ -460,35 +487,34 @@ class NotifySidecar(RegisterableProcess):
                 " marking unregistered (no APNs call)",
                 pid=row["public_id"],
             )
-            await self._mark_unregistered_no_device(row["public_id"])
+            await self._mark_unregistered_no_device(row["public_id"], now)
             return
         await self._attempt_once(
             row["public_id"],
             device,
             _event_row_to_alert_data(event),
+            now,
         )
 
-    async def _mark_failed(self, delivery_public_id: str, error_reason: str) -> None:
+    async def _mark_failed(self, delivery_public_id: str, error_reason: str, now: datetime) -> None:
         """Terminal failure with provenance stamped from this sidecar."""
-        ts = datetime.now(UTC)
         sid = self._tracker.session_id
         seq = self._tracker.next_sequence(_ZMQ_STREAM)
         await self._repo.mark_delivery_failed(
             delivery_public_id,
             error_reason=error_reason,
-            transition_at=ts,
+            transition_at=now,
             session_id=sid,
             sequence_id=seq,
         )
 
-    async def _mark_unregistered_no_device(self, delivery_public_id: str) -> None:
+    async def _mark_unregistered_no_device(self, delivery_public_id: str, now: datetime) -> None:
         """Mark a delivery unregistered when its target device is already gone."""
-        ts = datetime.now(UTC)
         sid = self._tracker.session_id
         seq = self._tracker.next_sequence(_ZMQ_STREAM)
         await self._repo.mark_delivery_unregistered(
             delivery_public_id,
-            transition_at=ts,
+            transition_at=now,
             session_id=sid,
             sequence_id=seq,
         )
@@ -499,19 +525,20 @@ class NotifySidecar(RegisterableProcess):
         Background task spawned in ``start()``; tears down when
         ``stop()`` sets the stop event. A cancelled retry is just an
         interrupted sleep — the next startup drains any rows left
-        behind.
+        behind. Each tick mints one ``now`` at the entry boundary
+        (per ``feedback_timestamp_discipline.md``) that drives both
+        the retry-eligibility SELECT and every SCD2 write performed
+        while processing the batch returned by that query.
         """
-        try:
-            while not self._stop_event.is_set():
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(self._stop_event.wait(), timeout=_RETRY_LOOP_INTERVAL_S)
-                if self._stop_event.is_set():
-                    return
-                rows = await self._repo.list_deliveries_ready_for_retry(datetime.now(UTC))
-                for row in rows:
-                    await self._attempt_on_queued_row(row)
-        except asyncio.CancelledError:
-            raise
+        while not self._stop_event.is_set():
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._stop_event.wait(), timeout=_RETRY_LOOP_INTERVAL_S)
+            if self._stop_event.is_set():
+                return
+            now = datetime.now(UTC)
+            rows = await self._repo.list_deliveries_ready_for_retry(now)
+            for row in rows:
+                await self._attempt_on_queued_row(row, now)
 
 
 def _priority_to_apns(priority: str) -> int:
@@ -574,8 +601,8 @@ def _event_row_to_alert_data(event: AlertEventRow) -> AlertEventData:
         user_public_id=event["user_public_id"],
         operator_public_id=event["operator_public_id"],
         wallet_public_id=event["wallet_public_id"],
-        alert_type=cast(Any, event["alert_type"]),
-        priority=cast(Any, event["priority"]),
+        alert_type=cast(AlertType, event["alert_type"]),
+        priority=cast(AlertPriority, event["priority"]),
         is_safety_critical=event["is_safety_critical"],
         title=event["title"],
         body=event["body"],

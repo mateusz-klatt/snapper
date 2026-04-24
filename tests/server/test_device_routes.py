@@ -83,6 +83,7 @@ def _device_row(
         previews_mode="private",
         registered_at=_ts(),
         last_seen_at=None,
+        token_status="active",
     )
 
 
@@ -197,12 +198,17 @@ class TestDeleteDevice:
 
     @pytest.mark.asyncio
     async def test_soft_deletes_owned_device(self) -> None:
-        """Owned device is closed via ``mark_notification_device_inactive``."""
+        """Owned device is closed via ``deactivate_notification_device_scd2``.
+
+        The route passes ``reason='user_unregistered'`` so that an
+        ``as_of`` query after the delete sees a tombstone successor
+        row rather than a gap (INV-9).
+        """
         repo = AsyncMock()
         repo.list_active_notification_devices_for_user = AsyncMock(
             return_value=[_device_row("dev-own")]
         )
-        repo.mark_notification_device_inactive = AsyncMock()
+        repo.deactivate_notification_device_scd2 = AsyncMock(return_value=True)
 
         response = await delete_device(
             request=_make_request(),
@@ -212,7 +218,9 @@ class TestDeleteDevice:
         )
 
         assert "dev-own" in response.payload
-        repo.mark_notification_device_inactive.assert_awaited_once()
+        repo.deactivate_notification_device_scd2.assert_awaited_once()
+        call_kwargs = repo.deactivate_notification_device_scd2.await_args.kwargs
+        assert call_kwargs["reason"] == "user_unregistered"
 
     @pytest.mark.asyncio
     async def test_returns_404_when_device_not_owned(self) -> None:
@@ -225,7 +233,7 @@ class TestDeleteDevice:
         repo.list_active_notification_devices_for_user = AsyncMock(
             return_value=[_device_row("dev-own")]
         )
-        repo.mark_notification_device_inactive = AsyncMock()
+        repo.deactivate_notification_device_scd2 = AsyncMock(return_value=True)
 
         with pytest.raises(HTTPException) as exc:
             await delete_device(
@@ -236,7 +244,7 @@ class TestDeleteDevice:
             )
 
         assert exc.value.status_code == 404
-        repo.mark_notification_device_inactive.assert_not_awaited()
+        repo.deactivate_notification_device_scd2.assert_not_awaited()
 
 
 class TestUpdateDevicePref:

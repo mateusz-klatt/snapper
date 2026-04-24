@@ -185,22 +185,36 @@ class TestNotificationDeviceRepo:
     async def test_list_active_excludes_scd2_closed_devices(
         self, repo: SQLAlchemyRepository
     ) -> None:
-        """SCD2-closed rows are not returned by ``list_active``."""
+        """Tombstone successor rows are not returned by ``list_active``."""
         active_pid = await _seed_user_and_device(
             repo, user_public_id="user-c", device_token="active-token", sequence_id=1
         )
-        await repo.mark_notification_device_inactive(active_pid, closed_at=_ts(5))
+        inserted = await repo.deactivate_notification_device_scd2(
+            active_pid,
+            reason="unregistered",
+            timestamp=_ts(5),
+            session_id="s-410",
+            sequence_id=99,
+        )
+        assert inserted is True
 
         devices = await repo.list_active_notification_devices_for_user("user-c")
 
         assert devices == []
 
     @pytest.mark.asyncio
-    async def test_mark_notification_device_inactive_unknown_is_noop(
+    async def test_deactivate_notification_device_scd2_unknown_is_noop(
         self, repo: SQLAlchemyRepository
     ) -> None:
-        """Marking a nonexistent public_id inactive is a silent no-op."""
-        await repo.mark_notification_device_inactive("nonexistent-public-id", closed_at=_ts(3))
+        """Deactivating a nonexistent public_id is a silent idempotent no-op."""
+        inserted = await repo.deactivate_notification_device_scd2(
+            "nonexistent-public-id",
+            reason="unregistered",
+            timestamp=_ts(3),
+            session_id="s-noop",
+            sequence_id=1,
+        )
+        assert inserted is False
 
     @pytest.mark.asyncio
     async def test_upsert_device_alert_pref_scope_partitioning(

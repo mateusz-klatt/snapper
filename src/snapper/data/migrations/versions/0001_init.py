@@ -31,6 +31,15 @@ def _bind_datetime_literal(value: datetime, dialect_name: str) -> datetime | str
 
 _KNOWN_TO_ACTIVE_PG = "known_to = '9999-12-31T23:59:59+00:00'"
 _KNOWN_TO_ACTIVE_SQLITE = "known_to = '9999-12-31 23:59:59.000000'"
+_NOTIFICATION_DEVICE_ACTIVE_PG = (
+    "known_to = '9999-12-31T23:59:59+00:00' AND token_status = 'active'"
+)
+_NOTIFICATION_DEVICE_ACTIVE_SQLITE = (
+    "known_to = '9999-12-31 23:59:59.000000' AND token_status = 'active'"
+)
+_CK_NOTIFICATION_DEVICE_TOKEN_STATUS = (
+    "token_status IN ('active', 'unregistered', 'user_unregistered')"
+)
 _CK_SESSION_ID = "session_id != ''"
 _CK_SEQUENCE_ID = "sequence_id > 0"
 _CK_SESSION_ID_NONEMPTY = "length(session_id) > 0"
@@ -2312,32 +2321,37 @@ def upgrade() -> None:
         sa.Column("previews_mode", sa.String(10), server_default="private", nullable=False),
         sa.Column("registered_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("token_status", sa.String(20), server_default="active", nullable=False),
         sa.PrimaryKeyConstraint("id"),
         sa.CheckConstraint(_CK_SESSION_ID, name="ck_notification_devices_session_id"),
         sa.CheckConstraint(_CK_SEQUENCE_ID, name="ck_notification_devices_sequence_id"),
+        sa.CheckConstraint(
+            _CK_NOTIFICATION_DEVICE_TOKEN_STATUS,
+            name="ck_notification_devices_token_status",
+        ),
     )
     op.create_index(
         "ix_notification_devices_public_id",
         "notification_devices",
         ["public_id"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+        sqlite_where=text(_NOTIFICATION_DEVICE_ACTIVE_SQLITE),
+        postgresql_where=text(_NOTIFICATION_DEVICE_ACTIVE_PG),
     )
     op.create_index(
         "uq_notification_devices_token_active",
         "notification_devices",
         ["device_token"],
         unique=True,
-        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+        sqlite_where=text(_NOTIFICATION_DEVICE_ACTIVE_SQLITE),
+        postgresql_where=text(_NOTIFICATION_DEVICE_ACTIVE_PG),
     )
     op.create_index(
         "ix_notification_devices_user_active",
         "notification_devices",
         ["user_public_id"],
-        sqlite_where=text(_KNOWN_TO_ACTIVE_SQLITE),
-        postgresql_where=text(_KNOWN_TO_ACTIVE_PG),
+        sqlite_where=text(_NOTIFICATION_DEVICE_ACTIVE_SQLITE),
+        postgresql_where=text(_NOTIFICATION_DEVICE_ACTIVE_PG),
     )
     op.create_table(
         "device_alert_prefs",

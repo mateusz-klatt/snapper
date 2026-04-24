@@ -19,7 +19,8 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
-from sqlalchemy import update
+from loguru import logger
+from sqlalchemy import select
 
 from snapper.application.notify.apns_client import ApnsSendResult
 from snapper.application.notify.sidecar import NotifySidecar
@@ -28,7 +29,7 @@ from snapper.application.notify.sidecar import _build_apns_payload
 from snapper.application.notify.sidecar import _event_row_to_alert_data
 from snapper.application.notify.sidecar import _priority_to_apns
 from snapper.data.models import KNOWN_TO_MAX
-from snapper.data.models import AlertDelivery
+from snapper.data.models import NotificationDevice
 from snapper.data.models import User
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import AlertDeliveryInsertRow
@@ -261,6 +262,7 @@ class TestSidecarHandleHappyPath:
         await sidecar._handle(
             f"alerts.{user}.order_fill_full",
             data.to_json().encode("utf-8"),
+            _ts(),
         )
 
         queued = await repo.list_queued_deliveries_all()
@@ -279,6 +281,7 @@ class TestSidecarHandleHappyPath:
         await sidecar._handle(
             "alerts.019dbb34-f439-77bd-afa8-aaaaaaaaaaaa.order_fill_full",
             data.to_json().encode("utf-8"),
+            _ts(),
         )
 
         apns.send.assert_not_awaited()
@@ -291,6 +294,7 @@ class TestSidecarHandleHappyPath:
         await sidecar._handle(
             "alerts.019dbb34-f439-77bd-afa8-ee5321d60307.order_fill_full",
             b"not-json",
+            _ts(),
         )
 
         apns.send.assert_not_awaited()
@@ -308,6 +312,7 @@ class TestSidecarHandleHappyPath:
         await sidecar._handle(
             f"alerts.{user}.order_fill_full",
             data.to_json().encode("utf-8"),
+            _ts(),
         )
 
         history = await repo.list_recent_alerts_for_user(user, limit=10, before=None)
@@ -333,10 +338,101 @@ class TestSidecarErrorSemantics:
         await sidecar._handle(
             f"alerts.{user}.order_fill_full",
             data.to_json().encode("utf-8"),
+            _ts(),
         )
 
         active = await repo.list_active_notification_devices_for_user(user)
         assert active == []
+
+    @pytest.mark.asyncio
+    async def test_410_path_writes_inactive_successor_row(self, repo: SQLAlchemyRepository) -> None:
+        """APNs 410 writes a tombstone successor (INV-9 — BE-3a R1 regression).
+
+        Closes B-1 from the BE-3a Copilot review: the 410 branch must
+        not just close the active row — it must insert a successor
+        with ``token_status = 'unregistered'`` and
+        ``known_to = KNOWN_TO_MAX`` so that an ``as_of`` query after
+        the close returns a visible inactive device row rather than a
+        gap.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        await _seed_device(repo, user)
+        unreg = ApnsSendResult(
+            status_code=410, status="unregistered", apns_id="", description="BadDeviceToken"
+        )
+        sidecar, _ = _make_sidecar(repo, send_result=unreg)
+        data = _alert_event_data(user_public_id=user)
+
+        await sidecar._handle(
+            f"alerts.{user}.order_fill_full",
+            data.to_json().encode("utf-8"),
+            _ts(),
+        )
+
+        async with repo.session() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(NotificationDevice).where(NotificationDevice.user_public_id == user)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert len(rows) == 2
+        closed = [r for r in rows if r.known_to != KNOWN_TO_MAX]
+        assert len(closed) == 1
+        assert closed[0].token_status == "active"
+        successor = [r for r in rows if r.known_to == KNOWN_TO_MAX]
+        assert len(successor) == 1
+        assert successor[0].token_status == "unregistered"
+        assert successor[0].public_id == closed[0].public_id
+
+    @pytest.mark.asyncio
+    async def test_retry_exhaustion_logs_warning(
+        self,
+        repo: SQLAlchemyRepository,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Retry give-up emits a `logger.warning` before the terminal mark.
+
+        Closes B-2 from the BE-3a Copilot review: a silent
+        ``mark_delivery_failed`` after 3 attempts leaves ops alerts
+        without a pivot log record. The sidecar must call
+        ``logger.warning`` with the delivery public_id, attempt
+        count, and error reason immediately before transitioning the
+        row to ``failed``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        await _seed_device(repo, user)
+        err = ApnsSendResult(status_code=500, status="server_error", apns_id="", description="")
+        sidecar, _ = _make_sidecar(repo, send_result=err)
+        data = _alert_event_data(user_public_id=user)
+
+        handler_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+        try:
+            await sidecar._handle(
+                f"alerts.{user}.order_fill_full",
+                data.to_json().encode("utf-8"),
+                _ts(),
+            )
+            row = (await repo.list_queued_deliveries_all())[0]
+            await sidecar._attempt_on_queued_row(row, _ts())
+            await sidecar._attempt_on_queued_row(
+                (await repo.list_queued_deliveries_all())[0], _ts()
+            )
+        finally:
+            logger.remove(handler_id)
+
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        exhaustion = [
+            r for r in warnings if "alert delivery failed after retries" in r.getMessage()
+        ]
+        assert len(exhaustion) == 1
+        assert row["public_id"] in exhaustion[0].getMessage()
+        assert "attempts=3" in exhaustion[0].getMessage()
 
     @pytest.mark.asyncio
     async def test_server_error_schedules_retry(self, repo: SQLAlchemyRepository) -> None:
@@ -351,6 +447,7 @@ class TestSidecarErrorSemantics:
         await sidecar._handle(
             f"alerts.{user}.order_fill_full",
             data.to_json().encode("utf-8"),
+            _ts(),
         )
 
         queued = await repo.list_queued_deliveries_all()
@@ -372,11 +469,12 @@ class TestSidecarErrorSemantics:
         await sidecar._handle(
             f"alerts.{user}.order_fill_full",
             data.to_json().encode("utf-8"),
+            _ts(),
         )
         queued = await repo.list_queued_deliveries_all()
         row = queued[0]
-        await sidecar._attempt_on_queued_row(row)
-        await sidecar._attempt_on_queued_row((await repo.list_queued_deliveries_all())[0])
+        await sidecar._attempt_on_queued_row(row, _ts())
+        await sidecar._attempt_on_queued_row((await repo.list_queued_deliveries_all())[0], _ts())
 
         still_queued = await repo.list_queued_deliveries_all()
         assert still_queued == []
@@ -393,6 +491,7 @@ class TestSidecarErrorSemantics:
         await sidecar._handle(
             f"alerts.{user}.order_fill_full",
             data.to_json().encode("utf-8"),
+            _ts(),
         )
 
         queued = await repo.list_queued_deliveries_all()
@@ -415,10 +514,11 @@ class TestDrainOutbox:
         await first_sidecar._handle(
             f"alerts.{user}.order_fill_full",
             _alert_event_data(user_public_id=user).to_json().encode("utf-8"),
+            _ts(),
         )
 
         success_sidecar, success_apns = _make_sidecar(repo)
-        await success_sidecar._drain_outbox()
+        await success_sidecar._drain_outbox(_ts())
 
         queued = await repo.list_queued_deliveries_all()
         assert queued == []
@@ -451,7 +551,7 @@ class TestDrainOutbox:
         )
         sidecar, apns = _make_sidecar(repo)
 
-        await sidecar._drain_outbox()
+        await sidecar._drain_outbox(_ts())
 
         queued = await repo.list_queued_deliveries_all()
         assert queued == []
@@ -493,10 +593,16 @@ class TestDrainOutbox:
                 timestamp=_ts(),
             )
         )
-        await repo.mark_notification_device_inactive(dev, closed_at=_ts(1))
+        await repo.deactivate_notification_device_scd2(
+            dev,
+            reason="user_unregistered",
+            timestamp=_ts(1),
+            session_id="s-close",
+            sequence_id=9,
+        )
         sidecar, apns = _make_sidecar(repo)
 
-        await sidecar._drain_outbox()
+        await sidecar._drain_outbox(_ts(2))
 
         queued = await repo.list_queued_deliveries_all()
         assert queued == []
@@ -678,20 +784,21 @@ class TestRetryQueueLoop:
         await sidecar._handle(
             f"alerts.{user}.order_fill_full",
             _alert_event_data(user_public_id=user).to_json().encode("utf-8"),
+            _ts(),
         )
         apns.send.reset_mock()
         ok = ApnsSendResult(status_code=200, status="success", apns_id="apns-ok", description="")
         apns.send.return_value = ok
         queued = (await repo.list_queued_deliveries_all())[0]
-        async with repo.session() as s:
-
-            await s.execute(
-                update(AlertDelivery)
-                .where(AlertDelivery.public_id == queued["public_id"])
-                .where(AlertDelivery.known_to == KNOWN_TO_MAX)
-                .values(next_attempt_at=datetime(2020, 1, 1, tzinfo=UTC))
-            )
-            await s.commit()
+        await repo.update_delivery_retry_schedule(
+            queued["public_id"],
+            attempt_count=queued["attempt_count"],
+            next_attempt_at=datetime(2020, 1, 1, tzinfo=UTC),
+            error_reason=queued["error_reason"],
+            transition_at=_ts(2),
+            session_id="s-retry-prep",
+            sequence_id=99,
+        )
 
         monkeypatch.setattr("snapper.application.notify.sidecar._RETRY_LOOP_INTERVAL_S", 0.05)
         task = asyncio.create_task(sidecar._process_retry_queue_loop())
@@ -725,6 +832,7 @@ class TestLoadDelivery:
         await sidecar._handle(
             f"alerts.{user}.order_fill_full",
             _alert_event_data(user_public_id=user).to_json().encode("utf-8"),
+            _ts(),
         )
 
         result = await sidecar._load_delivery("unknown-public-id")
@@ -756,6 +864,7 @@ class TestHandleNonAlertEvent:
         await sidecar._handle(
             f"alerts.{user}.order_fill_full",
             tick.to_json().encode("utf-8"),
+            _ts(),
         )
 
         apns.send.assert_not_awaited()

@@ -4249,7 +4249,7 @@ class TestNotifyCommand:
         fake_sock.close = MagicMock()
         fake_ctx.socket = MagicMock(return_value=fake_sock)
         fake_ctx.term = MagicMock()
-        monkeypatch.setattr("zmq.asyncio.Context", lambda: fake_ctx)
+        monkeypatch.setattr(app_module.zmq.asyncio, "Context", lambda: fake_ctx)
 
         result = cli_runner.invoke(app_module.app, ["notify"])
 
@@ -4300,7 +4300,7 @@ class TestNotifyCommand:
         fake_ctx = MagicMock()
         fake_sock = MagicMock()
         fake_ctx.socket = MagicMock(return_value=fake_sock)
-        monkeypatch.setattr("zmq.asyncio.Context", lambda: fake_ctx)
+        monkeypatch.setattr(app_module.zmq.asyncio, "Context", lambda: fake_ctx)
 
         result = cli_runner.invoke(app_module.app, ["notify"])
 

@@ -1453,7 +1453,10 @@ class NotificationDeviceUpsertRow(TypedDict, total=False):
     registered_at, session_id, sequence_id, timestamp. Optional:
     public_id (auto-generated if absent), platform (defaults "ios"),
     app_version, previews_mode (defaults "private"), last_seen_at,
-    known_to (defaults to KNOWN_TO_MAX on insert).
+    known_to (defaults to KNOWN_TO_MAX on insert), token_status
+    (defaults to "active"; tombstone successors set by
+    ``deactivate_notification_device_scd2`` use "unregistered" or
+    "user_unregistered").
     """
 
     public_id: str
@@ -1470,12 +1473,16 @@ class NotificationDeviceUpsertRow(TypedDict, total=False):
     previews_mode: str
     registered_at: datetime
     last_seen_at: datetime | None
+    token_status: str
 
 
 class NotificationDeviceRow(TypedDict):
     """Row dict returned by Repository.list_active_notification_devices_for_user.
 
-    Always an active SCD2 row (``known_to = KNOWN_TO_MAX``).
+    Always an active SCD2 row (``known_to = KNOWN_TO_MAX`` AND
+    ``token_status = "active"``). Unregistered / user_unregistered
+    tombstone rows are excluded from the listing filter but remain
+    in the table as historical successors for ``as_of`` queries.
     """
 
     public_id: str
@@ -1492,6 +1499,7 @@ class NotificationDeviceRow(TypedDict):
     previews_mode: str
     registered_at: datetime
     last_seen_at: datetime | None
+    token_status: str
 
 
 class DeviceAlertPrefUpsertRow(TypedDict, total=False):

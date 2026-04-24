@@ -134,6 +134,15 @@ __all__ = [
 _CK_EXCHANGE_LOWER = "exchange = LOWER(exchange)"
 _KNOWN_TO_ACTIVE_PG = text("known_to = '9999-12-31T23:59:59+00:00'")
 _KNOWN_TO_ACTIVE_SQLITE = text("known_to = '9999-12-31 23:59:59.000000'")
+_NOTIFICATION_DEVICE_ACTIVE_PG = text(
+    "known_to = '9999-12-31T23:59:59+00:00' AND token_status = 'active'"
+)
+_NOTIFICATION_DEVICE_ACTIVE_SQLITE = text(
+    "known_to = '9999-12-31 23:59:59.000000' AND token_status = 'active'"
+)
+_CK_NOTIFICATION_DEVICE_TOKEN_STATUS = (
+    "token_status IN ('active', 'unregistered', 'user_unregistered')"
+)
 
 
 class Base(DeclarativeBase):
@@ -2210,37 +2219,51 @@ class NotificationDevice(TemporalMixin, Base):
 
     Per project invariant (``feedback_bitemporal_all_tables``): every
     table must carry ``TemporalMixin`` (``timestamp`` + ``known_to``).
-    Device lifecycle is versioned via SCD2 — deactivation = close
-    (known_to := now), token refresh = close + insert new version,
-    reads use ``known_to == KNOWN_TO_MAX`` predicate (via the partial
-    active indexes below). ``device_token`` is the APNs binary token
-    hex-encoded; ``env`` tracks sandbox vs production APNs scope
-    (one token is valid for exactly one env per Apple);
-    ``previews_mode`` gates iOS lock-screen payload visibility
-    (``private`` by default).
+    Device lifecycle is versioned via SCD2: an active row is
+    ``known_to = KNOWN_TO_MAX AND token_status = 'active'``. Close +
+    insert successor is used for every transition — token refresh
+    (next active row), APNs 410 (successor with
+    ``token_status = 'unregistered'``), and explicit user unregister
+    from the app (successor with ``token_status = 'user_unregistered'``).
+    The tombstone successor keeps ``known_to = KNOWN_TO_MAX`` so an
+    ``as_of`` query returns a visible inactive row instead of a gap
+    (see plan 2 §D3 + BE-3a R1 invariant INV-9 closure). Partial
+    indexes add ``token_status = 'active'`` so multiple historical
+    tombstones per token do not collide with the active-row uniqueness
+    constraint, and re-registration of the same token after an
+    unregister is permitted.
+
+    ``device_token`` is the APNs binary token hex-encoded; ``env``
+    tracks sandbox vs production APNs scope (one token is valid for
+    exactly one env per Apple); ``previews_mode`` gates iOS
+    lock-screen payload visibility (``private`` by default).
     """
 
     __tablename__ = "notification_devices"
     __table_args__ = (
+        CheckConstraint(
+            _CK_NOTIFICATION_DEVICE_TOKEN_STATUS,
+            name="ck_notification_devices_token_status",
+        ),
         Index(
             "ix_notification_devices_public_id",
             "public_id",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
-            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+            sqlite_where=_NOTIFICATION_DEVICE_ACTIVE_SQLITE,
+            postgresql_where=_NOTIFICATION_DEVICE_ACTIVE_PG,
         ),
         Index(
             "uq_notification_devices_token_active",
             "device_token",
             unique=True,
-            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
-            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+            sqlite_where=_NOTIFICATION_DEVICE_ACTIVE_SQLITE,
+            postgresql_where=_NOTIFICATION_DEVICE_ACTIVE_PG,
         ),
         Index(
             "ix_notification_devices_user_active",
             "user_public_id",
-            sqlite_where=_KNOWN_TO_ACTIVE_SQLITE,
-            postgresql_where=_KNOWN_TO_ACTIVE_PG,
+            sqlite_where=_NOTIFICATION_DEVICE_ACTIVE_SQLITE,
+            postgresql_where=_NOTIFICATION_DEVICE_ACTIVE_PG,
         ),
     )
     user_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
@@ -2252,6 +2275,7 @@ class NotificationDevice(TemporalMixin, Base):
     previews_mode: Mapped[str] = mapped_column(String(10), nullable=False, server_default="private")
     registered_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
     last_seen_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    token_status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="active")
 
 
 class DeviceAlertPref(TemporalMixin, Base):
