@@ -20,10 +20,12 @@ import uuid
 from datetime import UTC
 from datetime import datetime
 from typing import ClassVar
+from typing import Literal
 from uuid import uuid7
 
 import bcrypt
 from loguru import logger
+from sqlalchemy import exists
 from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -305,51 +307,82 @@ class DelegateService:
                 operator_public_ids=[bound_operator_public_id],
                 primary_operator_public_id=bound_operator_public_id,
             )
-            pair = self.token_manager.create_tokens(delegate_principal)
-            access_claims = self.token_manager.decode_fresh_token(pair.access_token)
-            refresh_claims = self.token_manager.decode_fresh_token(pair.refresh_token)
-            issued_at = datetime.fromtimestamp(access_claims.iat, tz=UTC)
-            access_exp = datetime.fromtimestamp(access_claims.exp, tz=UTC)
-            refresh_exp = datetime.fromtimestamp(refresh_claims.exp, tz=UTC)
-            session.add(
-                UserActiveToken(
-                    public_id=str(uuid.uuid7()),
-                    user_public_id=delegate_user.public_id,
-                    jti=access_claims.jti,
-                    token_hash=hash_token(pair.access_token),
-                    token_type="access",
-                    issued_at=issued_at,
-                    expires_at=access_exp,
+            access_token: str
+            refresh_token: str | None
+            expires_in: int
+            token_kind: Literal["rotating", "long_lived"]
+            if body.long_lived:
+                pat = self.token_manager.create_long_lived_access_token(
+                    delegate_principal, issued_at=now
                 )
-            )
-            session.add(
-                UserActiveToken(
-                    public_id=str(uuid.uuid7()),
-                    user_public_id=delegate_user.public_id,
-                    jti=refresh_claims.jti,
-                    token_hash=hash_token(pair.refresh_token),
-                    token_type="refresh",
-                    issued_at=issued_at,
-                    expires_at=refresh_exp,
+                session.add(
+                    UserActiveToken(
+                        public_id=str(uuid.uuid7()),
+                        user_public_id=delegate_user.public_id,
+                        jti=pat.jti,
+                        token_hash=hash_token(pat.access_token),
+                        token_type="access",
+                        issued_at=now,
+                        expires_at=pat.expires_at,
+                    )
                 )
-            )
+                access_token = pat.access_token
+                refresh_token = None
+                expires_in = pat.expires_in
+                token_kind = "long_lived"
+            else:
+                pair = self.token_manager.create_tokens(delegate_principal)
+                access_claims = self.token_manager.decode_fresh_token(pair.access_token)
+                refresh_claims = self.token_manager.decode_fresh_token(pair.refresh_token)
+                issued_at = datetime.fromtimestamp(access_claims.iat, tz=UTC)
+                access_exp = datetime.fromtimestamp(access_claims.exp, tz=UTC)
+                refresh_exp = datetime.fromtimestamp(refresh_claims.exp, tz=UTC)
+                session.add(
+                    UserActiveToken(
+                        public_id=str(uuid.uuid7()),
+                        user_public_id=delegate_user.public_id,
+                        jti=access_claims.jti,
+                        token_hash=hash_token(pair.access_token),
+                        token_type="access",
+                        issued_at=issued_at,
+                        expires_at=access_exp,
+                    )
+                )
+                session.add(
+                    UserActiveToken(
+                        public_id=str(uuid.uuid7()),
+                        user_public_id=delegate_user.public_id,
+                        jti=refresh_claims.jti,
+                        token_hash=hash_token(pair.refresh_token),
+                        token_type="refresh",
+                        issued_at=issued_at,
+                        expires_at=refresh_exp,
+                    )
+                )
+                access_token = pair.access_token
+                refresh_token = pair.refresh_token
+                expires_in = pair.expires_in
+                token_kind = "rotating"
             await session.commit()
             delegate_read = self._delegate_read_from_rows(
                 user_row=delegate_user,
                 caps_row=caps_row,
                 label=self._label_from_username(delegate_user.username),
+                token_kind=token_kind,
             )
         logger.info(
-            "create_delegate: owner={} delegate={} username={}",
+            "create_delegate: owner={} delegate={} username={} kind={}",
             owner.user_public_id,
             delegate_user.public_id,
             delegate_user.username,
+            token_kind,
         )
         return DelegateCreatedPayload(
             delegate=delegate_read,
-            access_token=pair.access_token,
-            refresh_token=pair.refresh_token,
-            expires_in=pair.expires_in,
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_in=expires_in,
+            token_kind=token_kind,
         )
 
     def _resolve_operator_binding(
@@ -450,14 +483,18 @@ class DelegateService:
                     user_known_to,
                 )
             )
-            result = await session.execute(stmt)
+            rows = (await session.execute(stmt)).all()
+            kinds = await self._classify_token_kinds_batch(
+                session, [user_row.public_id for user_row, _ in rows]
+            )
             delegates: list[DelegateRead] = []
-            for user_row, caps_row in result.all():
+            for user_row, caps_row in rows:
                 delegates.append(
                     self._delegate_read_from_rows(
                         user_row=user_row,
                         caps_row=caps_row,
                         label=self._label_from_username(user_row.username),
+                        token_kind=kinds[user_row.public_id],
                     )
                 )
             return delegates
@@ -494,10 +531,16 @@ class DelegateService:
             user_row, caps_row = await self._load_delegate_with_caps(
                 session, public_id, owner_public_id
             )
+            token_kind: Literal["rotating", "long_lived"] = (
+                "rotating"
+                if await self._has_active_refresh_row(session, user_row.public_id)
+                else "long_lived"
+            )
         return self._delegate_read_from_rows(
             user_row=user_row,
             caps_row=caps_row,
             label=self._label_from_username(user_row.username),
+            token_kind=token_kind,
         )
 
     async def update_caps(
@@ -553,11 +596,17 @@ class DelegateService:
                 new_values=new_values,
                 bus_time=now,
             )
+            token_kind: Literal["rotating", "long_lived"] = (
+                "rotating"
+                if await self._has_active_refresh_row(session, user_row.public_id)
+                else "long_lived"
+            )
             await session.commit()
         return self._delegate_read_from_rows(
             user_row=user_row,
             caps_row=refreshed,
             label=self._label_from_username(user_row.username),
+            token_kind=token_kind,
         )
 
     @staticmethod
@@ -660,6 +709,56 @@ class DelegateService:
             f"Could not derive a unique username from label '{label}' after 8 attempts"
         )
 
+    @staticmethod
+    async def _has_active_refresh_row(session: AsyncSession, user_public_id: str) -> bool:
+        """Return True iff the delegate has any unrevoked refresh-token row.
+
+        Classifies a single delegate's ``token_kind`` for
+        :class:`DelegateRead` projection. The presence of ANY
+        non-revoked ``UserActiveToken(token_type='refresh')`` row
+        means the delegate was minted via the rotating flow; its
+        absence means the delegate was minted as a long-lived PAT.
+
+        EXISTS query runs in O(1) against
+        ``ix_user_active_tokens_user_revoked``. Includes revoked
+        rows' absence explicitly so the classification flips
+        correctly when a rotating delegate's tokens are all
+        blacklisted — though in practice the delegate's ``is_active``
+        gate would fire first.
+        """
+        stmt = select(
+            exists().where(
+                UserActiveToken.user_public_id == user_public_id,
+                UserActiveToken.token_type == "refresh",
+                UserActiveToken.revoked_at.is_(None),
+            )
+        )
+        return bool((await session.execute(stmt)).scalar())
+
+    @staticmethod
+    async def _classify_token_kinds_batch(
+        session: AsyncSession, user_public_ids: list[str]
+    ) -> dict[str, Literal["rotating", "long_lived"]]:
+        """Map each delegate's ``user_public_id`` to its ``token_kind``.
+
+        Batched variant of :meth:`_has_active_refresh_row` for
+        :meth:`list_delegates` — one query returns every user_public_id
+        that has an active refresh row; callers classify "not in the
+        set" as long-lived. Avoids N+1 queries when the operator has
+        many delegates.
+        """
+        if not user_public_ids:
+            return {}
+        stmt = select(UserActiveToken.user_public_id.distinct()).where(
+            UserActiveToken.user_public_id.in_(user_public_ids),
+            UserActiveToken.token_type == "refresh",
+            UserActiveToken.revoked_at.is_(None),
+        )
+        rotating_ids = {row for row, in (await session.execute(stmt)).all()}
+        return {
+            uid: ("rotating" if uid in rotating_ids else "long_lived") for uid in user_public_ids
+        }
+
     async def _load_delegate_with_caps(
         self,
         session: AsyncSession,
@@ -703,8 +802,18 @@ class DelegateService:
         user_row: User,
         caps_row: UserTradingCaps | None,
         label: str,
+        token_kind: Literal["rotating", "long_lived"],
     ) -> DelegateRead:
-        """Project the User + caps ORM rows into the API schema."""
+        """Project the User + caps ORM rows into the API schema.
+
+        ``token_kind`` is resolved externally — at create time it's
+        known directly from ``body.long_lived``; at read time it's
+        computed via the EXISTS subquery in :meth:`_has_active_refresh_row`
+        (see the create/list/get/update/deactivate callers). Keeping
+        the resolver outside this projector lets the read paths batch
+        the existence check alongside the User + caps join in a
+        single query.
+        """
         caps_body = DelegateCapsBody(
             max_order_quantity_per_instrument=self._coerce_caps_json(caps_row),
             max_open_orders=caps_row.max_open_orders if caps_row else None,
@@ -723,6 +832,7 @@ class DelegateService:
             created_at=user_row.created_at,
             is_active=user_row.is_active,
             caps=caps_body,
+            token_kind=token_kind,
         )
 
     @staticmethod

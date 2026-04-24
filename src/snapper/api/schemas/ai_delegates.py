@@ -82,6 +82,14 @@ class DelegateCreateBody(StrictBody):
             must be in the caller's claim set. ``None`` defers
             to the caller's primary operator so simple callers
             don't need to know their membership set.
+        long_lived: When ``True`` the delegate receives a single
+            long-lived access token (no refresh token), suitable
+            for local MCP clients where the operator prefers a
+            paste-once token over the rotating 15-min access +
+            7-day refresh pair. Defaults to ``False`` so existing
+            integrations see no behaviour change. Kill switch
+            (``POST /api/ai-delegates/{id}/deactivate``) works
+            identically on long-lived tokens.
     """
 
     label: str = Field(..., min_length=1, max_length=48, description="Delegate label")
@@ -93,6 +101,13 @@ class DelegateCreateBody(StrictBody):
         description=(
             "Operator the delegate is bound to — must be in the caller's claim set. "
             "Null defers to the caller's primary operator."
+        ),
+    )
+    long_lived: bool = Field(
+        False,
+        description=(
+            "When true, issue a non-rotating long-lived access token (no refresh). "
+            "Defaults to false — existing rotating behaviour."
         ),
     )
 
@@ -121,6 +136,13 @@ class DelegateRead(StrictBody):
         is_active: Flipped to ``False`` on
             ``POST /api/ai-delegates/{id}/deactivate``.
         caps: Current trading caps (always populated).
+        token_kind: ``"rotating"`` (default — 15-min access + 7-day
+            refresh pair) or ``"long_lived"`` (single access token
+            with ~10y expiry, no refresh token issued). Computed
+            from the live ``user_active_tokens`` inventory: a
+            delegate with any active refresh row is ``rotating``;
+            otherwise ``long_lived``. Frontend renders a "PAT"
+            badge when ``long_lived``.
     """
 
     public_id: str
@@ -130,6 +152,7 @@ class DelegateRead(StrictBody):
     created_at: datetime
     is_active: bool
     caps: DelegateCapsBody
+    token_kind: Literal["rotating", "long_lived"]
 
 
 class DelegateCreatedPayload(StrictBody):
@@ -144,17 +167,29 @@ class DelegateCreatedPayload(StrictBody):
             projection.
         access_token: Freshly-minted JWT — operator copies into
             the MCP client config.
-        refresh_token: Freshly-minted refresh JWT.
-        expires_in: Access-token lifetime in seconds (mirrors the
-            standard :class:`~snapper.auth.schemas.tokens.TokenPair`
-            shape so CLI clients that also handle login responses
-            can share deserialisation code).
+        refresh_token: Freshly-minted refresh JWT, OR ``None`` when
+            the caller opted into ``long_lived`` mode. Clients must
+            treat ``None`` as "no rotation expected" and stop
+            calling ``POST /api/auth/refresh``.
+        expires_in: Access-token lifetime in seconds. For rotating
+            delegates this matches the standard short TTL; for
+            long-lived delegates this is the ~10-year window
+            (approximately ``3650 * 86400`` seconds). Mirrors the
+            :class:`~snapper.auth.schemas.tokens.TokenPair` shape so
+            CLI clients that also handle login responses can share
+            deserialisation code.
+        token_kind: ``"rotating"`` (default) or ``"long_lived"``.
+            Mirrors the freshly-minted delegate's
+            :attr:`DelegateRead.token_kind`; surfaced here so the
+            frontend can branch config-snippet generation without a
+            follow-up GET.
     """
 
     delegate: DelegateRead
     access_token: str
-    refresh_token: str
+    refresh_token: str | None
     expires_in: int
+    token_kind: Literal["rotating", "long_lived"]
 
 
 class DelegateResponse(PayloadResponse[Literal["delegate_response"], DelegateRead]):

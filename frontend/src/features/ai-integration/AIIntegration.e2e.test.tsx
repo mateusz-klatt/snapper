@@ -66,6 +66,7 @@ const createdDelegate: DelegateRead = {
     max_cancels_per_minute: null,
     max_order_quantity_per_instrument: null,
   },
+  token_kind: 'rotating',
 }
 
 const emptyList: DelegateListResponse = {
@@ -89,6 +90,7 @@ const createdResponse: DelegateCreatedResponse = {
     access_token: 'access-token-xyz',
     refresh_token: 'refresh-token-xyz',
     expires_in: 900,
+    token_kind: 'rotating',
   },
 }
 

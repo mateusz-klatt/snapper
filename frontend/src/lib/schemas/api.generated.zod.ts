@@ -2348,6 +2348,7 @@ export const DelegateReadSchema = z
     created_at: z.iso.datetime(),
     is_active: z.boolean(),
     caps: DelegateCapsBodySchema,
+    token_kind: z.enum(['rotating', 'long_lived']),
   })
   .strict()
 
@@ -2356,6 +2357,7 @@ export const DelegateCreateBodySchema = z
     label: z.string().min(1).max(48),
     caps: DelegateCapsBodySchema.optional(),
     operator_public_id: z.string().nullable().optional(),
+    long_lived: z.boolean().optional(),
   })
   .strict()
 
@@ -2460,8 +2462,9 @@ export const DelegateCreatedPayloadSchema = z
   .object({
     delegate: DelegateReadSchema,
     access_token: z.string(),
-    refresh_token: z.string(),
+    refresh_token: z.string().nullable(),
     expires_in: z.number().int(),
+    token_kind: z.enum(['rotating', 'long_lived']),
   })
   .strict()
 

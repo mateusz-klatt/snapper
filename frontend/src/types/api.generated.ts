@@ -1769,8 +1769,9 @@ export type Components = {
         DelegateCreatedPayload: {
             delegate: Components["schemas"]["DelegateRead"];
             access_token: string;
-            refresh_token: string;
+            refresh_token: string | null;
             expires_in: number;
+            token_kind: "rotating" | "long_lived";
         };
         DelegateCreatedResponse: {
             type: "delegate_created_response";
@@ -1797,6 +1798,7 @@ export type Components = {
             created_at: string;
             is_active: boolean;
             caps: Components["schemas"]["DelegateCapsBody"];
+            token_kind: "rotating" | "long_lived";
         };
         DelegateResponse: {
             type: "delegate_response";
@@ -2994,6 +2996,7 @@ export type Components = {
             label: string;
             caps?: Components["schemas"]["DelegateCapsBody"];
             operator_public_id?: string | null;
+            long_lived?: boolean;
         };
         DelegateCapsUpdateRequest: {
             type?: "delegate_caps_update_request";

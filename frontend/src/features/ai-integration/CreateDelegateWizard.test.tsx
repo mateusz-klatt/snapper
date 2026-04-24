@@ -38,10 +38,12 @@ const mockPayload: DelegateCreatedPayload = {
       max_cancels_per_minute: null,
       max_order_quantity_per_instrument: null,
     },
+    token_kind: 'rotating',
   },
   access_token: 'access-xyz',
   refresh_token: 'refresh-xyz',
   expires_in: 900,
+  token_kind: 'rotating',
 }
 
 const envelope = { payload: mockPayload }

@@ -13,6 +13,7 @@ from datetime import timedelta as _td
 from typing import Any
 from unittest.mock import MagicMock as _Magic
 from unittest.mock import patch as _patch
+from uuid import uuid7
 
 import pytest
 from fastapi import HTTPException
@@ -1270,6 +1271,7 @@ class TestRouteHandlers:
             created_at=datetime.now(UTC),
             is_active=True,
             caps=DelegateCapsBody(),
+            token_kind="rotating",
         )
 
         class _OkService:
@@ -1300,6 +1302,7 @@ class TestRouteHandlers:
             created_at=datetime.now(UTC),
             is_active=True,
             caps=DelegateCapsBody(max_open_orders=42),
+            token_kind="rotating",
         )
 
         class _OkService:
@@ -1341,6 +1344,7 @@ class TestRouteHandlers:
             created_at=datetime.now(UTC),
             is_active=True,
             caps=DelegateCapsBody(),
+            token_kind="rotating",
         )
 
         class _OkService:
@@ -1353,6 +1357,7 @@ class TestRouteHandlers:
                     access_token="tok.access",
                     refresh_token="tok.refresh",
                     expires_in=900,
+                    token_kind="rotating",
                 )
 
         monkeypatch.setattr(ai_delegate_routes, "_build_service", lambda _repo: _OkService())
@@ -1411,6 +1416,7 @@ class TestRouteHandlers:
             created_at=datetime.now(UTC),
             is_active=True,
             caps=DelegateCapsBody(),
+            token_kind="rotating",
         )
 
         class _FoundService:
@@ -1456,6 +1462,7 @@ class TestRouteHandlers:
             created_at=datetime.now(UTC),
             is_active=True,
             caps=DelegateCapsBody(),
+            token_kind="rotating",
         )
 
         class _FoundService:
@@ -1488,3 +1495,250 @@ def _make_rest_request() -> Any:
     request = _Magic()
     request.app.state.rest_tracker = SequenceTracker()
     return request
+
+
+class TestLongLivedPat:
+    """Opt-in long-lived (PAT-style) delegate tokens.
+
+    Covers the ``body.long_lived=True`` branch in
+    :meth:`DelegateService._create_delegate_locked`:
+    a single access token is minted with a ~10-year ``exp``,
+    no refresh row is inserted, and the response surfaces
+    ``refresh_token=None`` + ``token_kind='long_lived'``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_create_delegate_long_lived_omits_refresh_row(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """PAT flow writes exactly ONE UserActiveToken row with ``token_type='access'``.
+
+        Given: an operator calls ``POST /api/ai-delegates`` with
+            ``body.long_lived=True``,
+        When: the create flow commits,
+        Then: the delegate's inventory has exactly one row, its
+            ``token_type`` is ``'access'``, and ``expires_at`` sits
+            approximately ten years in the future (±60s tolerance
+            for test clock skew).
+        """
+        await _seed_owner(repo, public_id="owner-pat-1", username="owner-pat-1")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        body = DelegateCreateBody(label="PAT Bot", caps=DelegateCapsBody(), long_lived=True)
+        payload = await service.create_delegate(
+            owner=_make_owner_principal("owner-pat-1"), body=body
+        )
+        async with repo.session() as s:
+            tokens = (
+                (
+                    await s.execute(
+                        _sel(UserActiveToken).where(
+                            UserActiveToken.user_public_id == payload.delegate.public_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert len(tokens) == 1
+        assert tokens[0].token_type == "access"
+        ten_years = _td(days=3650)
+        observed_lifetime = tokens[0].expires_at - tokens[0].issued_at
+        assert abs((observed_lifetime - ten_years).total_seconds()) < 60
+
+    @pytest.mark.asyncio
+    async def test_create_delegate_long_lived_payload_shape(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """PAT response nulls ``refresh_token`` + marks ``token_kind`` long-lived.
+
+        Given: an operator creates a long-lived delegate,
+        When: the response is inspected,
+        Then: ``refresh_token`` is ``None``, ``token_kind`` is
+            ``'long_lived'``, and ``expires_in`` approaches ten
+            years in seconds (>300M).
+        """
+        await _seed_owner(repo, public_id="owner-pat-2", username="owner-pat-2")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        body = DelegateCreateBody(label="PAT Two", caps=DelegateCapsBody(), long_lived=True)
+        payload = await service.create_delegate(
+            owner=_make_owner_principal("owner-pat-2"), body=body
+        )
+        assert payload.refresh_token is None
+        assert payload.token_kind == "long_lived"
+        assert payload.expires_in > 300_000_000
+        assert payload.delegate.token_kind == "long_lived"
+
+    @pytest.mark.asyncio
+    async def test_create_delegate_rotating_still_emits_refresh_row(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Default rotating path remains unchanged (regression).
+
+        Given: ``body.long_lived`` defaults to ``False``,
+        When: the create flow commits,
+        Then: two UserActiveToken rows land (access + refresh), the
+            response carries both JWTs, and ``token_kind`` is
+            ``'rotating'``.
+        """
+        await _seed_owner(repo, public_id="owner-pat-3", username="owner-pat-3")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        body = DelegateCreateBody(label="Rot Bot", caps=DelegateCapsBody())
+        payload = await service.create_delegate(
+            owner=_make_owner_principal("owner-pat-3"), body=body
+        )
+        async with repo.session() as s:
+            tokens = (
+                (
+                    await s.execute(
+                        _sel(UserActiveToken).where(
+                            UserActiveToken.user_public_id == payload.delegate.public_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert {t.token_type for t in tokens} == {"access", "refresh"}
+        assert payload.refresh_token is not None
+        assert payload.token_kind == "rotating"
+        assert payload.delegate.token_kind == "rotating"
+
+    @pytest.mark.asyncio
+    async def test_long_lived_access_token_decode_roundtrip(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Decoded JWT's ``exp - iat`` equals ~10 years in seconds.
+
+        Given: a minted PAT's access-token JWT,
+        When: decoded through :meth:`TokenManager.decode_fresh_token`,
+        Then: the ``exp`` claim sits roughly 3650 days after ``iat``.
+        """
+        await _seed_owner(repo, public_id="owner-pat-4", username="owner-pat-4")
+        manager = _fresh_manager()
+        service = DelegateService(repository=repo, token_manager=manager)
+        body = DelegateCreateBody(label="Decode", caps=DelegateCapsBody(), long_lived=True)
+        payload = await service.create_delegate(
+            owner=_make_owner_principal("owner-pat-4"), body=body
+        )
+        claims = manager.decode_fresh_token(payload.access_token)
+        lifetime_seconds = claims.exp - claims.iat
+        ten_years_seconds = 3650 * 86400
+        assert abs(lifetime_seconds - ten_years_seconds) < 120
+
+    @pytest.mark.asyncio
+    async def test_long_lived_jti_not_refresh_prefixed(self, repo: SQLAlchemyRepository) -> None:
+        """Verify PAT JTIs never carry the rotating-token ``refresh_`` prefix.
+
+        The prefix exists only to let
+        :meth:`TokenManager.refresh_tokens` distinguish refresh from
+        access JWTs. PATs never pass through that path.
+        """
+        await _seed_owner(repo, public_id="owner-pat-5", username="owner-pat-5")
+        manager = _fresh_manager()
+        service = DelegateService(repository=repo, token_manager=manager)
+        body = DelegateCreateBody(label="Jti", caps=DelegateCapsBody(), long_lived=True)
+        payload = await service.create_delegate(
+            owner=_make_owner_principal("owner-pat-5"), body=body
+        )
+        claims = manager.decode_fresh_token(payload.access_token)
+        assert not claims.jti.startswith("refresh_")
+
+    @pytest.mark.asyncio
+    async def test_delegate_read_classifies_rotating(self, repo: SQLAlchemyRepository) -> None:
+        """A rotating delegate's ``get_delegate`` projection reports ``token_kind='rotating'``."""
+        await _seed_owner(repo, public_id="owner-pat-6", username="owner-pat-6")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        body = DelegateCreateBody(label="ReadRot", caps=DelegateCapsBody())
+        created = await service.create_delegate(
+            owner=_make_owner_principal("owner-pat-6"), body=body
+        )
+        view = await service.get_delegate(
+            public_id=created.delegate.public_id, owner_public_id="owner-pat-6"
+        )
+        assert view.token_kind == "rotating"
+
+    @pytest.mark.asyncio
+    async def test_delegate_read_classifies_long_lived(self, repo: SQLAlchemyRepository) -> None:
+        """A long-lived delegate's ``get_delegate`` projection reports ``token_kind='long_lived'``."""
+        await _seed_owner(repo, public_id="owner-pat-7", username="owner-pat-7")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        body = DelegateCreateBody(label="ReadLL", caps=DelegateCapsBody(), long_lived=True)
+        created = await service.create_delegate(
+            owner=_make_owner_principal("owner-pat-7"), body=body
+        )
+        view = await service.get_delegate(
+            public_id=created.delegate.public_id, owner_public_id="owner-pat-7"
+        )
+        assert view.token_kind == "long_lived"
+
+    @pytest.mark.asyncio
+    async def test_deactivate_long_lived_delegate_blacklists_jti(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Kill-switch parity: PAT JTI lands in the blacklist after deactivate.
+
+        Given: a long-lived delegate was minted,
+        When: :meth:`TokenManager.revoke_user_sessions` runs against
+            its ``user_public_id``,
+        Then: the PAT's JTI appears in the in-memory blacklist, so
+            subsequent verify calls short-circuit before reaching
+            the DB. Exercises the same path the admin-bus
+            ``admin.user_deactivated`` subscriber uses, proving
+            revocation works byte-identically on PATs and rotating
+            delegates alike.
+        """
+        await _seed_owner(repo, public_id="owner-pat-8", username="owner-pat-8")
+        manager = _fresh_manager()
+        service = DelegateService(repository=repo, token_manager=manager)
+        body = DelegateCreateBody(label="Kill", caps=DelegateCapsBody(), long_lived=True)
+        payload = await service.create_delegate(
+            owner=_make_owner_principal("owner-pat-8"), body=body
+        )
+        claims = manager.decode_fresh_token(payload.access_token)
+        await manager.revoke_user_sessions(
+            user_public_id=payload.delegate.public_id, repository=repo
+        )
+        assert claims.jti in manager._blacklisted_tokens
+
+    @pytest.mark.asyncio
+    async def test_rotating_delegate_with_multiple_refresh_rows_is_not_duplicated_in_list(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """D4 regression — multiple refresh rows still yield a single list entry.
+
+        Given: a rotating delegate exists with TWO
+            ``UserActiveToken(token_type='refresh')`` rows for the
+            same ``user_public_id`` (older row has ``revoked_at``
+            set, newer has ``revoked_at IS NULL``) — simulates what
+            :meth:`TokenManager.rotate_tokens` leaves behind
+            mid-rotation,
+        When: ``list_delegates`` runs,
+        Then: exactly ONE :class:`DelegateRead` surfaces with
+            ``token_kind='rotating'`` — the EXISTS-based classifier
+            does not multiply rows.
+        """
+        await _seed_owner(repo, public_id="owner-pat-9", username="owner-pat-9")
+        service = DelegateService(repository=repo, token_manager=_fresh_manager())
+        body = DelegateCreateBody(label="DupRot", caps=DelegateCapsBody())
+        created = await service.create_delegate(
+            owner=_make_owner_principal("owner-pat-9"), body=body
+        )
+        seed_time = datetime(2026, 1, 1, tzinfo=UTC)
+        async with repo.session() as s:
+            s.add(
+                UserActiveToken(
+                    public_id=str(uuid7()),
+                    user_public_id=created.delegate.public_id,
+                    jti="refresh_legacy_rotated",
+                    token_hash=hash_token("legacy-rotated-refresh-token"),
+                    token_type="refresh",
+                    issued_at=seed_time,
+                    expires_at=seed_time + _td(days=7),
+                    revoked_at=seed_time + _td(minutes=5),
+                )
+            )
+            await s.commit()
+        delegates = await service.list_delegates(owner_public_id="owner-pat-9")
+        assert len(delegates) == 1
+        assert delegates[0].public_id == created.delegate.public_id
+        assert delegates[0].token_kind == "rotating"

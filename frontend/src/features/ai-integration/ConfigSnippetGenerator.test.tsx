@@ -19,10 +19,12 @@ const payload: DelegateCreatedPayload = {
       max_cancels_per_minute: null,
       max_order_quantity_per_instrument: null,
     },
+    token_kind: 'rotating',
   },
   access_token: 'token-access',
   refresh_token: 'token-refresh',
   expires_in: 900,
+  token_kind: 'rotating',
 }
 
 describe('buildMcpConfigSnippet', () => {

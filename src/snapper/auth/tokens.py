@@ -107,6 +107,47 @@ class VerifyOutcome:
     rejection_reason: str | None
 
 
+LONG_LIVED_TOKEN_EXPIRE_DAYS: Final[int] = 3650
+"""Access-token lifetime for long-lived (PAT-style) delegate tokens.
+
+Ten years gives practical immortality to operator-issued PATs without
+touching JWT verification code; ``exp`` + ``iat`` claims validate as
+normal. Revocation still works via the per-JTI blacklist + the
+``user_active_tokens.revoked_at`` inventory flip, so the ten-year
+window is a ceiling, not a commitment.
+"""
+
+
+@dataclass(slots=True, frozen=True)
+class LongLivedTokenResult:
+    """Result of minting a long-lived (PAT-style) delegate access token.
+
+    Returned by :meth:`TokenManager.create_long_lived_access_token`.
+    Distinct from :class:`~snapper.auth.schemas.tokens.TokenPair`
+    because there is no refresh token — callers would otherwise have
+    to check for a sentinel value on every use. A dedicated result
+    type also keeps the existing ``TokenPair`` shape invariant for
+    every non-PAT caller.
+
+    Attributes:
+        access_token: The freshly-minted JWT.
+        expires_at: UTC timestamp when the access token's ``exp``
+            claim lapses. Used by the caller to populate
+            ``UserActiveToken.expires_at``.
+        jti: The unique JTI claim in the JWT. Used by the caller to
+            populate ``UserActiveToken.jti``.
+        expires_in: Access-token lifetime in seconds — mirrors the
+            :class:`TokenPair.expires_in` field so REST response
+            shape stays consistent between rotating and long-lived
+            delegate creation.
+    """
+
+    access_token: str
+    expires_at: datetime
+    jti: str
+    expires_in: int
+
+
 def hash_token(raw_token: str) -> str:
     """Return the SHA-256 hex digest of a raw JWT.
 
@@ -258,6 +299,81 @@ class TokenManager:
             access_token=access_token,
             refresh_token=refresh_token,
             expires_in=int(access_token_expires.total_seconds()),
+        )
+
+    def create_long_lived_access_token(
+        self,
+        user: AuthPrincipal,
+        issued_at: datetime,
+        *,
+        session_id: str | None = None,
+    ) -> LongLivedTokenResult:
+        """Mint a non-rotating long-lived (PAT-style) access token.
+
+        Distinct from :meth:`create_tokens` in three ways:
+        (1) no refresh token is issued;
+        (2) the access-token ``exp`` claim is set
+            :data:`LONG_LIVED_TOKEN_EXPIRE_DAYS` days out (default
+            3650, ~10 years) instead of the short-lived access TTL;
+        (3) the JTI is a plain ``uuid4()`` and carries no
+            ``refresh_`` prefix so refresh-token-only code paths
+            (e.g. :meth:`refresh_tokens`) never match on it.
+
+        Boundary time is passed in (not minted inside the helper)
+        per feedback_timestamp_discipline.md — the ``DelegateService``
+        already computes ``now`` at the transaction boundary and
+        threads it into this helper so every inserted row, audit
+        entry, and token claim agrees on the same instant.
+
+        Args:
+            user: The delegate principal the token is issued to.
+                ``permissions`` is populated from the role map
+                identically to :meth:`create_tokens`.
+            issued_at: UTC boundary time supplied by the caller.
+                Drives the ``iat`` claim and the ``exp`` derivation.
+            session_id: Optional session identifier to carry through
+                to the ``sid`` claim; defaults to a fresh uuid4 when
+                absent.
+
+        Returns:
+            class:`LongLivedTokenResult` with the JWT, the UTC
+            ``expires_at`` datetime, the JTI, and the lifetime in
+            seconds (for REST envelope ``expires_in``).
+        """
+        jti = str(uuid.uuid4())
+        session_identifier = session_id or str(uuid.uuid4())
+        expires_at = issued_at + timedelta(days=LONG_LIVED_TOKEN_EXPIRE_DAYS)
+        iat = int(issued_at.timestamp()) - 1
+        exp = int(expires_at.timestamp())
+        claims = TokenClaims(
+            sub=user.username,
+            username=user.username,
+            role=user.role,
+            permissions=[p.value for p in ROLE_PERMISSIONS[user.role]],
+            exp=exp,
+            iat=iat,
+            jti=jti,
+            sid=session_identifier,
+            user_public_id=user.user_public_id,
+            operator_public_ids=user.operator_public_ids,
+            primary_operator_public_id=user.primary_operator_public_id,
+            active_wallet_public_id=user.active_wallet_public_id,
+        )
+        access_token = jwt.encode(
+            claims.model_dump(),
+            self.settings.auth_secret_key,
+            algorithm=self.settings.auth_algorithm,
+        )
+        expires_in = int(timedelta(days=LONG_LIVED_TOKEN_EXPIRE_DAYS).total_seconds())
+        logger.info(
+            f"Created long-lived access token for user {user.username} "
+            f"(jti={jti}, expires_at={expires_at.isoformat()})"
+        )
+        return LongLivedTokenResult(
+            access_token=access_token,
+            expires_at=expires_at,
+            jti=jti,
+            expires_in=expires_in,
         )
 
     def decode_fresh_token(self, token: str) -> TokenClaims:

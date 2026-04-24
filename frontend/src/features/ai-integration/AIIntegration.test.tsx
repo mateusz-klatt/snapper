@@ -58,6 +58,7 @@ const mkDelegate = (overrides: Partial<DelegateRead> = {}): DelegateRead => ({
     max_cancels_per_minute: null,
     max_order_quantity_per_instrument: null,
   },
+  token_kind: 'rotating',
   ...overrides,
 })
 
