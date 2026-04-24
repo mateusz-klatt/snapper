@@ -753,6 +753,20 @@ class TestRetryLoopLifecycle:
     """``_process_retry_queue_loop`` obeys the stop event."""
 
     @pytest.mark.asyncio
+    async def test_pre_set_stop_event_exits_without_polling_retry_queue(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A loop started after ``stop()`` exits before its first retry SELECT."""
+        sidecar, _ = _make_sidecar(repo)
+        list_ready = AsyncMock(return_value=[])
+        monkeypatch.setattr(repo, "list_deliveries_ready_for_retry", list_ready)
+
+        await sidecar.stop()
+        await asyncio.wait_for(sidecar._process_retry_queue_loop(), timeout=0.5)
+
+        list_ready.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_stop_event_breaks_loop(
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
