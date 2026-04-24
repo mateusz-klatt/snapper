@@ -8,18 +8,22 @@
 
 /* Begin PBXBuildFile section */
 		09218B2634404709C960AFBA /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 442D4323A9B7C8B7A02A5B08 /* APIClient.swift */; };
+		0EDEF3790D6B1C22EF3699E4 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4646B48A09BA542FF6ABECD /* AppDelegate.swift */; };
 		13E8D50DB0D86D78A2BF31DB /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F7849605786039354D6A6590 /* Assets.xcassets */; };
 		1C42056D6B73DB2475D007F4 /* APITypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = C90AC0DDC55DFC58EF4590D7 /* APITypes.swift */; };
 		3847E72F3248A41EA8DCD9F2 /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A50EF856475775A1EEA07E0 /* MainTabView.swift */; };
 		398C326321946F6554E4F5C3 /* Protocols.swift in Sources */ = {isa = PBXBuildFile; fileRef = D203FD7280A91512EE623EE1 /* Protocols.swift */; };
+		3A812C6207ED5A34EA4890E4 /* NavigationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DC7293CDEE72AC8C8C5341C /* NavigationCoordinator.swift */; };
 		3B5F692F8C98407F76E6F09E /* TypeBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = C69A0BFD6B16B0BD652D904F /* TypeBridge.swift */; };
 		3B9060A9B55885A03C1316D0 /* SnapperApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB34EE347C68EC93D009F7F4 /* SnapperApp.swift */; };
 		4903E053BC2B9E8FC22EC62A /* WebSocketManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1499AF1C8B116093A1A9426D /* WebSocketManager.swift */; };
 		60AFA2E0E27171B26CEA49C7 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4EDEB8970703709AC631633 /* DashboardView.swift */; };
+		744C6DC56C03FBBCF9651D96 /* DeviceRegistrationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B312129A11E7B3A9371A79C5 /* DeviceRegistrationService.swift */; };
 		7A8AC6E7C86070E41475CF8F /* Environment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10C33334091D91D43D43B1C3 /* Environment.swift */; };
 		7AD9A1C58498FCB2B7883463 /* Configuration.plist in Resources */ = {isa = PBXBuildFile; fileRef = 3AFFCD485E4541E995FC91CB /* Configuration.plist */; };
 		81189414878D69E0A0DC0601 /* TradingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 569FFBB46A52B74686A202D0 /* TradingView.swift */; };
 		8DB5E916777E3B48A477E414 /* AuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C866C094E8868C0EF03F6809 /* AuthService.swift */; };
+		9A375BEDC217E05D46F4F4E7 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A987AAE53C2CBDE34AE70BD /* NotificationService.swift */; };
 		A35D23705FCF8BC6B9E3E64C /* Permissions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 039FE3D502C2D2EB294EB4AA /* Permissions.swift */; };
 		B0B776140121A53C950E09F7 /* AnyCodable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34DDD4FA9EE84A8FF431E110 /* AnyCodable.swift */; };
 		BBB8164DA1ACDEF80598BF46 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 6B649B56E9F5DB1981C9D47E /* PrivacyInfo.xcprivacy */; };
@@ -56,14 +60,18 @@
 		5A50EF856475775A1EEA07E0 /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
 		6798D055E36E2A96D2575882 /* LoginViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginViewModel.swift; sourceTree = "<group>"; };
 		6B649B56E9F5DB1981C9D47E /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		7A987AAE53C2CBDE34AE70BD /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
+		7DC7293CDEE72AC8C8C5341C /* NavigationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationCoordinator.swift; sourceTree = "<group>"; };
 		9A0B22DD35B1534E9A1AFFA3 /* WSState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WSState.swift; sourceTree = "<group>"; };
 		A9948BCE1220922C26E1E5D5 /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
 		AA3A1CC61B90950DA6A44D16 /* Snapper.Debug.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Snapper.Debug.entitlements; sourceTree = "<group>"; };
+		B312129A11E7B3A9371A79C5 /* DeviceRegistrationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceRegistrationService.swift; sourceTree = "<group>"; };
 		C69A0BFD6B16B0BD652D904F /* TypeBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypeBridge.swift; sourceTree = "<group>"; };
 		C866C094E8868C0EF03F6809 /* AuthService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthService.swift; sourceTree = "<group>"; };
 		C90AC0DDC55DFC58EF4590D7 /* APITypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APITypes.swift; sourceTree = "<group>"; };
 		CB3EEEA02ED3924700201EC3 /* SnapperTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SnapperTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D203FD7280A91512EE623EE1 /* Protocols.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Protocols.swift; sourceTree = "<group>"; };
+		E4646B48A09BA542FF6ABECD /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		E6605FA90A650CA70270A857 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		F4EDEB8970703709AC631633 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
 		F7849605786039354D6A6590 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -111,7 +119,11 @@
 			isa = PBXGroup;
 			children = (
 				442D4323A9B7C8B7A02A5B08 /* APIClient.swift */,
+				E4646B48A09BA542FF6ABECD /* AppDelegate.swift */,
 				C866C094E8868C0EF03F6809 /* AuthService.swift */,
+				B312129A11E7B3A9371A79C5 /* DeviceRegistrationService.swift */,
+				7DC7293CDEE72AC8C8C5341C /* NavigationCoordinator.swift */,
+				7A987AAE53C2CBDE34AE70BD /* NotificationService.swift */,
 				D203FD7280A91512EE623EE1 /* Protocols.swift */,
 				1499AF1C8B116093A1A9426D /* WebSocketManager.swift */,
 				9A0B22DD35B1534E9A1AFFA3 /* WSState.swift */,
@@ -294,12 +306,16 @@
 				09218B2634404709C960AFBA /* APIClient.swift in Sources */,
 				1C42056D6B73DB2475D007F4 /* APITypes.swift in Sources */,
 				B0B776140121A53C950E09F7 /* AnyCodable.swift in Sources */,
+				0EDEF3790D6B1C22EF3699E4 /* AppDelegate.swift in Sources */,
 				8DB5E916777E3B48A477E414 /* AuthService.swift in Sources */,
 				60AFA2E0E27171B26CEA49C7 /* DashboardView.swift in Sources */,
+				744C6DC56C03FBBCF9651D96 /* DeviceRegistrationService.swift in Sources */,
 				7A8AC6E7C86070E41475CF8F /* Environment.swift in Sources */,
 				D4D538F756906829CC4ECC61 /* LoginView.swift in Sources */,
 				D5A6C18290A3F9154ED7E741 /* LoginViewModel.swift in Sources */,
 				3847E72F3248A41EA8DCD9F2 /* MainTabView.swift in Sources */,
+				3A812C6207ED5A34EA4890E4 /* NavigationCoordinator.swift in Sources */,
+				9A375BEDC217E05D46F4F4E7 /* NotificationService.swift in Sources */,
 				A35D23705FCF8BC6B9E3E64C /* Permissions.swift in Sources */,
 				398C326321946F6554E4F5C3 /* Protocols.swift in Sources */,
 				D339ECEBC32C9FE4E3040546 /* SettingsView.swift in Sources */,

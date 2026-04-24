@@ -28,6 +28,8 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         ITSAppUsesNonExemptEncryption: false
+        UIBackgroundModes:
+          - remote-notification
         UILaunchScreen:
           UIColorName: SystemBackground
           UIImageName: AppIcon

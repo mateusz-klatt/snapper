@@ -51,6 +51,7 @@ class AuthService: ObservableObject {
                 currentUser = loginResponse.payload.user
                 errorMessage = nil
                 isAuthenticated = true
+                await DeviceRegistrationService.shared().onLogin()
             } else {
                 let errorResponse = try? JSONDecoder().decode(ErrorResponse.self, from: data)
                 errorMessage = errorResponse?.detail ?? "Login failed"
@@ -61,6 +62,7 @@ class AuthService: ObservableObject {
     }
 
     func logout() async {
+        await DeviceRegistrationService.shared().onLogout()
         await logoutFromServer()
         wsToken = nil
         currentUser = nil

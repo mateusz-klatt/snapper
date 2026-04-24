@@ -2,8 +2,11 @@ import SwiftUI
 
 @main
 struct SnapperApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var authService = AuthService.shared
     @StateObject private var webSocketManager = WebSocketManager.shared
+    @StateObject private var notificationService = NotificationService.shared
+    @StateObject private var navigationCoordinator = NavigationCoordinator.shared
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
@@ -13,6 +16,8 @@ struct SnapperApp: App {
                     MainTabView()
                         .environmentObject(authService)
                         .environmentObject(webSocketManager)
+                        .environmentObject(notificationService)
+                        .environmentObject(navigationCoordinator)
                 } else {
                     LoginView()
                         .environmentObject(authService)

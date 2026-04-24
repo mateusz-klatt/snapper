@@ -93,6 +93,59 @@ final class APIClient: Sendable {
     func fetchHealth() async throws -> HealthCheckResponse {
         return try await request(endpoint: AppConfig.Endpoints.health)
     }
+
+    /// Register an APNs device token with the backend (BE-1c / iOS-1).
+    ///
+    /// Sends ``POST /api/devices`` with a full ``RegisterDeviceCommand``
+    /// envelope (the handler strips everything but the ``payload`` and
+    /// mints its own provenance; the iOS-side envelope fields are
+    /// placeholder values). The 401 retry path in ``request`` handles
+    /// an expired ws_token transparently.
+    ///
+    /// Args:
+    ///   command: Envelope-wrapped ``RegisterDeviceBody`` minted by
+    ///     ``DeviceRegistrationService``.
+    ///
+    /// Returns:
+    ///   ``NotificationDeviceResponse`` whose ``payload`` carries the
+    ///   server-assigned ``public_id`` that identifies this device
+    ///   row on subsequent `DELETE` / `PATCH` calls.
+    func registerDevice(command: RegisterDeviceCommand) async throws -> NotificationDeviceResponse {
+        return try await request(
+            endpoint: AppConfig.Endpoints.devices,
+            method: "POST",
+            body: command
+        )
+    }
+
+    /// Fetch the authenticated user's recent alert history (BE-1c).
+    ///
+    /// Powers the Alerts tab (iOS-4). ``limit`` caps page size; the
+    /// backend enforces its own upper bound. ``before`` is the opaque
+    /// cursor from the previous page's ``next_cursor`` — pass ``nil``
+    /// for the first page.
+    func fetchAlertHistory(limit: Int? = nil, before: String? = nil) async throws -> AlertHistoryResponse {
+        var query: [String] = []
+        if let limit {
+            query.append("limit=\(limit)")
+        }
+        if let before, !before.isEmpty {
+            query.append("before=\(before)")
+        }
+        let suffix = query.isEmpty ? "" : "?\(query.joined(separator: "&"))"
+        return try await request(endpoint: "\(AppConfig.Endpoints.alerts)\(suffix)")
+    }
+
+    /// Fetch a single alert by ``public_id`` (BE-1c — used for deep-linking).
+    ///
+    /// Args:
+    ///   publicId: UUID7 of the alert event to load.
+    ///
+    /// Returns:
+    ///   ``AlertEventResponse`` wrapping the one matching row.
+    func fetchAlert(publicId: String) async throws -> AlertEventResponse {
+        return try await request(endpoint: "\(AppConfig.Endpoints.alerts)/\(publicId)")
+    }
 }
 
 enum APIError: LocalizedError {
